@@ -1,8 +1,8 @@
 address:
-contractAddress: 0xaC622c6A20bE02C8794c346439b8Ca01703D69B7
+contractAddress: 0x0e6EA4ceb807e778bCC0Ee62AB5a6360f763646C
 mysql: root:123456@tcp(localhost:3306)/serving?parseTime=true
 privateKey:
 chainUrl: https://rpc-testnet.0g.ai
-servingUrl: http://localhost:8081
+servingUrl: http://localhost:8080
 customGasLimit: 100000
 customGasPrice: 100000

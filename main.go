@@ -32,7 +32,7 @@ func main() {
 
 	client := contract.MustNewWeb3(config.ChainUrl, config.PrivateKey)
 	defer client.Close()
-	c, err := contract.NewDataRetrieveContract(common.HexToAddress(config.ContractAddress), client, config.CustomGasPrice, config.CustomGasLimit)
+	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), client, config.CustomGasPrice, config.CustomGasLimit)
 	if err != nil {
 		panic(err)
 	}
