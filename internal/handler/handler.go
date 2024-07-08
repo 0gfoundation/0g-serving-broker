@@ -39,4 +39,5 @@ func (h *Handler) Register(r *gin.Engine) {
 	user.GET("/account", h.ListAccount)
 	user.POST("/account", h.AddAccount)
 	user.POST("/retrieval/:provider/:service", h.GetData)
+	user.POST("/retrieval/:provider/:service/*suffix", h.GetData)
 }

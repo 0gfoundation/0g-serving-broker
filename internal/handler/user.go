@@ -73,6 +73,7 @@ func (h *Handler) ListAccount(ctx *gin.Context) {
 func (h *Handler) GetData(ctx *gin.Context) {
 	provider := ctx.Param("provider")
 	svcName := ctx.Param("service")
+	suffix := ctx.Param("suffix")
 
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
@@ -82,5 +83,5 @@ func (h *Handler) GetData(ctx *gin.Context) {
 		errors.Response(ctx, errors.Wrap(err, "get service from contract"))
 		return
 	}
-	h.proxy.GetData(ctx, svc.Url, svcName, provider, h.key)
+	h.proxy.GetData(ctx, svc.Url, svcName, provider, suffix, h.key)
 }

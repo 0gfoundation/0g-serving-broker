@@ -1,5 +1,5 @@
 address:
-contractAddress: 0x0e6EA4ceb807e778bCC0Ee62AB5a6360f763646C
+contractAddress: 0xABe51ceF0087406Fe064a011fbe8663b93Ae2750
 mysql: root:123456@tcp(localhost:3306)/serving?parseTime=true
 privateKey:
 chainUrl: https://rpc-testnet.0g.ai

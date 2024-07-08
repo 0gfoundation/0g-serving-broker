@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func (p *Proxy) GetData(c *gin.Context, url, name, provider, key string) {
+func (p *Proxy) GetData(c *gin.Context, url, name, provider, suffix, key string) {
 	client := &http.Client{}
 
 	var reqBody map[string]interface{}
@@ -39,6 +39,9 @@ func (p *Proxy) GetData(c *gin.Context, url, name, provider, key string) {
 	}
 
 	route := url + servicePrefix + "/" + name
+	if suffix != "" {
+		route += suffix
+	}
 	req, err := http.NewRequest(c.Request.Method, route, bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
 		errors.Response(c, err)
@@ -77,7 +80,8 @@ func (p *Proxy) GetData(c *gin.Context, url, name, provider, key string) {
 		return
 	}
 
-	if err := cbReq.updateResponse(p.db, body, provider); err != nil {
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	if err := cbReq.updateResponse(p.db, body, provider, contentEncoding); err != nil {
 		errors.Response(c, err)
 		return
 	}

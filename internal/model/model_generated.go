@@ -47,34 +47,6 @@ func (d *Account) BindWithReadonly(ctx *gin.Context, old Account) error {
 	return nil
 }
 
-// ================================= Model =================================
-func (d *Model) BeforeCreate(tx *gorm.DB) error {
-	if d.ID == nil {
-		d.ID = PtrOf(uuid.New())
-	}
-	return nil
-}
-
-func (d *Model) Bind(ctx *gin.Context) error {
-	var r Model
-	if err := ctx.ShouldBindJSON(&r); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (d *Model) BindWithReadonly(ctx *gin.Context, old Model) error {
-	if err := d.Bind(ctx); err != nil {
-		return err
-	}
-	if d.ID == nil {
-		d.ID = old.ID
-	}
-
-	return nil
-}
-
 // ================================= Request =================================
 func (d *Request) BeforeCreate(tx *gorm.DB) error {
 	if d.ID == nil {
