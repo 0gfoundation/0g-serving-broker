@@ -67,6 +67,10 @@ project
 └── libs             // Serving contract repository, used to generate ABI files during development
 ```
 
+### Process Diagram
+
+![Process Diagram](image/0g-serving-agent.png)
+
 ## Test Cases
 
 Please refer to the README.md under the repo for test cases.
