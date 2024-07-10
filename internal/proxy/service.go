@@ -10,6 +10,7 @@ import (
 
 	"github.com/0glabs/0g-data-retrieve-agent/internal/errors"
 	"github.com/0glabs/0g-data-retrieve-agent/internal/model"
+	"github.com/0glabs/0g-data-retrieve-agent/internal/proxy/chatbot"
 )
 
 func (p *Proxy) AddHTTPRoute(route string, targetURL string) {
@@ -42,7 +43,7 @@ func (p *Proxy) proxyHTTPRequest(c *gin.Context, route, targetURL string) {
 		errors.Response(c, err)
 		return
 	}
-	pass, err := validate(*dbReq, p.address)
+	pass, err := chatbot.Validate(*dbReq, p.address)
 	if err != nil {
 		errors.Response(c, err)
 		return

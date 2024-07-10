@@ -78,6 +78,7 @@ func (h *Handler) GetData(ctx *gin.Context) {
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
 	}
+	// TODO: add a cache
 	svc, err := h.contract.GetService(callOpts, common.HexToAddress(provider), svcName)
 	if err != nil {
 		errors.Response(ctx, errors.Wrap(err, "get service from contract"))

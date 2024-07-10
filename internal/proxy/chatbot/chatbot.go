@@ -1,17 +1,10 @@
-package proxy
+package chatbot
 
 import (
-	"bytes"
-	"compress/gzip"
-	"compress/zlib"
-	"encoding/json"
-	"io"
-	"log"
 	"strings"
 
 	"gorm.io/gorm"
 
-	"github.com/andybalholm/brotli"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 
@@ -20,22 +13,10 @@ import (
 	"github.com/0glabs/0g-data-retrieve-agent/internal/model"
 )
 
-// https://platform.openai.com/docs/api-reference/making-requests
+type ChatBotRequest model.Request
 
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type Choice struct {
-	Message Message `json:"message"`
-}
-
-type chatBotRequest model.Request
-
-// Generate used by the user agent to generate the next request metadata
-
-func (c *chatBotRequest) generate(db *gorm.DB, reqBody map[string]interface{}, key, provider string) error {
+// user use generate to generate the next request metadata
+func (c *ChatBotRequest) Generate(db *gorm.DB, reqBody map[string]interface{}, key, provider string) error {
 	account := model.Account{}
 	if ret := db.Where(&model.Account{Provider: provider, User: c.UserAddress}).First(&account); ret.Error != nil {
 		return errors.Wrap(ret.Error, "get account from db")
@@ -80,55 +61,7 @@ func (c *chatBotRequest) generate(db *gorm.DB, reqBody map[string]interface{}, k
 	return errors.Wrap(ret.Error, "update in db")
 }
 
-func (c *chatBotRequest) updateResponse(db *gorm.DB, resp []byte, provider, contentEncoding string) error {
-	var reader io.ReadCloser
-	switch contentEncoding {
-	case "br":
-		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(resp)))
-	case "gzip":
-		gzipReader, err := gzip.NewReader(bytes.NewReader(resp))
-		if err != nil {
-			return err
-		}
-		defer gzipReader.Close()
-		reader = gzipReader
-	case "deflate":
-		deflateReader, err := zlib.NewReader(bytes.NewReader(resp))
-		if err != nil {
-			return err
-		}
-		defer deflateReader.Close()
-		reader = deflateReader
-	default:
-		reader = io.NopCloser(bytes.NewReader(resp))
-	}
-
-	decompressedBody, err := io.ReadAll(reader)
-	if err != nil {
-		return err
-	}
-
-	log.Println(string(decompressedBody))
-	var res struct {
-		Choices []Choice `json:"choices"`
-	}
-	if err := json.Unmarshal(decompressedBody, &res); err != nil {
-		return errors.Wrap(err, "unmarshal response")
-	}
-
-	outputCount := int64(0)
-	for _, content := range res.Choices {
-		outputCount += int64(len(strings.Fields(content.Message.Content)))
-	}
-
-	ret := db.Model(&model.Account{}).
-		Where(&model.Account{Provider: provider, User: c.UserAddress}).
-		Updates(model.Account{LastResponseTokenCount: outputCount})
-
-	return errors.Wrap(ret.Error, "update in db")
-}
-
-func validate(dbReq model.Request, provider string) (bool, error) {
+func Validate(dbReq model.Request, provider string) (bool, error) {
 	// TODO: Verify the following fields in the request header:
 	//  - inputToken matches the number of input tokens in the request body.
 	//  - previousOutputCount matches the number of tokens returned in the previous response.

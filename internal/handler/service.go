@@ -89,10 +89,11 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 }
 
 func (h *Handler) SettleFees(ctx *gin.Context) {
+	// TODO: remove limit after the add zk
 	reqs := []model.Request{}
 	ret := h.db.Model(model.Request{}).
 		Where("processed = ?", false).
-		Order("nonce ASC").Find(&reqs)
+		Order("nonce ASC").Limit(5).Find(&reqs)
 	if ret.Error != nil {
 		errors.Response(ctx, errors.Wrap(ret.Error, "list request in db"))
 		return

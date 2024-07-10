@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-data-retrieve-agent/internal/errors"
+	"github.com/0glabs/0g-data-retrieve-agent/internal/model"
+	"github.com/0glabs/0g-data-retrieve-agent/internal/proxy/chatbot"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,13 +25,14 @@ func (p *Proxy) GetData(c *gin.Context, url, name, provider, suffix, key string)
 		return
 	}
 
-	cbReq := chatBotRequest{
+	cbReq := chatbot.ChatBotRequest{
 		CreatedAt:           time.Now().Format(time.RFC3339),
 		UserAddress:         p.address,
 		ServiceName:         name,
 		PreviousOutputCount: 0,
+		InputCount:          int64(0),
 	}
-	if err := cbReq.generate(p.db, reqBody, key, provider); err != nil {
+	if err := cbReq.Generate(p.db, reqBody, key, provider); err != nil {
 		errors.Response(c, err)
 		return
 	}
@@ -74,17 +79,76 @@ func (p *Proxy) GetData(c *gin.Context, url, name, provider, suffix, key string)
 	}
 	c.Writer.WriteHeader(resp.StatusCode)
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		errors.Response(c, err)
-		return
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			errors.Response(c, err)
+			return
+		}
+
+		contentEncoding := resp.Header.Get("Content-Encoding")
+		res, err := chatbot.GetContent(body, contentEncoding)
+		if err != nil {
+			errors.Response(c, err)
+			return
+		}
+		err = p.updateTokenCount(provider, res.Choices[0].Message.Content)
+		if err != nil {
+			errors.Response(c, err)
+			return
+		}
+		c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 	}
 
-	contentEncoding := resp.Header.Get("Content-Encoding")
-	if err := cbReq.updateResponse(p.db, body, provider, contentEncoding); err != nil {
-		errors.Response(c, err)
-		return
-	}
+	c.Stream(func(w io.Writer) bool {
+		var chunkBuf bytes.Buffer
+		var output string
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					return false
+				}
+				errors.Response(c, err)
+				return false
+			}
 
-	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+			chunkBuf.WriteString(line)
+			if line == "\n" || line == "\r\n" {
+				_, err := w.Write(chunkBuf.Bytes())
+				if err != nil {
+					errors.Response(c, err)
+					return false
+				}
+
+				encoding := resp.Header.Get("Content-Encoding")
+				content, err := chatbot.GetContent(chunkBuf.Bytes(), encoding)
+				if err != nil {
+					errors.Response(c, err)
+					return false
+				}
+
+				if content.Choices[0].FinishReason != nil {
+					err = p.updateTokenCount(provider, output)
+					if err != nil {
+						errors.Response(c, err)
+					}
+					return false
+				}
+				output += content.Choices[0].Delta.Content
+				c.Writer.Flush()
+				chunkBuf.Reset()
+			}
+		}
+	})
+}
+
+func (p *Proxy) updateTokenCount(provider, content string) error {
+	count := int64(len(strings.Fields(content)))
+	ret := p.db.Model(&model.Account{}).
+		Where(&model.Account{Provider: provider, User: p.address}).
+		Updates(model.Account{LastResponseTokenCount: count})
+
+	return errors.Wrap(ret.Error, "update in db")
 }
