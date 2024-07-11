@@ -1,4 +1,4 @@
-module github.com/0glabs/0g-data-retrieve-agent
+module github.com/0glabs/0g-serving-agent
 
 go 1.22.1
 
@@ -99,6 +99,7 @@ require (
 	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
+	github.com/sashabaranov/go-openai v1.26.2 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/status-im/keycard-go v0.2.0 // indirect
 	github.com/supranational/blst v0.3.11 // indirect

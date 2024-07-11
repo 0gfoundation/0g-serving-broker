@@ -1,53 +1,42 @@
 package main
 
 import (
-	"github.com/gin-gonic/gin"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
+	"log"
+	"os"
+	"strings"
+	"time"
 
-	"github.com/ethereum/go-ethereum/common"
+	"k8s.io/apimachinery/pkg/util/rand"
 
-	"github.com/0glabs/0g-data-retrieve-agent/internal/config"
-	"github.com/0glabs/0g-data-retrieve-agent/internal/contract"
-	database "github.com/0glabs/0g-data-retrieve-agent/internal/db"
-	"github.com/0glabs/0g-data-retrieve-agent/internal/handler"
-	"github.com/0glabs/0g-data-retrieve-agent/internal/proxy"
+	provider "github.com/0glabs/0g-serving-agent/provider/cmd"
+	user "github.com/0glabs/0g-serving-agent/user/cmd"
 )
 
 func main() {
-	config := config.GetConfig()
-
-	db, err := gorm.Open(mysql.Open(config.MySQL), &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			SingularTable: true,
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	if err := database.Migrate(db); err != nil {
-		panic(err)
+	applets := map[string]func(){
+		"0g-provider": provider.Main,
+		"0g-user":     user.Main,
 	}
 
-	client := contract.MustNewWeb3(config.ChainUrl, config.PrivateKey)
-	defer client.Close()
-	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), client, config.CustomGasPrice, config.CustomGasLimit)
-	if err != nil {
-		panic(err)
+	names := []string{}
+	for k := range applets {
+		names = append(names, k)
 	}
+	appletsHelp := "Currently defined applets: " + strings.Join(names, ", ") + "."
 
-	r := gin.New()
-	p := proxy.New(db, r, c, config.Address, config.PrivateKey)
-	if err := p.Start(); err != nil {
-		panic(err)
+	if len(os.Args) < 2 {
+		log.Printf("Usage: %s [applet [arguments]...]\n\n", os.Args[0])
+		log.Println(appletsHelp)
+		os.Exit(1)
 	}
-
-	h := handler.New(db, p, c, config.ServingUrl, config.PrivateKey)
-	h.Register(r)
-
-	// Listen and Serve, config port with PORT=X
-	if err := r.Run(); err != nil {
-		panic(err)
+	applet := os.Args[1]
+	if f, ok := applets[applet]; ok {
+		os.Args = os.Args[1:]
+		rand.Seed(time.Now().UnixNano())
+		f()
+	} else {
+		log.Printf("%s: applet not found\n\n", applet)
+		log.Println(appletsHelp)
+		os.Exit(1)
 	}
 }
