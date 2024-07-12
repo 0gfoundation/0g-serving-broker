@@ -1,10 +1,10 @@
 address:
-contractAddress: 0xABe51ceF0087406Fe064a011fbe8663b93Ae2750
+contractAddress: 0x576E5761405Eee607089E34feFE7Da2E33c6851e
 database:
   provider: root:123456@tcp(localhost:3306)/provider?parseTime=true
   user: root:123456@tcp(localhost:3306)/user?parseTime=true
 privateKey:
 chainUrl: https://rpc-testnet.0g.ai
 servingUrl: http://localhost:8080
-customGasLimit: 100000
-customGasPrice: 100000
+customGasLimit: 10000000
+customGasPrice: 10000000

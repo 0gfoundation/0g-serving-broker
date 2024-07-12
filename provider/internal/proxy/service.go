@@ -65,7 +65,7 @@ func (p *Proxy) proxyHTTPRequest(c *gin.Context, route, targetURL string) {
 	}
 	req, err := http.NewRequest(c.Request.Method, targetURL, c.Request.Body)
 	if err != nil {
-		errors.Response(c, err)
+		errors.Response(c, errors.Wrap(err, "call the original service"))
 		return
 	}
 
