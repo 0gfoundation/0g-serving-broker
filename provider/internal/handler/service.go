@@ -34,7 +34,7 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 	}
 
 	doFunc := func() error {
-		_, err := h.contract.AddOrUpdateService(
+		tx, err := h.contract.AddOrUpdateService(
 			h.contract.CreateTransactOpts(),
 			service.Name,
 			service.Type,
@@ -42,6 +42,18 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 			util.ToBigInt(service.InputPrice),
 			util.ToBigInt(service.OutputPrice),
 		)
+		if err != nil {
+			return errors.Wrap(err, "add service")
+		}
+
+		receipt, err := h.contract.WaitForReceipt(tx.Hash(), true)
+		if receipt != nil && receipt.TxExecErrorMsg != nil {
+			return errors.Wrap(errors.New(*receipt.TxExecErrorMsg), "error in receipt")
+		}
+		if err != nil {
+			return errors.Wrap(err, "add service")
+		}
+
 		return errors.Wrap(err, "add service")
 	}
 	if err := doFunc(); err != nil {
