@@ -10,7 +10,6 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/config"
 	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/user/internal/db"
 	"github.com/0glabs/0g-serving-agent/user/internal/handler"
 )
@@ -38,8 +37,7 @@ func Main() {
 	}
 
 	r := gin.New()
-	ctrl := ctrl.New(db)
-	h := handler.New(db, ctrl, c, config.ServingUrl, config.PrivateKey, config.Address)
+	h := handler.New(db, c, config.ServingUrl, config.PrivateKey, config.Address)
 	h.Register(r)
 
 	// Listen and Serve, config port with PORT=X

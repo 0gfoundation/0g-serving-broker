@@ -1,4 +1,4 @@
-package convert
+package util
 
 import (
 	"math/big"
@@ -6,8 +6,7 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-agent/common/model"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
@@ -15,10 +14,10 @@ import (
 func ToContractRequest(req model.Request) (contract.Request, error) {
 	ret := contract.Request{
 		UserAddress:         common.HexToAddress(req.UserAddress),
-		Nonce:               util.ToBigInt(req.Nonce),
+		Nonce:               ToBigInt(req.Nonce),
 		ServiceName:         req.ServiceName,
-		InputCount:          util.ToBigInt(req.InputCount),
-		PreviousOutputCount: util.ToBigInt(req.PreviousOutputCount),
+		InputCount:          ToBigInt(req.InputCount),
+		PreviousOutputCount: ToBigInt(req.PreviousOutputCount),
 	}
 	createdAt, err := time.Parse(time.RFC3339, req.CreatedAt)
 	if err != nil {

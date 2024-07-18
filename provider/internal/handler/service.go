@@ -22,7 +22,7 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 	case "RPC":
 		//  TODO: Add proxy.AddRPCRoute
 	case "chatbot":
-		h.proxy.AddHTTPRoute(service.Name, service.URL)
+		h.proxy.AddHTTPRoute(service.Name, service.URL, service.Type)
 	default:
 		errors.Response(ctx, errors.New("invalid service type"))
 		return

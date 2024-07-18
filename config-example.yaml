@@ -1,5 +1,5 @@
 address:
-contractAddress: 0x576E5761405Eee607089E34feFE7Da2E33c6851e
+contractAddress: 0xA0e77F9e94909d3AC3aE2E3634B55Fd20912cD3c
 database:
   provider: root:123456@tcp(localhost:3306)/provider?parseTime=true
   user: root:123456@tcp(localhost:3306)/user?parseTime=true

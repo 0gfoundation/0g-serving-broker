@@ -10,6 +10,7 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/config"
 	"github.com/0glabs/0g-serving-agent/common/contract"
+	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
 	"github.com/0glabs/0g-serving-agent/provider/internal/handler"
 	"github.com/0glabs/0g-serving-agent/provider/internal/proxy"
@@ -38,12 +39,13 @@ func Main() {
 	}
 
 	r := gin.New()
-	p := proxy.New(db, r, c, config.Address, config.PrivateKey)
+	ctrl := ctrl.New(db)
+	p := proxy.New(db, ctrl, r, c, config.Address)
 	if err := p.Start(); err != nil {
 		panic(err)
 	}
 
-	h := handler.New(db, p, c, config.ServingUrl, config.PrivateKey)
+	h := handler.New(db, ctrl, p, c, config.ServingUrl)
 	h.Register(r)
 
 	// Listen and Serve, config port with PORT=X

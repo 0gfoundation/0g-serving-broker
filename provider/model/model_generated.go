@@ -23,51 +23,16 @@ func (d *Account) Bind(ctx *gin.Context) error {
 	}
 	d.Provider = r.Provider
 	d.User = r.User
-	d.Balance = r.Balance
-	d.PendingRefund = r.PendingRefund
+	d.LastRequestNonce = r.LastRequestNonce
+	d.LockBalance = r.LockBalance
+	d.LastBalanceCheckTime = r.LastBalanceCheckTime
 	d.LastResponseTokenCount = r.LastResponseTokenCount
-	d.Nonce = r.Nonce
+	d.UnsettledFee = r.UnsettledFee
 
 	return nil
 }
 
 func (d *Account) BindWithReadonly(ctx *gin.Context, old Account) error {
-	if err := d.Bind(ctx); err != nil {
-		return err
-	}
-	if d.ID == nil {
-		d.ID = old.ID
-	}
-
-	return nil
-}
-
-// ================================= Request =================================
-func (d *Request) BeforeCreate(tx *gorm.DB) error {
-	if d.ID == nil {
-		d.ID = PtrOf(uuid.New())
-	}
-	return nil
-}
-
-func (d *Request) Bind(ctx *gin.Context) error {
-	var r Request
-	if err := ctx.ShouldBindJSON(&r); err != nil {
-		return err
-	}
-	d.CreatedAt = r.CreatedAt
-	d.UserAddress = r.UserAddress
-	d.Nonce = r.Nonce
-	d.ServiceName = r.ServiceName
-	d.InputCount = r.InputCount
-	d.PreviousOutputCount = r.PreviousOutputCount
-	d.Signature = r.Signature
-	d.Processed = r.Processed
-
-	return nil
-}
-
-func (d *Request) BindWithReadonly(ctx *gin.Context, old Request) error {
 	if err := d.Bind(ctx); err != nil {
 		return err
 	}
