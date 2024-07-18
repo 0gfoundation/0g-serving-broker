@@ -39,9 +39,11 @@ func Migrate(database *gorm.DB) error {
 					CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user_provider"`
 					User                   string                `gorm:"type:varchar(255);not null;index:deleted_user_provider"`
-					Balance                string                `gorm:"type:varchar(255);not null;default:0"`
-					LastResponseTokenCount int64                 `gorm:"type:bigint;not null;default:0"`
-					Nonce                  int64                 `gorm:"type:bigint;not null;default:1"`
+					LastRequestNonce       *int64                `gorm:"type:bigint;not null;default:0"`
+					LockBalance            *int64                `gorm:"type:bigint;not null;default:0"`
+					LastBalanceCheckTime   *time.Time            `json:"lastBalanceCheckTime"`
+					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
+					UnsettledFee           *int64                `gorm:"type:bigint;not null;default:0"`
 					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider"`
 				}
 				return tx.AutoMigrate(&Account{})

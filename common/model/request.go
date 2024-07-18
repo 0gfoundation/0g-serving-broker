@@ -12,11 +12,3 @@ type Request struct {
 	Processed           bool   `gorm:"type:tinyint(1);not null;default:0" json:"processed"`
 }
 
-type DataFetcherInfo struct {
-	Url         string
-	User        string
-	Provider    string
-	ServiceName string
-	QuerySuffix string
-	PrivateKey  string
-}

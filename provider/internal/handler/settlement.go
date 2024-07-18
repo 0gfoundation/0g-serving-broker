@@ -7,8 +7,8 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/provider/internal/convert"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-agent/common/model"
+	"github.com/0glabs/0g-serving-agent/common/util"
 )
 
 func (h *Handler) SettleFees(ctx *gin.Context) {
@@ -24,7 +24,7 @@ func (h *Handler) SettleFees(ctx *gin.Context) {
 
 	categorizedTraces := make(map[string]*contract.RequestTrace)
 	for _, req := range reqs {
-		cReq, err := convert.ToContractRequest(req)
+		cReq, err := util.ToContractRequest(req)
 		if err != nil {
 			errors.Response(ctx, err)
 			return

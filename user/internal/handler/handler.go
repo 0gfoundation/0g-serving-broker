@@ -5,12 +5,10 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
 )
 
 type Handler struct {
 	db       *gorm.DB
-	ctrl     *ctrl.Ctrl
 	contract *contract.ServingContract
 
 	key         string
@@ -18,12 +16,11 @@ type Handler struct {
 	userAddress string
 }
 
-func New(db *gorm.DB, p *ctrl.Ctrl, c *contract.ServingContract, servingUrl, key, userAddress string) *Handler {
+func New(db *gorm.DB, contract *contract.ServingContract, servingUrl, key, userAddress string) *Handler {
 	h := &Handler{
 		db:          db,
-		contract:    c,
+		contract:    contract,
 		key:         key,
-		ctrl:        p,
 		servingUrl:  servingUrl,
 		userAddress: userAddress,
 	}
