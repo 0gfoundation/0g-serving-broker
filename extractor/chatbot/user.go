@@ -119,6 +119,8 @@ func (c *ChatBot) GetRespContent(resp []byte, encodingType string) ([]byte, erro
 	return shakeStreamResponse(decompressed), nil
 }
 
+// ErrMsg in user agent should parse provider agent
+// response error which defined in common/errors/response.go
 func (c *ChatBot) ErrMsg(body io.Reader) error {
 	msg := struct {
 		Error string `json:"error"`

@@ -34,8 +34,12 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 	}
 
 	doFunc := func() error {
+		opt, err := h.contract.CreateTransactOpts()
+		if err != nil {
+			return errors.Wrap(err, "create transact opts")
+		}
 		tx, err := h.contract.AddOrUpdateService(
-			h.contract.CreateTransactOpts(),
+			opt,
 			service.Name,
 			service.Type,
 			h.servingUrl,
@@ -45,11 +49,7 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 		if err != nil {
 			return errors.Wrap(err, "add service")
 		}
-
-		receipt, err := h.contract.WaitForReceipt(tx.Hash(), true)
-		if receipt != nil && receipt.TxExecErrorMsg != nil {
-			return errors.Wrap(errors.New(*receipt.TxExecErrorMsg), "error in receipt")
-		}
+		_, err = h.contract.WaitForReceipt(ctx, tx.Hash())
 		if err != nil {
 			return errors.Wrap(err, "add service")
 		}
@@ -59,7 +59,7 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 	if err := doFunc(); err != nil {
 		log.Println("failed to add service, rolling back...")
 		h.proxy.DeleteRoute(service.Name)
-		errRollback := h.db.Delete(&model.Service{}, service.Name)
+		errRollback := h.db.Where("name = ?", service.Name).Delete(&model.Service{})
 		log.Printf("rollback result: %v", errRollback)
 		errors.Response(ctx, err)
 		return
@@ -89,7 +89,13 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 		return
 	}
 
-	_, err := h.contract.RemoveService(h.contract.CreateTransactOpts(), name)
+	opt, err := h.contract.CreateTransactOpts()
+	if err != nil {
+		errors.Response(ctx, err)
+		return
+	}
+
+	_, err = h.contract.RemoveService(opt, name)
 	if err != nil {
 		errors.Response(ctx, err)
 		return

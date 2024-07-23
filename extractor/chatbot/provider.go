@@ -90,13 +90,10 @@ func (c *ProviderChatBot) GetRespContent(resp []byte, encodingType string) ([]by
 }
 
 func (c *ProviderChatBot) ErrMsg(body io.Reader) error {
-	msg := struct {
-		Error string `json:"error"`
-	}{}
-
+	var msg ErrorResponse
 	if err := json.NewDecoder(body).Decode(&msg); err != nil {
 		return errors.Wrap(err, "decode error message")
 	}
 
-	return errors.New(msg.Error)
+	return errors.New(msg.Error.Message)
 }

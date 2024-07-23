@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -29,15 +31,14 @@ func Main() {
 		panic(err)
 	}
 
-	client := contract.MustNewWeb3(config.ChainUrl, config.PrivateKey)
-	defer client.Close()
-	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), client, config.CustomGasPrice, config.CustomGasLimit)
+	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), config, os.Getenv("NETWORK"))
 	if err != nil {
 		panic(err)
 	}
+	defer c.Close()
 
 	r := gin.New()
-	h := handler.New(db, c, config.ServingUrl, config.PrivateKey, config.Address)
+	h := handler.New(db, c, config.ServingUrl, config.SigningKey, config.Address)
 	h.Register(r)
 
 	// Listen and Serve, config port with PORT=X

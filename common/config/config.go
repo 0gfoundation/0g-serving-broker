@@ -10,16 +10,15 @@ import (
 
 type Config struct {
 	Address         string `yaml:"address"`
-	ChainUrl        string `yaml:"chainUrl"`
-	CustomGasLimit  uint64 `yaml:"customGasLimit"`
-	CustomGasPrice  uint64 `yaml:"customGasPrice"`
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
 		User     string `json:"user"`
 		Provider string `json:"provider"`
 	} `json:"database"`
-	PrivateKey string `yaml:"privateKey"`
-	ServingUrl string `yaml:"servingUrl"`
+	SigningKey      string                    `yaml:"signingKey"`
+	ServingUrl      string                    `yaml:"servingUrl"`
+	Networks        map[string]*NetworkConfig `mapstructure:"networks" yaml:"networks"`
+	DefaultKeyStore string
 }
 
 var (
@@ -47,10 +46,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ChainUrl:        "https://rpc-testnet.0g.ai",
-			ContractAddress: "0xABe51ceF0087406Fe064a011fbe8663b93Ae2750",
-			CustomGasLimit:  100000,
-			CustomGasPrice:  100000,
+			ContractAddress: "0x59b9dD1cF82F6108526154c901256997095dE598",
 			Database: struct {
 				User     string `json:"user"`
 				Provider string `json:"provider"`
@@ -62,6 +58,10 @@ func GetConfig() *Config {
 
 		if err := loadConfig(instance); err != nil {
 			log.Fatalf("Error loading configuration: %v", err)
+		}
+
+		for _, networkConf := range instance.Networks {
+			networkConf.PrivateKeyStore = NewPrivateKeyStore(networkConf)
 		}
 	})
 

@@ -3,7 +3,6 @@ package handler
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -30,7 +29,7 @@ func (h *Handler) GetData(ctx *gin.Context) {
 	svcName := ctx.Param("service")
 
 	callOpts := &bind.CallOpts{
-		Context: context.Background(),
+		Context: ctx,
 	}
 	// TODO: add a cache
 	svc, err := h.contract.GetService(callOpts, common.HexToAddress(provider), svcName)
@@ -47,6 +46,8 @@ func (h *Handler) GetData(ctx *gin.Context) {
 		errors.Response(ctx, errors.New("known service type"))
 		return
 	}
+
+	// TODO: check the balance from contract
 
 	account := model.Account{}
 	if ret := h.db.Where(&model.Account{Provider: provider, User: h.userAddress}).First(&account); ret.Error != nil {

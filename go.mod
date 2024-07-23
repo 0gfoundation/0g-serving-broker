@@ -3,6 +3,7 @@ module github.com/0glabs/0g-serving-agent
 go 1.22.1
 
 require (
+	github.com/andybalholm/brotli v1.1.0
 	github.com/ethereum/go-ethereum v1.14.5
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-gormigrate/gormigrate/v2 v2.1.2
@@ -11,6 +12,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/openweb3/web3go v0.2.7
 	github.com/pkg/errors v0.9.1
+	github.com/rs/zerolog v1.33.0
 	github.com/sirupsen/logrus v1.9.3
 	gopkg.in/yaml.v2 v2.4.0
 	gorm.io/driver/mysql v1.5.7
@@ -24,7 +26,6 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
 	github.com/VictoriaMetrics/fastcache v1.12.2 // indirect
-	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.10.0 // indirect
 	github.com/btcsuite/btcd v0.21.0-beta // indirect

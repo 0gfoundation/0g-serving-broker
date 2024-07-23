@@ -26,7 +26,12 @@ func (h *Handler) AddAccount(ctx *gin.Context) {
 		return
 	}
 
-	opts := h.contract.CreateTransactOpts()
+	opts, err := h.contract.CreateTransactOpts()
+	if err != nil {
+		errors.Response(ctx, err)
+		return
+	}
+
 	opts.Value = big.NewInt(0)
 	opts.Value.SetString(account.Balance, 10)
 
@@ -36,7 +41,7 @@ func (h *Handler) AddAccount(ctx *gin.Context) {
 	}
 	if err := doFunc(); err != nil {
 		log.Println("failed to add account, rolling back...")
-		errRollback := h.db.Where("provider = ?", account.Provider).Delete(&model.Account{}, account.Provider)
+		errRollback := h.db.Where("provider = ?", account.Provider).Delete(&model.Account{})
 		log.Printf("rollback result: %v", errRollback)
 		errors.Response(ctx, err)
 		return

@@ -37,5 +37,5 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.POST("/settle", h.SettleFees)
 
 	group.GET("/account", h.ListAccount)
-	group.GET("/account/:name", h.getAccount)
+	group.GET("/account/:name", h.GetAccount)
 }
