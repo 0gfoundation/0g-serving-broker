@@ -14,8 +14,8 @@ import (
 type BlockchainNetworkID string
 
 const (
-	EthereumHardhatID BlockchainNetworkID = "ethereum_hardhat"
-	Ethereum0gID      BlockchainNetworkID = "ethereum_0g"
+	EthereumHardhatID BlockchainNetworkID = "ethereumHardhat"
+	Ethereum0gID      BlockchainNetworkID = "ethereum0g"
 )
 
 type BlockchainNetwork interface {

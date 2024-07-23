@@ -12,13 +12,16 @@ type Config struct {
 	Address         string `yaml:"address"`
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
-		User     string `json:"user"`
-		Provider string `json:"provider"`
-	} `json:"database"`
-	SigningKey      string                    `yaml:"signingKey"`
-	ServingUrl      string                    `yaml:"servingUrl"`
-	Networks        map[string]*NetworkConfig `mapstructure:"networks" yaml:"networks"`
-	DefaultKeyStore string
+		User     string `yaml:"user"`
+		Provider string `yaml:"provider"`
+	} `yaml:"database"`
+	Interval struct {
+		RefundProcessor     int `yaml:"refundProcessor"`
+		SettlementProcessor int `yaml:"settlementProcessor"`
+	} `yaml:"interval"`
+	SigningKey string                    `yaml:"signingKey"`
+	ServingUrl string                    `yaml:"servingUrl"`
+	Networks   map[string]*NetworkConfig `mapstructure:"networks" yaml:"networks"`
 }
 
 var (
@@ -48,8 +51,8 @@ func GetConfig() *Config {
 		instance = &Config{
 			ContractAddress: "0x59b9dD1cF82F6108526154c901256997095dE598",
 			Database: struct {
-				User     string `json:"user"`
-				Provider string `json:"provider"`
+				User     string `yaml:"user"`
+				Provider string `yaml:"provider"`
 			}{
 				User:     "user:user@tcp(mysql:3306)/user?parseTime=true",
 				Provider: "provider:provider@tcp(mysql:3306)/provider?parseTime=true",

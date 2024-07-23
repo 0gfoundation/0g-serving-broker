@@ -1,15 +1,18 @@
 address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-contractAddress: 0x4eA9d89Dd9Be07D229c100fb3e02DaED6f79aBB3
 database:
   provider: root:123456@tcp(localhost:3306)/provider?parseTime=true
   user: root:123456@tcp(localhost:3306)/user?parseTime=true
+contractAddress: 0x4eA9d89Dd9Be07D229c100fb3e02DaED6f79aBB3
+interval:
+  refundProcessor: 1
+  settlementProcessor: 1
 servingUrl: http://localhost:8080
 signingKey:
 networks:
-  ethereum_hardhat:
+  ethereumHardhat:
     url: "http://localhost:8545"
-    chain_id: 31337
-    private_keys:
+    chainID: 31337
+    privateKeys:
       - ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
       - 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
       - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
@@ -30,12 +33,12 @@ networks:
       - 689af8efa8c651a91ad287602527f3af2fe9f6501a7ac4b061667b5a93e037fd
       - de9be858da4a475276426320d5e9262ecfc3ba460bfac56360bfa6c4c28b4ee0
       - df57089febbacf7ba0bc227dafbffa9fc08a93fdc68e1e42411a14efcf23656e
-    transaction_limit: 9500000
-    gas_estimation_buffer: 0
-  ethereum_0g:
+    transactionLimit: 9500000
+    gasEstimationBuffer: 0
+  ethereum0g:
     url: "https://rpc-testnet.0g.ai"
-    chain_id: 16600
-    private_keys:
+    chainID: 16600
+    privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    transaction_limit: 1000000
-    gas_estimation_buffer: 10000
+    transactionLimit: 1000000
+    gasEstimationBuffer: 10000

@@ -8,14 +8,18 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	provider "github.com/0glabs/0g-serving-agent/provider/cmd"
-	user "github.com/0glabs/0g-serving-agent/user/cmd"
+	providerEvent "github.com/0glabs/0g-serving-agent/provider/cmd/event"
+	providerServer "github.com/0glabs/0g-serving-agent/provider/cmd/server"
+	userEvent "github.com/0glabs/0g-serving-agent/user/cmd/event"
+	userServer "github.com/0glabs/0g-serving-agent/user/cmd/server"
 )
 
 func main() {
 	applets := map[string]func(){
-		"0g-provider": provider.Main,
-		"0g-user":     user.Main,
+		"0g-provider-server": providerServer.Main,
+		"0g-provider-event":  providerEvent.Main,
+		"0g-user-server":     userServer.Main,
+		"0g-user-event":      userEvent.Main,
 	}
 
 	names := []string{}
