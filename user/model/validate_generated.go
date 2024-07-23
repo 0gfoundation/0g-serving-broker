@@ -9,7 +9,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
-func ValidateUpdateAccount(oldVal, newVal Account) error {
+func ValidateUpdateProvider(oldVal, newVal Provider) error {
 	fields := []string{}
 	if newVal.ID != nil && !apiequality.Semantic.DeepEqual(newVal.ID, oldVal.ID){
 		fields = append(fields, "id")
@@ -17,9 +17,6 @@ func ValidateUpdateAccount(oldVal, newVal Account) error {
 	
 	if !apiequality.Semantic.DeepEqual(newVal.Provider, oldVal.Provider){
 		fields = append(fields, "provider")
-	}
-	if !apiequality.Semantic.DeepEqual(newVal.User, oldVal.User){
-		fields = append(fields, "user")
 	}
 
 	if len(fields) > 0 {

@@ -14,15 +14,15 @@ import (
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
-func (h *Handler) AddAccount(ctx *gin.Context) {
-	var account model.Account
+func (h *Handler) AddProviderAccount(ctx *gin.Context) {
+	var account model.Provider
 	if err := account.Bind(ctx); err != nil {
 		errors.Response(ctx, err)
 		return
 	}
 
 	if ret := h.db.Create(&account); ret.Error != nil {
-		errors.Response(ctx, errors.Wrap(ret.Error, "create account in db"))
+		errors.Response(ctx, errors.Wrap(ret.Error, "create provider account in db"))
 		return
 	}
 
@@ -37,11 +37,11 @@ func (h *Handler) AddAccount(ctx *gin.Context) {
 
 	doFunc := func() error {
 		_, err := h.contract.DepositFund(opts, common.HexToAddress(account.Provider))
-		return errors.Wrap(err, "add account to contract")
+		return errors.Wrap(err, "add provider account to contract")
 	}
 	if err := doFunc(); err != nil {
-		log.Println("failed to add account, rolling back...")
-		errRollback := h.db.Where("provider = ?", account.Provider).Delete(&model.Account{})
+		log.Println("failed to add provider account, rolling back...")
+		errRollback := h.db.Where("provider = ?", account.Provider).Delete(&model.Provider{})
 		log.Printf("rollback result: %v", errRollback)
 		errors.Response(ctx, err)
 		return
@@ -50,8 +50,8 @@ func (h *Handler) AddAccount(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
-func (h *Handler) ListAccount(ctx *gin.Context) {
-	list := []model.Account{}
+func (h *Handler) ListProviderAccount(ctx *gin.Context) {
+	list := []model.Provider{}
 
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
@@ -63,13 +63,15 @@ func (h *Handler) ListAccount(ctx *gin.Context) {
 	}
 
 	for i, u := range users {
-		list = append(list, model.Account{
-			User:     u.String(),
+		if u.String() != h.userAddress {
+			continue
+		}
+		list = append(list, model.Provider{
 			Provider: providers[i].String(),
 			Balance:  balances[i].String(),
 		})
 	}
-	ctx.JSON(http.StatusOK, model.AccountList{
+	ctx.JSON(http.StatusOK, model.ProviderList{
 		Metadata: model.ListMeta{Total: uint64(len(list))},
 		Items:    list,
 	})

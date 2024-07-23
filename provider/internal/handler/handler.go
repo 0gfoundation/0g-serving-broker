@@ -36,6 +36,6 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.DELETE("/service/:name", h.DeleteService)
 	group.POST("/settle", h.SettleFees)
 
-	group.GET("/account", h.ListAccount)
-	group.GET("/account/:name", h.GetAccount)
+	group.GET("/user", h.ListUserAccount)
+	group.GET("/user/:name", h.GetUserAccount)
 }

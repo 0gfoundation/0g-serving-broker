@@ -30,8 +30,12 @@ func New(db *gorm.DB, contract *contract.ServingContract, servingUrl, key, userA
 func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
-	group.GET("/account", h.ListAccount)
-	group.POST("/account", h.AddAccount)
-	group.POST("/retrieval/:provider/:service", h.GetData)
-	group.POST("/retrieval/:provider/:service/*suffix", h.GetData)
+	group.GET("/provider", h.ListProviderAccount)
+	group.POST("/provider", h.AddProviderAccount)
+	// group.POST("/provider/:provider/refund", h.Refund)
+
+	// request service
+	group.POST("/provider/:provider/service/:service/*suffix", h.GetData)
+	group.POST("/provider/:provider/service/:service", h.GetData)
+
 }

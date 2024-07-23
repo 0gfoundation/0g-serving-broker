@@ -32,8 +32,8 @@ func NewSettlementProcessor(db *gorm.DB, contract *contract.ServingContract, add
 func (b SettlementProcessor) Start(ctx context.Context) error {
 	for {
 		time.Sleep(time.Duration(b.interval) * time.Second)
-		list := []model.Account{}
-		if ret := b.db.Model(model.Account{}).Where("unsettled_fee > ?", 0).Order("created_at DESC").Find(&list); ret.Error != nil {
+		list := []model.User{}
+		if ret := b.db.Model(model.User{}).Where("unsettled_fee > ?", 0).Order("created_at DESC").Find(&list); ret.Error != nil {
 			return ret.Error
 		}
 		log.Println(*list[0].UnsettledFee)

@@ -8,41 +8,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// ================================= Account =================================
-func (d *Account) BeforeCreate(tx *gorm.DB) error {
-	if d.ID == nil {
-		d.ID = PtrOf(uuid.New())
-	}
-	return nil
-}
-
-func (d *Account) Bind(ctx *gin.Context) error {
-	var r Account
-	if err := ctx.ShouldBindJSON(&r); err != nil {
-		return err
-	}
-	d.Provider = r.Provider
-	d.User = r.User
-	d.LastRequestNonce = r.LastRequestNonce
-	d.LockBalance = r.LockBalance
-	d.LastBalanceCheckTime = r.LastBalanceCheckTime
-	d.LastResponseTokenCount = r.LastResponseTokenCount
-	d.UnsettledFee = r.UnsettledFee
-
-	return nil
-}
-
-func (d *Account) BindWithReadonly(ctx *gin.Context, old Account) error {
-	if err := d.Bind(ctx); err != nil {
-		return err
-	}
-	if d.ID == nil {
-		d.ID = old.ID
-	}
-
-	return nil
-}
-
 // ================================= Service =================================
 func (d *Service) BeforeCreate(tx *gorm.DB) error {
 	if d.ID == nil {
@@ -66,6 +31,40 @@ func (d *Service) Bind(ctx *gin.Context) error {
 }
 
 func (d *Service) BindWithReadonly(ctx *gin.Context, old Service) error {
+	if err := d.Bind(ctx); err != nil {
+		return err
+	}
+	if d.ID == nil {
+		d.ID = old.ID
+	}
+
+	return nil
+}
+
+// ================================= User =================================
+func (d *User) BeforeCreate(tx *gorm.DB) error {
+	if d.ID == nil {
+		d.ID = PtrOf(uuid.New())
+	}
+	return nil
+}
+
+func (d *User) Bind(ctx *gin.Context) error {
+	var r User
+	if err := ctx.ShouldBindJSON(&r); err != nil {
+		return err
+	}
+	d.User = r.User
+	d.LastRequestNonce = r.LastRequestNonce
+	d.LockBalance = r.LockBalance
+	d.LastBalanceCheckTime = r.LastBalanceCheckTime
+	d.LastResponseTokenCount = r.LastResponseTokenCount
+	d.UnsettledFee = r.UnsettledFee
+
+	return nil
+}
+
+func (d *User) BindWithReadonly(ctx *gin.Context, old User) error {
 	if err := d.Bind(ctx); err != nil {
 		return err
 	}

@@ -25,14 +25,14 @@ import (
 )
 
 func (h *Handler) GetData(ctx *gin.Context) {
-	provider := ctx.Param("provider")
+	providerAddress := ctx.Param("provider")
 	svcName := ctx.Param("service")
 
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
 	// TODO: add a cache
-	svc, err := h.contract.GetService(callOpts, common.HexToAddress(provider), svcName)
+	svc, err := h.contract.GetService(callOpts, common.HexToAddress(providerAddress), svcName)
 	if err != nil {
 		errors.Response(ctx, errors.Wrap(err, "get service from contract"))
 		return
@@ -49,22 +49,22 @@ func (h *Handler) GetData(ctx *gin.Context) {
 
 	// TODO: check the balance from contract
 
-	account := model.Account{}
-	if ret := h.db.Where(&model.Account{Provider: provider, User: h.userAddress}).First(&account); ret.Error != nil {
-		errors.Response(ctx, errors.Wrap(ret.Error, "get account from db"))
+	provider := model.Provider{}
+	if ret := h.db.Where(&model.Provider{Provider: providerAddress}).First(&provider); ret.Error != nil {
+		errors.Response(ctx, errors.Wrap(ret.Error, "get provider from db"))
 		return
 	}
-	account.Nonce += 1
+	provider.Nonce += 1
 
-	req, err := h.prepareRequest(ctx, svc.Url, account, extractor)
+	req, err := h.prepareRequest(ctx, svc.Url, provider, extractor)
 	if err != nil {
 		errors.Response(ctx, err)
 		return
 	}
 
-	ret := h.db.Model(&model.Account{}).
-		Where(&model.Account{Provider: provider, User: h.userAddress}).
-		Updates(model.Account{Nonce: account.Nonce})
+	ret := h.db.Model(&model.Provider{}).
+		Where(&model.Provider{Provider: providerAddress}).
+		Updates(model.Provider{Nonce: provider.Nonce})
 	if ret.Error != nil {
 		errors.Response(ctx, errors.Wrap(ret.Error, "update in db"))
 		return
@@ -73,8 +73,8 @@ func (h *Handler) GetData(ctx *gin.Context) {
 	h.processRequest(ctx, req, extractor)
 }
 
-func (h *Handler) prepareRequest(ctx *gin.Context, url string, account model.Account, extractor extractor.UserReqRespExtractor) (*http.Request, error) {
-	provider := ctx.Param("provider")
+func (h *Handler) prepareRequest(ctx *gin.Context, url string, provider model.Provider, extractor extractor.UserReqRespExtractor) (*http.Request, error) {
+	providerAddress := ctx.Param("provider")
 	svcName := ctx.Param("service")
 	suffix := ctx.Param("suffix")
 
@@ -105,15 +105,15 @@ func (h *Handler) prepareRequest(ctx *gin.Context, url string, account model.Acc
 		CreatedAt:           time.Now().Format(time.RFC3339),
 		UserAddress:         h.userAddress,
 		ServiceName:         svcName,
-		PreviousOutputCount: account.LastResponseTokenCount,
+		PreviousOutputCount: provider.LastResponseTokenCount,
 		InputCount:          inputCount,
-		Nonce:               account.Nonce,
+		Nonce:               provider.Nonce,
 	}
 	cReq, err := util.ToContractRequest(reqModel)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := cReq.GetSignature(h.key, provider)
+	sig, err := cReq.GetSignature(h.key, providerAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ func (h *Handler) handleResponse(ctx *gin.Context, resp *http.Response, extracto
 }
 
 func (h *Handler) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.UserReqRespExtractor) {
-	provider := ctx.Param("provider")
+	providerAddress := ctx.Param("provider")
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
@@ -229,7 +229,7 @@ func (h *Handler) handleStreamResponse(ctx *gin.Context, resp *http.Response, ex
 						errors.Response(ctx, err)
 						return false
 					}
-					err = h.updateResponseInDB(provider, outputCount)
+					err = h.updateResponseInDB(providerAddress, outputCount)
 					if err != nil {
 						errors.Response(ctx, err)
 						return false
@@ -244,9 +244,9 @@ func (h *Handler) handleStreamResponse(ctx *gin.Context, resp *http.Response, ex
 }
 
 func (h *Handler) updateResponseInDB(provider string, outputCount int64) error {
-	ret := h.db.Model(&model.Account{}).
-		Where(&model.Account{Provider: provider, User: h.userAddress}).
-		Updates(model.Account{LastResponseTokenCount: outputCount})
+	ret := h.db.Model(&model.Provider{}).
+		Where(&model.Provider{Provider: provider}).
+		Updates(model.Provider{LastResponseTokenCount: outputCount})
 
 	return errors.Wrap(ret.Error, "update in db")
 }

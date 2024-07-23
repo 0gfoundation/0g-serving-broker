@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -55,9 +56,11 @@ func (h *Handler) SettleFees(ctx *gin.Context) {
 		return
 	}
 
-	_, err = h.contract.WaitForReceipt(ctx, tx.Hash())
+	receipt, err := h.contract.WaitForReceipt(ctx, tx.Hash())
+	log.Println(receipt)
 	if err != nil {
 		errors.Response(ctx, err)
+		return
 	}
 
 	ret = h.db.Model(&model.Request{}).

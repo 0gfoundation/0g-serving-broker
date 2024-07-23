@@ -196,8 +196,8 @@ func (r *requestValidator) getUnsettleFee() int64 {
 }
 
 func (r *requestValidator) getOrCreateAccount(ctx *gin.Context) error {
-	dbAccount := model.Account{}
-	ret := r.db.Where(&model.Account{Provider: r.provider, User: r.request.UserAddress}).First(&dbAccount)
+	dbAccount := model.User{}
+	ret := r.db.Where(&model.User{User: r.request.UserAddress}).First(&dbAccount)
 	if db.IgnoreNotFound(ret.Error) != nil {
 		return errors.Wrap(ret.Error, "get account from db")
 	}
@@ -224,8 +224,7 @@ func (r *requestValidator) getOrCreateAccount(ctx *gin.Context) error {
 	now := time.Now()
 	nonce := account.Nonce.Int64()
 	r.lockBalance = account.Balance.Int64() - account.PendingRefund.Int64()
-	dbAccount = model.Account{
-		Provider:             r.provider,
+	dbAccount = model.User{
 		User:                 r.request.UserAddress,
 		LockBalance:          &r.lockBalance,
 		LastRequestNonce:     &nonce,
@@ -254,11 +253,10 @@ func (r *requestValidator) syncAccount() error {
 	r.lockBalance = account.Balance.Int64() - account.PendingRefund.Int64()
 	now := time.Now()
 	ret := r.db.Where(
-		&model.Account{
-			Provider: r.provider,
-			User:     r.request.UserAddress,
+		&model.User{
+			User: r.request.UserAddress,
 		}).Updates(
-		model.Account{
+		model.User{
 			LockBalance:          &r.lockBalance,
 			LastBalanceCheckTime: &now,
 		})

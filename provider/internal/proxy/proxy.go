@@ -197,7 +197,7 @@ func (p *Proxy) processRequest(ctx *gin.Context, req *http.Request, reqV *reques
 	ctx.Writer.WriteHeader(resp.StatusCode)
 
 	fee := reqV.getUnsettleFee()
-	account := model.Account{
+	account := model.User{
 		LastRequestNonce: &reqV.request.Nonce,
 		UnsettledFee:     &fee,
 	}
@@ -208,7 +208,7 @@ func (p *Proxy) processRequest(ctx *gin.Context, req *http.Request, reqV *reques
 	}
 }
 
-func (p *Proxy) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.Account) {
+func (p *Proxy) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		errors.Response(ctx, err)
@@ -226,7 +226,7 @@ func (p *Proxy) handleResponse(ctx *gin.Context, resp *http.Response, extractor 
 		return
 	}
 	account.LastResponseTokenCount = &outputCount
-	err = p.ctrl.UpdateAccount(account)
+	err = p.ctrl.UpdateUserAccount(account)
 	if err != nil {
 		errors.Response(ctx, err)
 		return
@@ -235,7 +235,7 @@ func (p *Proxy) handleResponse(ctx *gin.Context, resp *http.Response, extractor 
 	ctx.Data(http.StatusOK, resp.Header.Get("Content-Type"), body)
 }
 
-func (p *Proxy) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.Account) {
+func (p *Proxy) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User) {
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
@@ -278,7 +278,7 @@ func (p *Proxy) handleStreamResponse(ctx *gin.Context, resp *http.Response, extr
 					}
 
 					account.LastResponseTokenCount = &outputCount
-					err = p.ctrl.UpdateAccount(account)
+					err = p.ctrl.UpdateUserAccount(account)
 					if err != nil {
 						errors.Response(ctx, err)
 						return false

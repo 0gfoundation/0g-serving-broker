@@ -4,7 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func (h *Handler) ListAccount(ctx *gin.Context) {
+func (h *Handler) ListUserAccount(ctx *gin.Context) {
 	// list := []model.Account{}
 
 	// callOpts := &bind.CallOpts{
@@ -31,7 +31,7 @@ func (h *Handler) ListAccount(ctx *gin.Context) {
 	// })
 }
 
-func (h *Handler) GetAccount(ctx *gin.Context) {
+func (h *Handler) GetUserAccount(ctx *gin.Context) {
 	// list := []model.Account{}
 
 	// callOpts := &bind.CallOpts{

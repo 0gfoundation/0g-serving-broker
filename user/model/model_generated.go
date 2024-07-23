@@ -12,21 +12,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// ================================= Account =================================
-func (d *Account) BeforeCreate(tx *gorm.DB) error {
+// ================================= Provider =================================
+func (d *Provider) BeforeCreate(tx *gorm.DB) error {
 	if d.ID == nil {
 		d.ID = PtrOf(uuid.New())
 	}
 	return nil
 }
 
-func (d *Account) Bind(ctx *gin.Context) error {
-	var r Account
+func (d *Provider) Bind(ctx *gin.Context) error {
+	var r Provider
 	if err := ctx.ShouldBindJSON(&r); err != nil {
 		return err
 	}
 	d.Provider = r.Provider
-	d.User = r.User
 	d.Balance = r.Balance
 	d.PendingRefund = r.PendingRefund
 	d.Refunds = r.Refunds
@@ -36,7 +35,7 @@ func (d *Account) Bind(ctx *gin.Context) error {
 	return nil
 }
 
-func (d *Account) BindWithReadonly(ctx *gin.Context, old Account) error {
+func (d *Provider) BindWithReadonly(ctx *gin.Context, old Provider) error {
 	if err := d.Bind(ctx); err != nil {
 		return err
 	}

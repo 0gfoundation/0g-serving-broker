@@ -32,13 +32,12 @@ func Migrate(database *gorm.DB) error {
 			},
 		},
 		{
-			ID: "create-account",
+			ID: "create-provider",
 			Migrate: func(tx *gorm.DB) error {
-				type Account struct {
+				type Provider struct {
 					model.Model
 					CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user_provider"`
-					User                   string                `gorm:"type:varchar(255);not null;index:deleted_user_provider"`
 					Balance                string                `gorm:"type:varchar(255);not null;default:0"`
 					PendingRefund          string                `gorm:"type:varchar(255);not null;default:0"`
 					Refunds                model.Refunds         `gorm:"type:json;not null;default:('[]')"`
@@ -46,7 +45,7 @@ func Migrate(database *gorm.DB) error {
 					Nonce                  int64                 `gorm:"type:bigint;not null;default:1"`
 					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider"`
 				}
-				return tx.AutoMigrate(&Account{})
+				return tx.AutoMigrate(&Provider{})
 			},
 		},
 		{

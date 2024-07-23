@@ -5,9 +5,9 @@ import (
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
-func (c *Ctrl) UpdateAccount(new model.Account) error {
-	old := model.Account{}
-	ret := c.db.Where(&model.Account{Provider: new.Provider, User: new.User}).First(&old)
+func (c *Ctrl) UpdateUserAccount(new model.User) error {
+	old := model.User{}
+	ret := c.db.Where(&model.User{User: new.User}).First(&old)
 	if ret.Error != nil {
 		errors.Wrap(ret.Error, "get account from db")
 	}
@@ -27,6 +27,6 @@ func (c *Ctrl) UpdateAccount(new model.Account) error {
 		old.UnsettledFee = new.UnsettledFee
 	}
 
-	ret = c.db.Where(&model.Account{Provider: old.Provider, User: old.User}).Updates(old)
+	ret = c.db.Where(&model.User{User: old.User}).Updates(old)
 	return errors.Wrap(ret.Error, "update account in db")
 }

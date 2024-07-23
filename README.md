@@ -73,13 +73,12 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    ```
 
 2. User Creates an Account:
-   The user creates an account to access the services registered by the provider.
+   The user creates an provider account to access the services registered by the provider.
 
    ```sh
-   curl -X POST http://<user_agent_url>/v1/account \
+   curl -X POST http://<user_agent_url>/v1/provider \
    -H "Content-Type: application/json" \
    -d '{
-     "user": "<user_address>",
      "provider": "<provider_address>",
      "balance": "<balance>"
    }'
@@ -89,7 +88,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    The provider agent will record the requests in the database.
 
    ```sh
-   curl http://<agent_url>/v1/retrieval/<provider_address>/<service_name> \
+   curl http://<agent_url>/v1/provider/<provider_address>/service/<service_name>/<optional_suffix> \
    -H "Content-Type: application/json" \
    -d '{
      "model": "someModel",
@@ -101,7 +100,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 4. Provider Settles the Fee:
 
    ```sh
-   curl -X POST http://<agent_url>/provider/settle
+   curl -X POST http://<agent_url>/v1/settle
    ```
 
 5. Provider Deletes the Service:
@@ -113,5 +112,5 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 6. User Checks Remaining Balance:
 
    ```sh
-   curl -X GET http://<agent_url>/v1/account
+   curl -X GET http://<agent_url>/v1/provider
    ```
