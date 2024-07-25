@@ -212,7 +212,7 @@ func (r *requestValidator) getOrCreateAccount(ctx *gin.Context) error {
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
-	account, err := r.contract.GetUserAccount(
+	account, err := r.contract.GetAccount(
 		callOpts,
 		common.HexToAddress(r.request.UserAddress),
 		common.HexToAddress(r.provider),
@@ -241,7 +241,7 @@ func (r *requestValidator) syncAccount() error {
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
 	}
-	account, err := r.contract.GetUserAccount(
+	account, err := r.contract.GetAccount(
 		callOpts,
 		common.HexToAddress(r.provider),
 		common.HexToAddress(r.request.UserAddress),

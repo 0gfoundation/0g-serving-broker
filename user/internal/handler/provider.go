@@ -53,22 +53,23 @@ func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 func (h *Handler) ListProviderAccount(ctx *gin.Context) {
 	list := []model.Provider{}
 
+	// TODO: sync data first and then get from db
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
 	}
-	users, providers, balances, err := h.contract.GetAllUserAccounts(callOpts)
+	svcs, err := h.contract.GetAllAccounts(callOpts)
 	if err != nil {
 		errors.Response(ctx, errors.Wrap(err, "list account from contract"))
 		return
 	}
 
-	for i, u := range users {
-		if u.String() != h.userAddress {
+	for i, svc := range svcs {
+		if svc.User.String() != h.userAddress {
 			continue
 		}
 		list = append(list, model.Provider{
-			Provider: providers[i].String(),
-			Balance:  balances[i].String(),
+			// Provider: providers[i].String(),
+			// Balance:  balances[i].String(),
 		})
 	}
 	ctx.JSON(http.StatusOK, model.ProviderList{
