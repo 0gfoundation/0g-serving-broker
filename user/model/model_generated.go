@@ -46,6 +46,37 @@ func (d *Provider) BindWithReadonly(ctx *gin.Context, old Provider) error {
 	return nil
 }
 
+// ================================= Refund =================================
+func (d *Refund) BeforeCreate(tx *gorm.DB) error {
+	if d.ID == nil {
+		d.ID = PtrOf(uuid.New())
+	}
+	return nil
+}
+
+func (d *Refund) Bind(ctx *gin.Context) error {
+	var r Refund
+	if err := ctx.ShouldBindJSON(&r); err != nil {
+		return err
+	}
+	d.Index = r.Index
+	d.Amount = r.Amount
+	d.Processed = r.Processed
+
+	return nil
+}
+
+func (d *Refund) BindWithReadonly(ctx *gin.Context, old Refund) error {
+	if err := d.Bind(ctx); err != nil {
+		return err
+	}
+	if d.ID == nil {
+		d.ID = old.ID
+	}
+
+	return nil
+}
+
 // ================================= Service =================================
 func (d *Service) BeforeCreate(tx *gorm.DB) error {
 	if d.ID == nil {

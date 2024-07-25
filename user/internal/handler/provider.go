@@ -1,12 +1,8 @@
 package handler
 
 import (
-	"context"
-	"log"
-	"math/big"
 	"net/http"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
@@ -17,63 +13,55 @@ import (
 func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 	var account model.Provider
 	if err := account.Bind(ctx); err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "bind account")
 		return
 	}
 
-	if ret := h.db.Create(&account); ret.Error != nil {
-		errors.Response(ctx, errors.Wrap(ret.Error, "create provider account in db"))
+	if err := h.ctrl.CreateProviderAccount(ctx, common.HexToAddress(account.Provider), account); err != nil {
+		handleError(ctx, err, "create account")
 		return
 	}
+	ctx.Status(http.StatusCreated)
+}
 
-	opts, err := h.contract.CreateTransactOpts()
+func (h *Handler) ListProviderAccount(ctx *gin.Context) {
+	accounts, err := h.ctrl.ListProviderAccount(ctx)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "list account")
+		return
+	}
+	ctx.JSON(http.StatusOK, model.ProviderList{
+		Metadata: model.ListMeta{Total: uint64(len(accounts))},
+		Items:    accounts,
+	})
+}
+
+func (h *Handler) GetProviderAccount(ctx *gin.Context) {
+	providerAddress := ctx.Param("provider")
+	account, err := h.contract.GetProviderAccount(ctx, common.HexToAddress(providerAddress))
+	if err != nil {
+		handleError(ctx, err, "get account from db")
 		return
 	}
 
-	opts.Value = big.NewInt(0)
-	opts.Value.SetString(account.Balance, 10)
+	ctx.JSON(http.StatusOK, account)
+}
 
-	doFunc := func() error {
-		_, err := h.contract.DepositFund(opts, common.HexToAddress(account.Provider))
-		return errors.Wrap(err, "add provider account to contract")
+func (h *Handler) Refund(ctx *gin.Context) {
+	providerAddress := ctx.Param("provider")
+	var refund model.Refund
+	if err := refund.Bind(ctx); err != nil {
+		handleError(ctx, err, "bind refund body")
+		return
 	}
-	if err := doFunc(); err != nil {
-		log.Println("failed to add provider account, rolling back...")
-		errRollback := h.db.Where("provider = ?", account.Provider).Delete(&model.Provider{})
-		log.Printf("rollback result: %v", errRollback)
-		errors.Response(ctx, err)
+	if err := h.ctrl.RequestRefund(ctx, common.HexToAddress(providerAddress), refund); err != nil {
+		handleError(ctx, err, "process refund")
 		return
 	}
 
 	ctx.Status(http.StatusAccepted)
 }
 
-func (h *Handler) ListProviderAccount(ctx *gin.Context) {
-	list := []model.Provider{}
-
-	// TODO: sync data first and then get from db
-	callOpts := &bind.CallOpts{
-		Context: context.Background(),
-	}
-	svcs, err := h.contract.GetAllAccounts(callOpts)
-	if err != nil {
-		errors.Response(ctx, errors.Wrap(err, "list account from contract"))
-		return
-	}
-
-	for i, svc := range svcs {
-		if svc.User.String() != h.userAddress {
-			continue
-		}
-		list = append(list, model.Provider{
-			// Provider: providers[i].String(),
-			// Balance:  balances[i].String(),
-		})
-	}
-	ctx.JSON(http.StatusOK, model.ProviderList{
-		Metadata: model.ListMeta{Total: uint64(len(list))},
-		Items:    list,
-	})
+func handleError(ctx *gin.Context, err error, context string) {
+	errors.Response(ctx, errors.Wrap(err, "User: handle provider account, "+context))
 }

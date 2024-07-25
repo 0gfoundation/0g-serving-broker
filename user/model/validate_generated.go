@@ -25,6 +25,19 @@ func ValidateUpdateProvider(oldVal, newVal Provider) error {
 	return nil
 }
 
+func ValidateUpdateRefund(oldVal, newVal Refund) error {
+	fields := []string{}
+	if newVal.ID != nil && !apiequality.Semantic.DeepEqual(newVal.ID, oldVal.ID){
+		fields = append(fields, "id")
+	}
+	
+
+	if len(fields) > 0 {
+		return fmt.Errorf("update field: [%s] not allowed", strings.Join(fields, ","))
+	}
+	return nil
+}
+
 func ValidateUpdateService(oldVal, newVal Service) error {
 	fields := []string{}
 	if newVal.ID != nil && !apiequality.Semantic.DeepEqual(newVal.ID, oldVal.ID){

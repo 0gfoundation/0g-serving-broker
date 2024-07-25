@@ -2,23 +2,26 @@ package handler
 
 import (
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
+	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
+	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
+	"github.com/0glabs/0g-serving-agent/user/internal/db"
 )
 
 type Handler struct {
-	db       *gorm.DB
-	contract *contract.ServingContract
+	db       *db.DB
+	ctrl     *ctrl.Ctrl
+	contract *usercontract.UserContract
 
 	key         string
 	servingUrl  string
 	userAddress string
 }
 
-func New(db *gorm.DB, contract *contract.ServingContract, servingUrl, key, userAddress string) *Handler {
+func New(db *db.DB, ctrl *ctrl.Ctrl, contract *usercontract.UserContract, servingUrl, key, userAddress string) *Handler {
 	h := &Handler{
 		db:          db,
+		ctrl:        ctrl,
 		contract:    contract,
 		key:         key,
 		servingUrl:  servingUrl,
@@ -32,7 +35,8 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.GET("/provider", h.ListProviderAccount)
 	group.POST("/provider", h.AddProviderAccount)
-	// group.POST("/provider/:provider/refund", h.Refund)
+	group.GET("/provider/:provider", h.GetProviderAccount)
+	group.POST("/provider/:provider/refund", h.Refund)
 
 	// request service
 	group.POST("/provider/:provider/service/:service/*suffix", h.GetData)

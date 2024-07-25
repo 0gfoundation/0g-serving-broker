@@ -119,41 +119,42 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route, targetURL, svcType str
 	case "chatbot":
 		extractor = &chatbot.ProviderChatBot{}
 	default:
-		errors.Response(ctx, errors.New("known service type"))
+		requestError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
 	reqV.extractor = extractor
 
 	err := reqV.backFillMetadata(ctx, p.address)
 	if err != nil {
-		errors.Response(ctx, err)
+		requestError(ctx, err, "get request metadata")
 		return
 	}
 
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
 		errors.Response(ctx, err)
+		requestError(ctx, err, "read request body")
 		return
 	}
 
 	err = reqV.validate(reqBody)
 	if err != nil {
-		errors.Response(ctx, errors.Wrap(err, "validate request in provider"))
+		requestError(ctx, err, "verify request")
 		return
 	}
 
+	// request should be stored even if an error occurs in the proxied service.
 	if ret := p.db.Create(reqV.request); ret.Error != nil {
-		errors.Response(ctx, ret.Error)
+		requestError(ctx, err, "store request")
 		return
 	}
 
 	req, err := p.prepareRequest(ctx, targetURL, route, reqBody)
 	if err != nil {
-		errors.Response(ctx, err)
+		requestError(ctx, err, "prepare request")
 		return
 	}
 
-	// TODO: Add a rollback
 	p.processRequest(ctx, req, &reqV)
 }
 
@@ -164,7 +165,7 @@ func (p *Proxy) prepareRequest(ctx *gin.Context, targetURL, route string, reqBod
 	}
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
 	if err != nil {
-		errors.Response(ctx, errors.Wrap(err, "call the original service"))
+		errors.Response(ctx, errors.Wrap(err, "provider proxy: prepare request for the proxied service"))
 		return nil, err
 	}
 
@@ -187,7 +188,7 @@ func (p *Proxy) processRequest(ctx *gin.Context, req *http.Request, reqV *reques
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errors.Response(ctx, reqV.extractor.ErrMsg(resp.Body))
+		responseError(ctx, reqV.extractor.ErrMsg(resp.Body), "read error from proxied service")
 		return
 	}
 
@@ -198,6 +199,7 @@ func (p *Proxy) processRequest(ctx *gin.Context, req *http.Request, reqV *reques
 
 	fee := reqV.getUnsettleFee()
 	account := model.User{
+		User:             reqV.request.UserAddress,
 		LastRequestNonce: &reqV.request.Nonce,
 		UnsettledFee:     &fee,
 	}
@@ -211,24 +213,26 @@ func (p *Proxy) processRequest(ctx *gin.Context, req *http.Request, reqV *reques
 func (p *Proxy) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errors.Response(ctx, err)
+		responseError(ctx, err, "read from body")
 		return
 	}
+
 	contentEncoding := resp.Header.Get("Content-Encoding")
 	outputContent, err := extractor.GetRespContent(body, contentEncoding)
 	if err != nil {
-		errors.Response(ctx, err)
+		responseError(ctx, err, "extract content")
 		return
 	}
+
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
-		errors.Response(ctx, err)
+		responseError(ctx, err, "extract count")
 		return
 	}
+
 	account.LastResponseTokenCount = &outputCount
-	err = p.ctrl.UpdateUserAccount(account)
-	if err != nil {
-		errors.Response(ctx, err)
+	if err = p.ctrl.UpdateUserAccount(account.User, account); err != nil {
+		responseError(ctx, err, "update user account in db")
 		return
 	}
 
@@ -246,7 +250,7 @@ func (p *Proxy) handleStreamResponse(ctx *gin.Context, resp *http.Response, extr
 				if err == io.EOF {
 					return false
 				}
-				errors.Response(ctx, err)
+				responseError(ctx, err, "read from body")
 				return false
 			}
 
@@ -254,33 +258,33 @@ func (p *Proxy) handleStreamResponse(ctx *gin.Context, resp *http.Response, extr
 			if line == "\n" || line == "\r\n" {
 				_, err := w.Write(chunkBuf.Bytes())
 				if err != nil {
-					errors.Response(ctx, err)
+					responseError(ctx, err, "write to stream")
 					return false
 				}
 
 				encoding := resp.Header.Get("Content-Encoding")
 				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
 				if err != nil {
-					errors.Response(ctx, err)
+					responseError(ctx, err, "extract content")
 					return false
 				}
 
 				completed, err := extractor.StreamCompleted(content)
 				if err != nil {
-					errors.Response(ctx, err)
+					responseError(ctx, err, "check stream completed")
 					return false
 				}
 				if completed {
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
-						errors.Response(ctx, err)
+						responseError(ctx, err, "extract output count")
 						return false
 					}
 
 					account.LastResponseTokenCount = &outputCount
-					err = p.ctrl.UpdateUserAccount(account)
+					err = p.ctrl.UpdateUserAccount(account.User, account)
 					if err != nil {
-						errors.Response(ctx, err)
+						responseError(ctx, err, "update user account in db")
 						return false
 					}
 				}
@@ -290,4 +294,12 @@ func (p *Proxy) handleStreamResponse(ctx *gin.Context, resp *http.Response, extr
 			}
 		}
 	})
+}
+
+func responseError(ctx *gin.Context, err error, context string) {
+	errors.Response(ctx, errors.Wrap(err, "provider proxy: handle proxied service response, "+context))
+}
+
+func requestError(ctx *gin.Context, err error, context string) {
+	errors.Response(ctx, errors.Wrap(err, "provider proxy: handle proxied service request, "+context))
 }

@@ -5,11 +5,14 @@ import (
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
-func (c *Ctrl) UpdateUserAccount(new model.User) error {
+func (c *Ctrl) UpdateUserAccount(userAddress string, new model.User) error {
 	old := model.User{}
-	ret := c.db.Where(&model.User{User: new.User}).First(&old)
+	ret := c.db.Where(&model.User{User: userAddress}).First(&old)
 	if ret.Error != nil {
 		errors.Wrap(ret.Error, "get account from db")
+	}
+	if err := model.ValidateUpdateUser(old, new); err != nil {
+		return err
 	}
 	if new.LastBalanceCheckTime != nil {
 		old.LastBalanceCheckTime = new.LastBalanceCheckTime
@@ -28,5 +31,5 @@ func (c *Ctrl) UpdateUserAccount(new model.User) error {
 	}
 
 	ret = c.db.Where(&model.User{User: old.User}).Updates(old)
-	return errors.Wrap(ret.Error, "update account in db")
+	return ret.Error
 }
