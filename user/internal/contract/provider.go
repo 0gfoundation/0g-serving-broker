@@ -11,10 +11,7 @@ import (
 )
 
 func (c *UserContract) CreateProviderAccount(ctx context.Context, provider common.Address, balance big.Int) error {
-	account, err := c.GetProviderAccount(ctx, provider)
-	if err != nil {
-		return errors.Wrap(err, "get account from contract")
-	}
+	account, _ := c.GetProviderAccount(ctx, provider)
 	zeroAddress := common.Address{}
 	if account.User != zeroAddress {
 		return errors.New("account already exists")

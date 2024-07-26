@@ -25,7 +25,7 @@ func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 }
 
 func (h *Handler) ListProviderAccount(ctx *gin.Context) {
-	accounts, err := h.ctrl.ListProviderAccount(ctx)
+	accounts, err := h.ctrl.ListProviderAccount(ctx, true)
 	if err != nil {
 		handleError(ctx, err, "list account")
 		return
@@ -38,7 +38,7 @@ func (h *Handler) ListProviderAccount(ctx *gin.Context) {
 
 func (h *Handler) GetProviderAccount(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
-	account, err := h.contract.GetProviderAccount(ctx, common.HexToAddress(providerAddress))
+	account, err := h.ctrl.GetProviderAccount(ctx, common.HexToAddress(providerAddress), true)
 	if err != nil {
 		handleError(ctx, err, "get account from db")
 		return

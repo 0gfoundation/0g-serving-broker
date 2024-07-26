@@ -2,7 +2,6 @@ package db
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
@@ -44,35 +43,13 @@ func (d *DB) UpdateProviderAccount(providerAddress string, new model.Provider) e
 	if err := model.ValidateUpdateProvider(old, new); err != nil {
 		return err
 	}
-	if new.Balance != nil {
-		old.Balance = new.Balance
-	}
-	if new.PendingRefund != nil {
-		old.PendingRefund = new.PendingRefund
-	}
-	if new.LastResponseTokenCount != nil {
-		old.LastResponseTokenCount = new.LastResponseTokenCount
-	}
-	if new.Nonce != nil {
+	if new.Nonce != nil && old.Nonce != nil {
 		if *new.Nonce < *old.Nonce {
 			return fmt.Errorf("updating is not allowed as new nonce %d is smaller than the old nonce %d", *new.Nonce, *old.Nonce)
 		}
 		old.Nonce = new.Nonce
 	}
-	if len(new.Refunds) > 0 {
-		var total int64
-		for _, refund := range new.Refunds {
-			if !refund.Processed {
-				total += *refund.Amount
-			}
-		}
-		if total+*old.PendingRefund > *old.Balance {
-			return fmt.Errorf("updating is not allowed as total refund %d exceeds the refundable balance", total)
-		}
-		old.Refunds = new.Refunds
-	}
-
-	ret := d.db.Where(&model.Provider{Provider: old.Provider}).Updates(old)
+	ret := d.db.Where(&model.Provider{Provider: old.Provider}).Updates(new)
 	return ret.Error
 }
 
@@ -127,29 +104,6 @@ func identicalProvider(old, new *model.Provider) bool {
 	if !identicalNumber(old.Nonce, new.Nonce) {
 		return false
 	}
-	if len(new.Refunds) != len(old.Refunds) {
-		return false
-	}
-
-	for _, refund := range new.Refunds {
-		if refund.Amount == nil || refund.CreatedAt == nil {
-			return false
-		}
-	}
-
-	sort.Slice(new.Refunds, func(i, j int) bool {
-		return new.Refunds[i].CreatedAt.After(*new.Refunds[j].CreatedAt)
-	})
-	sort.Slice(old.Refunds, func(i, j int) bool {
-		return old.Refunds[i].CreatedAt.After(*old.Refunds[j].CreatedAt)
-	})
-
-	for i := 0; i < len(new.Refunds); i++ {
-		if !identicalRefund(old.Refunds[i], new.Refunds[i]) {
-			return false
-		}
-	}
-
 	return true
 }
 
@@ -158,14 +112,4 @@ func identicalNumber(old *int64, new *int64) bool {
 		return false
 	}
 	return true
-}
-
-func identicalRefund(old, new model.Refund) bool {
-	if new.CreatedAt == nil || old.CreatedAt == nil || new.Amount == nil || old.Amount == nil {
-		return false
-	}
-	if !new.CreatedAt.Equal(*old.CreatedAt) || new.Processed != old.Processed {
-		return false
-	}
-	return *new.Amount == *old.Amount
 }

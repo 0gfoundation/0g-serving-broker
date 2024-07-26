@@ -29,86 +29,88 @@ func (c Ctrl) CreateProviderAccount(ctx context.Context, providerAddress common.
 	return errors.Wrap(err, "create provider account in db")
 }
 
-func (c Ctrl) GetProviderAccount(ctx context.Context, providerAddress common.Address) (model.Provider, error) {
+func (c Ctrl) GetProviderAccount(ctx context.Context, providerAddress common.Address, mergeDB bool) (model.Provider, error) {
 	account, err := c.contract.GetProviderAccount(ctx, providerAddress)
 	if err != nil {
 		return model.Provider{}, errors.Wrap(err, "get account from contract")
 	}
-	return parse(account), nil
+	ret := parse(account)
+	if !mergeDB {
+		return ret, nil
+	}
+	rets, err := c.backfillProviderAccount([]contract.Account{account})
+	return rets[0], err
 }
 
-func (c Ctrl) ListProviderAccount(ctx context.Context) ([]model.Provider, error) {
+func (c Ctrl) ListProviderAccount(ctx context.Context, mergeDB bool) ([]model.Provider, error) {
 	accounts, err := c.contract.ListProviderAccount(ctx)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "list account from contract")
 	}
-
+	if mergeDB {
+		return c.backfillProviderAccount(accounts)
+	}
 	list := make([]model.Provider, len(accounts))
 	for i, account := range accounts {
-		refunds := make([]model.Refund, len(account.Refunds))
-		for i, refund := range account.Refunds {
-			refunds[i] = model.Refund{
-				CreatedAt: model.PtrOf(time.Unix(refund.CreatedAt.Int64(), 0)),
-				Amount:    model.PtrOf(refund.Amount.Int64()),
-				Processed: refund.Processed,
-			}
-		}
 		list[i] = parse(account)
 	}
 	return list, nil
 }
 
-func (c Ctrl) RequestRefund(ctx context.Context, providerAddress common.Address, refund model.Refund) error {
-	amount := big.NewInt(0)
-	amount.SetInt64(*refund.Amount)
-	event, err := c.contract.RequestRefund(ctx, providerAddress, amount)
+func (c Ctrl) backfillProviderAccount(accounts []contract.Account) ([]model.Provider, error) {
+	list := make([]model.Provider, len(accounts))
+	dbAccounts, err := c.db.ListProviderAccount()
 	if err != nil {
-		return errors.Wrap(err, "request refund in contract")
+		return nil, errors.Wrap(err, "list account from db")
 	}
-
-	old, err := c.GetProviderAccount(ctx, providerAddress)
-	if err != nil {
-		return errors.Wrap(err, "finish refund, get account from contract")
+	accountMap := make(map[string]model.Provider, len(dbAccounts))
+	for i, account := range dbAccounts {
+		accountMap[account.Provider] = dbAccounts[i]
 	}
-
-	refund.CreatedAt = model.PtrOf(time.Unix(event.Timestamp.Int64(), 0))
-	refund.Index = model.PtrOf(event.Index.Int64())
-	new := model.Provider{
-		Provider: old.Provider,
-		Refunds:  append(old.Refunds, refund),
-	}
-	err = c.db.UpdateProviderAccount(old.Provider, new)
-	if err != nil {
-		rollBackErr := c.db.UpdateProviderAccount(old.Provider, new)
-		if rollBackErr != nil {
-			log.Printf("rollback updating refund error: %s", rollBackErr.Error())
+	for i, account := range accounts {
+		list[i] = parse(account)
+		if v, ok := accountMap[account.Provider.String()]; ok {
+			list[i].LastResponseTokenCount = v.LastResponseTokenCount
 		}
 	}
-	return errors.Wrapf(err, "finish refund, update account in db")
+	return list, nil
 }
 
 func (c Ctrl) SyncProviderAccounts(ctx context.Context) error {
-	list, err := c.ListProviderAccount(ctx)
+	accounts, err := c.ListProviderAccount(ctx, false)
 	if err != nil {
 		return err
 	}
+	refunds := []model.Refund{}
+	for i := range accounts {
+		refunds = append(refunds, accounts[i].Refunds...)
+	}
 
-	return c.db.BatchUpdateProviderAccount(list)
+	if err := c.db.BatchUpdateProviderAccount(accounts); err != nil {
+		return err
+	}
+
+	return c.db.BatchUpdateRefund(refunds)
 }
 
 func (c Ctrl) SyncProviderAccount(ctx context.Context, providerAddress common.Address) error {
-	account, err := c.GetProviderAccount(ctx, providerAddress)
+	account, err := c.GetProviderAccount(ctx, providerAddress, false)
 	if err != nil {
 		return err
 	}
+	if err := c.db.UpdateProviderAccount(account.Provider, account); err != nil {
+		return err
+	}
 
-	return c.db.UpdateProviderAccount(account.Provider, account)
+	return c.db.BatchUpdateRefund(account.Refunds)
 }
 
 func parse(account contract.Account) model.Provider {
 	refunds := make([]model.Refund, len(account.Refunds))
 	for i, refund := range account.Refunds {
 		refunds[i] = model.Refund{
+			Provider:  account.Provider.String(),
+			Index:     model.PtrOf(refund.Index.Int64()),
 			CreatedAt: model.PtrOf(time.Unix(refund.CreatedAt.Int64(), 0)),
 			Amount:    model.PtrOf(refund.Amount.Int64()),
 			Processed: refund.Processed,

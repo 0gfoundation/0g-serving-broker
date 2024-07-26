@@ -162,7 +162,7 @@ func (r *requestValidator) validateInputToken(reqBody []byte) error {
 }
 
 func (r *requestValidator) validatePreviousOutputCount() error {
-	if r.request.PreviousOutputCount == r.lastResponseTokenCount {
+	if r.request.PreviousOutputCount > r.lastResponseTokenCount {
 		return nil
 	}
 	return fmt.Errorf("invalid previousOutputCount, expected %d, but received %d", r.lastResponseTokenCount, r.request.PreviousOutputCount)

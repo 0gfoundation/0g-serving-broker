@@ -30,7 +30,13 @@ func ValidateUpdateRefund(oldVal, newVal Refund) error {
 	if newVal.ID != nil && !apiequality.Semantic.DeepEqual(newVal.ID, oldVal.ID){
 		fields = append(fields, "id")
 	}
+	if newVal.Index != nil && !apiequality.Semantic.DeepEqual(newVal.Index, oldVal.Index){
+		fields = append(fields, "index")
+	}
 	
+	if !apiequality.Semantic.DeepEqual(newVal.Provider, oldVal.Provider){
+		fields = append(fields, "provider")
+	}
 
 	if len(fields) > 0 {
 		return fmt.Errorf("update field: [%s] not allowed", strings.Join(fields, ","))

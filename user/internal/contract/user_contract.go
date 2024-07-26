@@ -19,7 +19,7 @@ func NewUserContract(conf *config.Config, userAddress string) (*UserContract, er
 		return nil, err
 	}
 
-	return &UserContract{contract: contract}, nil
+	return &UserContract{contract: contract, userAddress: userAddress}, nil
 }
 
 func (u *UserContract) Close() {

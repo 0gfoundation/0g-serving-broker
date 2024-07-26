@@ -3,10 +3,6 @@
 package model
 
 import (
-	"database/sql/driver"
-	"encoding/json"
-	"fmt"
-
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -28,7 +24,6 @@ func (d *Provider) Bind(ctx *gin.Context) error {
 	d.Provider = r.Provider
 	d.Balance = r.Balance
 	d.PendingRefund = r.PendingRefund
-	d.Refunds = r.Refunds
 	d.LastResponseTokenCount = r.LastResponseTokenCount
 	d.Nonce = r.Nonce
 
@@ -59,7 +54,7 @@ func (d *Refund) Bind(ctx *gin.Context) error {
 	if err := ctx.ShouldBindJSON(&r); err != nil {
 		return err
 	}
-	d.Index = r.Index
+	d.Provider = r.Provider
 	d.Amount = r.Amount
 	d.Processed = r.Processed
 
@@ -72,6 +67,9 @@ func (d *Refund) BindWithReadonly(ctx *gin.Context, old Refund) error {
 	}
 	if d.ID == nil {
 		d.ID = old.ID
+	}
+	if d.Index == nil {
+		d.Index = old.Index
 	}
 
 	return nil
@@ -109,14 +107,3 @@ func (d *Service) BindWithReadonly(ctx *gin.Context, old Service) error {
 
 	return nil
 }
-
-//=============== implementation of sql.scanner and sql.valuer  ===============
-func (m Refunds) Value() (driver.Value, error) {
-	return json.Marshal(m)
-}
-func (m *Refunds) Scan(value interface{}) error {
-	if v, ok := value.([]byte); ok {
-		return json.Unmarshal(v, m)
-	}
-	return fmt.Errorf("can't convert %T to Refunds", value)
-}	
