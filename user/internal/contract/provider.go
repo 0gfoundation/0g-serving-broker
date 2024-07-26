@@ -23,20 +23,20 @@ func (c *UserContract) GetProviderAccount(ctx context.Context, provider common.A
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
 	}
-	return c.contract.GetAccount(callOpts, common.HexToAddress(c.userAddress), provider)
+	return c.Contract.GetAccount(callOpts, common.HexToAddress(c.UserAddress), provider)
 }
 
 func (c *UserContract) ListProviderAccount(ctx context.Context) ([]contract.Account, error) {
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
 	}
-	accounts, err := c.contract.GetAllAccounts(callOpts)
+	accounts, err := c.Contract.GetAllAccounts(callOpts)
 	if err != nil {
 		return nil, err
 	}
 	ret := []contract.Account{}
 	for i := range accounts {
-		if accounts[i].User.String() != c.userAddress {
+		if accounts[i].User.String() != c.UserAddress {
 			continue
 		}
 		ret = append(ret, accounts[i])
@@ -45,33 +45,33 @@ func (c *UserContract) ListProviderAccount(ctx context.Context) ([]contract.Acco
 }
 
 func (c *UserContract) DepositFund(ctx context.Context, provider common.Address, balance big.Int) error {
-	opts, err := c.contract.CreateTransactOpts()
+	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
 	}
 
 	opts.Value = &balance
-	tx, err := c.contract.DepositFund(opts, provider)
+	tx, err := c.Contract.DepositFund(opts, provider)
 	if err != nil {
 		return err
 	}
-	_, err = c.contract.WaitForReceipt(ctx, tx.Hash())
+	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
 	return err
 }
 
 func (c *UserContract) RequestRefund(ctx context.Context, provider common.Address, refund *big.Int) (*contract.ServingRefundRequested, error) {
-	opts, err := c.contract.CreateTransactOpts()
+	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return nil, err
 	}
-	tx, err := c.contract.RequestRefund(opts, provider, refund)
+	tx, err := c.Contract.RequestRefund(opts, provider, refund)
 	if err != nil {
 		return nil, err
 	}
-	receipt, err := c.contract.WaitForReceipt(ctx, tx.Hash())
+	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
 		return nil, err
 	}
 
-	return c.contract.Serving.ParseRefundRequested(*receipt.Logs[0])
+	return c.Contract.Serving.ParseRefundRequested(*receipt.Logs[0])
 }

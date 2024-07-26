@@ -1,11 +1,16 @@
 package extractor
 
-import "io"
+import (
+	"io"
+
+	"github.com/0glabs/0g-serving-agent/common/contract"
+)
 
 // The extractors interface extract metadata from requests and responses for validation and settlement.
 // Any service that implements those interface can be registered and utilized in the 0g serving system.
 
 type UserReqRespExtractor interface {
+	GetSvcInfo() contract.Service
 	GetInputCount(reqBody []byte) (int64, error)
 	GetOutputCount(respBody [][]byte) (int64, error)
 	GetRespContent(resp []byte, encodingType string) ([]byte, error)

@@ -12,20 +12,13 @@ type Handler struct {
 	db       *db.DB
 	ctrl     *ctrl.Ctrl
 	contract *usercontract.UserContract
-
-	key         string
-	servingUrl  string
-	userAddress string
 }
 
-func New(db *db.DB, ctrl *ctrl.Ctrl, contract *usercontract.UserContract, servingUrl, key, userAddress string) *Handler {
+func New(db *db.DB, ctrl *ctrl.Ctrl, contract *usercontract.UserContract) *Handler {
 	h := &Handler{
-		db:          db,
-		ctrl:        ctrl,
-		contract:    contract,
-		key:         key,
-		servingUrl:  servingUrl,
-		userAddress: userAddress,
+		db:       db,
+		ctrl:     ctrl,
+		contract: contract,
 	}
 	return h
 }

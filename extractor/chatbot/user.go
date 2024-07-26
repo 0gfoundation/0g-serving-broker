@@ -10,10 +10,13 @@ import (
 
 	"github.com/andybalholm/brotli"
 
+	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
 )
 
-type ChatBot struct{}
+type ChatBot struct {
+	SvcInfo contract.Service
+}
 
 // https://platform.openai.com/docs/api-reference/making-requests
 
@@ -43,6 +46,10 @@ type ErrorResponse struct {
 		Param   string `json:"param"`
 		Code    string `json:"code"`
 	} `json:"error"`
+}
+
+func (c *ChatBot) GetSvcInfo() contract.Service {
+	return c.SvcInfo
 }
 
 func (c *ChatBot) GetInputCount(reqBody []byte) (int64, error) {

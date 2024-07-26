@@ -11,6 +11,7 @@ require (
 	github.com/go-sql-driver/mysql v1.7.0
 	github.com/google/uuid v1.6.0
 	github.com/openweb3/web3go v0.2.7
+	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/rs/zerolog v1.33.0
 	github.com/sirupsen/logrus v1.9.3
@@ -19,6 +20,7 @@ require (
 	gorm.io/gorm v1.25.10
 	gorm.io/plugin/soft_delete v1.2.1
 	k8s.io/apimachinery v0.30.2
+	k8s.io/client-go v0.30.1
 	sigs.k8s.io/controller-runtime v0.18.4
 )
 
@@ -145,7 +147,6 @@ require (
 	gotest.tools v2.2.0+incompatible // indirect
 	k8s.io/api v0.30.1 // indirect
 	k8s.io/apiextensions-apiserver v0.30.1 // indirect
-	k8s.io/client-go v0.30.1 // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	k8s.io/utils v0.0.0-20230726121419-3b25d923346b // indirect

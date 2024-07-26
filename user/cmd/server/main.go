@@ -1,7 +1,10 @@
 package server
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
+	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
 	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
@@ -28,8 +31,9 @@ func Main() {
 	defer contract.Close()
 
 	r := gin.New()
-	ctrl := ctrl.New(db, contract)
-	h := handler.New(db, ctrl, contract, config.ServingUrl, config.SigningKey, config.Address)
+	svcCache := cache.New(5*time.Minute, 10*time.Minute)
+	ctrl := ctrl.New(db, contract, config.SigningKey, svcCache)
+	h := handler.New(db, ctrl, contract)
 	h.Register(r)
 
 	// Listen and Serve, config port with PORT=X

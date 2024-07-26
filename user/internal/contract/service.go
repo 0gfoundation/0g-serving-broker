@@ -12,5 +12,5 @@ func (c *UserContract) GetService(ctx context.Context, providerAddress common.Ad
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
-	return c.contract.GetService(callOpts, providerAddress, svcName)
+	return c.Contract.GetService(callOpts, providerAddress, svcName)
 }

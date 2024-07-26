@@ -9,8 +9,8 @@ import (
 )
 
 type UserContract struct {
-	contract    *contract.ServingContract
-	userAddress string
+	Contract    *contract.ServingContract
+	UserAddress string
 }
 
 func NewUserContract(conf *config.Config, userAddress string) (*UserContract, error) {
@@ -19,9 +19,9 @@ func NewUserContract(conf *config.Config, userAddress string) (*UserContract, er
 		return nil, err
 	}
 
-	return &UserContract{contract: contract, userAddress: userAddress}, nil
+	return &UserContract{Contract: contract, UserAddress: userAddress}, nil
 }
 
 func (u *UserContract) Close() {
-	u.contract.Close()
+	u.Contract.Close()
 }
