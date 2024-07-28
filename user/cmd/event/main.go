@@ -1,51 +1,45 @@
 package event
 
 import (
-	"os"
-
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
-
-	"github.com/ethereum/go-ethereum/common"
 	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
+	controller "sigs.k8s.io/controller-runtime"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/contract"
+	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
+	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
+	database "github.com/0glabs/0g-serving-agent/user/internal/db"
 	"github.com/0glabs/0g-serving-agent/user/internal/event"
 )
 
 func Main() {
 	config := config.GetConfig()
 
-	db, err := gorm.Open(mysql.Open(config.Database.User), &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			SingularTable: true,
-		},
-	})
+	db, err := database.NewDB(config)
 	if err != nil {
 		panic(err)
 	}
-
-	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), config, os.Getenv("NETWORK"))
+	if err := db.Migrate(); err != nil {
+		panic(err)
+	}
+	contract, err := usercontract.NewUserContract(config, config.Address)
 	if err != nil {
 		panic(err)
 	}
-	defer c.Close()
+	defer contract.Close()
 
 	cfg := &rest.Config{}
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{})
+	mgr, err := controller.NewManager(cfg, controller.Options{})
 	if err != nil {
 		panic(err)
 	}
 
-	refundProcessor := event.NewRefundProcessor(db, c, config.Address, config.Interval.RefundProcessor)
+	ctrl := ctrl.New(db, contract, "", nil)
+	refundProcessor := event.NewRefundProcessor(ctrl, config.Interval.RefundProcessor)
 	if err := mgr.Add(refundProcessor); err != nil {
 		panic(err)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
+	ctx := controller.SetupSignalHandler()
 	if err := mgr.Start(ctx); err != nil {
 		panic(err)
 	}

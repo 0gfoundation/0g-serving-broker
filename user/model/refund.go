@@ -6,6 +6,11 @@ import (
 
 type Refunds []Refund
 
+type RefundListOptions struct {
+	Processed *bool
+	CreatedAt *time.Time
+}
+
 type Refund struct {
 	Model
 	Index     *int64     `gorm:"type:bigint;not null;uniqueIndex:provider_index" json:"index" readonly:"true"`

@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
@@ -23,9 +24,17 @@ func (d *DB) GetRefund(providerAddress string, index int64) (model.Refund, error
 	return old, nil
 }
 
-func (d *DB) ListRefund() ([]model.Refund, error) {
+func (d *DB) ListRefund(opt model.RefundListOptions) ([]model.Refund, error) {
+	tx := d.db.Model(model.Refund{})
+
+	if opt.Processed != nil {
+		tx = tx.Where("processed = ?", *opt.Processed)
+	}
+	if opt.CreatedAt != nil {
+		tx = tx.Where("created_at < ?", *opt.CreatedAt)
+	}
 	list := []model.Refund{}
-	ret := d.db.Model(model.Refund{}).Order("created_at DESC").Find(&list)
+	ret := tx.Order("created_at DESC").Find(&list)
 	return list, ret.Error
 }
 
@@ -50,7 +59,7 @@ func (d *DB) UpdateRefund(providerAddress string, index int64, new model.Refund,
 
 // BatchUpdateRefund doesn't check the validity of the incoming data
 func (d *DB) BatchUpdateRefund(news []model.Refund) error {
-	olds, err := d.ListRefund()
+	olds, err := d.ListRefund(model.RefundListOptions{})
 	if err != nil {
 		return err
 	}
@@ -59,7 +68,7 @@ func (d *DB) BatchUpdateRefund(news []model.Refund) error {
 		if old.Index == nil {
 			return errors.New("nil old refund.Index")
 		}
-		key := old.Provider + strconv.FormatInt(*old.Index, 10)
+		key := strings.ToLower(old.Provider + strconv.FormatInt(*old.Index, 10))
 		oldAccountMap[key] = &olds[i]
 	}
 
@@ -68,7 +77,7 @@ func (d *DB) BatchUpdateRefund(news []model.Refund) error {
 		if new.Index == nil {
 			return errors.New("nil incoming refund.Index")
 		}
-		key := new.Provider + strconv.FormatInt(*new.Index, 10)
+		key := strings.ToLower(new.Provider + strconv.FormatInt(*new.Index, 10))
 		if old, ok := oldAccountMap[key]; ok {
 			delete(oldAccountMap, key)
 			if !identicalRefund(old, &new) {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
@@ -61,14 +62,15 @@ func (d *DB) BatchUpdateProviderAccount(news []model.Provider) error {
 	}
 	oldAccountMap := make(map[string]*model.Provider, len(olds))
 	for i, old := range olds {
-		oldAccountMap[old.Provider] = &olds[i]
+		oldAccountMap[strings.ToLower(old.Provider)] = &olds[i]
 	}
 
 	var toAdd, toUpdate []model.Provider
 	var toRemove []string
 	for i, new := range news {
-		if old, ok := oldAccountMap[new.Provider]; ok {
-			delete(oldAccountMap, new.Provider)
+		key := strings.ToLower(new.Provider)
+		if old, ok := oldAccountMap[key]; ok {
+			delete(oldAccountMap, key)
 			if !identicalProvider(old, &new) {
 				toUpdate = append(toUpdate, news[i])
 			}

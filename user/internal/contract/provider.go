@@ -75,3 +75,16 @@ func (c *UserContract) RequestRefund(ctx context.Context, provider common.Addres
 
 	return c.Contract.Serving.ParseRefundRequested(*receipt.Logs[0])
 }
+
+func (c *UserContract) ProcessRefund(ctx context.Context, provider common.Address, indices []*big.Int) error {
+	opts, err := c.Contract.CreateTransactOpts()
+	if err != nil {
+		return err
+	}
+	tx, err := c.Contract.ProcessRefund(opts, provider, indices)
+	if err != nil {
+		return err
+	}
+	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	return err
+}

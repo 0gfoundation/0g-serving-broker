@@ -5,24 +5,18 @@ import (
 	"log"
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/user/model"
-	"gorm.io/gorm"
+	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
 )
 
 type RefundProcessor struct {
-	db       *gorm.DB
-	contract *contract.ServingContract
+	ctrl *ctrl.Ctrl
 
-	address  string
 	interval int
 }
 
-func NewRefundProcessor(db *gorm.DB, contract *contract.ServingContract, address string, interval int) *RefundProcessor {
+func NewRefundProcessor(ctrl *ctrl.Ctrl, interval int) *RefundProcessor {
 	b := &RefundProcessor{
-		db:       db,
-		contract: contract,
-		address:  address,
+		ctrl:     ctrl,
 		interval: interval,
 	}
 	return b
@@ -32,10 +26,9 @@ func NewRefundProcessor(db *gorm.DB, contract *contract.ServingContract, address
 func (b RefundProcessor) Start(ctx context.Context) error {
 	for {
 		time.Sleep(time.Duration(b.interval) * time.Second)
-		list := []model.Provider{}
-		if ret := b.db.Model(model.Provider{}).Where("pending_refund > ?", 0).Order("created_at DESC").Find(&list); ret.Error != nil {
-			return ret.Error
+		if err := b.ctrl.ProcessedRefunds(ctx); err != nil {
+			log.Printf("Processed refunds: %s", err.Error())
 		}
-		log.Println(list[0].Balance)
+		log.Printf("There are currently no refunds due")
 	}
 }
