@@ -72,6 +72,7 @@ func (d *DB) BatchUpdateProviderAccount(news []model.Provider) error {
 			if !identicalProvider(old, &new) {
 				toUpdate = append(toUpdate, news[i])
 			}
+			continue
 		}
 		toAdd = append(toAdd, news[i])
 	}

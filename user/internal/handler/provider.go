@@ -62,6 +62,25 @@ func (h *Handler) Refund(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
+func (h *Handler) SyncProviderAccounts(ctx *gin.Context) {
+	if err := h.ctrl.SyncProviderAccounts(ctx); err != nil {
+		handleError(ctx, err, "sync all data")
+		return
+	}
+
+	ctx.Status(http.StatusAccepted)
+}
+
+func (h *Handler) SyncProviderAccount(ctx *gin.Context) {
+	providerAddress := ctx.Param("provider")
+	if err := h.ctrl.SyncProviderAccount(ctx, common.HexToAddress(providerAddress)); err != nil {
+		handleError(ctx, err, "sync data")
+		return
+	}
+
+	ctx.Status(http.StatusAccepted)
+}
+
 func handleError(ctx *gin.Context, err error, context string) {
 	errors.Response(ctx, errors.Wrap(err, "User: handle provider account, "+context))
 }

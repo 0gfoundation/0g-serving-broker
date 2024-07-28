@@ -103,7 +103,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, url string, provider model.Provi
 	}
 	sig, err := cReq.GetSignature(c.signingKey, providerAddress)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "get signature from request")
 	}
 
 	req.Header.Set("Token-Count", strconv.FormatUint(uint64(reqModel.InputCount), 10))

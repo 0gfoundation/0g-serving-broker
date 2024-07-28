@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,11 @@ func Main() {
 	r := gin.New()
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
 	ctrl := ctrl.New(db, contract, config.SigningKey, svcCache)
+
+	ctx := context.Background()
+	if err := ctrl.SyncProviderAccounts(ctx); err != nil {
+		panic(err)
+	}
 	h := handler.New(db, ctrl, contract)
 	h.Register(r)
 

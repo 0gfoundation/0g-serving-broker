@@ -83,12 +83,6 @@ func (h *Handler) ListService(ctx *gin.Context) {
 
 func (h *Handler) DeleteService(ctx *gin.Context) {
 	name := ctx.Param("name")
-	ret := h.db.Where("name = ?", name).Delete(&model.Service{})
-	if ret.Error != nil {
-		errors.Response(ctx, errors.Wrapf(ret.Error, "delete service %s in db", name))
-		return
-	}
-
 	opt, err := h.contract.CreateTransactOpts()
 	if err != nil {
 		errors.Response(ctx, err)
@@ -100,6 +94,13 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 		errors.Response(ctx, err)
 		return
 	}
+
+	ret := h.db.Where("name = ?", name).Delete(&model.Service{})
+	if ret.Error != nil {
+		errors.Response(ctx, errors.Wrapf(ret.Error, "delete service %s in db", name))
+		return
+	}
+
 	h.proxy.DeleteRoute(name)
 
 	ctx.Status(http.StatusAccepted)

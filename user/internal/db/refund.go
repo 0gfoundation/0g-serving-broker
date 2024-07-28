@@ -57,7 +57,7 @@ func (d *DB) BatchUpdateRefund(news []model.Refund) error {
 	oldAccountMap := make(map[string]*model.Refund, len(olds))
 	for i, old := range olds {
 		if old.Index == nil {
-			return errors.New("nil incoming refund.Index")
+			return errors.New("nil old refund.Index")
 		}
 		key := old.Provider + strconv.FormatInt(*old.Index, 10)
 		oldAccountMap[key] = &olds[i]
@@ -74,6 +74,7 @@ func (d *DB) BatchUpdateRefund(news []model.Refund) error {
 			if !identicalRefund(old, &new) {
 				toUpdate = append(toUpdate, news[i])
 			}
+			continue
 		}
 		toAdd = append(toAdd, news[i])
 	}

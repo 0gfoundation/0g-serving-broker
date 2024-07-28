@@ -47,13 +47,13 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 1. Start the Provider Agent
 
    ```sh
-   PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-provider
+   PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-provider-server
    ```
 
 2. Start the User Agent
 
    ```sh
-   PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-user
+   PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-user-server
    ```
 
 ## Basic Usage Process
