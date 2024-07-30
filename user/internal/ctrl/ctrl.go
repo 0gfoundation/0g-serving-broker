@@ -1,8 +1,10 @@
 package ctrl
 
 import (
+	"github.com/0glabs/0g-serving-agent/common/errors"
 	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
 	"github.com/0glabs/0g-serving-agent/user/internal/db"
+	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 )
 
@@ -21,4 +23,8 @@ func New(db *db.DB, contract *usercontract.UserContract, signingKey string, svcC
 		svcCache:   svcCache,
 		signingKey: signingKey,
 	}
+}
+
+func handleError(ctx *gin.Context, err error, context string) {
+	errors.Response(ctx, errors.Wrap(err, "User: "+context))
 }

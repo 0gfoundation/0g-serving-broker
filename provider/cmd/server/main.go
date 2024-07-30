@@ -1,17 +1,10 @@
 package server
 
 import (
-	"os"
-
 	"github.com/gin-gonic/gin"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
-
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/contract"
+	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
 	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
 	"github.com/0glabs/0g-serving-agent/provider/internal/handler"
@@ -21,36 +14,32 @@ import (
 func Main() {
 	config := config.GetConfig()
 
-	db, err := gorm.Open(mysql.Open(config.Database.Provider), &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			SingularTable: true,
-		},
-	})
+	db, err := database.NewDB(config)
 	if err != nil {
 		panic(err)
 	}
-	if err := database.Migrate(db); err != nil {
+	if err := db.Migrate(); err != nil {
 		panic(err)
 	}
 
-	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), config, os.Getenv("NETWORK"))
+	contract, err := providercontract.NewProviderContract(config, config.Address)
 	if err != nil {
 		panic(err)
 	}
-	defer c.Close()
+	defer contract.Close()
 
-	r := gin.New()
-	ctrl := ctrl.New(db)
-	p := proxy.New(db, ctrl, r, c, config.Address)
-	if err := p.Start(); err != nil {
+	engine := gin.New()
+	ctrl := ctrl.New(db, contract, config.ServingUrl)
+	proxy := proxy.New(ctrl, engine)
+	if err := proxy.Start(); err != nil {
 		panic(err)
 	}
 
-	h := handler.New(db, ctrl, p, c, config.ServingUrl)
-	h.Register(r)
+	h := handler.New(ctrl, proxy)
+	h.Register(engine)
 
 	// Listen and Serve, config port with PORT=X
-	if err := r.Run(); err != nil {
+	if err := engine.Run(); err != nil {
 		panic(err)
 	}
 }

@@ -39,7 +39,7 @@ func Main() {
 	if err := ctrl.SyncProviderAccounts(ctx); err != nil {
 		panic(err)
 	}
-	h := handler.New(db, ctrl, contract)
+	h := handler.New(ctrl)
 	h.Register(r)
 
 	// Listen and Serve, config port with PORT=X

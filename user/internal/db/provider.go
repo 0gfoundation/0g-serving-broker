@@ -15,12 +15,9 @@ func (d *DB) CreateProviderAccounts(accounts []model.Provider) error {
 }
 
 func (d *DB) GetProviderAccount(providerAddress string) (model.Provider, error) {
-	old := model.Provider{}
-	ret := d.db.Where(&model.Provider{Provider: providerAddress}).First(&old)
-	if ret.Error != nil {
-		return old, ret.Error
-	}
-	return old, nil
+	account := model.Provider{}
+	ret := d.db.Where(&model.Provider{Provider: providerAddress}).First(&account)
+	return account, ret.Error
 }
 
 func (d *DB) ListProviderAccount() ([]model.Provider, error) {

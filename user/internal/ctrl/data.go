@@ -126,18 +126,21 @@ func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor ext
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "get response from provider")
 		return
 	}
 	defer resp.Body.Close()
 
 	for k, v := range resp.Header {
+		if k == "Content-Length" {
+			continue
+		}
 		ctx.Writer.Header()[k] = v
 	}
 	ctx.Writer.WriteHeader(resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
-		errors.Response(ctx, extractor.ErrMsg(resp.Body))
+		handleError(ctx, extractor.ErrMsg(resp.Body), "get response from provider")
 		return
 	}
 
@@ -152,17 +155,19 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	providerAddress := ctx.Param("provider")
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "read response")
 		return
 	}
 	contentEncoding := resp.Header.Get("Content-Encoding")
 	outputContent, err := extractor.GetRespContent(body, contentEncoding)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "get resp content")
+		return
 	}
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "get resp output count")
+		return
 	}
 	new := model.Provider{
 		Provider:               providerAddress,
@@ -170,7 +175,8 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	}
 	err = c.db.UpdateProviderAccount(providerAddress, new)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleError(ctx, err, "update provider output count in db")
+		return
 	}
 	ctx.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
@@ -187,7 +193,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 				if err == io.EOF {
 					return false
 				}
-				errors.Response(ctx, err)
+				handleError(ctx, err, "read from provider response")
 				return false
 			}
 
@@ -195,26 +201,26 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 			if line == "\n" || line == "\r\n" {
 				_, err := w.Write(chunkBuf.Bytes())
 				if err != nil {
-					errors.Response(ctx, err)
+					handleError(ctx, err, "write to response")
 					return false
 				}
 
 				encoding := resp.Header.Get("Content-Encoding")
 				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
 				if err != nil {
-					errors.Response(ctx, err)
+					handleError(ctx, err, "get response content")
 					return false
 				}
 
 				completed, err := extractor.StreamCompleted(content)
 				if err != nil {
-					errors.Response(ctx, err)
+					handleError(ctx, err, "check whether stream completed")
 					return false
 				}
 				if completed {
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
-						errors.Response(ctx, err)
+						handleError(ctx, err, "get response output count")
 						return false
 					}
 					new := model.Provider{
@@ -223,7 +229,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 					}
 					err = c.db.UpdateProviderAccount(providerAddress, new)
 					if err != nil {
-						errors.Response(ctx, err)
+						handleError(ctx, err, "update provider output count in db")
 						return false
 					}
 				}

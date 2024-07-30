@@ -100,10 +100,10 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 	case types.ReceiptStatusSuccessful:
 		return receipt, nil
 	case types.ReceiptStatusFailed:
-		return nil, errors.New("Transaction execution failed")
+		return receipt, errors.New("Transaction execution failed")
 
 	default:
-		return nil, errors.Errorf("Unknown receipt status %d", receipt.Status)
+		return receipt, errors.Errorf("Unknown receipt status %d", receipt.Status)
 	}
 }
 

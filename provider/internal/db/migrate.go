@@ -11,10 +11,10 @@ import (
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
-func Migrate(database *gorm.DB) error {
-	database.Set("gorm:table_options", "ENGINE=InnoDB")
+func (d *DB) Migrate() error {
+	d.db.Set("gorm:table_options", "ENGINE=InnoDB")
 
-	m := gormigrate.New(database, &gormigrate.Options{UseTransaction: false}, []*gormigrate.Migration{
+	m := gormigrate.New(d.db, &gormigrate.Options{UseTransaction: false}, []*gormigrate.Migration{
 		{
 			ID: "create-service",
 			Migrate: func(tx *gorm.DB) error {
@@ -37,13 +37,13 @@ func Migrate(database *gorm.DB) error {
 				type User struct {
 					model.Model
 					CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
-					User                   string                `gorm:"type:varchar(255);not null;index:deleted_user_provider"`
+					User                   string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
 					LastRequestNonce       *int64                `gorm:"type:bigint;not null;default:0"`
 					LockBalance            *int64                `gorm:"type:bigint;not null;default:0"`
 					LastBalanceCheckTime   *time.Time            `json:"lastBalanceCheckTime"`
 					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
 					UnsettledFee           *int64                `gorm:"type:bigint;not null;default:0"`
-					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider"`
+					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
 				}
 				return tx.AutoMigrate(&User{})
 			},

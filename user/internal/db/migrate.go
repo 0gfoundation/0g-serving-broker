@@ -37,12 +37,12 @@ func (d *DB) Migrate() error {
 				type Provider struct {
 					model.Model
 					CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
-					Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user_provider"`
+					Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_provider"`
 					Balance                *int64                `gorm:"type:bigint;not null;default:0"`
 					PendingRefund          *int64                `gorm:"type:bigint;not null;default:0"`
 					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
 					Nonce                  *int64                `gorm:"type:bigint;not null;default:1"`
-					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider"`
+					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_provider"`
 				}
 				return tx.AutoMigrate(&Provider{})
 			},

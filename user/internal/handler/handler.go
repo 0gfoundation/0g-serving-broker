@@ -3,22 +3,17 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
-	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
+	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
-	"github.com/0glabs/0g-serving-agent/user/internal/db"
 )
 
 type Handler struct {
-	db       *db.DB
-	ctrl     *ctrl.Ctrl
-	contract *usercontract.UserContract
+	ctrl *ctrl.Ctrl
 }
 
-func New(db *db.DB, ctrl *ctrl.Ctrl, contract *usercontract.UserContract) *Handler {
+func New(ctrl *ctrl.Ctrl) *Handler {
 	h := &Handler{
-		db:       db,
-		ctrl:     ctrl,
-		contract: contract,
+		ctrl: ctrl,
 	}
 	return h
 }
@@ -37,5 +32,8 @@ func (h *Handler) Register(r *gin.Engine) {
 	// request service
 	group.POST("/provider/:provider/service/:service/*suffix", h.GetData)
 	group.POST("/provider/:provider/service/:service", h.GetData)
+}
 
+func handleError(ctx *gin.Context, err error, context string) {
+	errors.Response(ctx, errors.Wrap(err, "User: "+context))
 }

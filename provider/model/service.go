@@ -21,3 +21,4 @@ type ServiceList struct {
 	Metadata ListMeta  `json:"metadata"`
 	Items    []Service `json:"items"`
 }
+	

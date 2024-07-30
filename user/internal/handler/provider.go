@@ -6,7 +6,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
@@ -79,8 +78,4 @@ func (h *Handler) SyncProviderAccount(ctx *gin.Context) {
 	}
 
 	ctx.Status(http.StatusAccepted)
-}
-
-func handleError(ctx *gin.Context, err error, context string) {
-	errors.Response(ctx, errors.Wrap(err, "User: handle provider account, "+context))
 }
