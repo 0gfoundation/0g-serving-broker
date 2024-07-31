@@ -79,7 +79,7 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 	if len(opts) > 0 {
 		opt = opts[0]
 	} else {
-		opt.Rounds = 3
+		opt.Rounds = 5
 		opt.Interval = time.Second * 3
 	}
 

@@ -5,37 +5,46 @@ import (
 	"log"
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/provider/model"
-	"gorm.io/gorm"
+	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 )
 
 type SettlementProcessor struct {
-	db       *gorm.DB
-	contract *contract.ServingContract
+	ctrl *ctrl.Ctrl
 
-	address  string
-	interval int
+	checkSettleInterval int
+	forceSettleInterval int
 }
 
-func NewSettlementProcessor(db *gorm.DB, contract *contract.ServingContract, address string, interval int) *SettlementProcessor {
-	b := &SettlementProcessor{
-		db:       db,
-		contract: contract,
-		address:  address,
-		interval: interval,
+func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int) *SettlementProcessor {
+	s := &SettlementProcessor{
+		ctrl:                ctrl,
+		checkSettleInterval: checkSettleInterval,
+		forceSettleInterval: forceSettleInterval,
 	}
-	return b
+	return s
 }
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
-func (b SettlementProcessor) Start(ctx context.Context) error {
+func (s SettlementProcessor) Start(ctx context.Context) error {
+	checkSettleTicker := time.NewTicker(time.Duration(s.checkSettleInterval) * time.Second)
+	forceSettleTicker := time.NewTicker(time.Duration(s.forceSettleInterval) * time.Second)
+	defer checkSettleTicker.Stop()
+	defer forceSettleTicker.Stop()
+
 	for {
-		time.Sleep(time.Duration(b.interval) * time.Second)
-		list := []model.User{}
-		if ret := b.db.Model(model.User{}).Where("unsettled_fee > ?", 0).Order("created_at DESC").Find(&list); ret.Error != nil {
-			return ret.Error
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-checkSettleTicker.C:
+			if err := s.ctrl.ProcessSettlement(ctx); err != nil {
+				log.Printf("Process settlement: %s", err.Error())
+			} else {
+				log.Printf("There is no settlement that is about to expire")
+			}
+		case <-forceSettleTicker.C:
+			if err := s.ctrl.SettleFees(ctx); err != nil {
+				log.Printf("Force process settlement: %s", err.Error())
+			}
 		}
-		log.Println(*list[0].UnsettledFee)
 	}
 }

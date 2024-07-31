@@ -9,15 +9,17 @@ import (
 )
 
 type Config struct {
-	Address         string `yaml:"address"`
-	ContractAddress string `yaml:"contractAddress"`
-	Database        struct {
+	Address              string `yaml:"address"`
+	AutoSettleBufferTime int    `yaml:"autoSettleBufferTime"`
+	ContractAddress      string `yaml:"contractAddress"`
+	Database             struct {
 		User     string `yaml:"user"`
 		Provider string `yaml:"provider"`
 	} `yaml:"database"`
 	Interval struct {
-		RefundProcessor     int `yaml:"refundProcessor"`
-		SettlementProcessor int `yaml:"settlementProcessor"`
+		RefundProcessor          int `yaml:"refundProcessor"`
+		SettlementProcessor      int `yaml:"settlementProcessor"`
+		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 	} `yaml:"interval"`
 	SigningKey string                    `yaml:"signingKey"`
 	ServingUrl string                    `yaml:"servingUrl"`
@@ -49,7 +51,8 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x59b9dD1cF82F6108526154c901256997095dE598",
+			AutoSettleBufferTime: 18000,
+			ContractAddress:      "0x59b9dD1cF82F6108526154c901256997095dE598",
 			Database: struct {
 				User     string `yaml:"user"`
 				Provider string `yaml:"provider"`

@@ -7,7 +7,7 @@ import (
 func (d *DB) ListRequest() ([]model.Request, error) {
 	list := []model.Request{}
 	ret := d.db.Model(model.Request{}).
-		Where("processed = ?", false).Limit(5).
+		Where("processed = ?", false).
 		Order("nonce ASC").Find(&list)
 	return list, ret.Error
 }

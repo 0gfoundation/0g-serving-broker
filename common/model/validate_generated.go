@@ -15,9 +15,6 @@ func ValidateUpdateRequest(oldVal, newVal Request) error {
 		fields = append(fields, "id")
 	}
 	
-	if !apiequality.Semantic.DeepEqual(newVal.CreatedAt, oldVal.CreatedAt){
-		fields = append(fields, "createdAt")
-	}
 	if !apiequality.Semantic.DeepEqual(newVal.UserAddress, oldVal.UserAddress){
 		fields = append(fields, "userAddress")
 	}

@@ -29,7 +29,7 @@ func Main() {
 	defer contract.Close()
 
 	engine := gin.New()
-	ctrl := ctrl.New(db, contract, config.ServingUrl)
+	ctrl := ctrl.New(db, contract, config.ServingUrl, config.AutoSettleBufferTime)
 	proxy := proxy.New(ctrl, engine)
 	if err := proxy.Start(); err != nil {
 		panic(err)

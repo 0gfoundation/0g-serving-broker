@@ -90,7 +90,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, url string, provider model.Provi
 		return nil, err
 	}
 	reqModel := commonModel.Request{
-		CreatedAt:           time.Now().Format(time.RFC3339),
+		CreatedAt:           model.PtrOf(time.Now().UTC()),
 		UserAddress:         c.contract.UserAddress,
 		ServiceName:         svcName,
 		PreviousOutputCount: *provider.LastResponseTokenCount,
@@ -110,7 +110,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, url string, provider model.Provi
 	req.Header.Set("Address", reqModel.UserAddress)
 	req.Header.Set("Service-Name", reqModel.ServiceName)
 	req.Header.Set("Previous-Output-Token-Count", strconv.FormatUint(uint64(reqModel.PreviousOutputCount), 10))
-	req.Header.Set("Created-At", reqModel.CreatedAt)
+	req.Header.Set("Created-At", reqModel.CreatedAt.String())
 	req.Header.Set("Nonce", strconv.FormatUint(uint64(reqModel.Nonce), 10))
 	req.Header.Set("Signature", hexutil.Encode(sig))
 

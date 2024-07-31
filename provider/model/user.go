@@ -22,3 +22,8 @@ type UserList struct {
 	Metadata ListMeta `json:"metadata"`
 	Items    []User   `json:"items"`
 }
+
+type UserListOptions struct {
+	MinUnsettledFee         *int64
+	MaxLastBalanceCheckTime *time.Time
+}

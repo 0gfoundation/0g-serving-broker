@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -33,7 +34,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (commonModel.Request, error)
 		case "Nonce":
 			num, err := strconv.ParseInt(values[0], 10, 64)
 			if err != nil {
-				return req, errors.Wrapf(err, "parse nonce from string %s", values[0])
+				return req, errors.Wrapf(err, "parse nonce %s", values[0])
 			}
 			req.Nonce = num
 		case "Service-Name":
@@ -41,19 +42,23 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (commonModel.Request, error)
 		case "Token-Count":
 			num, err := strconv.ParseInt(values[0], 10, 64)
 			if err != nil {
-				return req, errors.Wrapf(err, "parse inputCount from string %s", values[0])
+				return req, errors.Wrapf(err, "parse inputCount %s", values[0])
 			}
 			req.InputCount = num
 		case "Previous-Output-Token-Count":
 			num, err := strconv.ParseInt(values[0], 10, 64)
 			if err != nil {
-				return req, errors.Wrapf(err, "parse previousOutputCount from string %s", values[0])
+				return req, errors.Wrapf(err, "parse previousOutputCount %s", values[0])
 			}
 			req.PreviousOutputCount = num
 		case "Signature":
 			req.Signature = values[0]
 		case "Created-At":
-			req.CreatedAt = values[0]
+			createAt, err := time.Parse(time.RFC3339, values[0])
+			if err != nil {
+				return req, errors.Wrapf(err, "parse createAt %s", values[0])
+			}
+			req.CreatedAt = model.PtrOf(createAt)
 		}
 	}
 
@@ -155,7 +160,7 @@ func (c *Ctrl) validateFee(ctx context.Context, account model.User, fee int64) e
 	if fee+*account.UnsettledFee <= *account.LockBalance {
 		return nil
 	}
-	if err := c.SyncAccount(ctx, common.HexToAddress(account.User)); err != nil {
+	if err := c.SyncUserAccount(ctx, common.HexToAddress(account.User)); err != nil {
 		return err
 	}
 	newAccount, err := c.GetOrCreateAccount(ctx, account.User)

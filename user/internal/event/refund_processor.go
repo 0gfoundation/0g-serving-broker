@@ -15,20 +15,28 @@ type RefundProcessor struct {
 }
 
 func NewRefundProcessor(ctrl *ctrl.Ctrl, interval int) *RefundProcessor {
-	b := &RefundProcessor{
+	r := &RefundProcessor{
 		ctrl:     ctrl,
 		interval: interval,
 	}
-	return b
+	return r
 }
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
-func (b RefundProcessor) Start(ctx context.Context) error {
+func (r RefundProcessor) Start(ctx context.Context) error {
+	ticker := time.NewTicker(time.Duration(r.interval) * time.Second)
+	defer ticker.Stop()
+
 	for {
-		time.Sleep(time.Duration(b.interval) * time.Second)
-		if err := b.ctrl.ProcessedRefunds(ctx); err != nil {
-			log.Printf("Processed refunds: %s", err.Error())
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := r.ctrl.ProcessRefunds(ctx); err != nil {
+				log.Printf("Processed refunds: %s", err.Error())
+			} else {
+				log.Println("There are currently no refunds due")
+			}
 		}
-		log.Printf("There are currently no refunds due")
 	}
 }

@@ -21,7 +21,6 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	if err := ctx.ShouldBindJSON(&r); err != nil {
 		return err
 	}
-	d.CreatedAt = r.CreatedAt
 	d.UserAddress = r.UserAddress
 	d.Nonce = r.Nonce
 	d.ServiceName = r.ServiceName

@@ -1,51 +1,51 @@
 package event
 
 import (
-	"os"
-
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
-
-	"github.com/ethereum/go-ethereum/common"
 	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
+	controller "sigs.k8s.io/controller-runtime"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/contract"
+	"github.com/0glabs/0g-serving-agent/common/errors"
+	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
+	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
+	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
 	"github.com/0glabs/0g-serving-agent/provider/internal/event"
 )
 
 func Main() {
 	config := config.GetConfig()
 
-	db, err := gorm.Open(mysql.Open(config.Database.Provider), &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			SingularTable: true,
-		},
-	})
+	db, err := database.NewDB(config)
 	if err != nil {
 		panic(err)
 	}
-
-	c, err := contract.NewServingContract(common.HexToAddress(config.ContractAddress), config, os.Getenv("NETWORK"))
+	if err := db.Migrate(); err != nil {
+		panic(err)
+	}
+	contract, err := providercontract.NewProviderContract(config, config.Address)
 	if err != nil {
 		panic(err)
 	}
-	defer c.Close()
+	if config.AutoSettleBufferTime > int(contract.LockTime) {
+		panic(errors.New("AutoSettleBufferTime grater than refund LockTime"))
+	}
+	if config.AutoSettleBufferTime > config.Interval.ForceSettlementProcessor {
+		panic(errors.New("AutoSettleBufferTime grater than forceSettlement Interval"))
+	}
 
 	cfg := &rest.Config{}
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{})
+	mgr, err := controller.NewManager(cfg, controller.Options{})
 	if err != nil {
 		panic(err)
 	}
 
-	settlementProcessor := event.NewSettlementProcessor(db, c, config.Address, config.Interval.SettlementProcessor)
+	ctrl := ctrl.New(db, contract, "", config.AutoSettleBufferTime)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
+	ctx := controller.SetupSignalHandler()
 	if err := mgr.Start(ctx); err != nil {
 		panic(err)
 	}

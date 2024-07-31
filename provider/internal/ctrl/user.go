@@ -6,7 +6,6 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/provider/internal/db"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 	"github.com/ethereum/go-ethereum/common"
@@ -26,57 +25,59 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 	}
 
 	dbAccount = model.User{
-		User:                 userAddress,
-		LastRequestNonce:     model.PtrOf(contractAccount.Nonce.Int64()),
-		LockBalance:          model.PtrOf(contractAccount.Balance.Int64() - contractAccount.PendingRefund.Int64()),
-		LastBalanceCheckTime: model.PtrOf(time.Now()),
-		UnsettledFee: model.PtrOf(int64(0)),
+		User:                   userAddress,
+		LastRequestNonce:       model.PtrOf(contractAccount.Nonce.Int64()),
+		LockBalance:            model.PtrOf(contractAccount.Balance.Int64() - contractAccount.PendingRefund.Int64()),
+		LastBalanceCheckTime:   model.PtrOf(time.Now().UTC()),
+		UnsettledFee:           model.PtrOf(int64(0)),
 		LastResponseTokenCount: model.PtrOf(int64(0)),
 	}
 
-	return dbAccount, errors.Wrap(c.db.CreateUserAccount(dbAccount), "create account in db")
+	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
+}
+
+func (c Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User, error) {
+	accounts, err := c.contract.ListUserAccount(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "list account from contract")
+	}
+	if mergeDB {
+		return c.backfillUserAccount(accounts)
+	}
+	list := make([]model.User, len(accounts))
+	for i, account := range accounts {
+		list[i] = parse(account)
+	}
+	return list, nil
+}
+
+func (c Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, error) {
+	list := make([]model.User, len(accounts))
+	dbAccounts, err := c.db.ListUserAccount(nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "list account from db")
+	}
+	accountMap := make(map[string]model.User, len(dbAccounts))
+	for i, account := range dbAccounts {
+		accountMap[account.User] = dbAccounts[i]
+	}
+	for i, account := range accounts {
+		list[i] = parse(account)
+		if v, ok := accountMap[account.User.String()]; ok {
+			list[i].LastRequestNonce = v.LastRequestNonce
+			list[i].LastBalanceCheckTime = v.LastBalanceCheckTime
+			list[i].UnsettledFee = v.UnsettledFee
+			list[i].LastResponseTokenCount = v.LastResponseTokenCount
+		}
+	}
+	return list, nil
 }
 
 func (c *Ctrl) UpdateUserAccount(userAddress string, new model.User) error {
 	return errors.Wrap(c.db.UpdateUserAccount(userAddress, new), "create account in db")
-
 }
 
-func (c *Ctrl) SettleFees(ctx context.Context) error {
-	reqs, err := c.db.ListRequest()
-	if err != nil {
-		return errors.Wrap(err, "list request from db")
-	}
-
-	categorizedTraces := make(map[string]*contract.RequestTrace)
-	for _, req := range reqs {
-		cReq, err := util.ToContractRequest(req)
-		if err != nil {
-			return errors.Wrap(err, "convert request to contract acceptable format")
-		}
-		_, ok := categorizedTraces[req.UserAddress]
-		if ok {
-			categorizedTraces[req.UserAddress].Requests = append(categorizedTraces[req.UserAddress].Requests, cReq)
-			continue
-		}
-		categorizedTraces[req.UserAddress] = &contract.RequestTrace{
-			Requests: []contract.Request{cReq},
-		}
-	}
-
-	traces := []contract.RequestTrace{}
-	for _, t := range categorizedTraces {
-		traces = append(traces, *t)
-	}
-
-	if err := c.contract.SettleFees(ctx, traces); err != nil {
-		return errors.Wrap(err, "settle fees in contract")
-	}
-
-	return errors.Wrap(c.db.UpdateRequest(), "update service in db")
-}
-
-func (c *Ctrl) SyncAccount(ctx context.Context, userAddress common.Address) error {
+func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) error {
 	account, err := c.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
 		return err
@@ -84,7 +85,24 @@ func (c *Ctrl) SyncAccount(ctx context.Context, userAddress common.Address) erro
 
 	new := model.User{
 		LockBalance:          model.PtrOf(account.Balance.Int64() - account.PendingRefund.Int64()),
-		LastBalanceCheckTime: model.PtrOf(time.Now()),
+		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
 	}
-	return errors.Wrap(c.db.UpdateUserAccount(userAddress.String(), new), "update in db")
+	return errors.Wrap(c.db.UpdateUserAccount(userAddress.String(), new), "update account in db")
+}
+
+func (c *Ctrl) SyncUserAccounts(ctx context.Context) error {
+	accounts, err := c.ListUserAccount(ctx, false)
+	if err != nil {
+		return err
+	}
+
+	return errors.Wrap(c.db.BatchUpdateUserAccount(accounts), "batch update account in db")
+}
+
+func parse(account contract.Account) model.User {
+	return model.User{
+		User:                 account.User.String(),
+		LockBalance:          model.PtrOf(account.Balance.Int64() - account.PendingRefund.Int64()),
+		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+	}
 }

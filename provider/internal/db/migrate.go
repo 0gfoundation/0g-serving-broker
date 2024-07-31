@@ -53,14 +53,14 @@ func (d *DB) Migrate() error {
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
 					model.Model
-					CreatedAt           string `gorm:"type:varchar(255);not null"`
-					UserAddress         string `gorm:"type:varchar(255);not null;uniqueIndex:userAddress_nonce"`
-					Nonce               int64  `gorm:"type:bigint;not null;index:userAddress_nonce"`
-					ServiceName         string `gorm:"type:varchar(255);not null"`
-					InputCount          int64  `gorm:"type:bigint;not null"`
-					PreviousOutputCount int64  `gorm:"type:bigint;not null"`
-					Signature           string `gorm:"type:varchar(255);not null"`
-					Processed           bool   `gorm:"type:tinyint(1);not null;default:0"`
+					CreatedAt           *time.Time `json:"createdAt" readonly:"true" gen:"-"`
+					UserAddress         string     `gorm:"type:varchar(255);not null;uniqueIndex:userAddress_nonce"`
+					Nonce               int64      `gorm:"type:bigint;not null;index:userAddress_nonce"`
+					ServiceName         string     `gorm:"type:varchar(255);not null"`
+					InputCount          int64      `gorm:"type:bigint;not null"`
+					PreviousOutputCount int64      `gorm:"type:bigint;not null"`
+					Signature           string     `gorm:"type:varchar(255);not null"`
+					Processed           bool       `gorm:"type:tinyint(1);not null;default:0"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

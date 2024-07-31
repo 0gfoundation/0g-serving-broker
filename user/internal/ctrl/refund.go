@@ -39,9 +39,9 @@ func (c Ctrl) RequestRefund(ctx context.Context, providerAddress common.Address,
 	return errors.Wrapf(c.db.CreateRefunds([]model.Refund{refund}), "finish refund in contract, update in db")
 }
 
-func (c Ctrl) ProcessedRefunds(ctx context.Context) error {
+func (c Ctrl) ProcessRefunds(ctx context.Context) error {
 	refunds, err := c.db.ListRefund(model.RefundListOptions{
-		CreatedAt: model.PtrOf(time.Now().Add(c.contract.LockTime)),
+		CreatedAt: model.PtrOf(time.Now().UTC().Add(c.contract.LockTime)),
 		Processed: model.PtrOf(false),
 	})
 	if err != nil {

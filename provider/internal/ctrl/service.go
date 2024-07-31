@@ -17,7 +17,7 @@ func (c *Ctrl) RegisterService(ctx context.Context, service model.Service) error
 	if err == nil {
 		return errors.New("service already exists")
 	}
-		if err := c.contract.AddOrUpdateService(ctx, service, c.servingUrl); err != nil {
+	if err := c.contract.AddOrUpdateService(ctx, service, c.servingUrl); err != nil {
 		return errors.Wrap(err, "add service in contract")
 	}
 	err = c.db.AddService(service)
