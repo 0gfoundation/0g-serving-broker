@@ -48,7 +48,7 @@ func (h *Handler) ListService(ctx *gin.Context) {
 }
 
 func (h *Handler) UpdateService(ctx *gin.Context) {
-	name := ctx.Param("name")
+	name := ctx.Param("service")
 
 	var new model.Service
 	if err := new.Bind(ctx); err != nil {
@@ -82,7 +82,7 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 }
 
 func (h *Handler) DeleteService(ctx *gin.Context) {
-	name := ctx.Param("name")
+	name := ctx.Param("service")
 
 	if err := h.ctrl.DeleteService(ctx, name); err != nil {
 		handleError(ctx, err, "delete service: "+name)

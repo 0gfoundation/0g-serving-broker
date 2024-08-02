@@ -36,6 +36,15 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
 }
 
+func (c Ctrl) GetUserAccount(ctx context.Context, userAddress common.Address) (model.User, error) {
+	account, err := c.contract.GetUserAccount(ctx, userAddress)
+	if err != nil {
+		return model.User{}, errors.Wrap(err, "get account from contract")
+	}
+	rets, err := c.backfillUserAccount([]contract.Account{account})
+	return rets[0], err
+}
+
 func (c Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User, error) {
 	accounts, err := c.contract.ListUserAccount(ctx)
 	if err != nil {

@@ -26,14 +26,14 @@ func (h *Handler) Register(r *gin.Engine) {
 	// service
 	group.GET("/service", h.ListService)
 	group.POST("/service", h.RegisterService)
-	group.POST("/service/:name", h.UpdateService)
-	group.DELETE("/service/:name", h.DeleteService)
+	group.POST("/service/:service", h.UpdateService)
+	group.DELETE("/service/:service", h.DeleteService)
 
 	group.POST("/settle", h.SettleFees)
 
 	// account
 	group.GET("/user", h.ListUserAccount)
-	group.GET("/user/:name", h.GetUserAccount)
+	group.GET("/user/:user", h.GetUserAccount)
 	group.POST("sync", h.SyncUserAccounts)
 	group.POST("/user/:user/sync", h.SyncUserAccount)
 }
