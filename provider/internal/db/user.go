@@ -87,7 +87,7 @@ func (d *DB) BatchUpdateUserAccount(news []model.User) error {
 		if oldAccountMap[key] {
 			delete(oldAccountMap, key)
 			// BatchUpdateUserAccount is currently used to synchronize accounts from the contract to the database.
-			// All new data should be updated in the database as each record has a new LastBalanceCheckTime.
+			// All new data should be updated in the database since each record has a new LastBalanceCheckTime.
 			toUpdate = append(toUpdate, news[i])
 			continue
 		}

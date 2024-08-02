@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
@@ -30,6 +32,10 @@ func Main() {
 
 	engine := gin.New()
 	ctrl := ctrl.New(db, contract, config.ServingUrl, config.AutoSettleBufferTime)
+	ctx := context.Background()
+	if err := ctrl.SyncUserAccounts(ctx); err != nil {
+		panic(err)
+	}
 	proxy := proxy.New(ctrl, engine)
 	if err := proxy.Start(); err != nil {
 		panic(err)
