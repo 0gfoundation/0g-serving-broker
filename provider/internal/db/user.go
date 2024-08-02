@@ -14,6 +14,9 @@ func (d *DB) GetUserAccount(userAddress string) (model.User, error) {
 }
 
 func (d *DB) CreateUserAccounts(accounts []model.User) error {
+	if len(accounts) == 0 {
+		return nil
+	}
 	ret := d.db.Create(&accounts)
 	return ret.Error
 }
@@ -22,11 +25,11 @@ func (d *DB) ListUserAccount(opt *model.UserListOptions) ([]model.User, error) {
 	tx := d.db.Model(model.User{})
 
 	if opt != nil {
+		if opt.LowBalanceRisk != nil {
+			tx = tx.Where("((lock_balance - unsettled_fee) < 0 OR last_balance_check_time < ?)", *opt.LowBalanceRisk)
+		}
 		if opt.MinUnsettledFee != nil {
 			tx = tx.Where("unsettled_fee > ?", *opt.MinUnsettledFee)
-		}
-		if opt.MaxLastBalanceCheckTime != nil {
-			tx = tx.Where("last_balance_check_time < ?", *opt.MaxLastBalanceCheckTime)
 		}
 	}
 	list := []model.User{}
@@ -38,7 +41,7 @@ func (d *DB) DeleteUserAccounts(userAddresses []string) error {
 	if len(userAddresses) == 0 {
 		return nil
 	}
-	return d.db.Where("name IN (?)", userAddresses).Delete(&model.User{}).Error
+	return d.db.Where("user IN (?)", userAddresses).Delete(&model.User{}).Error
 }
 
 func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
@@ -46,9 +49,6 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 	ret := d.db.Where(&model.User{User: userAddress}).First(&old)
 	if ret.Error != nil {
 		errors.Wrap(ret.Error, "get account from db")
-	}
-	if err := model.ValidateUpdateUser(old, new); err != nil {
-		return err
 	}
 	if new.LastBalanceCheckTime != nil {
 		old.LastBalanceCheckTime = new.LastBalanceCheckTime
@@ -107,4 +107,9 @@ func (d *DB) BatchUpdateUserAccount(news []model.User) error {
 		}
 	}
 	return d.DeleteUserAccounts(toRemove)
+}
+
+func (d *DB) ResetUnsettledFee() error {
+	ret := d.db.Model(&model.User{}).Where("TRUE").Update("unsettled_fee", model.PtrOf(int64(0)))
+	return ret.Error
 }

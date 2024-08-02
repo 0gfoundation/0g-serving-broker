@@ -24,6 +24,6 @@ type UserList struct {
 }
 
 type UserListOptions struct {
-	MinUnsettledFee         *int64
-	MaxLastBalanceCheckTime *time.Time
+	LowBalanceRisk  *time.Time
+	MinUnsettledFee *int64
 }

@@ -39,11 +39,12 @@ func (s SettlementProcessor) Start(ctx context.Context) error {
 			if err := s.ctrl.ProcessSettlement(ctx); err != nil {
 				log.Printf("Process settlement: %s", err.Error())
 			} else {
-				log.Printf("There is no settlement that is about to expire")
+				log.Printf("All settlements at risk of failing due to insufficient funds have been successfully executed")
 			}
 		case <-forceSettleTicker.C:
+			log.Print("Force Settlement")
 			if err := s.ctrl.SettleFees(ctx); err != nil {
-				log.Printf("Force process settlement: %s", err.Error())
+				log.Printf("process settlement: %s", err.Error())
 			}
 		}
 	}
