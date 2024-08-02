@@ -50,6 +50,21 @@ func (h *Handler) GetProviderAccount(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, account)
 }
 
+func (h *Handler) Charge(ctx *gin.Context) {
+	providerAddress := ctx.Param("provider")
+	var account model.Provider
+	if err := account.Bind(ctx); err != nil {
+		handleError(ctx, err, "bind account")
+		return
+	}
+
+	if err := h.ctrl.ChargeProviderAccount(ctx, common.HexToAddress(providerAddress), account); err != nil {
+		handleError(ctx, err, "charge account")
+		return
+	}
+	ctx.Status(http.StatusAccepted)
+}
+
 func (h *Handler) Refund(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	var refund model.Refund

@@ -21,15 +21,18 @@ func New(ctrl *ctrl.Ctrl) *Handler {
 func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
+	// account info
 	group.GET("/provider", h.ListProviderAccount)
 	group.POST("/provider", h.AddProviderAccount)
 	group.GET("/provider/:provider", h.GetProviderAccount)
-	group.POST("/provider/:provider/refund", h.Refund)
-
 	group.POST("sync", h.SyncProviderAccounts)
 	group.POST("/provider/:provider/sync", h.SyncProviderAccount)
 
-	// request service
+	// fund
+	group.POST("/provider/:provider/charge", h.Charge)
+	group.POST("/provider/:provider/refund", h.Refund)
+
+	// request
 	group.POST("/provider/:provider/service/:service/*suffix", h.GetData)
 	group.POST("/provider/:provider/service/:service", h.GetData)
 }
