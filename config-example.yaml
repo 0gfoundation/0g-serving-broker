@@ -1,9 +1,12 @@
 address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 autoSettleBufferTime: 18000
+contractAddress: 0x244Cb2CC4F92982417d370C9605DC30c70Ef362F
 database:
   provider: root:123456@tcp(localhost:3306)/provider?parseTime=true
   user: root:123456@tcp(localhost:3306)/user?parseTime=true
-contractAddress: 0x157fb198D0876656901C3cc4590725Fa6D1de104
+event:
+  providerAddr: ":8088"
+  userAddr: ":8089"
 interval:
   refundProcessor: 600
   settlementProcessor: 600

@@ -3,6 +3,7 @@ package event
 import (
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"
+	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
 	"github.com/0glabs/0g-serving-agent/common/errors"
@@ -34,7 +35,11 @@ func Main() {
 	}
 
 	cfg := &rest.Config{}
-	mgr, err := controller.NewManager(cfg, controller.Options{})
+	mgr, err := controller.NewManager(cfg, controller.Options{
+		Metrics: metricserver.Options{
+			BindAddress: config.Event.ProviderAddr,
+		},
+	})
 	if err != nil {
 		panic(err)
 	}

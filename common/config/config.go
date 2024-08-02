@@ -16,6 +16,10 @@ type Config struct {
 		User     string `yaml:"user"`
 		Provider string `yaml:"provider"`
 	} `yaml:"database"`
+	Event struct {
+		ProviderAddr string `yaml:"providerAddr"`
+		UserAddr     string `yaml:"userAddr"`
+	} `yaml:"event"`
 	Interval struct {
 		RefundProcessor          int `yaml:"refundProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
@@ -59,6 +63,13 @@ func GetConfig() *Config {
 			}{
 				User:     "user:user@tcp(mysql:3306)/user?parseTime=true",
 				Provider: "provider:provider@tcp(mysql:3306)/provider?parseTime=true",
+			},
+			Event: struct {
+				ProviderAddr string `yaml:"providerAddr"`
+				UserAddr     string `yaml:"userAddr"`
+			}{
+				ProviderAddr: ":8088",
+				UserAddr:     ":8089",
 			},
 		}
 
