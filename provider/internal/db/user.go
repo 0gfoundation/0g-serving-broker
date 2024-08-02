@@ -33,7 +33,7 @@ func (d *DB) ListUserAccount(opt *model.UserListOptions) ([]model.User, error) {
 		}
 	}
 	list := []model.User{}
-	ret := tx.Order("created_at DESC").Find(&list)
+	ret := tx.Order("last_request_nonce DESC").Find(&list)
 	return list, ret.Error
 }
 

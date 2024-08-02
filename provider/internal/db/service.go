@@ -17,7 +17,7 @@ func (d *DB) GetService(name string) (model.Service, error) {
 
 func (d *DB) ListService() ([]model.Service, error) {
 	list := []model.Service{}
-	ret := d.db.Model(&model.Service{}).Order("created_at DESC").Find(&list)
+	ret := d.db.Model(&model.Service{}).Order("name DESC").Find(&list)
 	return list, ret.Error
 }
 

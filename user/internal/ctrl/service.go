@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"time"
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
@@ -32,6 +33,8 @@ func (c *Ctrl) ListService(ctx context.Context) ([]model.Service, error) {
 
 func parseService(svc contract.Service) model.Service {
 	return model.Service{
+		UpdatedAt:   model.PtrOf(time.Unix(svc.UpdatedAt.Int64(), 0)),
+		Provider:    svc.Provider.String(),
 		Name:        svc.Name,
 		Type:        svc.ServiceType,
 		URL:         svc.Url,

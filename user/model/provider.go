@@ -1,14 +1,10 @@
 package model
 
 import (
-	"time"
-
 	"gorm.io/plugin/soft_delete"
 )
 
 type Provider struct {
-	Model
-	CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user_provider" json:"provider" immutable:"true"`
 	Balance                *int64                `gorm:"type:bigint;not null;default:0" json:"balance"`
 	PendingRefund          *int64                `gorm:"type:bigint;not null;default:0" json:"pendingRefund"`

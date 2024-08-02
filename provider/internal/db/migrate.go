@@ -7,8 +7,6 @@ import (
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
 	"gorm.io/plugin/soft_delete"
-
-	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
 func (d *DB) Migrate() error {
@@ -19,8 +17,7 @@ func (d *DB) Migrate() error {
 			ID: "create-service",
 			Migrate: func(tx *gorm.DB) error {
 				type Service struct {
-					model.Model
-					CreatedAt   *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
+					UpdatedAt   *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 					Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name"`
 					Type        string                `gorm:"type:varchar(255);not null"`
 					URL         string                `gorm:"type:varchar(255);not null"`
@@ -35,8 +32,6 @@ func (d *DB) Migrate() error {
 			ID: "create-user",
 			Migrate: func(tx *gorm.DB) error {
 				type User struct {
-					model.Model
-					CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					User                   string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
 					LastRequestNonce       *int64                `gorm:"type:bigint;not null;default:0"`
 					LockBalance            *int64                `gorm:"type:bigint;not null;default:0"`
@@ -52,7 +47,6 @@ func (d *DB) Migrate() error {
 			ID: "create-request",
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
-					model.Model
 					CreatedAt           *time.Time `json:"createdAt" readonly:"true" gen:"-"`
 					UserAddress         string     `gorm:"type:varchar(255);not null;uniqueIndex:userAddress_nonce"`
 					Nonce               int64      `gorm:"type:bigint;not null;index:userAddress_nonce"`

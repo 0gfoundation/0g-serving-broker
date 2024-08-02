@@ -4,18 +4,9 @@ package model
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // ================================= Request =================================
-func (d *Request) BeforeCreate(tx *gorm.DB) error {
-	if d.ID == nil {
-		d.ID = PtrOf(uuid.New())
-	}
-	return nil
-}
-
 func (d *Request) Bind(ctx *gin.Context) error {
 	var r Request
 	if err := ctx.ShouldBindJSON(&r); err != nil {
@@ -35,9 +26,6 @@ func (d *Request) Bind(ctx *gin.Context) error {
 func (d *Request) BindWithReadonly(ctx *gin.Context, old Request) error {
 	if err := d.Bind(ctx); err != nil {
 		return err
-	}
-	if d.ID == nil {
-		d.ID = old.ID
 	}
 
 	return nil

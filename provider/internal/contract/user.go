@@ -25,7 +25,7 @@ func (c *ProviderContract) ListUserAccount(ctx context.Context) ([]contract.Acco
 	}
 	ret := []contract.Account{}
 	for i := range accounts {
-		if accounts[i].User.String() != c.ProviderAddress {
+		if accounts[i].Provider.String() != c.ProviderAddress {
 			continue
 		}
 		ret = append(ret, accounts[i])

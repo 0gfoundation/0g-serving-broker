@@ -3,7 +3,6 @@ package model
 import "time"
 
 type Request struct {
-	Model
 	CreatedAt           *time.Time `json:"createdAt" readonly:"true" gen:"-"`
 	UserAddress         string     `gorm:"type:varchar(255);not null" json:"userAddress" binding:"required" immutable:"true"`
 	Nonce               int64      `gorm:"type:bigint;not null;index:userAddress_nonce" json:"nonce" binding:"required" immutable:"true"`

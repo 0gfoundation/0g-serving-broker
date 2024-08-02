@@ -7,8 +7,6 @@ import (
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
 	"gorm.io/plugin/soft_delete"
-
-	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
 func (d *DB) Migrate() error {
@@ -16,27 +14,9 @@ func (d *DB) Migrate() error {
 
 	m := gormigrate.New(d.db, &gormigrate.Options{UseTransaction: false}, []*gormigrate.Migration{
 		{
-			ID: "create-service",
-			Migrate: func(tx *gorm.DB) error {
-				type Service struct {
-					model.Model
-					CreatedAt   *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
-					Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name"`
-					Type        string                `gorm:"type:varchar(255);not null"`
-					URL         string                `gorm:"type:varchar(255);not null"`
-					InputPrice  int64                 `gorm:"type:bigint;not null"`
-					OutputPrice int64                 `gorm:"type:bigint;not null"`
-					DeletedAt   soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
-				}
-				return tx.AutoMigrate(&Service{})
-			},
-		},
-		{
 			ID: "create-provider",
 			Migrate: func(tx *gorm.DB) error {
 				type Provider struct {
-					model.Model
-					CreatedAt              *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_provider"`
 					Balance                *int64                `gorm:"type:bigint;not null;default:0"`
 					PendingRefund          *int64                `gorm:"type:bigint;not null;default:0"`
@@ -51,7 +31,6 @@ func (d *DB) Migrate() error {
 			ID: "create-refund",
 			Migrate: func(tx *gorm.DB) error {
 				type Refund struct {
-					model.Model
 					Index     *int64     `gorm:"type:bigint;not null;uniqueIndex:provider_index"`
 					Provider  string     `gorm:"type:varchar(255);not null;index:provider_index"`
 					CreatedAt *time.Time `json:"createdAt" readonly:"true" gen:"-"`
@@ -59,23 +38,6 @@ func (d *DB) Migrate() error {
 					Processed bool       `gorm:"type:tinyint(1);not null;default:0"`
 				}
 				return tx.AutoMigrate(&Refund{})
-			},
-		},
-		{
-			ID: "create-request",
-			Migrate: func(tx *gorm.DB) error {
-				type Request struct {
-					model.Model
-					CreatedAt           string `gorm:"type:varchar(255);not null"`
-					UserAddress         string `gorm:"type:varchar(255);not null;uniqueIndex:userAddress_nonce"`
-					Nonce               int64  `gorm:"type:bigint;not null;index:userAddress_nonce"`
-					ServiceName         string `gorm:"type:varchar(255);not null"`
-					InputCount          int64  `gorm:"type:bigint;not null"`
-					PreviousOutputCount int64  `gorm:"type:bigint;not null"`
-					Signature           string `gorm:"type:varchar(255);not null"`
-					Processed           *bool  `gorm:"type:tinyint(1);not null;default:0"`
-				}
-				return tx.AutoMigrate(&Request{})
 			},
 		},
 	})

@@ -12,7 +12,6 @@ type RefundListOptions struct {
 }
 
 type Refund struct {
-	Model
 	Index     *int64     `gorm:"type:bigint;not null;uniqueIndex:provider_index" json:"index" readonly:"true"`
 	Provider  string     `gorm:"type:varchar(255);not null;index:provider_index" json:"provider" immutable:"true"`
 	CreatedAt *time.Time `json:"createdAt" readonly:"true" gen:"-"`

@@ -7,8 +7,7 @@ import (
 )
 
 type Service struct {
-	Model
-	CreatedAt   *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
+	UpdatedAt   *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 	Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name" json:"name" binding:"required" immutable:"true"`
 	Type        string                `gorm:"type:varchar(255);not null" json:"type" binding:"required"`
 	URL         string                `gorm:"type:varchar(255);not null" json:"url" binding:"required"`
@@ -21,4 +20,3 @@ type ServiceList struct {
 	Metadata ListMeta  `json:"metadata"`
 	Items    []Service `json:"items"`
 }
-	

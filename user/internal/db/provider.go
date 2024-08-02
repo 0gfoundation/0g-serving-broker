@@ -21,7 +21,7 @@ func (d *DB) GetProviderAccount(providerAddress string) (model.Provider, error) 
 
 func (d *DB) ListProviderAccount() ([]model.Provider, error) {
 	list := []model.Provider{}
-	ret := d.db.Model(model.Provider{}).Order("created_at DESC").Find(&list)
+	ret := d.db.Model(model.Provider{}).Order("nonce DESC").Find(&list)
 	return list, ret.Error
 }
 
