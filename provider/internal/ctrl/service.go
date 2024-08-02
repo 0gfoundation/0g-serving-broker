@@ -30,6 +30,13 @@ func (c *Ctrl) RegisterService(ctx context.Context, service model.Service) error
 }
 
 func (c *Ctrl) UpdateService(ctx context.Context, service model.Service) error {
+	reqs, err := c.db.ListRequest()
+	if err != nil {
+		return errors.Wrap(err, "add service in contract")
+	}
+	if len(reqs) > 0 {
+		return errors.New("unsettled requests exist, can not update service")
+	}
 	if err := c.contract.AddOrUpdateService(ctx, service, c.servingUrl); err != nil {
 		return errors.Wrap(err, "add service in contract")
 	}
@@ -60,6 +67,13 @@ func (c *Ctrl) ListService() ([]model.Service, error) {
 }
 
 func (c *Ctrl) DeleteService(ctx context.Context, name string) error {
+	reqs, err := c.db.ListRequest()
+	if err != nil {
+		return errors.Wrap(err, "add service in contract")
+	}
+	if len(reqs) > 0 {
+		return errors.New("unsettled requests exist, can not delete service")
+	}
 	if err := c.contract.DeleteService(ctx, name); err != nil {
 		return errors.Wrap(err, "delete service in contract")
 	}
