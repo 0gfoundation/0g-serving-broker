@@ -34,6 +34,17 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
+func (h *Handler) GetService(ctx *gin.Context) {
+	name := ctx.Param("service")
+	service, err := h.ctrl.GetService(name)
+	if err != nil {
+		handleError(ctx, err, "get service from db")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, service)
+}
+
 func (h *Handler) ListService(ctx *gin.Context) {
 	list, err := h.ctrl.ListService()
 	if err != nil {

@@ -102,7 +102,7 @@ func (c Ctrl) getProviderAccountFromContract(ctx context.Context, providerAddres
 	if err != nil {
 		return model.Provider{}, errors.Wrap(err, "get account from contract")
 	}
-	ret := parse(account, false)
+	ret := parseAccount(account, false)
 	return ret, nil
 }
 
@@ -114,7 +114,7 @@ func (c Ctrl) listProviderAccountFromContract(ctx context.Context) ([]model.Prov
 	}
 	list := make([]model.Provider, len(accounts))
 	for i, account := range accounts {
-		list[i] = parse(account, false)
+		list[i] = parseAccount(account, false)
 	}
 	return list, nil
 }
@@ -130,7 +130,7 @@ func (c Ctrl) backfillProviderAccount(accounts []contract.Account) ([]model.Prov
 		accountMap[account.Provider] = dbAccounts[i]
 	}
 	for i, account := range accounts {
-		list[i] = parse(account, true)
+		list[i] = parseAccount(account, true)
 		if v, ok := accountMap[account.Provider.String()]; ok {
 			list[i].LastResponseTokenCount = v.LastResponseTokenCount
 		}
@@ -138,7 +138,7 @@ func (c Ctrl) backfillProviderAccount(accounts []contract.Account) ([]model.Prov
 	return list, nil
 }
 
-func parse(account contract.Account, ignoreProcessedRefund bool) model.Provider {
+func parseAccount(account contract.Account, ignoreProcessedRefund bool) model.Provider {
 	refunds := []model.Refund{}
 	for _, refund := range account.Refunds {
 		if ignoreProcessedRefund && refund.Processed {

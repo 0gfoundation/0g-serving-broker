@@ -14,3 +14,10 @@ func (c *UserContract) GetService(ctx context.Context, providerAddress common.Ad
 	}
 	return c.Contract.GetService(callOpts, providerAddress, svcName)
 }
+
+func (c *UserContract) ListService(ctx context.Context) ([]contract.Service, error) {
+	callOpts := &bind.CallOpts{
+		Context: ctx,
+	}
+	return c.Contract.GetAllServices(callOpts)
+}

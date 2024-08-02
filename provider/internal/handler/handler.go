@@ -25,6 +25,7 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// service
 	group.GET("/service", h.ListService)
+	group.GET("/service/:service", h.GetService)
 	group.POST("/service", h.RegisterService)
 	group.POST("/service/:service", h.UpdateService)
 	group.DELETE("/service/:service", h.DeleteService)

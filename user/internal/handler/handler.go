@@ -32,6 +32,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.POST("/provider/:provider/charge", h.Charge)
 	group.POST("/provider/:provider/refund", h.Refund)
 
+	// service
+	group.GET("/service", h.ListService)
+	group.GET("/provider/:provider/service/:service", h.GetService)
+
 	// request
 	group.POST("/provider/:provider/service/:service/*suffix", h.GetData)
 	group.POST("/provider/:provider/service/:service", h.GetData)

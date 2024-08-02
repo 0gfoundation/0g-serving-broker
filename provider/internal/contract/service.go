@@ -27,6 +27,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model
 
 	return err
 }
+
 func (c *ProviderContract) DeleteService(ctx context.Context, name string) error {
 	opt, err := c.Contract.CreateTransactOpts()
 	if err != nil {
