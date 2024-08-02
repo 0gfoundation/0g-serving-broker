@@ -30,8 +30,8 @@ func (d *DB) ListRefund(opt model.RefundListOptions) ([]model.Refund, error) {
 	if opt.Processed != nil {
 		tx = tx.Where("processed = ?", *opt.Processed)
 	}
-	if opt.CreatedAt != nil {
-		tx = tx.Where("created_at < ?", *opt.CreatedAt)
+	if opt.MaxCreatedAt != nil {
+		tx = tx.Where("created_at < ?", *opt.MaxCreatedAt)
 	}
 	list := []model.Refund{}
 	ret := tx.Order("created_at DESC").Find(&list)
@@ -39,7 +39,7 @@ func (d *DB) ListRefund(opt model.RefundListOptions) ([]model.Refund, error) {
 }
 
 func (d *DB) DeleteRefund(providerAddress string, index int64) error {
-	return d.db.Where(&model.Refund{Provider: providerAddress, Index: &index}).Delete(&model.Provider{}).Error
+	return d.db.Where(&model.Refund{Provider: providerAddress, Index: &index}).Delete(&model.Refund{}).Error
 }
 
 func (d *DB) UpdateRefund(providerAddress string, index int64, new model.Refund, verify bool) error {

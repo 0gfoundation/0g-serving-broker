@@ -34,8 +34,6 @@ func (r RefundProcessor) Start(ctx context.Context) error {
 		case <-ticker.C:
 			if err := r.ctrl.ProcessRefunds(ctx); err != nil {
 				log.Printf("Processed refunds: %s", err.Error())
-			} else {
-				log.Println("There are currently no refunds due")
 			}
 		}
 	}

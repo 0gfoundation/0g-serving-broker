@@ -1,7 +1,6 @@
 package db
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/0glabs/0g-serving-agent/user/model"
@@ -30,7 +29,7 @@ func (d *DB) DeleteProviderAccounts(providerAddresses []string) error {
 	if len(providerAddresses) == 0 {
 		return nil
 	}
-	return d.db.Where("name IN (?)", providerAddresses).Delete(&model.Provider{}).Error
+	return d.db.Where("provider IN (?)", providerAddresses).Delete(&model.Provider{}).Error
 }
 
 func (d *DB) UpdateProviderAccount(providerAddress string, new model.Provider) error {
@@ -41,12 +40,7 @@ func (d *DB) UpdateProviderAccount(providerAddress string, new model.Provider) e
 	if err := model.ValidateUpdateProvider(old, new); err != nil {
 		return err
 	}
-	if new.Nonce != nil && old.Nonce != nil {
-		if *new.Nonce < *old.Nonce {
-			return fmt.Errorf("updating is not allowed as new nonce %d is smaller than the old nonce %d", *new.Nonce, *old.Nonce)
-		}
-		old.Nonce = new.Nonce
-	}
+	new.Nonce = getGreaterNonce(old.Nonce, new.Nonce)
 	ret := d.db.Where(&model.Provider{Provider: old.Provider}).Updates(new)
 	return ret.Error
 }
@@ -69,6 +63,7 @@ func (d *DB) BatchUpdateProviderAccount(news []model.Provider) error {
 		if old, ok := oldAccountMap[key]; ok {
 			delete(oldAccountMap, key)
 			if !identicalProvider(old, &new) {
+				news[i].Nonce = getGreaterNonce(old.Nonce, news[i].Nonce)
 				toUpdate = append(toUpdate, news[i])
 			}
 			continue
@@ -89,6 +84,19 @@ func (d *DB) BatchUpdateProviderAccount(news []model.Provider) error {
 		}
 	}
 	return d.DeleteProviderAccounts(toRemove)
+}
+
+func getGreaterNonce(old, new *int64) *int64 {
+	if new == nil {
+		return old
+	}
+	if old == nil {
+		return new
+	}
+	if *new > *old {
+		return new
+	}
+	return old
 }
 
 func identicalProvider(old, new *model.Provider) bool {

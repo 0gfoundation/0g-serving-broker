@@ -73,7 +73,7 @@ func (d *DB) Migrate() error {
 					InputCount          int64  `gorm:"type:bigint;not null"`
 					PreviousOutputCount int64  `gorm:"type:bigint;not null"`
 					Signature           string `gorm:"type:varchar(255);not null"`
-					Processed           bool   `gorm:"type:tinyint(1);not null;default:0"`
+					Processed           *bool  `gorm:"type:tinyint(1);not null;default:0"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

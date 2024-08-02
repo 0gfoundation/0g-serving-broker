@@ -6,6 +6,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
@@ -14,6 +15,9 @@ func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 	if err := account.Bind(ctx); err != nil {
 		handleError(ctx, err, "bind account")
 		return
+	}
+	if account.Provider == "" {
+		handleError(ctx, errors.New("missing field Provider"), "create account")
 	}
 
 	if err := h.ctrl.CreateProviderAccount(ctx, common.HexToAddress(account.Provider), account); err != nil {
@@ -24,7 +28,7 @@ func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 }
 
 func (h *Handler) ListProviderAccount(ctx *gin.Context) {
-	accounts, err := h.ctrl.ListProviderAccount(ctx, true)
+	accounts, err := h.ctrl.ListProviderAccount(ctx)
 	if err != nil {
 		handleError(ctx, err, "list account")
 		return
@@ -37,7 +41,7 @@ func (h *Handler) ListProviderAccount(ctx *gin.Context) {
 
 func (h *Handler) GetProviderAccount(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
-	account, err := h.ctrl.GetProviderAccount(ctx, common.HexToAddress(providerAddress), true)
+	account, err := h.ctrl.GetProviderAccount(ctx, common.HexToAddress(providerAddress))
 	if err != nil {
 		handleError(ctx, err, "get account from db")
 		return

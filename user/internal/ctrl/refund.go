@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/big"
 	"time"
 
@@ -17,7 +18,7 @@ func (c Ctrl) RequestRefund(ctx context.Context, providerAddress common.Address,
 	if refund.Amount == nil {
 		return fmt.Errorf("nil refund.Amount")
 	}
-	old, err := c.GetProviderAccount(ctx, providerAddress, false)
+	old, err := c.getProviderAccountFromContract(ctx, providerAddress)
 	if err != nil {
 		return errors.Wrap(err, "finish refund, get account from contract")
 	}
@@ -41,15 +42,17 @@ func (c Ctrl) RequestRefund(ctx context.Context, providerAddress common.Address,
 
 func (c Ctrl) ProcessRefunds(ctx context.Context) error {
 	refunds, err := c.db.ListRefund(model.RefundListOptions{
-		CreatedAt: model.PtrOf(time.Now().UTC().Add(c.contract.LockTime)),
-		Processed: model.PtrOf(false),
+		MaxCreatedAt: model.PtrOf(time.Now().UTC().Add(-c.contract.LockTime)),
+		Processed:    model.PtrOf(false),
 	})
 	if err != nil {
 		return errors.Wrap(err, "list refund in db")
 	}
 	if len(refunds) == 0 {
+		log.Println("There are currently no refunds due")
 		return nil
 	}
+	log.Printf("refunds created before %s is unlocked, process refunding", (time.Now().UTC().Add(-c.contract.LockTime).String()))
 	indexMap := map[string][]*big.Int{}
 	for _, refund := range refunds {
 		key := refund.Provider

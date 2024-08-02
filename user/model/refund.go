@@ -7,8 +7,8 @@ import (
 type Refunds []Refund
 
 type RefundListOptions struct {
-	Processed *bool
-	CreatedAt *time.Time
+	Processed    *bool
+	MaxCreatedAt *time.Time
 }
 
 type Refund struct {
@@ -17,5 +17,5 @@ type Refund struct {
 	Provider  string     `gorm:"type:varchar(255);not null;index:provider_index" json:"provider" immutable:"true"`
 	CreatedAt *time.Time `json:"createdAt" readonly:"true" gen:"-"`
 	Amount    *int64     `gorm:"type:bigint;not null;default:0" json:"amount"`
-	Processed bool       `gorm:"type:tinyint(1);not null;default:0" json:"processed"`
+	Processed *bool      `gorm:"type:tinyint(1);not null;default:0" json:"processed"`
 }
