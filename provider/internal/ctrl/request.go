@@ -54,7 +54,8 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (commonModel.Request, error)
 		case "Signature":
 			req.Signature = values[0]
 		case "Created-At":
-			createAt, err := time.Parse(time.RFC3339, values[0])
+			const layout = "2006-01-02 15:04:05.999999999 -0700 MST"
+			createAt, err := time.Parse(layout, values[0])
 			if err != nil {
 				return req, errors.Wrapf(err, "parse createAt %s", values[0])
 			}
@@ -170,5 +171,5 @@ func (c *Ctrl) validateFee(ctx context.Context, account model.User, fee int64) e
 	if fee+*newAccount.UnsettledFee <= *newAccount.LockBalance {
 		return nil
 	}
-	return fmt.Errorf("insufficient balance, total fee of %d exceeds the available balance of %d", fee, *newAccount.LockBalance)
+	return fmt.Errorf("insufficient balance, total fee of %d exceeds the available balance of %d", fee+*newAccount.UnsettledFee, *newAccount.LockBalance)
 }
