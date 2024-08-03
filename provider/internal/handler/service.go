@@ -66,6 +66,15 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 		handleError(ctx, err, "bind service")
 		return
 	}
+	old, err := h.ctrl.GetService(name)
+	if err != nil {
+		handleError(ctx, err, "get old service")
+		return
+	}
+	if err := model.ValidateUpdateService(old, new); err != nil {
+		errors.Response(ctx, err)
+		return
+	}
 	switch new.Type {
 	case "RPC":
 	case "chatbot":

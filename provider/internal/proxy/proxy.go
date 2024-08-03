@@ -20,14 +20,18 @@ type Proxy struct {
 
 	serviceRoutes     map[string]bool
 	serviceRoutesLock sync.RWMutex
+	serviceTargets    map[string]string
+	serviceTypes      map[string]string
 	serviceGroup      *gin.RouterGroup
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine) *Proxy {
 	p := &Proxy{
-		ctrl:          ctrl,
-		serviceRoutes: make(map[string]bool),
-		serviceGroup:  engine.Group(constant.ServicePrefix),
+		ctrl:           ctrl,
+		serviceRoutes:  make(map[string]bool),
+		serviceTargets: make(map[string]string),
+		serviceTypes:   make(map[string]string),
+		serviceGroup:   engine.Group(constant.ServicePrefix),
 	}
 
 	p.serviceGroup.Use(p.routeFilterMiddleware)
@@ -75,6 +79,8 @@ func (p *Proxy) AddHTTPRoute(route, targetURL, svcType string) {
 
 	p.serviceRoutesLock.Lock()
 	p.serviceRoutes[route] = true
+	p.serviceTargets[route] = targetURL
+	p.serviceTypes[route] = svcType
 	p.serviceRoutesLock.Unlock()
 
 	if exists {
@@ -82,7 +88,7 @@ func (p *Proxy) AddHTTPRoute(route, targetURL, svcType string) {
 	}
 
 	h := func(ctx *gin.Context) {
-		p.proxyHTTPRequest(ctx, route, targetURL, svcType)
+		p.proxyHTTPRequest(ctx, route)
 	}
 	p.serviceGroup.Any(route+"/*any", h)
 }
@@ -90,10 +96,12 @@ func (p *Proxy) AddHTTPRoute(route, targetURL, svcType string) {
 func (p *Proxy) DeleteRoute(route string) {
 	p.serviceRoutesLock.Lock()
 	p.serviceRoutes[route] = false
+	delete(p.serviceTargets, route)
+	delete(p.serviceTypes, route)
 	p.serviceRoutesLock.Unlock()
 }
 
-func (p *Proxy) UpdateRoute(route string, targetURL, svcType string) error {
+func (p *Proxy) UpdateRoute(route string, newTargetURL, newSvcType string) error {
 	//TODO: Add a URL validation
 	valid, exists := p.serviceRoutes[route]
 	if !exists || !valid {
@@ -102,16 +110,19 @@ func (p *Proxy) UpdateRoute(route string, targetURL, svcType string) error {
 
 	p.serviceRoutesLock.Lock()
 	p.serviceRoutes[route] = true
+	p.serviceTargets[route] = newTargetURL
+	p.serviceTypes[route] = newSvcType
 	p.serviceRoutesLock.Unlock()
 
-	h := func(ctx *gin.Context) {
-		p.proxyHTTPRequest(ctx, route, targetURL, svcType)
-	}
-	p.serviceGroup.Any(route+"/*any", h)
 	return nil
 }
 
-func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route, targetURL, svcType string) {
+func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
+	p.serviceRoutesLock.RLock()
+	targetURL := p.serviceTargets[route]
+	svcType := p.serviceTypes[route]
+	p.serviceRoutesLock.RUnlock()
+
 	var extractor extractor.ProviderReqRespExtractor
 	switch svcType {
 	case "chatbot":
@@ -160,7 +171,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route, targetURL, svcType str
 		handleError(ctx, err, "prepare HTTP request")
 		return
 	}
-
 	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee)
 }
 

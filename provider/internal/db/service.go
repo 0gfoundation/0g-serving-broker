@@ -21,6 +21,11 @@ func (d *DB) ListService() ([]model.Service, error) {
 	return list, ret.Error
 }
 
+func (d *DB) UpdateService(name string, new model.Service) error {
+	ret := d.db.Where(&model.Service{Name: name}).Updates(new)
+	return ret.Error
+}
+
 func (d *DB) DeleteService(name string) error {
 	ret := d.db.Where("name = ?", name).Delete(&model.Service{})
 	return ret.Error

@@ -34,9 +34,9 @@ func (d *DB) Migrate() error {
 				type User struct {
 					User                   string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
 					LastRequestNonce       *int64                `gorm:"type:bigint;not null;default:0"`
+					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
 					LockBalance            *int64                `gorm:"type:bigint;not null;default:0"`
 					LastBalanceCheckTime   *time.Time            `json:"lastBalanceCheckTime"`
-					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
 					UnsettledFee           *int64                `gorm:"type:bigint;not null;default:0"`
 					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
 				}

@@ -40,14 +40,14 @@ func (c *Ctrl) UpdateService(ctx context.Context, service model.Service) error {
 	if err := c.contract.AddOrUpdateService(ctx, service, c.servingUrl); err != nil {
 		return errors.Wrap(err, "add service in contract")
 	}
-	old, err := c.GetService(service.Name)
+	err = c.db.UpdateService(service.Name, service)
 	if err != nil {
-		return err
-	}
-	err = c.db.AddService(service)
-	if err != nil {
+		old, rollBackErr := c.GetService(service.Name)
+		if rollBackErr != nil {
+			log.Printf("rolling back updateService: %s", rollBackErr.Error())
+		}
 		if rollBackErr := c.contract.AddOrUpdateService(ctx, old, c.servingUrl); rollBackErr != nil {
-			log.Printf("rolling back service in the contract: %s", rollBackErr.Error())
+			log.Printf("rolling back updateService: %s", rollBackErr.Error())
 		}
 	}
 	return errors.Wrap(err, "add service in db")
