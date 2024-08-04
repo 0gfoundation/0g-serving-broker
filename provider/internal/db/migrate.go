@@ -48,13 +48,13 @@ func (d *DB) Migrate() error {
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
 					CreatedAt           *time.Time `json:"createdAt" readonly:"true" gen:"-"`
-					UserAddress         string     `gorm:"type:varchar(255);not null;uniqueIndex:userAddress_nonce"`
-					Nonce               int64      `gorm:"type:bigint;not null;index:userAddress_nonce"`
+					UserAddress         string     `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
+					Nonce               int64      `gorm:"type:bigint;not null;index:processed_userAddress_nonce"`
 					ServiceName         string     `gorm:"type:varchar(255);not null"`
 					InputCount          int64      `gorm:"type:bigint;not null"`
 					PreviousOutputCount int64      `gorm:"type:bigint;not null"`
 					Signature           string     `gorm:"type:varchar(255);not null"`
-					Processed           *bool      `gorm:"type:tinyint(1);not null;default:0"`
+					Processed           *bool      `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

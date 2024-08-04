@@ -114,6 +114,15 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
+func (h *Handler) SyncServices(ctx *gin.Context) {
+	if err := h.ctrl.SyncServices(ctx); err != nil {
+		handleError(ctx, err, "synchronize service from the database to the contract")
+		return
+	}
+
+	ctx.Status(http.StatusAccepted)
+}
+
 func handleError(ctx *gin.Context, err error, context string) {
 	errors.Response(ctx, errors.Wrap(err, "Provider: handle service, "+context))
 }

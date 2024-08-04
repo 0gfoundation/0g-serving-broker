@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log"
 
 	"github.com/gin-gonic/gin"
 
@@ -34,6 +35,12 @@ func Main() {
 	ctrl := ctrl.New(db, contract, config.ServingUrl, config.AutoSettleBufferTime)
 	ctx := context.Background()
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
+		panic(err)
+	}
+	settleFeesErr := ctrl.SettleFees(ctx)
+	if settleFeesErr != nil {
+		log.Printf("settle fee failed: %s", settleFeesErr.Error())
+	} else if err := ctrl.SyncServices(ctx); err != nil {
 		panic(err)
 	}
 	proxy := proxy.New(ctrl, engine)

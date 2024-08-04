@@ -4,8 +4,11 @@ import (
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
-func (d *DB) AddService(service model.Service) error {
-	ret := d.db.Create(&service)
+func (d *DB) AddServices(services []model.Service) error {
+	if len(services) == 0 {
+		return nil
+	}
+	ret := d.db.Create(&services)
 	return ret.Error
 }
 
@@ -26,7 +29,9 @@ func (d *DB) UpdateService(name string, new model.Service) error {
 	return ret.Error
 }
 
-func (d *DB) DeleteService(name string) error {
-	ret := d.db.Where("name = ?", name).Delete(&model.Service{})
-	return ret.Error
+func (d *DB) DeleteServices(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	return d.db.Where("name IN (?)", names).Delete(&model.Service{}).Error
 }

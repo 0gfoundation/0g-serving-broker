@@ -20,7 +20,7 @@ func (c *Ctrl) RegisterService(ctx context.Context, service model.Service) error
 	if err := c.contract.AddOrUpdateService(ctx, service, c.servingUrl); err != nil {
 		return errors.Wrap(err, "add service in contract")
 	}
-	err = c.db.AddService(service)
+	err = c.db.AddServices([]model.Service{service})
 	if err != nil {
 		if rollBackErr := c.contract.DeleteService(ctx, service.Name); rollBackErr != nil {
 			log.Printf("rolling back service in the contract: %s", rollBackErr.Error())
@@ -78,5 +78,25 @@ func (c *Ctrl) DeleteService(ctx context.Context, name string) error {
 		return errors.Wrap(err, "delete service in contract")
 	}
 
-	return errors.Wrapf(c.db.DeleteService(name), "delete service %s in db", name)
+	return errors.Wrapf(c.db.DeleteServices([]string{name}), "delete service %s in db", name)
+}
+
+func (c *Ctrl) SyncServices(ctx context.Context) error {
+	list, err := c.db.ListService()
+	if err != nil {
+		return err
+	}
+	if c.contract.BatchUpdateService(ctx, list, c.servingUrl); err != nil {
+		return errors.Wrap(err, "batch update service in contract")
+	}
+	newList, err := c.ListService()
+	if err != nil {
+		return errors.Wrap(err, "list service in contract")
+	}
+	for i := range newList {
+		if err := c.db.UpdateService(newList[i].Name, newList[i]); err != nil {
+			return errors.Wrap(err, "update service in database")
+		}
+	}
+	return nil
 }
