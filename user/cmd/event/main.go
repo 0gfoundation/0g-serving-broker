@@ -39,7 +39,7 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, "", nil)
+	ctrl := ctrl.New(db, contract, nil, "", nil)
 	refundProcessor := event.NewRefundProcessor(ctrl, config.Interval.RefundProcessor)
 	if err := mgr.Add(refundProcessor); err != nil {
 		panic(err)

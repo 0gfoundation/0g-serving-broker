@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-gormigrate/gormigrate/v2"
 	"github.com/pkg/errors"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/plugin/soft_delete"
 )
@@ -13,6 +14,17 @@ func (d *DB) Migrate() error {
 	d.db.Set("gorm:table_options", "ENGINE=InnoDB")
 
 	m := gormigrate.New(d.db, &gormigrate.Options{UseTransaction: false}, []*gormigrate.Migration{
+		{
+			ID: "create-systeminfo",
+			Migrate: func(tx *gorm.DB) error {
+				type SystemInfo struct {
+					UpdatedAt *time.Time     `json:"updatedAt" readonly:"true" gen:"-"`
+					K         string         `gorm:"type:char(36);primaryKey" json:"k"`
+					V         datatypes.JSON `gorm:"type:json;not null" json:"v"`
+				}
+				return tx.AutoMigrate(&SystemInfo{})
+			},
+		},
 		{
 			ID: "create-provider",
 			Migrate: func(tx *gorm.DB) error {
