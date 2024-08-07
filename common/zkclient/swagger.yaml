@@ -1,0 +1,183 @@
+consumes:
+  - application/json
+produces:
+  - application/json
+swagger: "2.0"
+info:
+  title: ZKSettlement
+  version: 1.0.0
+paths:
+  /sign-keypair:
+    get:
+      operationId: generateKeyPair
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              privkey:
+                type: array
+                items:
+                  type: integer
+              pubkey:
+                $ref: "#/definitions/pubkey"
+        default:
+          $ref: "#/responses/Error"
+
+  /signature:
+    post:
+      operationId: generateSignature
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              privkey:
+                type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              signatures:
+                type: array
+                items:
+                  type: integer
+        default:
+          $ref: "#/responses/Error"
+  /check-sign:
+    post:
+      operationId: checkSignature
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              pubkey:
+                $ref: "#/definitions/pubkey"
+              signatures:
+                $ref: "#/definitions/signatures"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: array
+            items:
+              type: integer
+        default:
+          $ref: "#/responses/Error"
+  /solidity-calldata:
+    post:
+      operationId: generateSolidityCalldata
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              l:
+                type: integer
+              pubkey:
+                $ref: "#/definitions/pubkey"
+              signatures:
+                $ref: "#/definitions/signatures"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              array1:
+                type: array
+                items:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+              array2:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: string
+                    pattern: "^0x[0-9a-fA-F]{64}$"
+              array3:
+                type: array
+                items:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+              array4:
+                type: array
+                items:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+        default:
+          $ref: "#/responses/Error"
+definitions:
+  pubkey:
+    type: array
+    items:
+      type: array
+      items:
+        type: integer
+  signatures:
+    type: array
+    items:
+      type: array
+      items:
+        type: integer
+  request:
+    type: object
+    properties:
+      nonce:
+        type: integer
+      inputCount:
+        type: integer
+      outputCount:
+        type: integer
+      price:
+        type: string
+      updatedAt:
+        type: string
+      createdAt:
+        type: string
+      serviceName:
+        type: string
+      userAddress:
+        type: string
+      providerAddress:
+        type: string
+  ErrorResponse:
+    type: object
+    properties:
+      status:
+        type: string
+      message:
+        type: string
+      stack:
+        type: string
+    required:
+      - status
+      - message
+responses:
+  Error:
+    description: Error
+    schema:
+      $ref: "#/definitions/ErrorResponse"
