@@ -33,7 +33,7 @@ func Main() {
 	defer contract.Close()
 
 	ctx := context.Background()
-	zk := zkclient.NewZKClient("localhost:3000")
+	zk := zkclient.NewZKClient(config.ZKService)
 
 	r := gin.New()
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)

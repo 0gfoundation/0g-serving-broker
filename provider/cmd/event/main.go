@@ -27,10 +27,10 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	if config.AutoSettleBufferTime > int(contract.LockTime) {
+	if config.Interval.AutoSettleBufferTime > int(contract.LockTime) {
 		panic(errors.New("AutoSettleBufferTime grater than refund LockTime"))
 	}
-	if config.AutoSettleBufferTime > config.Interval.ForceSettlementProcessor {
+	if config.Interval.AutoSettleBufferTime > config.Interval.ForceSettlementProcessor {
 		panic(errors.New("AutoSettleBufferTime grater than forceSettlement Interval"))
 	}
 
@@ -44,7 +44,7 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, "", config.AutoSettleBufferTime)
+	ctrl := ctrl.New(db, contract, "", config.Interval.AutoSettleBufferTime)
 	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)

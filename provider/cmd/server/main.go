@@ -32,7 +32,7 @@ func Main() {
 	defer contract.Close()
 
 	engine := gin.New()
-	ctrl := ctrl.New(db, contract, config.ServingUrl, config.AutoSettleBufferTime)
+	ctrl := ctrl.New(db, contract, config.ServingUrl, config.Interval.AutoSettleBufferTime)
 	ctx := context.Background()
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)

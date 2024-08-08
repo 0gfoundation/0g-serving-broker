@@ -1,5 +1,4 @@
 address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-autoSettleBufferTime: 18000
 contractAddress: 0x244Cb2CC4F92982417d370C9605DC30c70Ef362F
 database:
   provider: root:123456@tcp(localhost:3306)/provider?parseTime=true
@@ -8,9 +7,10 @@ event:
   providerAddr: ":8088"
   userAddr: ":8089"
 interval:
+  autoSettleBufferTime: 18000
+  forceSettlementProcessor: 86400
   refundProcessor: 600
   settlementProcessor: 600
-  forceSettlementProcessor: 86400
 servingUrl: http://localhost:8080
 signingKey:
 networks:
@@ -47,3 +47,4 @@ networks:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
+zkService: "localhost:3000"

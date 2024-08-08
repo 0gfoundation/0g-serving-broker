@@ -9,10 +9,9 @@ import (
 )
 
 type Config struct {
-	Address              string `yaml:"address"`
-	AutoSettleBufferTime int    `yaml:"autoSettleBufferTime"`
-	ContractAddress      string `yaml:"contractAddress"`
-	Database             struct {
+	Address         string `yaml:"address"`
+	ContractAddress string `yaml:"contractAddress"`
+	Database        struct {
 		User     string `yaml:"user"`
 		Provider string `yaml:"provider"`
 	} `yaml:"database"`
@@ -21,13 +20,15 @@ type Config struct {
 		UserAddr     string `yaml:"userAddr"`
 	} `yaml:"event"`
 	Interval struct {
+		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
+		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		RefundProcessor          int `yaml:"refundProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
-		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 	} `yaml:"interval"`
-	SigningKey string                    `yaml:"signingKey"`
-	ServingUrl string                    `yaml:"servingUrl"`
 	Networks   map[string]*NetworkConfig `mapstructure:"networks" yaml:"networks"`
+	ServingUrl string                    `yaml:"servingUrl"`
+	SigningKey string                    `yaml:"signingKey"`
+	ZKService  string                    `yaml:"zkService"`
 }
 
 var (
@@ -55,8 +56,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			AutoSettleBufferTime: 18000,
-			ContractAddress:      "0x59b9dD1cF82F6108526154c901256997095dE598",
+			ContractAddress: "0x59b9dD1cF82F6108526154c901256997095dE598",
 			Database: struct {
 				User     string `yaml:"user"`
 				Provider string `yaml:"provider"`
@@ -70,6 +70,14 @@ func GetConfig() *Config {
 			}{
 				ProviderAddr: ":8088",
 				UserAddr:     ":8089",
+			},
+			Interval: struct {
+				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
+				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
+				RefundProcessor          int `yaml:"refundProcessor"`
+				SettlementProcessor      int `yaml:"settlementProcessor"`
+			}{
+				AutoSettleBufferTime: 18000,
 			},
 		}
 
