@@ -4,16 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 
 	constant "github.com/0glabs/0g-serving-agent/common/const"
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	commonModel "github.com/0glabs/0g-serving-agent/common/model"
-	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
@@ -23,50 +20,24 @@ func (c *Ctrl) CreateRequest(req commonModel.Request) error {
 
 func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (commonModel.Request, error) {
 	var req commonModel.Request
+	headerMap := ctx.Request.Header
+
 	for k := range constant.RequestMetaData {
-		values := ctx.Request.Header.Values(k)
+		values := headerMap.Values(k)
 		if len(values) == 0 {
 			return req, errors.Wrapf(errors.New("missing Header"), "%s", k)
 		}
-		switch k {
-		case "Address":
-			req.UserAddress = values[0]
-		case "Nonce":
-			num, err := strconv.ParseInt(values[0], 10, 64)
-			if err != nil {
-				return req, errors.Wrapf(err, "parse nonce %s", values[0])
-			}
-			req.Nonce = num
-		case "Service-Name":
-			req.ServiceName = values[0]
-		case "Token-Count":
-			num, err := strconv.ParseInt(values[0], 10, 64)
-			if err != nil {
-				return req, errors.Wrapf(err, "parse inputCount %s", values[0])
-			}
-			req.InputCount = num
-		case "Previous-Output-Token-Count":
-			num, err := strconv.ParseInt(values[0], 10, 64)
-			if err != nil {
-				return req, errors.Wrapf(err, "parse previousOutputCount %s", values[0])
-			}
-			req.PreviousOutputCount = num
-		case "Signature":
-			req.Signature = values[0]
-		case "Created-At":
-			const layout = "2006-01-02 15:04:05.999999999 -0700 MST"
-			createAt, err := time.Parse(layout, values[0])
-			if err != nil {
-				return req, errors.Wrapf(err, "parse createAt %s", values[0])
-			}
-			req.CreatedAt = model.PtrOf(createAt)
+		value := values[0]
+
+		if err := updateRequestField(&req, k, value); err != nil {
+			return req, err
 		}
 	}
 
 	return req, nil
 }
 
-func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, fee, inputCount int64) error {
+func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, expectedFee, expectedInputCount int64) error {
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
 	if err != nil {
 		return err
@@ -77,22 +48,17 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, fee, i
 		return err
 	}
 
-	err = c.validateInputToken(req, inputCount)
-	if err != nil {
-		return err
-	}
-
-	err = c.validatePreviousOutputCount(req, account)
-	if err != nil {
-		return err
-	}
-
 	err = c.validateNonce(req, *account.LastRequestNonce)
 	if err != nil {
 		return err
 	}
 
-	err = c.validateFee(ctx, account, fee)
+	err = c.validateFee(req, account, expectedFee, expectedInputCount)
+	if err != nil {
+		return err
+	}
+
+	err = c.validateBalanceAdequacy(ctx, account, req.Fee)
 	if err != nil {
 		return err
 	}
@@ -100,51 +66,22 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, fee, i
 }
 
 func (c *Ctrl) validateSig(request commonModel.Request) error {
-	cReq, err := util.ToContractRequest(request)
-	if err != nil {
-		return errors.Wrap(err, "convert request from db schema to contract schema")
-	}
-
-	// https://github.com/ethereum/go-ethereum/issues/19751#issuecomment-504900739
-	// Transform yellow paper V from 27/28 to 0/1
-	if cReq.Signature[64] == 27 || cReq.Signature[64] == 28 {
-		cReq.Signature[64] -= 27
-	}
-
-	prefixedHash, err := cReq.GetMessage(c.contract.ProviderAddress)
-	if err != nil {
-		return errors.Wrap(err, "Get Message")
-	}
-
-	recovered, err := crypto.SigToPub(prefixedHash.Bytes(), cReq.Signature)
-	if err != nil {
-		return errors.Wrap(err, "SigToPub")
-	}
-
-	recoveredAddr := crypto.PubkeyToAddress(*recovered)
-	if recoveredAddr != cReq.UserAddress {
-		return errors.New("recovered address signature not match the real address")
-	}
+	// TODO validate signature by zk server
 
 	return nil
 }
 
-func (c *Ctrl) validateInputToken(actual commonModel.Request, inputCount int64) error {
-	if inputCount != actual.InputCount {
-		return fmt.Errorf("invalid inputCount, expected %d, but received %d", inputCount, actual.InputCount)
+func (c *Ctrl) validateFee(actual commonModel.Request, account model.User, expectedFee, expectedInputCount int64) error {
+	if account.LastResponseTokenCount != nil && actual.PreviousOutputCount < *account.LastResponseTokenCount {
+		return fmt.Errorf("invalid previousOutputCount, expected %d, but received %d", *account.LastResponseTokenCount, actual.PreviousOutputCount)
 	}
-
+	if actual.InputCount < expectedInputCount {
+		return fmt.Errorf("invalid inputCount, expected %d, but received %d", expectedInputCount, actual.InputCount)
+	}
+	if actual.Fee < expectedFee {
+		return fmt.Errorf("invalid fee, expected %d, but received %d. Please check the service price", expectedFee, actual.Fee)
+	}
 	return nil
-}
-
-func (c *Ctrl) validatePreviousOutputCount(actual commonModel.Request, account model.User) error {
-	if account.LastResponseTokenCount == nil {
-		return nil
-	}
-	if actual.PreviousOutputCount >= *account.LastResponseTokenCount {
-		return nil
-	}
-	return fmt.Errorf("invalid previousOutputCount, expected %d, but received %d", *account.LastResponseTokenCount, actual.PreviousOutputCount)
 }
 
 func (c *Ctrl) validateNonce(actual commonModel.Request, lastRequestNonce int64) error {
@@ -154,7 +91,7 @@ func (c *Ctrl) validateNonce(actual commonModel.Request, lastRequestNonce int64)
 	return fmt.Errorf("invalid nonce, received nonce %d not greater than the previous nonce: %d", actual.Nonce, lastRequestNonce)
 }
 
-func (c *Ctrl) validateFee(ctx context.Context, account model.User, fee int64) error {
+func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, fee int64) error {
 	if account.UnsettledFee == nil || account.LockBalance == nil {
 		return errors.New("nil unsettledFee or lockBalance in account")
 	}
@@ -172,4 +109,33 @@ func (c *Ctrl) validateFee(ctx context.Context, account model.User, fee int64) e
 		return nil
 	}
 	return fmt.Errorf("insufficient balance, total fee of %d exceeds the available balance of %d", fee+*newAccount.UnsettledFee, *newAccount.LockBalance)
+}
+
+func updateRequestField(req *commonModel.Request, key, value string) error {
+	switch key {
+	case "Address":
+		req.UserAddress = value
+	case "Fee":
+		return parseInt64Field(&req.Fee, "fee", value)
+	case "Input-Count":
+		return parseInt64Field(&req.InputCount, "inputCount", value)
+	case "Nonce":
+		return parseInt64Field(&req.Nonce, "nonce", value)
+	case "Previous-Output-Count":
+		return parseInt64Field(&req.PreviousOutputCount, "previousOutputCount", value)
+	case "Signature":
+		req.Signature = value
+	default:
+		return errors.Wrapf(errors.New("unexpected Header"), "%s", key)
+	}
+	return nil
+}
+
+func parseInt64Field(field *int64, name, value string) error {
+	num, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return errors.Wrapf(err, "parse %s %s", name, value)
+	}
+	*field = num
+	return nil
 }

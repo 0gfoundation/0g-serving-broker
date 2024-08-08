@@ -27,6 +27,9 @@ func ValidateUpdateRequest(oldVal, newVal Request) error {
 	if !apiequality.Semantic.DeepEqual(newVal.PreviousOutputCount, oldVal.PreviousOutputCount){
 		fields = append(fields, "previousOutputCount")
 	}
+	if !apiequality.Semantic.DeepEqual(newVal.Fee, oldVal.Fee){
+		fields = append(fields, "fee")
+	}
 	if !apiequality.Semantic.DeepEqual(newVal.Signature, oldVal.Signature){
 		fields = append(fields, "signature")
 	}

@@ -23,7 +23,7 @@ func (h *Handler) GetData(ctx *gin.Context) {
 		return
 	}
 
-	req, err := h.ctrl.PrepareRequest(ctx, extractor.GetSvcInfo().Url, account, extractor)
+	req, err := h.ctrl.PrepareRequest(ctx, extractor.GetSvcInfo(), account, extractor)
 	if err != nil {
 		handleError(ctx, errors.Wrap(err, "prepare request"), "get data")
 		return

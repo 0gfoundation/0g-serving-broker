@@ -17,29 +17,14 @@ import (
 // swagger:model request
 type Request struct {
 
-	// created at
-	CreatedAt string `json:"createdAt,omitempty"`
-
-	// input count
-	InputCount int64 `json:"inputCount,omitempty"`
+	// fee
+	Fee int64 `json:"fee,omitempty"`
 
 	// nonce
 	Nonce int64 `json:"nonce,omitempty"`
 
-	// output count
-	OutputCount int64 `json:"outputCount,omitempty"`
-
-	// price
-	Price string `json:"price,omitempty"`
-
 	// provider address
 	ProviderAddress string `json:"providerAddress,omitempty"`
-
-	// service name
-	ServiceName string `json:"serviceName,omitempty"`
-
-	// updated at
-	UpdatedAt string `json:"updatedAt,omitempty"`
 
 	// user address
 	UserAddress string `json:"userAddress,omitempty"`

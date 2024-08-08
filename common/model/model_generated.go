@@ -17,6 +17,7 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	d.ServiceName = r.ServiceName
 	d.InputCount = r.InputCount
 	d.PreviousOutputCount = r.PreviousOutputCount
+	d.Fee = r.Fee
 	d.Signature = r.Signature
 	d.Processed = r.Processed
 

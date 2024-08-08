@@ -148,18 +148,8 @@ definitions:
     properties:
       nonce:
         type: integer
-      inputCount:
+      fee:
         type: integer
-      outputCount:
-        type: integer
-      price:
-        type: string
-      updatedAt:
-        type: string
-      createdAt:
-        type: string
-      serviceName:
-        type: string
       userAddress:
         type: string
       providerAddress:

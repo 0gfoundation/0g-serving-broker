@@ -131,12 +131,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
-	s := ctx.Request.Header.Values("Service-Name")
-	if len(s) == 0 {
-		handleError(ctx, errors.New("get service name from request header"), "")
-		return
-	}
-	svc, err := p.ctrl.GetService(s[0])
+	svc, err := p.ctrl.GetService(route)
 	if err != nil {
 		handleError(ctx, err, "get service")
 		return

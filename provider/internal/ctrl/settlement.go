@@ -5,9 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
@@ -20,28 +18,9 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 	}
 
-	categorizedTraces := make(map[string]*contract.RequestTrace)
-	for _, req := range reqs {
-		cReq, err := util.ToContractRequest(req)
-		if err != nil {
-			return errors.Wrap(err, "convert request to contract acceptable format")
-		}
-		_, ok := categorizedTraces[req.UserAddress]
-		if ok {
-			categorizedTraces[req.UserAddress].Requests = append(categorizedTraces[req.UserAddress].Requests, cReq)
-			continue
-		}
-		categorizedTraces[req.UserAddress] = &contract.RequestTrace{
-			Requests: []contract.Request{cReq},
-		}
-	}
+	//TODO: use zk generateSolidityCalldata to obtain the inProof and public input
 
-	traces := []contract.RequestTrace{}
-	for _, t := range categorizedTraces {
-		traces = append(traces, *t)
-	}
-
-	if err := c.contract.SettleFees(ctx, traces); err != nil {
+	if err := c.contract.SettleFees(ctx, nil); err != nil {
 		return errors.Wrap(err, "settle fees in contract")
 	}
 	if err := c.db.UpdateRequest(); err != nil {

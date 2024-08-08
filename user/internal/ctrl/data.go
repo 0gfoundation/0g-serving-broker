@@ -9,16 +9,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
 	constant "github.com/0glabs/0g-serving-agent/common/const"
+	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	commonModel "github.com/0glabs/0g-serving-agent/common/model"
 	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/extractor"
 	"github.com/0glabs/0g-serving-agent/extractor/chatbot"
@@ -62,8 +60,7 @@ func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress, svcName string
 	return extractor, nil
 }
 
-func (c *Ctrl) PrepareRequest(ctx *gin.Context, url string, provider model.Provider, extractor extractor.UserReqRespExtractor) (*http.Request, error) {
-	providerAddress := ctx.Param("provider")
+func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider model.Provider, extractor extractor.UserReqRespExtractor) (*http.Request, error) {
 	svcName := ctx.Param("service")
 	suffix := ctx.Param("suffix")
 
@@ -76,7 +73,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, url string, provider model.Provi
 	if err != nil {
 		return nil, err
 	}
-	targetURL := url + constant.ServicePrefix + "/" + svcName
+	targetURL := svc.Url + constant.ServicePrefix + "/" + svcName
 	if suffix != "" {
 		targetURL += suffix
 	}
@@ -89,30 +86,22 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, url string, provider model.Provi
 	if err != nil {
 		return nil, err
 	}
-	reqModel := commonModel.Request{
-		CreatedAt:           model.PtrOf(time.Now().UTC()),
-		UserAddress:         c.contract.UserAddress,
-		ServiceName:         svcName,
-		PreviousOutputCount: *provider.LastResponseTokenCount,
-		InputCount:          inputCount,
-		Nonce:               *provider.Nonce,
-	}
-	cReq, err := util.ToContractRequest(reqModel)
-	if err != nil {
-		return nil, err
-	}
-	sig, err := cReq.GetSignature(c.signingKey, providerAddress)
-	if err != nil {
-		return nil, errors.Wrap(err, "get signature from request")
+	previousOutputCount := *provider.LastResponseTokenCount
+	fee := inputCount*svc.InputPrice.Int64() + previousOutputCount*svc.OutputPrice.Int64()
+
+	// TODO generate signature from zk-settlement
+	sig := ""
+
+	headers := map[string]string{
+		"Address":               c.contract.UserAddress,
+		"Fee":                   strconv.FormatInt(fee, 10),
+		"Input-Count":           strconv.FormatInt(inputCount, 10),
+		"Nonce":                 strconv.FormatInt(*provider.Nonce, 10),
+		"Previous-Output-Count": strconv.FormatInt(previousOutputCount, 10),
+		"Signature":             sig,
 	}
 
-	req.Header.Set("Token-Count", strconv.FormatUint(uint64(reqModel.InputCount), 10))
-	req.Header.Set("Address", reqModel.UserAddress)
-	req.Header.Set("Service-Name", reqModel.ServiceName)
-	req.Header.Set("Previous-Output-Token-Count", strconv.FormatUint(uint64(reqModel.PreviousOutputCount), 10))
-	req.Header.Set("Created-At", reqModel.CreatedAt.String())
-	req.Header.Set("Nonce", strconv.FormatUint(uint64(reqModel.Nonce), 10))
-	req.Header.Set("Signature", hexutil.Encode(sig))
+	util.SetHeaders(req, headers)
 
 	for key, values := range ctx.Request.Header {
 		for _, value := range values {

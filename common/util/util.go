@@ -2,6 +2,7 @@ package util
 
 import (
 	"math/big"
+	"net/http"
 )
 
 func ToBigInt(value int64) *big.Int {
@@ -19,4 +20,10 @@ func Max(old, new *int64) *int64 {
 		return new
 	}
 	return old
+}
+
+func SetHeaders(req *http.Request, headers map[string]string) {
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 }
