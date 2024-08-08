@@ -110,24 +110,24 @@ paths:
                 type: array
                 items:
                   type: string
-                  pattern: "^0x[0-9a-fA-F]{64}$"
+                  pattern: ^0x[0-9a-fA-F]{64}$
               array2:
                 type: array
                 items:
                   type: array
                   items:
                     type: string
-                    pattern: "^0x[0-9a-fA-F]{64}$"
+                    pattern: ^0x[0-9a-fA-F]{64}$
               array3:
                 type: array
                 items:
                   type: string
-                  pattern: "^0x[0-9a-fA-F]{64}$"
+                  pattern: ^0x[0-9a-fA-F]{64}$
               array4:
                 type: array
                 items:
                   type: string
-                  pattern: "^0x[0-9a-fA-F]{64}$"
+                  pattern: ^0x[0-9a-fA-F]{64}$
         default:
           $ref: "#/responses/Error"
 definitions:

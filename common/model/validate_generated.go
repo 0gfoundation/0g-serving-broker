@@ -36,3 +36,16 @@ func ValidateUpdateRequest(oldVal, newVal Request) error {
 	}
 	return nil
 }
+
+func ValidateUpdateSystemInfo(oldVal, newVal SystemInfo) error {
+	fields := []string{}
+	
+	if !apiequality.Semantic.DeepEqual(newVal.K, oldVal.K){
+		fields = append(fields, "k")
+	}
+
+	if len(fields) > 0 {
+		return fmt.Errorf("update field: [%s] not allowed", strings.Join(fields, ","))
+	}
+	return nil
+}

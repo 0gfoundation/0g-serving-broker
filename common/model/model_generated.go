@@ -30,3 +30,23 @@ func (d *Request) BindWithReadonly(ctx *gin.Context, old Request) error {
 
 	return nil
 }
+
+// ================================= SystemInfo =================================
+func (d *SystemInfo) Bind(ctx *gin.Context) error {
+	var r SystemInfo
+	if err := ctx.ShouldBindJSON(&r); err != nil {
+		return err
+	}
+	d.K = r.K
+	d.V = r.V
+
+	return nil
+}
+
+func (d *SystemInfo) BindWithReadonly(ctx *gin.Context, old SystemInfo) error {
+	if err := d.Bind(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}

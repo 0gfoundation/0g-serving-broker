@@ -8,7 +8,7 @@ import (
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
-	zkclient "github.com/0glabs/0g-serving-agent/common/zkclient/client"
+	"github.com/0glabs/0g-serving-agent/common/zkclient"
 	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
 	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/user/internal/db"
@@ -33,9 +33,7 @@ func Main() {
 	defer contract.Close()
 
 	ctx := context.Background()
-	zk := zkclient.NewHTTPClientWithConfig(
-		nil, zkclient.DefaultTransportConfig().WithHost("localhost:3000"),
-	).Operations
+	zk := zkclient.NewZKClient("localhost:3000")
 
 	r := gin.New()
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)

@@ -12,7 +12,7 @@ import (
 	"github.com/go-openapi/strfmt"
 )
 
-// Default zksettle HTTP client.
+// Default z k settlement HTTP client.
 var Default = NewHTTPClient(nil)
 
 const (
@@ -27,14 +27,14 @@ const (
 // DefaultSchemes are the default schemes found in Meta (info) section of spec file
 var DefaultSchemes = []string{"http"}
 
-// NewHTTPClient creates a new zksettle HTTP client.
-func NewHTTPClient(formats strfmt.Registry) *Zksettle {
+// NewHTTPClient creates a new z k settlement HTTP client.
+func NewHTTPClient(formats strfmt.Registry) *ZKSettlement {
 	return NewHTTPClientWithConfig(formats, nil)
 }
 
-// NewHTTPClientWithConfig creates a new zksettle HTTP client,
+// NewHTTPClientWithConfig creates a new z k settlement HTTP client,
 // using a customizable transport config.
-func NewHTTPClientWithConfig(formats strfmt.Registry, cfg *TransportConfig) *Zksettle {
+func NewHTTPClientWithConfig(formats strfmt.Registry, cfg *TransportConfig) *ZKSettlement {
 	// ensure nullable parameters have default
 	if cfg == nil {
 		cfg = DefaultTransportConfig()
@@ -45,14 +45,14 @@ func NewHTTPClientWithConfig(formats strfmt.Registry, cfg *TransportConfig) *Zks
 	return New(transport, formats)
 }
 
-// New creates a new zksettle client
-func New(transport runtime.ClientTransport, formats strfmt.Registry) *Zksettle {
+// New creates a new z k settlement client
+func New(transport runtime.ClientTransport, formats strfmt.Registry) *ZKSettlement {
 	// ensure nullable parameters have default
 	if formats == nil {
 		formats = strfmt.Default
 	}
 
-	cli := new(Zksettle)
+	cli := new(ZKSettlement)
 	cli.Transport = transport
 	cli.Operations = operations.New(transport, formats)
 	return cli
@@ -97,15 +97,15 @@ func (cfg *TransportConfig) WithSchemes(schemes []string) *TransportConfig {
 	return cfg
 }
 
-// Zksettle is a client for zksettle
-type Zksettle struct {
+// ZKSettlement is a client for z k settlement
+type ZKSettlement struct {
 	Operations operations.ClientService
 
 	Transport runtime.ClientTransport
 }
 
 // SetTransport changes the transport on the client and all its subresources
-func (c *Zksettle) SetTransport(transport runtime.ClientTransport) {
+func (c *ZKSettlement) SetTransport(transport runtime.ClientTransport) {
 	c.Transport = transport
 	c.Operations.SetTransport(transport)
 }
