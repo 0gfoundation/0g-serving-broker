@@ -16,12 +16,15 @@ import (
 func (c Ctrl) CreateProviderAccount(ctx context.Context, providerAddress common.Address, account model.Provider) error {
 	balance := big.NewInt(0)
 	balance.SetInt64(*account.Balance)
-	if err := c.contract.CreateProviderAccount(ctx, providerAddress, *balance); err != nil {
+
+	signer, err := c.getSigner(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get signer from db")
+	}
+	if err := c.contract.CreateProviderAccount(ctx, providerAddress, *balance, signer); err != nil {
 		return errors.Wrap(err, "create provider account in contract")
 	}
-
-	err := c.db.CreateProviderAccounts([]model.Provider{account})
-	if err != nil {
+	if err := c.db.CreateProviderAccounts([]model.Provider{account}); err != nil {
 		rollBackErr := c.SyncProviderAccount(ctx, providerAddress)
 		if rollBackErr != nil {
 			log.Printf("resync account in db: %s", rollBackErr.Error())
@@ -58,9 +61,13 @@ func (c Ctrl) ChargeProviderAccount(ctx context.Context, providerAddress common.
 		return err
 	}
 
+	signer, err := c.getSigner(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get signer from db")
+	}
 	amount := big.NewInt(0)
 	amount.SetInt64(*account.Balance)
-	if err := c.contract.DepositFund(ctx, providerAddress, *amount); err != nil {
+	if err := c.contract.DepositFund(ctx, providerAddress, *amount, signer); err != nil {
 		return errors.Wrap(err, "deposit fund in contract")
 	}
 

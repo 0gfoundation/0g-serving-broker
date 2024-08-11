@@ -18,6 +18,7 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/common/util"
+	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	"github.com/0glabs/0g-serving-agent/extractor"
 	"github.com/0glabs/0g-serving-agent/extractor/chatbot"
 	"github.com/0glabs/0g-serving-agent/user/model"
@@ -89,18 +90,28 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 	previousOutputCount := *provider.LastResponseTokenCount
 	fee := inputCount*svc.InputPrice.Int64() + previousOutputCount*svc.OutputPrice.Int64()
 
-	// TODO generate signature from zk-settlement
-	sig := ""
-
+	reqInZK := &models.Request{
+		Fee:             fee,
+		Nonce:           *provider.Nonce,
+		ProviderAddress: provider.Provider,
+		UserAddress:     c.contract.UserAddress,
+	}
+	sig, err := c.GenerateSignature(ctx, reqInZK)
+	if err != nil {
+		return nil, err
+	}
+	sigJson, err := json.Marshal(sig[0])
+	if err != nil {
+		return nil, err
+	}
 	headers := map[string]string{
 		"Address":               c.contract.UserAddress,
 		"Fee":                   strconv.FormatInt(fee, 10),
 		"Input-Count":           strconv.FormatInt(inputCount, 10),
 		"Nonce":                 strconv.FormatInt(*provider.Nonce, 10),
 		"Previous-Output-Count": strconv.FormatInt(previousOutputCount, 10),
-		"Signature":             sig,
+		"Signature":             string(sigJson),
 	}
-
 	util.SetHeaders(req, headers)
 
 	for key, values := range ctx.Request.Header {

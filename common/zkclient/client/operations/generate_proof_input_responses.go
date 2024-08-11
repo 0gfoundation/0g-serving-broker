@@ -20,22 +20,22 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 )
 
-// CheckSignatureReader is a Reader for the CheckSignature structure.
-type CheckSignatureReader struct {
+// GenerateProofInputReader is a Reader for the GenerateProofInput structure.
+type GenerateProofInputReader struct {
 	formats strfmt.Registry
 }
 
 // ReadResponse reads a server response into the received o.
-func (o *CheckSignatureReader) ReadResponse(response runtime.ClientResponse, consumer runtime.Consumer) (interface{}, error) {
+func (o *GenerateProofInputReader) ReadResponse(response runtime.ClientResponse, consumer runtime.Consumer) (interface{}, error) {
 	switch response.Code() {
 	case 200:
-		result := NewCheckSignatureOK()
+		result := NewGenerateProofInputOK()
 		if err := result.readResponse(response, consumer, o.formats); err != nil {
 			return nil, err
 		}
 		return result, nil
 	default:
-		result := NewCheckSignatureDefault(response.Code())
+		result := NewGenerateProofInputDefault(response.Code())
 		if err := result.readResponse(response, consumer, o.formats); err != nil {
 			return nil, err
 		}
@@ -46,65 +46,65 @@ func (o *CheckSignatureReader) ReadResponse(response runtime.ClientResponse, con
 	}
 }
 
-// NewCheckSignatureOK creates a CheckSignatureOK with default headers values
-func NewCheckSignatureOK() *CheckSignatureOK {
-	return &CheckSignatureOK{}
+// NewGenerateProofInputOK creates a GenerateProofInputOK with default headers values
+func NewGenerateProofInputOK() *GenerateProofInputOK {
+	return &GenerateProofInputOK{}
 }
 
 /*
-CheckSignatureOK describes a response with status code 200, with default header values.
+GenerateProofInputOK describes a response with status code 200, with default header values.
 
 OK
 */
-type CheckSignatureOK struct {
-	Payload []bool
+type GenerateProofInputOK struct {
+	Payload models.AdditionalProperties
 }
 
-// IsSuccess returns true when this check signature o k response has a 2xx status code
-func (o *CheckSignatureOK) IsSuccess() bool {
+// IsSuccess returns true when this generate proof input o k response has a 2xx status code
+func (o *GenerateProofInputOK) IsSuccess() bool {
 	return true
 }
 
-// IsRedirect returns true when this check signature o k response has a 3xx status code
-func (o *CheckSignatureOK) IsRedirect() bool {
+// IsRedirect returns true when this generate proof input o k response has a 3xx status code
+func (o *GenerateProofInputOK) IsRedirect() bool {
 	return false
 }
 
-// IsClientError returns true when this check signature o k response has a 4xx status code
-func (o *CheckSignatureOK) IsClientError() bool {
+// IsClientError returns true when this generate proof input o k response has a 4xx status code
+func (o *GenerateProofInputOK) IsClientError() bool {
 	return false
 }
 
-// IsServerError returns true when this check signature o k response has a 5xx status code
-func (o *CheckSignatureOK) IsServerError() bool {
+// IsServerError returns true when this generate proof input o k response has a 5xx status code
+func (o *GenerateProofInputOK) IsServerError() bool {
 	return false
 }
 
-// IsCode returns true when this check signature o k response a status code equal to that given
-func (o *CheckSignatureOK) IsCode(code int) bool {
+// IsCode returns true when this generate proof input o k response a status code equal to that given
+func (o *GenerateProofInputOK) IsCode(code int) bool {
 	return code == 200
 }
 
-// Code gets the status code for the check signature o k response
-func (o *CheckSignatureOK) Code() int {
+// Code gets the status code for the generate proof input o k response
+func (o *GenerateProofInputOK) Code() int {
 	return 200
 }
 
-func (o *CheckSignatureOK) Error() string {
+func (o *GenerateProofInputOK) Error() string {
 	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /check-sign][%d] checkSignatureOK %s", 200, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInputOK %s", 200, payload)
 }
 
-func (o *CheckSignatureOK) String() string {
+func (o *GenerateProofInputOK) String() string {
 	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /check-sign][%d] checkSignatureOK %s", 200, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInputOK %s", 200, payload)
 }
 
-func (o *CheckSignatureOK) GetPayload() []bool {
+func (o *GenerateProofInputOK) GetPayload() models.AdditionalProperties {
 	return o.Payload
 }
 
-func (o *CheckSignatureOK) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+func (o *GenerateProofInputOK) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	// response payload
 	if err := consumer.Consume(response.Body(), &o.Payload); err != nil && err != io.EOF {
@@ -114,69 +114,69 @@ func (o *CheckSignatureOK) readResponse(response runtime.ClientResponse, consume
 	return nil
 }
 
-// NewCheckSignatureDefault creates a CheckSignatureDefault with default headers values
-func NewCheckSignatureDefault(code int) *CheckSignatureDefault {
-	return &CheckSignatureDefault{
+// NewGenerateProofInputDefault creates a GenerateProofInputDefault with default headers values
+func NewGenerateProofInputDefault(code int) *GenerateProofInputDefault {
+	return &GenerateProofInputDefault{
 		_statusCode: code,
 	}
 }
 
 /*
-CheckSignatureDefault describes a response with status code -1, with default header values.
+GenerateProofInputDefault describes a response with status code -1, with default header values.
 
 Error
 */
-type CheckSignatureDefault struct {
+type GenerateProofInputDefault struct {
 	_statusCode int
 
 	Payload *models.ErrorResponse
 }
 
-// IsSuccess returns true when this check signature default response has a 2xx status code
-func (o *CheckSignatureDefault) IsSuccess() bool {
+// IsSuccess returns true when this generate proof input default response has a 2xx status code
+func (o *GenerateProofInputDefault) IsSuccess() bool {
 	return o._statusCode/100 == 2
 }
 
-// IsRedirect returns true when this check signature default response has a 3xx status code
-func (o *CheckSignatureDefault) IsRedirect() bool {
+// IsRedirect returns true when this generate proof input default response has a 3xx status code
+func (o *GenerateProofInputDefault) IsRedirect() bool {
 	return o._statusCode/100 == 3
 }
 
-// IsClientError returns true when this check signature default response has a 4xx status code
-func (o *CheckSignatureDefault) IsClientError() bool {
+// IsClientError returns true when this generate proof input default response has a 4xx status code
+func (o *GenerateProofInputDefault) IsClientError() bool {
 	return o._statusCode/100 == 4
 }
 
-// IsServerError returns true when this check signature default response has a 5xx status code
-func (o *CheckSignatureDefault) IsServerError() bool {
+// IsServerError returns true when this generate proof input default response has a 5xx status code
+func (o *GenerateProofInputDefault) IsServerError() bool {
 	return o._statusCode/100 == 5
 }
 
-// IsCode returns true when this check signature default response a status code equal to that given
-func (o *CheckSignatureDefault) IsCode(code int) bool {
+// IsCode returns true when this generate proof input default response a status code equal to that given
+func (o *GenerateProofInputDefault) IsCode(code int) bool {
 	return o._statusCode == code
 }
 
-// Code gets the status code for the check signature default response
-func (o *CheckSignatureDefault) Code() int {
+// Code gets the status code for the generate proof input default response
+func (o *GenerateProofInputDefault) Code() int {
 	return o._statusCode
 }
 
-func (o *CheckSignatureDefault) Error() string {
+func (o *GenerateProofInputDefault) Error() string {
 	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /check-sign][%d] checkSignature default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInput default %s", o._statusCode, payload)
 }
 
-func (o *CheckSignatureDefault) String() string {
+func (o *GenerateProofInputDefault) String() string {
 	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /check-sign][%d] checkSignature default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInput default %s", o._statusCode, payload)
 }
 
-func (o *CheckSignatureDefault) GetPayload() *models.ErrorResponse {
+func (o *GenerateProofInputDefault) GetPayload() *models.ErrorResponse {
 	return o.Payload
 }
 
-func (o *CheckSignatureDefault) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+func (o *GenerateProofInputDefault) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	o.Payload = new(models.ErrorResponse)
 
@@ -189,10 +189,13 @@ func (o *CheckSignatureDefault) readResponse(response runtime.ClientResponse, co
 }
 
 /*
-CheckSignatureBody check signature body
-swagger:model CheckSignatureBody
+GenerateProofInputBody generate proof input body
+swagger:model GenerateProofInputBody
 */
-type CheckSignatureBody struct {
+type GenerateProofInputBody struct {
+
+	// l
+	L int64 `json:"l,omitempty"`
 
 	// pubkey
 	Pubkey models.PublicKey `json:"pubkey"`
@@ -204,8 +207,8 @@ type CheckSignatureBody struct {
 	Signatures models.Signatures `json:"signatures"`
 }
 
-// Validate validates this check signature body
-func (o *CheckSignatureBody) Validate(formats strfmt.Registry) error {
+// Validate validates this generate proof input body
+func (o *GenerateProofInputBody) Validate(formats strfmt.Registry) error {
 	var res []error
 
 	if err := o.validatePubkey(formats); err != nil {
@@ -226,7 +229,7 @@ func (o *CheckSignatureBody) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
-func (o *CheckSignatureBody) validatePubkey(formats strfmt.Registry) error {
+func (o *GenerateProofInputBody) validatePubkey(formats strfmt.Registry) error {
 	if swag.IsZero(o.Pubkey) { // not required
 		return nil
 	}
@@ -243,7 +246,7 @@ func (o *CheckSignatureBody) validatePubkey(formats strfmt.Registry) error {
 	return nil
 }
 
-func (o *CheckSignatureBody) validateRequests(formats strfmt.Registry) error {
+func (o *GenerateProofInputBody) validateRequests(formats strfmt.Registry) error {
 	if swag.IsZero(o.Requests) { // not required
 		return nil
 	}
@@ -269,7 +272,7 @@ func (o *CheckSignatureBody) validateRequests(formats strfmt.Registry) error {
 	return nil
 }
 
-func (o *CheckSignatureBody) validateSignatures(formats strfmt.Registry) error {
+func (o *GenerateProofInputBody) validateSignatures(formats strfmt.Registry) error {
 	if swag.IsZero(o.Signatures) { // not required
 		return nil
 	}
@@ -286,8 +289,8 @@ func (o *CheckSignatureBody) validateSignatures(formats strfmt.Registry) error {
 	return nil
 }
 
-// ContextValidate validate this check signature body based on the context it is used
-func (o *CheckSignatureBody) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
+// ContextValidate validate this generate proof input body based on the context it is used
+func (o *GenerateProofInputBody) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
 	if err := o.contextValidatePubkey(ctx, formats); err != nil {
@@ -308,7 +311,7 @@ func (o *CheckSignatureBody) ContextValidate(ctx context.Context, formats strfmt
 	return nil
 }
 
-func (o *CheckSignatureBody) contextValidatePubkey(ctx context.Context, formats strfmt.Registry) error {
+func (o *GenerateProofInputBody) contextValidatePubkey(ctx context.Context, formats strfmt.Registry) error {
 
 	if err := o.Pubkey.ContextValidate(ctx, formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
@@ -322,7 +325,7 @@ func (o *CheckSignatureBody) contextValidatePubkey(ctx context.Context, formats 
 	return nil
 }
 
-func (o *CheckSignatureBody) contextValidateRequests(ctx context.Context, formats strfmt.Registry) error {
+func (o *GenerateProofInputBody) contextValidateRequests(ctx context.Context, formats strfmt.Registry) error {
 
 	for i := 0; i < len(o.Requests); i++ {
 
@@ -347,7 +350,7 @@ func (o *CheckSignatureBody) contextValidateRequests(ctx context.Context, format
 	return nil
 }
 
-func (o *CheckSignatureBody) contextValidateSignatures(ctx context.Context, formats strfmt.Registry) error {
+func (o *GenerateProofInputBody) contextValidateSignatures(ctx context.Context, formats strfmt.Registry) error {
 
 	if err := o.Signatures.ContextValidate(ctx, formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
@@ -362,7 +365,7 @@ func (o *CheckSignatureBody) contextValidateSignatures(ctx context.Context, form
 }
 
 // MarshalBinary interface implementation
-func (o *CheckSignatureBody) MarshalBinary() ([]byte, error) {
+func (o *GenerateProofInputBody) MarshalBinary() ([]byte, error) {
 	if o == nil {
 		return nil, nil
 	}
@@ -370,8 +373,8 @@ func (o *CheckSignatureBody) MarshalBinary() ([]byte, error) {
 }
 
 // UnmarshalBinary interface implementation
-func (o *CheckSignatureBody) UnmarshalBinary(b []byte) error {
-	var res CheckSignatureBody
+func (o *GenerateProofInputBody) UnmarshalBinary(b []byte) error {
+	var res GenerateProofInputBody
 	if err := swag.ReadJSON(b, &res); err != nil {
 		return err
 	}

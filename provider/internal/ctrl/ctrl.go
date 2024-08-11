@@ -3,6 +3,7 @@ package ctrl
 import (
 	"time"
 
+	"github.com/0glabs/0g-serving-agent/common/zkclient"
 	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
 	"github.com/0glabs/0g-serving-agent/provider/internal/db"
 )
@@ -10,17 +11,19 @@ import (
 type Ctrl struct {
 	db       *db.DB
 	contract *providercontract.ProviderContract
+	zkclient zkclient.ZKClient
 
 	servingUrl           string
-	AutoSettleBufferTime time.Duration
+	autoSettleBufferTime time.Duration
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, servingUrl string, AutoSettleBufferTime int) *Ctrl {
+func New(db *db.DB, contract *providercontract.ProviderContract, zkclient zkclient.ZKClient, servingUrl string, autoSettleBufferTime int) *Ctrl {
 	p := &Ctrl{
+		autoSettleBufferTime: time.Duration(autoSettleBufferTime) * time.Second,
 		db:                   db,
 		contract:             contract,
 		servingUrl:           servingUrl,
-		AutoSettleBufferTime: time.Duration(AutoSettleBufferTime) * time.Second,
+		zkclient:             zkclient,
 	}
 
 	return p

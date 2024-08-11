@@ -7,6 +7,7 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/config"
 	"github.com/0glabs/0g-serving-agent/common/errors"
+	"github.com/0glabs/0g-serving-agent/common/zkclient"
 	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
 	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
@@ -44,7 +45,8 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, "", config.Interval.AutoSettleBufferTime)
+	zk := zkclient.NewZKClient(config.ZKService)
+	ctrl := ctrl.New(db, contract, zk, "", config.Interval.AutoSettleBufferTime)
 	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)

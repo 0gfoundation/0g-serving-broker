@@ -14,6 +14,8 @@ import (
 	"github.com/go-openapi/runtime"
 	cr "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
+
+	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 )
 
 // NewGenerateSolidityCalldataParams creates a new GenerateSolidityCalldataParams object,
@@ -62,7 +64,7 @@ GenerateSolidityCalldataParams contains all the parameters to send to the API en
 type GenerateSolidityCalldataParams struct {
 
 	// Body.
-	Body GenerateSolidityCalldataBody
+	Body models.AdditionalProperties
 
 	timeout    time.Duration
 	Context    context.Context
@@ -118,13 +120,13 @@ func (o *GenerateSolidityCalldataParams) SetHTTPClient(client *http.Client) {
 }
 
 // WithBody adds the body to the generate solidity calldata params
-func (o *GenerateSolidityCalldataParams) WithBody(body GenerateSolidityCalldataBody) *GenerateSolidityCalldataParams {
+func (o *GenerateSolidityCalldataParams) WithBody(body models.AdditionalProperties) *GenerateSolidityCalldataParams {
 	o.SetBody(body)
 	return o
 }
 
 // SetBody adds the body to the generate solidity calldata params
-func (o *GenerateSolidityCalldataParams) SetBody(body GenerateSolidityCalldataBody) {
+func (o *GenerateSolidityCalldataParams) SetBody(body models.AdditionalProperties) {
 	o.Body = body
 }
 
@@ -135,8 +137,10 @@ func (o *GenerateSolidityCalldataParams) WriteToRequest(r runtime.ClientRequest,
 		return err
 	}
 	var res []error
-	if err := r.SetBodyParam(o.Body); err != nil {
-		return err
+	if o.Body != nil {
+		if err := r.SetBodyParam(o.Body); err != nil {
+			return err
+		}
 	}
 
 	if len(res) > 0 {

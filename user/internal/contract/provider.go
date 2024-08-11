@@ -10,13 +10,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func (c *UserContract) CreateProviderAccount(ctx context.Context, provider common.Address, balance big.Int) error {
+func (c *UserContract) CreateProviderAccount(ctx context.Context, provider common.Address, balance big.Int, signer [2]*big.Int) error {
 	account, _ := c.GetProviderAccount(ctx, provider)
 	zeroAddress := common.Address{}
 	if account.User != zeroAddress {
 		return errors.New("account already exists")
 	}
-	return c.DepositFund(ctx, provider, balance)
+	return c.DepositFund(ctx, provider, balance, signer)
 }
 
 func (c *UserContract) GetProviderAccount(ctx context.Context, provider common.Address) (contract.Account, error) {
@@ -44,14 +44,14 @@ func (c *UserContract) ListProviderAccount(ctx context.Context) ([]contract.Acco
 	return ret, nil
 }
 
-func (c *UserContract) DepositFund(ctx context.Context, provider common.Address, balance big.Int) error {
+func (c *UserContract) DepositFund(ctx context.Context, provider common.Address, balance big.Int, signer [2]*big.Int) error {
 	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
 	}
 
 	opts.Value = &balance
-	tx, err := c.Contract.DepositFund(opts, provider)
+	tx, err := c.Contract.DepositFund(opts, provider, signer)
 	if err != nil {
 		return err
 	}

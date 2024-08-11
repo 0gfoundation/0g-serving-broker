@@ -197,7 +197,7 @@ swagger:model GenerateSignatureBody
 type GenerateSignatureBody struct {
 
 	// privkey
-	Privkey string `json:"privkey,omitempty"`
+	Privkey models.PrivateKey `json:"privkey"`
 
 	// requests
 	Requests []*models.Request `json:"requests"`
@@ -207,6 +207,10 @@ type GenerateSignatureBody struct {
 func (o *GenerateSignatureBody) Validate(formats strfmt.Registry) error {
 	var res []error
 
+	if err := o.validatePrivkey(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := o.validateRequests(formats); err != nil {
 		res = append(res, err)
 	}
@@ -214,6 +218,23 @@ func (o *GenerateSignatureBody) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (o *GenerateSignatureBody) validatePrivkey(formats strfmt.Registry) error {
+	if swag.IsZero(o.Privkey) { // not required
+		return nil
+	}
+
+	if err := o.Privkey.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("body" + "." + "privkey")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("body" + "." + "privkey")
+		}
+		return err
+	}
+
 	return nil
 }
 
@@ -247,6 +268,10 @@ func (o *GenerateSignatureBody) validateRequests(formats strfmt.Registry) error 
 func (o *GenerateSignatureBody) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
+	if err := o.contextValidatePrivkey(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := o.contextValidateRequests(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -254,6 +279,20 @@ func (o *GenerateSignatureBody) ContextValidate(ctx context.Context, formats str
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (o *GenerateSignatureBody) contextValidatePrivkey(ctx context.Context, formats strfmt.Registry) error {
+
+	if err := o.Privkey.ContextValidate(ctx, formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("body" + "." + "privkey")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("body" + "." + "privkey")
+		}
+		return err
+	}
+
 	return nil
 }
 
@@ -307,7 +346,7 @@ swagger:model GenerateSignatureOKBody
 type GenerateSignatureOKBody struct {
 
 	// signatures
-	Signatures []int64 `json:"signatures"`
+	Signatures [][]int64 `json:"signatures"`
 }
 
 // Validate validates this generate signature o k body

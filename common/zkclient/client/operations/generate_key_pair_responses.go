@@ -196,15 +196,19 @@ swagger:model GenerateKeyPairOKBody
 type GenerateKeyPairOKBody struct {
 
 	// privkey
-	Privkey []int64 `json:"privkey"`
+	Privkey models.PrivateKey `json:"privkey"`
 
 	// pubkey
-	Pubkey models.Pubkey `json:"pubkey"`
+	Pubkey models.PublicKey `json:"pubkey"`
 }
 
 // Validate validates this generate key pair o k body
 func (o *GenerateKeyPairOKBody) Validate(formats strfmt.Registry) error {
 	var res []error
+
+	if err := o.validatePrivkey(formats); err != nil {
+		res = append(res, err)
+	}
 
 	if err := o.validatePubkey(formats); err != nil {
 		res = append(res, err)
@@ -213,6 +217,23 @@ func (o *GenerateKeyPairOKBody) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (o *GenerateKeyPairOKBody) validatePrivkey(formats strfmt.Registry) error {
+	if swag.IsZero(o.Privkey) { // not required
+		return nil
+	}
+
+	if err := o.Privkey.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("generateKeyPairOK" + "." + "privkey")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("generateKeyPairOK" + "." + "privkey")
+		}
+		return err
+	}
+
 	return nil
 }
 
@@ -237,6 +258,10 @@ func (o *GenerateKeyPairOKBody) validatePubkey(formats strfmt.Registry) error {
 func (o *GenerateKeyPairOKBody) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
+	if err := o.contextValidatePrivkey(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := o.contextValidatePubkey(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -244,6 +269,20 @@ func (o *GenerateKeyPairOKBody) ContextValidate(ctx context.Context, formats str
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (o *GenerateKeyPairOKBody) contextValidatePrivkey(ctx context.Context, formats strfmt.Registry) error {
+
+	if err := o.Privkey.ContextValidate(ctx, formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("generateKeyPairOK" + "." + "privkey")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("generateKeyPairOK" + "." + "privkey")
+		}
+		return err
+	}
+
 	return nil
 }
 

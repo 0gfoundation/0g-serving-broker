@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -11,6 +12,7 @@ import (
 	constant "github.com/0glabs/0g-serving-agent/common/const"
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	commonModel "github.com/0glabs/0g-serving-agent/common/model"
+	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
@@ -43,7 +45,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, expect
 		return err
 	}
 
-	err = c.validateSig(req)
+	err = c.validateSig(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -65,9 +67,25 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, expect
 	return nil
 }
 
-func (c *Ctrl) validateSig(request commonModel.Request) error {
-	// TODO validate signature by zk server
-
+func (c *Ctrl) validateSig(ctx context.Context, req commonModel.Request) error {
+	reqInZK := &models.Request{
+		Fee:             req.Fee,
+		Nonce:           req.Nonce,
+		ProviderAddress: c.contract.ProviderAddress,
+		UserAddress:     req.UserAddress,
+	}
+	var sig []int64
+	err := json.Unmarshal([]byte(req.Signature), &sig)
+	if err != nil {
+		return errors.New("Failed to parse signature")
+	}
+	ret, err := c.CheckSignatures(ctx, reqInZK, [][]int64{sig})
+	if err != nil {
+		return errors.Wrapf(err, "check signature")
+	}
+	if len(ret) == 0 || !ret[0] {
+		return errors.New("invalid signature")
+	}
 	return nil
 }
 

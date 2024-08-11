@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
+	"github.com/0glabs/0g-serving-agent/common/zkclient"
 	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
 	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
@@ -31,8 +32,9 @@ func Main() {
 	}
 	defer contract.Close()
 
+	zk := zkclient.NewZKClient(config.ZKService)
 	engine := gin.New()
-	ctrl := ctrl.New(db, contract, config.ServingUrl, config.Interval.AutoSettleBufferTime)
+	ctrl := ctrl.New(db, contract, zk, config.ServingUrl, config.Interval.AutoSettleBufferTime)
 	ctx := context.Background()
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)

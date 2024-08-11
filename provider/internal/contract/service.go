@@ -2,10 +2,10 @@ package providercontract
 
 import (
 	"context"
+	"math/big"
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 )
@@ -20,8 +20,8 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model
 		service.Name,
 		service.Type,
 		servingUrl,
-		util.ToBigInt(service.InputPrice),
-		util.ToBigInt(service.OutputPrice),
+		big.NewInt(service.InputPrice),
+		big.NewInt(service.OutputPrice),
 	)
 	if err != nil {
 		return err

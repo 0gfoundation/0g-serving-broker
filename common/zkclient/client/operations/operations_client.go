@@ -58,6 +58,8 @@ type ClientService interface {
 
 	GenerateKeyPair(params *GenerateKeyPairParams, opts ...ClientOption) (*GenerateKeyPairOK, error)
 
+	GenerateProofInput(params *GenerateProofInputParams, opts ...ClientOption) (*GenerateProofInputOK, error)
+
 	GenerateSignature(params *GenerateSignatureParams, opts ...ClientOption) (*GenerateSignatureOK, error)
 
 	GenerateSolidityCalldata(params *GenerateSolidityCalldataParams, opts ...ClientOption) (*GenerateSolidityCalldataOK, error)
@@ -136,6 +138,43 @@ func (a *Client) GenerateKeyPair(params *GenerateKeyPairParams, opts ...ClientOp
 	}
 	// unexpected success response
 	unexpectedSuccess := result.(*GenerateKeyPairDefault)
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+/*
+GenerateProofInput generate proof input API
+*/
+func (a *Client) GenerateProofInput(params *GenerateProofInputParams, opts ...ClientOption) (*GenerateProofInputOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGenerateProofInputParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "generateProofInput",
+		Method:             "POST",
+		PathPattern:        "/proof-input",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GenerateProofInputReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+	success, ok := result.(*GenerateProofInputOK)
+	if ok {
+		return success, nil
+	}
+	// unexpected success response
+	unexpectedSuccess := result.(*GenerateProofInputDefault)
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
 }
 

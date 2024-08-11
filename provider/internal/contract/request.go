@@ -6,12 +6,12 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/contract"
 )
 
-func (c *ProviderContract) SettleFees(ctx context.Context, traces []contract.RequestTrace) error {
+func (c *ProviderContract) SettleFees(ctx context.Context, verifierInput contract.VerifierInput) error {
 	opt, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
 	}
-	tx, err := c.Contract.SettleFees(opt, traces)
+	tx, err := c.Contract.SettleFees(opt, verifierInput)
 	if err != nil {
 		return err
 	}

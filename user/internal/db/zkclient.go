@@ -16,7 +16,7 @@ func (d *DB) GetKeyPair(key string) (model.KeyPair, error) {
 	info := model.SystemInfo{}
 	keyPair := model.KeyPair{}
 
-	ret := d.db.Where(&model.SystemInfo{K: key}).First(info)
+	ret := d.db.Where(&model.SystemInfo{K: key}).First(&info)
 	if ret.Error != nil {
 		return keyPair, ret.Error
 	}

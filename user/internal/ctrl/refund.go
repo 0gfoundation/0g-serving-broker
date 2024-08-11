@@ -10,7 +10,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
@@ -56,7 +55,7 @@ func (c Ctrl) ProcessRefunds(ctx context.Context) error {
 	indexMap := map[string][]*big.Int{}
 	for _, refund := range refunds {
 		key := refund.Provider
-		value := util.ToBigInt(*refund.Index)
+		value := big.NewInt(*refund.Index)
 		if _, ok := indexMap[key]; ok {
 			indexMap[key] = append(indexMap[key], value)
 			continue

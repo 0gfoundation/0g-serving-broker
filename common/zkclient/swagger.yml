@@ -17,14 +17,11 @@ paths:
             type: object
             properties:
               privkey:
-                type: array
-                items:
-                  type: integer
+                $ref: "#/definitions/privateKey"
               pubkey:
-                $ref: "#/definitions/pubkey"
+                $ref: "#/definitions/publicKey"
         default:
           $ref: "#/responses/Error"
-
   /signature:
     post:
       operationId: generateSignature
@@ -40,7 +37,7 @@ paths:
                 items:
                   $ref: "#/definitions/request"
               privkey:
-                type: string
+                $ref: "#/definitions/privateKey"
       responses:
         "200":
           description: OK
@@ -50,7 +47,9 @@ paths:
               signatures:
                 type: array
                 items:
-                  type: integer
+                  type: array
+                  items:
+                    type: integer
         default:
           $ref: "#/responses/Error"
   /check-sign:
@@ -68,7 +67,7 @@ paths:
                 items:
                   $ref: "#/definitions/request"
               pubkey:
-                $ref: "#/definitions/pubkey"
+                $ref: "#/definitions/publicKey"
               signatures:
                 $ref: "#/definitions/signatures"
       responses:
@@ -77,12 +76,12 @@ paths:
           schema:
             type: array
             items:
-              type: integer
+              type: boolean
         default:
           $ref: "#/responses/Error"
-  /solidity-calldata:
+  /proof-input:
     post:
-      operationId: generateSolidityCalldata
+      operationId: generateProofInput
       parameters:
         - name: body
           in: body
@@ -97,46 +96,56 @@ paths:
               l:
                 type: integer
               pubkey:
-                $ref: "#/definitions/pubkey"
+                $ref: "#/definitions/publicKey"
               signatures:
                 $ref: "#/definitions/signatures"
       responses:
         "200":
           description: OK
           schema:
+            $ref: "#/definitions/additionalProperties"
+        default:
+          $ref: "#/responses/Error"
+  /solidity-calldata:
+    post:
+      operationId: generateSolidityCalldata
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/additionalProperties"
+      responses:
+        "200":
+          description: OK
+          schema:
             type: object
             properties:
-              array1:
-                type: array
-                items:
-                  type: string
-                  pattern: ^0x[0-9a-fA-F]{64}$
-              array2:
+              proof:
                 type: array
                 items:
                   type: array
                   items:
-                    type: string
-                    pattern: ^0x[0-9a-fA-F]{64}$
-              array3:
+                    type: integer
+              publicInput:
                 type: array
                 items:
-                  type: string
-                  pattern: ^0x[0-9a-fA-F]{64}$
-              array4:
-                type: array
-                items:
-                  type: string
-                  pattern: ^0x[0-9a-fA-F]{64}$
+                  type: integer
         default:
           $ref: "#/responses/Error"
 definitions:
-  pubkey:
+  additionalProperties:
+    type: object
+    additionalProperties:
+      type: object
+  privateKey:
     type: array
     items:
-      type: array
-      items:
-        type: integer
+      type: string
+  publicKey:
+    type: array
+    items:
+      type: string
   signatures:
     type: array
     items:
