@@ -21,9 +21,6 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := db.Migrate(); err != nil {
-		panic(err)
-	}
 	contract, err := providercontract.NewProviderContract(config, config.Address)
 	if err != nil {
 		panic(err)

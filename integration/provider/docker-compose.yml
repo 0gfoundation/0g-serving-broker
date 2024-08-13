@@ -1,0 +1,59 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-serving-provider-agent-db
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_USER: provider
+      MYSQL_PASSWORD: provider
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - default
+
+  0g-serving-provider-agent:
+    image: 0g-seving-agent:dev1-amd64
+    container_name: 0g-serving-provider-agent
+    environment:
+      - PORT=8081
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ../../config.yaml:/etc/config.yaml
+    command: 0g-provider-server
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  0g-serving-provider-event:
+    image: 0g-seving-agent:dev1-amd64
+    container_name: 0g-serving-provider-event
+    environment:
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ../../config.yaml:/etc/config.yaml
+    command: 0g-provider-event
+    depends_on:
+      0g-serving-provider-agent:
+        condition: service_started
+
+  nginx:
+    image: nginx:1.27.0
+    container_name: nginx-server
+    ports:
+      - "3080:80"
+      - "30443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      0g-serving-provider-agent:
+        condition: service_started
+
+volumes:
+  mysql-data:

@@ -18,50 +18,35 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 
 ## Setup
 
-1. Start MySQL
+1. Copy and Modify Configuration File
 
-   ```sh
-   docker run --name mysql-8.0 -p 3306:3306 -e MYSQL_ROOT_PASSWORD=<password> -d mysql:8.0
-   ```
-
-2. Create Database
-
-   For provider agent:
-
-   ```sh
-   docker exec -i mysql-8.0 mysql -uroot -p<password> -e "CREATE DATABASE IF NOT EXISTS provider CHARACTER SET utf8mb4;"
-   ```
-
-   For user agent:
-
-   ```sh
-   docker exec -i mysql-8.0 mysql -uroot -p<password> -e "CREATE DATABASE IF NOT EXISTS user CHARACTER SET utf8mb4;"
-   ```
-
-3. Copy and Modify Configuration File
-
-   Copy and modify the configuration file from the [example](config-example.yaml) to suit your setup.
+   Copy and modify the configuration file from the [example](config-example.yaml) to config.yaml.
 
 ## Running the Agent
 
 1. Start the Provider Agent
 
    ```sh
-   PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-provider-server
+   docker compose -f ./integration/provider/docker-compose.yml up -d
    ```
+
+   The provider agent will be listening on 127.0.0.1:3080
 
 2. Start the User Agent
 
    ```sh
    PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-user-server
+   docker compose -f ./integration/user/docker-compose.yml up -d
    ```
+
+   The user agent will be listening on 127.0.0.1:1034
 
 ## Basic Usage Process
 
 1. Provider Registers the Service with the Provider Agent:
 
    ```sh
-   curl -X POST http://<provider_agent_url>/v1/service \
+   curl -X POST http://127.0.0.1:3080>/v1/service \
    -H "Content-Type: application/json" \
    -d '{
         "URL": "https://chatbot.com",
@@ -76,7 +61,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    The user creates an provider account to access the services registered by the provider.
 
    ```sh
-   curl -X POST http://<user_agent_url>/v1/provider \
+   curl -X POST http://127.0.0.1:1034/v1/provider \
    -H "Content-Type: application/json" \
    -d '{
      "provider": "<provider_address>",
@@ -88,7 +73,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    The provider agent will record the requests in the database.
 
    ```sh
-   curl http://<agent_url>/v1/provider/<provider_address>/service/<service_name>/<optional_suffix> \
+   curl http://127.0.0.1:1034/v1/provider/<provider_address>/service/<service_name>/<optional_suffix> \
    -H "Content-Type: application/json" \
    -d '{
      "model": "someModel",
@@ -100,17 +85,17 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 4. Provider Settles the Fee:
 
    ```sh
-   curl -X POST http://<agent_url>/v1/settle
+   curl -X POST http://127.0.0.1:3080/v1/settle
    ```
 
 5. Provider Deletes the Service:
 
    ```sh
-   curl -X DELETE http://<agent_url>/v1/service/<service_name>
+   curl -X DELETE http://127.0.0.1:3080/v1/service/<service_name>
    ```
 
 6. User Checks Remaining Balance:
 
    ```sh
-   curl -X GET http://<agent_url>/v1/provider
+   curl -X GET http://127.0.0.1:1034/v1/provider
    ```

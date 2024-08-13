@@ -20,9 +20,6 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := db.Migrate(); err != nil {
-		panic(err)
-	}
 	contract, err := usercontract.NewUserContract(config, config.Address)
 	if err != nil {
 		panic(err)

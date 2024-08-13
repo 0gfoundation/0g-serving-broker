@@ -1,10 +1,10 @@
 IMAGE_DEST ?= docker-daemon:0g-seving-agent
-VERSION    ?= $(shell git describe --tags --abbrev=8)
+VERSION	?= $(shell git describe --tags --abbrev=8)
 BASE_IMAGE ?= gcr.io/distroless/static:latest
-ARCH       ?= amd64
+ARCH	   ?= amd64
 
 export GO111MODULE := on
-export GOSUMDB     := off
+export GOSUMDB	 := off
 export CGO_ENABLED := 0
 
 lint:
@@ -35,7 +35,7 @@ oci: build
 release: oci
 	for arch in $(ARCH); do \
 		skopeo --insecure-policy copy --dest-tls-verify=false --format=v2s2 \
-			oci:build/oci:$(VERSION)-$$arch $(IMAGE_DEST)/agent:$(VERSION)-$$arch; \
+			oci:build/oci:$(VERSION)-$$arch $(IMAGE_DEST):$(VERSION)-$$arch; \
 	done
 
 install-tools:

@@ -61,8 +61,8 @@ func GetConfig() *Config {
 				User     string `yaml:"user"`
 				Provider string `yaml:"provider"`
 			}{
-				User:     "user:user@tcp(mysql:3306)/user?parseTime=true",
-				Provider: "provider:provider@tcp(mysql:3306)/provider?parseTime=true",
+				User:     "user:user@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true",
+				Provider: "provider:provider@tcp(0g-serving-provider-agent-db:3306)/provider?parseTime=true",
 			},
 			Event: struct {
 				ProviderAddr string `yaml:"providerAddr"`

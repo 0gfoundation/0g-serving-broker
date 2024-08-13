@@ -1,0 +1,49 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-serving-user-agent-db
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_USER: user
+      MYSQL_PASSWORD: user
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - default
+
+  0g-serving-user-agent:
+    image: 0g-seving-agent:dev1-amd64
+    container_name: 0g-serving-user-agent
+    ports:
+      - "1034:1034"
+    environment:
+      - PORT=1034
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ../../config.yaml:/etc/config.yaml
+    command: 0g-user-server
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  0g-serving-user-event:
+    image: 0g-seving-agent:dev1-amd64
+    container_name: 0g-serving-user-event
+    environment:
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ../../config.yaml:/etc/config.yaml
+    command: 0g-user-event
+    depends_on:
+      0g-serving-user-agent:
+        condition: service_started
+
+volumes:
+  mysql-data:

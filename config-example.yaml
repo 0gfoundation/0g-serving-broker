@@ -1,8 +1,8 @@
 address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 contractAddress: 0x244Cb2CC4F92982417d370C9605DC30c70Ef362F
 database:
-  provider: root:123456@tcp(localhost:3306)/provider?parseTime=true
-  user: root:123456@tcp(localhost:3306)/user?parseTime=true
+  provider: provider:provider@tcp(0g-serving-provider-agent-db:3306)/provider?parseTime=true
+  user: user:user@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true
 event:
   providerAddr: ":8088"
   userAddr: ":8089"
