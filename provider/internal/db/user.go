@@ -48,7 +48,7 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 	old := model.User{}
 	ret := d.db.Where(&model.User{User: userAddress}).First(&old)
 	if ret.Error != nil {
-		errors.Wrap(ret.Error, "get account from db")
+		return errors.Wrap(ret.Error, "get account from db")
 	}
 	if new.LastBalanceCheckTime != nil {
 		old.LastBalanceCheckTime = new.LastBalanceCheckTime

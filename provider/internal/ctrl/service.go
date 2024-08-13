@@ -86,7 +86,7 @@ func (c *Ctrl) SyncServices(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if c.contract.BatchUpdateService(ctx, list, c.servingUrl); err != nil {
+	if err := c.contract.BatchUpdateService(ctx, list, c.servingUrl); err != nil {
 		return errors.Wrap(err, "batch update service in contract")
 	}
 	newList, err := c.ListService()

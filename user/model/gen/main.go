@@ -75,5 +75,5 @@ func gen(tpl *template.Template, w io.Writer, typName string, allFields map[stri
 
 		parseField(field, &data)
 	}
-	tpl.Execute(w, data)
+	_ = tpl.Execute(w, data)
 }
