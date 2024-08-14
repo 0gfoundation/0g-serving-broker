@@ -14,7 +14,7 @@ func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.Request, sigs mo
 	if err != nil {
 		return nil, err
 	}
-	ret, err := c.zkclient.CheckSignature(
+	ret, err := c.zk.Operation.CheckSignature(
 		operations.NewCheckSignatureParamsWithContext(ctx).WithBody(operations.CheckSignatureBody{
 			Pubkey:     []string{userAccount.Signer[0].String(), userAccount.Signer[1].String()},
 			Requests:   []*models.Request{req},
@@ -36,9 +36,9 @@ func (c *Ctrl) GenerateSolidityCalldata(ctx context.Context, reqs []*models.Requ
 	if err != nil {
 		return nil, err
 	}
-	proof, err := c.zkclient.GenerateProofInput(
+	proof, err := c.zk.Operation.GenerateProofInput(
 		operations.NewGenerateProofInputParamsWithContext(ctx).WithBody(operations.GenerateProofInputBody{
-			L:          40,
+			L:          int64(c.zk.RequestLength),
 			Pubkey:     []string{userAccount.Signer[0].String(), userAccount.Signer[1].String()},
 			Requests:   reqs,
 			Signatures: sigs,
@@ -47,7 +47,7 @@ func (c *Ctrl) GenerateSolidityCalldata(ctx context.Context, reqs []*models.Requ
 	if err != nil {
 		return nil, errors.Wrap(err, "generate proof input from zk server")
 	}
-	ret, err := c.zkclient.GenerateSolidityCalldata(
+	ret, err := c.zk.Operation.GenerateSolidityCalldata(
 		operations.NewGenerateSolidityCalldataParamsWithContext(ctx).WithBody(proof.Payload),
 	)
 	if err != nil {

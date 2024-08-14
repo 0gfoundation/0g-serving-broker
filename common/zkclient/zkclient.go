@@ -7,10 +7,16 @@ import (
 
 //go:generate swagger generate client --target . --spec ./swagger.yml --skip-validation
 
-type ZKClient operations.ClientService
+type ZKClient struct {
+	Operation     operations.ClientService
+	RequestLength int
+}
 
-func NewZKClient(host string) ZKClient {
-	return client.NewHTTPClientWithConfig(
-		nil, client.DefaultTransportConfig().WithHost(host),
-	).Operations
+func NewZKClient(host string, requestLength int) ZKClient {
+	return ZKClient{
+		Operation: client.NewHTTPClientWithConfig(
+			nil, client.DefaultTransportConfig().WithHost(host),
+		).Operations,
+		RequestLength: requestLength,
+	}
 }

@@ -27,8 +27,10 @@ type Config struct {
 	} `yaml:"interval"`
 	Networks   map[string]*NetworkConfig `mapstructure:"networks" yaml:"networks"`
 	ServingUrl string                    `yaml:"servingUrl"`
-	SigningKey string                    `yaml:"signingKey"`
-	ZKService  string                    `yaml:"zkService"`
+	ZKProver   struct {
+		Host          string `yaml:"host"`
+		RequestLength int    `yaml:"requestLength"`
+	} `yaml:"zkProver"`
 }
 
 var (
@@ -56,7 +58,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x59b9dD1cF82F6108526154c901256997095dE598",
+			ContractAddress: "0xaff39B70cb3693D169Cc96B6C5DE8ffb021E9810",
 			Database: struct {
 				User     string `yaml:"user"`
 				Provider string `yaml:"provider"`
@@ -77,7 +79,17 @@ func GetConfig() *Config {
 				RefundProcessor          int `yaml:"refundProcessor"`
 				SettlementProcessor      int `yaml:"settlementProcessor"`
 			}{
-				AutoSettleBufferTime: 18000,
+				AutoSettleBufferTime:     18000,
+				ForceSettlementProcessor: 86400,
+				RefundProcessor:          600,
+				SettlementProcessor:      600,
+			},
+			ZKProver: struct {
+				Host          string `yaml:"host"`
+				RequestLength int    `yaml:"requestLength"`
+			}{
+				Host:          "localhost:3000",
+				RequestLength: 40,
 			},
 		}
 

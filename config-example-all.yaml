@@ -1,19 +1,42 @@
+# Ethereum-formatted wallet address
 address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-contractAddress: 0x244Cb2CC4F92982417d370C9605DC30c70Ef362F
+
 database:
+  # Database configuration for the provider:
+  # The provider connects to the database server located at '0g-serving-provider-agent-db' on port 3306.
+  # Do not change this configuration if using docker compose to start service.
   provider: provider:provider@tcp(0g-serving-provider-agent-db:3306)/provider?parseTime=true
+
+  # Database configuration for the user:
+  # The user connects to the database server located at '0g-serving-user-agent-db' on port 3306.
+  # Do not change this configuration if using docker compose to start service.
   user: user:user@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true
+
+# OG serving contract address used
+contractAddress: 0xaff39B70cb3693D169Cc96B6C5DE8ffb021E9810
+
 event:
+  # The address and port where the provider service listens for events.
   providerAddr: ":8088"
+
+  # The address and port where the user service listens for events.
   userAddr: ":8089"
+
 interval:
+  # Buffer time for automatic settlements in seconds.
   autoSettleBufferTime: 18000
+
+  # Interval for running the force settlement processor in seconds (24 hours).
   forceSettlementProcessor: 86400
+
+  # Interval for running the refund processor in seconds (10 minutes).
   refundProcessor: 600
+
+  # Interval for running the settlement processor in seconds (10 minutes).
   settlementProcessor: 600
-servingUrl: http://localhost:8080
-signingKey:
+
 networks:
+  # Network configuration for ethereumHardhat, which is mainly used for development mode.
   ethereumHardhat:
     url: "http://localhost:8545"
     chainID: 31337
@@ -40,6 +63,8 @@ networks:
       - df57089febbacf7ba0bc227dafbffa9fc08a93fdc68e1e42411a14efcf23656e
     transactionLimit: 9500000
     gasEstimationBuffer: 0
+
+  # Network configuration for 0g blockchain
   ethereum0g:
     url: "https://rpc-testnet.0g.ai"
     chainID: 16600
@@ -47,4 +72,12 @@ networks:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
-zkService: "localhost:3000"
+
+zkProver:
+  # Host of zk prover agent.
+  # Do not change this configuration if using docker compose to start service.
+  host: "localhost:3000"
+
+  # requestLength defines the number of requests prover agent packs into one
+  # chunk as the minimum unit for settlement.
+  requestLength: 40

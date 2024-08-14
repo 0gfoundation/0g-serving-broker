@@ -20,7 +20,9 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 
 1. Copy and Modify Configuration File
 
-   Copy and modify the configuration file from the [example](config-example.yaml) to config.yaml.
+   Copy and modify the configuration file from the [provider config example](config-example-provider.yaml)/[user config example](config-example-user.yaml) to config.yaml.
+
+   The meaning of each setting can be found in the [config example](config-example-all.yaml).
 
 ## Running the Agent
 

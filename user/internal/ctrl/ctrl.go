@@ -14,18 +14,15 @@ type Ctrl struct {
 	db       *db.DB
 	contract *usercontract.UserContract
 	svcCache *cache.Cache
-	zkclient zkclient.ZKClient
-
-	signingKey string
+	zk       zkclient.ZKClient
 }
 
-func New(db *db.DB, contract *usercontract.UserContract, zkclient zkclient.ZKClient, signingKey string, svcCache *cache.Cache) *Ctrl {
+func New(db *db.DB, contract *usercontract.UserContract, zk zkclient.ZKClient, svcCache *cache.Cache) *Ctrl {
 	return &Ctrl{
-		db:         db,
-		contract:   contract,
-		svcCache:   svcCache,
-		signingKey: signingKey,
-		zkclient:   zkclient,
+		db:       db,
+		contract: contract,
+		svcCache: svcCache,
+		zk:       zk,
 	}
 }
 

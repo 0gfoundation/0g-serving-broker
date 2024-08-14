@@ -29,7 +29,15 @@ func (c *Ctrl) IncreaseAccountNonce(providerAddress string) (model.Provider, err
 	if err != nil {
 		return ret, errors.Wrap(err, "get provider from db")
 	}
-	*ret.Nonce += 1
+	// The prover agent in the provider packs a certain number of requests into one
+	// chunk as the minimum unit for settlement. This number, referred to as the chunk size,
+	// is defined in the prover's circuit. If the number of real requests in a chunk is smaller than 40,
+	// the remaining slots will be filled with mock requests with incrementing nonces. During settlement,
+	// the nonce of the last request in the last chunk will replace the recorded nonce in the contract.
+	//
+	// Here, by setting the increment step equal to the chunk size, we can ensure that the
+	// nonce in the request is always valid, as the nonce in each new request will always be larger than the value in the contract.
+	*ret.Nonce += int64(c.zk.RequestLength)
 
 	return ret, c.db.UpdateProviderAccount(providerAddress, ret)
 }

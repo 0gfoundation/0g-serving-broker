@@ -21,7 +21,7 @@ func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (commonModel.KeyPair, err
 		return pair, nil
 	}
 
-	ret, err := c.zkclient.GenerateKeyPair(
+	ret, err := c.zk.Operation.GenerateKeyPair(
 		operations.NewGenerateKeyPairParamsWithContext(ctx),
 	)
 	if err != nil {
@@ -43,7 +43,7 @@ func (c *Ctrl) GenerateSignature(ctx context.Context, req *models.Request) (mode
 	if err != nil {
 		return nil, err
 	}
-	ret, err := c.zkclient.GenerateSignature(
+	ret, err := c.zk.Operation.GenerateSignature(
 		operations.NewGenerateSignatureParamsWithContext(ctx).WithBody(operations.GenerateSignatureBody{
 			Privkey:  keyPair.ZKPrivateKey,
 			Requests: []*models.Request{req},

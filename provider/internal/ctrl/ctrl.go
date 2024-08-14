@@ -11,7 +11,7 @@ import (
 type Ctrl struct {
 	db       *db.DB
 	contract *providercontract.ProviderContract
-	zkclient zkclient.ZKClient
+	zk       zkclient.ZKClient
 
 	servingUrl           string
 	autoSettleBufferTime time.Duration
@@ -23,7 +23,7 @@ func New(db *db.DB, contract *providercontract.ProviderContract, zkclient zkclie
 		db:                   db,
 		contract:             contract,
 		servingUrl:           servingUrl,
-		zkclient:             zkclient,
+		zk:                   zkclient,
 	}
 
 	return p

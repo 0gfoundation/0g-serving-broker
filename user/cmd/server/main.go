@@ -33,11 +33,11 @@ func Main() {
 	defer contract.Close()
 
 	ctx := context.Background()
-	zk := zkclient.NewZKClient(config.ZKService)
+	zk := zkclient.NewZKClient(config.ZKProver.Host, config.ZKProver.RequestLength)
 
 	r := gin.New()
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
-	ctrl := ctrl.New(db, contract, zk, config.SigningKey, svcCache)
+	ctrl := ctrl.New(db, contract, zk, svcCache)
 	if err := ctrl.SyncProviderAccounts(ctx); err != nil {
 		panic(err)
 	}

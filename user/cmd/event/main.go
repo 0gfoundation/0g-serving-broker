@@ -7,6 +7,7 @@ import (
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
+	"github.com/0glabs/0g-serving-agent/common/zkclient"
 	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
 	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
 	database "github.com/0glabs/0g-serving-agent/user/internal/db"
@@ -36,7 +37,7 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, nil, "", nil)
+	ctrl := ctrl.New(db, contract, zkclient.ZKClient{}, nil)
 	refundProcessor := event.NewRefundProcessor(ctrl, config.Interval.RefundProcessor)
 	if err := mgr.Add(refundProcessor); err != nil {
 		panic(err)

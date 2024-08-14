@@ -55,7 +55,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		SegmentSize: []*big.Int{},
 	}
 	for key := range categorizedReqs {
-		reqChunks, sigChunks := splitArray(categorizedReqs[key], 40), splitArray(categorizedSigs[key], 40)
+		reqChunks, sigChunks := splitArray(categorizedReqs[key], c.zk.RequestLength), splitArray(categorizedSigs[key], c.zk.RequestLength)
 		verifierInput.NumChunks.Add(verifierInput.NumChunks, big.NewInt(int64(len(reqChunks))))
 
 		segmentSize := 0
