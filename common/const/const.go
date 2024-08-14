@@ -9,6 +9,7 @@ var (
 		"Input-Count":           {},
 		"Nonce":                 {},
 		"Previous-Output-Count": {},
+		"Service-Name":          {},
 		"Signature":             {},
 	}
 )

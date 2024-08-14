@@ -9,6 +9,7 @@ import (
 
 	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
+	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
@@ -63,8 +64,15 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			verifierInput.InProof = flattenAndConvert(calldata.Proof)
-			verifierInput.ProofInputs = flattenAndConvert([][]int64{calldata.PublicInput})
+			// ProofInputs: [userAddress, providerAddress, initNonce, finalNonce, totalFee, signerPubKey[0], signerPubKey[1]]
+			verifierInput.InProof, err = flattenAndConvert([][]string{calldata.PA}, calldata.PB, [][]string{calldata.PC})
+			if err != nil {
+				return err
+			}
+			verifierInput.ProofInputs, err = flattenAndConvert([][]string{calldata.PubInputs})
+			if err != nil {
+				return err
+			}
 			segmentSize += len(verifierInput.ProofInputs)
 		}
 		verifierInput.SegmentSize = append(verifierInput.SegmentSize, big.NewInt(int64(segmentSize)))
@@ -130,15 +138,20 @@ func splitArray[T any](arr1 []T, groupSize int) [][]T {
 	return splitArr1
 }
 
-func flattenAndConvert(input [][]int64) []*big.Int {
+func flattenAndConvert(inputs ...[][]string) ([]*big.Int, error) {
 	var result []*big.Int
 
-	for _, row := range input {
-		for _, val := range row {
-			bigIntVal := big.NewInt(val)
-			result = append(result, bigIntVal)
+	for _, input := range inputs {
+		for _, row := range input {
+			for _, val := range row {
+				num, err := util.HexadecimalStringToBigInt(val)
+				if err != nil {
+					return []*big.Int{}, err
+				}
+				result = append(result, num)
+			}
 		}
 	}
 
-	return result
+	return result, nil
 }

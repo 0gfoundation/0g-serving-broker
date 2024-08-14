@@ -110,6 +110,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 		"Input-Count":           strconv.FormatInt(inputCount, 10),
 		"Nonce":                 strconv.FormatInt(*provider.Nonce, 10),
 		"Previous-Output-Count": strconv.FormatInt(previousOutputCount, 10),
+		"Service-Name":          svcName,
 		"Signature":             string(sigJson),
 	}
 	util.SetHeaders(req, headers)

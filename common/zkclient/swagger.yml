@@ -121,16 +121,24 @@ paths:
           schema:
             type: object
             properties:
-              proof:
+              pA:
+                type: array
+                items:
+                  type: string
+              pB:
                 type: array
                 items:
                   type: array
                   items:
-                    type: integer
-              publicInput:
+                    type: string
+              pC:
                 type: array
                 items:
-                  type: integer
+                  type: string
+              pubInputs:
+                type: array
+                items:
+                  type: string
         default:
           $ref: "#/responses/Error"
 definitions:

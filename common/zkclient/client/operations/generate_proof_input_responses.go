@@ -7,7 +7,6 @@ package operations
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -85,19 +84,12 @@ func (o *GenerateProofInputOK) IsCode(code int) bool {
 	return code == 200
 }
 
-// Code gets the status code for the generate proof input o k response
-func (o *GenerateProofInputOK) Code() int {
-	return 200
-}
-
 func (o *GenerateProofInputOK) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /proof-input][%d] generateProofInputOK %s", 200, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInputOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateProofInputOK) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /proof-input][%d] generateProofInputOK %s", 200, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInputOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateProofInputOK) GetPayload() models.AdditionalProperties {
@@ -132,6 +124,11 @@ type GenerateProofInputDefault struct {
 	Payload *models.ErrorResponse
 }
 
+// Code gets the status code for the generate proof input default response
+func (o *GenerateProofInputDefault) Code() int {
+	return o._statusCode
+}
+
 // IsSuccess returns true when this generate proof input default response has a 2xx status code
 func (o *GenerateProofInputDefault) IsSuccess() bool {
 	return o._statusCode/100 == 2
@@ -157,19 +154,12 @@ func (o *GenerateProofInputDefault) IsCode(code int) bool {
 	return o._statusCode == code
 }
 
-// Code gets the status code for the generate proof input default response
-func (o *GenerateProofInputDefault) Code() int {
-	return o._statusCode
-}
-
 func (o *GenerateProofInputDefault) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /proof-input][%d] generateProofInput default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInput default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateProofInputDefault) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /proof-input][%d] generateProofInput default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /proof-input][%d] generateProofInput default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateProofInputDefault) GetPayload() *models.ErrorResponse {
@@ -330,11 +320,6 @@ func (o *GenerateProofInputBody) contextValidateRequests(ctx context.Context, fo
 	for i := 0; i < len(o.Requests); i++ {
 
 		if o.Requests[i] != nil {
-
-			if swag.IsZero(o.Requests[i]) { // not required
-				return nil
-			}
-
 			if err := o.Requests[i].ContextValidate(ctx, formats); err != nil {
 				if ve, ok := err.(*errors.Validation); ok {
 					return ve.ValidateName("body" + "." + "requests" + "." + strconv.Itoa(i))

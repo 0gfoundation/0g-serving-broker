@@ -7,7 +7,6 @@ package operations
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -84,19 +83,12 @@ func (o *GenerateKeyPairOK) IsCode(code int) bool {
 	return code == 200
 }
 
-// Code gets the status code for the generate key pair o k response
-func (o *GenerateKeyPairOK) Code() int {
-	return 200
-}
-
 func (o *GenerateKeyPairOK) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPairOK %s", 200, payload)
+	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPairOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateKeyPairOK) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPairOK %s", 200, payload)
+	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPairOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateKeyPairOK) GetPayload() *GenerateKeyPairOKBody {
@@ -133,6 +125,11 @@ type GenerateKeyPairDefault struct {
 	Payload *models.ErrorResponse
 }
 
+// Code gets the status code for the generate key pair default response
+func (o *GenerateKeyPairDefault) Code() int {
+	return o._statusCode
+}
+
 // IsSuccess returns true when this generate key pair default response has a 2xx status code
 func (o *GenerateKeyPairDefault) IsSuccess() bool {
 	return o._statusCode/100 == 2
@@ -158,19 +155,12 @@ func (o *GenerateKeyPairDefault) IsCode(code int) bool {
 	return o._statusCode == code
 }
 
-// Code gets the status code for the generate key pair default response
-func (o *GenerateKeyPairDefault) Code() int {
-	return o._statusCode
-}
-
 func (o *GenerateKeyPairDefault) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPair default %s", o._statusCode, payload)
+	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPair default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateKeyPairDefault) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPair default %s", o._statusCode, payload)
+	return fmt.Sprintf("[GET /sign-keypair][%d] generateKeyPair default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateKeyPairDefault) GetPayload() *models.ErrorResponse {

@@ -7,7 +7,6 @@ package operations
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -83,19 +82,12 @@ func (o *GenerateSolidityCalldataOK) IsCode(code int) bool {
 	return code == 200
 }
 
-// Code gets the status code for the generate solidity calldata o k response
-func (o *GenerateSolidityCalldataOK) Code() int {
-	return 200
-}
-
 func (o *GenerateSolidityCalldataOK) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldataOK %s", 200, payload)
+	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldataOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateSolidityCalldataOK) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldataOK %s", 200, payload)
+	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldataOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateSolidityCalldataOK) GetPayload() *GenerateSolidityCalldataOKBody {
@@ -132,6 +124,11 @@ type GenerateSolidityCalldataDefault struct {
 	Payload *models.ErrorResponse
 }
 
+// Code gets the status code for the generate solidity calldata default response
+func (o *GenerateSolidityCalldataDefault) Code() int {
+	return o._statusCode
+}
+
 // IsSuccess returns true when this generate solidity calldata default response has a 2xx status code
 func (o *GenerateSolidityCalldataDefault) IsSuccess() bool {
 	return o._statusCode/100 == 2
@@ -157,19 +154,12 @@ func (o *GenerateSolidityCalldataDefault) IsCode(code int) bool {
 	return o._statusCode == code
 }
 
-// Code gets the status code for the generate solidity calldata default response
-func (o *GenerateSolidityCalldataDefault) Code() int {
-	return o._statusCode
-}
-
 func (o *GenerateSolidityCalldataDefault) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldata default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldata default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateSolidityCalldataDefault) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldata default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /solidity-calldata][%d] generateSolidityCalldata default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateSolidityCalldataDefault) GetPayload() *models.ErrorResponse {
@@ -194,11 +184,17 @@ swagger:model GenerateSolidityCalldataOKBody
 */
 type GenerateSolidityCalldataOKBody struct {
 
-	// proof
-	Proof [][]int64 `json:"proof"`
+	// p a
+	PA []string `json:"pA"`
 
-	// public input
-	PublicInput []int64 `json:"publicInput"`
+	// p b
+	PB [][]string `json:"pB"`
+
+	// p c
+	PC []string `json:"pC"`
+
+	// pub inputs
+	PubInputs []string `json:"pubInputs"`
 }
 
 // Validate validates this generate solidity calldata o k body

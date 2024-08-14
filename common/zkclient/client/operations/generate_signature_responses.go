@@ -7,7 +7,6 @@ package operations
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -85,19 +84,12 @@ func (o *GenerateSignatureOK) IsCode(code int) bool {
 	return code == 200
 }
 
-// Code gets the status code for the generate signature o k response
-func (o *GenerateSignatureOK) Code() int {
-	return 200
-}
-
 func (o *GenerateSignatureOK) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /signature][%d] generateSignatureOK %s", 200, payload)
+	return fmt.Sprintf("[POST /signature][%d] generateSignatureOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateSignatureOK) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /signature][%d] generateSignatureOK %s", 200, payload)
+	return fmt.Sprintf("[POST /signature][%d] generateSignatureOK  %+v", 200, o.Payload)
 }
 
 func (o *GenerateSignatureOK) GetPayload() *GenerateSignatureOKBody {
@@ -134,6 +126,11 @@ type GenerateSignatureDefault struct {
 	Payload *models.ErrorResponse
 }
 
+// Code gets the status code for the generate signature default response
+func (o *GenerateSignatureDefault) Code() int {
+	return o._statusCode
+}
+
 // IsSuccess returns true when this generate signature default response has a 2xx status code
 func (o *GenerateSignatureDefault) IsSuccess() bool {
 	return o._statusCode/100 == 2
@@ -159,19 +156,12 @@ func (o *GenerateSignatureDefault) IsCode(code int) bool {
 	return o._statusCode == code
 }
 
-// Code gets the status code for the generate signature default response
-func (o *GenerateSignatureDefault) Code() int {
-	return o._statusCode
-}
-
 func (o *GenerateSignatureDefault) Error() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /signature][%d] generateSignature default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /signature][%d] generateSignature default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateSignatureDefault) String() string {
-	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /signature][%d] generateSignature default %s", o._statusCode, payload)
+	return fmt.Sprintf("[POST /signature][%d] generateSignature default  %+v", o._statusCode, o.Payload)
 }
 
 func (o *GenerateSignatureDefault) GetPayload() *models.ErrorResponse {
@@ -301,11 +291,6 @@ func (o *GenerateSignatureBody) contextValidateRequests(ctx context.Context, for
 	for i := 0; i < len(o.Requests); i++ {
 
 		if o.Requests[i] != nil {
-
-			if swag.IsZero(o.Requests[i]) { // not required
-				return nil
-			}
-
 			if err := o.Requests[i].ContextValidate(ctx, formats); err != nil {
 				if ve, ok := err.(*errors.Validation); ok {
 					return ve.ValidateName("body" + "." + "requests" + "." + strconv.Itoa(i))

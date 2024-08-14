@@ -141,6 +141,8 @@ func updateRequestField(req *commonModel.Request, key, value string) error {
 		return parseInt64Field(&req.Nonce, "nonce", value)
 	case "Previous-Output-Count":
 		return parseInt64Field(&req.PreviousOutputCount, "previousOutputCount", value)
+	case "Service-Name":
+		req.ServiceName = value
 	case "Signature":
 		req.Signature = value
 	default:
