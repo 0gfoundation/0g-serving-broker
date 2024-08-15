@@ -58,7 +58,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0xaff39B70cb3693D169Cc96B6C5DE8ffb021E9810",
+			ContractAddress: "0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6",
 			Database: struct {
 				User     string `yaml:"user"`
 				Provider string `yaml:"provider"`

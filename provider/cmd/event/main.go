@@ -26,10 +26,16 @@ func Main() {
 		panic(err)
 	}
 	if config.Interval.AutoSettleBufferTime > int(contract.LockTime) {
-		panic(errors.New("AutoSettleBufferTime grater than refund LockTime"))
+		panic(errors.New("Interval.AutoSettleBufferTime grater than refund LockTime"))
 	}
 	if config.Interval.AutoSettleBufferTime > config.Interval.ForceSettlementProcessor {
-		panic(errors.New("AutoSettleBufferTime grater than forceSettlement Interval"))
+		panic(errors.New("Interval.AutoSettleBufferTime grater than forceSettlement Interval"))
+	}
+	if int(contract.LockTime)-config.Interval.AutoSettleBufferTime < 60 {
+		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
+	}
+	if config.Interval.ForceSettlementProcessor < 60 {
+		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
 	}
 
 	cfg := &rest.Config{}

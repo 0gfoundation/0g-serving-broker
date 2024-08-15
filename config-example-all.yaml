@@ -13,7 +13,7 @@ database:
   user: user:user@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true
 
 # OG serving contract address used
-contractAddress: 0xaff39B70cb3693D169Cc96B6C5DE8ffb021E9810
+contractAddress: 0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6
 
 event:
   # The address and port where the provider service listens for events.
@@ -27,6 +27,7 @@ interval:
   autoSettleBufferTime: 18000
 
   # Interval for running the force settlement processor in seconds (24 hours).
+  # Interval.ForceSettlementProcessor should larger than 60 to prevent overly frequent settlements
   forceSettlementProcessor: 86400
 
   # Interval for running the refund processor in seconds (10 minutes).
