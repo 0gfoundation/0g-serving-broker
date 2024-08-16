@@ -1,0 +1,324 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "title": "0G Serving Provider Agent API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "basePath": "/v1",
+    "paths": {
+        "/service": {
+            "get": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "listService",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.ServiceList"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "registerService",
+                "parameters": [
+                    {
+                        "description": "body",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/model.Service"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content - success without response body"
+                    }
+                }
+            }
+        },
+        "/service/{service}": {
+            "get": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "getService",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Service name",
+                        "name": "service",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.Service"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "updateService",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Service name",
+                        "name": "service",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "body",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/model.Service"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "deleteService",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Service name",
+                        "name": "service",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            }
+        },
+        "/settle": {
+            "post": {
+                "description": "This endpoint allows you to settle fees for requests from users",
+                "tags": [
+                    "settle"
+                ],
+                "operationId": "settleFees",
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            }
+        },
+        "/sync-account": {
+            "post": {
+                "description": "This endpoint allows you to synchronize information of all accounts from the contract",
+                "tags": [
+                    "user"
+                ],
+                "operationId": "syncUserAccounts",
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            }
+        },
+        "/sync-service": {
+            "post": {
+                "description": "This endpoint allows you to synchronize all services from local database to the contract",
+                "tags": [
+                    "service"
+                ],
+                "operationId": "syncServices",
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            }
+        },
+        "/user": {
+            "get": {
+                "tags": [
+                    "user"
+                ],
+                "operationId": "listUserAccount",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.UserList"
+                        }
+                    }
+                }
+            }
+        },
+        "/user/{user}": {
+            "get": {
+                "tags": [
+                    "user"
+                ],
+                "operationId": "getUserAccount",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User address",
+                        "name": "user",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.User"
+                        }
+                    }
+                }
+            }
+        },
+        "/user/{user}/sync": {
+            "post": {
+                "description": "This endpoint allows you to synchronize information of single account from the contract",
+                "tags": [
+                    "user"
+                ],
+                "operationId": "syncUserAccount",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User address",
+                        "name": "user",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "model.ListMeta": {
+            "type": "object",
+            "properties": {
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "model.Service": {
+            "type": "object",
+            "required": [
+                "inputPrice",
+                "name",
+                "outputPrice",
+                "type",
+                "url"
+            ],
+            "properties": {
+                "inputPrice": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "outputPrice": {
+                    "type": "integer"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.ServiceList": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.Service"
+                    }
+                },
+                "metadata": {
+                    "$ref": "#/definitions/model.ListMeta"
+                }
+            }
+        },
+        "model.User": {
+            "type": "object",
+            "required": [
+                "user"
+            ],
+            "properties": {
+                "lastBalanceCheckTime": {
+                    "type": "string"
+                },
+                "lastRequestNonce": {
+                    "type": "integer"
+                },
+                "lastResponseTokenCount": {
+                    "type": "integer"
+                },
+                "lockBalance": {
+                    "type": "integer"
+                },
+                "unsettledFee": {
+                    "type": "integer"
+                },
+                "user": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.UserList": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.User"
+                    }
+                },
+                "metadata": {
+                    "$ref": "#/definitions/model.ListMeta"
+                }
+            }
+        }
+    }
+}

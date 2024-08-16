@@ -10,6 +10,13 @@ import (
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
+// registerService
+//
+//	@ID			registerService
+//	@Tags		service
+//	@Router		/service [post]
+//	@Param		body	body	model.Service	true	"body"
+//	@Success	204		"No Content - success without response body"
 func (h *Handler) RegisterService(ctx *gin.Context) {
 	var service model.Service
 	if err := service.Bind(ctx); err != nil {
@@ -31,9 +38,16 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 		return
 	}
 
-	ctx.Status(http.StatusAccepted)
+	ctx.Status(http.StatusNoContent)
 }
 
+// getService
+//
+//	@ID			getService
+//	@Tags		service
+//	@Router		/service/{service} [get]
+//	@Param		service	path	string	true	"Service name"
+//	@Success	200	{object}	model.Service
 func (h *Handler) GetService(ctx *gin.Context) {
 	name := ctx.Param("service")
 	service, err := h.ctrl.GetService(name)
@@ -45,6 +59,12 @@ func (h *Handler) GetService(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, service)
 }
 
+// listService
+//
+//	@ID			listService
+//	@Tags		service
+//	@Router		/service [get]
+//	@Success	200	{object}	model.ServiceList
 func (h *Handler) ListService(ctx *gin.Context) {
 	list, err := h.ctrl.ListService()
 	if err != nil {
@@ -58,6 +78,14 @@ func (h *Handler) ListService(ctx *gin.Context) {
 	})
 }
 
+// updateService
+//
+//	@ID			updateService
+//	@Tags		service
+//	@Router		/service/{service} [put]
+//	@Param		service	path	string	true	"Service name"
+//	@Param		body	body	model.Service	true	"body"
+//	@Success	202
 func (h *Handler) UpdateService(ctx *gin.Context) {
 	name := ctx.Param("service")
 
@@ -101,6 +129,13 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
+// deleteService
+//
+//	@ID			deleteService
+//	@Tags		service
+//	@Router		/service/{service} [delete]
+//	@Param		service	path	string	true	"Service name"
+//	@Success	202
 func (h *Handler) DeleteService(ctx *gin.Context) {
 	name := ctx.Param("service")
 
@@ -114,6 +149,13 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
+// syncServices
+//
+//	@Description  This endpoint allows you to synchronize all services from local database to the contract
+//	@ID			syncServices
+//	@Tags		service
+//	@Router		/sync-service [post]
+//	@Success	202
 func (h *Handler) SyncServices(ctx *gin.Context) {
 	if err := h.ctrl.SyncServices(ctx); err != nil {
 		handleError(ctx, err, "synchronize service from the database to the contract")

@@ -9,6 +9,37 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
+func ValidateUpdateRequest(oldVal, newVal Request) error {
+	fields := []string{}
+	
+	if !apiequality.Semantic.DeepEqual(newVal.UserAddress, oldVal.UserAddress){
+		fields = append(fields, "userAddress")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.Nonce, oldVal.Nonce){
+		fields = append(fields, "nonce")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.ServiceName, oldVal.ServiceName){
+		fields = append(fields, "serviceName")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.InputCount, oldVal.InputCount){
+		fields = append(fields, "inputCount")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.PreviousOutputCount, oldVal.PreviousOutputCount){
+		fields = append(fields, "previousOutputCount")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.Fee, oldVal.Fee){
+		fields = append(fields, "fee")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.Signature, oldVal.Signature){
+		fields = append(fields, "signature")
+	}
+
+	if len(fields) > 0 {
+		return fmt.Errorf("update field: [%s] not allowed", strings.Join(fields, ","))
+	}
+	return nil
+}
+
 func ValidateUpdateService(oldVal, newVal Service) error {
 	fields := []string{}
 	

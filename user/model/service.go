@@ -2,8 +2,6 @@ package model
 
 import (
 	"time"
-
-	"gorm.io/plugin/soft_delete"
 )
 
 type Service struct {
@@ -14,7 +12,6 @@ type Service struct {
 	URL         string
 	InputPrice  int64
 	OutputPrice int64
-	DeletedAt   soft_delete.DeletedAt
 }
 
 type ServiceList struct {

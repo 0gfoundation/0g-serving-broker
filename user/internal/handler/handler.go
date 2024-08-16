@@ -27,8 +27,6 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/provider/:provider", h.GetProviderAccount)
 	group.POST("sync", h.SyncProviderAccounts)
 	group.POST("/provider/:provider/sync", h.SyncProviderAccount)
-
-	// fund
 	group.POST("/provider/:provider/charge", h.Charge)
 	group.POST("/provider/:provider/refund", h.Refund)
 
@@ -37,7 +35,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/provider/:provider/service/:service", h.GetService)
 
 	// request
-	group.POST("/provider/:provider/service/:service/*suffix", h.GetData)
+	group.POST("/provider/:provider/service/:service/*suffix", h.GetDataWithSuffix)
 	group.POST("/provider/:provider/service/:service", h.GetData)
 }
 

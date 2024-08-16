@@ -11,4 +11,3 @@ type SystemInfo struct {
 	K         string         `gorm:"type:char(36);primaryKey" json:"k" binding:"required" immutable:"true"`
 	V         datatypes.JSON `gorm:"type:json;not null" json:"v"`
 }
-

@@ -1,8 +1,6 @@
 package db
 
-import (
-	"github.com/0glabs/0g-serving-agent/common/model"
-)
+import "github.com/0glabs/0g-serving-agent/provider/model"
 
 func (d *DB) ListRequest() ([]model.Request, error) {
 	list := []model.Request{}

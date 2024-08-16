@@ -15,6 +15,15 @@ import (
 	"github.com/0glabs/0g-serving-agent/user/internal/handler"
 )
 
+//go:generate swag fmt
+//go:generate swag init --dir ./,../../ --output ../../doc
+
+//	@title		0G Serving User Agent API
+//	@version	1.0
+//	@BasePath	/v1
+
+//	@in	header
+
 func Main() {
 	config := config.GetConfig()
 

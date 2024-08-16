@@ -9,6 +9,12 @@ import (
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
+// listUserAccount
+//
+//	@ID			listUserAccount
+//	@Tags		user
+//	@Router		/user [get]
+//	@Success	200	{object}	model.UserList
 func (h *Handler) ListUserAccount(ctx *gin.Context) {
 	list, err := h.ctrl.ListUserAccount(ctx, true)
 	if err != nil {
@@ -22,6 +28,13 @@ func (h *Handler) ListUserAccount(ctx *gin.Context) {
 	})
 }
 
+// getUserAccount
+//
+//	@ID			getUserAccount
+//	@Tags		user
+//	@Router		/user/{user} [get]
+//	@Param		user	path	string	true	"User address"
+//	@Success	200	{object}	model.User
 func (h *Handler) GetUserAccount(ctx *gin.Context) {
 	userAddress := ctx.Param("user")
 	account, err := h.ctrl.GetUserAccount(ctx, common.HexToAddress(userAddress))
@@ -33,6 +46,13 @@ func (h *Handler) GetUserAccount(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, account)
 }
 
+// syncUserAccounts
+//
+//	@Description  This endpoint allows you to synchronize information of all accounts from the contract
+//	@ID			syncUserAccounts
+//	@Tags		user
+//	@Router		/sync-account [post]
+//	@Success	202
 func (h *Handler) SyncUserAccounts(ctx *gin.Context) {
 	if err := h.ctrl.SyncUserAccounts(ctx); err != nil {
 		handleError(ctx, err, "synchronize accounts from the contract to the database")
@@ -42,6 +62,14 @@ func (h *Handler) SyncUserAccounts(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
+// syncUserAccount
+//
+//	@Description  This endpoint allows you to synchronize information of single account from the contract
+//	@ID			syncUserAccount
+//	@Tags		user
+//	@Router		/user/{user}/sync [post]
+//	@Param		user	path	string	true	"User address"
+//	@Success	202
 func (h *Handler) SyncUserAccount(ctx *gin.Context) {
 	userAddress := ctx.Param("user")
 	if err := h.ctrl.SyncUserAccount(ctx, common.HexToAddress(userAddress)); err != nil {

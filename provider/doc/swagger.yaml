@@ -1,0 +1,213 @@
+basePath: /v1
+definitions:
+  model.ListMeta:
+    properties:
+      total:
+        type: integer
+    type: object
+  model.Service:
+    properties:
+      inputPrice:
+        type: integer
+      name:
+        type: string
+      outputPrice:
+        type: integer
+      type:
+        type: string
+      updatedAt:
+        readOnly: true
+        type: string
+      url:
+        type: string
+    required:
+    - inputPrice
+    - name
+    - outputPrice
+    - type
+    - url
+    type: object
+  model.ServiceList:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/model.Service'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
+  model.User:
+    properties:
+      lastBalanceCheckTime:
+        type: string
+      lastRequestNonce:
+        type: integer
+      lastResponseTokenCount:
+        type: integer
+      lockBalance:
+        type: integer
+      unsettledFee:
+        type: integer
+      user:
+        type: string
+    required:
+    - user
+    type: object
+  model.UserList:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/model.User'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
+info:
+  contact: {}
+  title: 0G Serving Provider Agent API
+  version: "1.0"
+paths:
+  /service:
+    get:
+      operationId: listService
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.ServiceList'
+      tags:
+      - service
+    post:
+      operationId: registerService
+      parameters:
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/model.Service'
+      responses:
+        "204":
+          description: No Content - success without response body
+      tags:
+      - service
+  /service/{service}:
+    delete:
+      operationId: deleteService
+      parameters:
+      - description: Service name
+        in: path
+        name: service
+        required: true
+        type: string
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - service
+    get:
+      operationId: getService
+      parameters:
+      - description: Service name
+        in: path
+        name: service
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.Service'
+      tags:
+      - service
+    put:
+      operationId: updateService
+      parameters:
+      - description: Service name
+        in: path
+        name: service
+        required: true
+        type: string
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/model.Service'
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - service
+  /settle:
+    post:
+      description: This endpoint allows you to settle fees for requests from users
+      operationId: settleFees
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - settle
+  /sync-account:
+    post:
+      description: This endpoint allows you to synchronize information of all accounts
+        from the contract
+      operationId: syncUserAccounts
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - user
+  /sync-service:
+    post:
+      description: This endpoint allows you to synchronize all services from local
+        database to the contract
+      operationId: syncServices
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - service
+  /user:
+    get:
+      operationId: listUserAccount
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.UserList'
+      tags:
+      - user
+  /user/{user}:
+    get:
+      operationId: getUserAccount
+      parameters:
+      - description: User address
+        in: path
+        name: user
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.User'
+      tags:
+      - user
+  /user/{user}/sync:
+    post:
+      description: This endpoint allows you to synchronize information of single account
+        from the contract
+      operationId: syncUserAccount
+      parameters:
+      - description: User address
+        in: path
+        name: user
+        required: true
+        type: string
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - user
+swagger: "2.0"

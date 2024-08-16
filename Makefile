@@ -40,6 +40,7 @@ release: oci
 
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
+	go install -v github.com/swaggo/swag/cmd/swag@v1.8.10
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
 
 .PHONY: lint build clean oci release install-tools

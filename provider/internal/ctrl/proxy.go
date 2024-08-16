@@ -11,7 +11,6 @@ import (
 
 	constant "github.com/0glabs/0g-serving-agent/common/const"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	commonModel "github.com/0glabs/0g-serving-agent/common/model"
 	"github.com/0glabs/0g-serving-agent/extractor"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
@@ -36,7 +35,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, req
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel commonModel.Request, extractor extractor.ProviderReqRespExtractor, fee int64) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee int64) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {

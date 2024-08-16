@@ -5,14 +5,14 @@ import (
 	"math/big"
 
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	commonModel "github.com/0glabs/0g-serving-agent/common/model"
 	"github.com/0glabs/0g-serving-agent/common/util"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/client/operations"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	database "github.com/0glabs/0g-serving-agent/user/internal/db"
+	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
-func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (commonModel.KeyPair, error) {
+func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {
 	pair, err := c.db.GetKeyPair("keypair")
 	if database.IgnoreNotFound(err) != nil {
 		return pair, errors.Wrap(err, "get key pair from db")
@@ -27,7 +27,7 @@ func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (commonModel.KeyPair, err
 	if err != nil {
 		return pair, errors.Wrap(err, "generate key pair from zk server")
 	}
-	pair = commonModel.KeyPair{
+	pair = model.KeyPair{
 		ZKPrivateKey: ret.Payload.Privkey,
 		ZKPublicKey:  [2]string(ret.Payload.Pubkey),
 	}

@@ -6,6 +6,32 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// ================================= Request =================================
+func (d *Request) Bind(ctx *gin.Context) error {
+	var r Request
+	if err := ctx.ShouldBindJSON(&r); err != nil {
+		return err
+	}
+	d.UserAddress = r.UserAddress
+	d.Nonce = r.Nonce
+	d.ServiceName = r.ServiceName
+	d.InputCount = r.InputCount
+	d.PreviousOutputCount = r.PreviousOutputCount
+	d.Fee = r.Fee
+	d.Signature = r.Signature
+	d.Processed = r.Processed
+
+	return nil
+}
+
+func (d *Request) BindWithReadonly(ctx *gin.Context, old Request) error {
+	if err := d.Bind(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // ================================= Service =================================
 func (d *Service) Bind(ctx *gin.Context) error {
 	var r Service

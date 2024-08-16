@@ -11,17 +11,16 @@ import (
 
 	constant "github.com/0glabs/0g-serving-agent/common/const"
 	"github.com/0glabs/0g-serving-agent/common/errors"
-	commonModel "github.com/0glabs/0g-serving-agent/common/model"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
 
-func (c *Ctrl) CreateRequest(req commonModel.Request) error {
+func (c *Ctrl) CreateRequest(req model.Request) error {
 	return errors.Wrap(c.db.CreateRequest(req), "create request in db")
 }
 
-func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (commonModel.Request, error) {
-	var req commonModel.Request
+func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
+	var req model.Request
 	headerMap := ctx.Request.Header
 
 	for k := range constant.RequestMetaData {
@@ -39,7 +38,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (commonModel.Request, error)
 	return req, nil
 }
 
-func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, expectedFee, expectedInputCount int64) error {
+func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputCount int64) error {
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
 	if err != nil {
 		return err
@@ -67,7 +66,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req commonModel.Request, expect
 	return nil
 }
 
-func (c *Ctrl) validateSig(ctx context.Context, req commonModel.Request) error {
+func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 	reqInZK := &models.Request{
 		Fee:             req.Fee,
 		Nonce:           req.Nonce,
@@ -89,7 +88,7 @@ func (c *Ctrl) validateSig(ctx context.Context, req commonModel.Request) error {
 	return nil
 }
 
-func (c *Ctrl) validateFee(actual commonModel.Request, account model.User, expectedFee, expectedInputCount int64) error {
+func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputCount int64) error {
 	if account.LastResponseTokenCount != nil && actual.PreviousOutputCount < *account.LastResponseTokenCount {
 		return fmt.Errorf("invalid previousOutputCount, expected %d, but received %d", *account.LastResponseTokenCount, actual.PreviousOutputCount)
 	}
@@ -102,7 +101,7 @@ func (c *Ctrl) validateFee(actual commonModel.Request, account model.User, expec
 	return nil
 }
 
-func (c *Ctrl) validateNonce(actual commonModel.Request, lastRequestNonce int64) error {
+func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce int64) error {
 	if actual.Nonce > lastRequestNonce {
 		return nil
 	}
@@ -129,7 +128,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, 
 	return fmt.Errorf("insufficient balance, total fee of %d exceeds the available balance of %d", fee+*newAccount.UnsettledFee, *newAccount.LockBalance)
 }
 
-func updateRequestField(req *commonModel.Request, key, value string) error {
+func updateRequestField(req *model.Request, key, value string) error {
 	switch key {
 	case "Address":
 		req.UserAddress = value
