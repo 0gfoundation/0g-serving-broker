@@ -1,0 +1,18 @@
+{
+    "extends": "solhint:recommended",
+    "plugins": ["prettier"],
+    "rules": {
+        "compiler-version": ["error", ">=0.8.0"],
+        "gas-custom-errors": "off",
+        "avoid-low-level-calls": "off",
+        "explicit-types": ["warn", "implicit"],
+        "func-visibility": ["warn", { "ignoreConstructors": true }],
+        "max-states-count": "off",
+        "no-empty-blocks": "off",
+        "no-global-import": "off",
+        "no-inline-assembly": "off",
+        "not-rely-on-time": "off",
+        "prettier/prettier": "error",
+        "reason-string": "off"
+    }
+}

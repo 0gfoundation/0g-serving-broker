@@ -1,0 +1,19 @@
+{
+    "compilerOptions": {
+        "target": "es2018",
+        "module": "commonjs",
+        "strict": true,
+        "esModuleInterop": true,
+        "resolveJsonModule": true,
+        "types": ["@nomiclabs/hardhat-ethers"]
+    },
+    "include": [
+        "./scripts",
+        "./test",
+        "./typechain-types",
+        "src/deploy",
+        "deploy/deploy.ts",
+        "src/utils/zk_settlement_calldata"
+    ],
+    "files": ["./hardhat.config.ts"]
+}
