@@ -77,6 +77,7 @@ func (h *Handler) GetProviderAccount(ctx *gin.Context) {
 //	@Tags		provider
 //	@Router		/provider/{provider}/charge [post]
 //	@Param		provider	path	string	true	"Provider address"
+//	@Param		body	body	model.Provider	true	"body"
 //	@Success	202
 func (h *Handler) Charge(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")

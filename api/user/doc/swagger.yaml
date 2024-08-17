@@ -127,6 +127,12 @@ paths:
         name: provider
         required: true
         type: string
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/model.Provider'
       responses:
         "202":
           description: Accepted
