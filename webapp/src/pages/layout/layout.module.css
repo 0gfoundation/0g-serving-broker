@@ -1,0 +1,22 @@
+.header {
+  text-align: center;
+  height: 64px;
+  padding-inline: 48px;
+  line-height: 64px;
+  background-color: #fff;
+  border-bottom: 1px solid #ddd;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  z-index: 1;
+}
+
+.content {
+  text-align: center;
+  min-height: 620;
+  line-height: 120px;
+  background-color: #fff;
+}
+
+.footer {
+  text-align: center;
+  background-color: #fff;
+}

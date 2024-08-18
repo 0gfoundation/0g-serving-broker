@@ -1,0 +1,10 @@
+.App {
+  display: flex;
+  flex-direction: column;
+  width: 350px;
+  min-height: 600px;
+}
+
+body {
+  margin: 0;
+}
