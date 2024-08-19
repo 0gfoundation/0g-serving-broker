@@ -8,7 +8,7 @@ export const listProviderAccount = async (): Promise<ModelProviderList> =>
     headers: getHeaders(),
   }).then((res) => res.json());
 
-export const getProviderAccount = (provider: string) =>
+export const getProviderAccount = (provider: string): Promise<ModelProvider> =>
   get(`/v1/provider/${provider}`, {
     headers: getHeaders(),
   }).then((res) => res.json());
@@ -36,7 +36,7 @@ export const syncProviderAccounts = () =>
     headers: getHeaders(),
   });
 
-export const SyncProviderAccount = (provider: string) =>
+export const syncProviderAccount = (provider: string) =>
   post(`/v1/provider/${provider}/sync`, {
     headers: getHeaders(),
   });
