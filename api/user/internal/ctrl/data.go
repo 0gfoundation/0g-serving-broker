@@ -21,6 +21,7 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	"github.com/0glabs/0g-serving-agent/extractor"
 	"github.com/0glabs/0g-serving-agent/extractor/chatbot"
+	"github.com/0glabs/0g-serving-agent/extractor/zgstorage"
 	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
@@ -60,6 +61,8 @@ func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress, svcName string
 
 	var extractor extractor.UserReqRespExtractor
 	switch svc.ServiceType {
+	case "zgStorage":
+		extractor = &zgstorage.UserZgStorage{SvcInfo: svc}
 	case "chatbot":
 		extractor = &chatbot.ChatBot{SvcInfo: svc}
 	default:
@@ -135,7 +138,7 @@ func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor ext
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		handleError(ctx, err, "get response from provider")
+		handleAgentError(ctx, err, "get response from provider")
 		return
 	}
 	defer resp.Body.Close()
@@ -149,7 +152,7 @@ func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor ext
 	ctx.Writer.WriteHeader(resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
-		handleError(ctx, extractor.ErrMsg(resp.Body), "get response from provider")
+		handleServiceError(ctx, resp.Body)
 		return
 	}
 
@@ -164,18 +167,18 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	providerAddress := ctx.Param("provider")
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handleError(ctx, err, "read response")
+		handleAgentError(ctx, err, "read response")
 		return
 	}
 	contentEncoding := resp.Header.Get("Content-Encoding")
 	outputContent, err := extractor.GetRespContent(body, contentEncoding)
 	if err != nil {
-		handleError(ctx, err, "get resp content")
+		handleAgentError(ctx, err, "get resp content")
 		return
 	}
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
-		handleError(ctx, err, "get resp output count")
+		handleAgentError(ctx, err, "get resp output count")
 		return
 	}
 	new := model.Provider{
@@ -184,7 +187,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	}
 	err = c.db.UpdateProviderAccount(providerAddress, new)
 	if err != nil {
-		handleError(ctx, err, "update provider output count in db")
+		handleAgentError(ctx, err, "update provider output count in db")
 		return
 	}
 	ctx.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
@@ -202,7 +205,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 				if err == io.EOF {
 					return false
 				}
-				handleError(ctx, err, "read from provider response")
+				handleAgentError(ctx, err, "read from provider response")
 				return false
 			}
 
@@ -210,26 +213,26 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 			if line == "\n" || line == "\r\n" {
 				_, err := w.Write(chunkBuf.Bytes())
 				if err != nil {
-					handleError(ctx, err, "write to response")
+					handleAgentError(ctx, err, "write to response")
 					return false
 				}
 
 				encoding := resp.Header.Get("Content-Encoding")
 				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
 				if err != nil {
-					handleError(ctx, err, "get response content")
+					handleAgentError(ctx, err, "get response content")
 					return false
 				}
 
 				completed, err := extractor.StreamCompleted(content)
 				if err != nil {
-					handleError(ctx, err, "check whether stream completed")
+					handleAgentError(ctx, err, "check whether stream completed")
 					return false
 				}
 				if completed {
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
-						handleError(ctx, err, "get response output count")
+						handleAgentError(ctx, err, "get response output count")
 						return false
 					}
 					new := model.Provider{
@@ -238,7 +241,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 					}
 					err = c.db.UpdateProviderAccount(providerAddress, new)
 					if err != nil {
-						handleError(ctx, err, "update provider output count in db")
+						handleAgentError(ctx, err, "update provider output count in db")
 						return false
 					}
 				}

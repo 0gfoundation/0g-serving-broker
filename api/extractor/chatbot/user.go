@@ -126,20 +126,6 @@ func (c *ChatBot) GetRespContent(resp []byte, encodingType string) ([]byte, erro
 	return shakeStreamResponse(decompressed), nil
 }
 
-// ErrMsg in user agent should parse provider agent
-// response error which defined in common/errors/response.go
-func (c *ChatBot) ErrMsg(body io.Reader) error {
-	msg := struct {
-		Error string `json:"error"`
-	}{}
-
-	if err := json.NewDecoder(body).Decode(&msg); err != nil {
-		return errors.Wrap(err, "decode error message")
-	}
-
-	return errors.New(msg.Error)
-}
-
 // shakeStreamResponse remove prefix and spaces from openAI response
 func shakeStreamResponse(input []byte) []byte {
 	const prefix = "data: "

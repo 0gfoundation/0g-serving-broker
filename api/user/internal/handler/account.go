@@ -20,15 +20,15 @@ import (
 func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 	var account model.Provider
 	if err := account.Bind(ctx); err != nil {
-		handleError(ctx, err, "bind account")
+		handleAgentError(ctx, err, "bind account")
 		return
 	}
 	if account.Provider == "" {
-		handleError(ctx, errors.New("missing field Provider"), "create account")
+		handleAgentError(ctx, errors.New("missing field Provider"), "create account")
 	}
 
 	if err := h.ctrl.CreateProviderAccount(ctx, common.HexToAddress(account.Provider), account); err != nil {
-		handleError(ctx, err, "create account")
+		handleAgentError(ctx, err, "create account")
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -43,7 +43,7 @@ func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 func (h *Handler) ListProviderAccount(ctx *gin.Context) {
 	accounts, err := h.ctrl.ListProviderAccount(ctx)
 	if err != nil {
-		handleError(ctx, err, "list account")
+		handleAgentError(ctx, err, "list account")
 		return
 	}
 	ctx.JSON(http.StatusOK, model.ProviderList{
@@ -63,7 +63,7 @@ func (h *Handler) GetProviderAccount(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	account, err := h.ctrl.GetProviderAccount(ctx, common.HexToAddress(providerAddress))
 	if err != nil {
-		handleError(ctx, err, "get account from db")
+		handleAgentError(ctx, err, "get account from db")
 		return
 	}
 
@@ -83,12 +83,12 @@ func (h *Handler) Charge(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	var account model.Provider
 	if err := account.Bind(ctx); err != nil {
-		handleError(ctx, err, "bind account")
+		handleAgentError(ctx, err, "bind account")
 		return
 	}
 
 	if err := h.ctrl.ChargeProviderAccount(ctx, common.HexToAddress(providerAddress), account); err != nil {
-		handleError(ctx, err, "charge account")
+		handleAgentError(ctx, err, "charge account")
 		return
 	}
 	ctx.Status(http.StatusAccepted)
@@ -107,11 +107,11 @@ func (h *Handler) Refund(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	var refund model.Refund
 	if err := refund.Bind(ctx); err != nil {
-		handleError(ctx, err, "bind refund body")
+		handleAgentError(ctx, err, "bind refund body")
 		return
 	}
 	if err := h.ctrl.RequestRefund(ctx, common.HexToAddress(providerAddress), refund); err != nil {
-		handleError(ctx, err, "process refund")
+		handleAgentError(ctx, err, "process refund")
 		return
 	}
 
@@ -127,7 +127,7 @@ func (h *Handler) Refund(ctx *gin.Context) {
 //	@Success	202
 func (h *Handler) SyncProviderAccounts(ctx *gin.Context) {
 	if err := h.ctrl.SyncProviderAccounts(ctx); err != nil {
-		handleError(ctx, err, "sync all data")
+		handleAgentError(ctx, err, "sync all data")
 		return
 	}
 
@@ -145,7 +145,7 @@ func (h *Handler) SyncProviderAccounts(ctx *gin.Context) {
 func (h *Handler) SyncProviderAccount(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	if err := h.ctrl.SyncProviderAccount(ctx, common.HexToAddress(providerAddress)); err != nil {
-		handleError(ctx, err, "sync data")
+		handleAgentError(ctx, err, "sync data")
 		return
 	}
 

@@ -1,8 +1,6 @@
 package extractor
 
 import (
-	"io"
-
 	"github.com/0glabs/0g-serving-agent/common/contract"
 )
 
@@ -15,7 +13,6 @@ type UserReqRespExtractor interface {
 	GetOutputCount(respBody [][]byte) (int64, error)
 	GetRespContent(resp []byte, encodingType string) ([]byte, error)
 	StreamCompleted(output []byte) (bool, error)
-	ErrMsg(body io.Reader) error
 }
 
 type ProviderReqRespExtractor interface {
@@ -23,5 +20,4 @@ type ProviderReqRespExtractor interface {
 	GetOutputCount(respBody [][]byte) (int64, error)
 	GetRespContent(resp []byte, encodingType string) ([]byte, error)
 	StreamCompleted(output []byte) (bool, error)
-	ErrMsg(body io.Reader) error
 }

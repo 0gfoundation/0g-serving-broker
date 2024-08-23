@@ -39,6 +39,11 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.POST("/provider/:provider/service/:service", h.GetData)
 }
 
-func handleError(ctx *gin.Context, err error, context string) {
-	errors.Response(ctx, errors.Wrap(err, "User: "+context))
+func handleAgentError(ctx *gin.Context, err error, context string) {
+	// TODO: recorded to log system
+	info := "User"
+	if context != "" {
+		info += (": " + context)
+	}
+	errors.Response(ctx, errors.Wrap(err, info))
 }

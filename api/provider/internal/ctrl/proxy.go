@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -22,7 +23,6 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, req
 	}
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
 	if err != nil {
-		errors.Response(ctx, errors.Wrap(err, "provider proxy: prepare request for the proxied service"))
 		return nil, err
 	}
 
@@ -39,13 +39,13 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleAgentError(ctx, err, "call proxied service")
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		responseError(ctx, extractor.ErrMsg(resp.Body), "read error from proxied service")
+		handleServiceError(ctx, resp.Body)
 		return
 	}
 
@@ -59,7 +59,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 
 	old, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
-		errors.Response(ctx, err)
+		handleAgentError(ctx, err, "")
 		return
 	}
 	account := model.User{
@@ -77,26 +77,26 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		responseError(ctx, err, "read from body")
+		handleAgentError(ctx, err, "read from body")
 		return
 	}
 
 	contentEncoding := resp.Header.Get("Content-Encoding")
 	outputContent, err := extractor.GetRespContent(body, contentEncoding)
 	if err != nil {
-		responseError(ctx, err, "extract content")
+		handleAgentError(ctx, err, "extract content")
 		return
 	}
 
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
-		responseError(ctx, err, "extract count")
+		handleAgentError(ctx, err, "extract count")
 		return
 	}
 
 	account.LastResponseTokenCount = &outputCount
 	if err = c.UpdateUserAccount(account.User, account); err != nil {
-		responseError(ctx, err, "update user account in db")
+		handleAgentError(ctx, err, "update user account in db")
 		return
 	}
 
@@ -114,7 +114,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 				if err == io.EOF {
 					return false
 				}
-				responseError(ctx, err, "read from body")
+				handleAgentError(ctx, err, "read from body")
 				return false
 			}
 
@@ -122,33 +122,33 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 			if line == "\n" || line == "\r\n" {
 				_, err := w.Write(chunkBuf.Bytes())
 				if err != nil {
-					responseError(ctx, err, "write to stream")
+					handleAgentError(ctx, err, "write to stream")
 					return false
 				}
 
 				encoding := resp.Header.Get("Content-Encoding")
 				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
 				if err != nil {
-					responseError(ctx, err, "extract content")
+					handleAgentError(ctx, err, "extract content")
 					return false
 				}
 
 				completed, err := extractor.StreamCompleted(content)
 				if err != nil {
-					responseError(ctx, err, "check stream completed")
+					handleAgentError(ctx, err, "check stream completed")
 					return false
 				}
 				if completed {
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
-						responseError(ctx, err, "extract output count")
+						handleAgentError(ctx, err, "extract output count")
 						return false
 					}
 
 					account.LastResponseTokenCount = &outputCount
 					err = c.UpdateUserAccount(account.User, account)
 					if err != nil {
-						responseError(ctx, err, "update user account in db")
+						handleAgentError(ctx, err, "update user account in db")
 						return false
 					}
 				}
@@ -160,6 +160,21 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 	})
 }
 
-func responseError(ctx *gin.Context, err error, context string) {
-	errors.Response(ctx, errors.Wrap(err, "Provider proxy: handle proxied service response, "+context))
+func handleAgentError(ctx *gin.Context, err error, context string) {
+	// TODO: recorded to log system
+	info := "Provider proxy: handle proxied service response"
+	if context != "" {
+		info += (", " + context)
+	}
+	errors.Response(ctx, errors.Wrap(err, info))
+}
+
+func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+	respBody, err := io.ReadAll(body)
+	if err != nil {
+		// TODO: recorded to log system
+		log.Println(err)
+		return
+	}
+	ctx.Writer.Write(respBody)
 }

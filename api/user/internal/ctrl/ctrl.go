@@ -1,6 +1,9 @@
 package ctrl
 
 import (
+	"io"
+	"log"
+
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
@@ -26,6 +29,21 @@ func New(db *db.DB, contract *usercontract.UserContract, zk zkclient.ZKClient, s
 	}
 }
 
-func handleError(ctx *gin.Context, err error, context string) {
-	errors.Response(ctx, errors.Wrap(err, "User: "+context))
+func handleAgentError(ctx *gin.Context, err error, context string) {
+	// TODO: recorded to log system
+	info := "User"
+	if context != "" {
+		info += (": " + context)
+	}
+	errors.Response(ctx, errors.Wrap(err, info))
+}
+
+func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+	respBody, err := io.ReadAll(body)
+	if err != nil {
+		// TODO: recorded to log system
+		log.Println(err)
+		return
+	}
+	ctx.Writer.Write(respBody)
 }

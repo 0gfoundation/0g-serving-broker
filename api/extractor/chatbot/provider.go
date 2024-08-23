@@ -88,12 +88,3 @@ func (c *ProviderChatBot) GetRespContent(resp []byte, encodingType string) ([]by
 	}
 	return shakeStreamResponse(decompressed), nil
 }
-
-func (c *ProviderChatBot) ErrMsg(body io.Reader) error {
-	var msg ErrorResponse
-	if err := json.NewDecoder(body).Decode(&msg); err != nil {
-		return errors.Wrap(err, "decode error message")
-	}
-
-	return errors.New(msg.Error.Message)
-}

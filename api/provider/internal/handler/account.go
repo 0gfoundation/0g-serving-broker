@@ -18,7 +18,7 @@ import (
 func (h *Handler) ListUserAccount(ctx *gin.Context) {
 	list, err := h.ctrl.ListUserAccount(ctx, true)
 	if err != nil {
-		handleError(ctx, err, "list accounts")
+		handleAgentError(ctx, err, "list accounts")
 		return
 	}
 
@@ -39,7 +39,7 @@ func (h *Handler) GetUserAccount(ctx *gin.Context) {
 	userAddress := ctx.Param("user")
 	account, err := h.ctrl.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
-		handleError(ctx, err, "get account from db")
+		handleAgentError(ctx, err, "get account from db")
 		return
 	}
 
@@ -55,7 +55,7 @@ func (h *Handler) GetUserAccount(ctx *gin.Context) {
 //	@Success	202
 func (h *Handler) SyncUserAccounts(ctx *gin.Context) {
 	if err := h.ctrl.SyncUserAccounts(ctx); err != nil {
-		handleError(ctx, err, "synchronize accounts from the contract to the database")
+		handleAgentError(ctx, err, "synchronize accounts from the contract to the database")
 		return
 	}
 
@@ -73,7 +73,7 @@ func (h *Handler) SyncUserAccounts(ctx *gin.Context) {
 func (h *Handler) SyncUserAccount(ctx *gin.Context) {
 	userAddress := ctx.Param("user")
 	if err := h.ctrl.SyncUserAccount(ctx, common.HexToAddress(userAddress)); err != nil {
-		handleError(ctx, err, "synchronize account from the contract to the database")
+		handleAgentError(ctx, err, "synchronize account from the contract to the database")
 		return
 	}
 

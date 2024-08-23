@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/extractor"
 	"github.com/0glabs/0g-serving-agent/extractor/chatbot"
+	"github.com/0glabs/0g-serving-agent/extractor/zgstorage"
 	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 )
 
@@ -45,8 +46,7 @@ func (p *Proxy) Start() error {
 	}
 	for _, svc := range svcs {
 		switch svc.Type {
-		case "RPC":
-		case "chatbot":
+		case "zgStorage", "chatbot":
 			p.AddHTTPRoute(svc.Name, svc.URL, svc.Type)
 		default:
 			return errors.New("invalid service type")
@@ -125,50 +125,56 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 
 	var extractor extractor.ProviderReqRespExtractor
 	switch svcType {
+	case "zgStorage":
+		extractor = &zgstorage.ProviderZgStorage{}
 	case "chatbot":
 		extractor = &chatbot.ProviderChatBot{}
 	default:
-		handleError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		handleAgentError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
 	svc, err := p.ctrl.GetService(route)
 	if err != nil {
-		handleError(ctx, err, "get service")
+		handleAgentError(ctx, err, "get service")
 		return
 	}
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
-		handleError(ctx, err, "get model.request from HTTP request")
+		handleAgentError(ctx, err, "get model.request from HTTP request")
 		return
 	}
 	fee := svc.InputPrice*req.InputCount + svc.OutputPrice*req.PreviousOutputCount
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
-		handleError(ctx, err, "read request body")
+		handleAgentError(ctx, err, "read request body")
 		return
 	}
 	inputCount, err := extractor.GetInputCount(reqBody)
 	if err != nil {
-		handleError(ctx, err, "get input count")
+		handleAgentError(ctx, err, "get input count")
 		return
 	}
 	if err := p.ctrl.ValidateRequest(ctx, req, fee, inputCount); err != nil {
-		handleError(ctx, err, "validate request")
+		handleAgentError(ctx, err, "validate request")
 		return
 	}
 	if err := p.ctrl.CreateRequest(req); err != nil {
-		handleError(ctx, err, "create request")
+		handleAgentError(ctx, err, "create request")
 		return
 	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, route, reqBody)
 	if err != nil {
-		handleError(ctx, err, "prepare HTTP request")
+		handleAgentError(ctx, err, "prepare HTTP request")
 		return
 	}
 	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee)
 }
 
-func handleError(ctx *gin.Context, err error, context string) {
-	errors.Response(ctx, errors.Wrap(err, "Provider proxy: handle proxied service, "+context))
+func handleAgentError(ctx *gin.Context, err error, context string) {
+	info := "Provider proxy: handle proxied service"
+	if context != "" {
+		info += (", " + context)
+	}
+	errors.Response(ctx, errors.Wrap(err, info))
 }

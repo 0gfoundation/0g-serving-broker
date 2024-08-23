@@ -3,6 +3,7 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
 	"github.com/0glabs/0g-serving-agent/provider/internal/proxy"
 )
@@ -39,4 +40,12 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/user/:user", h.GetUserAccount)
 	group.POST("/user/:user/sync", h.SyncUserAccount)
 	group.POST("sync-account", h.SyncUserAccounts)
+}
+
+func handleAgentError(ctx *gin.Context, err error, context string) {
+	info := "Provider"
+	if context != "" {
+		info += (": " + context)
+	}
+	errors.Response(ctx, errors.Wrap(err, info))
 }

@@ -20,7 +20,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	svc, err := h.ctrl.GetService(ctx, providerAddress, name)
 	if err != nil {
-		handleError(ctx, err, "get service from db")
+		handleAgentError(ctx, err, "get service from db")
 		return
 	}
 
@@ -36,7 +36,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 func (h *Handler) ListService(ctx *gin.Context) {
 	list, err := h.ctrl.ListService(ctx)
 	if err != nil {
-		handleError(ctx, err, "list service")
+		handleAgentError(ctx, err, "list service")
 		return
 	}
 
