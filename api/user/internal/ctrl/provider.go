@@ -74,6 +74,22 @@ func (c Ctrl) ChargeProviderAccount(ctx context.Context, providerAddress common.
 	return errors.Wrapf(c.SyncProviderAccount(ctx, providerAddress), "update charged account in db")
 }
 
+func (c *Ctrl) updateSigner(ctx context.Context, providerAddress common.Address, pubKey [2]string) error {
+	signer, err := c.parseBigIntStringKey(pubKey)
+	if err != nil {
+		return errors.Wrap(err, "parse signer")
+	}
+	amount := big.NewInt(0)
+	if err := c.contract.DepositFund(ctx, providerAddress, *amount, signer); err != nil {
+		return errors.Wrap(err, "update signer by calling depositFund in contract")
+	}
+	err = c.db.UpdateProviderAccount(providerAddress.String(), model.Provider{
+		Provider: providerAddress.String(),
+		Signer:   model.StringSlice{pubKey[0], pubKey[1]},
+	})
+	return errors.Wrap(err, "update signer in db")
+}
+
 func (c Ctrl) SyncProviderAccounts(ctx context.Context) error {
 	accounts, err := c.listProviderAccountFromContract(ctx)
 	if err != nil {
@@ -164,6 +180,7 @@ func parseAccount(account contract.Account, ignoreProcessedRefund bool) model.Pr
 		Balance:       model.PtrOf(account.Balance.Int64()),
 		PendingRefund: model.PtrOf(account.PendingRefund.Int64()),
 		Refunds:       refunds,
+		Signer:        []string{account.Signer[0].String(), account.Signer[1].String()},
 		Nonce:         model.PtrOf(account.Nonce.Int64()),
 	}
 }

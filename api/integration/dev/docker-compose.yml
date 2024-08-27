@@ -1,13 +1,11 @@
 services:
   mysql:
     image: mysql:8.0
-    container_name: 0g-serving-provider-agent-db
+    container_name: 0g-serving-agent-db
     ports:
-      - "33061:3306"
+      - "33060:3306"
     environment:
       MYSQL_ROOT_PASSWORD: 123456
-      MYSQL_USER: provider
-      MYSQL_PASSWORD: provider
     volumes:
       - mysql-data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -26,7 +24,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - /etc/config/config.yaml:/etc/config.yaml
+      - ./config.yaml:/etc/config.yaml
     command: 0g-provider-server
     depends_on:
       mysql:
@@ -39,10 +37,39 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - /etc/config/config.yaml:/etc/config.yaml
+      - ./config.yaml:/etc/config.yaml
     command: 0g-provider-event
     depends_on:
       0g-serving-provider-agent:
+        condition: service_started
+
+  0g-serving-user-agent:
+    image: 0g-seving-agent:dev1-amd64
+    container_name: 0g-serving-user-agent
+    ports:
+      - "1034:1034"
+    environment:
+      - PORT=1034
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config.yaml:/etc/config.yaml
+    command: 0g-user-server
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  0g-serving-user-event:
+    image: 0g-seving-agent:dev1-amd64
+    container_name: 0g-serving-user-event
+    environment:
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config.yaml:/etc/config.yaml
+    command: 0g-user-event
+    depends_on:
+      0g-serving-user-agent:
         condition: service_started
 
   nginx:
@@ -59,9 +86,9 @@ services:
 
   zk:
     image: zk:v1
-    container_name: zk-provider-server
+    container_name: zk-server
     ports:
-      - "3001:3000"
+      - "3000:3000"
 
 volumes:
   mysql-data:

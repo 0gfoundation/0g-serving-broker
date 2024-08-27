@@ -331,6 +331,12 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/model.Refund"
                     }
+                },
+                "signer": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },

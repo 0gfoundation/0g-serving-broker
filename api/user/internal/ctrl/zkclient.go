@@ -10,6 +10,7 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	database "github.com/0glabs/0g-serving-agent/user/internal/db"
 	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {
@@ -27,9 +28,19 @@ func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {
 	if err != nil {
 		return pair, errors.Wrap(err, "generate key pair from zk server")
 	}
+
+	// To align with data stored in contract
+	bigIntPrivateKey, err := c.parseHexadecimalKey([2]string(ret.Payload.Privkey))
+	if err != nil {
+		return pair, errors.Wrap(err, "parse hexadecimal private key")
+	}
+	bigIntPublicKey, err := c.parseHexadecimalKey([2]string(ret.Payload.Pubkey))
+	if err != nil {
+		return pair, errors.Wrap(err, "parse hexadecimal public key")
+	}
 	pair = model.KeyPair{
-		ZKPrivateKey: ret.Payload.Privkey,
-		ZKPublicKey:  [2]string(ret.Payload.Pubkey),
+		ZKPrivateKey: []string{bigIntPrivateKey[0].String(), bigIntPrivateKey[1].String()},
+		ZKPublicKey:  [2]string{bigIntPublicKey[0].String(), bigIntPublicKey[1].String()},
 	}
 	err = c.db.AddOrUpdateKeyPair(pair)
 	if err != nil {
@@ -38,10 +49,19 @@ func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {
 	return pair, nil
 }
 
-func (c *Ctrl) GenerateSignature(ctx context.Context, req *models.Request) (models.Signatures, error) {
+func (c *Ctrl) GenerateSignature(ctx context.Context, req *models.Request, signer []string) (models.Signatures, error) {
+	if len(signer) < 2 {
+		return nil, errors.New("signer in account is invalid")
+	}
 	keyPair, err := c.getOrCreateKeyPair(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if keyPair.ZKPublicKey[0] != signer[0] || keyPair.ZKPublicKey[1] != signer[1] {
+		err := c.updateSigner(ctx, common.HexToAddress(req.ProviderAddress), keyPair.ZKPublicKey)
+		if err != nil {
+			return nil, errors.Wrap(err, "update signer")
+		}
 	}
 	ret, err := c.zk.Operation.GenerateSignature(
 		operations.NewGenerateSignatureParamsWithContext(ctx).WithBody(operations.GenerateSignatureBody{
@@ -61,13 +81,31 @@ func (c *Ctrl) getSigner(ctx context.Context) ([2]*big.Int, error) {
 	if err != nil {
 		return [2]*big.Int{}, err
 	}
-	pubKey0, err := util.HexadecimalStringToBigInt(keyPair.ZKPublicKey[0])
+	return c.parseBigIntStringKey([2]string(keyPair.ZKPublicKey))
+}
+
+func (c *Ctrl) parseHexadecimalKey(old [2]string) ([2]*big.Int, error) {
+	new0, err := util.HexadecimalStringToBigInt(old[0])
 	if err != nil {
 		return [2]*big.Int{}, err
 	}
-	pubKey1, err := util.HexadecimalStringToBigInt(keyPair.ZKPublicKey[1])
+	new1, err := util.HexadecimalStringToBigInt(old[1])
 	if err != nil {
 		return [2]*big.Int{}, err
 	}
-	return [2]*big.Int{pubKey0, pubKey1}, nil
+	return [2]*big.Int{new0, new1}, nil
+}
+
+func (c *Ctrl) parseBigIntStringKey(old [2]string) ([2]*big.Int, error) {
+	new0 := new(big.Int)
+	_, success := new0.SetString(old[0], 10)
+	if !success {
+		return [2]*big.Int{}, errors.New("parse bigInt.string value to bigInt")
+	}
+	new1 := new(big.Int)
+	_, success = new1.SetString(old[1], 10)
+	if !success {
+		return [2]*big.Int{}, errors.New("parse bigInt.string value to bigInt")
+	}
+	return [2]*big.Int{new0, new1}, nil
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"time"
 
+	"github.com/0glabs/0g-serving-agent/provider/model"
 	"github.com/go-gormigrate/gormigrate/v2"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
@@ -37,6 +38,7 @@ func (d *DB) Migrate() error {
 					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
 					LockBalance            *int64                `gorm:"type:bigint;not null;default:0"`
 					LastBalanceCheckTime   *time.Time            `json:"lastBalanceCheckTime"`
+					Signer                 model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
 					UnsettledFee           *int64                `gorm:"type:bigint;not null;default:0"`
 					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
 				}

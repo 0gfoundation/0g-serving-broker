@@ -32,7 +32,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    docker compose -f ./integration/provider/docker-compose.yml up -d
    ```
 
-   The provider agent will be listening on 127.0.0.1:3080
+   The provider agent will be listening on 127.0.0.1:8080
 
 2. Start the User Agent
 
@@ -48,7 +48,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 1. Provider Registers the Service with the Provider Agent:
 
    ```sh
-   curl -X POST http://127.0.0.1:3080>/v1/service \
+   curl -X POST http://127.0.0.1:8080>/v1/service \
    -H "Content-Type: application/json" \
    -d '{
         "URL": "https://chatbot.com",
@@ -87,13 +87,13 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 4. Provider Settles the Fee:
 
    ```sh
-   curl -X POST http://127.0.0.1:3080/v1/settle
+   curl -X POST http://127.0.0.1:8080/v1/settle
    ```
 
 5. Provider Deletes the Service:
 
    ```sh
-   curl -X DELETE http://127.0.0.1:3080/v1/service/<service_name>
+   curl -X DELETE http://127.0.0.1:8080/v1/service/<service_name>
    ```
 
 6. User Checks Remaining Balance:

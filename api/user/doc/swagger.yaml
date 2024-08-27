@@ -21,6 +21,10 @@ definitions:
         items:
           $ref: '#/definitions/model.Refund'
         type: array
+      signer:
+        items:
+          type: string
+        type: array
     type: object
   model.ProviderList:
     properties:

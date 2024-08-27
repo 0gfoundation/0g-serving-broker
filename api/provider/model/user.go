@@ -12,6 +12,7 @@ type User struct {
 	LockBalance            *int64                `gorm:"type:bigint;not null;default:0" json:"lockBalance"`
 	LastBalanceCheckTime   *time.Time            `json:"lastBalanceCheckTime"`
 	LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0" json:"lastResponseTokenCount"`
+	Signer                 StringSlice           `gorm:"type:json;not null;default:('[]')" json:"signer"`
 	UnsettledFee           *int64                `gorm:"type:bigint;not null;default:0" json:"unsettledFee"`
 	DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider" json:"-" readonly:"true"`
 }

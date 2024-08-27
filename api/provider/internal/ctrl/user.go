@@ -30,6 +30,7 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 		LockBalance:            model.PtrOf(contractAccount.Balance.Int64() - contractAccount.PendingRefund.Int64()),
 		LastBalanceCheckTime:   model.PtrOf(time.Now().UTC()),
 		UnsettledFee:           model.PtrOf(int64(0)),
+		Signer:                 []string{contractAccount.Signer[0].String(), contractAccount.Signer[1].String()},
 		LastResponseTokenCount: model.PtrOf(int64(0)),
 	}
 
@@ -95,6 +96,7 @@ func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) 
 	new := model.User{
 		LockBalance:          model.PtrOf(account.Balance.Int64() - account.PendingRefund.Int64()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+		Signer:               []string{account.Signer[0].String(), account.Signer[1].String()},
 	}
 	return errors.Wrap(c.db.UpdateUserAccount(userAddress.String(), new), "update account in db")
 }
@@ -113,5 +115,6 @@ func parse(account contract.Account) model.User {
 		User:                 account.User.String(),
 		LockBalance:          model.PtrOf(account.Balance.Int64() - account.PendingRefund.Int64()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+		Signer:               []string{account.Signer[0].String(), account.Signer[1].String()},
 	}
 }

@@ -41,7 +41,7 @@ func Main() {
 	}
 	defer contract.Close()
 
-	zk := zkclient.NewZKClient(config.ZKProver.Host, config.ZKProver.RequestLength)
+	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
 	engine := gin.New()
 	ctrl := ctrl.New(db, contract, zk, config.ServingUrl, config.Interval.AutoSettleBufferTime)
 	ctx := context.Background()

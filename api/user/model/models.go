@@ -5,3 +5,5 @@ package model
 type ListMeta struct {
 	Total uint64 `json:"total"`
 }
+
+type StringSlice []string

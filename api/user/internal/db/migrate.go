@@ -3,6 +3,7 @@ package db
 import (
 	"time"
 
+	"github.com/0glabs/0g-serving-agent/user/model"
 	"github.com/go-gormigrate/gormigrate/v2"
 	"github.com/pkg/errors"
 	"gorm.io/datatypes"
@@ -34,6 +35,7 @@ func (d *DB) Migrate() error {
 					PendingRefund          *int64                `gorm:"type:bigint;not null;default:0"`
 					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
 					Nonce                  *int64                `gorm:"type:bigint;not null;default:1"`
+					Signer                 model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
 					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_provider"`
 				}
 				return tx.AutoMigrate(&Provider{})

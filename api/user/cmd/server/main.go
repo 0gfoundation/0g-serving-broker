@@ -42,7 +42,7 @@ func Main() {
 	defer contract.Close()
 
 	ctx := context.Background()
-	zk := zkclient.NewZKClient(config.ZKProver.Host, config.ZKProver.RequestLength)
+	zk := zkclient.NewZKClient(config.ZKProver.User, config.ZKProver.RequestLength)
 
 	r := gin.New()
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)

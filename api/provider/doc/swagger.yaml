@@ -46,6 +46,10 @@ definitions:
         type: integer
       lockBalance:
         type: integer
+      signer:
+        items:
+          type: string
+        type: array
       unsettledFee:
         type: integer
       user:

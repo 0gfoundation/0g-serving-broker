@@ -11,6 +11,7 @@ type Provider struct {
 	Refunds                Refunds               `gorm:"-" json:"refunds"`
 	LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0" json:"lastResponseTokenCount"`
 	Nonce                  *int64                `gorm:"type:bigint;not null;default:1" json:"nonce"`
+	Signer                 StringSlice           `gorm:"type:json;not null;default:('[]')" json:"signer"`
 	DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider" json:"-" readonly:"true"`
 }
 

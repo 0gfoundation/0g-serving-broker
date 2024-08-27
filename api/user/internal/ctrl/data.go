@@ -107,7 +107,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 		ProviderAddress: provider.Provider,
 		UserAddress:     c.contract.UserAddress,
 	}
-	sig, err := c.GenerateSignature(ctx, reqInZK)
+	sig, err := c.GenerateSignature(ctx, reqInZK, provider.Signer)
 	if err != nil {
 		return nil, err
 	}

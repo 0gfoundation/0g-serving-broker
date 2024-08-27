@@ -3,6 +3,10 @@
 package model
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -66,6 +70,7 @@ func (d *User) Bind(ctx *gin.Context) error {
 	d.LockBalance = r.LockBalance
 	d.LastBalanceCheckTime = r.LastBalanceCheckTime
 	d.LastResponseTokenCount = r.LastResponseTokenCount
+	d.Signer = r.Signer
 	d.UnsettledFee = r.UnsettledFee
 
 	return nil
@@ -78,3 +83,14 @@ func (d *User) BindWithReadonly(ctx *gin.Context, old User) error {
 
 	return nil
 }
+
+//=============== implementation of sql.scanner and sql.valuer  ===============
+func (m StringSlice) Value() (driver.Value, error) {
+	return json.Marshal(m)
+}
+func (m *StringSlice) Scan(value interface{}) error {
+	if v, ok := value.([]byte); ok {
+		return json.Unmarshal(v, m)
+	}
+	return fmt.Errorf("can't convert %T to StringSlice", value)
+}	

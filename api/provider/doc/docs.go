@@ -306,6 +306,12 @@ const docTemplate = `{
                 "lockBalance": {
                     "type": "integer"
                 },
+                "signer": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "unsettledFee": {
                     "type": "integer"
                 },

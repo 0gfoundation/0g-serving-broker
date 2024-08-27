@@ -28,7 +28,8 @@ type Config struct {
 	Networks   map[string]*NetworkConfig `mapstructure:"networks" yaml:"networks"`
 	ServingUrl string                    `yaml:"servingUrl"`
 	ZKProver   struct {
-		Host          string `yaml:"host"`
+		Provider      string `yaml:"provider"`
+		User          string `yaml:"user"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkProver"`
 }
@@ -85,10 +86,12 @@ func GetConfig() *Config {
 				SettlementProcessor:      600,
 			},
 			ZKProver: struct {
-				Host          string `yaml:"host"`
+				Provider      string `yaml:"provider"`
+				User          string `yaml:"user"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Host:          "localhost:3000",
+				Provider:      "zk-provider-server:3000",
+				User:          "zk-user-server:3000",
 				RequestLength: 40,
 			},
 		}
