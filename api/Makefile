@@ -38,9 +38,12 @@ release: oci
 			oci:build/oci:$(VERSION)-$$arch $(IMAGE_DEST):$(VERSION)-$$arch; \
 	done
 
+hardhat-env:
+	docker build -f ./libs/0g-serving-contract/intergrate/Dockerfile -t hardhat-node-with-contract:dev ./libs/0g-serving-contract
+
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
 	go install -v github.com/swaggo/swag/cmd/swag@v1.8.10
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
 
-.PHONY: lint build clean oci release install-tools
+.PHONY: lint build clean oci release hardhat-env install-tools

@@ -1,4 +1,18 @@
 services:
+  hardhat-node-with-contract:
+    image: hardhat-node-with-contract:dev
+    container_name: hardhat-node-with-contract
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -s -X POST --data ''{"jsonrpc":"2.0","method":"eth_getCode","params":["0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9", "latest"],"id":1}'' -H ''Content-Type: application/json'' http://localhost:8545 | jq -e ''.result != "0x"''',
+        ]
+      interval: 10s
+      retries: 5
+
   mysql:
     image: mysql:8.0
     container_name: 0g-serving-agent-db
@@ -17,7 +31,7 @@ services:
       - default
 
   0g-serving-provider-agent:
-    image: 0g-seving-agent:dev1-amd64
+    image: 0g-seving-agent:dev-amd64
     container_name: 0g-serving-provider-agent
     environment:
       - PORT=8080
@@ -29,9 +43,11 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      hardhat-node-with-contract:
+        condition: service_healthy
 
   0g-serving-provider-event:
-    image: 0g-seving-agent:dev1-amd64
+    image: 0g-seving-agent:dev-amd64
     container_name: 0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
@@ -44,7 +60,7 @@ services:
         condition: service_started
 
   0g-serving-user-agent:
-    image: 0g-seving-agent:dev1-amd64
+    image: 0g-seving-agent:dev-amd64
     container_name: 0g-serving-user-agent
     ports:
       - "1034:1034"
@@ -58,9 +74,11 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      hardhat-node-with-contract:
+        condition: service_healthy
 
   0g-serving-user-event:
-    image: 0g-seving-agent:dev1-amd64
+    image: 0g-seving-agent:dev-amd64
     container_name: 0g-serving-user-event
     environment:
       - CONFIG_FILE=/etc/config.yaml

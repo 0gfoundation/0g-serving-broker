@@ -50,14 +50,11 @@ func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {
 }
 
 func (c *Ctrl) GenerateSignature(ctx context.Context, req *models.Request, signer []string) (models.Signatures, error) {
-	if len(signer) < 2 {
-		return nil, errors.New("signer in account is invalid")
-	}
 	keyPair, err := c.getOrCreateKeyPair(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if keyPair.ZKPublicKey[0] != signer[0] || keyPair.ZKPublicKey[1] != signer[1] {
+	if len(signer) == 2 && (keyPair.ZKPublicKey[0] != signer[0] || keyPair.ZKPublicKey[1] != signer[1]) {
 		err := c.updateSigner(ctx, common.HexToAddress(req.ProviderAddress), keyPair.ZKPublicKey)
 		if err != nil {
 			return nil, errors.Wrap(err, "update signer")
