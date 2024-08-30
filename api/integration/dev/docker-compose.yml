@@ -5,11 +5,7 @@ services:
     ports:
       - "8545:8545"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'curl -s -X POST --data ''{"jsonrpc":"2.0","method":"eth_getCode","params":["0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9", "latest"],"id":1}'' -H ''Content-Type: application/json'' http://localhost:8545 | jq -e ''.result != "0x"''',
-        ]
+      test: ["CMD-SHELL", "/usr/local/bin/healthcheck.sh"]
       interval: 10s
       retries: 5
 
