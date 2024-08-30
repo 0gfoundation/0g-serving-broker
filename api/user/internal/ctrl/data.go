@@ -126,6 +126,19 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 	}
 	util.SetHeaders(req, headers)
 
+	reqInDB := model.Request{
+		ProviderAddress:     provider.Provider,
+		Nonce:               *provider.Nonce,
+		ServiceName:         svcName,
+		InputCount:          inputCount,
+		PreviousOutputCount: previousOutputCount,
+		Fee:                 fee,
+		Signature:           string(sigJson),
+	}
+	if err := c.CreateRequest(reqInDB); err != nil {
+		return req, err
+	}
+
 	for key, values := range ctx.Request.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)

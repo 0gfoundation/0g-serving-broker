@@ -34,9 +34,12 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/service", h.ListService)
 	group.GET("/provider/:provider/service/:service", h.GetService)
 
-	// request
+	// fetch data
 	group.POST("/provider/:provider/service/:service/*suffix", h.GetDataWithSuffix)
 	group.POST("/provider/:provider/service/:service", h.GetData)
+
+	// request
+	group.POST("/request", h.ListRequest)
 }
 
 func handleAgentError(ctx *gin.Context, err error, context string) {

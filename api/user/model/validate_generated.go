@@ -38,6 +38,37 @@ func ValidateUpdateRefund(oldVal, newVal Refund) error {
 	return nil
 }
 
+func ValidateUpdateRequest(oldVal, newVal Request) error {
+	fields := []string{}
+	
+	if !apiequality.Semantic.DeepEqual(newVal.ProviderAddress, oldVal.ProviderAddress){
+		fields = append(fields, "providerAddress")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.Nonce, oldVal.Nonce){
+		fields = append(fields, "nonce")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.ServiceName, oldVal.ServiceName){
+		fields = append(fields, "serviceName")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.InputCount, oldVal.InputCount){
+		fields = append(fields, "inputCount")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.PreviousOutputCount, oldVal.PreviousOutputCount){
+		fields = append(fields, "previousOutputCount")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.Fee, oldVal.Fee){
+		fields = append(fields, "fee")
+	}
+	if !apiequality.Semantic.DeepEqual(newVal.Signature, oldVal.Signature){
+		fields = append(fields, "signature")
+	}
+
+	if len(fields) > 0 {
+		return fmt.Errorf("update field: [%s] not allowed", strings.Join(fields, ","))
+	}
+	return nil
+}
+
 func ValidateUpdateSystemInfo(oldVal, newVal SystemInfo) error {
 	fields := []string{}
 	

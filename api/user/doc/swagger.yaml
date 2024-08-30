@@ -50,6 +50,42 @@ definitions:
       provider:
         type: string
     type: object
+  model.Request:
+    properties:
+      fee:
+        type: integer
+      inputCount:
+        type: integer
+      nonce:
+        type: integer
+      previousOutputCount:
+        type: integer
+      providerAddress:
+        type: string
+      serviceName:
+        type: string
+      signature:
+        type: string
+    required:
+    - fee
+    - inputCount
+    - nonce
+    - previousOutputCount
+    - providerAddress
+    - serviceName
+    - signature
+    type: object
+  model.RequestList:
+    properties:
+      fee:
+        type: integer
+      items:
+        items:
+          $ref: '#/definitions/model.Request'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
   model.Service:
     properties:
       inputPrice:
@@ -254,6 +290,16 @@ paths:
           description: Accepted
       tags:
       - provider
+  /request:
+    get:
+      operationId: listRequest
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.RequestList'
+      tags:
+      - request
   /service:
     get:
       operationId: listService

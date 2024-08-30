@@ -268,6 +268,22 @@ const docTemplate = `{
                 }
             }
         },
+        "/request": {
+            "get": {
+                "tags": [
+                    "request"
+                ],
+                "operationId": "listRequest",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.RequestList"
+                        }
+                    }
+                }
+            }
+        },
         "/service": {
             "get": {
                 "tags": [
@@ -373,6 +389,58 @@ const docTemplate = `{
                 },
                 "provider": {
                     "type": "string"
+                }
+            }
+        },
+        "model.Request": {
+            "type": "object",
+            "required": [
+                "fee",
+                "inputCount",
+                "nonce",
+                "previousOutputCount",
+                "providerAddress",
+                "serviceName",
+                "signature"
+            ],
+            "properties": {
+                "fee": {
+                    "type": "integer"
+                },
+                "inputCount": {
+                    "type": "integer"
+                },
+                "nonce": {
+                    "type": "integer"
+                },
+                "previousOutputCount": {
+                    "type": "integer"
+                },
+                "providerAddress": {
+                    "type": "string"
+                },
+                "serviceName": {
+                    "type": "string"
+                },
+                "signature": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.RequestList": {
+            "type": "object",
+            "properties": {
+                "fee": {
+                    "type": "integer"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.Request"
+                    }
+                },
+                "metadata": {
+                    "$ref": "#/definitions/model.ListMeta"
                 }
             }
         },

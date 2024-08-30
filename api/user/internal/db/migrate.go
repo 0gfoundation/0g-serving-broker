@@ -54,6 +54,21 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Refund{})
 			},
 		},
+		{
+			ID: "create-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					ProviderAddress     string `gorm:"type:varchar(255);not null;uniqueIndex:providerAddress_nonce"`
+					Nonce               int64  `gorm:"type:bigint;not null;index:providerAddress_nonce"`
+					ServiceName         string `gorm:"type:varchar(255);not null"`
+					InputCount          int64  `gorm:"type:bigint;not null"`
+					PreviousOutputCount int64  `gorm:"type:bigint;not null"`
+					Fee                 int64  `gorm:"type:bigint;not null"`
+					Signature           string `gorm:"type:varchar(255);not null"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

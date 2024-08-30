@@ -3,15 +3,14 @@ package db
 import (
 	"database/sql"
 
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-agent/user/model"
 )
 
-func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
+func (d *DB) ListRequest() ([]model.Request, int, error) {
 	list := []model.Request{}
 	var totalFee sql.NullInt64
 
 	ret := d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed).
 		Order("nonce ASC").
 		Find(&list)
 
@@ -20,7 +19,6 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	}
 
 	ret = d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed).
 		Select("SUM(fee)").Scan(&totalFee)
 
 	var totalFeeInt int
@@ -30,13 +28,6 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 		totalFeeInt = 0
 	}
 	return list, totalFeeInt, ret.Error
-}
-
-func (d *DB) UpdateRequest() error {
-	ret := d.db.Model(&model.Request{}).
-		Where("processed = ?", false).
-		Updates(model.Request{Processed: true})
-	return ret.Error
 }
 
 func (d *DB) CreateRequest(req model.Request) error {

@@ -58,6 +58,31 @@ func (d *Refund) BindWithReadonly(ctx *gin.Context, old Refund) error {
 	return nil
 }
 
+// ================================= Request =================================
+func (d *Request) Bind(ctx *gin.Context) error {
+	var r Request
+	if err := ctx.ShouldBindJSON(&r); err != nil {
+		return err
+	}
+	d.ProviderAddress = r.ProviderAddress
+	d.Nonce = r.Nonce
+	d.ServiceName = r.ServiceName
+	d.InputCount = r.InputCount
+	d.PreviousOutputCount = r.PreviousOutputCount
+	d.Fee = r.Fee
+	d.Signature = r.Signature
+
+	return nil
+}
+
+func (d *Request) BindWithReadonly(ctx *gin.Context, old Request) error {
+	if err := d.Bind(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // ================================= SystemInfo =================================
 func (d *SystemInfo) Bind(ctx *gin.Context) error {
 	var r SystemInfo
