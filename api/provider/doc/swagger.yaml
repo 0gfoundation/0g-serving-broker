@@ -5,6 +5,44 @@ definitions:
       total:
         type: integer
     type: object
+  model.Request:
+    properties:
+      fee:
+        type: integer
+      inputCount:
+        type: integer
+      nonce:
+        type: integer
+      previousOutputCount:
+        type: integer
+      processed:
+        type: boolean
+      serviceName:
+        type: string
+      signature:
+        type: string
+      userAddress:
+        type: string
+    required:
+    - fee
+    - inputCount
+    - nonce
+    - previousOutputCount
+    - serviceName
+    - signature
+    - userAddress
+    type: object
+  model.RequestList:
+    properties:
+      fee:
+        type: integer
+      items:
+        items:
+          $ref: '#/definitions/model.Request'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
   model.Service:
     properties:
       inputPrice:
@@ -71,6 +109,21 @@ info:
   title: 0G Serving Provider Agent API
   version: "1.0"
 paths:
+  /request:
+    get:
+      operationId: listRequest
+      parameters:
+      - description: Processed
+        in: query
+        name: processed
+        type: boolean
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.RequestList'
+      tags:
+      - request
   /service:
     get:
       operationId: listService

@@ -10,3 +10,13 @@ type Request struct {
 	Signature           string `gorm:"type:varchar(255);not null" json:"signature" binding:"required" immutable:"true"`
 	Processed           bool   `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce" json:"processed"`
 }
+
+type RequestList struct {
+	Metadata ListMeta  `json:"metadata"`
+	Items    []Request `json:"items"`
+	Fee      int       `json:"fee"`
+}
+
+type RequestListOptions struct {
+	Processed bool `form:"processed"`
+}

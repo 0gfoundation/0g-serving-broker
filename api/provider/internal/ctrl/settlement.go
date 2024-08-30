@@ -15,7 +15,9 @@ import (
 )
 
 func (c *Ctrl) SettleFees(ctx context.Context) error {
-	reqs, err := c.db.ListRequest()
+	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
+		Processed: false,
+	})
 	if err != nil {
 		return errors.Wrap(err, "list request from db")
 	}
