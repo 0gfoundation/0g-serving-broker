@@ -9,15 +9,14 @@
  * https://github.com/swagger-api/swagger-codegen.git
  * Do not edit the class manually.
  */
-import { ModelRefund } from './modelRefund';
 
 
-export interface ModelProvider { 
-    balance?: number;
-    lastResponseTokenCount?: number;
-    nonce?: number;
-    pendingRefund?: number;
-    provider?: string;
-    refunds?: Array<ModelRefund>;
-    signer?: Array<string>;
+export interface ModelRequest { 
+    fee: number;
+    inputCount: number;
+    nonce: number;
+    previousOutputCount: number;
+    providerAddress: string;
+    serviceName: string;
+    signature: string;
 }
