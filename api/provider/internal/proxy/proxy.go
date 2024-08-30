@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"io"
-	"net/http"
 	"strings"
 	"sync"
 
@@ -59,15 +58,19 @@ func (p *Proxy) routeFilterMiddleware(ctx *gin.Context) {
 	route := strings.TrimPrefix(ctx.Request.URL.Path, constant.ServicePrefix+"/")
 	segments := strings.Split(route, "/")
 	if len(segments) == 0 || segments[0] == "" {
-		ctx.AbortWithStatus(http.StatusNotFound)
+		handleAgentError(ctx, errors.New("route is invalid"), "route filter middleware")
 		return
 	}
 
 	p.serviceRoutesLock.RLock()
 	valid, exists := p.serviceRoutes[segments[0]]
 	p.serviceRoutesLock.RUnlock()
-	if !exists || !valid {
-		ctx.AbortWithStatus(http.StatusNotFound)
+	if !exists {
+		handleAgentError(ctx, errors.New("route is not exist"), "route filter middleware")
+		return
+	}
+	if !valid {
+		handleAgentError(ctx, errors.New("route is deleted"), "route filter middleware")
 		return
 	}
 	ctx.Next()
@@ -104,8 +107,11 @@ func (p *Proxy) DeleteRoute(route string) {
 func (p *Proxy) UpdateRoute(route string, newTargetURL, newSvcType string) error {
 	//TODO: Add a URL validation
 	valid, exists := p.serviceRoutes[route]
-	if !exists || !valid {
-		return errors.New("route is not valid")
+	if !exists {
+		return errors.New("route is not exist")
+	}
+	if !valid {
+		return errors.New("route is deleted")
 	}
 
 	p.serviceRoutesLock.Lock()
