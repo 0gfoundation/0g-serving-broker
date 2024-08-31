@@ -94,30 +94,6 @@ func (h *Handler) Charge(ctx *gin.Context) {
 	ctx.Status(http.StatusAccepted)
 }
 
-// refund
-//
-//	@Description  This endpoint allows you to refund from an account
-//	@ID			refund
-//	@Tags		provider
-//	@Router		/provider/{provider}/refund [post]
-//	@Param		provider	path	string	true	"Provider address"
-//	@Param		body	body	model.Refund	true	"body"
-//	@Success	202
-func (h *Handler) Refund(ctx *gin.Context) {
-	providerAddress := ctx.Param("provider")
-	var refund model.Refund
-	if err := refund.Bind(ctx); err != nil {
-		handleAgentError(ctx, err, "bind refund body")
-		return
-	}
-	if err := h.ctrl.RequestRefund(ctx, common.HexToAddress(providerAddress), refund); err != nil {
-		handleAgentError(ctx, err, "process refund")
-		return
-	}
-
-	ctx.Status(http.StatusAccepted)
-}
-
 // syncProviderAccounts
 //
 //	@Description  This endpoint allows you to synchronize information of all accounts from the contract

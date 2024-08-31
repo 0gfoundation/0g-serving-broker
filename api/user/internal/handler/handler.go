@@ -28,7 +28,6 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.POST("sync", h.SyncProviderAccounts)
 	group.POST("/provider/:provider/sync", h.SyncProviderAccount)
 	group.POST("/provider/:provider/charge", h.Charge)
-	group.POST("/provider/:provider/refund", h.Refund)
 
 	// service
 	group.GET("/service", h.ListService)
@@ -40,6 +39,10 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// request
 	group.GET("/request", h.ListRequest)
+
+	// refund
+	group.POST("/provider/:provider/refund", h.Refund)
+	group.GET("/refund", h.ListRefund)
 }
 
 func handleAgentError(ctx *gin.Context, err error, context string) {

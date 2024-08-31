@@ -18,3 +18,9 @@ type Refund struct {
 	Amount    *int64     `gorm:"type:bigint;not null;default:0" json:"amount"`
 	Processed *bool      `gorm:"type:tinyint(1);not null;default:0" json:"processed"`
 }
+
+type RefundList struct {
+	Metadata ListMeta `json:"metadata"`
+	Items    []Refund `json:"items"`
+	Fee      int      `json:"fee"`
+}

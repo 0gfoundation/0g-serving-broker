@@ -50,6 +50,17 @@ definitions:
       provider:
         type: string
     type: object
+  model.RefundList:
+    properties:
+      fee:
+        type: integer
+      items:
+        items:
+          $ref: '#/definitions/model.Refund'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
   model.Request:
     properties:
       fee:
@@ -198,7 +209,7 @@ paths:
         "202":
           description: Accepted
       tags:
-      - provider
+      - refund
   /provider/{provider}/service/{service}:
     get:
       operationId: getService
@@ -290,6 +301,21 @@ paths:
           description: Accepted
       tags:
       - provider
+  /refund:
+    get:
+      operationId: listRefund
+      parameters:
+      - description: Processed
+        in: query
+        name: processed
+        type: boolean
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.RefundList'
+      tags:
+      - refund
   /request:
     get:
       operationId: listRequest

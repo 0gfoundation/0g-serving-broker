@@ -80,3 +80,11 @@ func (c Ctrl) ProcessRefunds(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (c *Ctrl) ListRefund(opt model.RefundListOptions) ([]model.Refund, int, error) {
+	list, fee, err := c.db.ListRefund1(opt)
+	if err != nil {
+		return nil, 0, errors.Wrap(err, "list refund from db")
+	}
+	return list, fee, nil
+}

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"errors"
 	"strconv"
 	"strings"
@@ -36,6 +37,36 @@ func (d *DB) ListRefund(opt model.RefundListOptions) ([]model.Refund, error) {
 	list := []model.Refund{}
 	ret := tx.Order("created_at DESC").Find(&list)
 	return list, ret.Error
+}
+
+func (d *DB) ListRefund1(opt model.RefundListOptions) ([]model.Refund, int, error) {
+	tx := d.db.Model(model.Refund{})
+
+	if opt.Processed != nil {
+		tx = tx.Where("processed = ?", *opt.Processed)
+	}
+	if opt.MaxCreatedAt != nil {
+		tx = tx.Where("created_at < ?", *opt.MaxCreatedAt)
+	}
+
+	list := []model.Refund{}
+	var totalFee sql.NullInt64
+
+	ret := tx.Order("created_at DESC").Find(&list)
+	if ret.Error != nil {
+		return list, 0, ret.Error
+	}
+
+	ret = d.db.Model(model.Refund{}).
+		Select("SUM(Amount)").Scan(&totalFee)
+
+	var totalFeeInt int
+	if totalFee.Valid {
+		totalFeeInt = int(totalFee.Int64)
+	} else {
+		totalFeeInt = 0
+	}
+	return list, totalFeeInt, ret.Error
 }
 
 func (d *DB) DeleteRefund(providerAddress string, index int64) error {

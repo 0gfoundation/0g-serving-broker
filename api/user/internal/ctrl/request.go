@@ -12,7 +12,7 @@ func (c *Ctrl) CreateRequest(req model.Request) error {
 func (c *Ctrl) ListRequest() ([]model.Request, int, error) {
 	list, fee, err := c.db.ListRequest()
 	if err != nil {
-		return nil, 0, errors.Wrap(err, "list service from db")
+		return nil, 0, errors.Wrap(err, "list request from db")
 	}
 	return list, fee, nil
 }

@@ -114,7 +114,7 @@ const docTemplate = `{
             "post": {
                 "description": "This endpoint allows you to refund from an account",
                 "tags": [
-                    "provider"
+                    "refund"
                 ],
                 "operationId": "refund",
                 "parameters": [
@@ -268,6 +268,30 @@ const docTemplate = `{
                 }
             }
         },
+        "/refund": {
+            "get": {
+                "tags": [
+                    "refund"
+                ],
+                "operationId": "listRefund",
+                "parameters": [
+                    {
+                        "type": "boolean",
+                        "description": "Processed",
+                        "name": "processed",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.RefundList"
+                        }
+                    }
+                }
+            }
+        },
         "/request": {
             "get": {
                 "tags": [
@@ -389,6 +413,23 @@ const docTemplate = `{
                 },
                 "provider": {
                     "type": "string"
+                }
+            }
+        },
+        "model.RefundList": {
+            "type": "object",
+            "properties": {
+                "fee": {
+                    "type": "integer"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.Refund"
+                    }
+                },
+                "metadata": {
+                    "$ref": "#/definitions/model.ListMeta"
                 }
             }
         },
