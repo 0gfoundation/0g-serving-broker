@@ -1,5 +1,5 @@
 import { del, get, post, put } from "../utils";
-import { ModelProvider, ModelProviderList, ModelRefund } from "../models";
+import { ModelProvider, ModelProviderList } from "../models";
 
 const getHeaders = () => ({});
 
@@ -20,12 +20,6 @@ export const addProviderAccount = (body: ModelProvider) =>
   });
 
 export const charge = (provider: string, body: ModelProvider) =>
-  post(`/v1/provider/${provider}`, {
-    headers: getHeaders(),
-    body: body,
-  });
-
-export const refund = (provider: string, body: ModelRefund) =>
   post(`/v1/provider/${provider}`, {
     headers: getHeaders(),
     body: body,

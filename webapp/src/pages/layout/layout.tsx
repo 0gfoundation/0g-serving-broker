@@ -24,7 +24,6 @@ const AgLayout: React.FC = () => {
       <Content className={styles.content}>
         <AccountDetail selectedAccount={selectedAccount} />
       </Content>
-      <Footer className={styles.footer}></Footer>
     </Layout>
   );
 };

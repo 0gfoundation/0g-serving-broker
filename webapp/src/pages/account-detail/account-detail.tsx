@@ -14,6 +14,8 @@ import {
   RocketTwoTone,
 } from "@ant-design/icons";
 import { alertError } from "@src/utils";
+import RequestOverview from "../request/request-overview";
+import RefundOverview from "../refund/refund-overview";
 
 export interface AccountDetailProps {
   selectedAccount: ModelProvider | null;
@@ -26,12 +28,12 @@ const AccountDetail: React.FC<AccountDetailProps> = ({ selectedAccount }) => {
     {
       key: "1",
       label: "Request Record",
-      children: "Content of Request Record",
+      children: <RequestOverview />,
     },
     {
       key: "2",
       label: "Refund Record",
-      children: "Content of Refund Record",
+      children: <RefundOverview />,
     },
   ];
 
@@ -78,7 +80,17 @@ const AccountDetail: React.FC<AccountDetailProps> = ({ selectedAccount }) => {
   }> = ({ account, onChange }) => (
     <div style={{ width: "100%" }}>
       {!loading ? (
-        <p style={{ fontSize: 30, width: "100%", margin: 0 }}>
+        <p
+          style={{
+            height: "80px",
+            fontSize: 30,
+            width: "100%",
+            margin: 0,
+            justifyContent: "center",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
           {((account.balance || 0) / 10 ** 18).toPrecision(2)} A0GI
         </p>
       ) : (
@@ -114,6 +126,7 @@ const AccountDetail: React.FC<AccountDetailProps> = ({ selectedAccount }) => {
           defaultActiveKey="1"
           items={items}
           onChange={onChange}
+          centered={true}
         />
       </div>
     </div>
