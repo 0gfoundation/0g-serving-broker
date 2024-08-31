@@ -57,7 +57,7 @@ func (d *DB) ListRefund1(opt model.RefundListOptions) ([]model.Refund, int, erro
 		return list, 0, ret.Error
 	}
 
-	ret = d.db.Model(model.Refund{}).
+	ret = tx.Model(model.Refund{}).
 		Select("SUM(Amount)").Scan(&totalFee)
 
 	var totalFeeInt int
