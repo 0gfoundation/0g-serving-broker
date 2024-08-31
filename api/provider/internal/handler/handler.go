@@ -42,7 +42,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.POST("sync-account", h.SyncUserAccounts)
 
 	// request
-	group.POST("/request", h.ListRequest)
+	group.GET("/request", h.ListRequest)
 }
 
 func handleAgentError(ctx *gin.Context, err error, context string) {
