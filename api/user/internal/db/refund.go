@@ -25,21 +25,7 @@ func (d *DB) GetRefund(providerAddress string, index int64) (model.Refund, error
 	return old, nil
 }
 
-func (d *DB) ListRefund(opt model.RefundListOptions) ([]model.Refund, error) {
-	tx := d.db.Model(model.Refund{})
-
-	if opt.Processed != nil {
-		tx = tx.Where("processed = ?", *opt.Processed)
-	}
-	if opt.MaxCreatedAt != nil {
-		tx = tx.Where("created_at < ?", *opt.MaxCreatedAt)
-	}
-	list := []model.Refund{}
-	ret := tx.Order("created_at DESC").Find(&list)
-	return list, ret.Error
-}
-
-func (d *DB) ListRefund1(opt model.RefundListOptions) ([]model.Refund, int, error) {
+func (d *DB) ListRefund(opt model.RefundListOptions) ([]model.Refund, int, error) {
 	tx := d.db.Model(model.Refund{})
 
 	if opt.Processed != nil {
@@ -90,7 +76,7 @@ func (d *DB) UpdateRefund(providerAddress string, index int64, new model.Refund,
 
 // BatchUpdateRefund doesn't check the validity of the incoming data
 func (d *DB) BatchUpdateRefund(news []model.Refund) error {
-	olds, err := d.ListRefund(model.RefundListOptions{})
+	olds, _, err := d.ListRefund(model.RefundListOptions{})
 	if err != nil {
 		return err
 	}

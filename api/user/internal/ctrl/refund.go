@@ -40,7 +40,7 @@ func (c Ctrl) RequestRefund(ctx context.Context, providerAddress common.Address,
 }
 
 func (c Ctrl) ProcessRefunds(ctx context.Context) error {
-	refunds, err := c.db.ListRefund(model.RefundListOptions{
+	refunds, _, err := c.db.ListRefund(model.RefundListOptions{
 		MaxCreatedAt: model.PtrOf(time.Now().UTC().Add(-c.contract.LockTime)),
 		Processed:    model.PtrOf(false),
 	})
@@ -82,7 +82,7 @@ func (c Ctrl) ProcessRefunds(ctx context.Context) error {
 }
 
 func (c *Ctrl) ListRefund(opt model.RefundListOptions) ([]model.Refund, int, error) {
-	list, fee, err := c.db.ListRefund1(opt)
+	list, fee, err := c.db.ListRefund(opt)
 	if err != nil {
 		return nil, 0, errors.Wrap(err, "list refund from db")
 	}
