@@ -103,8 +103,24 @@ func (c Ctrl) SyncProviderAccounts(ctx context.Context) error {
 	if err := c.db.BatchUpdateProviderAccount(accounts); err != nil {
 		return err
 	}
+	if err := c.db.BatchUpdateRefund(refunds); err != nil {
+		return err
+	}
 
-	return c.db.BatchUpdateRefund(refunds)
+	dbAccounts, err := c.db.ListProviderAccount()
+	if err != nil {
+		return errors.Wrap(err, "list account from db")
+	}
+	nonceMap := map[string]int64{}
+	for i := range dbAccounts {
+		nonceMap[dbAccounts[i].Provider] = *dbAccounts[i].Nonce
+		refunds = append(refunds, dbAccounts[i].Refunds...)
+	}
+	// Delete requests sent to deprecated provider
+	//
+	// In the meanwhile, in case requests stored in db is deprecated due to
+	// using smaller nonce by redeployed contract in dev mode
+	return c.db.BatchDeleteRequest(nonceMap)
 }
 
 func (c Ctrl) SyncProviderAccount(ctx context.Context, providerAddress common.Address) error {

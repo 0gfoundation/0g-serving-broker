@@ -64,7 +64,8 @@ func (d *DB) BatchUpdateProviderAccount(news []model.Provider) error {
 		if old, ok := oldAccountMap[key]; ok {
 			delete(oldAccountMap, key)
 			if !identicalProvider(old, &new) {
-				// Ensure the nonce is valid
+				// Ensure the nonce is valid by adding a large number as large
+				// nonce could exist at unsettled requests in provider
 				*old.Nonce += 10000
 				news[i].Nonce = util.Max(old.Nonce, news[i].Nonce)
 				toUpdate = append(toUpdate, news[i])
