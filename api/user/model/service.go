@@ -5,16 +5,16 @@ import (
 )
 
 type Service struct {
-	UpdatedAt   *time.Time
-	Provider    string
-	Name        string
-	Type        string
-	URL         string
-	InputPrice  int64
-	OutputPrice int64
+	UpdatedAt   *time.Time `json:"updatedAt" readonly:"true" gen:"-"`
+	Provider    string     `json:"provider"`
+	Name        string     `json:"name"`
+	Type        string     `json:"type"`
+	URL         string     `json:"url"`
+	InputPrice  int64      `json:"inputPrice"`
+	OutputPrice int64      `json:"outputPrice"`
 }
 
 type ServiceList struct {
-	Metadata ListMeta
-	Items    []Service
+	Metadata ListMeta  `json:"metadata"`
+	Items    []Service `json:"items"`	
 }
