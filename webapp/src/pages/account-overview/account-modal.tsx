@@ -73,7 +73,7 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({
           <Input />
         </Form.Item>
         <Form.Item
-          label="Balance"
+          label="Balance (neuron)"
           name="balance"
           rules={[{ required: true, message: "Please input the balance" }]}
         >

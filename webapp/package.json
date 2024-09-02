@@ -11,6 +11,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ant-design/pro-components": "^2.7.15",
+    "ant-design": "^1.0.0",
     "dayjs": "^1.11.13",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"

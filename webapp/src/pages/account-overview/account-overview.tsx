@@ -1,12 +1,15 @@
 import React, { useState, useEffect } from "react";
-import { Button, Modal, Empty, Spin } from "antd";
-import { DownOutlined } from "@ant-design/icons";
+import { Button, Modal, Empty } from "antd";
+import { DownOutlined, SearchOutlined } from "@ant-design/icons";
 import { listProviderAccount } from "@src/apis/operations";
 import { ModelProvider } from "@src/apis";
 import { useOverlay } from "@src/hooks";
 import AddAccountModal, { AddAccountModalOpenArgs } from "./account-modal";
 import { alertError } from "@src/utils";
 import styles from "./account.module.css";
+import ServiceOverview, {
+  ServiceModalProps,
+} from "../service-overview/service-overview";
 
 export interface AccountOverviewProps {
   onSelectAccount: (account: ModelProvider) => void;
@@ -57,6 +60,12 @@ const AccountOverview: React.FC<AccountOverviewProps> = ({
     setOpen: setModalOpen,
   } = useOverlay<AddAccountModalOpenArgs>();
 
+  const {
+    openArgs: serviceModalOpenArgs,
+    setOpenArgs: setServiceModalOpenArgs,
+    setOpen: setServiceModalOpen,
+  } = useOverlay<any>();
+
   if (loading) {
     return <></>;
   }
@@ -79,7 +88,7 @@ const AccountOverview: React.FC<AccountOverviewProps> = ({
         <div style={{ display: "flex", flexDirection: "column" }}>
           <Omission item={account.provider || ""} start={6} end={4} />
         </div>
-        <p>{((account.balance || 0) / 10 ** 18).toPrecision(2)} A0GI</p>
+        <p>{account.balance} neuron</p>
       </div>
     );
   };
@@ -99,8 +108,33 @@ const AccountOverview: React.FC<AccountOverviewProps> = ({
   };
 
   return (
-    <div style={{ height: "100%", display: "flex", justifyContent: "center" }}>
-      <a onClick={showModal} style={{ display: "flex", alignItems: "center" }}>
+    <div
+      style={{
+        height: "100%",
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <Button
+        type="text"
+        icon={<SearchOutlined />}
+        style={{
+          display: "flex",
+          marginRight: "85px",
+          alignItems: "center",
+        }}
+        onClick={() => setServiceModalOpenArgs({ open: true, args: {} })}
+      />
+      <a
+        onClick={showModal}
+        style={{
+          display: "flex",
+          height: "100%",
+          marginRight: "auto",
+          alignItems: "center",
+        }}
+      >
         {providerAccount ? (
           <Omission item={providerAccount.provider || ""} start={6} end={4} />
         ) : (
@@ -140,6 +174,10 @@ const AccountOverview: React.FC<AccountOverviewProps> = ({
           Add account
         </Button>
       </Modal>
+      <ServiceOverview
+        openArgs={serviceModalOpenArgs}
+        onCancel={() => setServiceModalOpen(false)}
+      />
       <AddAccountModal
         openArgs={modalOpenArgs}
         onOk={() => {

@@ -21,24 +21,27 @@ const RequestOverview: React.FC = () => {
     <ZGTable
       columns={[
         {
-          title: "ServiceName",
+          title: "Service",
           align: "center",
           dataIndex: "serviceName",
-          width: "40%",
-          sorter: true,
+          width: "20%",
         },
         {
-          title: "Nonce",
+          title: "Input",
           align: "center",
-          dataIndex: "nonce",
-          width: "30%",
-          sorter: true,
+          dataIndex: "inputCount",
+          width: "20%",
+        },
+        {
+          title: "Last output",
+          align: "center",
+          dataIndex: "previousOutputCount",
+          width: "50%",
         },
         {
           title: "Fee",
           align: "center",
-          sorter: true,
-          width: "30%",
+          width: "10%",
           dataIndex: "fee",
         },
       ]}

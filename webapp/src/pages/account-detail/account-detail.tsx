@@ -50,29 +50,22 @@ const AccountDetail: React.FC<AccountDetailProps> = ({ selectedAccount }) => {
     // }, alertError);
   };
 
-  const handleRefund = () => {
-    console.log("123");
-  };
+  const handleRefund = () => {};
 
   const handleSync = () => {
     setLoading(true);
     const address = selectedAccount?.provider || "";
     syncProviderAccount(address).then(() => {
       getProviderAccount(address).then((data) => {
-        console.log(data.balance);
         setLoading(false);
         selectedAccount = data;
       }, alertError);
     }, alertError);
   };
 
-  const handleListService = () => {
-    console.log("123");
-  };
+  const handleListService = () => {};
 
-  const handleTabChange = (item: string) => {
-    console.log(item);
-  };
+  const handleTabChange = (item: string) => {};
 
   const ZGAccount: React.FC<{
     account: ModelProvider;
@@ -91,7 +84,7 @@ const AccountDetail: React.FC<AccountDetailProps> = ({ selectedAccount }) => {
             alignItems: "center",
           }}
         >
-          {((account.balance || 0) / 10 ** 18).toPrecision(2)} A0GI
+          {account.balance} neuron
         </p>
       ) : (
         <Spin />

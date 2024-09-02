@@ -27,20 +27,17 @@ const RefundOverview: React.FC = () => {
           align: "center",
           dataIndex: "CreatedAt",
           width: "50%",
-          sorter: true,
           render: (date: string) => dayjs(date).format("YYYY-MM-DD HH:mm"),
         },
         {
           title: "Amount",
           align: "center",
-          sorter: true,
           width: "25%",
           dataIndex: "amount",
         },
         {
           title: "Processed",
           align: "center",
-          sorter: true,
           width: "25%",
           dataIndex: "processed",
           render: (processed: boolean) => {
