@@ -34,7 +34,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config.yaml:/etc/config.yaml
+      - ./config-provider.yaml:/etc/config.yaml
     command: 0g-provider-server
     depends_on:
       mysql:
@@ -49,7 +49,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config.yaml:/etc/config.yaml
+      - ./config-provider.yaml:/etc/config.yaml
     command: 0g-provider-event
     depends_on:
       0g-serving-provider-agent:
@@ -65,7 +65,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config.yaml:/etc/config.yaml
+      - ./config-user.yaml:/etc/config.yaml
     command: 0g-user-server
     depends_on:
       mysql:
@@ -80,7 +80,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config.yaml:/etc/config.yaml
+      - ./config-user.yaml:/etc/config.yaml
     command: 0g-user-event
     depends_on:
       0g-serving-user-agent:
