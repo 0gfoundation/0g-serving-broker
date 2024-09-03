@@ -76,7 +76,7 @@ const AccountDetail: React.FC<AccountDetailProps> = ({ selectedAccount }) => {
         <p
           style={{
             height: "80px",
-            fontSize: 30,
+            fontSize: 20,
             width: "100%",
             margin: 0,
             justifyContent: "center",
