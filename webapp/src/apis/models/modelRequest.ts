@@ -15,7 +15,7 @@ export interface ModelRequest {
     fee: number;
     inputCount: number;
     nonce: number;
-    previousOutputCount: number;
+    previousOutputFee: number;
     providerAddress: string;
     serviceName: string;
     signature: string;

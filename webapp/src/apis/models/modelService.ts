@@ -17,6 +17,6 @@ export interface ModelService {
     outputPrice?: number;
     provider?: string;
     type?: string;
-    updatedAt?: string;
+    readonly updatedAt?: string;
     url?: string;
 }

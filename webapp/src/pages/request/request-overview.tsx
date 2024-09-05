@@ -33,9 +33,9 @@ const RequestOverview: React.FC = () => {
           width: "20%",
         },
         {
-          title: "Last output",
+          title: "Previous Output Fee",
           align: "center",
-          dataIndex: "previousOutputCount",
+          dataIndex: "previousOutputFee",
           width: "50%",
         },
         {

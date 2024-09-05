@@ -14,7 +14,7 @@ import { ModelRefund } from './modelRefund';
 
 export interface ModelProvider { 
     balance?: number;
-    lastResponseTokenCount?: number;
+    lastResponseFee?: number;
     nonce?: number;
     pendingRefund?: number;
     provider?: string;
