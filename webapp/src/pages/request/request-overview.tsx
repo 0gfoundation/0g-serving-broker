@@ -27,9 +27,9 @@ const RequestOverview: React.FC = () => {
           width: "20%",
         },
         {
-          title: "Input",
+          title: "Input Fee",
           align: "center",
-          dataIndex: "inputCount",
+          dataIndex: "inputFee",
           width: "20%",
         },
         {
