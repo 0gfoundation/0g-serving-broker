@@ -437,7 +437,7 @@ const docTemplate = `{
             "type": "object",
             "required": [
                 "fee",
-                "inputCount",
+                "inputFee",
                 "nonce",
                 "previousOutputFee",
                 "providerAddress",
@@ -448,7 +448,7 @@ const docTemplate = `{
                 "fee": {
                     "type": "integer"
                 },
-                "inputCount": {
+                "inputFee": {
                     "type": "integer"
                 },
                 "nonce": {

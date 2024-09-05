@@ -99,7 +99,8 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 		return nil, err
 	}
 	previousOutputFee := *provider.LastResponseFee
-	fee := inputCount*svc.InputPrice.Int64() + previousOutputFee
+	inputFee := inputCount * svc.InputPrice.Int64()
+	fee := inputFee + previousOutputFee
 
 	reqInZK := &models.Request{
 		Fee:             fee,
@@ -118,7 +119,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 	headers := map[string]string{
 		"Address":             c.contract.UserAddress,
 		"Fee":                 strconv.FormatInt(fee, 10),
-		"Input-Count":         strconv.FormatInt(inputCount, 10),
+		"Input-Fee":           strconv.FormatInt(inputFee, 10),
 		"Nonce":               strconv.FormatInt(*provider.Nonce, 10),
 		"Previous-Output-Fee": strconv.FormatInt(previousOutputFee, 10),
 		"Service-Name":        svcName,
@@ -130,7 +131,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 		ProviderAddress:   provider.Provider,
 		Nonce:             *provider.Nonce,
 		ServiceName:       svcName,
-		InputCount:        inputCount,
+		InputFee:          inputFee,
 		PreviousOutputFee: previousOutputFee,
 		Fee:               fee,
 		Signature:         string(sigJson),

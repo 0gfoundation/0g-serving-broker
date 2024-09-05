@@ -46,7 +46,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 	return req, nil
 }
 
-func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputCount int64) error {
+func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputFee int64) error {
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
 	if err != nil {
 		return err
@@ -62,7 +62,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 		return err
 	}
 
-	err = c.validateFee(req, account, expectedFee, expectedInputCount)
+	err = c.validateFee(req, account, expectedFee, expectedInputFee)
 	if err != nil {
 		return err
 	}
@@ -96,12 +96,12 @@ func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 	return nil
 }
 
-func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputCount int64) error {
+func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputFee int64) error {
 	if account.LastResponseFee != nil && actual.PreviousOutputFee < *account.LastResponseFee {
 		return fmt.Errorf("invalid previousOutputFee, expected %d, but received %d", *account.LastResponseFee, actual.PreviousOutputFee)
 	}
-	if actual.InputCount < expectedInputCount {
-		return fmt.Errorf("invalid inputCount, expected %d, but received %d", expectedInputCount, actual.InputCount)
+	if actual.InputFee < expectedInputFee {
+		return fmt.Errorf("invalid inputFee, expected %d, but received %d", expectedInputFee, actual.InputFee)
 	}
 	if actual.Fee < expectedFee {
 		return fmt.Errorf("invalid fee, expected %d, but received %d. Please check the service price", expectedFee, actual.Fee)
@@ -142,8 +142,8 @@ func updateRequestField(req *model.Request, key, value string) error {
 		req.UserAddress = value
 	case "Fee":
 		return parseInt64Field(&req.Fee, "fee", value)
-	case "Input-Count":
-		return parseInt64Field(&req.InputCount, "inputCount", value)
+	case "Input-Fee":
+		return parseInt64Field(&req.InputFee, "inputFee", value)
 	case "Nonce":
 		return parseInt64Field(&req.Nonce, "nonce", value)
 	case "Previous-Output-Fee":

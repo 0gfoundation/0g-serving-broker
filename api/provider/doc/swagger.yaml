@@ -9,7 +9,7 @@ definitions:
     properties:
       fee:
         type: integer
-      inputCount:
+      inputFee:
         type: integer
       nonce:
         type: integer
@@ -25,7 +25,7 @@ definitions:
         type: string
     required:
     - fee
-    - inputCount
+    - inputFee
     - nonce
     - previousOutputFee
     - serviceName

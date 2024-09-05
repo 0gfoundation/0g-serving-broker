@@ -61,7 +61,7 @@ func (d *DB) Migrate() error {
 					ProviderAddress   string `gorm:"type:varchar(255);not null;uniqueIndex:providerAddress_nonce"`
 					Nonce             int64  `gorm:"type:bigint;not null;index:providerAddress_nonce"`
 					ServiceName       string `gorm:"type:varchar(255);not null"`
-					InputCount        int64  `gorm:"type:bigint;not null"`
+					InputFee          int64  `gorm:"type:bigint;not null"`
 					PreviousOutputFee int64  `gorm:"type:bigint;not null"`
 					Fee               int64  `gorm:"type:bigint;not null"`
 					Signature         string `gorm:"type:varchar(255);not null"`
