@@ -141,6 +141,55 @@ paths:
                   type: string
         default:
           $ref: "#/responses/Error"
+  /solidity-calldata-combined:
+    post:
+      operationId: generateSolidityCalldataCombined
+      parameters:
+        - name: backend
+          in: query
+          type: string
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              l:
+                type: integer
+              pubkey:
+                $ref: "#/definitions/publicKey"
+              signatures:
+                $ref: "#/definitions/signatures"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              pA:
+                type: array
+                items:
+                  type: string
+              pB:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: string
+              pC:
+                type: array
+                items:
+                  type: string
+              pubInputs:
+                type: array
+                items:
+                  type: string
+        default:
+          $ref: "#/responses/Error"
 definitions:
   additionalProperties:
     type: object
