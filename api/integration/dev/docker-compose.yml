@@ -41,6 +41,8 @@ services:
         condition: service_healthy
       hardhat-node-with-contract:
         condition: service_healthy
+      zk:
+        condition: service_healthy
 
   0g-serving-provider-event:
     image: 0g-seving-agent:dev-amd64
@@ -71,6 +73,8 @@ services:
       mysql:
         condition: service_healthy
       hardhat-node-with-contract:
+        condition: service_healthy
+      zk:
         condition: service_healthy
 
   0g-serving-user-event:
@@ -103,6 +107,13 @@ services:
     container_name: zk-server
     ports:
       - "3000:3000"
+    healthcheck:
+      test:
+        ["CMD", "curl", "-f", "-X", "GET", "http://zk-server:3000/sign-keypair"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
 volumes:
   mysql-data:

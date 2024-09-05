@@ -31,6 +31,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      zk:
+        condition: service_healthy
 
   0g-serving-provider-event:
     image: 0g-seving-agent:dev1-amd64
@@ -62,6 +64,20 @@ services:
     container_name: zk-provider-server
     ports:
       - "3001:3000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "-X",
+          "GET",
+          "http://zk-provider-server:3000/sign-keypair",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
 volumes:
   mysql-data:
