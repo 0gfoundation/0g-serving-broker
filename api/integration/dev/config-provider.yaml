@@ -7,7 +7,7 @@ event:
   userAddr: ":8089"
 interval:
   autoSettleBufferTime: 2
-  forceSettlementProcessor: 30
+  forceSettlementProcessor: 60
   refundProcessor: 1
   settlementProcessor: 1
 servingUrl: http://nginx-server:80

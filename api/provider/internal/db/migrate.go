@@ -33,14 +33,14 @@ func (d *DB) Migrate() error {
 			ID: "create-user",
 			Migrate: func(tx *gorm.DB) error {
 				type User struct {
-					User                   string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
-					LastRequestNonce       *int64                `gorm:"type:bigint;not null;default:0"`
-					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
-					LockBalance            *int64                `gorm:"type:bigint;not null;default:0"`
-					LastBalanceCheckTime   *time.Time            `json:"lastBalanceCheckTime"`
-					Signer                 model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
-					UnsettledFee           *int64                `gorm:"type:bigint;not null;default:0"`
-					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
+					User                 string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
+					LastRequestNonce     *int64                `gorm:"type:bigint;not null;default:0"`
+					LastResponseFee      *int64                `gorm:"type:bigint;not null;default:0"`
+					LockBalance          *int64                `gorm:"type:bigint;not null;default:0"`
+					LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
+					Signer               model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
+					UnsettledFee         *int64                `gorm:"type:bigint;not null;default:0"`
+					DeletedAt            soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
 				}
 				return tx.AutoMigrate(&User{})
 			},
@@ -49,14 +49,14 @@ func (d *DB) Migrate() error {
 			ID: "create-request",
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
-					UserAddress         string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
-					Nonce               int64  `gorm:"type:bigint;not null;index:processed_userAddress_nonce"`
-					ServiceName         string `gorm:"type:varchar(255);not null"`
-					InputCount          int64  `gorm:"type:bigint;not null"`
-					PreviousOutputCount int64  `gorm:"type:bigint;not null"`
-					Fee                 int64  `gorm:"type:bigint;not null"`
-					Signature           string `gorm:"type:varchar(255);not null"`
-					Processed           *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
+					UserAddress       string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
+					Nonce             int64  `gorm:"type:bigint;not null;index:processed_userAddress_nonce"`
+					ServiceName       string `gorm:"type:varchar(255);not null"`
+					InputCount        int64  `gorm:"type:bigint;not null"`
+					PreviousOutputFee int64  `gorm:"type:bigint;not null"`
+					Fee               int64  `gorm:"type:bigint;not null"`
+					Signature         string `gorm:"type:varchar(255);not null"`
+					Processed         *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

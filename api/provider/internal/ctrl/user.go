@@ -25,13 +25,13 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 	}
 
 	dbAccount = model.User{
-		User:                   userAddress,
-		LastRequestNonce:       model.PtrOf(contractAccount.Nonce.Int64()),
-		LockBalance:            model.PtrOf(contractAccount.Balance.Int64() - contractAccount.PendingRefund.Int64()),
-		LastBalanceCheckTime:   model.PtrOf(time.Now().UTC()),
-		UnsettledFee:           model.PtrOf(int64(0)),
-		Signer:                 []string{contractAccount.Signer[0].String(), contractAccount.Signer[1].String()},
-		LastResponseTokenCount: model.PtrOf(int64(0)),
+		User:                 userAddress,
+		LastRequestNonce:     model.PtrOf(contractAccount.Nonce.Int64()),
+		LockBalance:          model.PtrOf(contractAccount.Balance.Int64() - contractAccount.PendingRefund.Int64()),
+		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+		UnsettledFee:         model.PtrOf(int64(0)),
+		Signer:               []string{contractAccount.Signer[0].String(), contractAccount.Signer[1].String()},
+		LastResponseFee:      model.PtrOf(int64(0)),
 	}
 
 	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
@@ -77,7 +77,7 @@ func (c Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, er
 			list[i].LastRequestNonce = v.LastRequestNonce
 			list[i].LastBalanceCheckTime = v.LastBalanceCheckTime
 			list[i].UnsettledFee = v.UnsettledFee
-			list[i].LastResponseTokenCount = v.LastResponseTokenCount
+			list[i].LastResponseFee = v.LastResponseFee
 		}
 	}
 	return list, nil

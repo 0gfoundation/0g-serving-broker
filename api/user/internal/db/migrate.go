@@ -30,13 +30,13 @@ func (d *DB) Migrate() error {
 			ID: "create-provider",
 			Migrate: func(tx *gorm.DB) error {
 				type Provider struct {
-					Provider               string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_provider"`
-					Balance                *int64                `gorm:"type:bigint;not null;default:0"`
-					PendingRefund          *int64                `gorm:"type:bigint;not null;default:0"`
-					LastResponseTokenCount *int64                `gorm:"type:bigint;not null;default:0"`
-					Nonce                  *int64                `gorm:"type:bigint;not null;default:1"`
-					Signer                 model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
-					DeletedAt              soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_provider"`
+					Provider        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_provider"`
+					Balance         *int64                `gorm:"type:bigint;not null;default:0"`
+					PendingRefund   *int64                `gorm:"type:bigint;not null;default:0"`
+					LastResponseFee *int64                `gorm:"type:bigint;not null;default:0"`
+					Nonce           *int64                `gorm:"type:bigint;not null;default:1"`
+					Signer          model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
+					DeletedAt       soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_provider"`
 				}
 				return tx.AutoMigrate(&Provider{})
 			},
@@ -58,13 +58,13 @@ func (d *DB) Migrate() error {
 			ID: "create-request",
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
-					ProviderAddress     string `gorm:"type:varchar(255);not null;uniqueIndex:providerAddress_nonce"`
-					Nonce               int64  `gorm:"type:bigint;not null;index:providerAddress_nonce"`
-					ServiceName         string `gorm:"type:varchar(255);not null"`
-					InputCount          int64  `gorm:"type:bigint;not null"`
-					PreviousOutputCount int64  `gorm:"type:bigint;not null"`
-					Fee                 int64  `gorm:"type:bigint;not null"`
-					Signature           string `gorm:"type:varchar(255);not null"`
+					ProviderAddress   string `gorm:"type:varchar(255);not null;uniqueIndex:providerAddress_nonce"`
+					Nonce             int64  `gorm:"type:bigint;not null;index:providerAddress_nonce"`
+					ServiceName       string `gorm:"type:varchar(255);not null"`
+					InputCount        int64  `gorm:"type:bigint;not null"`
+					PreviousOutputFee int64  `gorm:"type:bigint;not null"`
+					Fee               int64  `gorm:"type:bigint;not null"`
+					Signature         string `gorm:"type:varchar(255);not null"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

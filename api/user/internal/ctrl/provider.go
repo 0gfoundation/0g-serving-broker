@@ -171,7 +171,7 @@ func (c Ctrl) backfillProviderAccount(accounts []contract.Account) ([]model.Prov
 	for i, account := range accounts {
 		list[i] = parseAccount(account, true)
 		if v, ok := accountMap[account.Provider.String()]; ok {
-			list[i].LastResponseTokenCount = v.LastResponseTokenCount
+			list[i].LastResponseFee = v.LastResponseFee
 		}
 	}
 	return list, nil

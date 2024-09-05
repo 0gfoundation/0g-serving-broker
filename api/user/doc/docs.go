@@ -354,7 +354,7 @@ const docTemplate = `{
                 "balance": {
                     "type": "integer"
                 },
-                "lastResponseTokenCount": {
+                "lastResponseFee": {
                     "type": "integer"
                 },
                 "nonce": {
@@ -439,7 +439,7 @@ const docTemplate = `{
                 "fee",
                 "inputCount",
                 "nonce",
-                "previousOutputCount",
+                "previousOutputFee",
                 "providerAddress",
                 "serviceName",
                 "signature"
@@ -454,7 +454,7 @@ const docTemplate = `{
                 "nonce": {
                     "type": "integer"
                 },
-                "previousOutputCount": {
+                "previousOutputFee": {
                     "type": "integer"
                 },
                 "providerAddress": {

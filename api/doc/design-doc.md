@@ -9,14 +9,14 @@ The Serving Agent (hereafter referred to as the agent) is an HTTP service that c
    - Parameters include service type, URL, name, and price. The agent records this information in the database.
    - The provider agent creates the corresponding proxy service based on the service type (RPC/HTTP) and calls a contract function to add the service to the contract. The URL stored in the provider agent's database is the address of the registered service, while the URL stored on the contract is the public address of the provider agent service.
 3. The user queries the user agent for registered services, and the user agent retrieves and returns information from the contract.
-4. The user selects an appropriate service and sends a request. The request header contains metadata: userAddress, nonce, serviceName, inputCount, previousOutputCount, signature, and createdAt.
+4. The user selects an appropriate service and sends a request. The request header contains metadata: userAddress, nonce, serviceName, inputCount, previousOutputFee, signature, and createdAt.
 5. Upon receiving a request, the provider agent verifies and records the metadata:
    - Whether the signature can be correctly parsed.
    - Check if the userAddress has sufficient balance.
    - Verify if the nonce is valid.
    - Confirm whether the serviceName corresponds to an existing service.
    - Ensure inputCount matches the number of tokens in the request payload (useful for services like chatbots). The provider agent should verify the consistency with the token count in the request body.
-   - previousOutputCount is the token count of the previous response (used as a billing basis if it’s included in the user-signed feedback for the current request). The provider agent must compare it to the previous answer data recorded in the database.
+   - previousOutputFee is the token count of the previous response (used as a billing basis if it’s included in the user-signed feedback for the current request). The provider agent must compare it to the previous answer data recorded in the database.
    - Ensure createdAt is close to the current time.
    - If all validations pass, the agent constructs the request structure with the metadata, records it in the database, and forwards the request to the proxied service.
 6. The service provider submits settlement requests to the agent. The agent constructs a request trace from the request and submits the settlement request to the contract.

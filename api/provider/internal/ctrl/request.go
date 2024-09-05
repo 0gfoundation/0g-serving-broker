@@ -97,8 +97,8 @@ func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 }
 
 func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputCount int64) error {
-	if account.LastResponseTokenCount != nil && actual.PreviousOutputCount < *account.LastResponseTokenCount {
-		return fmt.Errorf("invalid previousOutputCount, expected %d, but received %d", *account.LastResponseTokenCount, actual.PreviousOutputCount)
+	if account.LastResponseFee != nil && actual.PreviousOutputFee < *account.LastResponseFee {
+		return fmt.Errorf("invalid previousOutputFee, expected %d, but received %d", *account.LastResponseFee, actual.PreviousOutputFee)
 	}
 	if actual.InputCount < expectedInputCount {
 		return fmt.Errorf("invalid inputCount, expected %d, but received %d", expectedInputCount, actual.InputCount)
@@ -146,8 +146,8 @@ func updateRequestField(req *model.Request, key, value string) error {
 		return parseInt64Field(&req.InputCount, "inputCount", value)
 	case "Nonce":
 		return parseInt64Field(&req.Nonce, "nonce", value)
-	case "Previous-Output-Count":
-		return parseInt64Field(&req.PreviousOutputCount, "previousOutputCount", value)
+	case "Previous-Output-Fee":
+		return parseInt64Field(&req.PreviousOutputFee, "previousOutputFee", value)
 	case "Service-Name":
 		req.ServiceName = value
 	case "Signature":

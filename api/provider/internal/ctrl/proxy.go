@@ -35,7 +35,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, req
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee int64) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee, outputPrice int64) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -57,7 +57,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 	}
 	ctx.Writer.WriteHeader(resp.StatusCode)
 
-	old, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
+	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
 		handleAgentError(ctx, err, "")
 		return
@@ -65,16 +65,16 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 	account := model.User{
 		User:             reqModel.UserAddress,
 		LastRequestNonce: &reqModel.Nonce,
-		UnsettledFee:     model.PtrOf(fee + *old.UnsettledFee),
+		UnsettledFee:     model.PtrOf(fee + *oldAccount.UnsettledFee),
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		c.handleResponse(ctx, resp, extractor, account)
+		c.handleResponse(ctx, resp, extractor, account, outputPrice)
 	} else {
-		c.handleStreamResponse(ctx, resp, extractor, account)
+		c.handleStreamResponse(ctx, resp, extractor, account, outputPrice)
 	}
 }
 
-func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User) {
+func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		handleAgentError(ctx, err, "read from body")
@@ -94,7 +94,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 		return
 	}
 
-	account.LastResponseTokenCount = &outputCount
+	account.LastResponseFee = model.PtrOf(outputCount * outputPrice)
 	if err = c.UpdateUserAccount(account.User, account); err != nil {
 		handleAgentError(ctx, err, "update user account in db")
 		return
@@ -103,7 +103,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	ctx.Data(http.StatusOK, resp.Header.Get("Content-Type"), body)
 }
 
-func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User) {
+func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
@@ -145,7 +145,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 						return false
 					}
 
-					account.LastResponseTokenCount = &outputCount
+					account.LastResponseFee = model.PtrOf(outputCount * outputPrice)
 					err = c.UpdateUserAccount(account.User, account)
 					if err != nil {
 						handleAgentError(ctx, err, "update user account in db")

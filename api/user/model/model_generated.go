@@ -19,7 +19,7 @@ func (d *Provider) Bind(ctx *gin.Context) error {
 	d.Provider = r.Provider
 	d.Balance = r.Balance
 	d.PendingRefund = r.PendingRefund
-	d.LastResponseTokenCount = r.LastResponseTokenCount
+	d.LastResponseFee = r.LastResponseFee
 	d.Nonce = r.Nonce
 	d.Signer = r.Signer
 
@@ -68,7 +68,7 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	d.Nonce = r.Nonce
 	d.ServiceName = r.ServiceName
 	d.InputCount = r.InputCount
-	d.PreviousOutputCount = r.PreviousOutputCount
+	d.PreviousOutputFee = r.PreviousOutputFee
 	d.Fee = r.Fee
 	d.Signature = r.Signature
 

@@ -97,7 +97,7 @@ func identicalProvider(old, new *model.Provider) bool {
 	if !identicalNumber(old.PendingRefund, new.PendingRefund) {
 		return false
 	}
-	if !identicalNumber(old.LastResponseTokenCount, new.LastResponseTokenCount) {
+	if !identicalNumber(old.LastResponseFee, new.LastResponseFee) {
 		return false
 	}
 	if !identicalNumber(old.Nonce, new.Nonce) {

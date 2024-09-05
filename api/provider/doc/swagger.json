@@ -265,7 +265,7 @@
                 "fee",
                 "inputCount",
                 "nonce",
-                "previousOutputCount",
+                "previousOutputFee",
                 "serviceName",
                 "signature",
                 "userAddress"
@@ -280,7 +280,7 @@
                 "nonce": {
                     "type": "integer"
                 },
-                "previousOutputCount": {
+                "previousOutputFee": {
                     "type": "integer"
                 },
                 "processed": {
@@ -371,7 +371,7 @@
                 "lastRequestNonce": {
                     "type": "integer"
                 },
-                "lastResponseTokenCount": {
+                "lastResponseFee": {
                     "type": "integer"
                 },
                 "lockBalance": {

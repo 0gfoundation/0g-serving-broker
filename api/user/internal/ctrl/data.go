@@ -98,8 +98,8 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 	if err != nil {
 		return nil, err
 	}
-	previousOutputCount := *provider.LastResponseTokenCount
-	fee := inputCount*svc.InputPrice.Int64() + previousOutputCount*svc.OutputPrice.Int64()
+	previousOutputFee := *provider.LastResponseFee
+	fee := inputCount*svc.InputPrice.Int64() + previousOutputFee
 
 	reqInZK := &models.Request{
 		Fee:             fee,
@@ -116,24 +116,24 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 		return nil, err
 	}
 	headers := map[string]string{
-		"Address":               c.contract.UserAddress,
-		"Fee":                   strconv.FormatInt(fee, 10),
-		"Input-Count":           strconv.FormatInt(inputCount, 10),
-		"Nonce":                 strconv.FormatInt(*provider.Nonce, 10),
-		"Previous-Output-Count": strconv.FormatInt(previousOutputCount, 10),
-		"Service-Name":          svcName,
-		"Signature":             string(sigJson),
+		"Address":             c.contract.UserAddress,
+		"Fee":                 strconv.FormatInt(fee, 10),
+		"Input-Count":         strconv.FormatInt(inputCount, 10),
+		"Nonce":               strconv.FormatInt(*provider.Nonce, 10),
+		"Previous-Output-Fee": strconv.FormatInt(previousOutputFee, 10),
+		"Service-Name":        svcName,
+		"Signature":           string(sigJson),
 	}
 	util.SetHeaders(req, headers)
 
 	reqInDB := model.Request{
-		ProviderAddress:     provider.Provider,
-		Nonce:               *provider.Nonce,
-		ServiceName:         svcName,
-		InputCount:          inputCount,
-		PreviousOutputCount: previousOutputCount,
-		Fee:                 fee,
-		Signature:           string(sigJson),
+		ProviderAddress:   provider.Provider,
+		Nonce:             *provider.Nonce,
+		ServiceName:       svcName,
+		InputCount:        inputCount,
+		PreviousOutputFee: previousOutputFee,
+		Fee:               fee,
+		Signature:         string(sigJson),
 	}
 	if err := c.CreateRequest(reqInDB); err != nil {
 		return req, err
@@ -195,8 +195,8 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 		return
 	}
 	new := model.Provider{
-		Provider:               providerAddress,
-		LastResponseTokenCount: &outputCount,
+		Provider:        providerAddress,
+		LastResponseFee: model.PtrOf(outputCount * extractor.GetSvcInfo().OutputPrice.Int64()),
 	}
 	err = c.db.UpdateProviderAccount(providerAddress, new)
 	if err != nil {
@@ -249,8 +249,8 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 						return false
 					}
 					new := model.Provider{
-						Provider:               providerAddress,
-						LastResponseTokenCount: &outputCount,
+						Provider:        providerAddress,
+						LastResponseFee: model.PtrOf(outputCount * extractor.GetSvcInfo().OutputPrice.Int64()),
 					}
 					err = c.db.UpdateProviderAccount(providerAddress, new)
 					if err != nil {

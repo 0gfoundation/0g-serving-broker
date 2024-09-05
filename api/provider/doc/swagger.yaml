@@ -13,7 +13,7 @@ definitions:
         type: integer
       nonce:
         type: integer
-      previousOutputCount:
+      previousOutputFee:
         type: integer
       processed:
         type: boolean
@@ -27,7 +27,7 @@ definitions:
     - fee
     - inputCount
     - nonce
-    - previousOutputCount
+    - previousOutputFee
     - serviceName
     - signature
     - userAddress
@@ -80,7 +80,7 @@ definitions:
         type: string
       lastRequestNonce:
         type: integer
-      lastResponseTokenCount:
+      lastResponseFee:
         type: integer
       lockBalance:
         type: integer

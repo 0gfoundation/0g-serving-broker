@@ -56,8 +56,8 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 	if new.LastRequestNonce != nil {
 		old.LastRequestNonce = new.LastRequestNonce
 	}
-	if new.LastResponseTokenCount != nil {
-		old.LastResponseTokenCount = new.LastResponseTokenCount
+	if new.LastResponseFee != nil {
+		old.LastResponseFee = new.LastResponseFee
 	}
 	if new.LockBalance != nil {
 		old.LockBalance = new.LockBalance

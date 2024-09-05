@@ -9,7 +9,7 @@ definitions:
     properties:
       balance:
         type: integer
-      lastResponseTokenCount:
+      lastResponseFee:
         type: integer
       nonce:
         type: integer
@@ -69,7 +69,7 @@ definitions:
         type: integer
       nonce:
         type: integer
-      previousOutputCount:
+      previousOutputFee:
         type: integer
       providerAddress:
         type: string
@@ -81,7 +81,7 @@ definitions:
     - fee
     - inputCount
     - nonce
-    - previousOutputCount
+    - previousOutputFee
     - providerAddress
     - serviceName
     - signature

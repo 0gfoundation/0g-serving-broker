@@ -149,7 +149,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleAgentError(ctx, err, "get model.request from HTTP request")
 		return
 	}
-	fee := svc.InputPrice*req.InputCount + svc.OutputPrice*req.PreviousOutputCount
+	fee := svc.InputPrice*req.InputCount + req.PreviousOutputFee
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
 		handleAgentError(ctx, err, "read request body")
@@ -174,7 +174,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleAgentError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee)
+	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee, svc.OutputPrice)
 }
 
 func handleAgentError(ctx *gin.Context, err error, context string) {
