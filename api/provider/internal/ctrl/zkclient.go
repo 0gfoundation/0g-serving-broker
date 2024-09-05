@@ -6,6 +6,7 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/client/operations"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
+	"github.com/0glabs/0g-serving-agent/provider/model"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -28,7 +29,7 @@ func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.Request, sigs mo
 	return ret.Payload, nil
 }
 
-func (c *Ctrl) GenerateSolidityCalldata(ctx context.Context, reqs []*models.Request, sigs models.Signatures) (*operations.GenerateSolidityCalldataOKBody, error) {
+func (c *Ctrl) GenerateSolidityCalldata(ctx context.Context, reqs []*models.Request, sigs models.Signatures) (*operations.GenerateSolidityCalldataCombinedOKBody, error) {
 	if len(reqs) == 0 {
 		return nil, nil
 	}
@@ -36,8 +37,8 @@ func (c *Ctrl) GenerateSolidityCalldata(ctx context.Context, reqs []*models.Requ
 	if err != nil {
 		return nil, err
 	}
-	proof, err := c.zk.Operation.GenerateProofInput(
-		operations.NewGenerateProofInputParamsWithContext(ctx).WithBody(operations.GenerateProofInputBody{
+	ret, err := c.zk.Operation.GenerateSolidityCalldataCombined(
+		operations.NewGenerateSolidityCalldataCombinedParamsWithContext(ctx).WithBackend(model.PtrOf("rust")).WithBody(operations.GenerateSolidityCalldataCombinedBody{
 			L:          int64(c.zk.RequestLength),
 			Pubkey:     []string{userAccount.Signer[0].String(), userAccount.Signer[1].String()},
 			Requests:   reqs,
@@ -47,12 +48,5 @@ func (c *Ctrl) GenerateSolidityCalldata(ctx context.Context, reqs []*models.Requ
 	if err != nil {
 		return nil, errors.Wrap(err, "generate proof input from zk server")
 	}
-	ret, err := c.zk.Operation.GenerateSolidityCalldata(
-		operations.NewGenerateSolidityCalldataParamsWithContext(ctx).WithBody(proof.Payload),
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "generate proof input from zk server")
-	}
-
 	return ret.Payload, nil
 }
