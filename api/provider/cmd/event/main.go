@@ -21,7 +21,7 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	contract, err := providercontract.NewProviderContract(config, config.Address)
+	contract, err := providercontract.NewProviderContract(config)
 	if err != nil {
 		panic(err)
 	}

@@ -1,4 +1,3 @@
-address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 interval:
   autoSettleBufferTime: 18000
   forceSettlementProcessor: 86400

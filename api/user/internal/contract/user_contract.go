@@ -17,7 +17,7 @@ type UserContract struct {
 	LockTime    time.Duration
 }
 
-func NewUserContract(conf *config.Config, userAddress string) (*UserContract, error) {
+func NewUserContract(conf *config.Config) (*UserContract, error) {
 	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), conf, os.Getenv("NETWORK"))
 	if err != nil {
 		return nil, err
@@ -29,9 +29,13 @@ func NewUserContract(conf *config.Config, userAddress string) (*UserContract, er
 	if err != nil {
 		return nil, err
 	}
+	wallets, err := contract.Client.Network.Wallets()
+	if err != nil {
+		return nil, err
+	}
 	return &UserContract{
 		Contract:    contract,
-		UserAddress: userAddress,
+		UserAddress: wallets.Default().Address(),
 		LockTime:    time.Duration(lockTime.Int64()) * time.Second,
 	}, nil
 }

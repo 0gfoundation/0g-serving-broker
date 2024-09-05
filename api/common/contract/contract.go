@@ -45,7 +45,7 @@ func NewServingContract(servingAddress common.Address, conf *config.Config, netw
 	}
 
 	contract := &Contract{
-		client:  *ethereumClient,
+		Client:  *ethereumClient,
 		address: servingAddress,
 	}
 
@@ -58,16 +58,16 @@ func NewServingContract(servingAddress common.Address, conf *config.Config, netw
 }
 
 type Contract struct {
-	client  client.EthereumClient
+	Client  client.EthereumClient
 	address common.Address
 }
 
 func (c *Contract) CreateTransactOpts() (*bind.TransactOpts, error) {
-	wallets, err := c.client.Network.Wallets()
+	wallets, err := c.Client.Network.Wallets()
 	if err != nil {
 		return nil, err
 	}
-	opt, err := c.client.TransactionOpts(wallets.Default(), c.address, nil, nil)
+	opt, err := c.Client.TransactionOpts(wallets.Default(), c.address, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 			return nil, errors.New("no receipt after max retries")
 		}
 		time.Sleep(opt.Interval)
-		receipt, err = c.client.Client.TransactionReceipt(ctx, txHash)
+		receipt, err = c.Client.Client.TransactionReceipt(ctx, txHash)
 		if err != nil && err != ethereum.NotFound {
 			return nil, err
 		}
@@ -108,5 +108,5 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 }
 
 func (c *Contract) Close() {
-	c.client.Client.Close()
+	c.Client.Client.Close()
 }

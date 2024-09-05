@@ -504,7 +504,8 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "updatedAt": {
-                    "type": "string"
+                    "type": "string",
+                    "readOnly": true
                 },
                 "url": {
                     "type": "string"

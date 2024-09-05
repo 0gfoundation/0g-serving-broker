@@ -9,7 +9,6 @@ import (
 )
 
 type Config struct {
-	Address         string `yaml:"address"`
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
 		User     string `yaml:"user"`

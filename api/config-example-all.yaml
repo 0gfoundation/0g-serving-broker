@@ -1,6 +1,3 @@
-# Ethereum-formatted wallet address
-address: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-
 database:
   # Database configuration for the provider:
   # The provider connects to the database server located at '0g-serving-provider-agent-db' on port 3306.

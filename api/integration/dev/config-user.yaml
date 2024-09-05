@@ -1,4 +1,3 @@
-address: 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 contractAddress: 0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
 database:
   provider: root:123456@tcp(0g-serving-agent-db:3306)/provider?parseTime=true
