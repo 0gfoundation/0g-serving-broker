@@ -10,14 +10,14 @@ import (
 
 func (c *ProviderContract) GetUserAccount(ctx context.Context, user common.Address) (contract.Account, error) {
 	callOpts := &bind.CallOpts{
-		Context: context.Background(),
+		Context: ctx,
 	}
 	return c.Contract.GetAccount(callOpts, user, common.HexToAddress(c.ProviderAddress))
 }
 
 func (c *ProviderContract) ListUserAccount(ctx context.Context) ([]contract.Account, error) {
 	callOpts := &bind.CallOpts{
-		Context: context.Background(),
+		Context: ctx,
 	}
 	accounts, err := c.Contract.GetAllAccounts(callOpts)
 	if err != nil {

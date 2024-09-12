@@ -8,6 +8,7 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/provider/model"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model.Service, servingUrl string) error {
@@ -45,9 +46,17 @@ func (c *ProviderContract) DeleteService(ctx context.Context, name string) error
 	return err
 }
 
+func (c *ProviderContract) GetService(ctx context.Context, name string) (contract.Service, error) {
+	callOpts := &bind.CallOpts{
+		Context: ctx,
+	}
+
+	return c.Contract.GetService(callOpts, common.HexToAddress(c.ProviderAddress), name)
+}
+
 func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service, error) {
 	callOpts := &bind.CallOpts{
-		Context: context.Background(),
+		Context: ctx,
 	}
 
 	list, err := c.Contract.GetAllServices(callOpts)

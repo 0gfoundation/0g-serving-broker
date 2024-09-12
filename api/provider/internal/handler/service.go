@@ -30,7 +30,11 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 		handleAgentError(ctx, errors.New("invalid service type"), "register service")
 		return
 	}
-
+	svc, _ := h.ctrl.GetContractService(ctx, service.Name)
+	if svc.Name != "" {
+		handleAgentError(ctx, errors.New("service already exists in contract"), "register service")
+		return
+	}
 	if err := h.ctrl.RegisterService(ctx, service); err != nil {
 		h.proxy.DeleteRoute(service.Name)
 		handleAgentError(ctx, err, "register service")

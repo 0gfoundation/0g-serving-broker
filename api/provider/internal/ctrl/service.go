@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/provider/internal/db"
 	"github.com/0glabs/0g-serving-agent/provider/model"
@@ -58,6 +59,10 @@ func (c *Ctrl) UpdateService(ctx context.Context, service model.Service) error {
 func (c *Ctrl) GetService(name string) (model.Service, error) {
 	svc, err := c.db.GetService(name)
 	return svc, errors.Wrap(err, "get service from db")
+}
+
+func (c *Ctrl) GetContractService(ctx context.Context, name string) (contract.Service, error) {
+	return c.contract.GetService(ctx, name)
 }
 
 func (c *Ctrl) ListService() ([]model.Service, error) {
