@@ -79,8 +79,8 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 	if len(opts) > 0 {
 		opt = opts[0]
 	} else {
-		opt.Rounds = 5
-		opt.Interval = time.Second * 3
+		opt.Rounds = 10
+		opt.Interval = time.Second * 10
 	}
 
 	var tries uint
@@ -91,7 +91,7 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 		time.Sleep(opt.Interval)
 		receipt, err = c.Client.Client.TransactionReceipt(ctx, txHash)
 		if err != nil && err != ethereum.NotFound {
-			return nil, err
+			return nil, errors.Wrap(err, "get transaction receipt")
 		}
 		tries++
 	}
