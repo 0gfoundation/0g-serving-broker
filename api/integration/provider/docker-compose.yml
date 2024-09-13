@@ -19,14 +19,13 @@ services:
       - default
 
   0g-serving-provider-agent:
-    image: 0g-seving-agent:dev1-amd64
+    image: 0g-seving-agent:dev-amd64
     container_name: 0g-serving-provider-agent
     environment:
       - PORT=8080
       - CONFIG_FILE=/etc/config.yaml
-      - NETWORK=hardhat
     volumes:
-      - /etc/config/config.yaml:/etc/config.yaml
+      - ./config.local.yaml:/etc/config.yaml
     command: 0g-provider-server
     depends_on:
       mysql:
@@ -35,13 +34,12 @@ services:
         condition: service_healthy
 
   0g-serving-provider-event:
-    image: 0g-seving-agent:dev1-amd64
+    image: 0g-seving-agent:dev-amd64
     container_name: 0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
-      - NETWORK=hardhat
     volumes:
-      - /etc/config/config.yaml:/etc/config.yaml
+      - ./config.local.yaml:/etc/config.yaml
     command: 0g-provider-event
     depends_on:
       0g-serving-provider-agent:

@@ -1,5 +1,7 @@
 # 0G Serving usage procedure
 
+TODO：REMOVE AFTER `api/integration/README.md` IS COMPLETED
+
 ## Background
 
 The 0G Serving Agent integrates with the [0G Serving Contract](https://github.com/0glabs/0g-serving-contract) to provide a seamless settlement solution for data retrieval services. For example, if a provider has a chatbot service that can be called using the following command:

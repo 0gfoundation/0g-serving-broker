@@ -58,13 +58,13 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6",
+			ContractAddress: "0x9Ae9b2C822beFF4B4466075006bc6b5ac35E779F",
 			Database: struct {
 				User     string `yaml:"user"`
 				Provider string `yaml:"provider"`
 			}{
-				User:     "user:user@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true",
-				Provider: "provider:provider@tcp(0g-serving-provider-agent-db:3306)/provider?parseTime=true",
+				User:     "root:123456@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true",
+				Provider: "root:123456@tcp(0g-serving-provider-agent-db:3306)/provider?parseTime=true",
 			},
 			Event: struct {
 				ProviderAddr string `yaml:"providerAddr"`

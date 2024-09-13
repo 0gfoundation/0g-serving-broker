@@ -1,3 +1,6 @@
 abis
 .vscode
 build
+config.local.*
+.openapi-generator-ignore
+.openapi-generator*

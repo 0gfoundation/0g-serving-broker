@@ -2,9 +2,9 @@ interval:
   refundProcessor: 600
 networks:
   ethereum0g:
-    url: "https://rpc-testnet.0g.ai"
+    url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
-      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000
     gasEstimationBuffer: 10000

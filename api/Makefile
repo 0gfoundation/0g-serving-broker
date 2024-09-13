@@ -41,6 +41,24 @@ release: oci
 hardhat-env:
 	docker build -f ./libs/0g-serving-contract/intergrate/Dockerfile -t hardhat-node-with-contract:dev ./libs/0g-serving-contract
 
+generate-user-api:
+	docker run --rm -v ./user/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
+
+generate-provider-api:
+	docker run --rm -v ./provider/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
+
+package:
+	@mkdir -p /tmp/0g-serving && \
+	cp ./integration/README.md /tmp/0g-serving/ && \
+	cp ./integration/introduction.md /tmp/0g-serving/ && \
+	rsync -av --exclude 'config.local.*' ./integration/provider/ /tmp/0g-serving/provider/ && \
+	rsync -av --exclude 'config.local.*' ./integration/user/ /tmp/0g-serving/user/ && \
+	cp ./user/doc/api/index.html /tmp/0g-serving/user/api.html && \
+	cp ./provider/doc/api/index.html /tmp/0g-serving/provider/api.html && \
+	tar -czf /tmp/0g-serving.tar.gz -C /tmp 0g-serving && \
+	rm -rf /tmp/0g-serving && \
+	echo "Package created at /tmp/0g-serving.tar.gz"
+
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
 	go install -v github.com/swaggo/swag/cmd/swag@v1.8.10
