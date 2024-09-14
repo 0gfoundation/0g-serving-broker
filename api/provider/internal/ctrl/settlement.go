@@ -15,6 +15,10 @@ import (
 )
 
 func (c *Ctrl) SettleFees(ctx context.Context) error {
+	err := c.pruneRequest(ctx)
+	if err != nil {
+		return errors.Wrap(err, "prune request")
+	}
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
 	})
@@ -122,6 +126,34 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 	}
 	log.Print("Accounts at risk of having insufficient funds and will be settled immediately.")
 	return errors.Wrap(c.SettleFees(ctx), "settle fees")
+}
+
+func (c Ctrl) pruneRequest(ctx context.Context) error {
+	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
+		Processed: false,
+	})
+	if err != nil {
+		return errors.Wrap(err, "list request from db")
+	}
+	if len(reqs) == 0 {
+		return nil
+	}
+	accountsInDebt := map[string]int64{}
+	for _, req := range reqs {
+		if _, ok := accountsInDebt[req.UserAddress]; !ok {
+			accountsInDebt[req.UserAddress] = 1
+		}
+	}
+	accounts, err := c.contract.ListUserAccount(ctx)
+	if err != nil {
+		return errors.Wrap(err, "list account from contract")
+	}
+	for _, account := range accounts {
+		if _, ok := accountsInDebt[account.User.String()]; ok {
+			accountsInDebt[account.User.String()] = account.Nonce.Int64()
+		}
+	}
+	return errors.Wrap(c.db.PruneRequest(accountsInDebt), "prune request in db")
 }
 
 func splitArray[T any](arr1 []T, groupSize int) [][]T {

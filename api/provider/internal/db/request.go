@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 
 	"github.com/0glabs/0g-serving-agent/provider/model"
 )
@@ -42,4 +43,21 @@ func (d *DB) UpdateRequest() error {
 func (d *DB) CreateRequest(req model.Request) error {
 	ret := d.db.Create(&req)
 	return ret.Error
+}
+
+func (d *DB) PruneRequest(minNonceMap map[string]int64) error {
+	var whereClauses []string
+	var args []interface{}
+
+	if len(minNonceMap) == 0 {
+		return nil
+	}
+
+	for address, minNonce := range minNonceMap {
+		whereClauses = append(whereClauses, "(user_address = ? AND nonce <= ?)")
+		args = append(args, address, minNonce)
+	}
+	condition := strings.Join(whereClauses, " OR ")
+
+	return d.db.Where(condition, args...).Delete(&model.Request{}).Error
 }
