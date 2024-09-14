@@ -16,7 +16,7 @@ func (c *UserContract) CreateProviderAccount(ctx context.Context, provider commo
 	if account.User != zeroAddress {
 		return errors.New("account already exists")
 	}
-	return c.DepositFund(ctx, provider, balance, signer)
+	return c.AddAccount(ctx, provider, balance, signer)
 }
 
 func (c *UserContract) GetProviderAccount(ctx context.Context, provider common.Address) (contract.Account, error) {
@@ -44,14 +44,29 @@ func (c *UserContract) ListProviderAccount(ctx context.Context) ([]contract.Acco
 	return ret, nil
 }
 
-func (c *UserContract) DepositFund(ctx context.Context, provider common.Address, balance big.Int, signer [2]*big.Int) error {
+func (c *UserContract) AddAccount(ctx context.Context, provider common.Address, balance big.Int, signer [2]*big.Int) error {
 	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
 	}
 
 	opts.Value = &balance
-	tx, err := c.Contract.DepositFund(opts, provider, signer)
+	tx, err := c.Contract.AddAccount(opts, provider, signer)
+	if err != nil {
+		return err
+	}
+	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	return err
+}
+
+func (c *UserContract) DepositFund(ctx context.Context, provider common.Address, balance big.Int) error {
+	opts, err := c.Contract.CreateTransactOpts()
+	if err != nil {
+		return err
+	}
+
+	opts.Value = &balance
+	tx, err := c.Contract.DepositFund(opts, provider)
 	if err != nil {
 		return err
 	}

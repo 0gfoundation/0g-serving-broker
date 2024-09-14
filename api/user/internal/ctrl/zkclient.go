@@ -10,7 +10,6 @@ import (
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
 	database "github.com/0glabs/0g-serving-agent/user/internal/db"
 	"github.com/0glabs/0g-serving-agent/user/model"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {
@@ -55,10 +54,7 @@ func (c *Ctrl) GenerateSignature(ctx context.Context, req *models.Request, signe
 		return nil, err
 	}
 	if len(signer) == 2 && (keyPair.ZKPublicKey[0] != signer[0] || keyPair.ZKPublicKey[1] != signer[1]) {
-		err := c.updateSigner(ctx, common.HexToAddress(req.ProviderAddress), keyPair.ZKPublicKey)
-		if err != nil {
-			return nil, errors.Wrap(err, "update signer")
-		}
+		return nil, errors.New("signer in db mismatches that on contract")
 	}
 	ret, err := c.zk.Operation.GenerateSignature(
 		operations.NewGenerateSignatureParamsWithContext(ctx).WithBody(operations.GenerateSignatureBody{

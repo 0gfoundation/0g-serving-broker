@@ -60,34 +60,13 @@ func (c Ctrl) ChargeProviderAccount(ctx context.Context, providerAddress common.
 	if err != nil {
 		return err
 	}
-
-	signer, err := c.getSigner(ctx)
-	if err != nil {
-		return errors.Wrap(err, "get signer from db")
-	}
 	amount := big.NewInt(0)
 	amount.SetInt64(*account.Balance)
-	if err := c.contract.DepositFund(ctx, providerAddress, *amount, signer); err != nil {
+	if err := c.contract.DepositFund(ctx, providerAddress, *amount); err != nil {
 		return errors.Wrap(err, "deposit fund in contract")
 	}
 
 	return errors.Wrapf(c.SyncProviderAccount(ctx, providerAddress), "update charged account in db")
-}
-
-func (c *Ctrl) updateSigner(ctx context.Context, providerAddress common.Address, pubKey [2]string) error {
-	signer, err := c.parseBigIntStringKey(pubKey)
-	if err != nil {
-		return errors.Wrap(err, "parse signer")
-	}
-	amount := big.NewInt(0)
-	if err := c.contract.DepositFund(ctx, providerAddress, *amount, signer); err != nil {
-		return errors.Wrap(err, "update signer by calling depositFund in contract")
-	}
-	err = c.db.UpdateProviderAccount(providerAddress.String(), model.Provider{
-		Provider: providerAddress.String(),
-		Signer:   model.StringSlice{pubKey[0], pubKey[1]},
-	})
-	return errors.Wrap(err, "update signer in db")
 }
 
 func (c Ctrl) SyncProviderAccounts(ctx context.Context) error {
