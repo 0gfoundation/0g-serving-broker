@@ -49,7 +49,7 @@ func Main() {
 	}
 
 	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
-	ctrl := ctrl.New(db, contract, zk, "", config.Interval.AutoSettleBufferTime)
+	ctrl := ctrl.New(db, contract, zk, "", config.Interval.AutoSettleBufferTime, nil)
 	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)

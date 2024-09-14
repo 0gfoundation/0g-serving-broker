@@ -3,6 +3,9 @@ package ctrl
 import (
 	"context"
 
+	"github.com/patrickmn/go-cache"
+
+	"github.com/0glabs/0g-serving-agent/common/contract"
 	"github.com/0glabs/0g-serving-agent/common/errors"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/client/operations"
 	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
@@ -11,10 +14,22 @@ import (
 )
 
 func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.Request, sigs models.Signatures) ([]bool, error) {
-	userAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
-	if err != nil {
-		return nil, err
+	var userAccount contract.Account
+	value, found := c.svcCache.Get(req.UserAddress)
+	if found {
+		account, ok := value.(contract.Account)
+		if !ok {
+			return nil, errors.New("cached object does not implement contract.Account")
+		}
+		userAccount = account
+	} else {
+		userAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
+		if err != nil {
+			return nil, err
+		}
+		c.svcCache.Set(req.UserAddress, userAccount, cache.DefaultExpiration)
 	}
+
 	ret, err := c.zk.Operation.CheckSignature(
 		operations.NewCheckSignatureParamsWithContext(ctx).WithBody(operations.CheckSignatureBody{
 			Pubkey:     []string{userAccount.Signer[0].String(), userAccount.Signer[1].String()},
@@ -23,7 +38,7 @@ func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.Request, sigs mo
 		}),
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "generate key pair from zk server")
+		return nil, errors.Wrap(err, "check signature from zk server")
 	}
 
 	return ret.Payload, nil

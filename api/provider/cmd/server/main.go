@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-agent/common/config"
 	"github.com/0glabs/0g-serving-agent/common/zkclient"
@@ -43,7 +45,8 @@ func Main() {
 
 	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
 	engine := gin.New()
-	ctrl := ctrl.New(db, contract, zk, config.ServingUrl, config.Interval.AutoSettleBufferTime)
+	svcCache := cache.New(5*time.Minute, 10*time.Minute)
+	ctrl := ctrl.New(db, contract, zk, config.ServingUrl, config.Interval.AutoSettleBufferTime, svcCache)
 	ctx := context.Background()
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
