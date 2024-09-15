@@ -8,19 +8,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
-	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/zkclient"
-	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
-	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
-	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
-	"github.com/0glabs/0g-serving-agent/provider/internal/handler"
-	"github.com/0glabs/0g-serving-agent/provider/internal/proxy"
+	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	providercontract "github.com/0glabs/0g-serving-broker/provider/internal/contract"
+	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
+	database "github.com/0glabs/0g-serving-broker/provider/internal/db"
+	"github.com/0glabs/0g-serving-broker/provider/internal/handler"
+	"github.com/0glabs/0g-serving-broker/provider/internal/proxy"
 )
 
 //go:generate swag fmt
 //go:generate swag init --dir ./,../../ --output ../../doc
 
-//	@title		0G Serving Provider Agent API
+//	@title		0G Serving Provider Broker API
 //	@version	1.0
 //	@BasePath	/v1
 

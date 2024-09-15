@@ -3,8 +3,8 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/user/internal/ctrl"
 )
 
 type Handler struct {
@@ -45,7 +45,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/refund", h.ListRefund)
 }
 
-func handleAgentError(ctx *gin.Context, err error, context string) {
+func handleBrokerError(ctx *gin.Context, err error, context string) {
 	// TODO: recorded to log system
 	info := "User"
 	if context != "" {

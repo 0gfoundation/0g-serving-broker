@@ -1,7 +1,7 @@
 package zgstorage
 
 import (
-	"github.com/0glabs/0g-serving-agent/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/contract"
 )
 
 type UserZgStorage struct {

@@ -6,12 +6,12 @@ import (
 
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/zkclient"
-	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
-	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
-	database "github.com/0glabs/0g-serving-agent/user/internal/db"
-	"github.com/0glabs/0g-serving-agent/user/internal/event"
+	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	usercontract "github.com/0glabs/0g-serving-broker/user/internal/contract"
+	"github.com/0glabs/0g-serving-broker/user/internal/ctrl"
+	database "github.com/0glabs/0g-serving-broker/user/internal/db"
+	"github.com/0glabs/0g-serving-broker/user/internal/event"
 )
 
 func Main() {

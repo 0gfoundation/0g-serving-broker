@@ -1,7 +1,7 @@
 package db
 
 import (
-	"github.com/0glabs/0g-serving-agent/common/config"
+	"github.com/0glabs/0g-serving-broker/common/config"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 func (d *DB) CreateRefunds(refunds []model.Refund) error {

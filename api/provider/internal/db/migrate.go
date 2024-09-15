@@ -3,7 +3,7 @@ package db
 import (
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 	"github.com/go-gormigrate/gormigrate/v2"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"

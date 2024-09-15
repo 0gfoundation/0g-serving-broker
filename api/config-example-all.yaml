@@ -1,13 +1,13 @@
 database:
   # Database configuration for the provider:
-  # The provider connects to the database server located at '0g-serving-provider-agent-db' on port 3306.
+  # The provider connects to the database server located at '0g-serving-provider-broker-db' on port 3306.
   # Do not change this configuration if using docker compose to start service.
-  provider: provider:provider@tcp(0g-serving-provider-agent-db:3306)/provider?parseTime=true
+  provider: provider:provider@tcp(0g-serving-provider-broker-db:3306)/provider?parseTime=true
 
   # Database configuration for the user:
-  # The user connects to the database server located at '0g-serving-user-agent-db' on port 3306.
+  # The user connects to the database server located at '0g-serving-user-broker-db' on port 3306.
   # Do not change this configuration if using docker compose to start service.
-  user: user:user@tcp(0g-serving-user-agent-db:3306)/user?parseTime=true
+  user: user:user@tcp(0g-serving-user-broker-db:3306)/user?parseTime=true
 
 # OG serving contract address used
 contractAddress: 0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6
@@ -72,10 +72,10 @@ networks:
     gasEstimationBuffer: 10000
 
 zkProver:
-  # Host of zk prover agent.
+  # Host of zk prover broker.
   # Do not change this configuration if using docker compose to start service.
   host: "localhost:3000"
 
-  # requestLength defines the number of requests prover agent packs into one
+  # requestLength defines the number of requests prover broker packs into one
   # chunk as the minimum unit for settlement.
   requestLength: 40

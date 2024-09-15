@@ -6,8 +6,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 // addProviderAccount
@@ -20,15 +20,15 @@ import (
 func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 	var account model.Provider
 	if err := account.Bind(ctx); err != nil {
-		handleAgentError(ctx, err, "bind account")
+		handleBrokerError(ctx, err, "bind account")
 		return
 	}
 	if account.Provider == "" {
-		handleAgentError(ctx, errors.New("missing field Provider"), "create account")
+		handleBrokerError(ctx, errors.New("missing field Provider"), "create account")
 	}
 
 	if err := h.ctrl.CreateProviderAccount(ctx, common.HexToAddress(account.Provider), account); err != nil {
-		handleAgentError(ctx, err, "create account")
+		handleBrokerError(ctx, err, "create account")
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -43,7 +43,7 @@ func (h *Handler) AddProviderAccount(ctx *gin.Context) {
 func (h *Handler) ListProviderAccount(ctx *gin.Context) {
 	accounts, err := h.ctrl.ListProviderAccount(ctx)
 	if err != nil {
-		handleAgentError(ctx, err, "list account")
+		handleBrokerError(ctx, err, "list account")
 		return
 	}
 	ctx.JSON(http.StatusOK, model.ProviderList{
@@ -63,7 +63,7 @@ func (h *Handler) GetProviderAccount(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	account, err := h.ctrl.GetProviderAccount(ctx, common.HexToAddress(providerAddress))
 	if err != nil {
-		handleAgentError(ctx, err, "get account from db")
+		handleBrokerError(ctx, err, "get account from db")
 		return
 	}
 
@@ -83,12 +83,12 @@ func (h *Handler) Charge(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	var account model.Provider
 	if err := account.Bind(ctx); err != nil {
-		handleAgentError(ctx, err, "bind account")
+		handleBrokerError(ctx, err, "bind account")
 		return
 	}
 
 	if err := h.ctrl.ChargeProviderAccount(ctx, common.HexToAddress(providerAddress), account); err != nil {
-		handleAgentError(ctx, err, "charge account")
+		handleBrokerError(ctx, err, "charge account")
 		return
 	}
 	ctx.Status(http.StatusAccepted)
@@ -103,7 +103,7 @@ func (h *Handler) Charge(ctx *gin.Context) {
 //	@Success	202
 func (h *Handler) SyncProviderAccounts(ctx *gin.Context) {
 	if err := h.ctrl.SyncProviderAccounts(ctx); err != nil {
-		handleAgentError(ctx, err, "sync all data")
+		handleBrokerError(ctx, err, "sync all data")
 		return
 	}
 
@@ -121,7 +121,7 @@ func (h *Handler) SyncProviderAccounts(ctx *gin.Context) {
 func (h *Handler) SyncProviderAccount(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	if err := h.ctrl.SyncProviderAccount(ctx, common.HexToAddress(providerAddress)); err != nil {
-		handleAgentError(ctx, err, "sync data")
+		handleBrokerError(ctx, err, "sync data")
 		return
 	}
 

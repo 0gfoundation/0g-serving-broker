@@ -1,7 +1,7 @@
 package db
 
 import (
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 func (d *DB) AddServices(services []model.Service) error {

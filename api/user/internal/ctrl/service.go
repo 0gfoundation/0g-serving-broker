@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/user/model"
 	"github.com/ethereum/go-ethereum/common"
 )
 

@@ -7,10 +7,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/zkclient"
-	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
-	"github.com/0glabs/0g-serving-agent/user/internal/db"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	usercontract "github.com/0glabs/0g-serving-broker/user/internal/contract"
+	"github.com/0glabs/0g-serving-broker/user/internal/db"
 )
 
 type Ctrl struct {
@@ -29,7 +29,7 @@ func New(db *db.DB, contract *usercontract.UserContract, zk zkclient.ZKClient, s
 	}
 }
 
-func handleAgentError(ctx *gin.Context, err error, context string) {
+func handleBrokerError(ctx *gin.Context, err error, context string) {
 	// TODO: recorded to log system
 	info := "User"
 	if context != "" {

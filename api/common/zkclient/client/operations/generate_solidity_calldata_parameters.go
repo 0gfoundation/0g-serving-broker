@@ -15,7 +15,7 @@ import (
 	cr "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
 
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
 )
 
 // NewGenerateSolidityCalldataParams creates a new GenerateSolidityCalldataParams object,

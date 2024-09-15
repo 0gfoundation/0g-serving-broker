@@ -10,7 +10,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/errors"
 )
 
 type ProviderChatBot struct{}

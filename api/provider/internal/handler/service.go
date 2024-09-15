@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 // registerService
@@ -20,24 +20,24 @@ import (
 func (h *Handler) RegisterService(ctx *gin.Context) {
 	var service model.Service
 	if err := service.Bind(ctx); err != nil {
-		handleAgentError(ctx, err, "bind service")
+		handleBrokerError(ctx, err, "bind service")
 		return
 	}
 	switch service.Type {
 	case "zgStorage", "chatbot":
 		h.proxy.AddHTTPRoute(service.Name, service.URL, service.Type)
 	default:
-		handleAgentError(ctx, errors.New("invalid service type"), "register service")
+		handleBrokerError(ctx, errors.New("invalid service type"), "register service")
 		return
 	}
 	svc, _ := h.ctrl.GetContractService(ctx, service.Name)
 	if svc.Name != "" {
-		handleAgentError(ctx, errors.New("service already exists in contract"), "register service")
+		handleBrokerError(ctx, errors.New("service already exists in contract"), "register service")
 		return
 	}
 	if err := h.ctrl.RegisterService(ctx, service); err != nil {
 		h.proxy.DeleteRoute(service.Name)
-		handleAgentError(ctx, err, "register service")
+		handleBrokerError(ctx, err, "register service")
 		return
 	}
 
@@ -55,7 +55,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 	name := ctx.Param("service")
 	service, err := h.ctrl.GetService(name)
 	if err != nil {
-		handleAgentError(ctx, err, "get service from db")
+		handleBrokerError(ctx, err, "get service from db")
 		return
 	}
 
@@ -71,7 +71,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 func (h *Handler) ListService(ctx *gin.Context) {
 	list, err := h.ctrl.ListService()
 	if err != nil {
-		handleAgentError(ctx, err, "list service")
+		handleBrokerError(ctx, err, "list service")
 		return
 	}
 
@@ -94,26 +94,26 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 
 	var new model.Service
 	if err := new.Bind(ctx); err != nil {
-		handleAgentError(ctx, err, "bind service")
+		handleBrokerError(ctx, err, "bind service")
 		return
 	}
 	old, err := h.ctrl.GetService(name)
 	if err != nil {
-		handleAgentError(ctx, err, "get old service")
+		handleBrokerError(ctx, err, "get old service")
 		return
 	}
 	if err := model.ValidateUpdateService(old, new); err != nil {
-		handleAgentError(ctx, err, "")
+		handleBrokerError(ctx, err, "")
 		return
 	}
 	switch new.Type {
 	case "zgStorage", "chatbot":
 		if err := h.proxy.UpdateRoute(name, new.URL, new.Type); err != nil {
-			handleAgentError(ctx, err, "update service route")
+			handleBrokerError(ctx, err, "update service route")
 			return
 		}
 	default:
-		handleAgentError(ctx, errors.New("invalid service type"), "register service")
+		handleBrokerError(ctx, errors.New("invalid service type"), "register service")
 		return
 	}
 	if err := h.ctrl.UpdateService(ctx, new); err != nil {
@@ -124,7 +124,7 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 		if rollBackErr := h.proxy.UpdateRoute(name, old.URL, old.Type); rollBackErr != nil {
 			log.Printf("rolling back operation in route: %s", rollBackErr.Error())
 		}
-		handleAgentError(ctx, err, "update service")
+		handleBrokerError(ctx, err, "update service")
 		return
 	}
 
@@ -142,7 +142,7 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 	name := ctx.Param("service")
 
 	if err := h.ctrl.DeleteService(ctx, name); err != nil {
-		handleAgentError(ctx, err, "delete service: "+name)
+		handleBrokerError(ctx, err, "delete service: "+name)
 		return
 	}
 
@@ -160,7 +160,7 @@ func (h *Handler) DeleteService(ctx *gin.Context) {
 //	@Success	202
 func (h *Handler) SyncServices(ctx *gin.Context) {
 	if err := h.ctrl.SyncServices(ctx); err != nil {
-		handleAgentError(ctx, err, "synchronize service from the database to the contract")
+		handleBrokerError(ctx, err, "synchronize service from the database to the contract")
 		return
 	}
 

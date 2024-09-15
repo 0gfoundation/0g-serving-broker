@@ -10,7 +10,7 @@ Please refer to [introduction](./introduction.md).
 
 ## Basic Usage Process
 
-1. Provider Starts the Provider Agent:
+1. Provider Starts the Provider Broker:
 
    1. Copy the file [config](./provider/config.example.yaml) and make the following modifications:
 
@@ -18,27 +18,27 @@ Please refer to [introduction](./introduction.md).
       - Update `privateKeys` to the private key of your wallet for the 0G blockchain.
 
    2. Save the modified file as `./provider/config.local.yaml`.
-   3. Start the provider agent
+   3. Start the provider broker
 
       ```sh
       docker compose -f ./provider/docker-compose.yml up -d
 
-      # It costs around a few minutes to start, the agent will be listening on 127.0.0.1:3080
+      # It costs around a few minutes to start, the broker will be listening on 127.0.0.1:3080
       ```
 
-2. User Starts the User Agent:
+2. User Starts the User Broker:
 
    1. Copy the file [config](./user/config.example.yaml) and make the following modifications:
 
       - Update `privateKeys` to the private key of your wallet for the 0G blockchain.
 
    2. Save the modified file as `./user/config.local.yaml`.
-   3. Start the user agent
+   3. Start the user broker
 
       ```sh
       docker compose -f ./user/docker-compose.yml up -d
 
-      # It costs around a few minutes to start, the agent will be listening on 127.0.0.1:1034
+      # It costs around a few minutes to start, the broker will be listening on 127.0.0.1:1034
       ```
 
 3. Provider Registers the Service:
@@ -47,7 +47,7 @@ Please refer to [introduction](./introduction.md).
 
    1. A service should be prepared, and it should expose an endpoint.
 
-   2. Register the service using provider agent API
+   2. Register the service using provider broker API
 
    ```sh
    curl -X POST http://127.0.0.1:3080/v1/service \
@@ -90,7 +90,7 @@ Please refer to [introduction](./introduction.md).
    }
    ```
 
-   - Please note that the URLs provided to the user differ from those used in the API requests to register services. The former are publicly exposed URLs of the provider agent, while the latter represent the original, unchangeable services proxied by the provider agent.
+   - Please note that the URLs provided to the user differ from those used in the API requests to register services. The former are publicly exposed URLs of the provider broker, while the latter represent the original, unchangeable services proxied by the provider broker.
 
 5. User Creates an Account for the Desired Service:
 
@@ -120,7 +120,7 @@ Please refer to [introduction](./introduction.md).
       }'
       ```
 
-      - To utilize the services, the basic route in the API endpoint provided by the user agent is `/v1/provider/<provider_address>/service/<service_name>`. An `<optional_suffix>` can be included, as original services may offer multiple endpoints for different purposes.
+      - To utilize the services, the basic route in the API endpoint provided by the user broker is `/v1/provider/<provider_address>/service/<service_name>`. An `<optional_suffix>` can be included, as original services may offer multiple endpoints for different purposes.
 
         For example, if a service supports two endpoints:
 
@@ -139,7 +139,7 @@ Please refer to [introduction](./introduction.md).
    curl -X POST http://127.0.0.1:3080/v1/settle
    ```
 
-   - The provider agent also incorporates an engine that automatically settles fees. This engine follows a specific rule to ensure that all users in debt are charged before their remaining balance becomes insufficient (users can request refunds, but each refund will be temporarily locked). At the same time, it manages the frequency of settlements to avoid incurring excessive gas costs.
+   - The provider broker also incorporates an engine that automatically settles fees. This engine follows a specific rule to ensure that all users in debt are charged before their remaining balance becomes insufficient (users can request refunds, but each refund will be temporarily locked). At the same time, it manages the frequency of settlements to avoid incurring excessive gas costs.
 
 ## Additional Operations
 

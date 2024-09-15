@@ -1,7 +1,7 @@
 services:
   mysql:
     image: mysql:8.0
-    container_name: 0g-serving-user-agent-db
+    container_name: 0g-serving-user-broker-db
     ports:
       - "33062:3306"
     environment:
@@ -18,9 +18,9 @@ services:
     networks:
       - default
 
-  0g-serving-user-agent:
-    image: 0g-seving-agent:dev-amd64
-    container_name: 0g-serving-user-agent
+  0g-serving-user-broker:
+    image: 0g-seving-broker:dev-amd64
+    container_name: 0g-serving-user-broker
     ports:
       - "1034:1034"
     environment:
@@ -36,7 +36,7 @@ services:
         condition: service_healthy
 
   0g-serving-user-event:
-    image: 0g-seving-agent:dev-amd64
+    image: 0g-seving-broker:dev-amd64
     container_name: 0g-serving-user-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
@@ -44,7 +44,7 @@ services:
       - ./config.local.yaml:/etc/config.yaml
     command: 0g-user-event
     depends_on:
-      0g-serving-user-agent:
+      0g-serving-user-broker:
         condition: service_started
 
   zk:

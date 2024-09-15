@@ -8,10 +8,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	providerEvent "github.com/0glabs/0g-serving-agent/provider/cmd/event"
-	providerServer "github.com/0glabs/0g-serving-agent/provider/cmd/server"
-	userEvent "github.com/0glabs/0g-serving-agent/user/cmd/event"
-	userServer "github.com/0glabs/0g-serving-agent/user/cmd/server"
+	providerEvent "github.com/0glabs/0g-serving-broker/provider/cmd/event"
+	providerServer "github.com/0glabs/0g-serving-broker/provider/cmd/server"
+	userEvent "github.com/0glabs/0g-serving-broker/user/cmd/event"
+	userServer "github.com/0glabs/0g-serving-broker/user/cmd/server"
 )
 
 func main() {

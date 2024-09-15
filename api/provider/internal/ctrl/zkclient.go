@@ -5,11 +5,11 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/client/operations"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/client/operations"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 	"github.com/ethereum/go-ethereum/common"
 )
 

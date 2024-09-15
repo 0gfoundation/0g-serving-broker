@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <title>0G Serving Provider Agent API</title>
+  <title>0G Serving Provider Broker API</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
   <meta charset="UTF-8" />
@@ -1047,7 +1047,7 @@ ul.nav-tabs {
       <div id="content">
         <div id="project">
           <div class="pull-left">
-            <h1>0G Serving Provider Agent API</h1>
+            <h1>0G Serving Provider Broker API</h1>
           </div>
           <div class="clearfix"></div>
         </div>
@@ -1190,10 +1190,10 @@ Boolean *processed = true; // Processed (optional) (default to null)
                             </div>
 
                             <div class="tab-pane" id="examples-Request-listRequest-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.RequestApi()
+var api = new 0GServingProviderBrokerApi.RequestApi()
 var opts = {
   'processed': true // {Boolean} Processed
 };
@@ -1552,10 +1552,10 @@ String *service = service_example; // Service name (default to null)
                             </div>
 
                             <div class="tab-pane" id="examples-Service-deleteService-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.ServiceApi()
+var api = new 0GServingProviderBrokerApi.ServiceApi()
 var service = service_example; // {String} Service name
 
 var callback = function(error, data, response) {
@@ -1903,10 +1903,10 @@ String *service = service_example; // Service name (default to null)
                             </div>
 
                             <div class="tab-pane" id="examples-Service-getService-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.ServiceApi()
+var api = new 0GServingProviderBrokerApi.ServiceApi()
 var service = service_example; // {String} Service name
 
 var callback = function(error, data, response) {
@@ -2265,10 +2265,10 @@ ServiceApi *apiInstance = [[ServiceApi alloc] init];
                             </div>
 
                             <div class="tab-pane" id="examples-Service-listService-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.ServiceApi()
+var api = new 0GServingProviderBrokerApi.ServiceApi()
 var callback = function(error, data, response) {
   if (error) {
     console.error(error);
@@ -2589,10 +2589,10 @@ ModelService *body = ; //
                             </div>
 
                             <div class="tab-pane" id="examples-Service-registerService-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.ServiceApi()
+var api = new 0GServingProviderBrokerApi.ServiceApi()
 var body = ; // {ModelService} 
 
 var callback = function(error, data, response) {
@@ -2949,10 +2949,10 @@ ServiceApi *apiInstance = [[ServiceApi alloc] init];
                             </div>
 
                             <div class="tab-pane" id="examples-Service-syncServices-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.ServiceApi()
+var api = new 0GServingProviderBrokerApi.ServiceApi()
 var callback = function(error, data, response) {
   if (error) {
     console.error(error);
@@ -3263,10 +3263,10 @@ ModelService *body = ; //
                             </div>
 
                             <div class="tab-pane" id="examples-Service-updateService-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.ServiceApi()
+var api = new 0GServingProviderBrokerApi.ServiceApi()
 var service = service_example; // {String} Service name
 var body = ; // {ModelService} 
 
@@ -3662,10 +3662,10 @@ SettleApi *apiInstance = [[SettleApi alloc] init];
                             </div>
 
                             <div class="tab-pane" id="examples-Settle-settleFees-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.SettleApi()
+var api = new 0GServingProviderBrokerApi.SettleApi()
 var callback = function(error, data, response) {
   if (error) {
     console.error(error);
@@ -3979,10 +3979,10 @@ String *user = user_example; // User address (default to null)
                             </div>
 
                             <div class="tab-pane" id="examples-User-getUserAccount-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.UserApi()
+var api = new 0GServingProviderBrokerApi.UserApi()
 var user = user_example; // {String} User address
 
 var callback = function(error, data, response) {
@@ -4341,10 +4341,10 @@ UserApi *apiInstance = [[UserApi alloc] init];
                             </div>
 
                             <div class="tab-pane" id="examples-User-listUserAccount-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.UserApi()
+var api = new 0GServingProviderBrokerApi.UserApi()
 var callback = function(error, data, response) {
   if (error) {
     console.error(error);
@@ -4664,10 +4664,10 @@ String *user = user_example; // User address (default to null)
                             </div>
 
                             <div class="tab-pane" id="examples-User-syncUserAccount-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.UserApi()
+var api = new 0GServingProviderBrokerApi.UserApi()
 var user = user_example; // {String} User address
 
 var callback = function(error, data, response) {
@@ -5005,10 +5005,10 @@ UserApi *apiInstance = [[UserApi alloc] init];
                             </div>
 
                             <div class="tab-pane" id="examples-User-syncUserAccounts-0-javascript">
-                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderAgentApi = require('0_g_serving_provider_agent_api');
+                              <pre class="prettyprint"><code class="language-js">var 0GServingProviderBrokerApi = require('0_g_serving_provider_broker_api');
 
 // Create an instance of the API class
-var api = new 0GServingProviderAgentApi.UserApi()
+var api = new 0GServingProviderBrokerApi.UserApi()
 var callback = function(error, data, response) {
   if (error) {
     console.error(error);

@@ -126,7 +126,7 @@ definitions:
     type: object
 info:
   contact: {}
-  title: 0G Serving User Agent API
+  title: 0G Serving User Broker API
   version: "1.0"
 paths:
   /provider:

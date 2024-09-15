@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
 )
 
 type SettlementProcessor struct {

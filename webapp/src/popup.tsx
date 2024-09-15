@@ -6,7 +6,7 @@ import { ConfigProvider } from "antd";
 import AntThemeConfig from "./styles/theme";
 
 const root = ReactDOM.createRoot(
-  document.getElementById("user-agent-container") as HTMLElement
+  document.getElementById("user-broker-container") as HTMLElement
 );
 root.render(
   <ConfigProvider theme={AntThemeConfig}>

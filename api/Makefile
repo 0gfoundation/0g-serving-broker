@@ -1,4 +1,4 @@
-IMAGE_DEST ?= docker-daemon:0g-seving-agent
+IMAGE_DEST ?= docker-daemon:0g-seving-broker
 VERSION	?= $(shell git describe --tags --abbrev=8)
 BASE_IMAGE ?= gcr.io/distroless/static:latest
 ARCH	   ?= amd64
@@ -15,7 +15,7 @@ build: clean
 		mkdir -p ./build/$$arch; \
 		GOOS=linux GOARCH=$$arch \
 			go build -trimpath \
-			-o ./build/$$arch/agent . ; \
+			-o ./build/$$arch/broker . ; \
 	done
 
 clean:
@@ -25,9 +25,9 @@ oci: build
 	for arch in $(ARCH); do \
 		skopeo --insecure-policy copy --src-tls-verify=false \
 			docker://$(BASE_IMAGE) oci:build/oci:$(VERSION)-$$arch; \
-		umoci insert --image build/oci:$(VERSION)-$$arch build/$$arch/agent /usr/bin/agent; \
+		umoci insert --image build/oci:$(VERSION)-$$arch build/$$arch/broker /usr/bin/broker; \
 		umoci config --image build/oci:$(VERSION)-$$arch \
-			--config.entrypoint /usr/bin/agent \
+			--config.entrypoint /usr/bin/broker \
 			--author 0glab --created $$(date -u +%FT%T.%NZ) \
 			--architecture $$arch --os linux; \
 	done
@@ -47,7 +47,7 @@ generate-user-api:
 generate-provider-api:
 	docker run --rm -v ./provider/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
 
-package:
+package: generate-user-api generate-provider-api
 	@mkdir -p /tmp/0g-serving && \
 	cp ./integration/README.md /tmp/0g-serving/ && \
 	cp ./integration/introduction.md /tmp/0g-serving/ && \

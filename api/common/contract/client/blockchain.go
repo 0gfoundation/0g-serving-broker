@@ -8,7 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/0glabs/0g-serving-agent/common/config"
+	"github.com/0glabs/0g-serving-broker/common/config"
 )
 
 type BlockchainNetworkID string

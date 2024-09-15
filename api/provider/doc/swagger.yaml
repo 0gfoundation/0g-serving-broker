@@ -106,7 +106,7 @@ definitions:
     type: object
 info:
   contact: {}
-  title: 0G Serving Provider Agent API
+  title: 0G Serving Provider Broker API
   version: "1.0"
 paths:
   /request:

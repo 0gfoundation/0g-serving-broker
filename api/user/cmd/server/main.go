@@ -7,18 +7,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
-	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/zkclient"
-	usercontract "github.com/0glabs/0g-serving-agent/user/internal/contract"
-	"github.com/0glabs/0g-serving-agent/user/internal/ctrl"
-	database "github.com/0glabs/0g-serving-agent/user/internal/db"
-	"github.com/0glabs/0g-serving-agent/user/internal/handler"
+	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	usercontract "github.com/0glabs/0g-serving-broker/user/internal/contract"
+	"github.com/0glabs/0g-serving-broker/user/internal/ctrl"
+	database "github.com/0glabs/0g-serving-broker/user/internal/db"
+	"github.com/0glabs/0g-serving-broker/user/internal/handler"
 )
 
 //go:generate swag fmt
 //go:generate swag init --dir ./,../../ --output ../../doc
 
-//	@title		0G Serving User Agent API
+//	@title		0G Serving User Broker API
 //	@version	1.0
 //	@BasePath	/v1
 

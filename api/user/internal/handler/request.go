@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 // listRequest
@@ -17,7 +17,7 @@ import (
 func (h *Handler) ListRequest(ctx *gin.Context) {
 	list, fee, err := h.ctrl.ListRequest()
 	if err != nil {
-		handleAgentError(ctx, err, "list request")
+		handleBrokerError(ctx, err, "list request")
 		return
 	}
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"math/big"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 )

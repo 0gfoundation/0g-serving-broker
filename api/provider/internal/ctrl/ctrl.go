@@ -5,9 +5,9 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
-	"github.com/0glabs/0g-serving-agent/common/zkclient"
-	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
-	"github.com/0glabs/0g-serving-agent/provider/internal/db"
+	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	providercontract "github.com/0glabs/0g-serving-broker/provider/internal/contract"
+	"github.com/0glabs/0g-serving-broker/provider/internal/db"
 )
 
 type Ctrl struct {

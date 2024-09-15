@@ -1,7 +1,7 @@
 package extractor
 
 import (
-	"github.com/0glabs/0g-serving-agent/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/contract"
 )
 
 // The extractors interface extract metadata from requests and responses for validation and settlement.

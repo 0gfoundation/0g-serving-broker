@@ -15,7 +15,7 @@ import (
 //	@Success	202
 func (h *Handler) SettleFees(ctx *gin.Context) {
 	if err := h.ctrl.SettleFees(ctx); err != nil {
-		handleAgentError(ctx, err, "settle fees")
+		handleBrokerError(ctx, err, "settle fees")
 		return
 	}
 

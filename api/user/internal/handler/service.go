@@ -3,7 +3,7 @@ package handler
 import (
 	"net/http"
 
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/user/model"
 	"github.com/gin-gonic/gin"
 )
 
@@ -20,7 +20,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	svc, err := h.ctrl.GetService(ctx, providerAddress, name)
 	if err != nil {
-		handleAgentError(ctx, err, "get service from db")
+		handleBrokerError(ctx, err, "get service from db")
 		return
 	}
 
@@ -36,7 +36,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 func (h *Handler) ListService(ctx *gin.Context) {
 	list, err := h.ctrl.ListService(ctx)
 	if err != nil {
-		handleAgentError(ctx, err, "list service")
+		handleBrokerError(ctx, err, "list service")
 		return
 	}
 

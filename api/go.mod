@@ -1,4 +1,4 @@
-module github.com/0glabs/0g-serving-agent
+module github.com/0glabs/0g-serving-broker
 
 go 1.22.1
 

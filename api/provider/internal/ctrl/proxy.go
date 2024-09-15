@@ -10,10 +10,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	constant "github.com/0glabs/0g-serving-agent/common/const"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/extractor"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	constant "github.com/0glabs/0g-serving-broker/common/const"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/extractor"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, reqBody []byte) (*http.Request, error) {
@@ -39,7 +39,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		handleAgentError(ctx, err, "call proxied service")
+		handleBrokerError(ctx, err, "call proxied service")
 		return
 	}
 	defer resp.Body.Close()
@@ -59,7 +59,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 
 	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
-		handleAgentError(ctx, err, "")
+		handleBrokerError(ctx, err, "")
 		return
 	}
 	account := model.User{
@@ -77,26 +77,26 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handleAgentError(ctx, err, "read from body")
+		handleBrokerError(ctx, err, "read from body")
 		return
 	}
 
 	contentEncoding := resp.Header.Get("Content-Encoding")
 	outputContent, err := extractor.GetRespContent(body, contentEncoding)
 	if err != nil {
-		handleAgentError(ctx, err, "extract content")
+		handleBrokerError(ctx, err, "extract content")
 		return
 	}
 
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
-		handleAgentError(ctx, err, "extract count")
+		handleBrokerError(ctx, err, "extract count")
 		return
 	}
 
 	account.LastResponseFee = model.PtrOf(outputCount * outputPrice)
 	if err = c.UpdateUserAccount(account.User, account); err != nil {
-		handleAgentError(ctx, err, "update user account in db")
+		handleBrokerError(ctx, err, "update user account in db")
 		return
 	}
 
@@ -114,7 +114,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 				if err == io.EOF {
 					return false
 				}
-				handleAgentError(ctx, err, "read from body")
+				handleBrokerError(ctx, err, "read from body")
 				return false
 			}
 
@@ -122,33 +122,33 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 			if line == "\n" || line == "\r\n" {
 				_, err := w.Write(chunkBuf.Bytes())
 				if err != nil {
-					handleAgentError(ctx, err, "write to stream")
+					handleBrokerError(ctx, err, "write to stream")
 					return false
 				}
 
 				encoding := resp.Header.Get("Content-Encoding")
 				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
 				if err != nil {
-					handleAgentError(ctx, err, "extract content")
+					handleBrokerError(ctx, err, "extract content")
 					return false
 				}
 
 				completed, err := extractor.StreamCompleted(content)
 				if err != nil {
-					handleAgentError(ctx, err, "check stream completed")
+					handleBrokerError(ctx, err, "check stream completed")
 					return false
 				}
 				if completed {
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
-						handleAgentError(ctx, err, "extract output count")
+						handleBrokerError(ctx, err, "extract output count")
 						return false
 					}
 
 					account.LastResponseFee = model.PtrOf(outputCount * outputPrice)
 					err = c.UpdateUserAccount(account.User, account)
 					if err != nil {
-						handleAgentError(ctx, err, "update user account in db")
+						handleBrokerError(ctx, err, "update user account in db")
 						return false
 					}
 				}
@@ -160,7 +160,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 	})
 }
 
-func handleAgentError(ctx *gin.Context, err error, context string) {
+func handleBrokerError(ctx *gin.Context, err error, context string) {
 	// TODO: recorded to log system
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {

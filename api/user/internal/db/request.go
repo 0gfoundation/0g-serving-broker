@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 func (d *DB) ListRequest() ([]model.Request, int, error) {

@@ -3,9 +3,9 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
-	"github.com/0glabs/0g-serving-agent/provider/internal/proxy"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/provider/internal/proxy"
 )
 
 type Handler struct {
@@ -45,7 +45,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/request", h.ListRequest)
 }
 
-func handleAgentError(ctx *gin.Context, err error, context string) {
+func handleBrokerError(ctx *gin.Context, err error, context string) {
 	info := "Provider"
 	if context != "" {
 		info += (": " + context)

@@ -4,10 +4,10 @@ import (
 	"context"
 	"log"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/provider/internal/db"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/provider/internal/db"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 func (c *Ctrl) RegisterService(ctx context.Context, service model.Service) error {

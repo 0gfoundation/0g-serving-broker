@@ -6,7 +6,7 @@ A chat service implementing OpenAI api format
 
 ## How to use
 
-1. Start provider agent, user agent, hardhat node environment
+1. Start provider broker, user broker, hardhat node environment
 
    ```bash
    docker compose -f ../../api/integration/dev/docker-compose.yml up -d

@@ -6,7 +6,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 // refund
@@ -22,11 +22,11 @@ func (h *Handler) Refund(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	var refund model.Refund
 	if err := refund.Bind(ctx); err != nil {
-		handleAgentError(ctx, err, "bind refund body")
+		handleBrokerError(ctx, err, "bind refund body")
 		return
 	}
 	if err := h.ctrl.RequestRefund(ctx, common.HexToAddress(providerAddress), refund); err != nil {
-		handleAgentError(ctx, err, "process refund")
+		handleBrokerError(ctx, err, "process refund")
 		return
 	}
 
@@ -45,7 +45,7 @@ func (h *Handler) ListRefund(ctx *gin.Context) {
 		Processed *bool `form:"processed"`
 	}
 	if err := ctx.ShouldBindQuery(&q); err != nil {
-		handleAgentError(ctx, err, "bind query")
+		handleBrokerError(ctx, err, "bind query")
 		return
 	}
 
@@ -53,7 +53,7 @@ func (h *Handler) ListRefund(ctx *gin.Context) {
 		Processed: q.Processed,
 	})
 	if err != nil {
-		handleAgentError(ctx, err, "list refund")
+		handleBrokerError(ctx, err, "list refund")
 		return
 	}
 

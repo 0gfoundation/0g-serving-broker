@@ -14,15 +14,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
-	constant "github.com/0glabs/0g-serving-agent/common/const"
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
-	"github.com/0glabs/0g-serving-agent/extractor"
-	"github.com/0glabs/0g-serving-agent/extractor/chatbot"
-	"github.com/0glabs/0g-serving-agent/extractor/zgstorage"
-	"github.com/0glabs/0g-serving-agent/user/model"
+	constant "github.com/0glabs/0g-serving-broker/common/const"
+	"github.com/0glabs/0g-serving-broker/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
+	"github.com/0glabs/0g-serving-broker/extractor"
+	"github.com/0glabs/0g-serving-broker/extractor/chatbot"
+	"github.com/0glabs/0g-serving-broker/extractor/zgstorage"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 func (c *Ctrl) IncreaseAccountNonce(providerAddress string) (model.Provider, error) {
@@ -30,7 +30,7 @@ func (c *Ctrl) IncreaseAccountNonce(providerAddress string) (model.Provider, err
 	if err != nil {
 		return ret, errors.Wrap(err, "get provider from db")
 	}
-	// The prover agent in the provider packs a certain number of requests into one
+	// The prover broker in the provider packs a certain number of requests into one
 	// chunk as the minimum unit for settlement. This number, referred to as the chunk size,
 	// is defined in the prover's circuit. If the number of real requests in a chunk is smaller than 40,
 	// the remaining slots will be filled with mock requests with incrementing nonces. During settlement,
@@ -152,7 +152,7 @@ func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor ext
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		handleAgentError(ctx, err, "get response from provider")
+		handleBrokerError(ctx, err, "get response from provider")
 		return
 	}
 	defer resp.Body.Close()
@@ -181,18 +181,18 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	providerAddress := ctx.Param("provider")
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handleAgentError(ctx, err, "read response")
+		handleBrokerError(ctx, err, "read response")
 		return
 	}
 	contentEncoding := resp.Header.Get("Content-Encoding")
 	outputContent, err := extractor.GetRespContent(body, contentEncoding)
 	if err != nil {
-		handleAgentError(ctx, err, "get resp content")
+		handleBrokerError(ctx, err, "get resp content")
 		return
 	}
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
-		handleAgentError(ctx, err, "get resp output count")
+		handleBrokerError(ctx, err, "get resp output count")
 		return
 	}
 	new := model.Provider{
@@ -201,7 +201,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	}
 	err = c.db.UpdateProviderAccount(providerAddress, new)
 	if err != nil {
-		handleAgentError(ctx, err, "update provider output count in db")
+		handleBrokerError(ctx, err, "update provider output count in db")
 		return
 	}
 	ctx.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
@@ -219,7 +219,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 				if err == io.EOF {
 					return false
 				}
-				handleAgentError(ctx, err, "read from provider response")
+				handleBrokerError(ctx, err, "read from provider response")
 				return false
 			}
 
@@ -227,26 +227,26 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 			if line == "\n" || line == "\r\n" {
 				_, err := w.Write(chunkBuf.Bytes())
 				if err != nil {
-					handleAgentError(ctx, err, "write to response")
+					handleBrokerError(ctx, err, "write to response")
 					return false
 				}
 
 				encoding := resp.Header.Get("Content-Encoding")
 				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
 				if err != nil {
-					handleAgentError(ctx, err, "get response content")
+					handleBrokerError(ctx, err, "get response content")
 					return false
 				}
 
 				completed, err := extractor.StreamCompleted(content)
 				if err != nil {
-					handleAgentError(ctx, err, "check whether stream completed")
+					handleBrokerError(ctx, err, "check whether stream completed")
 					return false
 				}
 				if completed {
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
-						handleAgentError(ctx, err, "get response output count")
+						handleBrokerError(ctx, err, "get response output count")
 						return false
 					}
 					new := model.Provider{
@@ -255,7 +255,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 					}
 					err = c.db.UpdateProviderAccount(providerAddress, new)
 					if err != nil {
-						handleAgentError(ctx, err, "update provider output count in db")
+						handleBrokerError(ctx, err, "update provider output count in db")
 						return false
 					}
 				}

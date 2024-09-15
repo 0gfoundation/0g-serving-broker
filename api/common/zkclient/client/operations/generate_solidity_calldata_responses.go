@@ -14,7 +14,7 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
 
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
 )
 
 // GenerateSolidityCalldataReader is a Reader for the GenerateSolidityCalldata structure.

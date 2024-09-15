@@ -9,10 +9,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
-	constant "github.com/0glabs/0g-serving-agent/common/const"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	constant "github.com/0glabs/0g-serving-broker/common/const"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 func (c *Ctrl) CreateRequest(req model.Request) error {

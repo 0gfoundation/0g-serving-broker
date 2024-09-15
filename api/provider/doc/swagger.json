@@ -1,7 +1,7 @@
 {
     "swagger": "2.0",
     "info": {
-        "title": "0G Serving Provider Agent API",
+        "title": "0G Serving Provider Broker API",
         "contact": {},
         "version": "1.0"
     },

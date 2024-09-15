@@ -3,7 +3,7 @@ package db
 import (
 	"strings"
 
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 	"github.com/pkg/errors"
 )
 

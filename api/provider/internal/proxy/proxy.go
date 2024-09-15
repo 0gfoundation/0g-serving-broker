@@ -7,12 +7,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	constant "github.com/0glabs/0g-serving-agent/common/const"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/extractor"
-	"github.com/0glabs/0g-serving-agent/extractor/chatbot"
-	"github.com/0glabs/0g-serving-agent/extractor/zgstorage"
-	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
+	constant "github.com/0glabs/0g-serving-broker/common/const"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/extractor"
+	"github.com/0glabs/0g-serving-broker/extractor/chatbot"
+	"github.com/0glabs/0g-serving-broker/extractor/zgstorage"
+	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
 )
 
 type Proxy struct {
@@ -58,7 +58,7 @@ func (p *Proxy) routeFilterMiddleware(ctx *gin.Context) {
 	route := strings.TrimPrefix(ctx.Request.URL.Path, constant.ServicePrefix+"/")
 	segments := strings.Split(route, "/")
 	if len(segments) == 0 || segments[0] == "" {
-		handleAgentError(ctx, errors.New("route is invalid"), "route filter middleware")
+		handleBrokerError(ctx, errors.New("route is invalid"), "route filter middleware")
 		return
 	}
 
@@ -66,11 +66,11 @@ func (p *Proxy) routeFilterMiddleware(ctx *gin.Context) {
 	valid, exists := p.serviceRoutes[segments[0]]
 	p.serviceRoutesLock.RUnlock()
 	if !exists {
-		handleAgentError(ctx, errors.New("route is not exist"), "route filter middleware")
+		handleBrokerError(ctx, errors.New("route is not exist"), "route filter middleware")
 		return
 	}
 	if !valid {
-		handleAgentError(ctx, errors.New("route is deleted"), "route filter middleware")
+		handleBrokerError(ctx, errors.New("route is deleted"), "route filter middleware")
 		return
 	}
 	ctx.Next()
@@ -136,48 +136,48 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 	case "chatbot":
 		extractor = &chatbot.ProviderChatBot{}
 	default:
-		handleAgentError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
 	svc, err := p.ctrl.GetService(route)
 	if err != nil {
-		handleAgentError(ctx, err, "get service")
+		handleBrokerError(ctx, err, "get service")
 		return
 	}
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
-		handleAgentError(ctx, err, "get model.request from HTTP request")
+		handleBrokerError(ctx, err, "get model.request from HTTP request")
 		return
 	}
 	fee := req.InputFee + req.PreviousOutputFee
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
-		handleAgentError(ctx, err, "read request body")
+		handleBrokerError(ctx, err, "read request body")
 		return
 	}
 	inputCount, err := extractor.GetInputCount(reqBody)
 	if err != nil {
-		handleAgentError(ctx, err, "get input count")
+		handleBrokerError(ctx, err, "get input count")
 		return
 	}
 	if err := p.ctrl.ValidateRequest(ctx, req, fee, inputCount*svc.InputPrice); err != nil {
-		handleAgentError(ctx, err, "validate request")
+		handleBrokerError(ctx, err, "validate request")
 		return
 	}
 	if err := p.ctrl.CreateRequest(req); err != nil {
-		handleAgentError(ctx, err, "create request")
+		handleBrokerError(ctx, err, "create request")
 		return
 	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, route, reqBody)
 	if err != nil {
-		handleAgentError(ctx, err, "prepare HTTP request")
+		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
 	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee, svc.OutputPrice)
 }
 
-func handleAgentError(ctx *gin.Context, err error, context string) {
+func handleBrokerError(ctx *gin.Context, err error, context string) {
 	info := "Provider proxy: handle proxied service"
 	if context != "" {
 		info += (", " + context)

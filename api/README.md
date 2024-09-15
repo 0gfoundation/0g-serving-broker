@@ -1,8 +1,8 @@
-# 0G Serving Agent
+# 0G Serving Broker
 
 ## Introduction
 
-The 0G Serving Agent integrates with the [0G Serving Contract](https://github.com/0glabs/0g-serving-contract) to provide a seamless settlement solution for data retrieval services. For example, if a provider has a chatbot service that can be called using the following command:
+The 0G Serving Broker integrates with the [0G Serving Contract](https://github.com/0glabs/0g-serving-contract) to provide a seamless settlement solution for data retrieval services. For example, if a provider has a chatbot service that can be called using the following command:
 
 ```sh
 curl https://chatbot.com \
@@ -14,7 +14,7 @@ curl https://chatbot.com \
 }'
 ```
 
-To upgrade this service into a chargeable one, the provider first initiates the provider agent service locally and registers the original service with the agent. Once registered, the agent will host the service and manage the charging process. Users who wish to access the service can start a user agent service locally and send requests to it just as they would with the original service. The user agent will handle the necessary conversions of requests and responses to comply with the protocol.
+To upgrade this service into a chargeable one, the provider first initiates the provider broker service locally and registers the original service with the broker. Once registered, the broker will host the service and manage the charging process. Users who wish to access the service can start a user broker service locally and send requests to it just as they would with the original service. The user broker will handle the necessary conversions of requests and responses to comply with the protocol.
 
 ## Setup
 
@@ -24,28 +24,28 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 
    The meaning of each setting can be found in the [config example](config-example-all.yaml).
 
-## Running the Agent
+## Running the Broker
 
-1. Start the Provider Agent
+1. Start the Provider Broker
 
    ```sh
    docker compose -f ./integration/provider/docker-compose.yml up -d
    ```
 
-   The provider agent will be listening on 127.0.0.1:8080
+   The provider broker will be listening on 127.0.0.1:8080
 
-2. Start the User Agent
+2. Start the User Broker
 
    ```sh
    PORT=<PORT> CONFIG_FILE=<path_to_config> go run main.go 0g-user-server
    docker compose -f ./integration/user/docker-compose.yml up -d
    ```
 
-   The user agent will be listening on 127.0.0.1:1034
+   The user broker will be listening on 127.0.0.1:1034
 
 ## Basic Usage Process
 
-1. Provider Registers the Service with the Provider Agent:
+1. Provider Registers the Service with the Provider Broker:
 
    ```sh
    curl -X POST http://127.0.0.1:8080>/v1/service \
@@ -72,7 +72,7 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    ```
 
 3. User Calls a Provider's Service for Several Rounds:
-   The provider agent will record the requests in the database.
+   The provider broker will record the requests in the database.
 
    ```sh
    curl http://127.0.0.1:1034/v1/provider/<provider_address>/service/<service_name>/<optional_suffix> \

@@ -4,12 +4,12 @@ import (
 	"context"
 	"math/big"
 
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/client/operations"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
-	database "github.com/0glabs/0g-serving-agent/user/internal/db"
-	"github.com/0glabs/0g-serving-agent/user/model"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/client/operations"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
+	database "github.com/0glabs/0g-serving-broker/user/internal/db"
+	"github.com/0glabs/0g-serving-broker/user/model"
 )
 
 func (c *Ctrl) getOrCreateKeyPair(ctx context.Context) (model.KeyPair, error) {

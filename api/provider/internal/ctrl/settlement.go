@@ -7,11 +7,11 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/0glabs/0g-serving-agent/common/contract"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/util"
-	"github.com/0glabs/0g-serving-agent/common/zkclient/models"
-	"github.com/0glabs/0g-serving-agent/provider/model"
+	"github.com/0glabs/0g-serving-broker/common/contract"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 func (c *Ctrl) SettleFees(ctx context.Context) error {

@@ -5,13 +5,13 @@ import (
 	controller "sigs.k8s.io/controller-runtime"
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/0glabs/0g-serving-agent/common/config"
-	"github.com/0glabs/0g-serving-agent/common/errors"
-	"github.com/0glabs/0g-serving-agent/common/zkclient"
-	providercontract "github.com/0glabs/0g-serving-agent/provider/internal/contract"
-	"github.com/0glabs/0g-serving-agent/provider/internal/ctrl"
-	database "github.com/0glabs/0g-serving-agent/provider/internal/db"
-	"github.com/0glabs/0g-serving-agent/provider/internal/event"
+	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	providercontract "github.com/0glabs/0g-serving-broker/provider/internal/contract"
+	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
+	database "github.com/0glabs/0g-serving-broker/provider/internal/db"
+	"github.com/0glabs/0g-serving-broker/provider/internal/event"
 )
 
 func Main() {
