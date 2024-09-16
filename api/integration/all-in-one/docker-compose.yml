@@ -27,7 +27,7 @@ services:
       - default
 
   0g-serving-provider-broker:
-    image: 0g-seving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     container_name: 0g-serving-provider-broker
     environment:
       - PORT=8080
@@ -45,7 +45,7 @@ services:
         condition: service_healthy
 
   0g-serving-provider-event:
-    image: 0g-seving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     container_name: 0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
@@ -58,7 +58,7 @@ services:
         condition: service_started
 
   0g-serving-user-broker:
-    image: 0g-seving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     container_name: 0g-serving-user-broker
     ports:
       - "1034:1034"
@@ -78,7 +78,7 @@ services:
         condition: service_healthy
 
   0g-serving-user-event:
-    image: 0g-seving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     container_name: 0g-serving-user-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
@@ -103,7 +103,7 @@ services:
         condition: service_started
 
   zk:
-    image: zk:v1
+    image: ghcr.io/0glabs/zk:dev-amd64
     container_name: zk-server
     ports:
       - "3000:3000"
