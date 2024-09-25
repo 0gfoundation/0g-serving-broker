@@ -23,7 +23,8 @@ func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.Request, sigs mo
 		}
 		userAccount = account
 	} else {
-		userAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
+		var err error
+		userAccount, err = c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
 		if err != nil {
 			return nil, err
 		}
