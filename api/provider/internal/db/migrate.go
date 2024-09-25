@@ -18,7 +18,7 @@ func (d *DB) Migrate() error {
 			ID: "create-service",
 			Migrate: func(tx *gorm.DB) error {
 				type Service struct {
-					UpdatedAt   *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
+					model.Model
 					Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name"`
 					Type        string                `gorm:"type:varchar(255);not null"`
 					URL         string                `gorm:"type:varchar(255);not null"`
@@ -33,6 +33,7 @@ func (d *DB) Migrate() error {
 			ID: "create-user",
 			Migrate: func(tx *gorm.DB) error {
 				type User struct {
+					model.Model
 					User                 string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
 					LastRequestNonce     *int64                `gorm:"type:bigint;not null;default:0"`
 					LastResponseFee      *int64                `gorm:"type:bigint;not null;default:0"`
@@ -49,6 +50,7 @@ func (d *DB) Migrate() error {
 			ID: "create-request",
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
+					model.Model
 					UserAddress       string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
 					Nonce             int64  `gorm:"type:bigint;not null;index:processed_userAddress_nonce"`
 					ServiceName       string `gorm:"type:varchar(255);not null"`

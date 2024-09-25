@@ -1,6 +1,7 @@
 package model
 
 type Request struct {
+	Model
 	UserAddress       string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce" json:"userAddress" binding:"required" immutable:"true"`
 	Nonce             int64  `gorm:"type:bigint;not null;index:processed_userAddress_nonce" json:"nonce" binding:"required" immutable:"true"`
 	ServiceName       string `gorm:"type:varchar(255);not null" json:"serviceName" binding:"required" immutable:"true"`
@@ -18,5 +19,6 @@ type RequestList struct {
 }
 
 type RequestListOptions struct {
-	Processed bool `form:"processed"`
+	Processed bool    `form:"processed"`
+	Sort      *string `form:"sort"`
 }

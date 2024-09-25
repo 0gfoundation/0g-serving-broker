@@ -279,6 +279,10 @@ const docTemplate = `{
                 "userAddress"
             ],
             "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
                 "fee": {
                     "type": "integer"
                 },
@@ -299,6 +303,10 @@ const docTemplate = `{
                 },
                 "signature": {
                     "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "readOnly": true
                 },
                 "userAddress": {
                     "type": "string"
@@ -332,6 +340,10 @@ const docTemplate = `{
                 "url"
             ],
             "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
                 "inputPrice": {
                     "type": "integer"
                 },
@@ -373,6 +385,10 @@ const docTemplate = `{
                 "user"
             ],
             "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
                 "lastBalanceCheckTime": {
                     "type": "string"
                 },
@@ -393,6 +409,10 @@ const docTemplate = `{
                 },
                 "unsettledFee": {
                     "type": "integer"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "readOnly": true
                 },
                 "user": {
                     "type": "string"

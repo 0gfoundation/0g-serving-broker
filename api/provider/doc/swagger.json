@@ -271,6 +271,10 @@
                 "userAddress"
             ],
             "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
                 "fee": {
                     "type": "integer"
                 },
@@ -291,6 +295,10 @@
                 },
                 "signature": {
                     "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "readOnly": true
                 },
                 "userAddress": {
                     "type": "string"
@@ -324,6 +332,10 @@
                 "url"
             ],
             "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
                 "inputPrice": {
                     "type": "integer"
                 },
@@ -365,6 +377,10 @@
                 "user"
             ],
             "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "readOnly": true
+                },
                 "lastBalanceCheckTime": {
                     "type": "string"
                 },
@@ -385,6 +401,10 @@
                 },
                 "unsettledFee": {
                     "type": "integer"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "readOnly": true
                 },
                 "user": {
                     "type": "string"

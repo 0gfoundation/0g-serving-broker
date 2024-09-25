@@ -33,6 +33,7 @@ func (c *Ctrl) RegisterService(ctx context.Context, service model.Service) error
 func (c *Ctrl) UpdateService(ctx context.Context, service model.Service) error {
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
+		Sort:      model.PtrOf("nonce ASC"),
 	})
 	if err != nil {
 		return errors.Wrap(err, "add service in contract")
@@ -74,7 +75,11 @@ func (c *Ctrl) ListService() ([]model.Service, error) {
 }
 
 func (c *Ctrl) DeleteService(ctx context.Context, name string) error {
-	reqs, _, err := c.db.ListRequest(model.RequestListOptions{Processed: false})
+	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
+		Processed: false,
+		Sort:      model.PtrOf("nonce ASC"),
+	},
+	)
 	if err != nil {
 		return errors.Wrap(err, "add service in contract")
 	}

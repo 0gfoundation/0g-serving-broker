@@ -7,6 +7,9 @@ definitions:
     type: object
   model.Request:
     properties:
+      createdAt:
+        readOnly: true
+        type: string
       fee:
         type: integer
       inputFee:
@@ -20,6 +23,9 @@ definitions:
       serviceName:
         type: string
       signature:
+        type: string
+      updatedAt:
+        readOnly: true
         type: string
       userAddress:
         type: string
@@ -45,6 +51,9 @@ definitions:
     type: object
   model.Service:
     properties:
+      createdAt:
+        readOnly: true
+        type: string
       inputPrice:
         type: integer
       name:
@@ -76,6 +85,9 @@ definitions:
     type: object
   model.User:
     properties:
+      createdAt:
+        readOnly: true
+        type: string
       lastBalanceCheckTime:
         type: string
       lastRequestNonce:
@@ -90,6 +102,9 @@ definitions:
         type: array
       unsettledFee:
         type: integer
+      updatedAt:
+        readOnly: true
+        type: string
       user:
         type: string
     required:

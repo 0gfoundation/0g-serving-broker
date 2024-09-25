@@ -7,6 +7,7 @@ import (
 )
 
 type User struct {
+	Model
 	User                 string                `gorm:"type:varchar(255);not null;index:deleted_user_provider" json:"user" binding:"required" immutable:"true"`
 	LastRequestNonce     *int64                `gorm:"type:uint;not null;default:0" json:"lastRequestNonce"`
 	LockBalance          *int64                `gorm:"type:bigint;not null;default:0" json:"lockBalance"`

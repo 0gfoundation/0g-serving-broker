@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"strings"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/provider/model"
 )
@@ -12,9 +13,14 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	var totalFee sql.NullInt64
 
 	ret := d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed).
-		Order("nonce ASC").
-		Find(&list)
+		Where("processed = ?", q.Processed)
+
+	if q.Sort != nil {
+		ret.Order(*q.Sort)
+	} else {
+		ret.Order("created_at DESC")
+	}
+	ret.Find(&list)
 
 	if ret.Error != nil {
 		return list, 0, ret.Error
@@ -33,9 +39,10 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	return list, totalFeeInt, ret.Error
 }
 
-func (d *DB) UpdateRequest() error {
+func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 	ret := d.db.Model(&model.Request{}).
 		Where("processed = ?", false).
+		Where("created_at <= ?", *latestReqCreateAt).
 		Updates(model.Request{Processed: true})
 	return ret.Error
 }

@@ -21,6 +21,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	}
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
+		Sort:      model.PtrOf("nonce ASC"),
 	})
 	if err != nil {
 		return errors.Wrap(err, "list request from db")
@@ -28,10 +29,15 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	if len(reqs) == 0 {
 		return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 	}
+	latestReqCreateAt := reqs[0].CreatedAt
 
 	categorizedReqs := make(map[string][]*models.Request)
 	categorizedSigs := make(map[string][][]int64)
 	for _, req := range reqs {
+		if latestReqCreateAt.Before(*reqs[0].CreatedAt) {
+			latestReqCreateAt = reqs[0].CreatedAt
+		}
+
 		var sig []int64
 		err := json.Unmarshal([]byte(req.Signature), &sig)
 		if err != nil {
@@ -70,16 +76,18 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			// ProofInputs: [userAddress, providerAddress, initNonce, finalNonce, totalFee, signerPubKey[0], signerPubKey[1]]
-			verifierInput.InProof, err = flattenAndConvert([][]string{calldata.PA}, calldata.PB, [][]string{calldata.PC})
+			proof, err := flattenAndConvert([][]string{calldata.PA}, calldata.PB, [][]string{calldata.PC})
 			if err != nil {
 				return err
 			}
-			verifierInput.ProofInputs, err = flattenAndConvert([][]string{calldata.PubInputs})
+			verifierInput.InProof = append(verifierInput.InProof, proof...)
+			// proofInputs: [userAddress, providerAddress, initNonce, finalNonce, totalFee, signerPubKey[0], signerPubKey[1]]
+			proofInputs, err := flattenAndConvert([][]string{calldata.PubInputs})
 			if err != nil {
 				return err
 			}
-			segmentSize += len(verifierInput.ProofInputs)
+			segmentSize += len(proofInputs)
+			verifierInput.ProofInputs = append(verifierInput.ProofInputs, proofInputs...)
 		}
 		verifierInput.SegmentSize = append(verifierInput.SegmentSize, big.NewInt(int64(segmentSize)))
 	}
@@ -87,7 +95,8 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	if err := c.contract.SettleFees(ctx, verifierInput); err != nil {
 		return errors.Wrap(err, "settle fees in contract")
 	}
-	if err := c.db.UpdateRequest(); err != nil {
+
+	if err := c.db.UpdateRequest(latestReqCreateAt); err != nil {
 		return errors.Wrap(err, "update request in db")
 	}
 	if err := c.SyncUserAccounts(ctx); err != nil {
@@ -131,6 +140,7 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 func (c Ctrl) pruneRequest(ctx context.Context) error {
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
+		Sort:      model.PtrOf("nonce ASC"),
 	})
 	if err != nil {
 		return errors.Wrap(err, "list request from db")

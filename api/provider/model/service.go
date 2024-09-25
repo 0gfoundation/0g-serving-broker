@@ -1,13 +1,11 @@
 package model
 
 import (
-	"time"
-
 	"gorm.io/plugin/soft_delete"
 )
 
 type Service struct {
-	UpdatedAt   *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
+	Model
 	Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name" json:"name" binding:"required" immutable:"true"`
 	Type        string                `gorm:"type:varchar(255);not null" json:"type" binding:"required"`
 	URL         string                `gorm:"type:varchar(255);not null" json:"url" binding:"required"`
