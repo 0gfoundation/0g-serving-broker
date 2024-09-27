@@ -112,7 +112,7 @@ services:
         ["CMD", "curl", "-f", "-X", "GET", "http://zk-server:3000/sign-keypair"]
       interval: 30s
       timeout: 10s
-      retries: 10
+      retries: 20
       start_period: 30s
 
 volumes:
