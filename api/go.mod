@@ -5,6 +5,7 @@ go 1.22.1
 require (
 	github.com/andybalholm/brotli v1.1.0
 	github.com/ethereum/go-ethereum v1.14.5
+	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-gormigrate/gormigrate/v2 v2.1.2
 	github.com/go-openapi/errors v0.22.0

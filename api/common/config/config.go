@@ -9,7 +9,8 @@ import (
 )
 
 type Config struct {
-	ContractAddress string `yaml:"contractAddress"`
+	AllowOrigins    []string `yaml:"allowOrigins"`
+	ContractAddress string   `yaml:"contractAddress"`
 	Database        struct {
 		User     string `yaml:"user"`
 		Provider string `yaml:"provider"`
@@ -58,6 +59,9 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
+			AllowOrigins: []string{
+				"http://localhost:4000",
+			},
 			ContractAddress: "0x9Ae9b2C822beFF4B4466075006bc6b5ac35E779F",
 			Database: struct {
 				User     string `yaml:"user"`

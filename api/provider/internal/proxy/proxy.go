@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
 	constant "github.com/0glabs/0g-serving-broker/common/const"
@@ -18,6 +19,7 @@ import (
 type Proxy struct {
 	ctrl *ctrl.Ctrl
 
+	allowOrigins      []string
 	serviceRoutes     map[string]bool
 	serviceRoutesLock sync.RWMutex
 	serviceTargets    map[string]string
@@ -25,8 +27,9 @@ type Proxy struct {
 	serviceGroup      *gin.RouterGroup
 }
 
-func New(ctrl *ctrl.Ctrl, engine *gin.Engine) *Proxy {
+func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string) *Proxy {
 	p := &Proxy{
+		allowOrigins:   allowOrigins,
 		ctrl:           ctrl,
 		serviceRoutes:  make(map[string]bool),
 		serviceTargets: make(map[string]string),
@@ -34,6 +37,11 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine) *Proxy {
 		serviceGroup:   engine.Group(constant.ServicePrefix),
 	}
 
+	p.serviceGroup.Use(cors.New(cors.Config{
+		AllowOrigins: p.allowOrigins,
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders: []string{"*"},
+	}))
 	p.serviceGroup.Use(p.routeFilterMiddleware)
 	return p
 }

@@ -57,7 +57,7 @@ func Main() {
 	} else if err := ctrl.SyncServices(ctx); err != nil {
 		panic(err)
 	}
-	proxy := proxy.New(ctrl, engine)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins)
 	if err := proxy.Start(); err != nil {
 		panic(err)
 	}
