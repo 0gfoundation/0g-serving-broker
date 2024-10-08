@@ -100,10 +100,23 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 		return
 	}
 
-	ctx.Data(http.StatusOK, resp.Header.Get("Content-Type"), body)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			ctx.Writer.Header().Add(key, value)
+		}
+	}
+
+	ctx.Status(resp.StatusCode)
+	ctx.Writer.Write(body)
 }
 
 func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
+	ctx.Status(resp.StatusCode)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			ctx.Writer.Header().Add(key, value)
+		}
+	}
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
