@@ -17,10 +17,6 @@ import (
 )
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, reqBody []byte) (*http.Request, error) {
-	targetRoute := strings.TrimPrefix(ctx.Request.RequestURI, constant.ServicePrefix+"/"+route)
-	if targetRoute != "/" {
-		targetURL += targetRoute
-	}
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
 	if err != nil {
 		return nil, err
@@ -35,7 +31,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, req
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee, outputPrice int64) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee, outputPrice int64, charing bool) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -55,7 +51,17 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 		}
 		ctx.Writer.Header()[k] = v
 	}
-	ctx.Writer.WriteHeader(resp.StatusCode)
+
+	ctx.Writer.Header().Add("provider", c.contract.ProviderAddress)
+	ctx.Writer.Header().Add("service-name", reqModel.ServiceName)
+	c.addExposeHeaders(ctx)
+
+	ctx.Status(resp.StatusCode)
+
+	if !charing {
+		c.handleResponse(ctx, resp)
+		return
+	}
 
 	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
@@ -68,13 +74,22 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 		UnsettledFee:     model.PtrOf(fee + *oldAccount.UnsettledFee),
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		c.handleResponse(ctx, resp, extractor, account, outputPrice)
+		c.handleChargingResponse(ctx, resp, extractor, account, outputPrice)
 	} else {
-		c.handleStreamResponse(ctx, resp, extractor, account, outputPrice)
+		c.handleChargingStreamResponse(ctx, resp, extractor, account, outputPrice)
 	}
 }
 
-func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
+func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		handleBrokerError(ctx, err, "read from body")
+		return
+	}
+	ctx.Writer.Write(body)
+}
+
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		handleBrokerError(ctx, err, "read from body")
@@ -100,23 +115,10 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 		return
 	}
 
-	for key, values := range resp.Header {
-		for _, value := range values {
-			ctx.Writer.Header().Add(key, value)
-		}
-	}
-
-	ctx.Status(resp.StatusCode)
 	ctx.Writer.Write(body)
 }
 
-func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
-	ctx.Status(resp.StatusCode)
-	for key, values := range resp.Header {
-		for _, value := range values {
-			ctx.Writer.Header().Add(key, value)
-		}
-	}
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
@@ -171,6 +173,30 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 			}
 		}
 	})
+}
+
+func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
+	// Set 'Access-Control-Expose-Headers' for CORS
+	exposeHeaders := []string{"Provider", "content-encoding", "service-name"}
+	existing := ctx.Writer.Header().Get("Access-Control-Expose-Headers")
+	var newHeaders string
+	if existing != "" {
+		headerSet := make(map[string]struct{})
+		for _, header := range strings.Split(existing, ",") {
+			headerSet[strings.TrimSpace(header)] = struct{}{}
+		}
+
+		for _, header := range exposeHeaders {
+			if _, exists := headerSet[header]; !exists {
+				existing += "," + header
+			}
+		}
+
+		newHeaders = existing
+	} else {
+		newHeaders = strings.Join(exposeHeaders, ",")
+	}
+	ctx.Writer.Header().Set("Access-Control-Expose-Headers", newHeaders)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

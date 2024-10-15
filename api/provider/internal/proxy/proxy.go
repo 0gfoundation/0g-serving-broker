@@ -14,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/extractor/chatbot"
 	"github.com/0glabs/0g-serving-broker/extractor/zgstorage"
 	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
 type Proxy struct {
@@ -137,6 +138,26 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 	svcType := p.serviceTypes[route]
 	p.serviceRoutesLock.RUnlock()
 
+	targetRoute := strings.TrimPrefix(ctx.Request.RequestURI, constant.ServicePrefix+"/"+route)
+	if targetRoute != "/" {
+		targetURL += targetRoute
+	}
+	reqBody, err := io.ReadAll(ctx.Request.Body)
+	if err != nil {
+		handleBrokerError(ctx, err, "read request body")
+		return
+	}
+	// handle endpoints not need to be charged
+	if _, ok := constant.TargetRoute[targetRoute]; !ok {
+		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, route, reqBody)
+		if err != nil {
+			handleBrokerError(ctx, err, "prepare HTTP request")
+			return
+		}
+		p.ctrl.ProcessHTTPRequest(ctx, httpReq, model.Request{}, nil, 0, 0, false)
+		return
+	}
+
 	var extractor extractor.ProviderReqRespExtractor
 	switch svcType {
 	case "zgStorage":
@@ -158,11 +179,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		return
 	}
 	fee := req.InputFee + req.PreviousOutputFee
-	reqBody, err := io.ReadAll(ctx.Request.Body)
-	if err != nil {
-		handleBrokerError(ctx, err, "read request body")
-		return
-	}
+
 	inputCount, err := extractor.GetInputCount(reqBody)
 	if err != nil {
 		handleBrokerError(ctx, err, "get input count")
@@ -182,7 +199,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee, svc.OutputPrice)
+	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee, svc.OutputPrice, true)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
