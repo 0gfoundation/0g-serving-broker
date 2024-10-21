@@ -4,7 +4,7 @@ var (
 	ServicePrefix = "/v1/proxy"
 
 	TargetRoute = map[string]struct{}{
-		"/chat/completion": {},
+		"/chat/completions": {},
 	}
 
 	RequestMetaData = map[string]struct{}{

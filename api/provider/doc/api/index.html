@@ -856,6 +856,10 @@ ul.nav-tabs {
   "required" : [ "fee", "inputFee", "nonce", "previousOutputFee", "serviceName", "signature", "userAddress" ],
   "type" : "object",
   "properties" : {
+    "createdAt" : {
+      "type" : "string",
+      "readOnly" : true
+    },
     "fee" : {
       "type" : "integer"
     },
@@ -876,6 +880,10 @@ ul.nav-tabs {
     },
     "signature" : {
       "type" : "string"
+    },
+    "updatedAt" : {
+      "type" : "string",
+      "readOnly" : true
     },
     "userAddress" : {
       "type" : "string"
@@ -903,6 +911,10 @@ ul.nav-tabs {
   "required" : [ "inputPrice", "name", "outputPrice", "type", "url" ],
   "type" : "object",
   "properties" : {
+    "createdAt" : {
+      "type" : "string",
+      "readOnly" : true
+    },
     "inputPrice" : {
       "type" : "integer"
     },
@@ -942,6 +954,10 @@ ul.nav-tabs {
   "required" : [ "user" ],
   "type" : "object",
   "properties" : {
+    "createdAt" : {
+      "type" : "string",
+      "readOnly" : true
+    },
     "lastBalanceCheckTime" : {
       "type" : "string"
     },
@@ -962,6 +978,10 @@ ul.nav-tabs {
     },
     "unsettledFee" : {
       "type" : "integer"
+    },
+    "updatedAt" : {
+      "type" : "string",
+      "readOnly" : true
     },
     "user" : {
       "type" : "string"
