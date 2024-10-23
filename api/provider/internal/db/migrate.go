@@ -63,6 +63,15 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "alter-table-service-add-column-model",
+			Migrate: func(tx *gorm.DB) error {
+				type Service struct {
+					ModelType string `gorm:"type:varchar(255);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Service{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

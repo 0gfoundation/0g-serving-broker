@@ -334,6 +334,7 @@ const docTemplate = `{
             "type": "object",
             "required": [
                 "inputPrice",
+                "model",
                 "name",
                 "outputPrice",
                 "type",
@@ -346,6 +347,9 @@ const docTemplate = `{
                 },
                 "inputPrice": {
                     "type": "integer"
+                },
+                "model": {
+                    "type": "string"
                 },
                 "name": {
                     "type": "string"

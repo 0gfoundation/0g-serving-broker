@@ -56,6 +56,8 @@ definitions:
         type: string
       inputPrice:
         type: integer
+      model:
+        type: string
       name:
         type: string
       outputPrice:
@@ -69,6 +71,7 @@ definitions:
         type: string
     required:
     - inputPrice
+    - model
     - name
     - outputPrice
     - type

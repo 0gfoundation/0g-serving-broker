@@ -908,7 +908,7 @@ ul.nav-tabs {
   }
 };
     defs["model.Service"] = {
-  "required" : [ "inputPrice", "name", "outputPrice", "type", "url" ],
+  "required" : [ "inputPrice", "model", "name", "outputPrice", "type", "url" ],
   "type" : "object",
   "properties" : {
     "createdAt" : {
@@ -917,6 +917,9 @@ ul.nav-tabs {
     },
     "inputPrice" : {
       "type" : "integer"
+    },
+    "model" : {
+      "type" : "string"
     },
     "name" : {
       "type" : "string"

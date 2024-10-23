@@ -38,6 +38,7 @@ func parseService(svc contract.Service) model.Service {
 		Name:        svc.Name,
 		Type:        svc.ServiceType,
 		URL:         svc.Url,
+		ModelType:   svc.Model,
 		InputPrice:  svc.InputPrice.Int64(),
 		OutputPrice: svc.OutputPrice.Int64(),
 	}

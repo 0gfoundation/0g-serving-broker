@@ -491,6 +491,9 @@ const docTemplate = `{
                 "inputPrice": {
                     "type": "integer"
                 },
+                "model": {
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },

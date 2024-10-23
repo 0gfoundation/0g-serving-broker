@@ -45,6 +45,7 @@ func (d *Service) Bind(ctx *gin.Context) error {
 	d.Name = r.Name
 	d.Type = r.Type
 	d.URL = r.URL
+	d.ModelType = r.ModelType
 	d.InputPrice = r.InputPrice
 	d.OutputPrice = r.OutputPrice
 

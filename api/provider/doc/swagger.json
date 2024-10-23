@@ -326,6 +326,7 @@
             "type": "object",
             "required": [
                 "inputPrice",
+                "model",
                 "name",
                 "outputPrice",
                 "type",
@@ -338,6 +339,9 @@
                 },
                 "inputPrice": {
                     "type": "integer"
+                },
+                "model": {
+                    "type": "string"
                 },
                 "name": {
                     "type": "string"
