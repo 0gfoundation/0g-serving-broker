@@ -69,7 +69,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 		return
 	}
 	account := model.User{
-		User:             reqModel.UserAddress,
+		User:             "",
 		LastRequestNonce: &reqModel.Nonce,
 		UnsettledFee:     model.PtrOf(fee + *oldAccount.UnsettledFee),
 	}

@@ -24,7 +24,7 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 		return
 	}
 	switch service.Type {
-	case "zgStorage", "chatbot":
+	case "zgStorage", "chatbot", "image-generation":
 		h.proxy.AddHTTPRoute(service.Name, service.URL, service.Type)
 	default:
 		handleBrokerError(ctx, errors.New("invalid service type"), "register service")
@@ -107,7 +107,7 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 		return
 	}
 	switch new.Type {
-	case "zgStorage", "chatbot":
+	case "zgStorage", "chatbot", "image-generation":
 		if err := h.proxy.UpdateRoute(name, new.URL, new.Type); err != nil {
 			handleBrokerError(ctx, err, "update service route")
 			return

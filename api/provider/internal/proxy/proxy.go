@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/extractor"
 	"github.com/0glabs/0g-serving-broker/extractor/chatbot"
+	imageGeneration "github.com/0glabs/0g-serving-broker/extractor/image-generation"
 	"github.com/0glabs/0g-serving-broker/extractor/zgstorage"
 	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/provider/model"
@@ -54,7 +55,7 @@ func (p *Proxy) Start() error {
 	}
 	for _, svc := range svcs {
 		switch svc.Type {
-		case "zgStorage", "chatbot":
+		case "zgStorage", "chatbot", "image-generation":
 			p.AddHTTPRoute(svc.Name, svc.URL, svc.Type)
 		default:
 			return errors.New("invalid service type")
@@ -164,6 +165,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		extractor = &zgstorage.ProviderZgStorage{}
 	case "chatbot":
 		extractor = &chatbot.ProviderChatBot{}
+	case "image-generation":
+		extractor = &imageGeneration.ProviderImageGeneration{}
 	default:
 		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

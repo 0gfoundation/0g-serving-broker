@@ -5,6 +5,7 @@ var (
 
 	TargetRoute = map[string]struct{}{
 		"/chat/completions": {},
+		// "/images/generations": {},
 	}
 
 	RequestMetaData = map[string]struct{}{
