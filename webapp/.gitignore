@@ -1,6 +1,0 @@
-dist
-node_modules
-.node-version
-.vite
-.ts
-tsconfig.tsbuildinfo

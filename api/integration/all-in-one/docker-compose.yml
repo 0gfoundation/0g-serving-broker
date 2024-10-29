@@ -57,39 +57,6 @@ services:
       0g-serving-provider-broker:
         condition: service_started
 
-  0g-serving-user-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-user-broker
-    ports:
-      - "1034:1034"
-    environment:
-      - PORT=1034
-      - CONFIG_FILE=/etc/config.yaml
-      - NETWORK=hardhat
-    volumes:
-      - ./config-user.yaml:/etc/config.yaml
-    command: 0g-user-server
-    depends_on:
-      mysql:
-        condition: service_healthy
-      hardhat-node-with-contract:
-        condition: service_healthy
-      zk:
-        condition: service_healthy
-
-  0g-serving-user-event:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-user-event
-    environment:
-      - CONFIG_FILE=/etc/config.yaml
-      - NETWORK=hardhat
-    volumes:
-      - ./config-user.yaml:/etc/config.yaml
-    command: 0g-user-event
-    depends_on:
-      0g-serving-user-broker:
-        condition: service_started
-
   nginx:
     image: nginx:1.27.0
     container_name: nginx-server

@@ -10,16 +10,12 @@ import (
 
 	providerEvent "github.com/0glabs/0g-serving-broker/provider/cmd/event"
 	providerServer "github.com/0glabs/0g-serving-broker/provider/cmd/server"
-	userEvent "github.com/0glabs/0g-serving-broker/user/cmd/event"
-	userServer "github.com/0glabs/0g-serving-broker/user/cmd/server"
 )
 
 func main() {
 	applets := map[string]func(){
 		"0g-provider-server": providerServer.Main,
 		"0g-provider-event":  providerEvent.Main,
-		"0g-user-server":     userServer.Main,
-		"0g-user-event":      userEvent.Main,
 	}
 
 	names := []string{}

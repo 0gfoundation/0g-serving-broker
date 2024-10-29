@@ -4,20 +4,12 @@ database:
   # Do not change this configuration if using docker compose to start service.
   provider: provider:provider@tcp(0g-serving-provider-broker-db:3306)/provider?parseTime=true
 
-  # Database configuration for the user:
-  # The user connects to the database server located at '0g-serving-user-broker-db' on port 3306.
-  # Do not change this configuration if using docker compose to start service.
-  user: user:user@tcp(0g-serving-user-broker-db:3306)/user?parseTime=true
-
 # OG serving contract address used
 contractAddress: 0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6
 
 event:
   # The address and port where the provider service listens for events.
   providerAddr: ":8088"
-
-  # The address and port where the user service listens for events.
-  userAddr: ":8089"
 
 interval:
   # Buffer time for automatic settlements in seconds.
@@ -26,9 +18,6 @@ interval:
   # Interval for running the force settlement processor in seconds (24 hours).
   # Interval.ForceSettlementProcessor should larger than 60 to prevent overly frequent settlements
   forceSettlementProcessor: 86400
-
-  # Interval for running the refund processor in seconds (10 minutes).
-  refundProcessor: 600
 
   # Interval for running the settlement processor in seconds (10 minutes).
   settlementProcessor: 600
