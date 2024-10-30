@@ -14,8 +14,18 @@ import (
 	"github.com/0glabs/0g-serving-broker/provider/model"
 )
 
+type SettlementInfo struct {
+	Account                   string `json:"account"`
+	RecordedNonceInContract   int64  `json:"recorded_nonce_in_contract"`
+	RecordedBalanceInContract int64  `json:"recorded_balance_in_contract"`
+	MinNonceInSettlement      int64  `json:"min_nonce_in_settlement"`
+	TotalFeeInSettlement      int64  `json:"total_fee_in_settlement"`
+}
+
 func (c *Ctrl) SettleFees(ctx context.Context) error {
-	err := c.pruneRequest(ctx)
+	categorizedSettlementInfo := make(map[string]SettlementInfo)
+
+	err := c.pruneRequest(ctx, &categorizedSettlementInfo)
 	if err != nil {
 		return errors.Wrap(err, "prune request")
 	}
@@ -50,12 +60,25 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			ProviderAddress: c.contract.ProviderAddress,
 			UserAddress:     req.UserAddress,
 		}
-
+		if v, ok := categorizedSettlementInfo[req.UserAddress]; ok {
+			minNonce := v.MinNonceInSettlement
+			if minNonce == 0 || minNonce > req.Nonce {
+				minNonce = req.Nonce
+			}
+			categorizedSettlementInfo[req.UserAddress] = SettlementInfo{
+				Account:                   req.UserAddress,
+				RecordedNonceInContract:   v.RecordedNonceInContract,
+				RecordedBalanceInContract: v.RecordedBalanceInContract,
+				MinNonceInSettlement:      minNonce,
+				TotalFeeInSettlement:      req.Fee + v.TotalFeeInSettlement,
+			}
+		}
 		if _, ok := categorizedReqs[req.UserAddress]; ok {
 			categorizedReqs[req.UserAddress] = append(categorizedReqs[req.UserAddress], reqInZK)
 			categorizedSigs[req.UserAddress] = append(categorizedSigs[req.UserAddress], sig)
 			continue
 		}
+
 		categorizedReqs[req.UserAddress] = []*models.Request{reqInZK}
 		categorizedSigs[req.UserAddress] = [][]int64{sig}
 	}
@@ -92,8 +115,18 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		verifierInput.SegmentSize = append(verifierInput.SegmentSize, big.NewInt(int64(segmentSize)))
 	}
 
+	var settlementInfos []SettlementInfo
+	for k := range categorizedSettlementInfo {
+		settlementInfos = append(settlementInfos, categorizedSettlementInfo[k])
+	}
+	settlementInfoJSON, err := json.Marshal(settlementInfos)
+	if err != nil {
+		log.Println("Error marshalling settlement infos:", err)
+		settlementInfoJSON = []byte("[]")
+	}
+	log.Printf("Settlement infos: %s", string(settlementInfoJSON))
 	if err := c.contract.SettleFees(ctx, verifierInput); err != nil {
-		return errors.Wrap(err, "settle fees in contract")
+		return errors.Wrapf(err, "settle fees in contract, the ")
 	}
 
 	if err := c.db.UpdateRequest(latestReqCreateAt); err != nil {
@@ -137,7 +170,7 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 	return errors.Wrap(c.SettleFees(ctx), "settle fees")
 }
 
-func (c Ctrl) pruneRequest(ctx context.Context) error {
+func (c Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[string]SettlementInfo) error {
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
 		Sort:      model.PtrOf("nonce ASC"),
@@ -148,6 +181,7 @@ func (c Ctrl) pruneRequest(ctx context.Context) error {
 	if len(reqs) == 0 {
 		return nil
 	}
+	// accountsInDebt marks the accounts needed to be charged
 	accountsInDebt := map[string]int64{}
 	for _, req := range reqs {
 		if _, ok := accountsInDebt[req.UserAddress]; !ok {
@@ -161,6 +195,12 @@ func (c Ctrl) pruneRequest(ctx context.Context) error {
 	for _, account := range accounts {
 		if _, ok := accountsInDebt[account.User.String()]; ok {
 			accountsInDebt[account.User.String()] = account.Nonce.Int64()
+			if categorizedSettlementInfo != nil && *categorizedSettlementInfo != nil {
+				(*categorizedSettlementInfo)[account.User.String()] = SettlementInfo{
+					RecordedNonceInContract:   account.Nonce.Int64(),
+					RecordedBalanceInContract: account.Balance.Int64(),
+				}
+			}
 		}
 	}
 	return errors.Wrap(c.db.PruneRequest(accountsInDebt), "prune request in db")
