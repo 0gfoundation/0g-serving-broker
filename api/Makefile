@@ -44,6 +44,10 @@ hardhat-env:
 generate-provider-api:
 	docker run --rm -v ./provider/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
 
+generate-provider-api-md:
+	docker run --rm -v ./provider/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
+	asciidoctor-pdf ./provider/doc/swagger.adoc -o ./provider/doc/swagger.pdf
+
 package: generate-provider-api
 	@mkdir -p /tmp/0g-serving && \
 	cp ./integration/README.md /tmp/0g-serving/ && \
