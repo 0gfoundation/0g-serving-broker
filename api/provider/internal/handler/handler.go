@@ -30,6 +30,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.POST("/service", h.RegisterService)
 	group.PUT("/service/:service", h.UpdateService)
 	group.DELETE("/service/:service", h.DeleteService)
+	group.GET("contract-service", h.ListServiceInContract)
 	group.POST("sync-service", h.SyncServices)
 
 	// settle

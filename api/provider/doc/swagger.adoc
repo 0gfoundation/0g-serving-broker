@@ -19,6 +19,23 @@ __BasePath__ : /v1
 [[_paths]]
 == Paths
 
+[[_listserviceincontract]]
+=== GET /contract-service
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_servicelist,model.ServiceList>>
+|===
+
+
+==== Tags
+
+* service
+
+
 [[_listrequest]]
 === GET /request
 
@@ -396,6 +413,8 @@ __required__|string
 __optional__ +
 __read-only__|string
 |**url** +
+__required__|string
+|**verifiability** +
 __required__|string
 |===
 

@@ -22,6 +22,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model
 		service.Type,
 		servingUrl,
 		service.ModelType,
+		service.Verifiability,
 		big.NewInt(service.InputPrice),
 		big.NewInt(service.OutputPrice),
 	)
@@ -115,6 +116,9 @@ func (c *ProviderContract) BatchUpdateService(ctx context.Context, news []model.
 
 func identicalService(old contract.Service, new model.Service) bool {
 	if old.Model != new.ModelType {
+		return false
+	}
+	if old.Verifiability != new.Verifiability {
 		return false
 	}
 	if old.InputPrice.Int64() != new.InputPrice {

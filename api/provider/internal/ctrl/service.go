@@ -74,6 +74,18 @@ func (c *Ctrl) ListService() ([]model.Service, error) {
 	return list, nil
 }
 
+func (c *Ctrl) ListServiceInContract(ctx context.Context) ([]model.Service, error) {
+	list, err := c.contract.ListService(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "list service from contract")
+	}
+	ret := make([]model.Service, len(list))
+	for i, svc := range list {
+		ret[i] = parseService(svc)
+	}
+	return ret, nil
+}
+
 func (c *Ctrl) DeleteService(ctx context.Context, name string) error {
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
@@ -111,4 +123,16 @@ func (c *Ctrl) SyncServices(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func parseService(svc contract.Service) model.Service {
+	return model.Service{
+		Name:          svc.Name,
+		Type:          svc.ServiceType,
+		URL:           svc.Url,
+		ModelType:     svc.Model,
+		InputPrice:    svc.InputPrice.Int64(),
+		OutputPrice:   svc.OutputPrice.Int64(),
+		Verifiability: svc.Verifiability,
+	}
 }

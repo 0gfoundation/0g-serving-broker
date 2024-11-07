@@ -72,6 +72,15 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Service{})
 			},
 		},
+		{
+			ID: "alter-table-service-add-column-verifiability",
+			Migrate: func(tx *gorm.DB) error {
+				type Service struct {
+					Verifiability string `gorm:"type:varchar(255);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Service{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

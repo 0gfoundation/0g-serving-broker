@@ -7,6 +7,22 @@
     },
     "basePath": "/v1",
     "paths": {
+        "/contract-service": {
+            "get": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "listServiceInContract",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.ServiceList"
+                        }
+                    }
+                }
+            }
+        },
         "/request": {
             "get": {
                 "tags": [
@@ -330,7 +346,8 @@
                 "name",
                 "outputPrice",
                 "type",
-                "url"
+                "url",
+                "verifiability"
             ],
             "properties": {
                 "createdAt": {
@@ -357,6 +374,9 @@
                     "readOnly": true
                 },
                 "url": {
+                    "type": "string"
+                },
+                "verifiability": {
                     "type": "string"
                 }
             }

@@ -69,6 +69,8 @@ definitions:
         type: string
       url:
         type: string
+      verifiability:
+        type: string
     required:
     - inputPrice
     - model
@@ -76,6 +78,7 @@ definitions:
     - outputPrice
     - type
     - url
+    - verifiability
     type: object
   model.ServiceList:
     properties:
@@ -127,6 +130,16 @@ info:
   title: 0G Serving Provider Broker API
   version: "1.0"
 paths:
+  /contract-service:
+    get:
+      operationId: listServiceInContract
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.ServiceList'
+      tags:
+      - service
   /request:
     get:
       operationId: listRequest

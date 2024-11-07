@@ -81,6 +81,25 @@ func (h *Handler) ListService(ctx *gin.Context) {
 	})
 }
 
+// listServiceInContract
+//
+//	@ID			listServiceInContract
+//	@Tags		service
+//	@Router		/contract-service [get]
+//	@Success	200	{object}	model.ServiceList
+func (h *Handler) ListServiceInContract(ctx *gin.Context) {
+	list, err := h.ctrl.ListServiceInContract(ctx)
+	if err != nil {
+		handleBrokerError(ctx, err, "list service")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, model.ServiceList{
+		Metadata: model.ListMeta{Total: uint64(len(list))},
+		Items:    list,
+	})
+}
+
 // updateService
 //
 //	@ID			updateService

@@ -15,6 +15,22 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/contract-service": {
+            "get": {
+                "tags": [
+                    "service"
+                ],
+                "operationId": "listServiceInContract",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.ServiceList"
+                        }
+                    }
+                }
+            }
+        },
         "/request": {
             "get": {
                 "tags": [
@@ -338,7 +354,8 @@ const docTemplate = `{
                 "name",
                 "outputPrice",
                 "type",
-                "url"
+                "url",
+                "verifiability"
             ],
             "properties": {
                 "createdAt": {
@@ -365,6 +382,9 @@ const docTemplate = `{
                     "readOnly": true
                 },
                 "url": {
+                    "type": "string"
+                },
+                "verifiability": {
                     "type": "string"
                 }
             }
