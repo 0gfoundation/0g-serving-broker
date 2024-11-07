@@ -1,14 +1,10 @@
-# 0G Serving Usage Procedure
-
-## Background
-
-Please refer to [introduction](./introduction.md).
+# 0G Serving
 
 ## Prerequisites
 
 - Docker Compose: 1.27+
 
-## Basic Usage Process
+## Key Commands
 
 1. Provider Starts the Provider Broker:
 
@@ -56,6 +52,6 @@ Please refer to [introduction](./introduction.md).
 
    - The provider broker also incorporates an engine that automatically settles fees. This engine follows a specific rule to ensure that all users in debt are charged before their remaining balance becomes insufficient (users can request refunds, but each refund will be temporarily locked). At the same time, it manages the frequency of settlements to avoid incurring excessive gas costs.
 
-## Additional Operations
+## Other API
 
-Please refer [provider API document](./provider/api.html) for more information.
+Please refer [Provider API](./api.html) for more information.

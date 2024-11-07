@@ -46,17 +46,16 @@ generate-provider-api:
 
 generate-provider-api-md:
 	docker run --rm -v ./provider/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
-	asciidoctor-pdf ./provider/doc/swagger.adoc -o ./provider/doc/swagger.pdf
+	asciidoctor-pdf ./provider/doc/swagger.adoc -o ./provider/doc/0G-Serving-Broker-API.pdf
 
 package: generate-provider-api
-	@mkdir -p /tmp/0g-serving && \
-	cp ./integration/README.md /tmp/0g-serving/ && \
-	cp ./integration/introduction.md /tmp/0g-serving/ && \
-	rsync -av --exclude 'config.local.*' ./integration/provider/ /tmp/0g-serving/provider/ && \
-	cp ./provider/doc/api/index.html /tmp/0g-serving/provider/api.html && \
-	tar -czf /tmp/0g-serving.tar.gz -C /tmp 0g-serving && \
-	rm -rf /tmp/0g-serving && \
-	echo "Package created at /tmp/0g-serving.tar.gz"
+	@mkdir -p /tmp/provider-broker && \
+	cp ./integration/README.md /tmp/provider-broker/ && \
+	rsync -av --exclude 'config.local.*' ./integration/provider/ /tmp/provider-broker && \
+	cp ./provider/doc/api/index.html /tmp/provider-broker/api.html && \
+	tar -czf /tmp/provider-broker.tar.gz -C /tmp provider-broker && \
+	rm -rf /tmp/provider-broker && \
+	echo "Package created at /tmp/provider-broker.tar.gz"
 
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
