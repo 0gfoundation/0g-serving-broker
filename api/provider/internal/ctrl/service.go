@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/contract"
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -127,6 +128,10 @@ func (c *Ctrl) SyncServices(ctx context.Context) error {
 
 func parseService(svc contract.Service) model.Service {
 	return model.Service{
+		Model: model.Model{
+			CreatedAt: model.PtrOf(time.Unix(svc.UpdatedAt.Int64(), 0)),
+			UpdatedAt: model.PtrOf(time.Unix(svc.UpdatedAt.Int64(), 0)),
+		},
 		Name:          svc.Name,
 		Type:          svc.ServiceType,
 		URL:           svc.Url,
