@@ -1,0 +1,61 @@
+---
+version: "2.0"
+services:
+  zg-serving-provider-broker:
+    image: raven20241/provider-broker:dev-amd64-v3
+    expose:
+      - port: 8080
+        as: 3080
+        to:
+          - global: true
+    args:
+      - 0g-provider-server
+    env:
+      - PORT=8080
+      - CONFIG_FILE=/etc/config.yaml
+  zg-serving-provider-broker-db:
+    image: raven20241/mysql:v1
+    expose:
+      - port: 3306
+        to:
+          - service: zg-serving-provider-broker
+    env:
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_USER=provider
+      - MYSQL_PASSWORD=provider
+profiles:
+  compute:
+    zg-serving-provider-broker:
+      resources:
+        cpu:
+          units: 4
+        memory:
+          size: 8Gb
+        storage:
+          - size: 8Gb
+    zg-serving-provider-broker-db:
+      resources:
+        cpu:
+          units: 4
+        memory:
+          size: 8Gb
+        storage:
+          - size: 8Gb
+  placement:
+    dcloud:
+      pricing:
+        zg-serving-provider-broker:
+          denom: ibc/170C677610AC31DF0904FFE09CD3B5C657492170E7E52372E48756B71E56F2F1
+          amount: 10000
+        zg-serving-provider-broker-db:
+          denom: ibc/170C677610AC31DF0904FFE09CD3B5C657492170E7E52372E48756B71E56F2F1
+          amount: 10000
+deployment:
+  zg-serving-provider-broker:
+    dcloud:
+      profile: zg-serving-provider-broker
+      count: 1
+  zg-serving-provider-broker-db:
+    dcloud:
+      profile: zg-serving-provider-broker-db
+      count: 1

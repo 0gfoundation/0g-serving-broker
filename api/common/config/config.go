@@ -62,7 +62,7 @@ func GetConfig() *Config {
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
-				Provider: "root:123456@tcp(0g-serving-provider-broker-db:3306)/provider?parseTime=true",
+				Provider: "root:123456@tcp(zg-serving-provider-broker-db:3306)/provider?parseTime=true",
 			},
 			Event: struct {
 				ProviderAddr string `yaml:"providerAddr"`

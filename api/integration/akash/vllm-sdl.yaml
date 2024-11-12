@@ -1,0 +1,66 @@
+---
+version: "2.0"
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.6.2@sha256:730ef3d3c17a217b34cfdbfd99be80b3f459e37ef2fc0c5c43ba70752dad08ae
+    expose:
+      - port: 8000
+        as: 8000
+        to:
+          - global: true
+    command:
+      - bash
+      - "-c"
+    args:
+      - >-
+        vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct
+        --tensor-parallel-size 1
+    env:
+      - "HF_TOKEN=" # Hugging Face API token required for Meta-Llama Models
+      #- "NCCL_DEBUG=INFO" # Uncomment to enable NCCL debugging
+    params:
+      storage:
+        shm:
+          mount: /dev/shm
+        data:
+          mount: /root/.cache
+          readOnly: false
+profiles:
+  compute:
+    vllm:
+      resources:
+        cpu:
+          units: 12
+        memory:
+          size: 32Gi
+        storage:
+          - size: 50Gi
+          - name: data
+            size: 100Gi
+            attributes:
+              persistent: true
+              class: beta3
+          - name: shm
+            size: 10Gi
+            attributes:
+              class: ram
+              persistent: false
+        gpu:
+          units: 1
+          attributes:
+            vendor:
+              nvidia:
+                - model: h100
+                - model: a100
+                - model: rtxa6000
+  placement:
+    dcloud:
+      pricing:
+        vllm:
+          denom: ibc/170C677610AC31DF0904FFE09CD3B5C657492170E7E52372E48756B71E56F2F1
+          amount: 1000000
+deployment:
+  vllm:
+    dcloud:
+      profile: vllm
+      count: 1

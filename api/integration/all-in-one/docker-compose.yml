@@ -26,9 +26,9 @@ services:
     networks:
       - default
 
-  0g-serving-provider-broker:
+  zg-serving-provider-broker:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-broker
+    container_name: zg-serving-provider-broker
     environment:
       - PORT=8080
       - CONFIG_FILE=/etc/config.yaml
@@ -44,9 +44,9 @@ services:
       zk:
         condition: service_healthy
 
-  0g-serving-provider-event:
+  zg-serving-provider-event:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-event
+    container_name: zg-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
@@ -54,7 +54,7 @@ services:
       - ./config-provider.yaml:/etc/config.yaml
     command: 0g-provider-event
     depends_on:
-      0g-serving-provider-broker:
+      zg-serving-provider-broker:
         condition: service_started
 
   nginx:
@@ -66,7 +66,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf
     depends_on:
-      0g-serving-provider-broker:
+      zg-serving-provider-broker:
         condition: service_started
 
   zk:

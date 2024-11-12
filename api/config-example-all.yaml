@@ -1,8 +1,8 @@
 database:
   # Database configuration for the provider:
-  # The provider connects to the database server located at '0g-serving-provider-broker-db' on port 3306.
+  # The provider connects to the database server located at 'zg-serving-provider-broker-db' on port 3306.
   # Do not change this configuration if using docker compose to start service.
-  provider: provider:provider@tcp(0g-serving-provider-broker-db:3306)/provider?parseTime=true
+  provider: provider:provider@tcp(zg-serving-provider-broker-db:3306)/provider?parseTime=true
 
 # OG serving contract address used
 contractAddress: 0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6

@@ -32,6 +32,24 @@ oci: build
 			--architecture $$arch --os linux; \
 	done
 
+oci-with-config: build
+	for arch in $(ARCH); do \
+		skopeo --insecure-policy copy --src-tls-verify=false \
+			docker://$(BASE_IMAGE) oci:build/oci:$(VERSION)-$$arch; \
+		umoci insert --image build/oci:$(VERSION)-$$arch build/$$arch/broker /usr/bin/broker; \
+        umoci insert --image build/oci:$(VERSION)-$$arch ./integration/akash-all-in-one/config.local.yaml /etc/config.yaml; \
+		umoci config --image build/oci:$(VERSION)-$$arch \
+			--config.entrypoint /usr/bin/broker \
+			--author 0glab --created $$(date -u +%FT%T.%NZ) \
+			--architecture $$arch --os linux; \
+	done
+
+release-with-config: oci-with-config
+	for arch in $(ARCH); do \
+		skopeo --insecure-policy copy --dest-tls-verify=false --format=v2s2 \
+			oci:build/oci:$(VERSION)-$$arch $(IMAGE_DEST):$(VERSION)-$$arch; \
+	done
+
 release: oci
 	for arch in $(ARCH); do \
 		skopeo --insecure-policy copy --dest-tls-verify=false --format=v2s2 \
