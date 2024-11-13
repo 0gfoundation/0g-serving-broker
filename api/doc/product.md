@@ -1,69 +1,125 @@
-# 0G Serving Network v0.1
+# 0G Serving Network
+
+[[_TOC_]]
+
+This document focuses on aligning product design without delving into technical specifics. It covers:
+
+- Objectives
+- Serving Network Design Protocol
+- Product Structure
+- Integration of LLM Inference and Storage Registry Services into the serving network (i.e., their implementation of the design protocol)
+
+For detailed interface and usage information, refer to the component design document:
+
+- [Provider Broker](./provider.md#0g-serving-network-provider-broker)
+- [Chat service SDK](./sdk-chat.md#0g-serving-network-sdk-for-chat-service)
+- [Storage registry SDK](./sdk-storage.md#0g-serving-network-sdk-for-storage-registry)
+- Router API (currently in development)
+- Retail Page (currently in development)
 
 ## Objectives
 
-The goal of the 0G Serving Network is to connect service providers (providers) with service users (customers). Providers can offer various AI services, such as LLM inference, model, and dataset downloads, while customers can utilize these services in three forms: as users, developers, or architects.
+The 0G Serving Network is designed to bridge service providers with service users. Providers can offer a range of AI services, like LLM inference, and model and dataset downloads. Customers can engage with these services in three roles: users, developers, or architects.
 
 ### For Providers
 
-1. Provide an easy way to integrate into the Serving Network.
-2. Offer a flexible settlement system.
+1. Ensure a versatile settlement system.
 
 ### For Customers
 
-1. Provide different levels of access to services:
-   - **Customer as User**: Direct usage of AI services through a Retail UI.
-   - **Customer as Developer**: Access via OpenAI-compatible, high-availability API interfaces through a router server.
-   - **Customer as Architect**: Integrate provider services into custom applications using an SDK.
-2. Provide service verification to ensure validity and reliability.
+1. Offer varied access levels to services:
+   - **Customer as User**: Engage directly with AI services via a Retail UI.
+   - **Customer as Developer**: Utilize OpenAI-compatible APIs with high availability through a router server.
+   - **Customer as Architect**: Customize applications by incorporating provider services using an SDK.
+1. Ensure service verification for reliability and validity.
 
 ## Terminology
 
-- **Provider**: Service provider.
-- **Retail UI**: Interface offered to users for direct service use, like chat and model downloads.
-- **Router**: 0G server acting as an intermediary for providers.
-- **Customer**: General term for service users.
-  - **User**: Customer interacting with the system through the Retail UI.
-  - **Developer**: Customer interacting with the system via the API and **0G Router**.
-  - **Architect**: Customer interacting directly with **Provider Services** using the SDK.
+- **Provider**: The service provider.
+- **Retail UI**: The user interface for direct service access, such as chat and model downloads.
+- **Router**: A 0G server that serves as an intermediary between providers and users.
+- **Customer**: A general term encompassing users, developers, and architects.
+  - **User**: Interacts with services through the Retail UI.
+  - **Developer**: Engages with services via the 0G Router API.
+  - **Architect**: Directly interacts with Provider Services using the SDK.
 
-## Consensus Rules
+## Protocol
 
-### 0G Serving Account
+Various services should reuse the same rules for contracts, ZK components, and provider broker components to standardize processes and minimize redundant development.
 
-- Customers must create an account on the 0G Serving Contract before using services, with the account identified by the combination of customer address and provider address.
-- Customers need to deposit 0G tokens in advance before accessing services.
-- Accounts are required to bind a key pair:
-  - Customers sign requests with a private key.
-  - Providers verify the validity of requests using the public key.
-  - During settlements, the contract verifies the request with the public key before transferring tokens.
+### Account Setup
 
-### 0G Serving Service
+- Customers must create an account with the 0G Serving Contract to use services.
+- The account is identified by a combination of "customer address + provider address".
+- Customers must preemptively deposit 0G tokens before accessing services.
+- Upon account creation, a key pair is generated:
+  - Customers sign requests using their private key.
+  - Providers verify requests with the corresponding public key.
+  - The contract uses the public key to verify requests during settlements.
 
-- Providers must register their services using the registration function provided by the contract. Services should include the following metadata:
+### Service Registration
 
-  | Field Name      | Description                                                                                                                           |
-  | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-  | Name            | The name of the service. Provider address + Name forms the primary key of the service.                                                |
-  | URL             | Must be a public IP address.                                                                                                          |
-  | Service Type    | Types of service include:<br>Chat (Text to Text LLM inference)<br>Model Download<br>Dataset Download                                  |
-  | Service Subtype | Subtype of the service:<br>Chat (e.g., llama-3.1-8B)<br>Model Download (e.g., llama-3.1-8B)<br>Dataset Download (name of the dataset) |
-  | Verifiability   | Verifiability:<br>Chat (OpML, TeeML)<br>Model/Dataset Download (TO BE DECIDED)                                                        |
-  | InputPrice      | Optional, indicates the price per unit of a request, e.g., in Chat scenarios, the price per token in a request.                       |
-  | OutputPrice     | Optional, indicates the price per unit of a response, e.g., in Chat scenarios, the price per token in a response.                     |
+Providers register their services using the contract's registration function. Services metadata:
+
+| Field Name            | Description                                                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Name                  | The name of the service. A service is identified by a combination of "provider address + name".                                                    |
+| URL                   | A public IP address is used to accept requests from customers.                                                                                     |
+| Service Type          | Categories of services include:<br>Chat (Text-to-Text LLM inference)<br>Model Download<br>Dataset Download                                         |
+| AdditionalProperties  | JSON structure stored as a string in the contract, allowing varied attributes for different service types.                                         |
+| Verifiability         | Verification methods:<br>Chat (OpML, TeeML)<br>Model/Dataset Download (details pending)                                                            |
+| InputPrice            | Optional, specifies the cost per request unit, e.g., per token in chat scenarios.                                                                  |
+| OutputPrice           | Optional, specifies the cost per response unit, e.g., per token in chat scenarios.                                                                 |
 
 ### Settlement
 
 - Communication between customer and provider occurs over HTTP, with customer-signed requests serving as settlement receipts. Providers can submit these to the contract for settlement.
-- Costs are calculated by multiplying the amount by unit price, differing by service type.
-- Each request charge comprises the current request cost plus the previous response cost, reducing dishonest actions.
-- To mitigate risks, contents like downloads are split into smaller parts and transmitted multiple times.
+- Cost Calculation: Quantify the request/response into a single value, then multiply by the unit price.
+
+  1. LLM chat: number of tokens \* price per token
+  1. Model download: number of bytes downloaded \* price per byte
+
+- Cost for each round: Current request cost + previous response cost. For example:
+
+  1. LLM chat: Current question token cost + previous answer token cost
+  1. Model download: Current request cost (0) + previous download cost
+
+- Based on the above, the first and last requests in a sequence can be exploited:
+
+  1. First: Customer sends a signed request, but the provider doesn't respond.
+  1. Last: Provider responds, but the customer stops sending requests, so the provider's response can't be charged.
+
+     To prevent this, serving network requests should be small. For instance, in model download services, the provider side should split the model into small parts, transfer them multiple times, and reassemble them on the customer side.
+
+### Settlement Process
+
+- Customers and providers exchange data via HTTP, using customer-signed requests as settlement receipts. Providers can then submit these for payment.
+- Cost Calculation: Transform the request/response into a value and multiply by the unit price.
+
+  1. LLM chat: Number of tokens \* price per token
+  1. Model download: Bytes downloaded \* price per byte
+  1. Each request calculates cost as: Current request cost + cost of previous response. For example:
+     1. LLM chat: Cost of current question tokens + cost of previous response tokens
+     1. Model download: Cost of current request (in this case is 0) + cost of previous download
+
+- Potential Exploits:
+
+  1. Initial request in a sequence: The customer sends a signed request, but the provider doesn't respond.
+  1. Final request in a sequence: The provider responds, but the customer stops sending requests, preventing the provider's response from being invoiced.
+
+  To prevent these issues, keep request sizes small. For model downloads, providers should split the model into smaller parts, send them sequentially, and reassemble them on the customer's end.
 
 ### Service Verification
 
-- LLM inference and Model/dataset download verification methods are to be decided.
+- LLM inference
 
-## Product Architecture
+  To be decided
+
+- Model/dataset download
+
+  To be decided
+
+## Product Structure
 
 Structured as a three-layer architecture to reflect different customer needs and capabilities:
 
@@ -71,75 +127,36 @@ Structured as a three-layer architecture to reflect different customer needs and
 
 ![architecture](./image/architecture.png)
 
-**Features**:
-
 - No server involvement; data is acquired from the contract.
 - Architects conduct P2P communication with providers.
-- Ensure contract rule compliance using [0G SDK](#0g-sdk) and [0G Provider Broker](#0g-provider-broker).
 
-#### 0G SDK
+#### usage
 
-**Functions**:
-
-- Generate headers required for settlement.
-- Verify the integrity and validity of returned data.
-- Support calling contract functions for account creation and more.
-
-**Supported Languages**:
-
-- [TypeScript SDK for Web UI development](https://github.com/0glabs/0g-serving-user-broker)
-- TypeScript SDK for Node.js development
-- Python SDK
-
-#### 0G Provider Broker
-
-**Functions**:
-
-- Service registration and proxying; request validation and automated settlement mechanisms.
-
-**Usage**:
-
-- Download the 0G Provider Broker package.
-- Fill out configuration files and deploy.
-- After deployment, use the appropriate script to start registration.
-
-**Configuration File Example**:
-
-```yaml
-interval:
-  forceSettlementProcessor: 86400    // Fixed frequency cycle for settlements
-  settlementProcessor: 600           // Detection frequency: Check balance risk and auto-settle if needed.
-servingUrl: "http://ip:port"  // Public IP address
-networks:
-  ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16600
-    privateKeys:
-      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  // 0G private key
-    transactionLimit: 1000000      // Transaction gas limit
-    gasEstimationBuffer: 10000     // Transaction gas buffer
-service:
-  name:
-  url:
-  serviceType:
-  serviceSubtype:
-  verifiability:
-  inputPrice:
-  outputPrice:
-```
+1. Providers utilize the [0G Provider Broker](./provider.md#0g-serving-network-provider-broker) for service registration and settlement.
+2. Architects use the [0G SDK](./sdk.md#0g-serving-network-sdk) to manage accounts and query services.
 
 ### Router Layer [For Developers]
 
-Not Covered in v0.1
-
-Offers an OpenAI-compatible API for resolving high-availability issues.
+- Not Included in v0.1
+- Provides OpenAI-compatible, high-availability API interfaces via a router server
+- Built on the [Contract Layer](#contract-layer-for-architects)
 
 ### Retail Layer [For Users]
 
-Not Covered in v0.1
+- Not included in v0.1
+- Offers a user-friendly interface for direct service access.
+- Built on the [Router Layer](#router-layer-for-developers)
 
-Provides a user-friendly interface for direct service usage.
+## Integration
 
-## Inference Services
+### LLM Inference
 
-## Storage Services
+#### LLM Inference Workflow
+
+#### Design Protocol for Implementing LLM Inference
+
+### Storage Registry
+
+#### Storage Registry Workflow
+
+#### Design Protocol for Implementing Storage Registry
