@@ -7,6 +7,8 @@ var (
 		"/chat/completions": {},
 	}
 
+	SettleFeeRoute = "/settle-fee"
+
 	RequestMetaData = map[string]struct{}{
 		"Address":             {},
 		"Fee":                 {},

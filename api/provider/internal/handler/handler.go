@@ -39,7 +39,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	// account
 	group.GET("/user", h.ListUserAccount)
 	group.GET("/user/:user", h.GetUserAccount)
-	group.POST("/user/:user/sync", h.SyncUserAccount)
+	group.POST("/user/:user/settle-fees", h.SyncUserAccount)
 	group.POST("sync-account", h.SyncUserAccounts)
 
 	// request

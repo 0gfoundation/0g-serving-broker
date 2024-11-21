@@ -9,6 +9,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/provider/internal/db"
 	"github.com/0glabs/0g-serving-broker/provider/model"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/gin-gonic/gin"
 )
 
 func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (model.User, error) {
@@ -108,6 +109,30 @@ func (c *Ctrl) SyncUserAccounts(ctx context.Context) error {
 	}
 
 	return errors.Wrap(c.db.BatchUpdateUserAccount(accounts), "batch update account in db")
+}
+
+func (c *Ctrl) SettleUserAccountFee(ctx *gin.Context) error {
+	req, err := c.GetFromHTTPRequest(ctx)
+	if err != nil {
+		return err
+	}
+	if err := c.ValidateRequest(ctx, req, req.PreviousOutputFee, 0); err != nil {
+		return err
+	}
+	if err := c.CreateRequest(req); err != nil {
+		return err
+	}
+	oldAccount, err := c.GetOrCreateAccount(ctx, req.UserAddress)
+	if err != nil {
+		return err
+	}
+	account := model.User{
+		User:             req.UserAddress,
+		LastRequestNonce: &req.Nonce,
+		UnsettledFee:     model.PtrOf(req.PreviousOutputFee + *oldAccount.UnsettledFee),
+		LastResponseFee:  model.PtrOf(int64(0)),
+	}
+	return c.UpdateUserAccount(account.User, account)
 }
 
 func parse(account contract.Account) model.User {
