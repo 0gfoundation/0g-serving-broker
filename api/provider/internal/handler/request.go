@@ -10,6 +10,7 @@ import (
 
 // listRequest
 //
+//	@Description	This endpoint allows you to list requests
 //	@ID			listRequest
 //	@Tags		request
 //	@Router		/request [get]

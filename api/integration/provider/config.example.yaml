@@ -2,7 +2,7 @@ interval:
   autoSettleBufferTime: 18000
   forceSettlementProcessor: 86400
   settlementProcessor: 600
-servingUrl: http://<Public_IP_Address>:8080
+servingUrl: http://<Public_IP_Address>:3080
 networks:
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"

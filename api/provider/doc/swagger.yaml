@@ -11,13 +11,13 @@ definitions:
         readOnly: true
         type: string
       fee:
-        type: integer
+        type: string
       inputFee:
-        type: integer
+        type: string
       nonce:
-        type: integer
+        type: string
       previousOutputFee:
-        type: integer
+        type: string
       processed:
         type: boolean
       serviceName:
@@ -55,13 +55,13 @@ definitions:
         readOnly: true
         type: string
       inputPrice:
-        type: integer
+        type: string
       model:
         type: string
       name:
         type: string
       outputPrice:
-        type: integer
+        type: string
       type:
         type: string
       updatedAt:
@@ -97,17 +97,17 @@ definitions:
       lastBalanceCheckTime:
         type: string
       lastRequestNonce:
-        type: integer
+        type: string
       lastResponseFee:
-        type: integer
+        type: string
       lockBalance:
-        type: integer
+        type: string
       signer:
         items:
           type: string
         type: array
       unsettledFee:
-        type: integer
+        type: string
       updatedAt:
         readOnly: true
         type: string
@@ -125,13 +125,18 @@ definitions:
       metadata:
         $ref: '#/definitions/model.ListMeta'
     type: object
+host: localhost:3080
 info:
   contact: {}
+  description: These APIs allow providers to manage services and user accounts. The
+    host is localhost, and the port is configured in the provider's configuration
+    file, defaulting to 3080.
   title: 0G Serving Provider Broker API
-  version: "1.0"
+  version: 0.1.0
 paths:
   /contract-service:
     get:
+      description: This endpoint allows you to list all services in the contract
       operationId: listServiceInContract
       responses:
         "200":
@@ -142,6 +147,7 @@ paths:
       - service
   /request:
     get:
+      description: This endpoint allows you to list requests
       operationId: listRequest
       parameters:
       - description: Processed
@@ -157,6 +163,9 @@ paths:
       - request
   /service:
     get:
+      description: This endpoint allows you to list all services in the database.
+        Compared to the output from listServiceInContract, the service.url from this
+        endpoint is the original URL of the service, which is not public.
       operationId: listService
       responses:
         "200":
@@ -166,6 +175,7 @@ paths:
       tags:
       - service
     post:
+      description: This endpoint allows you to register service in the contract
       operationId: registerService
       parameters:
       - description: body
@@ -181,6 +191,7 @@ paths:
       - service
   /service/{service}:
     delete:
+      description: This endpoint allows you to delete service in the contract
       operationId: deleteService
       parameters:
       - description: Service name
@@ -194,6 +205,7 @@ paths:
       tags:
       - service
     get:
+      description: This endpoint allows you to get service by name
       operationId: getService
       parameters:
       - description: Service name
@@ -209,6 +221,8 @@ paths:
       tags:
       - service
     put:
+      description: This endpoint allows you to update service in the contract. The
+        name attribute cannot be updated
       operationId: updateService
       parameters:
       - description: Service name
@@ -258,6 +272,8 @@ paths:
       - service
   /user:
     get:
+      description: This endpoint allows you to list all users who have created accounts
+        for your service
       operationId: listUserAccount
       responses:
         "200":
@@ -268,6 +284,7 @@ paths:
       - user
   /user/{user}:
     get:
+      description: This endpoint allows you to get account by user address
       operationId: getUserAccount
       parameters:
       - description: User address

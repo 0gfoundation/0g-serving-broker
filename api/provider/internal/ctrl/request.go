@@ -11,6 +11,7 @@ import (
 
 	constant "github.com/0glabs/0g-serving-broker/common/const"
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/common/zkclient/models"
 	"github.com/0glabs/0g-serving-broker/provider/model"
 )
@@ -46,7 +47,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 	return req, nil
 }
 
-func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputFee int64) error {
+func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputFee string) error {
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
 	if err != nil {
 		return err
@@ -57,7 +58,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 		return err
 	}
 
-	err = c.validateNonce(req, *account.LastRequestNonce)
+	err = c.validateNonce(req, account.LastRequestNonce)
 	if err != nil {
 		return err
 	}
@@ -96,33 +97,61 @@ func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 	return nil
 }
 
-func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputFee int64) error {
-	if account.LastResponseFee != nil && actual.PreviousOutputFee < *account.LastResponseFee {
-		return fmt.Errorf("invalid previousOutputFee, expected %d, but received %d", *account.LastResponseFee, actual.PreviousOutputFee)
+func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputFee string) error {
+	if account.LastResponseFee != nil {
+		cmp1, err := util.Compare(actual.PreviousOutputFee, account.LastResponseFee)
+		if err != nil {
+			return err
+		}
+		if cmp1 < 0 {
+			return fmt.Errorf("invalid previousOutputFee, expected %d, but received %d", *account.LastResponseFee, actual.PreviousOutputFee)
+		}
 	}
-	if actual.InputFee < expectedInputFee {
+	cmp2, err := util.Compare(actual.InputFee, expectedInputFee)
+	if err != nil {
+		return err
+	}
+	if cmp2 < 0 {
 		return fmt.Errorf("invalid inputFee, expected %d, but received %d", expectedInputFee, actual.InputFee)
 	}
-	if actual.Fee < expectedFee {
+	cmp3, err := util.Compare(actual.Fee, expectedFee)
+	if err != nil {
+		return err
+	}
+	if cmp3 < 0 {
 		return fmt.Errorf("invalid fee, expected %d, but received %d. Please check the service price", expectedFee, actual.Fee)
 	}
 	return nil
 }
 
-func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce int64) error {
-	if actual.Nonce > lastRequestNonce {
+func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce *string) error {
+	cmp, err := util.Compare(actual.Nonce, lastRequestNonce)
+	if err != nil {
+		return err
+	}
+	if cmp > 0 {
 		return nil
 	}
 	return fmt.Errorf("invalid nonce, received nonce %d not greater than the previous nonce: %d", actual.Nonce, lastRequestNonce)
 }
 
-func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, fee int64) error {
+func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, fee string) error {
 	if account.UnsettledFee == nil || account.LockBalance == nil {
 		return errors.New("nil unsettledFee or lockBalance in account")
 	}
-	if fee+*account.UnsettledFee <= *account.LockBalance {
+	total, err := util.Add(fee, account.UnsettledFee)
+	if err != nil {
+		return err
+	}
+	cmp1, err := util.Compare(total, account.LockBalance)
+	if err != nil {
+		return err
+	}
+	if cmp1 <= 0 {
 		return nil
 	}
+
+	// reload account and repeat the check
 	if err := c.SyncUserAccount(ctx, common.HexToAddress(account.User)); err != nil {
 		return err
 	}
@@ -130,10 +159,18 @@ func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, 
 	if err != nil {
 		return err
 	}
-	if fee+*newAccount.UnsettledFee <= *newAccount.LockBalance {
+	totalNew, err := util.Add(fee, account.UnsettledFee)
+	if err != nil {
+		return err
+	}
+	cmp2, err := util.Compare(totalNew, newAccount.LockBalance)
+	if err != nil {
+		return err
+	}
+	if cmp2 <= 0 {
 		return nil
 	}
-	return fmt.Errorf("insufficient balance, total fee of %d exceeds the available balance of %d", fee+*newAccount.UnsettledFee, *newAccount.LockBalance)
+	return fmt.Errorf("insufficient balance, total fee of %s exceeds the available balance of %s", totalNew.String(), *newAccount.LockBalance)
 }
 
 func updateRequestField(req *model.Request, key, value string) error {
@@ -141,13 +178,13 @@ func updateRequestField(req *model.Request, key, value string) error {
 	case "Address":
 		req.UserAddress = value
 	case "Fee":
-		return parseInt64Field(&req.Fee, "fee", value)
+		req.Fee = value
 	case "Input-Fee":
-		return parseInt64Field(&req.InputFee, "inputFee", value)
+		req.InputFee = value
 	case "Nonce":
-		return parseInt64Field(&req.Nonce, "nonce", value)
+		req.Nonce = value
 	case "Previous-Output-Fee":
-		return parseInt64Field(&req.PreviousOutputFee, "previousOutputFee", value)
+		req.PreviousOutputFee = value
 	case "Service-Name":
 		req.ServiceName = value
 	case "Signature":

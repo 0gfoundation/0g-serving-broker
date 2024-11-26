@@ -11,6 +11,7 @@ import (
 
 // listUserAccount
 //
+//	@Description	This endpoint allows you to list all users who have created accounts for your service
 //	@ID			listUserAccount
 //	@Tags		user
 //	@Router		/user [get]
@@ -30,6 +31,7 @@ func (h *Handler) ListUserAccount(ctx *gin.Context) {
 
 // getUserAccount
 //
+//	@Description	This endpoint allows you to get account by user address
 //	@ID			getUserAccount
 //	@Tags		user
 //	@Router		/user/{user} [get]

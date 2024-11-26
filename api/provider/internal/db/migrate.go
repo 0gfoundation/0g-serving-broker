@@ -22,8 +22,8 @@ func (d *DB) Migrate() error {
 					Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name"`
 					Type        string                `gorm:"type:varchar(255);not null"`
 					URL         string                `gorm:"type:varchar(255);not null"`
-					InputPrice  int64                 `gorm:"type:bigint;not null"`
-					OutputPrice int64                 `gorm:"type:bigint;not null"`
+					InputPrice  string                `gorm:"type:varchar(255);not null"`
+					OutputPrice string                `gorm:"type:varchar(255);not null"`
 					DeletedAt   soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
 				}
 				return tx.AutoMigrate(&Service{})
@@ -35,12 +35,12 @@ func (d *DB) Migrate() error {
 				type User struct {
 					model.Model
 					User                 string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
-					LastRequestNonce     *int64                `gorm:"type:bigint;not null;default:0"`
-					LastResponseFee      *int64                `gorm:"type:bigint;not null;default:0"`
-					LockBalance          *int64                `gorm:"type:bigint;not null;default:0"`
+					LastRequestNonce     *string               `gorm:"type:varchar(255);not null;default:0"`
+					LastResponseFee      *string               `gorm:"type:varchar(255);not null;default:'0'"`
+					LockBalance          *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
 					Signer               model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
-					UnsettledFee         *int64                `gorm:"type:bigint;not null;default:0"`
+					UnsettledFee         *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					DeletedAt            soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
 				}
 				return tx.AutoMigrate(&User{})
@@ -52,11 +52,11 @@ func (d *DB) Migrate() error {
 				type Request struct {
 					model.Model
 					UserAddress       string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
-					Nonce             int64  `gorm:"type:bigint;not null;index:processed_userAddress_nonce"`
+					Nonce             string `gorm:"type:varchar(255);not null;index:processed_userAddress_nonce"`
 					ServiceName       string `gorm:"type:varchar(255);not null"`
-					InputFee          int64  `gorm:"type:bigint;not null"`
-					PreviousOutputFee int64  `gorm:"type:bigint;not null"`
-					Fee               int64  `gorm:"type:bigint;not null"`
+					InputFee          string `gorm:"type:varchar(255);not null"`
+					PreviousOutputFee string `gorm:"type:varchar(255);not null"`
+					Fee               string `gorm:"type:varchar(255);not null"`
 					Signature         string `gorm:"type:varchar(255);not null"`
 					Processed         *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
 				}

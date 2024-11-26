@@ -16,10 +16,10 @@ import (
 
 type SettlementInfo struct {
 	Account                   string `json:"account"`
-	RecordedNonceInContract   int64  `json:"recorded_nonce_in_contract"`
-	RecordedBalanceInContract int64  `json:"recorded_balance_in_contract"`
-	MinNonceInSettlement      int64  `json:"min_nonce_in_settlement"`
-	TotalFeeInSettlement      int64  `json:"total_fee_in_settlement"`
+	RecordedNonceInContract   string `json:"recorded_nonce_in_contract"`
+	RecordedBalanceInContract string `json:"recorded_balance_in_contract"`
+	MinNonceInSettlement      string `json:"min_nonce_in_settlement"`
+	TotalFeeInSettlement      string `json:"total_fee_in_settlement"`
 }
 
 func (c *Ctrl) SettleFees(ctx context.Context) error {
@@ -44,8 +44,8 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	categorizedReqs := make(map[string][]*models.Request)
 	categorizedSigs := make(map[string][][]int64)
 	for _, req := range reqs {
-		if latestReqCreateAt.Before(*reqs[0].CreatedAt) {
-			latestReqCreateAt = reqs[0].CreatedAt
+		if latestReqCreateAt.Before(*req.CreatedAt) {
+			latestReqCreateAt = req.CreatedAt
 		}
 
 		var sig []int64
@@ -62,15 +62,25 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		}
 		if v, ok := categorizedSettlementInfo[req.UserAddress]; ok {
 			minNonce := v.MinNonceInSettlement
-			if minNonce == 0 || minNonce > req.Nonce {
+
+			cmp, err := util.Compare(minNonce, req.Nonce)
+			if err != nil {
+				return errors.Wrap(err, "compare nonce")
+			}
+			if minNonce == "0" || cmp > 0 {
 				minNonce = req.Nonce
+			}
+
+			totalFeeInSettlement, err := util.Add(req.Fee, v.TotalFeeInSettlement)
+			if err != nil {
+				return errors.Wrap(err, "add fee")
 			}
 			categorizedSettlementInfo[req.UserAddress] = SettlementInfo{
 				Account:                   req.UserAddress,
 				RecordedNonceInContract:   v.RecordedNonceInContract,
 				RecordedBalanceInContract: v.RecordedBalanceInContract,
 				MinNonceInSettlement:      minNonce,
-				TotalFeeInSettlement:      req.Fee + v.TotalFeeInSettlement,
+				TotalFeeInSettlement:      totalFeeInSettlement.String(),
 			}
 		}
 		if _, ok := categorizedReqs[req.UserAddress]; ok {
@@ -182,10 +192,10 @@ func (c Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[s
 		return nil
 	}
 	// accountsInDebt marks the accounts needed to be charged
-	accountsInDebt := map[string]int64{}
+	accountsInDebt := map[string]string{}
 	for _, req := range reqs {
 		if _, ok := accountsInDebt[req.UserAddress]; !ok {
-			accountsInDebt[req.UserAddress] = 1
+			accountsInDebt[req.UserAddress] = "1"
 		}
 	}
 	accounts, err := c.contract.ListUserAccount(ctx)
@@ -194,11 +204,13 @@ func (c Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[s
 	}
 	for _, account := range accounts {
 		if _, ok := accountsInDebt[account.User.String()]; ok {
-			accountsInDebt[account.User.String()] = account.Nonce.Int64()
+			accountsInDebt[account.User.String()] = account.Nonce.String()
 			if categorizedSettlementInfo != nil && *categorizedSettlementInfo != nil {
 				(*categorizedSettlementInfo)[account.User.String()] = SettlementInfo{
-					RecordedNonceInContract:   account.Nonce.Int64(),
-					RecordedBalanceInContract: account.Balance.Int64(),
+					RecordedNonceInContract:   account.Nonce.String(),
+					RecordedBalanceInContract: account.Balance.String(),
+					MinNonceInSettlement:      "0",
+					TotalFeeInSettlement:      "0",
 				}
 			}
 		}

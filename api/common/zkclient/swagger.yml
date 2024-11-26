@@ -213,9 +213,9 @@ definitions:
     type: object
     properties:
       nonce:
-        type: integer
+        type: string
       fee:
-        type: integer
+        type: string
       userAddress:
         type: string
       providerAddress:

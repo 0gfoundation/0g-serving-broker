@@ -17,6 +17,7 @@ const docTemplate = `{
     "paths": {
         "/contract-service": {
             "get": {
+                "description": "This endpoint allows you to list all services in the contract",
                 "tags": [
                     "service"
                 ],
@@ -33,6 +34,7 @@ const docTemplate = `{
         },
         "/request": {
             "get": {
+                "description": "This endpoint allows you to list requests",
                 "tags": [
                     "request"
                 ],
@@ -57,6 +59,7 @@ const docTemplate = `{
         },
         "/service": {
             "get": {
+                "description": "This endpoint allows you to list all services in the database. Compared to the output from listServiceInContract, the service.url from this endpoint is the original URL of the service, which is not public.",
                 "tags": [
                     "service"
                 ],
@@ -71,6 +74,7 @@ const docTemplate = `{
                 }
             },
             "post": {
+                "description": "This endpoint allows you to register service in the contract",
                 "tags": [
                     "service"
                 ],
@@ -95,6 +99,7 @@ const docTemplate = `{
         },
         "/service/{service}": {
             "get": {
+                "description": "This endpoint allows you to get service by name",
                 "tags": [
                     "service"
                 ],
@@ -118,6 +123,7 @@ const docTemplate = `{
                 }
             },
             "put": {
+                "description": "This endpoint allows you to update service in the contract. The name attribute cannot be updated",
                 "tags": [
                     "service"
                 ],
@@ -147,6 +153,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
+                "description": "This endpoint allows you to delete service in the contract",
                 "tags": [
                     "service"
                 ],
@@ -211,6 +218,7 @@ const docTemplate = `{
         },
         "/user": {
             "get": {
+                "description": "This endpoint allows you to list all users who have created accounts for your service",
                 "tags": [
                     "user"
                 ],
@@ -227,6 +235,7 @@ const docTemplate = `{
         },
         "/user/{user}": {
             "get": {
+                "description": "This endpoint allows you to get account by user address",
                 "tags": [
                     "user"
                 ],
@@ -300,16 +309,16 @@ const docTemplate = `{
                     "readOnly": true
                 },
                 "fee": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "inputFee": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "nonce": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "previousOutputFee": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "processed": {
                     "type": "boolean"
@@ -363,7 +372,7 @@ const docTemplate = `{
                     "readOnly": true
                 },
                 "inputPrice": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "model": {
                     "type": "string"
@@ -372,7 +381,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "outputPrice": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "type": {
                     "type": "string"
@@ -417,13 +426,13 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "lastRequestNonce": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "lastResponseFee": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "lockBalance": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "signer": {
                     "type": "array",
@@ -432,7 +441,7 @@ const docTemplate = `{
                     }
                 },
                 "unsettledFee": {
-                    "type": "integer"
+                    "type": "string"
                 },
                 "updatedAt": {
                     "type": "string",
@@ -462,12 +471,12 @@ const docTemplate = `{
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "1.0",
-	Host:             "",
+	Version:          "0.1.0",
+	Host:             "localhost:3080",
 	BasePath:         "/v1",
 	Schemes:          []string{},
 	Title:            "0G Serving Provider Broker API",
-	Description:      "",
+	Description:      "These APIs allow providers to manage services and user accounts. The host is localhost, and the port is configured in the provider's configuration file, defaulting to 3080.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 }

@@ -12,6 +12,7 @@ import (
 
 // registerService
 //
+//	@Description  This endpoint allows you to register service in the contract
 //	@ID			registerService
 //	@Tags		service
 //	@Router		/service [post]
@@ -46,6 +47,7 @@ func (h *Handler) RegisterService(ctx *gin.Context) {
 
 // getService
 //
+//	@Description  This endpoint allows you to get service by name
 //	@ID			getService
 //	@Tags		service
 //	@Router		/service/{service} [get]
@@ -64,6 +66,7 @@ func (h *Handler) GetService(ctx *gin.Context) {
 
 // listService
 //
+//	@Description  This endpoint allows you to list all services in the database. Compared to the output from listServiceInContract, the service.url from this endpoint is the original URL of the service, which is not public.
 //	@ID			listService
 //	@Tags		service
 //	@Router		/service [get]
@@ -83,10 +86,11 @@ func (h *Handler) ListService(ctx *gin.Context) {
 
 // listServiceInContract
 //
-//	@ID			listServiceInContract
-//	@Tags		service
-//	@Router		/contract-service [get]
-//	@Success	200	{object}	model.ServiceList
+//	@Description  This endpoint allows you to list all services in the contract
+//	@ID			 listServiceInContract
+//	@Tags		 service
+//	@Router		 /contract-service [get]
+//	@Success	 200	{object}	model.ServiceList
 func (h *Handler) ListServiceInContract(ctx *gin.Context) {
 	list, err := h.ctrl.ListServiceInContract(ctx)
 	if err != nil {
@@ -102,6 +106,7 @@ func (h *Handler) ListServiceInContract(ctx *gin.Context) {
 
 // updateService
 //
+//	@Description  This endpoint allows you to update service in the contract. The name attribute cannot be updated
 //	@ID			updateService
 //	@Tags		service
 //	@Router		/service/{service} [put]
@@ -152,6 +157,7 @@ func (h *Handler) UpdateService(ctx *gin.Context) {
 
 // deleteService
 //
+//	@Description  This endpoint allows you to delete service in the contract
 //	@ID			deleteService
 //	@Tags		service
 //	@Router		/service/{service} [delete]
