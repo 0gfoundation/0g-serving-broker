@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,7 +53,7 @@ func (d *DB) CreateRequest(req model.Request) error {
 	return ret.Error
 }
 
-func (d *DB) PruneRequest(minNonceMap map[string]int64) error {
+func (d *DB) PruneRequest(minNonceMap map[string]string) error {
 	var whereClauses []string
 	var args []interface{}
 
@@ -60,8 +61,12 @@ func (d *DB) PruneRequest(minNonceMap map[string]int64) error {
 		return nil
 	}
 
-	for address, minNonce := range minNonceMap {
-		whereClauses = append(whereClauses, "(user_address = ? AND nonce <= ?)")
+	for address, minNonceStr := range minNonceMap {
+		minNonce, err := strconv.ParseUint(minNonceStr, 10, 64)
+		if err != nil {
+			return err
+		}
+		whereClauses = append(whereClauses, "(user_address = ? AND CAST(nonce AS UNSIGNED) <= ?)")
 		args = append(args, address, minNonce)
 	}
 	condition := strings.Join(whereClauses, " OR ")

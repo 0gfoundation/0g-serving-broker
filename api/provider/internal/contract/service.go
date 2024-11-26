@@ -2,10 +2,10 @@ package providercontract
 
 import (
 	"context"
-	"math/big"
 
 	"github.com/0glabs/0g-serving-broker/common/contract"
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/provider/model"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -16,6 +16,14 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model
 	if err != nil {
 		return err
 	}
+	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
+	if err != nil {
+		return errors.Wrap(err, "convert input price")
+	}
+	outputPrice, err := util.ConvertToBigInt(service.OutputPrice)
+	if err != nil {
+		return errors.Wrap(err, "convert input price")
+	}
 	tx, err := c.Contract.AddOrUpdateService(
 		opts,
 		service.Name,
@@ -23,8 +31,8 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model
 		servingUrl,
 		service.ModelType,
 		service.Verifiability,
-		big.NewInt(service.InputPrice),
-		big.NewInt(service.OutputPrice),
+		inputPrice,
+		outputPrice,
 	)
 	if err != nil {
 		return err
@@ -121,10 +129,10 @@ func identicalService(old contract.Service, new model.Service) bool {
 	if old.Verifiability != new.Verifiability {
 		return false
 	}
-	if old.InputPrice.Int64() != new.InputPrice {
+	if old.InputPrice.String() != new.InputPrice {
 		return false
 	}
-	if old.OutputPrice.Int64() != new.OutputPrice {
+	if old.OutputPrice.String() != new.OutputPrice {
 		return false
 	}
 	if old.ServiceType != new.Type {

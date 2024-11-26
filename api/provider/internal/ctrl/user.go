@@ -2,10 +2,12 @@ package ctrl
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/contract"
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/provider/internal/db"
 	"github.com/0glabs/0g-serving-broker/provider/model"
 	"github.com/ethereum/go-ethereum/common"
@@ -25,14 +27,17 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 		return model.User{}, errors.Wrap(err, "get account from contract")
 	}
 
+	lockBalance := big.NewInt(0)
+	lockBalance.Sub(contractAccount.Balance, contractAccount.PendingRefund)
+
 	dbAccount = model.User{
 		User:                 userAddress,
-		LastRequestNonce:     model.PtrOf(contractAccount.Nonce.Int64()),
-		LockBalance:          model.PtrOf(contractAccount.Balance.Int64() - contractAccount.PendingRefund.Int64()),
+		LastRequestNonce:     model.PtrOf(contractAccount.Nonce.String()),
+		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
-		UnsettledFee:         model.PtrOf(int64(0)),
+		UnsettledFee:         model.PtrOf("0"),
 		Signer:               []string{contractAccount.Signer[0].String(), contractAccount.Signer[1].String()},
-		LastResponseFee:      model.PtrOf(int64(0)),
+		LastResponseFee:      model.PtrOf("0"),
 	}
 
 	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
@@ -94,8 +99,11 @@ func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) 
 		return err
 	}
 
+	lockBalance := big.NewInt(0)
+	lockBalance.Sub(account.Balance, account.PendingRefund)
+
 	new := model.User{
-		LockBalance:          model.PtrOf(account.Balance.Int64() - account.PendingRefund.Int64()),
+		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
 		Signer:               []string{account.Signer[0].String(), account.Signer[1].String()},
 	}
@@ -116,7 +124,7 @@ func (c *Ctrl) SettleUserAccountFee(ctx *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.ValidateRequest(ctx, req, req.PreviousOutputFee, 0); err != nil {
+	if err := c.ValidateRequest(ctx, req, req.PreviousOutputFee, "0"); err != nil {
 		return err
 	}
 	if err := c.CreateRequest(req); err != nil {
@@ -126,19 +134,26 @@ func (c *Ctrl) SettleUserAccountFee(ctx *gin.Context) error {
 	if err != nil {
 		return err
 	}
+	unsettledFee, err := util.Add(req.PreviousOutputFee, oldAccount.UnsettledFee)
+	if err != nil {
+		return err
+	}
 	account := model.User{
 		User:             req.UserAddress,
 		LastRequestNonce: &req.Nonce,
-		UnsettledFee:     model.PtrOf(req.PreviousOutputFee + *oldAccount.UnsettledFee),
-		LastResponseFee:  model.PtrOf(int64(0)),
+		UnsettledFee:     model.PtrOf(unsettledFee.String()),
+		LastResponseFee:  model.PtrOf("0"),
 	}
 	return c.UpdateUserAccount(account.User, account)
 }
 
 func parse(account contract.Account) model.User {
+	lockBalance := big.NewInt(0)
+	lockBalance.Sub(account.Balance, account.PendingRefund)
+
 	return model.User{
 		User:                 account.User.String(),
-		LockBalance:          model.PtrOf(account.Balance.Int64() - account.PendingRefund.Int64()),
+		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
 		Signer:               []string{account.Signer[0].String(), account.Signer[1].String()},
 	}

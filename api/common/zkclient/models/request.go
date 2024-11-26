@@ -18,10 +18,10 @@ import (
 type Request struct {
 
 	// fee
-	Fee int64 `json:"fee,omitempty"`
+	Fee string `json:"fee,omitempty"`
 
 	// nonce
-	Nonce int64 `json:"nonce,omitempty"`
+	Nonce string `json:"nonce,omitempty"`
 
 	// provider address
 	ProviderAddress string `json:"providerAddress,omitempty"`

@@ -20,11 +20,12 @@ import (
 //go:generate swag fmt
 //go:generate swag init --dir ./,../../ --output ../../doc
 
-//	@title		0G Serving Provider Broker API
-//	@version	1.0
-//	@BasePath	/v1
-
-//	@in	header
+//	@title			0G Serving Provider Broker API
+//	@version		0.1.0
+//	@description	These APIs allow providers to manage services and user accounts. The host is localhost, and the port is configured in the provider's configuration file, defaulting to 3080.
+//	@host			localhost:3080
+//	@BasePath		/v1
+//	@in				header
 
 func Main() {
 	config := config.GetConfig()

@@ -32,14 +32,14 @@ To upgrade this service into a chargeable one, the provider first initiates the 
    docker compose -f ./integration/provider/docker-compose.yml up -d
    ```
 
-   The provider broker will be listening on 127.0.0.1:8080
+   The provider broker will be listening on 127.0.0.1:3080
 
 ## Basic Usage Process
 
 1. Provider Registers the Service with the Provider Broker:
 
    ```sh
-   curl -X POST http://127.0.0.1:8080>/v1/service \
+   curl -X POST http://127.0.0.1:3080>/v1/service \
    -H "Content-Type: application/json" \
    -d '{
         "URL": "https://chatbot.com",
@@ -53,11 +53,11 @@ To upgrade this service into a chargeable one, the provider first initiates the 
 2. Provider Settles the Fee:
 
    ```sh
-   curl -X POST http://127.0.0.1:8080/v1/settle
+   curl -X POST http://127.0.0.1:3080/v1/settle
    ```
 
 3. Provider Deletes the Service:
 
    ```sh
-   curl -X DELETE http://127.0.0.1:8080/v1/service/<service_name>
+   curl -X DELETE http://127.0.0.1:3080/v1/service/<service_name>
    ```

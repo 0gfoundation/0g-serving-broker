@@ -12,6 +12,7 @@ import (
 
 	constant "github.com/0glabs/0g-serving-broker/common/const"
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/extractor"
 	"github.com/0glabs/0g-serving-broker/provider/model"
 )
@@ -31,7 +32,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, req
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee, outputPrice int64, charing bool) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee, outputPrice string, charing bool) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -68,10 +69,16 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 		handleBrokerError(ctx, err, "")
 		return
 	}
+	unsettledFee, err := util.Add(fee, oldAccount.UnsettledFee)
+	if err != nil {
+		handleBrokerError(ctx, err, "add unsettled fee")
+		return
+	}
+
 	account := model.User{
 		User:             reqModel.UserAddress,
 		LastRequestNonce: &reqModel.Nonce,
-		UnsettledFee:     model.PtrOf(fee + *oldAccount.UnsettledFee),
+		UnsettledFee:     model.PtrOf(unsettledFee.String()),
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		c.handleChargingResponse(ctx, resp, extractor, account, outputPrice)
@@ -89,7 +96,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
 	ctx.Writer.Write(body)
 }
 
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice string) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		handleBrokerError(ctx, err, "read from body")
@@ -108,8 +115,13 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, ext
 		handleBrokerError(ctx, err, "extract count")
 		return
 	}
+	lastResponseFee, err := util.Multiply(outputPrice, outputCount)
+	if err != nil {
+		handleBrokerError(ctx, err, "multiply")
+		return
+	}
 
-	account.LastResponseFee = model.PtrOf(outputCount * outputPrice)
+	account.LastResponseFee = model.PtrOf(lastResponseFee.String())
 	if err = c.UpdateUserAccount(account.User, account); err != nil {
 		handleBrokerError(ctx, err, "update user account in db")
 		return
@@ -118,7 +130,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, ext
 	ctx.Writer.Write(body)
 }
 
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice string) {
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
@@ -159,8 +171,13 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 						handleBrokerError(ctx, err, "extract output count")
 						return false
 					}
+					lastResponseFee, err := util.Multiply(outputPrice, outputCount)
+					if err != nil {
+						handleBrokerError(ctx, err, "multiply")
+						return false
+					}
 
-					account.LastResponseFee = model.PtrOf(outputCount * outputPrice)
+					account.LastResponseFee = model.PtrOf(lastResponseFee.String())
 					err = c.UpdateUserAccount(account.User, account)
 					if err != nil {
 						handleBrokerError(ctx, err, "update user account in db")

@@ -11,6 +11,7 @@ import (
 
 	constant "github.com/0glabs/0g-serving-broker/common/const"
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/extractor"
 	"github.com/0glabs/0g-serving-broker/extractor/chatbot"
 	"github.com/0glabs/0g-serving-broker/extractor/zgstorage"
@@ -167,7 +168,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 			handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
-		p.ctrl.ProcessHTTPRequest(ctx, httpReq, model.Request{}, nil, 0, 0, false)
+		p.ctrl.ProcessHTTPRequest(ctx, httpReq, model.Request{}, nil, "0", "0", false)
 		return
 	}
 
@@ -186,19 +187,26 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleBrokerError(ctx, err, "get service")
 		return
 	}
+
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
 		handleBrokerError(ctx, err, "get model.request from HTTP request")
 		return
 	}
-	fee := req.InputFee + req.PreviousOutputFee
 
 	inputCount, err := extractor.GetInputCount(reqBody)
 	if err != nil {
 		handleBrokerError(ctx, err, "get input count")
 		return
 	}
-	if err := p.ctrl.ValidateRequest(ctx, req, fee, inputCount*svc.InputPrice); err != nil {
+
+	expectedInputFee, err := util.Multiply(inputCount, svc.InputPrice)
+	if err != nil {
+		handleBrokerError(ctx, err, "multiply input count and input fee")
+		return
+	}
+
+	if err := p.ctrl.ValidateRequest(ctx, req, req.Fee, expectedInputFee.String()); err != nil {
 		handleBrokerError(ctx, err, "validate request")
 		return
 	}
@@ -212,7 +220,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, fee, svc.OutputPrice, true)
+	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, req.Fee, svc.OutputPrice, true)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

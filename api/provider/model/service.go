@@ -11,8 +11,8 @@ type Service struct {
 	URL           string                `gorm:"type:varchar(255);not null" json:"url" binding:"required"`
 	ModelType     string                `gorm:"type:varchar(255);not null" json:"model" binding:"required"`
 	Verifiability string                `gorm:"type:varchar(255);not null" json:"verifiability" binding:"required"`
-	InputPrice    int64                 `gorm:"type:bigint;not null" json:"inputPrice" binding:"required"`
-	OutputPrice   int64                 `gorm:"type:bigint;not null" json:"outputPrice" binding:"required"`
+	InputPrice    string                `gorm:"type:varchar(255);not null" json:"inputPrice" binding:"required"`
+	OutputPrice   string                `gorm:"type:varchar(255);not null" json:"outputPrice" binding:"required"`
 	DeletedAt     soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
 

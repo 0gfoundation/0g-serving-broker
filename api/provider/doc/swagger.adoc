@@ -3,14 +3,17 @@
 
 [[_overview]]
 == Overview
+These APIs allow providers to manage services and user accounts. The host is localhost, and the port is configured in the provider's configuration file, defaulting to 3080.
+
 
 === Version information
 [%hardbreaks]
-__Version__ : 1.0
+__Version__ : 0.1.0
 
 
 === URI scheme
 [%hardbreaks]
+__Host__ : localhost:3080
 __BasePath__ : /v1
 
 
@@ -21,6 +24,10 @@ __BasePath__ : /v1
 
 [[_listserviceincontract]]
 === GET /contract-service
+
+==== Description
+This endpoint allows you to list all services in the contract
+
 
 ==== Responses
 
@@ -38,6 +45,10 @@ __BasePath__ : /v1
 
 [[_listrequest]]
 === GET /request
+
+==== Description
+This endpoint allows you to list requests
+
 
 ==== Parameters
 
@@ -66,6 +77,10 @@ __optional__|Processed|boolean
 [[_registerservice]]
 === POST /service
 
+==== Description
+This endpoint allows you to register service in the contract
+
+
 ==== Parameters
 
 [options="header", cols=".^2a,.^3a,.^9a,.^4a"]
@@ -93,6 +108,10 @@ __required__|body|<<_model_service,model.Service>>
 [[_listservice]]
 === GET /service
 
+==== Description
+This endpoint allows you to list all services in the database. Compared to the output from listServiceInContract, the service.url from this endpoint is the original URL of the service, which is not public.
+
+
 ==== Responses
 
 [options="header", cols=".^2a,.^14a,.^4a"]
@@ -109,6 +128,10 @@ __required__|body|<<_model_service,model.Service>>
 
 [[_getservice]]
 === GET /service/{service}
+
+==== Description
+This endpoint allows you to get service by name
+
 
 ==== Parameters
 
@@ -136,6 +159,10 @@ __required__|Service name|string
 
 [[_updateservice]]
 === PUT /service/{service}
+
+==== Description
+This endpoint allows you to update service in the contract. The name attribute cannot be updated
+
 
 ==== Parameters
 
@@ -165,6 +192,10 @@ __required__|body|<<_model_service,model.Service>>
 
 [[_deleteservice]]
 === DELETE /service/{service}
+
+==== Description
+This endpoint allows you to delete service in the contract
+
 
 ==== Parameters
 
@@ -256,6 +287,10 @@ This endpoint allows you to synchronize all services from local database to the 
 [[_listuseraccount]]
 === GET /user
 
+==== Description
+This endpoint allows you to list all users who have created accounts for your service
+
+
 ==== Responses
 
 [options="header", cols=".^2a,.^14a,.^4a"]
@@ -272,6 +307,10 @@ This endpoint allows you to synchronize all services from local database to the 
 
 [[_getuseraccount]]
 === GET /user/{user}
+
+==== Description
+This endpoint allows you to get account by user address
+
 
 ==== Parameters
 
@@ -354,13 +393,13 @@ __optional__|integer
 __optional__ +
 __read-only__|string
 |**fee** +
-__required__|integer
+__required__|string
 |**inputFee** +
-__required__|integer
+__required__|string
 |**nonce** +
-__required__|integer
+__required__|string
 |**previousOutputFee** +
-__required__|integer
+__required__|string
 |**processed** +
 __optional__|boolean
 |**serviceName** +
@@ -400,13 +439,13 @@ __optional__|<<_model_listmeta,model.ListMeta>>
 __optional__ +
 __read-only__|string
 |**inputPrice** +
-__required__|integer
+__required__|string
 |**model** +
 __required__|string
 |**name** +
 __required__|string
 |**outputPrice** +
-__required__|integer
+__required__|string
 |**type** +
 __required__|string
 |**updatedAt** +
@@ -444,15 +483,15 @@ __read-only__|string
 |**lastBalanceCheckTime** +
 __optional__|string
 |**lastRequestNonce** +
-__optional__|integer
+__optional__|string
 |**lastResponseFee** +
-__optional__|integer
+__optional__|string
 |**lockBalance** +
-__optional__|integer
+__optional__|string
 |**signer** +
 __optional__|< string > array
 |**unsettledFee** +
-__optional__|integer
+__optional__|string
 |**updatedAt** +
 __optional__ +
 __read-only__|string
