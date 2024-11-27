@@ -1,4 +1,4 @@
-# 0G Serving
+# 0G Serving Network Provider
 
 ## Prerequisites
 
@@ -14,12 +14,13 @@
       - Update `privateKeys` to the private key of your wallet for the 0G blockchain.
 
    2. Save the modified file as `./provider/config.local.yaml`.
-   3. Start the provider broker
+   3. Replace `#PORT#` in `docker-compose.yml` with the port you want to use. It should be the same as the port of `servingUrl` in `config.local.yaml`.
+   4. Start the provider broker
 
       ```sh
-      docker compose -f ./provider/docker-compose.yml up -d
+      docker compose -f ./docker-compose.yml up -d
 
-      # It costs around a few minutes to start, the broker will be listening on 127.0.0.1:3080
+      # It costs around a few minutes to start, the broker will be listening on 127.0.0.1:<PORT>
       ```
 
 2. Provider Registers the Service:
@@ -31,7 +32,7 @@
    2. Register the service using provider broker API
 
    ```sh
-   curl -X POST http://127.0.0.1:3080/v1/service \
+   curl -X POST http://127.0.0.1:<PORT>/v1/service \
    -H "Content-Type: application/json" \
    -d '{
            "URL": "<endpoint_of_the_prepared_service>",
@@ -47,7 +48,7 @@
 3. Provider Settles the Fee:
 
    ```sh
-   curl -X POST http://127.0.0.1:3080/v1/settle
+   curl -X POST http://127.0.0.1:<PORT>/v1/settle
    ```
 
    - The provider broker also incorporates an engine that automatically settles fees. This engine follows a specific rule to ensure that all users in debt are charged before their remaining balance becomes insufficient (users can request refunds, but each refund will be temporarily locked). At the same time, it manages the frequency of settlements to avoid incurring excessive gas costs.

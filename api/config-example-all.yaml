@@ -15,12 +15,12 @@ interval:
   # Buffer time for automatic settlements in seconds.
   autoSettleBufferTime: 18000
 
-  # Interval for running the force settlement processor in seconds (24 hours).
+  # Interval for running the force settlement processor in seconds.
   # Interval.ForceSettlementProcessor should larger than 60 to prevent overly frequent settlements
-  forceSettlementProcessor: 86400
+  forceSettlementProcessor: 600
 
-  # Interval for running the settlement processor in seconds (10 minutes).
-  settlementProcessor: 600
+  # Interval for running the settlement processor in seconds.
+  settlementProcessor: 300
 
 networks:
   # Network configuration for ethereumHardhat, which is mainly used for development mode.
@@ -53,7 +53,7 @@ networks:
 
   # Network configuration for 0g blockchain
   ethereum0g:
-    url: "https://rpc-testnet.0g.ai"
+    url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -63,7 +63,7 @@ networks:
 zkProver:
   # Host of zk prover broker.
   # Do not change this configuration if using docker compose to start service.
-  host: "localhost:3000"
+  host: "zk-provider-server:3000"
 
   # requestLength defines the number of requests prover broker packs into one
   # chunk as the minimum unit for settlement.

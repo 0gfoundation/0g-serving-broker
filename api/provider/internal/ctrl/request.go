@@ -104,7 +104,7 @@ func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee
 			return err
 		}
 		if cmp1 < 0 {
-			return fmt.Errorf("invalid previousOutputFee, expected %d, but received %d", *account.LastResponseFee, actual.PreviousOutputFee)
+			return fmt.Errorf("invalid previousOutputFee, expected %s, but received %s", *account.LastResponseFee, actual.PreviousOutputFee)
 		}
 	}
 	cmp2, err := util.Compare(actual.InputFee, expectedInputFee)
@@ -112,14 +112,14 @@ func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee
 		return err
 	}
 	if cmp2 < 0 {
-		return fmt.Errorf("invalid inputFee, expected %d, but received %d", expectedInputFee, actual.InputFee)
+		return fmt.Errorf("invalid inputFee, expected %s, but received %s", expectedInputFee, actual.InputFee)
 	}
 	cmp3, err := util.Compare(actual.Fee, expectedFee)
 	if err != nil {
 		return err
 	}
 	if cmp3 < 0 {
-		return fmt.Errorf("invalid fee, expected %d, but received %d. Please check the service price", expectedFee, actual.Fee)
+		return fmt.Errorf("invalid fee, expected %s, but received %s. Please check the service price", expectedFee, actual.Fee)
 	}
 	return nil
 }
