@@ -104,7 +104,7 @@ func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee
 			return err
 		}
 		if cmp1 < 0 {
-			return fmt.Errorf("invalid previousOutputFee, expected %s, but received %s", *account.LastResponseFee, actual.PreviousOutputFee)
+			return fmt.Errorf("invalid previousOutputFee, expected %s neuron, but received %s neuron. Please use 'settleFee' (https://docs.0g.ai/build-with-0g/compute-network/sdk#55-settle-fees-manually) to manually settle the fee first", *account.LastResponseFee, actual.PreviousOutputFee)
 		}
 	}
 	cmp2, err := util.Compare(actual.InputFee, expectedInputFee)
