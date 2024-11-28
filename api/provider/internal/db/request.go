@@ -29,7 +29,7 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 
 	ret = d.db.Model(model.Request{}).
 		Where("processed = ?", q.Processed).
-		Select("SUM(fee)").Scan(&totalFee)
+		Select("SUM(CAST(fee AS SIGNED))").Scan(&totalFee)
 
 	var totalFeeInt int
 	if totalFee.Valid {
