@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
+	"log"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -98,28 +98,36 @@ func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 }
 
 func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputFee string) error {
-	if account.LastResponseFee != nil {
-		cmp1, err := util.Compare(actual.PreviousOutputFee, account.LastResponseFee)
+	if err := c.compareFees("previousOutputFee", actual.PreviousOutputFee, account.LastResponseFee); err != nil {
+		return errors.Wrap(err, "Please use 'settleFee' (https://docs.0g.ai/build-with-0g/compute-network/sdk#55-settle-fees-manually) to manually settle the fee first")
+	}
+	if err := c.compareFees("inputFee", actual.InputFee, &expectedInputFee); err != nil {
+		return err
+	}
+	if err := c.compareFees("fee", actual.Fee, &expectedFee); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Ctrl) compareFees(feeType, actualFee string, expectedFee *string) error {
+	if expectedFee == nil {
+		return nil
+	}
+	cmp, err := util.Compare(actualFee, *expectedFee)
+	if err != nil {
+		return err
+	}
+	if cmp < 0 {
+		expectedFeeA0gi, err := util.NeuronToA0gi(*expectedFee)
 		if err != nil {
-			return err
+			log.Printf("Failed to convert %s to A0GI: %v", feeType, err)
 		}
-		if cmp1 < 0 {
-			return fmt.Errorf("invalid previousOutputFee, expected %s neuron, but received %s neuron. Please use 'settleFee' (https://docs.0g.ai/build-with-0g/compute-network/sdk#55-settle-fees-manually) to manually settle the fee first", *account.LastResponseFee, actual.PreviousOutputFee)
+		actualFeeA0gi, err := util.NeuronToA0gi(actualFee)
+		if err != nil {
+			log.Printf("Failed to convert actual.%s to A0GI: %v", feeType, err)
 		}
-	}
-	cmp2, err := util.Compare(actual.InputFee, expectedInputFee)
-	if err != nil {
-		return err
-	}
-	if cmp2 < 0 {
-		return fmt.Errorf("invalid inputFee, expected %s, but received %s", expectedInputFee, actual.InputFee)
-	}
-	cmp3, err := util.Compare(actual.Fee, expectedFee)
-	if err != nil {
-		return err
-	}
-	if cmp3 < 0 {
-		return fmt.Errorf("invalid fee, expected %s, but received %s. Please check the service price", expectedFee, actual.Fee)
+		return fmt.Errorf("invalid %s, expected %s A0GI, but received %s A0GI", feeType, expectedFeeA0gi, actualFeeA0gi)
 	}
 	return nil
 }
@@ -132,7 +140,7 @@ func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce *string) err
 	if cmp > 0 {
 		return nil
 	}
-	return fmt.Errorf("invalid nonce, received nonce %d not greater than the previous nonce: %d", actual.Nonce, lastRequestNonce)
+	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, *lastRequestNonce)
 }
 
 func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, fee string) error {
@@ -192,14 +200,5 @@ func updateRequestField(req *model.Request, key, value string) error {
 	default:
 		return errors.Wrapf(errors.New("unexpected Header"), "%s", key)
 	}
-	return nil
-}
-
-func parseInt64Field(field *int64, name, value string) error {
-	num, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return errors.Wrapf(err, "parse %s %s", name, value)
-	}
-	*field = num
 	return nil
 }

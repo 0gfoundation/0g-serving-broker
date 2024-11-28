@@ -1,5 +1,5 @@
 interval:
-  autoSettleBufferTime: 18000
+  autoSettleBufferTime: 60
   forceSettlementProcessor: 600
   settlementProcessor: 300
 servingUrl: http://<Public_IP_Address>:<PORT>

@@ -37,6 +37,24 @@ func SetHeaders(req *http.Request, headers map[string]string) {
 	}
 }
 
+func NeuronToA0gi(neuronStr string) (string, error) {
+	// 1 neuron = 10^-18 A0GI
+	conversionFactor := new(big.Float).SetFloat64(1e-18)
+
+	neuronInt := new(big.Int)
+	_, ok := neuronInt.SetString(neuronStr, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid input string: %s", neuronStr)
+	}
+
+	neuronFloat := new(big.Float).SetInt(neuronInt)
+
+	a0giFloat := new(big.Float).Mul(neuronFloat, conversionFactor)
+
+	// Output the result as a string
+	return a0giFloat.Text('f', -1), nil // Use 'f' for fixed-point formatting with full precision
+}
+
 func ConvertToBigInt(value interface{}) (*big.Int, error) {
 	var result big.Int
 

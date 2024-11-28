@@ -74,9 +74,9 @@ func GetConfig() *Config {
 				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 				SettlementProcessor      int `yaml:"settlementProcessor"`
 			}{
-				AutoSettleBufferTime:     18000,
-				ForceSettlementProcessor: 86400,
-				SettlementProcessor:      600,
+				AutoSettleBufferTime:     60,
+				ForceSettlementProcessor: 600,
+				SettlementProcessor:      300,
 			},
 			ZKProver: struct {
 				Provider      string `yaml:"provider"`
