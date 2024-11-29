@@ -4,55 +4,53 @@
 
 - Docker Compose: 1.27+
 
+## Download the Installation Package
+
+Please visit the [releases page](https://github.com/0glabs/0g-serving-broker/releases) to download and extract the latest version of the installation package.
+
+## Configuration Setup
+
+- Copy the `config.example.yaml` file.
+- Modify `servingUrl` to point to your publicly exposed URL.
+- Set `privateKeys` to your wallet's private key for the 0G blockchain.
+- Save the file as `config.local.yaml`.
+- Replace `#PORT#` in `docker-compose.yml` with the port you want to use. It should be the same as the port of `servingUrl` in `config.local.yaml`.
+
+## Start the Provider Broker
+
+```bash
+docker compose -f docker-compose.yml up -d
+```
+
 ## Key Commands
 
-1. Provider Starts the Provider Broker:
+1. **Register the Service**
 
-   1. Copy the file [config](./provider/config.example.yaml) and make the following modifications:
+   The compute network currently supports `chatbot` services. Additional services are in the pipeline to be released soon.
 
-      - Update `servingUrl` to the publicly exposed URL.
-      - Update `privateKeys` to the private key of your wallet for the 0G blockchain.
-
-   2. Save the modified file as `./provider/config.local.yaml`.
-   3. Replace `#PORT#` in `docker-compose.yml` with the port you want to use. It should be the same as the port of `servingUrl` in `config.local.yaml`.
-   4. Start the provider broker
-
-      ```sh
-      docker compose -f ./docker-compose.yml up -d
-
-      # It costs around a few minutes to start, the broker will be listening on 127.0.0.1:<PORT>
-      ```
-
-2. Provider Registers the Service:
-
-   The serving system now support type of services: LLM inference and 0G Storage. Service type of first one is `chatbot`, and that of the second one is `zgStorage`. In this document, we will use the example of LLM inference services to illustrate.
-
-   1. A service should be prepared, and it should expose an endpoint.
-
-   2. Register the service using provider broker API
-
-   ```sh
-   curl -X POST http://127.0.0.1:<PORT>/v1/service \
-   -H "Content-Type: application/json" \
+   ```bash
+   curl -X POST http://127.0.0.1:4002/v1/service \
    -d '{
-           "URL": "<endpoint_of_the_prepared_service>",
-           "inputPrice": 100000,
-           "outputPrice": 200000,
-           "Type": "chatbot",
-           "Name": "llama7b"
+         "url": "<endpoint_of_the_prepared_service>",
+         "inputPrice": "10000000",
+         "outputPrice": "20000000",
+         "type": "chatbot",
+         "name": "llama8Bb",
+         "model": "llama-3.1-8B-Instruct",
+         "verifiability":"TeeML"
    }'
    ```
 
-   - `inputPrice` and `outputPrice` have different meanings depending on the service type. For `chatbot`, they represent the cost per token. For `zgStorage`, they are prices per unit of network traffic. The price unit is neuron.
+   - `inputPrice` and `outputPrice` vary by service type, for `chatbot`, they represent the cost per token. The unit is in neuron. 1 A0GI = 1e18 neuron.
 
-3. Provider Settles the Fee:
+2. **Settle the Fee**
 
-   ```sh
+   ```bash
    curl -X POST http://127.0.0.1:<PORT>/v1/settle
    ```
 
-   - The provider broker also incorporates an engine that automatically settles fees. This engine follows a specific rule to ensure that all users in debt are charged before their remaining balance becomes insufficient (users can request refunds, but each refund will be temporarily locked). At the same time, it manages the frequency of settlements to avoid incurring excessive gas costs.
+   - The provider broker has an automatic settlement engine that ensures you can collect fees promptly before your customer's account balance is insufficient, while also minimizing the frequency of charges to reduce gas consumption.
 
-## Other API
+## Documentation
 
-Please refer [Provider API](./api.html) for more information.
+Please refer to the [0G Compute Network Provider](https://docs.0g.ai/build-with-0g/compute-network/provider) guide.
