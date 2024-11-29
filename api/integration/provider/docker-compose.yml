@@ -2,8 +2,6 @@ services:
   mysql:
     image: mysql:8.0
     container_name: 0g-serving-provider-broker-db
-    ports:
-      - "33061:3306"
     environment:
       MYSQL_ROOT_PASSWORD: 123456
       MYSQL_USER: provider
@@ -49,8 +47,7 @@ services:
     image: nginx:1.27.0
     container_name: nginx-server
     ports:
-      - "3080:80"
-      - "30443:443"
+      - "#PORT#:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf
     depends_on:
@@ -60,8 +57,6 @@ services:
   zk:
     image: ghcr.io/0glabs/zk:0.1.0
     container_name: zk-provider-server
-    ports:
-      - "3001:3000"
     healthcheck:
       test:
         [
