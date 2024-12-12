@@ -51,7 +51,7 @@ generate-provider-api-md:
 package: generate-provider-api
 	@mkdir -p /tmp/provider-broker && \
 	cp ./integration/README.md /tmp/provider-broker/ && \
-	rsync -av --exclude 'config.local.*' ./integration/provider/ /tmp/provider-broker && \
+	rsync -av --exclude '**.local.*' ./integration/provider/ /tmp/provider-broker && \
 	cp ./provider/doc/api/index.html /tmp/provider-broker/api.html && \
 	tar -czf /tmp/provider-broker.tar.gz -C /tmp provider-broker && \
 	rm -rf /tmp/provider-broker && \

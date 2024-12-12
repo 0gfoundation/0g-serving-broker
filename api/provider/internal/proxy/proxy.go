@@ -15,6 +15,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/extractor"
 	"github.com/0glabs/0g-serving-broker/extractor/chatbot"
 	"github.com/0glabs/0g-serving-broker/extractor/zgstorage"
+	"github.com/0glabs/0g-serving-broker/monitor"
 	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/provider/model"
 )
@@ -30,7 +31,7 @@ type Proxy struct {
 	serviceGroup      *gin.RouterGroup
 }
 
-func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string) *Proxy {
+func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
 	p := &Proxy{
 		allowOrigins:   allowOrigins,
 		ctrl:           ctrl,
@@ -46,6 +47,11 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string) *Proxy {
 		AllowHeaders: []string{"*"},
 	}))
 	p.serviceGroup.Use(p.routeFilterMiddleware)
+
+	if enableMonitor {
+		p.serviceGroup.Use(monitor.TrackMetrics())
+	}
+
 	return p
 }
 

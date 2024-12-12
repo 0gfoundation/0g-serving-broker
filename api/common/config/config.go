@@ -28,6 +28,10 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkProver"`
+	Monitor struct {
+		Enable       bool   `yaml:"enable"`
+		EventAddress string `yaml:"eventAddress"`
+	} `yaml:"monitor"`
 }
 
 var (
@@ -84,6 +88,13 @@ func GetConfig() *Config {
 			}{
 				Provider:      "zk-provider-server:3000",
 				RequestLength: 40,
+			},
+			Monitor: struct {
+				Enable       bool   `yaml:"enable"`
+				EventAddress string `yaml:"eventAddress"`
+			}{
+				Enable:       false,
+				EventAddress: "0g-serving-provider-event:3081",
 			},
 		}
 

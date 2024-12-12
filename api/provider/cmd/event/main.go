@@ -8,6 +8,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/zkclient"
+	"github.com/0glabs/0g-serving-broker/monitor"
 	providercontract "github.com/0glabs/0g-serving-broker/provider/internal/contract"
 	"github.com/0glabs/0g-serving-broker/provider/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/provider/internal/db"
@@ -16,6 +17,11 @@ import (
 
 func Main() {
 	config := config.GetConfig()
+
+	if config.Monitor.Enable {
+		monitor.InitPrometheus()
+		go monitor.StartMetricsServer(config.Monitor.EventAddress)
+	}
 
 	db, err := database.NewDB(config)
 	if err != nil {
@@ -50,7 +56,7 @@ func Main() {
 
 	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
 	ctrl := ctrl.New(db, contract, zk, "", config.Interval.AutoSettleBufferTime, nil)
-	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor, config.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}

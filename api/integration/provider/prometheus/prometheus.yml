@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus-go"
+    static_configs:
+      - targets:
+          ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
+          # node-exporter
+      - targets: ["prometheus-node-exporter:9100"]

@@ -5,8 +5,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/monitor"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/zkclient"
@@ -46,6 +48,12 @@ func Main() {
 
 	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
 	engine := gin.New()
+
+	if config.Monitor.Enable {
+		monitor.PrometheusInit()
+		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
+
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
 	ctrl := ctrl.New(db, contract, zk, config.ServingUrl, config.Interval.AutoSettleBufferTime, svcCache)
 	ctx := context.Background()
@@ -58,7 +66,7 @@ func Main() {
 	} else if err := ctrl.SyncServices(ctx); err != nil {
 		panic(err)
 	}
-	proxy := proxy.New(ctrl, engine, config.AllowOrigins)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable)
 	if err := proxy.Start(); err != nil {
 		panic(err)
 	}
