@@ -4,9 +4,11 @@ import (
 	"errors"
 )
 
+type Networks map[string]*NetworkConfig
+
 // GetNetworkConfig finds a specified network config based on its name
-func (c *Config) GetNetworkConfig(name string) (*NetworkConfig, error) {
-	if network, ok := c.Networks[name]; ok {
+func (c Networks) GetNetworkConfig(name string) (*NetworkConfig, error) {
+	if network, ok := c[name]; ok {
 		return network, nil
 	}
 	return nil, errors.New("no supported network of name " + name + " was found. Ensure that the config for it exists.")

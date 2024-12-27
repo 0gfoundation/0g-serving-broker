@@ -27,7 +27,7 @@ type RetryOption struct {
 	Interval time.Duration
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Config, network string) (*ServingContract, error) {
+func NewServingContract(servingAddress common.Address, conf *config.Networks, network string) (*ServingContract, error) {
 	var networkConfig client.BlockchainNetwork
 	var err error
 	if network == "hardhat" {

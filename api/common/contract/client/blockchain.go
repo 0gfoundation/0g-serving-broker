@@ -25,13 +25,13 @@ type BlockchainNetwork interface {
 	Config() *config.NetworkConfig
 }
 
-type BlockchainNetworkInit func(conf *config.Config) (BlockchainNetwork, error)
+type BlockchainNetworkInit func(conf *config.Networks) (BlockchainNetwork, error)
 
 type EthereumNetwork struct {
 	networkConfig *config.NetworkConfig
 }
 
-func newEthereumNetwork(conf *config.Config, networkID BlockchainNetworkID) (BlockchainNetwork, error) {
+func newEthereumNetwork(conf *config.Networks, networkID BlockchainNetworkID) (BlockchainNetwork, error) {
 	networkConf, err := conf.GetNetworkConfig(string(networkID))
 	if err != nil {
 		return nil, err
@@ -41,11 +41,11 @@ func newEthereumNetwork(conf *config.Config, networkID BlockchainNetworkID) (Blo
 	}, nil
 }
 
-func NewHardhatNetwork(conf *config.Config) (BlockchainNetwork, error) {
+func NewHardhatNetwork(conf *config.Networks) (BlockchainNetwork, error) {
 	return newEthereumNetwork(conf, EthereumHardhatID)
 }
 
-func New0gNetwork(conf *config.Config) (BlockchainNetwork, error) {
+func New0gNetwork(conf *config.Networks) (BlockchainNetwork, error) {
 	return newEthereumNetwork(conf, Ethereum0gID)
 }
 

@@ -39,23 +39,23 @@ release: oci
 	done
 
 hardhat-env:
-	docker build -f ./libs/0g-serving-contract/intergrate/Dockerfile -t hardhat-node-with-contract:dev ./libs/0g-serving-contract
+	docker build -f ./libs/0g-serving-contract/integrate/Dockerfile -t hardhat-node-with-contract:dev ./libs/0g-serving-contract
 
-generate-provider-api:
-	docker run --rm -v ./provider/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
+generate-inference-api:
+	docker run --rm -v ./inference/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
 
-generate-provider-api-md:
-	docker run --rm -v ./provider/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
-	asciidoctor-pdf ./provider/doc/swagger.adoc -o ./provider/doc/0G-Serving-Broker-API.pdf
+generate-inference-api-md:
+	docker run --rm -v ./inference/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
+	asciidoctor-pdf ./inference/doc/swagger.adoc -o ./inference/doc/0G-Serving-Inference-Broker-API.pdf
 
-package: generate-provider-api
-	@mkdir -p /tmp/provider-broker && \
-	cp ./integration/README.md /tmp/provider-broker/ && \
-	rsync -av --exclude '**.local.*' ./integration/provider/ /tmp/provider-broker && \
-	cp ./provider/doc/api/index.html /tmp/provider-broker/api.html && \
-	tar -czf /tmp/provider-broker.tar.gz -C /tmp provider-broker && \
-	rm -rf /tmp/provider-broker && \
-	echo "Package created at /tmp/provider-broker.tar.gz"
+package: generate-inference-api
+	@mkdir -p /tmp/inference-broker && \
+	cp ./inference/integration/README.md /tmp/inference-broker/ && \
+	rsync -av --exclude '**.local.*' ./inference/integration/provider/ /tmp/inference-broker && \
+	cp ./inference/doc/api/index.html /tmp/inference-broker/api.html && \
+	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
+	rm -rf /tmp/inference-broker && \
+	echo "Package created at /tmp/inference-broker.tar.gz"
 
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
