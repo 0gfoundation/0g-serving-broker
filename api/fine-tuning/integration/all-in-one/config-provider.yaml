@@ -26,3 +26,5 @@ services:
       storage: 10
       gpuType: "H200"
       gpuCount: 1
+logger:
+  level: "debug"

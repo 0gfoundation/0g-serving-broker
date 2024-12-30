@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
@@ -28,7 +28,12 @@ import (
 func Main() {
 	config := config.GetConfig()
 
-	db, err := database.NewDB(config)
+	logger, err := log.GetLogger(&config.Logger)
+	if err != nil {
+		panic(err)
+	}
+
+	db, err := database.NewDB(config, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -36,13 +41,13 @@ func Main() {
 		panic(err)
 	}
 
-	contract, err := providercontract.NewProviderContract(config)
+	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
 		panic(err)
 	}
 	defer contract.Close()
 
-	ctrl := ctrl.New(db, contract, config.Services)
+	ctrl := ctrl.New(db, contract, config.Services, logger)
 
 	ctx := context.Background()
 	err = ctrl.SyncServices(ctx)
@@ -51,7 +56,7 @@ func Main() {
 	}
 
 	engine := gin.New()
-	h := handler.New(ctrl)
+	h := handler.New(ctrl, logger)
 	h.Register(engine)
 
 	stop := make(chan os.Signal, 1)
@@ -64,9 +69,10 @@ func Main() {
 		}
 	}()
 
+	logger.Info("Server started")
 	<-stop
 
 	if err := ctrl.DeleteAllService(ctx); err != nil {
-		log.Printf("Error deleting all services: %v", err)
+		logger.Errorf("Error deleting all services: %v", err)
 	}
 }
