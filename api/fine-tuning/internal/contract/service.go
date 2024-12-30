@@ -4,36 +4,52 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
-	"github.com/0glabs/0g-serving-broker/inference/contract"
-	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 )
 
-func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model.Service, servingUrl string) error {
+func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service) error {
 	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
 	}
-	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
+	cpuCount, err := util.ConvertToBigInt(service.Quota.CpuCount)
 	if err != nil {
-		return errors.Wrap(err, "convert input price")
+		return errors.Wrap(err, "convert cpuCount")
 	}
-	outputPrice, err := util.ConvertToBigInt(service.OutputPrice)
+	memory, err := util.ConvertToBigInt(service.Quota.Memory)
 	if err != nil {
-		return errors.Wrap(err, "convert input price")
+		return errors.Wrap(err, "convert memory")
+	}
+	storage, err := util.ConvertToBigInt(service.Quota.Storage)
+	if err != nil {
+		return errors.Wrap(err, "convert storage")
+	}
+	gpuCount, err := util.ConvertToBigInt(service.Quota.GpuCount)
+	if err != nil {
+		return errors.Wrap(err, "convert gpuCount")
+	}
+	pricePerToken, err := util.ConvertToBigInt(service.PricePerToken)
+	if err != nil {
+		return errors.Wrap(err, "convert PricePerToken")
+	}
+	quota := contract.Quota{
+		CpuCount:    cpuCount,
+		NodeMemory:  memory,
+		NodeStorage: storage,
+		GpuType:     service.Quota.GpuType,
+		GpuCount:    gpuCount,
 	}
 	tx, err := c.Contract.AddOrUpdateService(
 		opts,
 		service.Name,
-		service.Type,
-		servingUrl,
-		service.ModelType,
-		service.Verifiability,
-		inputPrice,
-		outputPrice,
+		service.ServingUrl,
+		quota,
+		pricePerToken,
+		false,
 	)
 	if err != nil {
 		return err
@@ -57,14 +73,6 @@ func (c *ProviderContract) DeleteService(ctx context.Context, name string) error
 	return err
 }
 
-func (c *ProviderContract) GetService(ctx context.Context, name string) (contract.Service, error) {
-	callOpts := &bind.CallOpts{
-		Context: ctx,
-	}
-
-	return c.Contract.GetService(callOpts, common.HexToAddress(c.ProviderAddress), name)
-}
-
 func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service, error) {
 	callOpts := &bind.CallOpts{
 		Context: ctx,
@@ -85,7 +93,7 @@ func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service,
 	return ret, nil
 }
 
-func (c *ProviderContract) BatchUpdateService(ctx context.Context, news []model.Service, servingURL string) error {
+func (c *ProviderContract) SyncServices(ctx context.Context, news []config.Service) error {
 	olds, err := c.ListService(ctx)
 	if err != nil {
 		return err
@@ -95,7 +103,7 @@ func (c *ProviderContract) BatchUpdateService(ctx context.Context, news []model.
 		oldMap[old.Name] = olds[i]
 	}
 
-	var toAddOrUpdate []model.Service
+	var toAddOrUpdate []config.Service
 	var toRemove []string
 	for i, new := range news {
 		key := new.Name
@@ -111,7 +119,7 @@ func (c *ProviderContract) BatchUpdateService(ctx context.Context, news []model.
 		toRemove = append(toRemove, k)
 	}
 	for i := range toAddOrUpdate {
-		if err := c.AddOrUpdateService(ctx, toAddOrUpdate[i], servingURL); err != nil {
+		if err := c.AddOrUpdateService(ctx, toAddOrUpdate[i]); err != nil {
 			return errors.Wrap(err, "add service in contract")
 		}
 	}
@@ -123,20 +131,29 @@ func (c *ProviderContract) BatchUpdateService(ctx context.Context, news []model.
 	return nil
 }
 
-func identicalService(old contract.Service, new model.Service) bool {
-	if old.Model != new.ModelType {
+func identicalService(old contract.Service, new config.Service) bool {
+	if old.Url != new.ServingUrl {
 		return false
 	}
-	if old.Verifiability != new.Verifiability {
+	if old.PricePerToken.Int64() != new.PricePerToken {
 		return false
 	}
-	if old.InputPrice.String() != new.InputPrice {
+	if old.Occupied {
 		return false
 	}
-	if old.OutputPrice.String() != new.OutputPrice {
+	if old.Quota.CpuCount.Int64() != new.Quota.CpuCount {
 		return false
 	}
-	if old.ServiceType != new.Type {
+	if old.Quota.NodeMemory.Int64() != new.Quota.Memory {
+		return false
+	}
+	if old.Quota.GpuCount.Int64() != new.Quota.GpuCount {
+		return false
+	}
+	if old.Quota.NodeStorage.Int64() != new.Quota.Storage {
+		return false
+	}
+	if old.Quota.GpuType != new.Quota.GpuType {
 		return false
 	}
 	return true

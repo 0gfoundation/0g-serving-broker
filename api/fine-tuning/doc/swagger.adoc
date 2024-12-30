@@ -1,0 +1,518 @@
+= 0G Serving Provider Broker API
+
+
+[[_overview]]
+== Overview
+These APIs allow providers to manage services and user accounts. The host is localhost, and the port is configured in the provider's configuration file, defaulting to 3080.
+
+
+=== Version information
+[%hardbreaks]
+__Version__ : 0.1.0
+
+
+=== URI scheme
+[%hardbreaks]
+__Host__ : localhost:3080
+__BasePath__ : /v1
+
+
+
+
+[[_paths]]
+== Paths
+
+[[_listserviceincontract]]
+=== GET /contract-service
+
+==== Description
+This endpoint allows you to list all services in the contract
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_servicelist,model.ServiceList>>
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_listrequest]]
+=== GET /request
+
+==== Description
+This endpoint allows you to list requests
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Query**|**processed** +
+__optional__|Processed|boolean
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_requestlist,model.RequestList>>
+|===
+
+
+==== Tags
+
+* request
+
+
+[[_registerservice]]
+=== POST /service
+
+==== Description
+This endpoint allows you to register service in the contract
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Body**|**body** +
+__required__|body|<<_model_service,model.Service>>
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**204**|No Content - success without response body|No Content
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_listservice]]
+=== GET /service
+
+==== Description
+This endpoint allows you to list all services in the database. Compared to the output from listServiceInContract, the service.url from this endpoint is the original URL of the service, which is not public.
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_servicelist,model.ServiceList>>
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_getservice]]
+=== GET /service/{service}
+
+==== Description
+This endpoint allows you to get service by name
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Path**|**service** +
+__required__|Service name|string
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_service,model.Service>>
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_updateservice]]
+=== PUT /service/{service}
+
+==== Description
+This endpoint allows you to update service in the contract. The name attribute cannot be updated
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Path**|**service** +
+__required__|Service name|string
+|**Body**|**body** +
+__required__|body|<<_model_service,model.Service>>
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**202**|Accepted|No Content
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_deleteservice]]
+=== DELETE /service/{service}
+
+==== Description
+This endpoint allows you to delete service in the contract
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Path**|**service** +
+__required__|Service name|string
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**202**|Accepted|No Content
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_settlefees]]
+=== POST /settle
+
+==== Description
+This endpoint allows you to settle fees for requests from users
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**202**|Accepted|No Content
+|===
+
+
+==== Tags
+
+* settle
+
+
+[[_syncuseraccounts]]
+=== POST /sync-account
+
+==== Description
+This endpoint allows you to synchronize information of all accounts from the contract
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**202**|Accepted|No Content
+|===
+
+
+==== Tags
+
+* user
+
+
+[[_syncservices]]
+=== POST /sync-service
+
+==== Description
+This endpoint allows you to synchronize all services from local database to the contract
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**202**|Accepted|No Content
+|===
+
+
+==== Tags
+
+* service
+
+
+[[_listuseraccount]]
+=== GET /user
+
+==== Description
+This endpoint allows you to list all users who have created accounts for your service
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_userlist,model.UserList>>
+|===
+
+
+==== Tags
+
+* user
+
+
+[[_getuseraccount]]
+=== GET /user/{user}
+
+==== Description
+This endpoint allows you to get account by user address
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Path**|**user** +
+__required__|User address|string
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**200**|OK|<<_model_user,model.User>>
+|===
+
+
+==== Tags
+
+* user
+
+
+[[_syncuseraccount]]
+=== POST /user/{user}/sync
+
+==== Description
+This endpoint allows you to synchronize information of single account from the contract
+
+
+==== Parameters
+
+[options="header", cols=".^2a,.^3a,.^9a,.^4a"]
+|===
+|Type|Name|Description|Schema
+|**Path**|**user** +
+__required__|User address|string
+|===
+
+
+==== Responses
+
+[options="header", cols=".^2a,.^14a,.^4a"]
+|===
+|HTTP Code|Description|Schema
+|**202**|Accepted|No Content
+|===
+
+
+==== Tags
+
+* user
+
+
+
+
+[[_definitions]]
+== Definitions
+
+[[_model_listmeta]]
+=== model.ListMeta
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**total** +
+__optional__|integer
+|===
+
+
+[[_model_request]]
+=== model.Request
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**createdAt** +
+__optional__ +
+__read-only__|string
+|**fee** +
+__required__|string
+|**inputFee** +
+__required__|string
+|**nonce** +
+__required__|string
+|**previousOutputFee** +
+__required__|string
+|**processed** +
+__optional__|boolean
+|**serviceName** +
+__required__|string
+|**signature** +
+__required__|string
+|**updatedAt** +
+__optional__ +
+__read-only__|string
+|**userAddress** +
+__required__|string
+|===
+
+
+[[_model_requestlist]]
+=== model.RequestList
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**fee** +
+__optional__|integer
+|**items** +
+__optional__|< <<_model_request,model.Request>> > array
+|**metadata** +
+__optional__|<<_model_listmeta,model.ListMeta>>
+|===
+
+
+[[_model_service]]
+=== model.Service
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**createdAt** +
+__optional__ +
+__read-only__|string
+|**inputPrice** +
+__required__|string
+|**model** +
+__required__|string
+|**name** +
+__required__|string
+|**outputPrice** +
+__required__|string
+|**type** +
+__required__|string
+|**updatedAt** +
+__optional__ +
+__read-only__|string
+|**url** +
+__required__|string
+|**verifiability** +
+__required__|string
+|===
+
+
+[[_model_servicelist]]
+=== model.ServiceList
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**items** +
+__optional__|< <<_model_service,model.Service>> > array
+|**metadata** +
+__optional__|<<_model_listmeta,model.ListMeta>>
+|===
+
+
+[[_model_user]]
+=== model.User
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**createdAt** +
+__optional__ +
+__read-only__|string
+|**lastBalanceCheckTime** +
+__optional__|string
+|**lastRequestNonce** +
+__optional__|string
+|**lastResponseFee** +
+__optional__|string
+|**lockBalance** +
+__optional__|string
+|**signer** +
+__optional__|< string > array
+|**unsettledFee** +
+__optional__|string
+|**updatedAt** +
+__optional__ +
+__read-only__|string
+|**user** +
+__required__|string
+|===
+
+
+[[_model_userlist]]
+=== model.UserList
+
+[options="header", cols=".^3a,.^4a"]
+|===
+|Name|Schema
+|**items** +
+__optional__|< <<_model_user,model.User>> > array
+|**metadata** +
+__optional__|<<_model_listmeta,model.ListMeta>>
+|===
+
+
+
+
+

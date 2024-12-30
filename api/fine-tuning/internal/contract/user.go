@@ -3,9 +3,10 @@ package providercontract
 import (
 	"context"
 
-	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 )
 
 func (c *ProviderContract) GetUserAccount(ctx context.Context, user common.Address) (contract.Account, error) {

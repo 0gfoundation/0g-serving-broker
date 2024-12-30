@@ -1,0 +1,55 @@
+services:
+  hardhat-node-with-compute-network-contract:
+    image: raven20241/hardhat-compute-network-contract:dev
+    container_name: hardhat-node-with-compute-network-contract
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/local/bin/healthcheck.sh"]
+      interval: 10s
+      retries: 5
+    networks:
+      - localhost
+
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-fine-tune-broker-db
+    ports:
+      - "33060:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - localhost
+
+  # 0g-fine-tune-broker:
+  #   image: ghcr.io/0glabs/0g-fine-tune-broker:dev-amd64
+  #   container_name: 0g-fine-tune-broker
+  #   environment:
+  #     - PORT=3080
+  #     - CONFIG_FILE=/etc/config.yaml
+  #     - NETWORK=hardhat
+  #   volumes:
+  #     - ./config-provider.yaml:/etc/config.yaml
+  #   command: broker-server
+  #   networks:
+  #     - localhost
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #     hardhat-node-with-compute-network-contract:
+  #       condition: service_healthy
+
+volumes:
+  mysql-data:
+
+networks:
+  localhost:
+    name: localhost
+    external: false

@@ -48,7 +48,7 @@ generate-inference-api-md:
 	docker run --rm -v ./inference/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
 	asciidoctor-pdf ./inference/doc/swagger.adoc -o ./inference/doc/0G-Serving-Inference-Broker-API.pdf
 
-package: generate-inference-api
+package-inference: generate-inference-api
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
 	rsync -av --exclude '**.local.*' ./inference/integration/provider/ /tmp/inference-broker && \
@@ -56,6 +56,15 @@ package: generate-inference-api
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
 	echo "Package created at /tmp/inference-broker.tar.gz"
+
+package-fine-tuning:
+	@mkdir -p /tmp/fine-tuning-broker && \
+	cp ./fine-tuning/integration/README.md /tmp/fine-tuning-broker/ && \
+	rsync -av --exclude '**.local.*' ./fine-tuning/integration/provider/ /tmp/fine-tuning-broker && \
+	cp ./fine-tuning/doc/api/index.html /tmp/fine-tuning-broker/api.html && \
+	tar -czf /tmp/fine-tuning-broker.tar.gz -C /tmp fine-tuning-broker && \
+	rm -rf /tmp/fine-tuning-broker && \
+	echo "Package created at /tmp/fine-tuning-broker.tar.gz"
 
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3

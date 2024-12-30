@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/0glabs/0g-serving-broker/inference/config"
-	"github.com/0glabs/0g-serving-broker/inference/contract"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 )
