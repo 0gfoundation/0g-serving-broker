@@ -1,0 +1,78 @@
+basePath: /v1
+definitions:
+  schema.Task:
+    properties:
+      command:
+        type: string
+      createdAt:
+        readOnly: true
+        type: string
+      customerAddress:
+        type: string
+      datasetHash:
+        type: string
+      epochNumber:
+        type: integer
+      fineTunedScriptHash:
+        type: string
+      id:
+        readOnly: true
+        type: string
+      preTrainedModelHash:
+        type: string
+      progress:
+        readOnly: true
+        type: integer
+      updatedAt:
+        readOnly: true
+        type: string
+    required:
+    - command
+    - customerAddress
+    - datasetHash
+    - epochNumber
+    - fineTunedScriptHash
+    - preTrainedModelHash
+    type: object
+host: localhost:3080
+info:
+  contact: {}
+  description: These APIs allows customers to interact with the 0G Compute Fine Tune
+    Service
+  title: 0G Serving Provider Broker API
+  version: 0.2.0
+paths:
+  /task:
+    post:
+      description: This endpoint allows you to create fine tune task
+      operationId: createTask
+      parameters:
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/schema.Task'
+      responses:
+        "204":
+          description: No Content - success without response body
+      tags:
+      - task
+  /task/{id}:
+    get:
+      description: This endpoint allows you to get task by name
+      operationId: getTask
+      parameters:
+      - description: task ID
+        in: path
+        name: taskID
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/schema.Task'
+      tags:
+      - task
+swagger: "2.0"

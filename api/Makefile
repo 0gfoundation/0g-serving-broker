@@ -66,7 +66,16 @@ package-inference-router-all-in-one: generate-inference-router-api
 	cp ./inference-router/doc/api/index.html /tmp/inference-router-all-ine-one/api.html && \
 	tar -czf /tmp/inference-router-all-ine-one.tar.gz -C /tmp inference-router-all-ine-one && \
 	rm -rf /tmp/inference-router-all-ine-one && \
-	echo "Package created at /tmp/inference-router-all-ine-one.tar.gz"	
+	echo "Package created at /tmp/inference-router-all-ine-one.tar.gz"
+	
+package-fine-tuning:
+	@mkdir -p /tmp/fine-tuning-broker && \
+	cp ./fine-tuning/integration/README.md /tmp/fine-tuning-broker/ && \
+	rsync -av --exclude '**.local.*' ./fine-tuning/integration/provider/ /tmp/fine-tuning-broker && \
+	cp ./fine-tuning/doc/api/index.html /tmp/fine-tuning-broker/api.html && \
+	tar -czf /tmp/fine-tuning-broker.tar.gz -C /tmp fine-tuning-broker && \
+	rm -rf /tmp/fine-tuning-broker && \
+	echo "Package created at /tmp/fine-tuning-broker.tar.gz"
 
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3

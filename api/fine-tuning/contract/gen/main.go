@@ -25,7 +25,7 @@ func main() {
 }
 
 func extractAndGenerate() error {
-	mainFolder := "../../libs/0g-serving-contract/artifacts/contracts/inference"
+	mainFolder := "../../libs/0g-serving-contract/artifacts/contracts/fine-tune"
 	abiFolder := "abis"
 
 	folders, err := os.ReadDir(mainFolder)
