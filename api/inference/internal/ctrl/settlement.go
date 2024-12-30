@@ -7,9 +7,9 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/0glabs/0g-serving-broker/common/contract"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
 )

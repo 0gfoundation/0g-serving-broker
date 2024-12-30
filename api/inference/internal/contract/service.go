@@ -3,12 +3,13 @@ package providercontract
 import (
 	"context"
 
-	"github.com/0glabs/0g-serving-broker/common/contract"
-	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
-	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model.Service, servingUrl string) error {

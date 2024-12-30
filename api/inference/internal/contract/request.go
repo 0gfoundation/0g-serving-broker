@@ -3,8 +3,8 @@ package providercontract
 import (
 	"context"
 
-	"github.com/0glabs/0g-serving-broker/common/contract"
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
 
 func (c *ProviderContract) SettleFees(ctx context.Context, verifierInput contract.VerifierInput) error {
