@@ -17,7 +17,7 @@ func (d *DB) Migrate() error {
 		{
 			ID: "create-task",
 			Migrate: func(tx *gorm.DB) error {
-				type Service struct {
+				type Task struct {
 					ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
 					CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
@@ -30,7 +30,7 @@ func (d *DB) Migrate() error {
 					Progress            *uint                 `gorm:"type:uint;not null;default 0"`
 					DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
 				}
-				return tx.AutoMigrate(&Service{})
+				return tx.AutoMigrate(&Task{})
 			},
 		},
 	})
