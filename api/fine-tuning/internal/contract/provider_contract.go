@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -15,9 +16,10 @@ type ProviderContract struct {
 	Contract        *contract.ServingContract
 	ProviderAddress string
 	LockTime        time.Duration
+	logger          log.Logger
 }
 
-func NewProviderContract(conf *config.Config) (*ProviderContract, error) {
+func NewProviderContract(conf *config.Config, logger log.Logger) (*ProviderContract, error) {
 	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, os.Getenv("NETWORK"))
 	if err != nil {
 		return nil, err
@@ -37,6 +39,7 @@ func NewProviderContract(conf *config.Config) (*ProviderContract, error) {
 		Contract:        contract,
 		ProviderAddress: wallets.Default().Address(),
 		LockTime:        time.Duration(lockTime.Int64()) * time.Second,
+		logger:          logger,
 	}, nil
 }
 

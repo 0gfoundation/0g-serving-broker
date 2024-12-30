@@ -4,16 +4,19 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 )
 
 type Handler struct {
-	ctrl *ctrl.Ctrl
+	ctrl   *ctrl.Ctrl
+	logger log.Logger
 }
 
-func New(ctrl *ctrl.Ctrl) *Handler {
+func New(ctrl *ctrl.Ctrl, logger log.Logger) *Handler {
 	h := &Handler{
-		ctrl: ctrl,
+		ctrl:   ctrl,
+		logger: logger,
 	}
 	return h
 }

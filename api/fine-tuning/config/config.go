@@ -28,9 +28,10 @@ type Config struct {
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks   config.Networks `mapstructure:"networks" yaml:"networks"`
-	ServingUrl string          `yaml:"servingUrl"`
-	Services   []Service       `mapstructure:"services" yaml:"services"`
+	Networks   config.Networks     `mapstructure:"networks" yaml:"networks"`
+	ServingUrl string              `yaml:"servingUrl"`
+	Services   []Service           `mapstructure:"services" yaml:"services"`
+	Logger     config.LoggerConfig `yaml:"logger"`
 }
 
 var (
@@ -63,6 +64,12 @@ func GetConfig() *Config {
 				FineTune string `yaml:"fineTune"`
 			}{
 				FineTune: "root:123456@tcp(0g-fine-tune-broker-db:3306)/fineTune?parseTime=true",
+			},
+			Logger: config.LoggerConfig{
+				Format:        "text",
+				Level:         "info",
+				Path:          "",
+				RotationCount: 50,
 			},
 		}
 

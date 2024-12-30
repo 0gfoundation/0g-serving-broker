@@ -14,12 +14,15 @@ require (
 	github.com/go-openapi/swag v0.23.0
 	github.com/go-openapi/validate v0.24.0
 	github.com/google/uuid v1.6.0
+	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
+	github.com/prometheus/client_golang v1.16.0
+	github.com/rifflock/lfshook v0.0.0-20180920164130-b9218ef580f5
 	github.com/rs/zerolog v1.33.0
+	github.com/sirupsen/logrus v1.9.3
 	github.com/swaggo/swag v1.16.3
 	gopkg.in/yaml.v2 v2.4.0
-	gorm.io/datatypes v1.2.1
 	gorm.io/driver/mysql v1.5.7
 	gorm.io/gorm v1.25.10
 	gorm.io/plugin/soft_delete v1.2.1
@@ -83,6 +86,7 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
+	github.com/lestrrat-go/strftime v1.1.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -95,7 +99,6 @@ require (
 	github.com/oklog/ulid v1.3.1 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
-	github.com/prometheus/client_golang v1.16.0 // indirect
 	github.com/prometheus/client_model v0.4.0 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
