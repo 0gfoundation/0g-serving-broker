@@ -1,6 +1,6 @@
 contractAddress: 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
 database:
-  fineTune: root:123456@tcp(localhost:33060)/fineTune?parseTime=true
+  fineTune: root:123456@tcp(localhost:33061)/fineTune?parseTime=true
 networks:
   ethereumHardhat:
     url: "http://127.0.0.1:8545/"

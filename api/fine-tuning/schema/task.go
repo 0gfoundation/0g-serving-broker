@@ -17,14 +17,13 @@ type Task struct {
 	FineTunedScriptHash string                `gorm:"type:varchar(255);not null" json:"fineTunedScriptHash" binding:"required"`
 	DatasetHash         string                `gorm:"type:varchar(255);not null" json:"datasetHash" binding:"required"`
 	Command             string                `gorm:"type:varchar(255);not null" json:"command" binding:"required"`
-	EpochNumber         uint                  `gorm:"type:uint;not null;default 0" json:"epochNumber" binding:"required"`
 	Progress            *uint                 `gorm:"type:uint;not null;default 0" json:"progress" readonly:"true"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
 
 func (d *Task) Bind(ctx *gin.Context) error {
 	var r Task
-	if err := ctx.ShouldBindJSON(&r); err != nil {
+	if err := ctx.ShouldBindTOML(&r); err != nil {
 		return err
 	}
 	d.CustomerAddress = r.CustomerAddress
@@ -32,7 +31,6 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	d.FineTunedScriptHash = r.FineTunedScriptHash
 	d.DatasetHash = r.DatasetHash
 	d.Command = r.Command
-	d.EpochNumber = r.EpochNumber
 
 	return nil
 }
