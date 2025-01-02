@@ -15,7 +15,7 @@ services:
     image: mysql:8.0
     container_name: 0g-fine-tune-broker-db
     ports:
-      - "33060:3306"
+      - "33061:3306"
     environment:
       MYSQL_ROOT_PASSWORD: 123456
     volumes:

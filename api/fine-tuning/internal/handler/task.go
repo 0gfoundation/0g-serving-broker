@@ -3,9 +3,10 @@ package handler
 import (
 	"net/http"
 
-	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
 // createTask
@@ -22,6 +23,7 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 		handleBrokerError(ctx, err, "bind service")
 		return
 	}
+
 	if err := h.ctrl.CreateTask(ctx, task); err != nil {
 		handleBrokerError(ctx, err, "register service")
 		return
@@ -39,7 +41,11 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 //	@Param		taskID	path	string	true	"task ID"
 //	@Success	200	{object}	schema.Task
 func (h *Handler) GetTask(ctx *gin.Context) {
-	id, err := uuid.Parse(ctx.Param("id"))
+	id, err := uuid.Parse(ctx.Param("taskID"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
 	task, err := h.ctrl.GetTask(&id)
 	if err != nil {
 		handleBrokerError(ctx, err, "get task")
@@ -47,4 +53,21 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, task)
+}
+
+func (h *Handler) GetTaskProgress(ctx *gin.Context) {
+	id, err := uuid.Parse(ctx.Param("taskID"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
+	filePath, err := h.ctrl.GetProgress(&id)
+	if err != nil {
+		handleBrokerError(ctx, err, "get task")
+		return
+	}
+
+	ctx.FileAttachment(filePath, "progress.log")
+
+	ctx.Status(http.StatusOK)
 }
