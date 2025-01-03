@@ -53,7 +53,7 @@ networks:
 
   # Network configuration for 0g blockchain
   ethereum0g:
-    url: "https://0g-json-rpc-public.originstake.com"
+    url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

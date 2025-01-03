@@ -6,7 +6,7 @@ interval:
   refundProcessor: 1
 networks:
   ethereum0g:
-    url: "https://0g-json-rpc-public.originstake.com"
+    url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
