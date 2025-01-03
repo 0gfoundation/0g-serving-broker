@@ -1,0 +1,239 @@
+consumes:
+  - application/json
+produces:
+  - application/json
+swagger: "2.0"
+info:
+  title: ZKSettlement
+  version: 1.0.0
+paths:
+  /sign-keypair:
+    get:
+      operationId: generateKeyPair
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              privkey:
+                $ref: "#/definitions/privateKey"
+              pubkey:
+                $ref: "#/definitions/publicKey"
+        default:
+          $ref: "#/responses/Error"
+  /signature:
+    post:
+      operationId: generateSignature
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              privkey:
+                $ref: "#/definitions/privateKey"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              signatures:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: integer
+        default:
+          $ref: "#/responses/Error"
+  /check-sign:
+    post:
+      operationId: checkSignature
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              pubkey:
+                $ref: "#/definitions/publicKey"
+              signatures:
+                $ref: "#/definitions/signatures"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: array
+            items:
+              type: boolean
+        default:
+          $ref: "#/responses/Error"
+  /proof-input:
+    post:
+      operationId: generateProofInput
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              l:
+                type: integer
+              pubkey:
+                $ref: "#/definitions/publicKey"
+              signatures:
+                $ref: "#/definitions/signatures"
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: "#/definitions/additionalProperties"
+        default:
+          $ref: "#/responses/Error"
+  /solidity-calldata:
+    post:
+      operationId: generateSolidityCalldata
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/additionalProperties"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              pA:
+                type: array
+                items:
+                  type: string
+              pB:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: string
+              pC:
+                type: array
+                items:
+                  type: string
+              pubInputs:
+                type: array
+                items:
+                  type: string
+        default:
+          $ref: "#/responses/Error"
+  /solidity-calldata-combined:
+    post:
+      operationId: generateSolidityCalldataCombined
+      parameters:
+        - name: backend
+          in: query
+          type: string
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/definitions/request"
+              l:
+                type: integer
+              pubkey:
+                $ref: "#/definitions/publicKey"
+              signatures:
+                $ref: "#/definitions/signatures"
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              pA:
+                type: array
+                items:
+                  type: string
+              pB:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: string
+              pC:
+                type: array
+                items:
+                  type: string
+              pubInputs:
+                type: array
+                items:
+                  type: string
+        default:
+          $ref: "#/responses/Error"
+definitions:
+  additionalProperties:
+    type: object
+    additionalProperties:
+      type: object
+  privateKey:
+    type: array
+    items:
+      type: string
+  publicKey:
+    type: array
+    items:
+      type: string
+  signatures:
+    type: array
+    items:
+      type: array
+      items:
+        type: integer
+  request:
+    type: object
+    properties:
+      nonce:
+        type: string
+      fee:
+        type: string
+      userAddress:
+        type: string
+      providerAddress:
+        type: string
+  ErrorResponse:
+    type: object
+    properties:
+      status:
+        type: string
+      message:
+        type: string
+      stack:
+        type: string
+    required:
+      - status
+      - message
+responses:
+  Error:
+    description: Error
+    schema:
+      $ref: "#/definitions/ErrorResponse"

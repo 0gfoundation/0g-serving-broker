@@ -8,14 +8,18 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/rand"
 
+	routerEvent "github.com/0glabs/0g-serving-broker/inference-router/cmd/event"
+	routerServer "github.com/0glabs/0g-serving-broker/inference-router/cmd/server"
 	providerEvent "github.com/0glabs/0g-serving-broker/inference/cmd/event"
 	providerServer "github.com/0glabs/0g-serving-broker/inference/cmd/server"
 )
 
 func main() {
 	applets := map[string]func(){
-		"0g-inference-server": providerServer.Main,
-		"0g-inference-event":  providerEvent.Main,
+		"0g-inference-server":        providerServer.Main,
+		"0g-inference-event":         providerEvent.Main,
+		"0g-inference-router-server": routerServer.Main,
+		"0g-inference-router-event":  routerEvent.Main,
 	}
 
 	names := []string{}

@@ -1,0 +1,352 @@
+basePath: /v1
+definitions:
+  model.ListMeta:
+    properties:
+      total:
+        type: integer
+    type: object
+  model.Provider:
+    properties:
+      balance:
+        type: integer
+      lastResponseFee:
+        type: integer
+      nonce:
+        type: integer
+      pendingRefund:
+        type: integer
+      provider:
+        type: string
+      refunds:
+        items:
+          $ref: '#/definitions/model.Refund'
+        type: array
+      signer:
+        items:
+          type: string
+        type: array
+    type: object
+  model.ProviderList:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/model.Provider'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
+  model.Refund:
+    properties:
+      amount:
+        type: integer
+      createdAt:
+        readOnly: true
+        type: string
+      index:
+        readOnly: true
+        type: integer
+      processed:
+        type: boolean
+      provider:
+        type: string
+    type: object
+  model.RefundList:
+    properties:
+      fee:
+        type: integer
+      items:
+        items:
+          $ref: '#/definitions/model.Refund'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
+  model.Request:
+    properties:
+      fee:
+        type: integer
+      inputFee:
+        type: integer
+      nonce:
+        type: integer
+      previousOutputFee:
+        type: integer
+      providerAddress:
+        type: string
+      serviceName:
+        type: string
+      signature:
+        type: string
+    required:
+    - fee
+    - inputFee
+    - nonce
+    - previousOutputFee
+    - providerAddress
+    - serviceName
+    - signature
+    type: object
+  model.RequestList:
+    properties:
+      fee:
+        type: integer
+      items:
+        items:
+          $ref: '#/definitions/model.Request'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
+  model.Service:
+    properties:
+      inputPrice:
+        type: integer
+      model:
+        type: string
+      name:
+        type: string
+      outputPrice:
+        type: integer
+      provider:
+        type: string
+      type:
+        type: string
+      updatedAt:
+        readOnly: true
+        type: string
+      url:
+        type: string
+    type: object
+  model.ServiceList:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/model.Service'
+        type: array
+      metadata:
+        $ref: '#/definitions/model.ListMeta'
+    type: object
+info:
+  contact: {}
+  title: 0G Serving User Broker API
+  version: "1.0"
+paths:
+  /provider:
+    get:
+      operationId: listProviderAccount
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.ProviderList'
+      tags:
+      - provider
+    post:
+      operationId: addProviderAccount
+      parameters:
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/model.Provider'
+      responses:
+        "204":
+          description: No Content - success without response body
+      tags:
+      - provider
+  /provider/{provider}:
+    get:
+      operationId: getProviderAccount
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.Provider'
+      tags:
+      - provider
+  /provider/{provider}/charge:
+    post:
+      description: This endpoint allows you to add fund to an account
+      operationId: charge
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/model.Provider'
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - provider
+  /provider/{provider}/refund:
+    post:
+      description: This endpoint allows you to refund from an account
+      operationId: refund
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      - description: body
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/model.Refund'
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - refund
+  /provider/{provider}/service/{service}:
+    get:
+      operationId: getService
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      - description: Service name
+        in: path
+        name: service
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.Service'
+      tags:
+      - service
+    post:
+      description: This endpoint allows you to retrieve data based on provider and
+        service. This endpoint acts as a proxy to retrieve data from various external
+        services. The response type can vary depending on the service being accessed
+      operationId: getData
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      - description: Service name
+        in: path
+        name: service
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Binary stream response
+          schema:
+            type: string
+      tags:
+      - data
+  /provider/{provider}/service/{service}/{suffix}:
+    post:
+      description: This endpoint acts as a proxy to retrieve data from various external
+        services based on the provided `provider` and `service` parameters. The response
+        type can vary depending on the external service being accessed. An optional
+        `suffix` parameter can be appended to further specify the request for external
+        services
+      operationId: getDataWithSuffix
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      - description: Service name
+        in: path
+        name: service
+        required: true
+        type: string
+      - description: Suffix
+        in: path
+        name: suffix
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Binary stream response
+          schema:
+            type: string
+      tags:
+      - data
+  /provider/{provider}/sync:
+    post:
+      description: This endpoint allows you to synchronize information of single account
+        from the contract
+      operationId: syncProviderAccount
+      parameters:
+      - description: Provider address
+        in: path
+        name: provider
+        required: true
+        type: string
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - provider
+  /refund:
+    get:
+      operationId: listRefund
+      parameters:
+      - description: Processed
+        in: query
+        name: processed
+        type: boolean
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.RefundList'
+      tags:
+      - refund
+  /request:
+    get:
+      operationId: listRequest
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.RequestList'
+      tags:
+      - request
+  /service:
+    get:
+      operationId: listService
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/model.ServiceList'
+      tags:
+      - service
+  /sync:
+    post:
+      description: This endpoint allows you to synchronize information of all accounts
+        from the contract
+      operationId: syncProviderAccounts
+      responses:
+        "202":
+          description: Accepted
+      tags:
+      - provider
+swagger: "2.0"

@@ -1,0 +1,173 @@
+services:
+  hardhat-node-with-contract:
+    image: hardhat-node-with-contract:dev
+    container_name: hardhat-node-with-contract
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/local/bin/healthcheck.sh"]
+      interval: 10s
+      retries: 5
+    networks:
+      - localhost
+
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-serving-broker-db
+    ports:
+      - "33060:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - localhost
+
+  0g-serving-provider-broker:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-serving-provider-broker
+    ports:
+      - "3080:3080"
+    environment:
+      - PORT=3080
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config-provider.yaml:/etc/config.yaml
+    command: 0g-inference-server
+    networks:
+      - localhost
+    depends_on:
+      mysql:
+        condition: service_healthy
+      hardhat-node-with-contract:
+        condition: service_healthy
+      zk:
+        condition: service_healthy
+
+  0g-serving-provider-event:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-serving-provider-event
+    environment:
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config-provider.yaml:/etc/config.yaml
+    command: 0g-inference-event
+    networks:
+      - localhost
+    depends_on:
+      0g-serving-provider-broker:
+        condition: service_started
+
+  zk:
+    image: ghcr.io/0glabs/zk:0.1.0
+    container_name: zk-server
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        ["CMD", "curl", "-f", "-X", "GET", "http://zk-server:3000/sign-keypair"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - localhost
+
+  prometheus:
+    image: prom/prometheus:v2.45.2
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - localhost
+
+  grafana:
+    image: grafana/grafana-oss:11.4.0
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - localhost
+    depends_on:
+      - prometheus
+
+  # source https://github.com/prometheus/node_exporter
+  # https://github.com/vegasbrianc/prometheus/
+  prometheus-node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: prometheus-node-exporter
+    restart: always
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    networks:
+      - localhost
+    privileged: true
+    depends_on:
+      - prometheus
+    expose:
+      - 9100
+
+  0g-serving-router:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-serving-router
+    environment:
+      - PORT=1034
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config-router.yaml:/etc/config.yaml
+    command: 0g-inference-router-server
+    networks:
+      - localhost
+    depends_on:
+      mysql:
+        condition: service_healthy
+      hardhat-node-with-contract:
+        condition: service_healthy
+      zk:
+        condition: service_healthy
+
+  nginx-router:
+    image: nginx:1.27.0
+    container_name: nginx-router-server
+    ports:
+      - "3082:80"
+      - "30445:443"
+    volumes:
+      - ./nginx-router.conf:/etc/nginx/nginx.conf
+      - ./certificate.pem:/etc/nginx/certificate.pem
+      - ./privatekey.pem:/etc/nginx/privatekey.pem
+    networks:
+      - localhost
+    depends_on:
+      0g-serving-router:
+        condition: service_started
+
+volumes:
+  mysql-data:
+
+networks:
+  localhost:
+    name: localhost
+    external: false

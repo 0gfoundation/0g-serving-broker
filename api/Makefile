@@ -48,6 +48,9 @@ generate-inference-api-md:
 	docker run --rm -v ./inference/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
 	asciidoctor-pdf ./inference/doc/swagger.adoc -o ./inference/doc/0G-Serving-Inference-Broker-API.pdf
 
+generate-inference-router-api:
+	docker run --rm -v ./inference-router/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
+
 package: generate-inference-api
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \

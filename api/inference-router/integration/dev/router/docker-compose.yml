@@ -1,0 +1,83 @@
+services:
+  mysql-router:
+    image: mysql:8.0
+    container_name: 0g-serving-router-db
+    ports:
+      - "33061:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+    volumes:
+      - mysql-data-router:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - router-network
+
+  0g-serving-router:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-serving-router
+    environment:
+      - PORT=1034
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config-router.yaml:/etc/config.yaml
+    command: 0g-inference-router-server
+    networks:
+      - router-network
+    depends_on:
+      mysql-router:
+        condition: service_healthy
+      # hardhat-node-with-contract:
+      #   condition: service_healthy
+      zk-router:
+        condition: service_healthy
+
+  nginx-router:
+    image: nginx:1.27.0
+    container_name: nginx-router-server
+    ports:
+      - "3082:80"
+      - "30445:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./certificate.pem:/etc/nginx/certificate.pem
+      - ./privatekey.pem:/etc/nginx/privatekey.pem
+    networks:
+      - router-network
+    depends_on:
+      0g-serving-router:
+        condition: service_started
+
+  zk-router:
+    image: ghcr.io/0glabs/zk:0.1.0
+    container_name: zk-server-router
+    ports:
+      - "3002:3000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "-X",
+          "GET",
+          "http://zk-server-router:3000/sign-keypair",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - router-network
+
+volumes:
+  mysql-data-router:
+
+networks:
+  router-network:
+    name: router-network
+    external: false
