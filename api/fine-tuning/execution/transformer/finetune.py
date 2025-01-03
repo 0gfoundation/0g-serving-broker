@@ -1,5 +1,5 @@
 import argparse
-import toml
+import json
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, AutoConfig, TrainerCallback
 from datasets import load_dataset
 
@@ -15,10 +15,10 @@ class ProgressCallback(TrainerCallback):
 
 
 def load_config(config_path):
-    """Loads configuration from a TOML file."""
+    """Loads configuration from a JSON file."""
     try:
         with open(config_path, "r") as f:
-            return toml.load(f)
+            return json.load(f)
     except Exception as e:
         print(f"Error reading config file: {e}")
         exit(1)
@@ -29,12 +29,12 @@ def main():
     parser.add_argument("--data_path", type=str, required=True, help="Name of the dataset (Hugging Face hub).")
     parser.add_argument("--model_path", type=str, required=True, help="Name of the pre-trained model.")
     parser.add_argument("--tokenizer_path", type=str, required=True, help="Name of the tokenizer.")
-    parser.add_argument("--config_path", type=str, default="config.toml", help="Path to the config.toml file.")
+    parser.add_argument("--config_path", type=str, default="config.json", help="Path to the config.json file.")
     parser.add_argument("--output_dir", type=str, default="./model_output", help="Directory to save the fine-tuned model.")
 
     args = parser.parse_args()
 
-    # Load configuration from TOML file
+    # Load configuration from JSON file
     config = load_config(args.config_path)
 
     # Load dataset
