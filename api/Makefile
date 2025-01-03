@@ -51,7 +51,7 @@ generate-inference-api-md:
 generate-inference-router-api:
 	docker run --rm -v ./inference-router/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
 
-package: generate-inference-api
+package-inference: generate-inference-api
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
 	rsync -av --exclude '**.local.*' ./inference/integration/provider/ /tmp/inference-broker && \
@@ -59,6 +59,14 @@ package: generate-inference-api
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
 	echo "Package created at /tmp/inference-broker.tar.gz"
+
+package-inference-router-all-in-one: generate-inference-router-api
+	@mkdir -p /tmp/inference-router-all-ine-one && \
+	rsync -av --exclude '**.local.*' --exclude '*.key' --exclude '*.pem'  ./inference-router/integration/prod/all-in-one/ /tmp/inference-router-all-ine-one && \
+	cp ./inference-router/doc/api/index.html /tmp/inference-router-all-ine-one/api.html && \
+	tar -czf /tmp/inference-router-all-ine-one.tar.gz -C /tmp inference-router-all-ine-one && \
+	rm -rf /tmp/inference-router-all-ine-one && \
+	echo "Package created at /tmp/inference-router-all-ine-one.tar.gz"	
 
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3

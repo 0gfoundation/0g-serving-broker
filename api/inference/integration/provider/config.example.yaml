@@ -5,7 +5,7 @@ interval:
 servingUrl: http://<Public_IP_Address>:<PORT>
 networks:
   ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
+    url: "https://0g-json-rpc-public.originstake.com"
     chainID: 16600
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
