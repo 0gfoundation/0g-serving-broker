@@ -7,7 +7,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-storage-client/common"
 	"github.com/0glabs/0g-storage-client/indexer"
-	"github.com/sirupsen/logrus"
 )
 
 type Ctrl struct {
@@ -30,7 +29,7 @@ func New(config *config.Config, contract *providercontract.ProviderContract, ser
 
 	indexerStandardClient, err := indexer.NewClient(config.IndexerStandardUrl, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
-		LogOption:      common.LogOption{Logger: logrus.StandardLogger()},
+		LogOption:      common.LogOption{Logger: logger.InnerLogger()},
 	})
 	if err != nil {
 		return nil
@@ -38,7 +37,7 @@ func New(config *config.Config, contract *providercontract.ProviderContract, ser
 
 	indexerTurboClient, err := indexer.NewClient(config.IndexerTurboUrl, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
-		LogOption:      common.LogOption{Logger: logrus.StandardLogger()},
+		LogOption:      common.LogOption{Logger: logger.InnerLogger()},
 	})
 	if err != nil {
 		return nil

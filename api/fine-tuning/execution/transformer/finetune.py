@@ -5,13 +5,36 @@ from datasets import load_dataset
 
 
 class ProgressCallback(TrainerCallback):
+    def __init__(self, log_file_path="/app/logs/progress.log"):
+        self.log_file_path = log_file_path
+        self.log_file = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        # Open the log file at the start of training
+        try:
+            self.log_file = open(self.log_file_path, "a")
+        except Exception as e:
+            print(f"Error opening log file: {e}")
+            exit(1)
+
     def on_log(self, args, state, control, logs=None, **kwargs):
         logs = logs or {}
-        # Print progress information
         if state.is_local_process_zero:  # Only log for the main process in distributed training
-            print(f"Step: {state.global_step}, Logs: {logs}")
-            # Example: Call an API here (replace `print` with your API logic)
-            # requests.post("http://your-api-endpoint", json={"step": state.global_step, "logs": logs})
+            log_message = f"Step: {state.global_step}, Logs: {logs}\n"
+            try:
+                self.log_file.write(log_message)
+                self.log_file.flush()  # Ensure the log is written immediately
+            except Exception as e:
+                print(f"Error writing to log file: {e}")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        # Close the log file at the end of training
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except Exception as e:
+                print(f"Error closing log file: {e}")
+
 
 
 def load_config(config_path):

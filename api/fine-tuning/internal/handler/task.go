@@ -45,3 +45,16 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 
 	ctx.JSON(http.StatusOK, task)
 }
+
+func (h *Handler) GetTaskProgress(ctx *gin.Context) {
+	id, err := uuid.Parse(ctx.Param("id"))
+	filePath, err := h.ctrl.GetProgress(&id)
+	if err != nil {
+		handleBrokerError(ctx, err, "get task")
+		return
+	}
+
+	ctx.FileAttachment(filePath, "progress.log")
+
+	ctx.Status(http.StatusOK)
+}

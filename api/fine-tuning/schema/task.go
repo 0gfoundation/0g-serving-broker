@@ -18,13 +18,13 @@ type Task struct {
 	DatasetHash         string                `gorm:"type:varchar(255);not null" json:"datasetHash" binding:"required"`
 	TrainingParams      string                `gorm:"type:json;not null" json:"trainingParams" binding:"required"`
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
-	Progress            *uint                 `gorm:"type:uint;not null;default 0" json:"progress" readonly:"true"`
+	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
 
 func (d *Task) Bind(ctx *gin.Context) error {
 	var r Task
-	if err := ctx.ShouldBindTOML(&r); err != nil {
+	if err := ctx.ShouldBindJSON(&r); err != nil {
 		return err
 	}
 	d.CustomerAddress = r.CustomerAddress
@@ -42,9 +42,6 @@ func (d *Task) BindWithReadonly(ctx *gin.Context, old Task) error {
 	}
 	if d.ID == nil {
 		d.ID = old.ID
-	}
-	if d.Progress == nil {
-		d.Progress = old.Progress
 	}
 
 	return nil

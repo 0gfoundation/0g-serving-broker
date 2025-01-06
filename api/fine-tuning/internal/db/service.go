@@ -9,7 +9,10 @@ func (d *DB) AddTasks(services []schema.Task) error {
 	if len(services) == 0 {
 		return nil
 	}
+
+	// Insert the records
 	ret := d.db.Create(&services)
+
 	return ret.Error
 }
 
