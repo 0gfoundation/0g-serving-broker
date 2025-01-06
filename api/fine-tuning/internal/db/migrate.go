@@ -15,7 +15,7 @@ type Task struct {
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 	CustomerAddress     string                `gorm:"type:varchar(255);not null"`
-	TokenizerHash	    string                `gorm:"type:varchar(255);not null"`
+	TokenizerHash       string                `gorm:"type:varchar(255);not null"`
 	PreTrainedModelHash string                `gorm:"type:varchar(255);not null"`
 	DatasetHash         string                `gorm:"type:varchar(255);not null"`
 	TrainingParams      string                `gorm:"type:json;not null"`

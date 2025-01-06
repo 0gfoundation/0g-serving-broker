@@ -4,10 +4,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
-	"github.com/0glabs/0g-storage-client/common"
-	"github.com/0glabs/0g-storage-client/indexer"
 	"github.com/gin-gonic/gin"
-	"github.com/sirupsen/logrus"
 )
 
 type Handler struct {

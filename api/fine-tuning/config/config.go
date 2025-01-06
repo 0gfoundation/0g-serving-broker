@@ -23,19 +23,18 @@ type Service struct {
 	} `yaml:"quota"`
 	PricePerToken int64 `yaml:"pricePerToken"`
 }
-	
 
 type Config struct {
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks   config.Networks      `mapstructure:"networks" yaml:"networks"`
-	IndexerStandardUrl string       `yaml:"indexerStandardUrl"`
-	IndexerTurboUrl    string       `yaml:"indexerTurboUrl"`
-	ServingUrl string               `yaml:"servingUrl"`
-	Services   []Service            `mapstructure:"services" yaml:"services"`
-	ProviderOption providers.Option `mapstructure:"providerOption" yaml:"providerOption"`
+	Networks           config.Networks       `mapstructure:"networks" yaml:"networks"`
+	IndexerStandardUrl string        `yaml:"indexerStandardUrl"`
+	IndexerTurboUrl    string        `yaml:"indexerTurboUrl"`
+	ServingUrl         string                `yaml:"servingUrl"`
+	Services           []Service             `mapstructure:"services" yaml:"services"`
+	ProviderOption     providers.Option `mapstructure:"providerOption" yaml:"providerOption"`
 	Logger     config.LoggerConfig  `yaml:"logger"`
 }
 
