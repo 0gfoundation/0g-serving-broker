@@ -10,32 +10,12 @@ import (
 type Handler struct {
 	ctrl   *ctrl.Ctrl
 	logger log.Logger
-	indexerStandardClient *indexer.Client
-	indexerTurboClient *indexer.Client
 }
 
-func New(ctrl *ctrl.Ctrl, config *config.Config, logger log.Logger) *Handler {
-	indexerStandardClient, err := indexer.NewClient(config.IndexerStandardUrl, indexer.IndexerClientOption{
-		ProviderOption: config.ProviderOption,
-		LogOption:      common.LogOption{Logger: logrus.StandardLogger()},
-	})
-	if err != nil {
-		return nil
-	}
-
-	indexerTurboClient, err := indexer.NewClient(config.IndexerTurboUrl, indexer.IndexerClientOption{
-		ProviderOption: config.ProviderOption,
-		LogOption:      common.LogOption{Logger: logrus.StandardLogger()},
-	})
-	if err != nil {
-		return nil
-	}
-
+func New(ctrl *ctrl.Ctrl, logger log.Logger) *Handler {
 	h := &Handler{
 		ctrl:   ctrl,
 		logger: logger,
-		indexerStandardClient: indexerStandardClient,
-		indexerTurboClient: indexerTurboClient,
 	}
 	return h
 }

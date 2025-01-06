@@ -33,14 +33,6 @@ func Main() {
 		panic(err)
 	}
 
-	db, err := database.NewDB(config, logger)
-	if err != nil {
-		panic(err)
-	}
-	if err := db.Migrate(); err != nil {
-		panic(err)
-	}
-
 	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
 		panic(err)

@@ -29,13 +29,13 @@ type Config struct {
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks           config.Networks       `mapstructure:"networks" yaml:"networks"`
-	IndexerStandardUrl string        `yaml:"indexerStandardUrl"`
-	IndexerTurboUrl    string        `yaml:"indexerTurboUrl"`
-	ServingUrl         string                `yaml:"servingUrl"`
-	Services           []Service             `mapstructure:"services" yaml:"services"`
-	ProviderOption     providers.Option `mapstructure:"providerOption" yaml:"providerOption"`
-	Logger     config.LoggerConfig  `yaml:"logger"`
+	Networks           config.Networks     `mapstructure:"networks" yaml:"networks"`
+	IndexerStandardUrl string              `yaml:"indexerStandardUrl"`
+	IndexerTurboUrl    string              `yaml:"indexerTurboUrl"`
+	ServingUrl         string              `yaml:"servingUrl"`
+	Services           []Service           `mapstructure:"services" yaml:"services"`
+	ProviderOption     providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
+	Logger             config.LoggerConfig `yaml:"logger"`
 }
 
 var (

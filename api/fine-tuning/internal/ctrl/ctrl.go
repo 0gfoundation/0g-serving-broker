@@ -16,11 +16,11 @@ type Ctrl struct {
 	indexerStandardClient *indexer.Client
 	indexerTurboClient    *indexer.Client
 	services              []config.Service
-	logger   log.Logger
+	logger                log.Logger
 }
 
 func New(config *config.Config, contract *providercontract.ProviderContract, services []config.Service, logger log.Logger) *Ctrl {
-	db, err := db.NewDB(config)
+	db, err := db.NewDB(config, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -50,7 +50,7 @@ func New(config *config.Config, contract *providercontract.ProviderContract, ser
 		indexerStandardClient: indexerStandardClient,
 		indexerTurboClient:    indexerTurboClient,
 		services:              services,
-		logger:   logger,
+		logger:                logger,
 	}
 
 	return p
