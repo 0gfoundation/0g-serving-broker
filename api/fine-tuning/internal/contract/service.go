@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -129,6 +130,24 @@ func (c *ProviderContract) SyncServices(ctx context.Context, news []config.Servi
 		}
 	}
 	return nil
+}
+
+func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, index uint64, modelRootHash []byte) error {
+	opt, err := c.Contract.CreateTransactOpts()
+	if err != nil {
+		return err
+	}
+
+	idx, err := util.ConvertToBigInt(index)
+	if err != nil {
+		return errors.Wrap(err, "index")
+	}
+	tx, err := c.Contract.AddDeliverable(opt, user, idx, modelRootHash)
+	if err != nil {
+		return err
+	}
+	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	return err
 }
 
 func identicalService(old contract.Service, new config.Service) bool {
