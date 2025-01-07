@@ -11,14 +11,14 @@ import (
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) error {
-	// TODO: Implement the business logic of CreateTask
+
 	err := c.db.AddTasks([]schema.Task{task})
 	if err != nil {
 		return errors.Wrap(err, "create task in db")
 	}
 
 	go c.Execute(ctx, task)
-	return errors.Wrap(err, "execute task in container")
+	return nil
 }
 
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
@@ -31,10 +31,9 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 }
 
 func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
-	// TODO: Implement the business logic of GetProgress
 	task, err := c.db.GetTask(id)
 	if err != nil {
-		return "", errors.Wrap(err, "get service from db")
+		return "", err
 	}
 	baseDir := os.TempDir()
 	return fmt.Sprintf("%s/%s/%s/progress.log", baseDir, task.ID, LogPath), nil

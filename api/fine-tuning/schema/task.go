@@ -13,10 +13,10 @@ type Task struct {
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 	CustomerAddress     string                `gorm:"type:varchar(255);not null" json:"customerAddress" binding:"required"`
-	TokenizerHash       string                `gorm:"type:varchar(255);not null" json:"tokenizerHash" binding:"required"`
-	PreTrainedModelHash string                `gorm:"type:varchar(255);not null" json:"preTrainedModelHash" binding:"required"`
-	DatasetHash         string                `gorm:"type:varchar(255);not null" json:"datasetHash" binding:"required"`
-	TrainingParams      string                `gorm:"type:json;not null" json:"trainingParams" binding:"required"`
+	PreTrainedModelHash string                `gorm:"type:text;not null" json:"preTrainedModelHash" binding:"required"`
+	DatasetHash         string                `gorm:"type:text;not null" json:"datasetHash" binding:"required"`
+	TrainingParams      string                `gorm:"type:text;not null" json:"trainingParams" binding:"required"`
+	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash"`
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
@@ -27,10 +27,10 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	if err := ctx.ShouldBindJSON(&r); err != nil {
 		return err
 	}
+
 	d.CustomerAddress = r.CustomerAddress
 	d.PreTrainedModelHash = r.PreTrainedModelHash
 	d.DatasetHash = r.DatasetHash
-	d.TokenizerHash = r.TokenizerHash
 	d.TrainingParams = r.TrainingParams
 	d.IsTurbo = r.IsTurbo
 	return nil

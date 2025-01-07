@@ -19,7 +19,7 @@ interval:
   # Buffer time for automatic settlements in seconds.
   autoSettleBufferTime: 60
 
-  # Interval for running the force settlement processor in second s.
+  # Interval for running the force settlement processor in seconds.
   # Interval.ForceSettlementProcessor should larger than 60 to prevent overly frequent settlements
   forceSettlementProcessor: 600
 

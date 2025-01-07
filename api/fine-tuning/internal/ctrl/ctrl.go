@@ -1,33 +1,56 @@
 package ctrl
 
 import (
+	"github.com/0glabs/0g-serving-broker/common/chain"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-storage-client/common"
+	"github.com/0glabs/0g-storage-client/common/blockchain"
+	"github.com/openweb3/web3go"
+
 	"github.com/0glabs/0g-storage-client/indexer"
 )
 
 type Ctrl struct {
 	db                    *db.DB
 	contract              *providercontract.ProviderContract
+	w3Client              *web3go.Client
+	storageUploadUrgs     *config.UploadArgs
 	indexerStandardClient *indexer.Client
 	indexerTurboClient    *indexer.Client
 	services              []config.Service
 	logger                log.Logger
 }
 
-func New(config *config.Config, contract *providercontract.ProviderContract, services []config.Service, logger log.Logger) *Ctrl {
-	db, err := db.NewDB(config, logger)
+func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {
+
+
+
+	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
 		panic(err)
 	}
-	if err := db.Migrate(); err != nil {
+	defer contract.Close()
+
+	zgConfig, err := chain.New0gNetwork(&config.Networks)
+	if err != nil {
 		panic(err)
 	}
 
-	indexerStandardClient, err := indexer.NewClient(config.IndexerStandardUrl, indexer.IndexerClientOption{
+	wallets, err := zgConfig.Wallets()
+	if err != nil {
+		panic(err)
+	}
+	wallet, err := wallets.Wallet(0)
+	if err != nil {
+		panic(err)
+	}
+	w3client := blockchain.MustNewWeb3(zgConfig.URL(), wallet.PrivateKey(), config.ProviderOption)
+	defer w3client.Close()
+
+	indexerStandardClient, err := indexer.NewClient(config.StorageClientConfig.IndexerStandard, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
 		LogOption:      common.LogOption{Logger: logger.InnerLogger()},
 	})
@@ -35,7 +58,7 @@ func New(config *config.Config, contract *providercontract.ProviderContract, ser
 		return nil
 	}
 
-	indexerTurboClient, err := indexer.NewClient(config.IndexerTurboUrl, indexer.IndexerClientOption{
+	indexerTurboClient, err := indexer.NewClient(config.StorageClientConfig.IndexerTurbo, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
 		LogOption:      common.LogOption{Logger: logger.InnerLogger()},
 	})
@@ -46,9 +69,11 @@ func New(config *config.Config, contract *providercontract.ProviderContract, ser
 	p := &Ctrl{
 		db:                    db,
 		contract:              contract,
+		w3Client:              w3client,
+		storageUploadUrgs:     &config.StorageClientConfig.UploadArgs,
 		indexerStandardClient: indexerStandardClient,
 		indexerTurboClient:    indexerTurboClient,
-		services:              services,
+		services:              config.Services,
 		logger:                logger,
 	}
 

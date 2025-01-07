@@ -22,5 +22,6 @@ func NewDB(conf *config.Config, logger log.Logger) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	
 	return &DB{db: db, logger: logger}, nil
 }

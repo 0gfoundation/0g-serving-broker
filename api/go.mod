@@ -5,7 +5,7 @@ go 1.22.7
 toolchain go1.22.10
 
 require (
-	github.com/0glabs/0g-storage-client v0.6.1
+	github.com/0glabs/0g-storage-client v0.6.2
 	github.com/andybalholm/brotli v1.1.0
 	github.com/docker/docker v27.4.1+incompatible
 	github.com/ethereum/go-ethereum v1.14.7
@@ -20,6 +20,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
 	github.com/openweb3/go-rpc-provider v0.3.4
+	github.com/openweb3/web3go v0.2.9
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.19.1
@@ -148,7 +149,6 @@ require (
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/openweb3/go-ethereum-hdwallet v0.1.0 // indirect
 	github.com/openweb3/go-sdk-common v0.0.0-20240627072707-f78f0155ab34 // indirect
-	github.com/openweb3/web3go v0.2.9 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect

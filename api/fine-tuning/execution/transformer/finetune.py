@@ -1,11 +1,12 @@
 import argparse
 import json
+import os
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, AutoConfig, TrainerCallback
 from datasets import load_dataset
 
 
 class ProgressCallback(TrainerCallback):
-    def __init__(self, log_file_path="/app/logs/progress.log"):
+    def __init__(self, log_file_path="/app/input/logs/progress.log"):
         self.log_file_path = log_file_path
         self.log_file = None
 
@@ -36,7 +37,6 @@ class ProgressCallback(TrainerCallback):
                 print(f"Error closing log file: {e}")
 
 
-
 def load_config(config_path):
     """Loads configuration from a JSON file."""
     try:
@@ -51,7 +51,6 @@ def main():
     parser = argparse.ArgumentParser(description="Fine-tune a Hugging Face model.")
     parser.add_argument("--data_path", type=str, required=True, help="Name of the dataset (Hugging Face hub).")
     parser.add_argument("--model_path", type=str, required=True, help="Name of the pre-trained model.")
-    parser.add_argument("--tokenizer_path", type=str, required=True, help="Name of the tokenizer.")
     parser.add_argument("--config_path", type=str, default="config.json", help="Path to the config.json file.")
     parser.add_argument("--output_dir", type=str, default="./model_output", help="Directory to save the fine-tuned model.")
 
@@ -61,12 +60,16 @@ def main():
     config = load_config(args.config_path)
 
     # Load dataset
-    dataset = load_dataset(args.data_path)
+    data_files = {"train": args.data_path + "/train", "test": args.data_path + "/test"}
+    if os.path.exists(args.data_path + "/eval"):
+        data_files["eval"] = args.data_path + "/eval"
+    
+    dataset = load_dataset("parquet", data_files=data_files)
 
     n_labels = len(set(dataset["train"]["label"]))
 
     # Load tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_path, config=AutoConfig.from_pretrained(args.model_path, num_labels=n_labels)  # Adjust `num_labels` as needed.
     )
@@ -81,8 +84,8 @@ def main():
     train_dataset = tokenized_datasets["train"]
     eval_dataset = tokenized_datasets["validation"] if "validation" in tokenized_datasets else None
 
-    small_train_dataset = tokenized_datasets["train"].shuffle(seed=42).select(range(100))
-    small_eval_dataset = tokenized_datasets["test"].shuffle(seed=42).select(range(100))
+    small_train_dataset = tokenized_datasets["train"].shuffle(seed=42).select(range(1000))
+    small_eval_dataset = tokenized_datasets["test"].shuffle(seed=42).select(range(1000))
 
     # Training arguments from config file
     training_args = TrainingArguments(

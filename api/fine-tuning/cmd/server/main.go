@@ -8,8 +8,8 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
-	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/handler"
 	"github.com/gin-gonic/gin"
@@ -33,13 +33,15 @@ func Main() {
 		panic(err)
 	}
 
-	contract, err := providercontract.NewProviderContract(config, logger)
+	db, err := db.NewDB(config, logger)
 	if err != nil {
 		panic(err)
 	}
-	defer contract.Close()
+	if err := db.Migrate(); err != nil {
+		panic(err)
+	}
 
-	ctrl := ctrl.New(config, contract, config.Services, logger)
+	ctrl := ctrl.New(db, config, logger)
 
 	ctx := context.Background()
 	err = ctrl.SyncServices(ctx)

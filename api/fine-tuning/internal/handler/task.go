@@ -24,6 +24,11 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 		return
 	}
 
+	if err := h.ctrl.CreateTask(ctx, task); err != nil {
+		handleBrokerError(ctx, err, "register service")
+		return
+	}
+
 	ctx.Status(http.StatusNoContent)
 }
 
@@ -37,6 +42,10 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 //	@Success	200	{object}	model.Task
 func (h *Handler) GetTask(ctx *gin.Context) {
 	id, err := uuid.Parse(ctx.Param("id"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
 	task, err := h.ctrl.GetTask(&id)
 	if err != nil {
 		handleBrokerError(ctx, err, "get task")
@@ -48,6 +57,10 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 
 func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 	id, err := uuid.Parse(ctx.Param("id"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
 	filePath, err := h.ctrl.GetProgress(&id)
 	if err != nil {
 		handleBrokerError(ctx, err, "get task")

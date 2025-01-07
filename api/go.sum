@@ -1,7 +1,7 @@
 filippo.io/edwards25519 v1.1.0 h1:FNf4tywRC1HmFuKW5xopWpigGjJKiJSV0Cqo0cJWDaA=
 filippo.io/edwards25519 v1.1.0/go.mod h1:BxyFTGdWcka3PhytdK4V28tE5sGfRvvvRV7EaN4VDT4=
-github.com/0glabs/0g-storage-client v0.6.1 h1:aOBk6vbERx2L6h/5I1Y+TCAFCT+sTQkbJhlnUT7TZdQ=
-github.com/0glabs/0g-storage-client v0.6.1/go.mod h1:Qt5AuIUPODYRu6/H/vsUTOVR14aAxI9G2FwxmRugZds=
+github.com/0glabs/0g-storage-client v0.6.2 h1:aUF0Ta2YE0uWvKDmk6t/kfaM79o1ISNggGuUrGRaatk=
+github.com/0glabs/0g-storage-client v0.6.2/go.mod h1:Qt5AuIUPODYRu6/H/vsUTOVR14aAxI9G2FwxmRugZds=
 github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 h1:UQHMgLO+TxOElx5B5HZ4hJQsoJ/PvUvKRhJHDQXO8P8=
 github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
 github.com/DataDog/zstd v1.4.5 h1:EndNeuB0l9syBZhut0wns3gV1hL8zX8LIu6ZiVHWLIQ=
