@@ -13,9 +13,9 @@ networks:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
-      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    transactionLimit: 1000000
-    gasEstimationBuffer: 10000
+      - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+    transactionLimit: 10000000
+    gasEstimationBuffer: 100000
 services:
   - name: "fine-tune-service1"
     servingUrl: "http://192.168.2.142:3080"
@@ -34,7 +34,7 @@ storageClient:
     tags: "0x"
     expectedReplica: 1
     skipTx: false
-    taskSize: 10
+    taskSize: 4
     fragmentSize: 4294967296
     routines: 4
 logger:

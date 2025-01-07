@@ -2,11 +2,11 @@ import argparse
 import json
 import os
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, AutoConfig, TrainerCallback
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 
 
 class ProgressCallback(TrainerCallback):
-    def __init__(self, log_file_path="/app/input/logs/progress.log"):
+    def __init__(self, log_file_path="/app/mnt/progress.log"):
         self.log_file_path = log_file_path
         self.log_file = None
 
@@ -60,18 +60,15 @@ def main():
     config = load_config(args.config_path)
 
     # Load dataset
-    data_files = {"train": args.data_path + "/train", "test": args.data_path + "/test"}
-    if os.path.exists(args.data_path + "/eval"):
-        data_files["eval"] = args.data_path + "/eval"
-    
-    dataset = load_dataset("parquet", data_files=data_files)
+    dataset = load_from_disk(args.data_path)
 
     n_labels = len(set(dataset["train"]["label"]))
+    model_config = AutoConfig.from_pretrained(args.model_path, num_labels=n_labels)  # Adjust `num_labels` as needed.
 
     # Load tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
     model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_path, config=AutoConfig.from_pretrained(args.model_path, num_labels=n_labels)  # Adjust `num_labels` as needed.
+        args.model_path, config=model_config, local_files_only=True
     )
 
     # Tokenize the dataset

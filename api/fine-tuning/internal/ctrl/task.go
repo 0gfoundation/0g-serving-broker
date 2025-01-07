@@ -12,7 +12,7 @@ import (
 
 func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) error {
 
-	err := c.db.AddTasks([]schema.Task{task})
+	err := c.db.AddTask(&task)
 	if err != nil {
 		return errors.Wrap(err, "create task in db")
 	}
@@ -36,5 +36,5 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 	baseDir := os.TempDir()
-	return fmt.Sprintf("%s/%s/%s/progress.log", baseDir, task.ID, LogPath), nil
+	return fmt.Sprintf("%s/%s/progress.log", baseDir, task.ID), nil
 }

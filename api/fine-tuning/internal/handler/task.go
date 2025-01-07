@@ -39,9 +39,9 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 //	@Tags		task
 //	@Router		/task/{id} [get]
 //	@Param		taskID	path	string	true	"task ID"
-//	@Success	200	{object}	model.Task
+//	@Success	200	{object}	schema.Task
 func (h *Handler) GetTask(ctx *gin.Context) {
-	id, err := uuid.Parse(ctx.Param("id"))
+	id, err := uuid.Parse(ctx.Param("taskID"))
 	if err != nil {
 		handleBrokerError(ctx, err, "parse task id")
 		return
@@ -56,7 +56,7 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 }
 
 func (h *Handler) GetTaskProgress(ctx *gin.Context) {
-	id, err := uuid.Parse(ctx.Param("id"))
+	id, err := uuid.Parse(ctx.Param("taskID"))
 	if err != nil {
 		handleBrokerError(ctx, err, "parse task id")
 		return

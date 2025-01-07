@@ -24,7 +24,7 @@ func (c *Ctrl) DownloadFromStorage(ctx context.Context, hash, fileName string, i
 	return nil
 }
 
-func (c *Ctrl) UploadToStorage(ctx context.Context, fileName string, isTurbo bool) error {
+func (c *Ctrl) UploadToStorage(ctx context.Context, fileName string, isTurbo bool) (string, error) {
 	finalityRequired := transfer.TransactionPacked
 	if c.storageUploadUrgs.FinalityRequired {
 		finalityRequired = transfer.FileFinalized
@@ -41,7 +41,7 @@ func (c *Ctrl) UploadToStorage(ctx context.Context, fileName string, isTurbo boo
 	file, err := core.Open(fileName)
 	if err != nil {
 		c.logger.Errorf("Error opening file to upload: %v\n", err)
-		return err
+		return "", err
 	}
 	defer file.Close()
 
@@ -55,7 +55,7 @@ func (c *Ctrl) UploadToStorage(ctx context.Context, fileName string, isTurbo boo
 	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil)
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
-		return err
+		return "", err
 	}
 	defer indexerClient.Close()
 
@@ -64,6 +64,7 @@ func (c *Ctrl) UploadToStorage(ctx context.Context, fileName string, isTurbo boo
 	_, roots, err := uploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
 	if err != nil {
 		c.logger.Errorf("Error uploading file: %v\n", err)
+		return "", err
 	}
 	if len(roots) == 1 {
 		c.logger.Infof("file uploaded in 1 fragment, root = %v", roots[0].String())
@@ -75,5 +76,10 @@ func (c *Ctrl) UploadToStorage(ctx context.Context, fileName string, isTurbo boo
 		c.logger.Infof("file uploaded in %v fragments, roots = %v", len(roots), s)
 	}
 
-	return nil
+	var rootStr string
+	for _, root := range roots {
+		rootStr += root.String() + ","
+	}
+
+	return rootStr, nil
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/0glabs/0g-storage-client/common"
 	"github.com/0glabs/0g-storage-client/common/blockchain"
 	"github.com/openweb3/web3go"
+	"github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-storage-client/indexer"
 )
@@ -25,8 +26,6 @@ type Ctrl struct {
 }
 
 func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {
-
-
 
 	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
@@ -47,12 +46,18 @@ func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {
 	if err != nil {
 		panic(err)
 	}
+
+	logger.WithFields(logrus.Fields{
+		"wallet": wallet.Address(),
+		"url":    zgConfig.URL(),
+	}).Info("Wallet and URL")
+
 	w3client := blockchain.MustNewWeb3(zgConfig.URL(), wallet.PrivateKey(), config.ProviderOption)
 	defer w3client.Close()
 
 	indexerStandardClient, err := indexer.NewClient(config.StorageClientConfig.IndexerStandard, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
-		LogOption:      common.LogOption{Logger: logger.InnerLogger()},
+		LogOption:      common.LogOption{LogLevel: logrus.InfoLevel},
 	})
 	if err != nil {
 		return nil
@@ -60,7 +65,7 @@ func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {
 
 	indexerTurboClient, err := indexer.NewClient(config.StorageClientConfig.IndexerTurbo, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
-		LogOption:      common.LogOption{Logger: logger.InnerLogger()},
+		LogOption:      common.LogOption{LogLevel: logrus.InfoLevel},
 	})
 	if err != nil {
 		return nil

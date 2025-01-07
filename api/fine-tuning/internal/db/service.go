@@ -5,13 +5,22 @@ import (
 	"github.com/google/uuid"
 )
 
-func (d *DB) AddTasks(services []schema.Task) error {
-	if len(services) == 0 {
-		return nil
+func (d *DB) AddTask(task *schema.Task) error {
+	// Insert the record
+	taskDB := Task{
+		CustomerAddress:     task.CustomerAddress,
+		PreTrainedModelHash: task.PreTrainedModelHash,
+		DatasetHash:         task.DatasetHash,
+		IsTurbo:             task.IsTurbo,
+		TrainingParams:      task.TrainingParams,
+	}
+	ret := d.db.Create(&taskDB)
+
+	if ret.Error != nil {
+		return ret.Error
 	}
 
-	// Insert the records
-	ret := d.db.Create(&services)
+	task.ID = taskDB.ID
 
 	return ret.Error
 }

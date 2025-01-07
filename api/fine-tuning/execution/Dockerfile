@@ -10,6 +10,9 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
     && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
 WORKDIR /app
+
+# mount point for data
+RUN mkdir /app/mnt
 COPY transformer/finetune.py /app/finetune.py
 
 # Install additional Python libraries

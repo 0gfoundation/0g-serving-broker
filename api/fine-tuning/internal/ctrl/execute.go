@@ -22,12 +22,11 @@ const (
 )
 
 const (
-	DatasetPath         = "dataset"
-	PretrainedModelPath = "pretrained_model"
-	LogPath             = "logs"
+	DatasetPath         = "data"
+	PretrainedModelPath = "model"
 	TrainingConfigPath  = "config.json"
 	OutputPath          = "output_model"
-	ContainerBasePath   = "/app/input"
+	ContainerBasePath   = "/app/mnt"
 )
 
 type TaskPaths struct {
@@ -63,6 +62,8 @@ func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
 		c.logger.Errorf("Error creating temporary folder: %v\n", err)
 		return err
 	}
+
+	c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
 
 	paths := NewTaskPaths(tmpFolderPath)
 
@@ -112,6 +113,12 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		},
 	}
 
+	// containerConfig := &container.Config{
+	// 	Image: "execution-test-pytorch",
+	// 	Cmd: []string{
+	// 		"tail", "-f", "/dev/null",
+	// 	},
+	// }
 	hostConfig := &container.HostConfig{
 		Mounts: []mount.Mount{
 			{
@@ -173,13 +180,17 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 
-	err = c.UploadToStorage(ctx, zipFile, task.IsTurbo)
+	rootStr, err := c.UploadToStorage(ctx, zipFile, task.IsTurbo)
 	if err != nil {
 		c.logger.Errorf("Error uploading output folder: %v\n", err)
 		return err
 	}
 
-	err = c.db.UpdateTask(task.ID, schema.Task{Progress: ProgressFinished})
+	err = c.db.UpdateTask(task.ID,
+		schema.Task{
+			Progress:       ProgressFinished,
+			OutputRootHash: rootStr,
+		})
 	if err != nil {
 		c.logger.Errorf("Failed to update task: %v", err)
 		return err
@@ -189,7 +200,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 }
 
 func (c *Ctrl) downloadFromStorage(hash, filePath string, isTurbo bool) error {
-
 	var indexerClient *indexer.Client
 	if isTurbo {
 		indexerClient = c.indexerTurboClient
@@ -202,7 +212,7 @@ func (c *Ctrl) downloadFromStorage(hash, filePath string, isTurbo bool) error {
 		return err
 	}
 
-	if err := c.unzip(fileName, filePath); err != nil {
+	if err := c.unzip(fileName, filepath.Dir(filePath)); err != nil {
 		c.logger.Errorf("Error unzipping dataset: %v\n", err)
 		return err
 	}
