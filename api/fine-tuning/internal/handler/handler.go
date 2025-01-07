@@ -26,6 +26,8 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.POST("/task", h.CreateTask)
 	group.GET("/task/:taskID", h.GetTask)
+
+	group.POST("/quote", h.PostQuote)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
