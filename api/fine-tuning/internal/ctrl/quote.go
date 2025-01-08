@@ -5,42 +5,35 @@ import (
 	"encoding/json"
 
 	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/ethereum/go-ethereum/crypto"
 )
-
-const (
-	Url               = "http://localhost/prpc/Tappd.tdxQuote?json"
-	SocketNetworkType = "unix"
-	SocketAddress     = "/var/run/tappd.sock"
-)
-
-type QuoteRequest struct {
-	Address string `json:"address"`
-}
 
 type QuoteResponse struct {
 	Quote          string `json:"quote"`
 	ProviderSigner string `json:"provider_signer"`
 }
 
-func (c *Ctrl) ReadQuote(ctx context.Context, request QuoteRequest) (string, error) {
-	quote, err := phala.Quote(ctx, request.Address)
+func (c *Ctrl) SyncQuote(ctx context.Context) error {
+	signer, err := phala.SigningKey(ctx)
 	if err != nil {
-		return "", err
+		return err
+	}
+	c.providerSigner = signer
+
+	address := crypto.PubkeyToAddress(signer.PublicKey)
+	quote, err := phala.Quote(ctx, address.Hex())
+	if err != nil {
+		return err
 	}
 
-	privateKey, err := phala.SigningKey(ctx, request.Address)
-	if err != nil {
-		return "", err
-	}
+	c.quote = quote
+	return nil
+}
 
-	publicKey, err := phala.SerializePublicKey(ctx, privateKey)
-	if err != nil {
-		return "", err
-	}
-
+func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 	jsonData, err := json.Marshal(QuoteResponse{
-		Quote:          quote,
-		ProviderSigner: publicKey,
+		Quote:          c.quote,
+		ProviderSigner: crypto.PubkeyToAddress(c.providerSigner.PublicKey).Hex(),
 	})
 	if err != nil {
 		return "", err

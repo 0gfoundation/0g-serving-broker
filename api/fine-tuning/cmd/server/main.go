@@ -55,6 +55,11 @@ func Main() {
 		panic(err)
 	}
 
+	err = ctrl.SyncQuote(ctx)
+	if err != nil {
+		panic(err)
+	}
+
 	engine := gin.New()
 	h := handler.New(ctrl, logger)
 	h.Register(engine)

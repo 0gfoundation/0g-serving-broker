@@ -3,7 +3,6 @@ package handler
 import (
 	"net/http"
 
-	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -50,22 +49,15 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, task)
 }
 
-// postQuote
+// getQuote
 //
 //	@Description  This endpoint allows you to get quote
-//	@ID			postQuote
+//	@ID			getQuote
 //	@Tags		quote
 //	@Router		/quote [post]
-//	@Param		ctrl.QuoteRequest
 //	@Success	200		{object}	quote
-func (h *Handler) PostQuote(ctx *gin.Context) {
-	var quoteRequest ctrl.QuoteRequest
-	if err := ctx.ShouldBindJSON(&quoteRequest); err != nil {
-		handleBrokerError(ctx, err, "invalid request body")
-		return
-	}
-
-	quote, err := h.ctrl.ReadQuote(ctx, quoteRequest)
+func (h *Handler) GetQuote(ctx *gin.Context) {
+	quote, err := h.ctrl.GetQuote(ctx)
 	if err != nil {
 		handleBrokerError(ctx, err, "read quote")
 		return

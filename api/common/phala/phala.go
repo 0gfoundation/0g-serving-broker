@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -69,9 +68,9 @@ func Quote(ctx context.Context, reportData string) (string, error) {
 	return hex.EncodeToString(body), nil
 }
 
-func SigningKey(ctx context.Context, reportData string) (*ecdsa.PrivateKey, error) {
+func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
 	client := tappd.NewTappdClient()
-	deriveKeyResp, err := client.DeriveKey(ctx, fmt.Sprintf("/%s", reportData))
+	deriveKeyResp, err := client.DeriveKey(ctx, "/")
 
 	if err != nil {
 		return nil, errors.Wrap(err, "new tapped client")
@@ -82,19 +81,14 @@ func SigningKey(ctx context.Context, reportData string) (*ecdsa.PrivateKey, erro
 		return nil, errors.Wrap(err, "decode private key")
 	}
 
-	privateKey, err := x509.ParseECPrivateKey(privateKeyBytes)
+	if len(privateKeyBytes) != 32 {
+		return nil, errors.New("Error: private key must be 32 bytes long")
+	}
+
+	privateKey, err := crypto.ToECDSA(privateKeyBytes)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse EC private key")
+		return nil, errors.Wrap(err, " converting to ECDSA private key")
 	}
 
 	return privateKey, nil
-}
-
-func SerializePublicKey(ctx context.Context, privateKey *ecdsa.PrivateKey) (string, error) {
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(privateKey.PublicKey)
-	if err != nil {
-		return "", errors.Wrap(err, "serializing public key")
-	}
-
-	return hex.EncodeToString(publicKeyBytes), nil
 }
