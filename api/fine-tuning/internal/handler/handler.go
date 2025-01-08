@@ -1,11 +1,10 @@
 package handler
 
 import (
-	"github.com/gin-gonic/gin"
-
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
+	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
@@ -26,6 +25,7 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.POST("/task", h.CreateTask)
 	group.GET("/task/:taskID", h.GetTask)
+	group.GET("/task-progress/:taskID", h.GetTaskProgress)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

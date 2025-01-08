@@ -10,6 +10,20 @@ import (
 	"gorm.io/plugin/soft_delete"
 )
 
+type Task struct {
+	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
+	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
+	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
+	CustomerAddress     string                `gorm:"type:text;not null"`
+	PreTrainedModelHash string                `gorm:"type:text;not null"`
+	DatasetHash         string                `gorm:"type:text;not null"`
+	TrainingParams      string                `gorm:"type:text;not null"`
+	OutputRootHash      string                `gorm:"type:text;"`
+	IsTurbo             bool                  `gorm:"type:bool;not null;default:false"`
+	Progress            string                `gorm:"type:varchar(255);not null;default:InProgress"`
+	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
+}
+
 func (d *DB) Migrate() error {
 	d.db.Set("gorm:table_options", "ENGINE=InnoDB")
 
@@ -17,19 +31,7 @@ func (d *DB) Migrate() error {
 		{
 			ID: "create-task",
 			Migrate: func(tx *gorm.DB) error {
-				type Task struct {
-					ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
-					CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
-					UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
-					CustomerAddress     string                `gorm:"type:varchar(255);not null"`
-					PreTrainedModelHash string                `gorm:"type:varchar(255);not null"`
-					FineTunedScriptHash string                `gorm:"type:varchar(255);not null"`
-					DatasetHash         string                `gorm:"type:varchar(255);not null"`
-					Command             string                `gorm:"type:varchar(255);not null"`
-					EpochNumber         uint                  `gorm:"type:uint;not null;default 0"`
-					Progress            *uint                 `gorm:"type:uint;not null;default 0"`
-					DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
-				}
+
 				return tx.AutoMigrate(&Task{})
 			},
 		},
