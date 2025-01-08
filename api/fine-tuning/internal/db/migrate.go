@@ -24,15 +24,6 @@ type Task struct {
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
 }
 
-// BeforeCreate hook for generating a UUID
-func (t *Task) BeforeCreate(tx *gorm.DB) (err error) {
-	if t.ID == nil {
-		id := uuid.New()
-		t.ID = &id
-	}
-	return
-}
-
 func (d *DB) Migrate() error {
 	d.db.Set("gorm:table_options", "ENGINE=InnoDB")
 

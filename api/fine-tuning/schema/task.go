@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"gorm.io/plugin/soft_delete"
 )
 
@@ -20,6 +21,15 @@ type Task struct {
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+}
+
+// BeforeCreate hook for generating a UUID
+func (t *Task) BeforeCreate(tx *gorm.DB) (err error) {
+	if t.ID == nil {
+		id := uuid.New()
+		t.ID = &id
+	}
+	return
 }
 
 func (d *Task) Bind(ctx *gin.Context) error {

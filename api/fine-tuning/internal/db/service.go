@@ -6,22 +6,7 @@ import (
 )
 
 func (d *DB) AddTask(task *schema.Task) error {
-	// Insert the record
-	taskDB := Task{
-		CustomerAddress:     task.CustomerAddress,
-		PreTrainedModelHash: task.PreTrainedModelHash,
-		DatasetHash:         task.DatasetHash,
-		IsTurbo:             task.IsTurbo,
-		TrainingParams:      task.TrainingParams,
-	}
-	ret := d.db.Create(&taskDB)
-
-	if ret.Error != nil {
-		return ret.Error
-	}
-
-	task.ID = taskDB.ID
-
+	ret := d.db.Create(&task)
 	return ret.Error
 }
 
