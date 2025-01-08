@@ -1,15 +1,10 @@
 package ctrl
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
-	"net"
-	"net/http"
-	"time"
 
-	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/phala"
 )
 
 const (
@@ -19,50 +14,37 @@ const (
 )
 
 type QuoteRequest struct {
-	ReportData string `json:"report_data"`
+	Address string `json:"address"`
+}
+
+type QuoteResponse struct {
+	Quote          string `json:"quote"`
+	ProviderSigner string `json:"provider_signer"`
 }
 
 func (c *Ctrl) ReadQuote(ctx context.Context, request QuoteRequest) (string, error) {
-	jsonData, err := json.Marshal(request)
+	quote, err := phala.Quote(ctx, request.Address)
 	if err != nil {
-		return "", errors.Wrap(err, "encoding json")
+		return "", err
 	}
 
-	socket, err := net.Dial(SocketNetworkType, SocketAddress)
+	privateKey, err := phala.SigningKey(ctx, request.Address)
 	if err != nil {
-		return "", errors.Wrap(err, "creating socket")
-	}
-	defer socket.Close()
-
-	transport := &http.Transport{
-		Dial: func(network, addr string) (net.Conn, error) {
-			return socket, nil
-		},
+		return "", err
 	}
 
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-	}
-
-	req, err := http.NewRequest(http.MethodPost, Url, bytes.NewBuffer(jsonData))
+	publicKey, err := phala.SerializePublicKey(ctx, privateKey)
 	if err != nil {
-		return "", errors.Wrap(err, "creating request")
+		return "", err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
+	jsonData, err := json.Marshal(QuoteResponse{
+		Quote:          quote,
+		ProviderSigner: publicKey,
+	})
 	if err != nil {
-		return "", errors.Wrap(err, "sending request")
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", errors.Wrap(err, "reading response body")
+		return "", err
 	}
 
-	c.logger.Infof("Response status: %v", resp.Status)
-	return string(body), nil
+	return string(jsonData), nil
 }
