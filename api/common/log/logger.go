@@ -45,6 +45,7 @@ type Logger interface {
 	Panicln(args ...interface{})
 
 	WithFields(fields log.Fields) Logger
+	InnerLogger() *log.Logger
 }
 
 type logger struct {
@@ -115,6 +116,10 @@ func (l *logger) WithFields(fields log.Fields) Logger {
 		l.logger,
 		fields,
 	}
+}
+
+func (l *logger) InnerLogger() *log.Logger {
+	return l.logger
 }
 
 func (l *logger) Debugf(format string, args ...interface{}) {
