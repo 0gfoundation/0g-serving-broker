@@ -61,7 +61,6 @@ func Main() {
 	}
 
 	ctrl := ctrl.New(db, config, contract, storageClient, verifier, logger)
-
 	ctx := context.Background()
 	err = ctrl.SyncServices(ctx)
 	if err != nil {
@@ -70,7 +69,9 @@ func Main() {
 
 	err = ctrl.SyncQuote(ctx)
 	if err != nil {
-		panic(err)
+		// TODO: panic error
+		logger.Errorf("Error syncing quote: %v", err)
+
 	}
 
 	engine := gin.New()

@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -10,7 +11,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/client/operations"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.Request, sigs models.Signatures) ([]bool, error) {

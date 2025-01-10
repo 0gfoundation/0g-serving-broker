@@ -50,6 +50,8 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		service.ServingUrl,
 		quota,
 		pricePerToken,
+		// TODO: replace by real provider signer address
+		common.HexToAddress("0x111111"),
 		false,
 	)
 	if err != nil {
@@ -138,11 +140,7 @@ func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Addre
 		return err
 	}
 
-	idx, err := util.ConvertToBigInt(index)
-	if err != nil {
-		return errors.Wrap(err, "index")
-	}
-	tx, err := c.Contract.AddDeliverable(opt, user, idx, modelRootHash)
+	tx, err := c.Contract.AddDeliverable(opt, user, modelRootHash)
 	if err != nil {
 		return err
 	}

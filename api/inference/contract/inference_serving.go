@@ -72,7 +72,7 @@ type VerifierInput struct {
 
 // InferenceServingMetaData contains all meta data concerning the InferenceServing contract.
 var InferenceServingMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountNotExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"InsufficientBalance\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidProofInputs\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"name\":\"BalanceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"previousOwner\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"OwnershipTransferred\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"name\":\"RefundRequested\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"ServiceRemoved\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"name\":\"ServiceUpdated\",\"type\":\"event\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"accountExists\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"name\":\"addAccount\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"}],\"name\":\"addOrUpdateService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"batchVerifierAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"deleteAccount\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"depositFund\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getAccount\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structAccount\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllAccounts\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structAccount[]\",\"name\":\"\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllServices\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"internalType\":\"structService[]\",\"name\":\"services\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"getService\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"internalType\":\"structService\",\"name\":\"service\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"}],\"name\":\"initialize\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"initialized\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"lockTime\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"processRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"totalAmount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"removeService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"renounceOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"requestRefund\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"requestRefundAll\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"uint256[]\",\"name\":\"inProof\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256[]\",\"name\":\"proofInputs\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256\",\"name\":\"numChunks\",\"type\":\"uint256\"},{\"internalType\":\"uint256[]\",\"name\":\"segmentSize\",\"type\":\"uint256[]\"}],\"internalType\":\"structVerifierInput\",\"name\":\"verifierInput\",\"type\":\"tuple\"}],\"name\":\"settleFees\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"transferOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"}],\"name\":\"updateBatchVerifierAddress\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"}],\"name\":\"updateLockTime\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
+	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountNotExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidProofInputs\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"name\":\"BalanceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"previousOwner\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"OwnershipTransferred\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"name\":\"RefundRequested\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"ServiceRemoved\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"name\":\"ServiceUpdated\",\"type\":\"event\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"accountExists\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"name\":\"addAccount\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"}],\"name\":\"addOrUpdateService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"batchVerifierAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"deleteAccount\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"depositFund\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getAccount\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structAccount\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllAccounts\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structAccount[]\",\"name\":\"\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllServices\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"internalType\":\"structService[]\",\"name\":\"services\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"getService\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"internalType\":\"structService\",\"name\":\"service\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"_ledgerAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"}],\"name\":\"initialize\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"initialized\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"ledgerAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"lockTime\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"processRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"totalAmount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"removeService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"renounceOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"requestRefundAll\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"uint256[]\",\"name\":\"inProof\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256[]\",\"name\":\"proofInputs\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256\",\"name\":\"numChunks\",\"type\":\"uint256\"},{\"internalType\":\"uint256[]\",\"name\":\"segmentSize\",\"type\":\"uint256[]\"}],\"internalType\":\"structVerifierInput\",\"name\":\"verifierInput\",\"type\":\"tuple\"}],\"name\":\"settleFees\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"transferOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"}],\"name\":\"updateBatchVerifierAddress\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"}],\"name\":\"updateLockTime\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
 }
 
 // InferenceServingABI is the input ABI used to generate the binding from.
@@ -438,6 +438,37 @@ func (_InferenceServing *InferenceServingCallerSession) Initialized() (bool, err
 	return _InferenceServing.Contract.Initialized(&_InferenceServing.CallOpts)
 }
 
+// LedgerAddress is a free data retrieval call binding the contract method 0xd1d20056.
+//
+// Solidity: function ledgerAddress() view returns(address)
+func (_InferenceServing *InferenceServingCaller) LedgerAddress(opts *bind.CallOpts) (common.Address, error) {
+	var out []interface{}
+	err := _InferenceServing.contract.Call(opts, &out, "ledgerAddress")
+
+	if err != nil {
+		return *new(common.Address), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new(common.Address)).(*common.Address)
+
+	return out0, err
+
+}
+
+// LedgerAddress is a free data retrieval call binding the contract method 0xd1d20056.
+//
+// Solidity: function ledgerAddress() view returns(address)
+func (_InferenceServing *InferenceServingSession) LedgerAddress() (common.Address, error) {
+	return _InferenceServing.Contract.LedgerAddress(&_InferenceServing.CallOpts)
+}
+
+// LedgerAddress is a free data retrieval call binding the contract method 0xd1d20056.
+//
+// Solidity: function ledgerAddress() view returns(address)
+func (_InferenceServing *InferenceServingCallerSession) LedgerAddress() (common.Address, error) {
+	return _InferenceServing.Contract.LedgerAddress(&_InferenceServing.CallOpts)
+}
+
 // LockTime is a free data retrieval call binding the contract method 0x0d668087.
 //
 // Solidity: function lockTime() view returns(uint256)
@@ -500,25 +531,25 @@ func (_InferenceServing *InferenceServingCallerSession) Owner() (common.Address,
 	return _InferenceServing.Contract.Owner(&_InferenceServing.CallOpts)
 }
 
-// AddAccount is a paid mutator transaction binding the contract method 0x0b1d1392.
+// AddAccount is a paid mutator transaction binding the contract method 0x4bc3aff4.
 //
-// Solidity: function addAccount(address provider, uint256[2] signer, string additionalInfo) payable returns()
-func (_InferenceServing *InferenceServingTransactor) AddAccount(opts *bind.TransactOpts, provider common.Address, signer [2]*big.Int, additionalInfo string) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "addAccount", provider, signer, additionalInfo)
+// Solidity: function addAccount(address user, address provider, uint256[2] signer, string additionalInfo) payable returns()
+func (_InferenceServing *InferenceServingTransactor) AddAccount(opts *bind.TransactOpts, user common.Address, provider common.Address, signer [2]*big.Int, additionalInfo string) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "addAccount", user, provider, signer, additionalInfo)
 }
 
-// AddAccount is a paid mutator transaction binding the contract method 0x0b1d1392.
+// AddAccount is a paid mutator transaction binding the contract method 0x4bc3aff4.
 //
-// Solidity: function addAccount(address provider, uint256[2] signer, string additionalInfo) payable returns()
-func (_InferenceServing *InferenceServingSession) AddAccount(provider common.Address, signer [2]*big.Int, additionalInfo string) (*types.Transaction, error) {
-	return _InferenceServing.Contract.AddAccount(&_InferenceServing.TransactOpts, provider, signer, additionalInfo)
+// Solidity: function addAccount(address user, address provider, uint256[2] signer, string additionalInfo) payable returns()
+func (_InferenceServing *InferenceServingSession) AddAccount(user common.Address, provider common.Address, signer [2]*big.Int, additionalInfo string) (*types.Transaction, error) {
+	return _InferenceServing.Contract.AddAccount(&_InferenceServing.TransactOpts, user, provider, signer, additionalInfo)
 }
 
-// AddAccount is a paid mutator transaction binding the contract method 0x0b1d1392.
+// AddAccount is a paid mutator transaction binding the contract method 0x4bc3aff4.
 //
-// Solidity: function addAccount(address provider, uint256[2] signer, string additionalInfo) payable returns()
-func (_InferenceServing *InferenceServingTransactorSession) AddAccount(provider common.Address, signer [2]*big.Int, additionalInfo string) (*types.Transaction, error) {
-	return _InferenceServing.Contract.AddAccount(&_InferenceServing.TransactOpts, provider, signer, additionalInfo)
+// Solidity: function addAccount(address user, address provider, uint256[2] signer, string additionalInfo) payable returns()
+func (_InferenceServing *InferenceServingTransactorSession) AddAccount(user common.Address, provider common.Address, signer [2]*big.Int, additionalInfo string) (*types.Transaction, error) {
+	return _InferenceServing.Contract.AddAccount(&_InferenceServing.TransactOpts, user, provider, signer, additionalInfo)
 }
 
 // AddOrUpdateService is a paid mutator transaction binding the contract method 0x6341b2d1.
@@ -542,88 +573,88 @@ func (_InferenceServing *InferenceServingTransactorSession) AddOrUpdateService(n
 	return _InferenceServing.Contract.AddOrUpdateService(&_InferenceServing.TransactOpts, name, serviceType, url, model, verifiability, inputPrice, outputPrice)
 }
 
-// DeleteAccount is a paid mutator transaction binding the contract method 0x4c1b64cb.
+// DeleteAccount is a paid mutator transaction binding the contract method 0x97216725.
 //
-// Solidity: function deleteAccount(address provider) returns()
-func (_InferenceServing *InferenceServingTransactor) DeleteAccount(opts *bind.TransactOpts, provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "deleteAccount", provider)
+// Solidity: function deleteAccount(address user, address provider) returns()
+func (_InferenceServing *InferenceServingTransactor) DeleteAccount(opts *bind.TransactOpts, user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "deleteAccount", user, provider)
 }
 
-// DeleteAccount is a paid mutator transaction binding the contract method 0x4c1b64cb.
+// DeleteAccount is a paid mutator transaction binding the contract method 0x97216725.
 //
-// Solidity: function deleteAccount(address provider) returns()
-func (_InferenceServing *InferenceServingSession) DeleteAccount(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.DeleteAccount(&_InferenceServing.TransactOpts, provider)
+// Solidity: function deleteAccount(address user, address provider) returns()
+func (_InferenceServing *InferenceServingSession) DeleteAccount(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.DeleteAccount(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// DeleteAccount is a paid mutator transaction binding the contract method 0x4c1b64cb.
+// DeleteAccount is a paid mutator transaction binding the contract method 0x97216725.
 //
-// Solidity: function deleteAccount(address provider) returns()
-func (_InferenceServing *InferenceServingTransactorSession) DeleteAccount(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.DeleteAccount(&_InferenceServing.TransactOpts, provider)
+// Solidity: function deleteAccount(address user, address provider) returns()
+func (_InferenceServing *InferenceServingTransactorSession) DeleteAccount(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.DeleteAccount(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// DepositFund is a paid mutator transaction binding the contract method 0xe12d4a52.
+// DepositFund is a paid mutator transaction binding the contract method 0x3f54d973.
 //
-// Solidity: function depositFund(address provider) payable returns()
-func (_InferenceServing *InferenceServingTransactor) DepositFund(opts *bind.TransactOpts, provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "depositFund", provider)
+// Solidity: function depositFund(address user, address provider) payable returns()
+func (_InferenceServing *InferenceServingTransactor) DepositFund(opts *bind.TransactOpts, user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "depositFund", user, provider)
 }
 
-// DepositFund is a paid mutator transaction binding the contract method 0xe12d4a52.
+// DepositFund is a paid mutator transaction binding the contract method 0x3f54d973.
 //
-// Solidity: function depositFund(address provider) payable returns()
-func (_InferenceServing *InferenceServingSession) DepositFund(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.DepositFund(&_InferenceServing.TransactOpts, provider)
+// Solidity: function depositFund(address user, address provider) payable returns()
+func (_InferenceServing *InferenceServingSession) DepositFund(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.DepositFund(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// DepositFund is a paid mutator transaction binding the contract method 0xe12d4a52.
+// DepositFund is a paid mutator transaction binding the contract method 0x3f54d973.
 //
-// Solidity: function depositFund(address provider) payable returns()
-func (_InferenceServing *InferenceServingTransactorSession) DepositFund(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.DepositFund(&_InferenceServing.TransactOpts, provider)
+// Solidity: function depositFund(address user, address provider) payable returns()
+func (_InferenceServing *InferenceServingTransactorSession) DepositFund(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.DepositFund(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// Initialize is a paid mutator transaction binding the contract method 0xb4988fd0.
+// Initialize is a paid mutator transaction binding the contract method 0x754d1d54.
 //
-// Solidity: function initialize(uint256 _locktime, address _batchVerifierAddress, address owner) returns()
-func (_InferenceServing *InferenceServingTransactor) Initialize(opts *bind.TransactOpts, _locktime *big.Int, _batchVerifierAddress common.Address, owner common.Address) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "initialize", _locktime, _batchVerifierAddress, owner)
+// Solidity: function initialize(uint256 _locktime, address _batchVerifierAddress, address _ledgerAddress, address owner) returns()
+func (_InferenceServing *InferenceServingTransactor) Initialize(opts *bind.TransactOpts, _locktime *big.Int, _batchVerifierAddress common.Address, _ledgerAddress common.Address, owner common.Address) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "initialize", _locktime, _batchVerifierAddress, _ledgerAddress, owner)
 }
 
-// Initialize is a paid mutator transaction binding the contract method 0xb4988fd0.
+// Initialize is a paid mutator transaction binding the contract method 0x754d1d54.
 //
-// Solidity: function initialize(uint256 _locktime, address _batchVerifierAddress, address owner) returns()
-func (_InferenceServing *InferenceServingSession) Initialize(_locktime *big.Int, _batchVerifierAddress common.Address, owner common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.Initialize(&_InferenceServing.TransactOpts, _locktime, _batchVerifierAddress, owner)
+// Solidity: function initialize(uint256 _locktime, address _batchVerifierAddress, address _ledgerAddress, address owner) returns()
+func (_InferenceServing *InferenceServingSession) Initialize(_locktime *big.Int, _batchVerifierAddress common.Address, _ledgerAddress common.Address, owner common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.Initialize(&_InferenceServing.TransactOpts, _locktime, _batchVerifierAddress, _ledgerAddress, owner)
 }
 
-// Initialize is a paid mutator transaction binding the contract method 0xb4988fd0.
+// Initialize is a paid mutator transaction binding the contract method 0x754d1d54.
 //
-// Solidity: function initialize(uint256 _locktime, address _batchVerifierAddress, address owner) returns()
-func (_InferenceServing *InferenceServingTransactorSession) Initialize(_locktime *big.Int, _batchVerifierAddress common.Address, owner common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.Initialize(&_InferenceServing.TransactOpts, _locktime, _batchVerifierAddress, owner)
+// Solidity: function initialize(uint256 _locktime, address _batchVerifierAddress, address _ledgerAddress, address owner) returns()
+func (_InferenceServing *InferenceServingTransactorSession) Initialize(_locktime *big.Int, _batchVerifierAddress common.Address, _ledgerAddress common.Address, owner common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.Initialize(&_InferenceServing.TransactOpts, _locktime, _batchVerifierAddress, _ledgerAddress, owner)
 }
 
-// ProcessRefund is a paid mutator transaction binding the contract method 0xb9795b6d.
+// ProcessRefund is a paid mutator transaction binding the contract method 0x4e3c4f22.
 //
-// Solidity: function processRefund(address provider) returns(uint256 totalAmount, uint256 balance, uint256 pendingRefund)
-func (_InferenceServing *InferenceServingTransactor) ProcessRefund(opts *bind.TransactOpts, provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "processRefund", provider)
+// Solidity: function processRefund(address user, address provider) returns(uint256 totalAmount, uint256 balance, uint256 pendingRefund)
+func (_InferenceServing *InferenceServingTransactor) ProcessRefund(opts *bind.TransactOpts, user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "processRefund", user, provider)
 }
 
-// ProcessRefund is a paid mutator transaction binding the contract method 0xb9795b6d.
+// ProcessRefund is a paid mutator transaction binding the contract method 0x4e3c4f22.
 //
-// Solidity: function processRefund(address provider) returns(uint256 totalAmount, uint256 balance, uint256 pendingRefund)
-func (_InferenceServing *InferenceServingSession) ProcessRefund(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.ProcessRefund(&_InferenceServing.TransactOpts, provider)
+// Solidity: function processRefund(address user, address provider) returns(uint256 totalAmount, uint256 balance, uint256 pendingRefund)
+func (_InferenceServing *InferenceServingSession) ProcessRefund(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.ProcessRefund(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// ProcessRefund is a paid mutator transaction binding the contract method 0xb9795b6d.
+// ProcessRefund is a paid mutator transaction binding the contract method 0x4e3c4f22.
 //
-// Solidity: function processRefund(address provider) returns(uint256 totalAmount, uint256 balance, uint256 pendingRefund)
-func (_InferenceServing *InferenceServingTransactorSession) ProcessRefund(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.ProcessRefund(&_InferenceServing.TransactOpts, provider)
+// Solidity: function processRefund(address user, address provider) returns(uint256 totalAmount, uint256 balance, uint256 pendingRefund)
+func (_InferenceServing *InferenceServingTransactorSession) ProcessRefund(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.ProcessRefund(&_InferenceServing.TransactOpts, user, provider)
 }
 
 // RemoveService is a paid mutator transaction binding the contract method 0xf51acaea.
@@ -668,46 +699,25 @@ func (_InferenceServing *InferenceServingTransactorSession) RenounceOwnership() 
 	return _InferenceServing.Contract.RenounceOwnership(&_InferenceServing.TransactOpts)
 }
 
-// RequestRefund is a paid mutator transaction binding the contract method 0x99652de7.
+// RequestRefundAll is a paid mutator transaction binding the contract method 0x6c79158d.
 //
-// Solidity: function requestRefund(address provider, uint256 amount) returns()
-func (_InferenceServing *InferenceServingTransactor) RequestRefund(opts *bind.TransactOpts, provider common.Address, amount *big.Int) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "requestRefund", provider, amount)
+// Solidity: function requestRefundAll(address user, address provider) returns()
+func (_InferenceServing *InferenceServingTransactor) RequestRefundAll(opts *bind.TransactOpts, user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "requestRefundAll", user, provider)
 }
 
-// RequestRefund is a paid mutator transaction binding the contract method 0x99652de7.
+// RequestRefundAll is a paid mutator transaction binding the contract method 0x6c79158d.
 //
-// Solidity: function requestRefund(address provider, uint256 amount) returns()
-func (_InferenceServing *InferenceServingSession) RequestRefund(provider common.Address, amount *big.Int) (*types.Transaction, error) {
-	return _InferenceServing.Contract.RequestRefund(&_InferenceServing.TransactOpts, provider, amount)
+// Solidity: function requestRefundAll(address user, address provider) returns()
+func (_InferenceServing *InferenceServingSession) RequestRefundAll(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.RequestRefundAll(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// RequestRefund is a paid mutator transaction binding the contract method 0x99652de7.
+// RequestRefundAll is a paid mutator transaction binding the contract method 0x6c79158d.
 //
-// Solidity: function requestRefund(address provider, uint256 amount) returns()
-func (_InferenceServing *InferenceServingTransactorSession) RequestRefund(provider common.Address, amount *big.Int) (*types.Transaction, error) {
-	return _InferenceServing.Contract.RequestRefund(&_InferenceServing.TransactOpts, provider, amount)
-}
-
-// RequestRefundAll is a paid mutator transaction binding the contract method 0xd81577ef.
-//
-// Solidity: function requestRefundAll(address provider) returns()
-func (_InferenceServing *InferenceServingTransactor) RequestRefundAll(opts *bind.TransactOpts, provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "requestRefundAll", provider)
-}
-
-// RequestRefundAll is a paid mutator transaction binding the contract method 0xd81577ef.
-//
-// Solidity: function requestRefundAll(address provider) returns()
-func (_InferenceServing *InferenceServingSession) RequestRefundAll(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.RequestRefundAll(&_InferenceServing.TransactOpts, provider)
-}
-
-// RequestRefundAll is a paid mutator transaction binding the contract method 0xd81577ef.
-//
-// Solidity: function requestRefundAll(address provider) returns()
-func (_InferenceServing *InferenceServingTransactorSession) RequestRefundAll(provider common.Address) (*types.Transaction, error) {
-	return _InferenceServing.Contract.RequestRefundAll(&_InferenceServing.TransactOpts, provider)
+// Solidity: function requestRefundAll(address user, address provider) returns()
+func (_InferenceServing *InferenceServingTransactorSession) RequestRefundAll(user common.Address, provider common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.RequestRefundAll(&_InferenceServing.TransactOpts, user, provider)
 }
 
 // SettleFees is a paid mutator transaction binding the contract method 0x78c00436.

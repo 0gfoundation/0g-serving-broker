@@ -31,7 +31,7 @@ var (
 
 // VerifierLibraryMetaData contains all meta data concerning the VerifierLibrary contract.
 var VerifierLibraryMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"internalType\":\"bytes32\",\"name\":\"ethSignedMessageHash\",\"type\":\"bytes32\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"}],\"name\":\"recoverSigner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"pure\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes\",\"name\":\"sig\",\"type\":\"bytes\"}],\"name\":\"splitSignature\",\"outputs\":[{\"internalType\":\"bytes32\",\"name\":\"r\",\"type\":\"bytes32\"},{\"internalType\":\"bytes32\",\"name\":\"s\",\"type\":\"bytes32\"},{\"internalType\":\"uint8\",\"name\":\"v\",\"type\":\"uint8\"}],\"stateMutability\":\"pure\",\"type\":\"function\"}]",
+	ABI: "[]",
 }
 
 // VerifierLibraryABI is the input ABI used to generate the binding from.
@@ -178,85 +178,4 @@ func (_VerifierLibrary *VerifierLibraryTransactorRaw) Transfer(opts *bind.Transa
 // Transact invokes the (paid) contract method with params as input values.
 func (_VerifierLibrary *VerifierLibraryTransactorRaw) Transact(opts *bind.TransactOpts, method string, params ...interface{}) (*types.Transaction, error) {
 	return _VerifierLibrary.Contract.contract.Transact(opts, method, params...)
-}
-
-// RecoverSigner is a free data retrieval call binding the contract method 0x97aba7f9.
-//
-// Solidity: function recoverSigner(bytes32 ethSignedMessageHash, bytes signature) pure returns(address)
-func (_VerifierLibrary *VerifierLibraryCaller) RecoverSigner(opts *bind.CallOpts, ethSignedMessageHash [32]byte, signature []byte) (common.Address, error) {
-	var out []interface{}
-	err := _VerifierLibrary.contract.Call(opts, &out, "recoverSigner", ethSignedMessageHash, signature)
-
-	if err != nil {
-		return *new(common.Address), err
-	}
-
-	out0 := *abi.ConvertType(out[0], new(common.Address)).(*common.Address)
-
-	return out0, err
-
-}
-
-// RecoverSigner is a free data retrieval call binding the contract method 0x97aba7f9.
-//
-// Solidity: function recoverSigner(bytes32 ethSignedMessageHash, bytes signature) pure returns(address)
-func (_VerifierLibrary *VerifierLibrarySession) RecoverSigner(ethSignedMessageHash [32]byte, signature []byte) (common.Address, error) {
-	return _VerifierLibrary.Contract.RecoverSigner(&_VerifierLibrary.CallOpts, ethSignedMessageHash, signature)
-}
-
-// RecoverSigner is a free data retrieval call binding the contract method 0x97aba7f9.
-//
-// Solidity: function recoverSigner(bytes32 ethSignedMessageHash, bytes signature) pure returns(address)
-func (_VerifierLibrary *VerifierLibraryCallerSession) RecoverSigner(ethSignedMessageHash [32]byte, signature []byte) (common.Address, error) {
-	return _VerifierLibrary.Contract.RecoverSigner(&_VerifierLibrary.CallOpts, ethSignedMessageHash, signature)
-}
-
-// SplitSignature is a free data retrieval call binding the contract method 0xa7bb5803.
-//
-// Solidity: function splitSignature(bytes sig) pure returns(bytes32 r, bytes32 s, uint8 v)
-func (_VerifierLibrary *VerifierLibraryCaller) SplitSignature(opts *bind.CallOpts, sig []byte) (struct {
-	R [32]byte
-	S [32]byte
-	V uint8
-}, error) {
-	var out []interface{}
-	err := _VerifierLibrary.contract.Call(opts, &out, "splitSignature", sig)
-
-	outstruct := new(struct {
-		R [32]byte
-		S [32]byte
-		V uint8
-	})
-	if err != nil {
-		return *outstruct, err
-	}
-
-	outstruct.R = *abi.ConvertType(out[0], new([32]byte)).(*[32]byte)
-	outstruct.S = *abi.ConvertType(out[1], new([32]byte)).(*[32]byte)
-	outstruct.V = *abi.ConvertType(out[2], new(uint8)).(*uint8)
-
-	return *outstruct, err
-
-}
-
-// SplitSignature is a free data retrieval call binding the contract method 0xa7bb5803.
-//
-// Solidity: function splitSignature(bytes sig) pure returns(bytes32 r, bytes32 s, uint8 v)
-func (_VerifierLibrary *VerifierLibrarySession) SplitSignature(sig []byte) (struct {
-	R [32]byte
-	S [32]byte
-	V uint8
-}, error) {
-	return _VerifierLibrary.Contract.SplitSignature(&_VerifierLibrary.CallOpts, sig)
-}
-
-// SplitSignature is a free data retrieval call binding the contract method 0xa7bb5803.
-//
-// Solidity: function splitSignature(bytes sig) pure returns(bytes32 r, bytes32 s, uint8 v)
-func (_VerifierLibrary *VerifierLibraryCallerSession) SplitSignature(sig []byte) (struct {
-	R [32]byte
-	S [32]byte
-	V uint8
-}, error) {
-	return _VerifierLibrary.Contract.SplitSignature(&_VerifierLibrary.CallOpts, sig)
 }
