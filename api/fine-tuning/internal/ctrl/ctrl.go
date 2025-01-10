@@ -1,6 +1,8 @@
 package ctrl
 
 import (
+	"crypto/ecdsa"
+
 	"github.com/0glabs/0g-serving-broker/common/chain"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
@@ -23,6 +25,9 @@ type Ctrl struct {
 	indexerTurboClient    *indexer.Client
 	services              []config.Service
 	logger                log.Logger
+
+	providerSigner *ecdsa.PrivateKey
+	quote          string
 }
 
 func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {

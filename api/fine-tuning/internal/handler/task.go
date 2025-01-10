@@ -55,6 +55,23 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, task)
 }
 
+// getQuote
+//
+//	@Description  This endpoint allows you to get quote
+//	@ID			getQuote
+//	@Tags		quote
+//	@Router		/quote [post]
+//	@Success	200		{object}	quote
+func (h *Handler) GetQuote(ctx *gin.Context) {
+	quote, err := h.ctrl.GetQuote(ctx)
+	if err != nil {
+		handleBrokerError(ctx, err, "read quote")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, quote)
+}
+
 func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 	id, err := uuid.Parse(ctx.Param("taskID"))
 	if err != nil {
