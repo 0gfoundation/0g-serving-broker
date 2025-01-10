@@ -11,8 +11,16 @@ import (
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) error {
+	count, err := c.db.InProgressTaskCount()
+	if err != nil {
+		return err
+	}
 
-	err := c.db.AddTask(&task)
+	if count != 0 {
+		return errors.New("cannot create a new task while there is an in-progress task")
+	}
+
+	err = c.db.AddTask(&task)
 	if err != nil {
 		return errors.Wrap(err, "create task in db")
 	}

@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
 )
 
 func GenerateRandomString() (string, error) {
@@ -92,6 +94,10 @@ func ZipDirectory(sourceDir, destinationZip string) error {
 				return nil
 			}
 
+			if info.IsDir() {
+				return nil
+			}
+
 			f, err := os.Open(file)
 			if err != nil {
 				return err
@@ -130,7 +136,6 @@ func ZipDirectory(sourceDir, destinationZip string) error {
 		if err != nil {
 			return err
 		}
-		header.Name = sourceDir
 
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
@@ -142,28 +147,95 @@ func ZipDirectory(sourceDir, destinationZip string) error {
 	}
 }
 
-func UploadEncryptFile(sourceDir string, ciphertext []byte, tagSig []byte) ([]byte, error) {
+func WriteToFile(sourceDir string, ciphertext []byte, tagSig []byte) (string, error) {
 	encryptFile, err := GetFileName(sourceDir, ".data")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	err = os.WriteFile(encryptFile, append(ciphertext, tagSig...), 0644)
 
-	defer func() {
-		_, err := os.Stat(encryptFile)
-		if err != nil && os.IsNotExist(err) {
-			return
-		}
-		_ = os.Remove(encryptFile)
-	}()
-
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	// todo: upload encryptFile and get model root hash
-	modelRootHash := []byte{}
+	return encryptFile, nil
+}
 
-	return modelRootHash, nil
+func FileContentSize(filePath string) (int64, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return 0, errors.Wrap(err, "opening file")
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return 0, errors.Wrap(err, "getting file info")
+	}
+
+	return fileInfo.Size(), nil
+}
+
+// Unzip extracts a ZIP archive to a specified destination folder.
+func Unzip(src string, dest string) error {
+	// Open the zip file
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	// Ensure the destination folder exists
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+
+	// Extract each file from the zip archive
+	for _, f := range r.File {
+		filePath := filepath.Join(dest, f.Name)
+
+		// Ensure the path is safe (prevent directory traversal)
+		if !filepath.HasPrefix(filePath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal file path: %s", filePath)
+		}
+
+		// If it's a directory, create it
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(filePath, f.Mode()); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Create the file
+		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+			return err
+		}
+
+		outFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return err
+		}
+
+		// Open the file in the zip archive
+		rc, err := f.Open()
+		if err != nil {
+			outFile.Close()
+			return err
+		}
+
+		// Copy the contents of the file
+		_, err = io.Copy(outFile, rc)
+
+		// Close resources
+		outFile.Close()
+		rc.Close()
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

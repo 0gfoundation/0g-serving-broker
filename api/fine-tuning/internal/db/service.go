@@ -20,3 +20,9 @@ func (d *DB) UpdateTask(id *uuid.UUID, new schema.Task) error {
 	ret := d.db.Where(&schema.Task{ID: id}).Updates(new)
 	return ret.Error
 }
+
+func (d *DB) InProgressTaskCount() (int64, error) {
+	var count int64
+	d.db.Model(&schema.Task{}).Where("Progress <> ?", schema.ProgressFinished).Count(&count)
+	return count, nil
+}

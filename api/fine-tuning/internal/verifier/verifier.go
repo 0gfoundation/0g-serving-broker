@@ -8,11 +8,14 @@ import (
 	"encoding/gob"
 	"fmt"
 	"math/big"
+	"os"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -42,10 +45,10 @@ func (s *SignatureMetadata) Serialize() ([]byte, error) {
 }
 
 type SettlementMetadata struct {
-	modelRootHash   []byte
-	secret          []byte
-	encryptedSecret []byte
-	signature       []byte
+	ModelRootHash   []byte
+	Secret          []byte
+	EncryptedSecret []byte
+	Signature       []byte
 }
 
 func (s *SettlementMetadata) Serialize() ([]byte, error) {
@@ -64,26 +67,55 @@ type Verifier struct {
 	logger   log.Logger
 }
 
-func (v *Verifier) PreVerify(ctx context.Context, totalFee *big.Int, signatureHex string, signatureMetadata SignatureMetadata) error {
-	if totalFee.Cmp(signatureMetadata.taskFee) < 0 {
+func New(contract *providercontract.ProviderContract, logger log.Logger) (*Verifier, error) {
+	return &Verifier{
+		contract: contract,
+		users:    make(map[common.Address]*ecdsa.PublicKey),
+		logger:   logger,
+	}, nil
+}
+
+func (v *Verifier) PreVerify(ctx context.Context, tokenSize int64, pricePerToken int64, task *schema.Task) error {
+	totalFee := new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken))
+	fee, err := util.HexadecimalStringToBigInt(task.Fee)
+	if err != nil {
+		return err
+	}
+
+	if totalFee.Cmp(fee) > 0 {
 		return errors.New("not enough task fee")
 	}
 
-	account, err := v.contract.GetUserAccount(ctx, signatureMetadata.userAddress)
+	customerAddress := common.HexToAddress(task.CustomerAddress)
+	account, err := v.contract.GetUserAccount(ctx, customerAddress)
 	if err != nil {
 		return err
 	}
 
 	amount := new(big.Int).Sub(account.Balance, account.PendingRefund)
-	if amount.Cmp(signatureMetadata.taskFee) < 0 {
+	if amount.Cmp(fee) < 0 {
 		return errors.New("not enough balance")
 	}
 
-	if account.Nonce.Cmp(signatureMetadata.nonce) > 0 {
+	nonce, err := util.HexadecimalStringToBigInt(task.Nonce)
+	if err != nil {
+		return err
+	}
+	if account.Nonce.Cmp(nonce) > 0 {
 		return errors.New("invalid nonce")
 	}
 
-	return v.verifyUserSignature(ctx, signatureHex, signatureMetadata)
+	datasetHash, err := hexutil.Decode(task.DatasetHash)
+	if err != nil {
+		return errors.Wrap(err, "decoding DatasetHash")
+	}
+
+	return v.verifyUserSignature(ctx, task.Signature, SignatureMetadata{
+		taskFee:      fee,
+		fileRootHash: datasetHash,
+		userAddress:  customerAddress,
+		nonce:        nonce,
+	})
 }
 
 func (v *Verifier) verifyUserSignature(ctx context.Context, signatureHex string, signatureMetadata SignatureMetadata) error {
@@ -121,18 +153,18 @@ func (v *Verifier) verifyUserSignature(ctx context.Context, signatureHex string,
 	return nil
 }
 
-func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, user common.Address, deliverIndex uint64, taskFee string, nonce string) (*SettlementMetadata, error) {
+func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, deliverIndex uint64, task *schema.Task, storage *storage.Client) (*SettlementMetadata, error) {
 	plaintext, err := util.ZipAndGetContent(sourceDir)
 	if err != nil {
 		return nil, err
 	}
 
-	key, err := util.GenerateAESKey(aesKeySize)
+	aesKey, err := util.GenerateAESKey(aesKeySize)
 	if err != nil {
 		return nil, err
 	}
 
-	ciphertext, tag, err := util.AesEncrypt(key, plaintext)
+	ciphertext, tag, err := util.AesEncrypt(aesKey, plaintext)
 	if err != nil {
 		return nil, err
 	}
@@ -142,27 +174,45 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.Wrap(err, "sign tag")
 	}
 
-	modelRootHash, err := util.UploadEncryptFile(sourceDir, ciphertext, tagSig)
+	encryptFile, err := util.WriteToFile(sourceDir, ciphertext, tagSig)
+	defer func() {
+		_, err := os.Stat(encryptFile)
+		if err != nil && os.IsNotExist(err) {
+			return
+		}
+		_ = os.Remove(encryptFile)
+	}()
+
 	if err != nil {
 		return nil, err
 	}
 
-	err = v.contract.AddDeliverable(ctx, user, deliverIndex, modelRootHash)
+	modelRootHashes, err := storage.UploadToStorage(ctx, encryptFile, task.IsTurbo)
 	if err != nil {
 		return nil, err
 	}
 
-	return v.GenerateTeeSignature(user, key, modelRootHash, taskFee, nonce, providerPriv)
+	if len(modelRootHashes) != 1 {
+		return nil, errors.New(fmt.Sprintf("invalid model root hashes: %v", modelRootHashes))
+	}
+
+	user := common.HexToAddress(task.CustomerAddress)
+	err = v.contract.AddDeliverable(ctx, user, deliverIndex, modelRootHashes[0].Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	return v.GenerateTeeSignature(ctx, user, aesKey, modelRootHashes[0].Bytes(), task.Fee, task.Nonce, providerPriv)
 }
 
-func (v *Verifier) GenerateTeeSignature(user common.Address, key []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
+func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
 	publicKey, ok := v.users[user]
 	if !ok {
 		return nil, errors.New(fmt.Sprintf("public key for user %v not exist", user))
 	}
 
 	eciesPublicKey := ecies.ImportECDSAPublic(publicKey)
-	encryptedSecret, err := ecies.Encrypt(rand.Reader, eciesPublicKey, key, nil, nil)
+	encryptedSecret, err := ecies.Encrypt(rand.Reader, eciesPublicKey, aesKey, nil, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "encrypting secret")
 	}
@@ -178,10 +228,10 @@ func (v *Verifier) GenerateTeeSignature(user common.Address, key []byte, modelRo
 	}
 
 	return &SettlementMetadata{
-		modelRootHash:   modelRootHash,
-		secret:          key,
-		encryptedSecret: encryptedSecret,
-		signature:       sig,
+		ModelRootHash:   modelRootHash,
+		Secret:          aesKey,
+		EncryptedSecret: encryptedSecret,
+		Signature:       sig,
 	}, nil
 }
 

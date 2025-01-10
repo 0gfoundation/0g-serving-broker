@@ -8,10 +8,12 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
+	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
-
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/handler"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/verifier"
 	"github.com/gin-gonic/gin"
 )
 
@@ -41,7 +43,23 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, config, logger)
+	storageClient, err := storage.New(config, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	contract, err := providercontract.NewProviderContract(config, logger)
+	if err != nil {
+		panic(err)
+	}
+	defer contract.Close()
+
+	verifier, err := verifier.New(contract, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	ctrl := ctrl.New(db, config, contract, storageClient, verifier, logger)
 
 	ctx := context.Background()
 	err = ctrl.SyncServices(ctx)

@@ -9,6 +9,11 @@ import (
 	"gorm.io/plugin/soft_delete"
 )
 
+const (
+	ProgressInProgress = "InProgress"
+	ProgressFinished   = "Finished"
+)
+
 type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
@@ -21,6 +26,12 @@ type Task struct {
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee" binding:"required"`
+	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce" binding:"required"`
+	Signature           string                `gorm:"type:varchar(132);not null" json:"signature" binding:"required"`
+	Secret              string                `gorm:"type:varchar(40)" json:"secret" binding:"required"`
+	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret" binding:"required"`
+	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" binding:"required"`
 }
 
 // BeforeCreate hook for generating a UUID
@@ -43,6 +54,9 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	d.DatasetHash = r.DatasetHash
 	d.TrainingParams = r.TrainingParams
 	d.IsTurbo = r.IsTurbo
+	d.Fee = r.Fee
+	d.Nonce = r.Nonce
+	d.Signature = r.Signature
 	return nil
 }
 
