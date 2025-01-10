@@ -2,8 +2,6 @@ basePath: /v1
 definitions:
   schema.Task:
     properties:
-      command:
-        type: string
       createdAt:
         readOnly: true
         type: string
@@ -11,28 +9,28 @@ definitions:
         type: string
       datasetHash:
         type: string
-      epochNumber:
-        type: integer
-      fineTunedScriptHash:
-        type: string
       id:
         readOnly: true
+        type: string
+      isTurbo:
+        type: boolean
+      outputRootHash:
         type: string
       preTrainedModelHash:
         type: string
       progress:
-        readOnly: true
-        type: integer
+        type: string
+      trainingParams:
+        type: string
       updatedAt:
         readOnly: true
         type: string
     required:
-    - command
     - customerAddress
     - datasetHash
-    - epochNumber
-    - fineTunedScriptHash
+    - isTurbo
     - preTrainedModelHash
+    - trainingParams
     type: object
 host: localhost:3080
 info:

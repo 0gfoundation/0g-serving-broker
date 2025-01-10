@@ -11,7 +11,6 @@ import (
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) error {
-
 	err := c.db.AddTask(&task)
 	if err != nil {
 		return errors.Wrap(err, "create task in db")

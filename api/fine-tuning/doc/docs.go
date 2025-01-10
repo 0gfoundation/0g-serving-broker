@@ -71,17 +71,13 @@ const docTemplate = `{
         "schema.Task": {
             "type": "object",
             "required": [
-                "command",
                 "customerAddress",
                 "datasetHash",
-                "epochNumber",
-                "fineTunedScriptHash",
-                "preTrainedModelHash"
+                "isTurbo",
+                "preTrainedModelHash",
+                "trainingParams"
             ],
             "properties": {
-                "command": {
-                    "type": "string"
-                },
                 "createdAt": {
                     "type": "string",
                     "readOnly": true
@@ -92,22 +88,24 @@ const docTemplate = `{
                 "datasetHash": {
                     "type": "string"
                 },
-                "epochNumber": {
-                    "type": "integer"
-                },
-                "fineTunedScriptHash": {
-                    "type": "string"
-                },
                 "id": {
                     "type": "string",
                     "readOnly": true
+                },
+                "isTurbo": {
+                    "type": "boolean"
+                },
+                "outputRootHash": {
+                    "type": "string"
                 },
                 "preTrainedModelHash": {
                     "type": "string"
                 },
                 "progress": {
-                    "type": "integer",
-                    "readOnly": true
+                    "type": "string"
+                },
+                "trainingParams": {
+                    "type": "string"
                 },
                 "updatedAt": {
                     "type": "string",

@@ -6,6 +6,7 @@ toolchain go1.22.10
 
 require (
 	github.com/0glabs/0g-storage-client v0.6.2
+	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20250104005905-a5edadf269e6
 	github.com/andybalholm/brotli v1.1.0
 	github.com/docker/docker v27.4.1+incompatible
 	github.com/ethereum/go-ethereum v1.14.7
@@ -29,8 +30,9 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/swaggo/swag v1.16.3
 	gopkg.in/yaml.v2 v2.4.0
+	gorm.io/datatypes v1.2.5
 	gorm.io/driver/mysql v1.5.7
-	gorm.io/gorm v1.25.10
+	gorm.io/gorm v1.25.11
 	gorm.io/plugin/soft_delete v1.2.1
 	k8s.io/apimachinery v0.30.2
 	k8s.io/client-go v0.30.1
@@ -39,7 +41,6 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20250104005905-a5edadf269e6 // indirect
 	github.com/DataDog/zstd v1.4.5 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect

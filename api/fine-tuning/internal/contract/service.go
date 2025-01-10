@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -49,6 +50,8 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		service.ServingUrl,
 		quota,
 		pricePerToken,
+		// TODO: replace by real provider signer address
+		common.HexToAddress("0x111111"),
 		false,
 	)
 	if err != nil {

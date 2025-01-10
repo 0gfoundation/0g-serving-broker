@@ -31,7 +31,6 @@ type Ctrl struct {
 }
 
 func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {
-
 	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
 		panic(err)
@@ -65,7 +64,7 @@ func New(db *db.DB, config *config.Config, logger log.Logger) *Ctrl {
 		LogOption:      common.LogOption{LogLevel: logrus.InfoLevel},
 	})
 	if err != nil {
-		return nil
+		panic(err)
 	}
 
 	indexerTurboClient, err := indexer.NewClient(config.StorageClientConfig.IndexerTurbo, indexer.IndexerClientOption{

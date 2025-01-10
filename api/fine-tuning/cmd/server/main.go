@@ -51,7 +51,8 @@ func Main() {
 
 	err = ctrl.SyncQuote(ctx)
 	if err != nil {
-		panic(err)
+		// TODO: panic error
+		logger.Errorf("Error syncing quote: %v", err)
 	}
 
 	engine := gin.New()
