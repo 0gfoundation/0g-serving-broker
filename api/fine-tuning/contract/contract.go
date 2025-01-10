@@ -19,7 +19,7 @@ import (
 // ServingContract wraps the EthereumClient to interact with the serving contract deployed in EVM based Blockchain
 type ServingContract struct {
 	*Contract
-	*InferenceServing
+	*FineTuningServing
 }
 
 type RetryOption struct {
@@ -49,7 +49,7 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 		address: servingAddress,
 	}
 
-	serving, err := NewInferenceServing(servingAddress, ethereumClient.Client)
+	serving, err := NewFineTuningServing(servingAddress, ethereumClient.Client)
 	if err != nil {
 		return nil, err
 	}

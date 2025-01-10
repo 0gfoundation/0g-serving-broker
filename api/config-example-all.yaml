@@ -7,6 +7,10 @@ database:
 # OG serving contract address used
 contractAddress: 0x2404dCdA9eddAf03B2B96aD0705A10D1B0755Bf6
 
+# 0G storage indexer URLs
+indexerStandardUrl: "https://indexer-storage-testnet-standard.0g.ai"
+indexerTurboUrl: "https://indexer-storage-testnet-turbo.0g.ai"
+
 event:
   # The address and port where the provider service listens for events.
   providerAddr: ":8088"

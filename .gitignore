@@ -1,3 +1,15 @@
 .vscode
 
 
+0g-serving-broker
+# example
+.env
+data-node
+images
+logs
+meili_data_v1.7
+
+**/prometheus/data
+**/grafana
+
+**.local.*
