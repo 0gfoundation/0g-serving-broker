@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/0glabs/0g-serving-broker/common/config"
+	providers "github.com/openweb3/go-rpc-provider/provider_wrapper"
 )
 
 type Service struct {
@@ -28,10 +29,30 @@ type Config struct {
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks   config.Networks     `mapstructure:"networks" yaml:"networks"`
-	ServingUrl string              `yaml:"servingUrl"`
-	Services   []Service           `mapstructure:"services" yaml:"services"`
-	Logger     config.LoggerConfig `yaml:"logger"`
+	Networks            config.Networks     `mapstructure:"networks" yaml:"networks"`
+	StorageClientConfig StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
+	ServingUrl          string              `yaml:"servingUrl"`
+	Services            []Service           `mapstructure:"services" yaml:"services"`
+	ProviderOption      providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
+	Logger              config.LoggerConfig `yaml:"logger"`
+}
+
+type StorageClientConfig struct {
+	IndexerStandard string     `yaml:"indexerStandard"`
+	IndexerTurbo    string     `yaml:"indexerTurbo"`
+	UploadArgs      UploadArgs `yaml:"uploadArgs"`
+}
+
+type UploadArgs struct {
+	Tags            string `yaml:"tags"`
+	ExpectedReplica uint   `yaml:"expectedReplica"`
+
+	SkipTx           bool `yaml:"skipTx"`
+	FinalityRequired bool `yaml:"finalityRequired"`
+	TaskSize         uint `yaml:"taskSize"`
+	Routines         int  `yaml:"routines"`
+
+	FragmentSize int64 `yaml:"fragmentSize"`
 }
 
 var (

@@ -5,11 +5,8 @@ import (
 	"github.com/google/uuid"
 )
 
-func (d *DB) AddTasks(services []schema.Task) error {
-	if len(services) == 0 {
-		return nil
-	}
-	ret := d.db.Create(&services)
+func (d *DB) AddTask(task *schema.Task) error {
+	ret := d.db.Create(&task)
 	return ret.Error
 }
 
