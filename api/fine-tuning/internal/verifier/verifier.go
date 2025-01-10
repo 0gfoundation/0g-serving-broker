@@ -75,7 +75,7 @@ func New(contract *providercontract.ProviderContract, logger log.Logger) (*Verif
 	}, nil
 }
 
-func (v *Verifier) PreVerify(ctx context.Context, tokenSize int64, pricePerToken int64, task *schema.Task) error {
+func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey, tokenSize int64, pricePerToken int64, task *schema.Task) error {
 	totalFee := new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken))
 	fee, err := util.HexadecimalStringToBigInt(task.Fee)
 	if err != nil {
@@ -103,6 +103,10 @@ func (v *Verifier) PreVerify(ctx context.Context, tokenSize int64, pricePerToken
 	}
 	if account.Nonce.Cmp(nonce) > 0 {
 		return errors.New("invalid nonce")
+	}
+
+	if account.ProviderSigner == ethcrypto.PubkeyToAddress(providerPriv.PublicKey) {
+		return errors.New("user not acknowledged")
 	}
 
 	datasetHash, err := hexutil.Decode(task.DatasetHash)

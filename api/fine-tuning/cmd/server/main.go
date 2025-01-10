@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/handler"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/settlement"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/verifier"
 	"github.com/gin-gonic/gin"
@@ -78,6 +79,12 @@ func Main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	settlement, err := settlement.New(logger)
+	if err != nil {
+		panic(err)
+	}
+	settlement.Start(ctx)
 
 	go func() {
 		// Listen and Serve, config port with PORT=X

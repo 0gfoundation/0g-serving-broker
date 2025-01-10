@@ -3,7 +3,6 @@ package util
 import (
 	"archive/zip"
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +18,7 @@ func GenerateRandomString() (string, error) {
 		return "", fmt.Errorf("failed to generate random bytes: %v", err)
 	}
 
-	return hex.EncodeToString(randomBytes), nil
+	return string(randomBytes), nil
 }
 
 func GetFileName(prefix, extension string) (string, error) {

@@ -9,10 +9,20 @@ import (
 	"gorm.io/plugin/soft_delete"
 )
 
+type ProgressState int
+
 const (
-	ProgressInProgress = "InProgress"
-	ProgressFinished   = "Finished"
+	ProgressStateUnknown ProgressState = iota
+	ProgressStateInProgress
+	ProgressStateDelivered
+	ProgressStateUserAckDelivered
+	ProgressStateFinished
+	ProgressStateFailed
 )
+
+func (p ProgressState) String() string {
+	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "Finished", "Failed"}[p]
+}
 
 type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
@@ -57,6 +67,7 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	d.Fee = r.Fee
 	d.Nonce = r.Nonce
 	d.Signature = r.Signature
+	d.Progress = ProgressStateUnknown.String()
 	return nil
 }
 

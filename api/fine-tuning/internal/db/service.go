@@ -23,6 +23,12 @@ func (d *DB) UpdateTask(id *uuid.UUID, new schema.Task) error {
 
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
-	d.db.Model(&schema.Task{}).Where("Progress <> ?", schema.ProgressFinished).Count(&count)
+	d.db.Model(&schema.Task{}).Where("Progress <> ?", schema.ProgressStateFinished.String()).Count(&count)
 	return count, nil
+}
+
+func (d *DB) GetUserAckDeliveredTasks() ([]schema.Task, error) {
+	var filteredTasks []schema.Task
+	d.db.Where(&schema.Task{Progress: schema.ProgressStateUserAckDelivered.String()}).Find(&filteredTasks)
+	return filteredTasks, nil
 }

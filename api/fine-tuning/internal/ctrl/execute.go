@@ -78,7 +78,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPat
 	if err != nil {
 		return err
 	}
-	if err := c.verifier.PreVerify(ctx, tokenSize, c.services[0].PricePerToken, &task); err != nil {
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.services[0].PricePerToken, &task); err != nil {
 		return err
 	}
 
@@ -181,7 +181,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 	err = c.db.UpdateTask(task.ID,
 		schema.Task{
-			Progress:        schema.ProgressFinished,
+			Progress:        schema.ProgressStateDelivered.String(),
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
 			Secret:          string(settlementMetadata.Secret),
 			EncryptedSecret: string(settlementMetadata.EncryptedSecret),
