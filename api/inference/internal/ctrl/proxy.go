@@ -93,7 +93,9 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
 		handleBrokerError(ctx, err, "read from body")
 		return
 	}
-	ctx.Writer.Write(body)
+	if _, err := ctx.Writer.Write(body); err != nil {
+		handleBrokerError(ctx, err, "write response body")
+	}
 }
 
 func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice string) {
@@ -127,7 +129,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, ext
 		return
 	}
 
-	ctx.Writer.Write(body)
+	if _, err := ctx.Writer.Write(body); err != nil {
+		handleBrokerError(ctx, err, "write response body")
+	}
 }
 
 func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice string) {
@@ -232,5 +236,8 @@ func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 		log.Println(err)
 		return
 	}
-	ctx.Writer.Write(respBody)
+	if _, err := ctx.Writer.Write(respBody); err != nil {
+		// TODO: recorded to log system
+		log.Println(err)
+	}
 }

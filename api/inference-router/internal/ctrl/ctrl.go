@@ -45,5 +45,8 @@ func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 		log.Println(err)
 		return
 	}
-	ctx.Writer.Write(respBody)
+	if _, err := ctx.Writer.Write(respBody); err != nil {
+		// TODO: recorded to log system
+		log.Println(err)
+	}
 }

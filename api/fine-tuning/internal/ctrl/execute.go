@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/0glabs/0g-storage-client/indexer"
@@ -307,7 +308,7 @@ func (c *Ctrl) unzip(src string, dest string) error {
 		filePath := filepath.Join(dest, f.Name)
 
 		// Ensure the path is safe (prevent directory traversal)
-		if !filepath.HasPrefix(filePath, filepath.Clean(dest)+string(os.PathSeparator)) {
+		if !strings.HasPrefix(filePath, filepath.Clean(dest)+string(os.PathSeparator)) {
 			return fmt.Errorf("illegal file path: %s", filePath)
 		}
 
