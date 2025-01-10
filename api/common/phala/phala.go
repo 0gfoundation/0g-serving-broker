@@ -13,6 +13,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -69,11 +70,22 @@ func Quote(ctx context.Context, reportData string) (string, error) {
 }
 
 func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
-	client := tappd.NewTappdClient()
-	deriveKeyResp, err := client.DeriveKey(ctx, "/")
+	// Todo: Uncomment this code
+	// client := tappd.NewTappdClient()
 
+	// deriveKeyResp, err := client.DeriveKey(ctx, "/")
+
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "new tapped client")
+	// }
+
+	key, err := crypto.GenerateKey()
 	if err != nil {
-		return nil, errors.Wrap(err, "new tapped client")
+		return nil, err
+	}
+
+	deriveKeyResp := tappd.DeriveKeyResponse{
+		Key: hexutil.Encode(crypto.FromECDSA(key)),
 	}
 
 	privateKeyBytes, err := deriveKeyResp.ToBytes(-1)
