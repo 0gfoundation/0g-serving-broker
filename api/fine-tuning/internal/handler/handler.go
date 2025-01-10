@@ -25,6 +25,8 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.POST("/task", h.CreateTask)
 	group.GET("/task/:taskID", h.GetTask)
+
+	group.GET("/quote", h.GetQuote)
 	group.GET("/task-progress/:taskID", h.GetTaskProgress)
 }
 
