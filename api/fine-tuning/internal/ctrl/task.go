@@ -25,7 +25,11 @@ func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) error {
 		return errors.Wrap(err, "create task in db")
 	}
 
-	go c.Execute(ctx, task)
+	go func() {
+		if err := c.Execute(ctx, task); err != nil {
+			c.logger.Error("Error executing task: %v", err)
+		}
+	}()
 	return nil
 }
 

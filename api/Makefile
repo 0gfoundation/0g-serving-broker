@@ -4,7 +4,6 @@ BASE_IMAGE ?= gcr.io/distroless/static:latest
 ARCH	   ?= amd64
 
 export GO111MODULE := on
-export GOSUMDB	 := off
 export CGO_ENABLED := 0
 
 lint:
