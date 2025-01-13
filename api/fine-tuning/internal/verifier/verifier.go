@@ -157,7 +157,7 @@ func (v *Verifier) verifyUserSignature(ctx context.Context, signatureHex string,
 	return nil
 }
 
-func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, deliverIndex uint64, task *schema.Task, storage *storage.Client) (*SettlementMetadata, error) {
+func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, task *schema.Task, storage *storage.Client) (*SettlementMetadata, error) {
 	plaintext, err := util.ZipAndGetContent(sourceDir)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 	}
 
 	user := common.HexToAddress(task.CustomerAddress)
-	err = v.contract.AddDeliverable(ctx, user, deliverIndex, modelRootHashes[0].Bytes())
+	err = v.contract.AddDeliverable(ctx, user, modelRootHashes[0].Bytes())
 	if err != nil {
 		return nil, err
 	}

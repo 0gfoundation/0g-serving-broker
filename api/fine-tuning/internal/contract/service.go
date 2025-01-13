@@ -134,7 +134,7 @@ func (c *ProviderContract) SyncServices(ctx context.Context, news []config.Servi
 	return nil
 }
 
-func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, index uint64, modelRootHash []byte) error {
+func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, modelRootHash []byte) error {
 	opt, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err

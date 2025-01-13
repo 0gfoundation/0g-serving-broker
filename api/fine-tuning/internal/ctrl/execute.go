@@ -174,7 +174,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		c.logger.Errorf("Error reading logs: %v", err)
 	}
 
-	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, 0, &task, c.storage)
+	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, &task, c.storage)
 	if err != nil {
 		return err
 	}
