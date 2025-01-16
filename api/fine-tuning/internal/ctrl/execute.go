@@ -19,11 +19,6 @@ import (
 )
 
 const (
-	ProgressInProgress = "InProgress"
-	ProgressFinished   = "Finished"
-)
-
-const (
 	DatasetPath         = "data"
 	PretrainedModelPath = "model"
 	TrainingConfigPath  = "config.json"
@@ -191,7 +186,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 	err = c.db.UpdateTask(task.ID,
 		schema.Task{
-			Progress:       ProgressFinished,
+			Status:         schema.TaskStatusSucceeded,
 			OutputRootHash: rootStr,
 		})
 	if err != nil {

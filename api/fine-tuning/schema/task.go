@@ -19,9 +19,18 @@ type Task struct {
 	TrainingParams      string                `gorm:"type:text;not null" json:"trainingParams" binding:"required"`
 	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash"`
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
-	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
+	Status              TaskStatus            `gorm:"type:varchar(255);not null;default 'Pending'" json:"status"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
+
+type TaskStatus string
+
+const (
+	TaskStatusError     TaskStatus = "Error"
+	TaskStatusPending   TaskStatus = "Pending"
+	TaskStatusRunning   TaskStatus = "Running"
+	TaskStatusSucceeded TaskStatus = "Succeeded"
+)
 
 // BeforeCreate hook for generating a UUID
 func (t *Task) BeforeCreate(tx *gorm.DB) (err error) {

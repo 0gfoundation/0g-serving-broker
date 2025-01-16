@@ -24,12 +24,13 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.ctrl.CreateTask(ctx, task); err != nil {
+	id, err := h.ctrl.CreateTask(ctx, task)
+	if err != nil {
 		handleBrokerError(ctx, err, "register service")
 		return
 	}
 
-	ctx.Status(http.StatusNoContent)
+	ctx.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
 // getTask

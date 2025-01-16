@@ -10,18 +10,25 @@ import (
 	"github.com/google/uuid"
 )
 
-func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) error {
+func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) (*uuid.UUID, error) {
+	task.Status = schema.TaskStatusRunning
 	err := c.db.AddTask(&task)
 	if err != nil {
-		return errors.Wrap(err, "create task in db")
+		return nil, errors.Wrap(err, "create task in db")
 	}
 
 	go func() {
 		if err := c.Execute(ctx, task); err != nil {
 			c.logger.Error("Error executing task: %v", err)
+			if err := c.db.UpdateTask(task.ID, schema.Task{
+				Status: schema.TaskStatusError,
+			}); err != nil {
+				c.logger.Error("Error updating task: %v", err)
+			}
 		}
 	}()
-	return nil
+
+	return task.ID, nil
 }
 
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
