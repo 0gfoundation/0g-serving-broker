@@ -2,24 +2,34 @@ package settlement
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 type Settlement struct {
-	db            *db.DB
-	contract      *providercontract.ProviderContract
-	checkInterval time.Duration
-	logger        log.Logger
+	db             *db.DB
+	contract       *providercontract.ProviderContract
+	checkInterval  time.Duration
+	providerSigner common.Address
+	logger         log.Logger
 }
 
-func New(logger log.Logger) (*Settlement, error) {
+func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
-		logger: logger,
+		db:             db,
+		contract:       contract,
+		checkInterval:  checkInterval,
+		providerSigner: providerSigner,
+		logger:         logger,
 	}, nil
 }
 
@@ -59,6 +69,45 @@ func (s *Settlement) getPendingSettlementTask() *schema.Task {
 }
 
 func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error {
+	modelRootHash, err := hexutil.Decode(task.OutputRootHash)
+	if err != nil {
+		return err
+	}
+
+	nonce, err := util.HexadecimalStringToBigInt(task.Nonce)
+	if err != nil {
+		return err
+	}
+
+	fee, err := util.HexadecimalStringToBigInt(task.Fee)
+	if err != nil {
+		return err
+	}
+
+	signature, err := hexutil.Decode(task.Signature)
+	if err != nil {
+		return err
+	}
+
+	input := contract.VerifierInput{
+		Index:           big.NewInt(int64(task.DeliverIndex)),
+		EncryptedSecret: []byte(task.EncryptedSecret),
+		ModelRootHash:   modelRootHash,
+		Nonce:           nonce,
+		ProviderSigner:  s.providerSigner,
+		Signature:       signature,
+		TaskFee:         fee,
+		User:            common.HexToAddress(task.CustomerAddress),
+	}
+
+	if err := s.contract.SettleFees(ctx, input); err != nil {
+		return err
+	}
+
+	err = s.db.UpdateTask(task.ID,
+		schema.Task{
+			Progress: schema.ProgressStateFinished.String(),
+		})
 
 	return nil
 }

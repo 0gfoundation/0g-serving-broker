@@ -145,6 +145,8 @@ func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Addre
 		return err
 	}
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+
+	// todo return deliver index?
 	return err
 }
 

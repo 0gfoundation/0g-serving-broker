@@ -2,9 +2,11 @@ package ctrl
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 
 	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -40,4 +42,12 @@ func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 	}
 
 	return string(jsonData), nil
+}
+
+func (c *Ctrl) GetProviderSigner(ctx context.Context) (*ecdsa.PrivateKey, error) {
+	return c.providerSigner, nil
+}
+
+func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
+	return crypto.PubkeyToAddress(c.providerSigner.PublicKey)
 }

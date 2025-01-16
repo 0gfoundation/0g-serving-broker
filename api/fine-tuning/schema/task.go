@@ -36,12 +36,13 @@ type Task struct {
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
-	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee" binding:"required"`
-	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce" binding:"required"`
-	Signature           string                `gorm:"type:varchar(132);not null" json:"signature" binding:"required"`
-	Secret              string                `gorm:"type:varchar(40)" json:"secret" binding:"required"`
-	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret" binding:"required"`
-	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" binding:"required"`
+	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee"`
+	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce"`
+	Signature           string                `gorm:"type:varchar(132);not null" json:"signature"`
+	Secret              string                `gorm:"type:varchar(40)" json:"secret"`
+	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret"`
+	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature"`
+	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex"`
 }
 
 // BeforeCreate hook for generating a UUID
