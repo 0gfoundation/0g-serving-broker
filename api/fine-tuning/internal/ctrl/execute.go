@@ -65,6 +65,13 @@ func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
 		return err
 	}
 
+	for _, s := range c.services {
+		if s.Name == task.TaskName {
+			c.contract.AddOrUpdateService(ctx, s, true)
+			break
+		}
+	}
+
 	return c.handleContainerLifecycle(ctx, paths, task)
 }
 
@@ -74,6 +81,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPat
 		return err
 	}
 
+	// Todo: what's the better way to calculate the token size
 	tokenSize, err := util.FileContentSize(paths.Dataset)
 	if err != nil {
 		return err
@@ -183,7 +191,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		schema.Task{
 			Progress:        schema.ProgressStateDelivered.String(),
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
-			Secret:          string(settlementMetadata.Secret),
 			EncryptedSecret: string(settlementMetadata.EncryptedSecret),
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 		})

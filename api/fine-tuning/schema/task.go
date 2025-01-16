@@ -36,10 +36,10 @@ type Task struct {
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'InProgress'" json:"progress"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+	TaskName            string                `gorm:"type:varchar(200);not null" json:"taskName"`
 	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee"`
 	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce"`
 	Signature           string                `gorm:"type:varchar(132);not null" json:"signature"`
-	Secret              string                `gorm:"type:varchar(40)" json:"secret"`
 	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret"`
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature"`
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex"`

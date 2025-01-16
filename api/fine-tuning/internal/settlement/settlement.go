@@ -7,6 +7,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
@@ -20,15 +21,17 @@ type Settlement struct {
 	contract       *providercontract.ProviderContract
 	checkInterval  time.Duration
 	providerSigner common.Address
+	services       []config.Service
 	logger         log.Logger
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, logger log.Logger) (*Settlement, error) {
+func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, services []config.Service, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
 		db:             db,
 		contract:       contract,
 		checkInterval:  checkInterval,
 		providerSigner: providerSigner,
+		services:       services,
 		logger:         logger,
 	}, nil
 }
@@ -108,6 +111,13 @@ func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error 
 		schema.Task{
 			Progress: schema.ProgressStateFinished.String(),
 		})
+
+	for _, srv := range s.services {
+		if srv.Name == task.TaskName {
+			s.contract.AddOrUpdateService(ctx, srv, false)
+			break
+		}
+	}
 
 	return nil
 }

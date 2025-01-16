@@ -36,6 +36,7 @@ type Config struct {
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
 	Logger                      config.LoggerConfig `yaml:"logger"`
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
+	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 }
 
 type StorageClientConfig struct {

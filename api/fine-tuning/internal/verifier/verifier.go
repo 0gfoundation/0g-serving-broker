@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/ecies"
+	"github.com/ethereum/go-ethereum/params"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -62,20 +63,30 @@ func (s *SettlementMetadata) Serialize() ([]byte, error) {
 }
 
 type Verifier struct {
-	contract *providercontract.ProviderContract
-	users    map[common.Address]*ecdsa.PublicKey
-	logger   log.Logger
+	contract                *providercontract.ProviderContract
+	users                   map[common.Address]*ecdsa.PublicKey
+	balanceThresholdInEther *big.Int
+	logger                  log.Logger
 }
 
-func New(contract *providercontract.ProviderContract, logger log.Logger) (*Verifier, error) {
+func New(contract *providercontract.ProviderContract, BalanceThresholdInEther int64, logger log.Logger) (*Verifier, error) {
 	return &Verifier{
-		contract: contract,
-		users:    make(map[common.Address]*ecdsa.PublicKey),
-		logger:   logger,
+		contract:                contract,
+		users:                   make(map[common.Address]*ecdsa.PublicKey),
+		balanceThresholdInEther: new(big.Int).Mul(big.NewInt(BalanceThresholdInEther), big.NewInt(params.Ether)),
+		logger:                  logger,
 	}, nil
 }
 
 func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey, tokenSize int64, pricePerToken int64, task *schema.Task) error {
+	balance, err := v.contract.Contract.GetBalance(ctx, common.HexToAddress(v.contract.ProviderAddress), nil)
+	if err != nil {
+		return err
+	}
+	if balance.Cmp(v.balanceThresholdInEther) < 0 {
+		return errors.New("insufficient balance")
+	}
+
 	totalFee := new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken))
 	fee, err := util.HexadecimalStringToBigInt(task.Fee)
 	if err != nil {
@@ -101,11 +112,11 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	if err != nil {
 		return err
 	}
-	if account.Nonce.Cmp(nonce) > 0 {
+	if account.Nonce.Cmp(nonce) >= 0 {
 		return errors.New("invalid nonce")
 	}
 
-	if account.ProviderSigner == ethcrypto.PubkeyToAddress(providerPriv.PublicKey) {
+	if account.ProviderSigner != ethcrypto.PubkeyToAddress(providerPriv.PublicKey) {
 		return errors.New("user not acknowledged")
 	}
 
@@ -221,7 +232,7 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 		return nil, errors.Wrap(err, "encrypting secret")
 	}
 
-	settlementHash, err := getSettlementMessageHash(modelRootHash, taskFee, nonce, user, encryptedSecret)
+	settlementHash, err := getSettlementMessageHash(modelRootHash, taskFee, nonce, user, ethcrypto.PubkeyToAddress(providerPriv.PublicKey), encryptedSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -239,27 +250,31 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 	}, nil
 }
 
-func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user common.Address, encryptedSecret []byte) ([32]byte, error) {
+func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) ([32]byte, error) {
 	dataType, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
 		{
-			Name: "modelRootHash",
+			Name: "encryptedSecret",
 			Type: "bytes",
 		},
 		{
-			Name: "taskFee",
-			Type: "uint256",
+			Name: "modelRootHash",
+			Type: "bytes",
 		},
 		{
 			Name: "nonce",
 			Type: "uint256",
 		},
 		{
-			Name: "user",
+			Name: "providerSigner",
 			Type: "address",
 		},
 		{
-			Name: "encryptedSecret",
-			Type: "bytes",
+			Name: "taskFee",
+			Type: "uint256",
+		},
+		{
+			Name: "user",
+			Type: "address",
 		},
 	})
 	if err != nil {
@@ -283,17 +298,19 @@ func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string
 	}
 
 	o := struct {
-		modelRootHash   []byte
-		taskFee         *big.Int
-		nonce           *big.Int
-		user            common.Address
 		encryptedSecret []byte
+		modelRootHash   []byte
+		nonce           *big.Int
+		providerSigner  common.Address
+		taskFee         *big.Int
+		user            common.Address
 	}{
-		modelRootHash:   modelRootHash,
-		taskFee:         fee,
-		nonce:           inputNonce,
-		user:            user,
 		encryptedSecret: encryptedSecret,
+		modelRootHash:   modelRootHash,
+		nonce:           inputNonce,
+		providerSigner:  providerSigner,
+		taskFee:         fee,
+		user:            user,
 	}
 
 	bytes, err := arguments.Pack(o)

@@ -56,7 +56,7 @@ func Main() {
 	}
 	defer contract.Close()
 
-	verifier, err := verifier.New(contract, logger)
+	verifier, err := verifier.New(contract, config.BalanceThresholdInEther, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -82,7 +82,7 @@ func Main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), logger)
+	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Services, logger)
 	if err != nil {
 		panic(err)
 	}

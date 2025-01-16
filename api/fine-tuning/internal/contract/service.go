@@ -12,7 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 )
 
-func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service) error {
+func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
 	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
@@ -52,7 +52,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		pricePerToken,
 		// TODO: replace by real provider signer address
 		common.HexToAddress("0x111111"),
-		false,
+		occupied,
 	)
 	if err != nil {
 		return err
@@ -122,7 +122,7 @@ func (c *ProviderContract) SyncServices(ctx context.Context, news []config.Servi
 		toRemove = append(toRemove, k)
 	}
 	for i := range toAddOrUpdate {
-		if err := c.AddOrUpdateService(ctx, toAddOrUpdate[i]); err != nil {
+		if err := c.AddOrUpdateService(ctx, toAddOrUpdate[i], false); err != nil {
 			return errors.Wrap(err, "add service in contract")
 		}
 	}
