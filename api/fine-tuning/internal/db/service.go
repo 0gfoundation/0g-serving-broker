@@ -27,8 +27,8 @@ func (d *DB) InProgressTaskCount() (int64, error) {
 	return count, nil
 }
 
-func (d *DB) GetUserAckDeliveredTasks() ([]schema.Task, error) {
+func (d *DB) GetDeliveredTasks() ([]schema.Task, error) {
 	var filteredTasks []schema.Task
-	d.db.Where(&schema.Task{Progress: schema.ProgressStateUserAckDelivered.String()}).Find(&filteredTasks)
+	d.db.Where(&schema.Task{Progress: schema.ProgressStateDelivered.String()}).Find(&filteredTasks)
 	return filteredTasks, nil
 }

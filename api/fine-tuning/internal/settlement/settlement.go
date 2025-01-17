@@ -38,6 +38,7 @@ func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval t
 
 func (s *Settlement) Start(ctx context.Context) error {
 	go func() {
+		s.logger.Info("settlement service started")
 		ticker := time.NewTicker(s.checkInterval)
 		defer ticker.Stop()
 
@@ -46,7 +47,7 @@ func (s *Settlement) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				task := s.getPendingSettlementTask()
+				task := s.getPendingSettlementTask(ctx)
 				if task != nil {
 					err := s.doSettlement(ctx, task)
 					if err != nil {
@@ -61,14 +62,36 @@ func (s *Settlement) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Settlement) getPendingSettlementTask() *schema.Task {
-	tasks, err := s.db.GetUserAckDeliveredTasks()
+func (s *Settlement) getPendingSettlementTask(ctx context.Context) *schema.Task {
+	tasks, err := s.db.GetDeliveredTasks()
 	if err != nil {
-		s.logger.Error(" error getting user ack delivered tasks", "err", err)
+		s.logger.Error("error getting delivered tasks", "err", err)
+		return nil
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	// The provider processes tasks single-threaded,
+	// so theoretically only one task is Delivered in DB.
+	task := tasks[0]
+	account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.CustomerAddress))
+	if err != nil {
+		s.logger.Error("error getting user account from contract", "err", err)
+		return nil
+	}
+	if !account.Deliverables[len(account.Deliverables)-1].Acknowledged {
+		return nil
+	}
+	err = s.db.UpdateTask(task.ID,
+		schema.Task{
+			Progress: schema.ProgressStateUserAckDelivered.String(),
+		})
+	if err != nil {
+		s.logger.Error("error updating task", "err", err)
 		return nil
 	}
 
-	return &tasks[0]
+	return &task
 }
 
 func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error {
@@ -111,9 +134,12 @@ func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error 
 		schema.Task{
 			Progress: schema.ProgressStateFinished.String(),
 		})
+	if err != nil {
+		return err
+	}
 
 	for _, srv := range s.services {
-		if srv.Name == task.TaskName {
+		if srv.Name == task.ServiceName {
 			s.contract.AddOrUpdateService(ctx, srv, false)
 			break
 		}

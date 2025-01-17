@@ -66,7 +66,7 @@ func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
 	}
 
 	for _, s := range c.services {
-		if s.Name == task.TaskName {
+		if s.Name == task.ServiceName {
 			c.contract.AddOrUpdateService(ctx, s, true)
 			break
 		}

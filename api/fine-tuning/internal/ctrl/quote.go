@@ -23,7 +23,7 @@ func (c *Ctrl) SyncQuote(ctx context.Context) error {
 	c.providerSigner = signer
 
 	address := crypto.PubkeyToAddress(signer.PublicKey)
-	quote, err := phala.Quote(ctx, address.Hex())
+	quote, err := phala.QuoteMock(ctx, address.Hex())
 	if err != nil {
 		return err
 	}
