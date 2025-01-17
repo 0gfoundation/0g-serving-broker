@@ -18,7 +18,7 @@ networks:
     gasEstimationBuffer: 100000
 services:
   - name: "fine-tune-service1"
-    servingUrl: "http://192.168.2.142:3080"
+    servingUrl: "http://192.168.1.103:3080"
     pricePerToken: 1
     quota:
       cpuCount: 8

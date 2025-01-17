@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -21,7 +23,7 @@ func (h *Handler) GetDataWithSuffix(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	svcName := ctx.Param("service")
 	suffix := ctx.Param("suffix")
-	h.getData(ctx, providerAddress, svcName, suffix)
+	h.getData(ctx, providerAddress, svcName, suffix, "", nil)
 }
 
 // getData
@@ -37,10 +39,10 @@ func (h *Handler) GetDataWithSuffix(ctx *gin.Context) {
 func (h *Handler) GetData(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
 	svcName := ctx.Param("service")
-	h.getData(ctx, providerAddress, svcName, "")
+	h.getData(ctx, providerAddress, svcName, "", "", nil)
 }
 
-func (h *Handler) getData(ctx *gin.Context, providerAddress, svcName, suffix string) {
+func (h *Handler) getData(ctx *gin.Context, providerAddress, svcName, suffix, signingAddress string, reqBody map[string]interface{}) {
 	extractor, err := h.ctrl.GetExtractor(ctx, providerAddress, svcName)
 	if err != nil {
 		handleBrokerError(ctx, errors.Wrap(err, "get extractor"), "get data")
@@ -54,17 +56,61 @@ func (h *Handler) getData(ctx *gin.Context, providerAddress, svcName, suffix str
 		return
 	}
 
-	req, err := h.ctrl.PrepareRequest(ctx, extractor.GetSvcInfo(), account, extractor, suffix)
+	req, err := h.ctrl.PrepareRequest(ctx, extractor.GetSvcInfo(), account, extractor, suffix, reqBody)
 	if err != nil {
 		handleBrokerError(ctx, errors.Wrap(err, "prepare request"), "get data")
 		return
 	}
 
-	h.ctrl.ProcessRequest(ctx, req, extractor)
+	h.ctrl.ProcessRequest(ctx, req, extractor, signingAddress)
 }
 
+// All preset services should implement interfaces for compute network TEE service requirements.
 func (h *Handler) getChatCompletions(ctx *gin.Context) {
 	providerAddress := h.presetProviderAddress
 	svcName := h.serviceName
-	h.getData(ctx, providerAddress, svcName, "/chat/completions")
+
+	var reqBody map[string]interface{}
+
+	if err := ctx.ShouldBindJSON(&reqBody); err != nil {
+		handleBrokerError(ctx, errors.Wrap(err, "bind JSON"), "get chat completions")
+		return
+	}
+	if _, ok := reqBody["model"].(string); !ok {
+		handleBrokerError(ctx, errors.New("model is required"), "get chat completions")
+		return
+	}
+
+	signingAddress, err := h.ctrl.GetSigningAddress(ctx, providerAddress, svcName, reqBody["model"].(string))
+	if err != nil {
+		handleBrokerError(ctx, err, "get signing address")
+		return
+	}
+
+	h.getData(ctx, providerAddress, svcName, "/chat/completions", signingAddress, reqBody)
+}
+
+func (h *Handler) GetAttestationReport(ctx *gin.Context) {
+	model := ctx.Query("model")
+	if model == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Model parameter is required"})
+		return
+	}
+
+	providerAddress := h.presetProviderAddress
+	svcName := h.serviceName
+
+	body, err := h.ctrl.FetchAttestationReport(ctx, providerAddress, svcName, model)
+	if err != nil {
+		handleBrokerError(ctx, err, "fetch attestation report")
+		return
+	}
+
+	for k, v := range ctx.Request.Header {
+		ctx.Writer.Header().Set(k, v[0])
+	}
+
+	if _, err := ctx.Writer.Write(body); err != nil {
+		handleBrokerError(ctx, err, "write response body")
+	}
 }
