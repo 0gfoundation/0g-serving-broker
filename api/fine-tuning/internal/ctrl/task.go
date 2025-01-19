@@ -11,8 +11,17 @@ import (
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) (*uuid.UUID, error) {
-	task.Status = schema.TaskStatusRunning
-	err := c.db.AddTask(&task)
+	count, err := c.db.InProgressTaskCount()
+	if err != nil {
+		return nil, err
+	}
+
+	if count != 0 {
+		return nil, errors.New("cannot create a new task while there is an in-progress task")
+	}
+
+	task.Progress = schema.ProgressStateUnknown.String()
+	err = c.db.AddTask(&task)
 	if err != nil {
 		return nil, errors.Wrap(err, "create task in db")
 	}
@@ -21,7 +30,7 @@ func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) (*uuid.UUID, er
 		if err := c.Execute(ctx, task); err != nil {
 			c.logger.Error("Error executing task: %v", err)
 			if err := c.db.UpdateTask(task.ID, schema.Task{
-				Status: schema.TaskStatusError,
+				Progress: schema.ProgressStateFailed.String(),
 			}); err != nil {
 				c.logger.Error("Error updating task: %v", err)
 			}

@@ -1,21 +1,19 @@
 package ctrl
 
 import (
-	"archive/zip"
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"strings"
 
-	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
-	"github.com/0glabs/0g-storage-client/indexer"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+
+	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 )
 
 const (
@@ -64,21 +62,37 @@ func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
 
 	paths := NewTaskPaths(tmpFolderPath)
 
-	if err := c.processData(task, paths); err != nil {
+	if err := c.prepareData(ctx, task, paths); err != nil {
 		c.logger.Errorf("Error processing data: %v\n", err)
 		return err
+	}
+
+	for _, s := range c.services {
+		if s.Name == task.ServiceName {
+			c.contract.AddOrUpdateService(ctx, s, true)
+			break
+		}
 	}
 
 	return c.handleContainerLifecycle(ctx, paths, task)
 }
 
-func (c *Ctrl) processData(task schema.Task, paths *TaskPaths) error {
-	if err := c.downloadFromStorage(task.DatasetHash, paths.Dataset, task.IsTurbo); err != nil {
+func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPaths) error {
+	if err := c.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, task.IsTurbo); err != nil {
 		c.logger.Errorf("Error creating dataset folder: %v\n", err)
 		return err
 	}
 
-	if err := c.downloadFromStorage(task.PreTrainedModelHash, paths.PretrainedModel, task.IsTurbo); err != nil {
+	// Todo: what's the better way to calculate the token size
+	tokenSize, err := util.FileContentSize(paths.Dataset)
+	if err != nil {
+		return err
+	}
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.services[0].PricePerToken, &task); err != nil {
+		return err
+	}
+
+	if err := c.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, task.IsTurbo); err != nil {
 		c.logger.Errorf("Error creating pre-trained model folder: %v\n", err)
 		return err
 	}
@@ -171,179 +185,21 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		c.logger.Errorf("Error reading logs: %v", err)
 	}
 
-	zipFile := fmt.Sprintf("%s/%s.zip", paths.BasePath, task.ID)
-	err = c.zipFolder(paths.Output, zipFile)
+	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, &task, c.storage)
 	if err != nil {
-		c.logger.Errorf("Error zipping output folder: %v\n", err)
-		return err
-	}
-
-	rootStr, err := c.UploadToStorage(ctx, zipFile, task.IsTurbo)
-	if err != nil {
-		c.logger.Errorf("Error uploading output folder: %v\n", err)
 		return err
 	}
 
 	err = c.db.UpdateTask(task.ID,
 		schema.Task{
-			Status:         schema.TaskStatusSucceeded,
-			OutputRootHash: rootStr,
+			Progress:        schema.ProgressStateDelivered.String(),
+			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
+			EncryptedSecret: string(settlementMetadata.EncryptedSecret),
+			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 		})
 	if err != nil {
 		c.logger.Errorf("Failed to update task: %v", err)
 		return err
-	}
-
-	return nil
-}
-
-func (c *Ctrl) downloadFromStorage(hash, filePath string, isTurbo bool) error {
-	var indexerClient *indexer.Client
-	if isTurbo {
-		indexerClient = c.indexerTurboClient
-	} else {
-		indexerClient = c.indexerStandardClient
-	}
-	fileName := fmt.Sprintf("%s.zip", filePath)
-	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
-		c.logger.Errorf("Error downloading dataset: %v\n", err)
-		return err
-	}
-
-	if err := c.unzip(fileName, filepath.Dir(filePath)); err != nil {
-		c.logger.Errorf("Error unzipping dataset: %v\n", err)
-		return err
-	}
-
-	c.logger.Infof("Downloaded and unzipped %s\n", fileName)
-
-	return nil
-}
-
-// ZipFolder zips the contents of a folder to a specified zip file location.
-func (c *Ctrl) zipFolder(sourceFolder, zipFilePath string) error {
-	// Create the zip file
-	zipFile, err := os.Create(zipFilePath)
-	if err != nil {
-		return err
-	}
-	defer zipFile.Close()
-
-	// Create a new zip writer
-	zipWriter := zip.NewWriter(zipFile)
-	defer zipWriter.Close()
-
-	// Walk through the source folder and add files to the zip archive
-	return filepath.Walk(sourceFolder, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip the folder itself
-		if path == sourceFolder {
-			return nil
-		}
-
-		// Create a zip header
-		relPath, err := filepath.Rel(sourceFolder, path)
-		if err != nil {
-			return err
-		}
-
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-
-		// Set the relative path
-		header.Name = relPath
-		if info.IsDir() {
-			header.Name += "/"
-		} else {
-			header.Method = zip.Deflate
-		}
-
-		// Write the header to the zip file
-		writer, err := zipWriter.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-
-		// If it's a file, copy its content
-		if !info.IsDir() {
-			file, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			_, err = io.Copy(writer, file)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-// Unzip extracts a ZIP archive to a specified destination folder.
-func (c *Ctrl) unzip(src string, dest string) error {
-	// Open the zip file
-	r, err := zip.OpenReader(src)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	// Ensure the destination folder exists
-	if err := os.MkdirAll(dest, 0755); err != nil {
-		return err
-	}
-
-	// Extract each file from the zip archive
-	for _, f := range r.File {
-		filePath := filepath.Join(dest, f.Name)
-
-		// Ensure the path is safe (prevent directory traversal)
-		if !strings.HasPrefix(filePath, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path: %s", filePath)
-		}
-
-		// If it's a directory, create it
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(filePath, f.Mode()); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Create the file
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			return err
-		}
-
-		outFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
-		}
-
-		// Open the file in the zip archive
-		rc, err := f.Open()
-		if err != nil {
-			outFile.Close()
-			return err
-		}
-
-		// Copy the contents of the file
-		_, err = io.Copy(outFile, rc)
-
-		// Close resources
-		outFile.Close()
-		rc.Close()
-
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil

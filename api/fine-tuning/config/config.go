@@ -29,12 +29,14 @@ type Config struct {
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks            config.Networks     `mapstructure:"networks" yaml:"networks"`
-	StorageClientConfig StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
-	ServingUrl          string              `yaml:"servingUrl"`
-	Services            []Service           `mapstructure:"services" yaml:"services"`
-	ProviderOption      providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
-	Logger              config.LoggerConfig `yaml:"logger"`
+	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks"`
+	StorageClientConfig         StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
+	ServingUrl                  string              `yaml:"servingUrl"`
+	Services                    []Service           `mapstructure:"services" yaml:"services"`
+	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
+	Logger                      config.LoggerConfig `yaml:"logger"`
+	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
+	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 }
 
 type StorageClientConfig struct {
@@ -92,6 +94,7 @@ func GetConfig() *Config {
 				Path:          "",
 				RotationCount: 50,
 			},
+			SettlementCheckIntervalSecs: 60,
 		}
 
 		if err := loadConfig(instance); err != nil {

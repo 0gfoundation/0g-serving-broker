@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -22,6 +20,11 @@ const (
 	SocketNetworkType = "unix"
 	SocketAddress     = "/var/run/tappd.sock"
 )
+
+// TODO: remove this function
+func QuoteMock(ctx context.Context, reportData string) (string, error) {
+	return "mock", nil
+}
 
 func Quote(ctx context.Context, reportData string) (string, error) {
 	jsonData, err := json.Marshal(map[string]interface{}{
@@ -78,28 +81,19 @@ func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
 	// if err != nil {
 	// 	return nil, errors.Wrap(err, "new tapped client")
 	// }
-
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, err
 	}
 
-	deriveKeyResp := tappd.DeriveKeyResponse{
-		Key: hexutil.Encode(crypto.FromECDSA(key)),
-	}
-
-	privateKeyBytes, err := deriveKeyResp.ToBytes(-1)
-	if err != nil {
-		return nil, errors.Wrap(err, "decode private key")
-	}
-
+	privateKeyBytes := crypto.FromECDSA(key)
 	if len(privateKeyBytes) != 32 {
 		return nil, errors.New("Error: private key must be 32 bytes long")
 	}
 
 	privateKey, err := crypto.ToECDSA(privateKeyBytes)
 	if err != nil {
-		return nil, errors.Wrap(err, " converting to ECDSA private key")
+		return nil, errors.Wrap(err, "converting to ECDSA private key")
 	}
 
 	return privateKey, nil

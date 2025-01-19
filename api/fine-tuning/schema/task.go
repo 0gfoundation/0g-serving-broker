@@ -9,6 +9,21 @@ import (
 	"gorm.io/plugin/soft_delete"
 )
 
+type ProgressState int
+
+const (
+	ProgressStateUnknown ProgressState = iota
+	ProgressStateInProgress
+	ProgressStateDelivered
+	ProgressStateUserAckDelivered
+	ProgressStateFinished
+	ProgressStateFailed
+)
+
+func (p ProgressState) String() string {
+	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "Finished", "Failed"}[p]
+}
+
 type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
@@ -21,6 +36,13 @@ type Task struct {
 	IsTurbo             bool                  `gorm:"type:bool;not null;default:false" json:"isTurbo" binding:"required"`
 	Status              TaskStatus            `gorm:"type:varchar(255);not null;default 'Pending'" json:"status"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+	ServiceName         string                `gorm:"type:varchar(200);not null" json:"serviceName"`
+	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee"`
+	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce"`
+	Signature           string                `gorm:"type:varchar(132);not null" json:"signature"`
+	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret"`
+	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature"`
+	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex"`
 }
 
 type TaskStatus string
@@ -52,6 +74,10 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	d.DatasetHash = r.DatasetHash
 	d.TrainingParams = r.TrainingParams
 	d.IsTurbo = r.IsTurbo
+	d.Fee = r.Fee
+	d.Nonce = r.Nonce
+	d.Signature = r.Signature
+	d.Progress = ProgressStateUnknown.String()
 	return nil
 }
 

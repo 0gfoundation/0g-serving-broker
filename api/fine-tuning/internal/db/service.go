@@ -20,3 +20,15 @@ func (d *DB) UpdateTask(id *uuid.UUID, new schema.Task) error {
 	ret := d.db.Where(&schema.Task{ID: id}).Updates(new)
 	return ret.Error
 }
+
+func (d *DB) InProgressTaskCount() (int64, error) {
+	var count int64
+	d.db.Model(&schema.Task{}).Where("Progress <> ?", schema.ProgressStateFinished.String()).Count(&count)
+	return count, nil
+}
+
+func (d *DB) GetDeliveredTasks() ([]schema.Task, error) {
+	var filteredTasks []schema.Task
+	d.db.Where(&schema.Task{Progress: schema.ProgressStateDelivered.String()}).Find(&filteredTasks)
+	return filteredTasks, nil
+}

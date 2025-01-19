@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
@@ -105,6 +106,10 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 	default:
 		return receipt, errors.Errorf("Unknown receipt status %d", receipt.Status)
 	}
+}
+
+func (c *Contract) GetBalance(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error) {
+	return c.Client.Client.BalanceAt(ctx, account, blockNumber)
 }
 
 func (c *Contract) Close() {
