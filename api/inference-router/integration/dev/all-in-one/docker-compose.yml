@@ -1,6 +1,6 @@
 services:
   hardhat-node-with-contract:
-    image: hardhat-node-with-contract:dev
+    image: hardhat-node-with-contract:dev-bak
     container_name: hardhat-node-with-contract
     ports:
       - "8545:8545"

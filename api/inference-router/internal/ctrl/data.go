@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
+	"golang.org/x/exp/rand"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -72,13 +73,8 @@ func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress, svcName string
 	return extractor, nil
 }
 
-func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider model.Provider, extractor extractor.UserReqRespExtractor, suffix string) (*http.Request, error) {
+func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider model.Provider, extractor extractor.UserReqRespExtractor, suffix string, reqBody map[string]interface{}) (*http.Request, error) {
 	svcName := svc.Name
-
-	var reqBody map[string]interface{}
-	if err := ctx.ShouldBindJSON(&reqBody); err != nil {
-		return nil, err
-	}
 
 	reqBodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -147,7 +143,7 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 	return req, nil
 }
 
-func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor extractor.UserReqRespExtractor) {
+func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor extractor.UserReqRespExtractor, signingAddress string) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -169,14 +165,15 @@ func (c *Ctrl) ProcessRequest(ctx *gin.Context, req *http.Request, extractor ext
 		return
 	}
 
+	secretHeader := req.Header.Get("Authorization")
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		c.handleResponse(ctx, resp, extractor)
+		c.handleResponse(ctx, resp, extractor, signingAddress, secretHeader)
 		return
 	}
-	c.handleStreamResponse(ctx, resp, extractor)
+	c.handleStreamResponse(ctx, resp, extractor, signingAddress, secretHeader)
 }
 
-func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.UserReqRespExtractor) {
+func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor extractor.UserReqRespExtractor, signingAddress, secretHeader string) {
 	providerAddress := extractor.GetSvcInfo().Provider.String()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -189,6 +186,11 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 		handleBrokerError(ctx, err, "get resp content")
 		return
 	}
+	if err := c.VerifyChat(ctx, providerAddress, extractor.GetSvcInfo().Name, [][]byte{outputContent}, signingAddress, extractor.GetSvcInfo().Model, secretHeader); err != nil {
+		handleBrokerError(ctx, err, "verify chat")
+		return
+	}
+
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
 		handleBrokerError(ctx, err, "get resp output count")
@@ -206,7 +208,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 	ctx.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
-func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.UserReqRespExtractor) {
+func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.UserReqRespExtractor, signingAddress, secretHeader string) {
 	providerAddress := extractor.GetSvcInfo().Provider.String()
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
@@ -243,6 +245,10 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 					return false
 				}
 				if completed {
+					if err := c.VerifyChat(ctx, providerAddress, extractor.GetSvcInfo().Name, output, signingAddress, extractor.GetSvcInfo().Model, secretHeader); err != nil {
+						handleBrokerError(ctx, err, "verify chat")
+						return false
+					}
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
 						handleBrokerError(ctx, err, "get response output count")
@@ -259,9 +265,42 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 					}
 				}
 				output = append(output, content)
+
 				ctx.Writer.Flush()
 				chunkBuf.Reset()
 			}
 		}
 	})
+}
+
+func (c *Ctrl) VerifyChat(ctx *gin.Context, providerAddress, svcName string, output [][]byte, signingAddress, modelName, secretHeader string) error {
+	ids := []string{}
+	for _, output := range output {
+		var response struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(output, &response)
+		if response.ID != "" {
+			ids = append(ids, response.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	randomID := ids[rand.Intn(len(ids))]
+	responseSignature, err := c.FetchSignatureByChatID(ctx, providerAddress, svcName, randomID, modelName, secretHeader)
+	if err != nil {
+		return err
+	}
+
+	err = c.VerifySignature(
+		responseSignature.Text,
+		"0x"+responseSignature.Signature,
+		signingAddress,
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

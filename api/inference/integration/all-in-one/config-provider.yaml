@@ -1,4 +1,4 @@
-contractAddress: 0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
+contractAddress: 0x0165878A594ca255338adfa4d48449f69242Eb8F
 database:
   provider: root:123456@tcp(0g-serving-broker-db:3306)/provider?parseTime=true
 event:
@@ -7,7 +7,7 @@ interval:
   autoSettleBufferTime: 2
   forceSettlementProcessor: 60
   settlementProcessor: 1
-servingUrl: http://192.168.2.142:3080
+servingUrl: http://192.168.1.103:3080
 networks:
   ethereumHardhat:
     url: "http://hardhat-node-with-contract:8545"

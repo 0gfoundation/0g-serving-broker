@@ -52,6 +52,7 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// expose
 	group.POST("chat/completions", h.getChatCompletions)
+	group.GET("/attestation/report", h.GetAttestationReport)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+
+	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 )
 
 const (
@@ -110,8 +112,15 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 
+	image := constant.EXECUTION_IMAGE_NAME
+	runTime := "nvidia"
+	if os.Getenv("NETWORK") == "hardhat" {
+		image = constant.EXECUTION_MOCK_IMAGE_NAME
+		runTime = ""
+	}
+
 	containerConfig := &container.Config{
-		Image: "execution-test-pytorch",
+		Image: image,
 		Cmd: []string{
 			"python",
 			"/app/finetune.py",
@@ -122,12 +131,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		},
 	}
 
-	// containerConfig := &container.Config{
-	// 	Image: "execution-test-pytorch",
-	// 	Cmd: []string{
-	// 		"tail", "-f", "/dev/null",
-	// 	},
-	// }
 	hostConfig := &container.HostConfig{
 		Mounts: []mount.Mount{
 			{
@@ -136,7 +139,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 				Target: ContainerBasePath,
 			},
 		},
-		Runtime: "nvidia",
+		Runtime: runTime,
 	}
 
 	// TODO: need to set the quotas according to api/fine-tuning/config/config.go Service.Quota

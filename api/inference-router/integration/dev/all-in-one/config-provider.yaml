@@ -7,7 +7,7 @@ interval:
   autoSettleBufferTime: 2
   forceSettlementProcessor: 60
   settlementProcessor: 1
-servingUrl: http://192.168.2.142:3080
+servingUrl: http://192.168.1.103:3080
 networks:
   ethereumHardhat:
     url: "http://hardhat-node-with-contract:8545"
