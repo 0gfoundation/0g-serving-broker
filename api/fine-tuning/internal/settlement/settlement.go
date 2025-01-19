@@ -110,7 +110,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error 
 		return err
 	}
 
-	signature, err := hexutil.Decode(task.Signature)
+	signature, err := hexutil.Decode(task.TeeSignature)
 	if err != nil {
 		return err
 	}

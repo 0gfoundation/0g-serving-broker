@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
@@ -103,8 +104,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return err
 	}
 
-	amount := new(big.Int).Sub(account.Balance, account.PendingRefund)
-	if amount.Cmp(fee) < 0 {
+	if account.Balance.Cmp(fee) < 0 {
 		return errors.New("not enough balance")
 	}
 
@@ -125,7 +125,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return errors.Wrap(err, "decoding DatasetHash")
 	}
 
-	return v.verifyUserSignature(ctx, task.Signature, SignatureMetadata{
+	return v.verifyUserSignature(task.Signature, SignatureMetadata{
 		taskFee:      fee,
 		fileRootHash: datasetHash,
 		userAddress:  customerAddress,
@@ -133,7 +133,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	})
 }
 
-func (v *Verifier) verifyUserSignature(ctx context.Context, signatureHex string, signatureMetadata SignatureMetadata) error {
+func (v *Verifier) verifyUserSignature(signatureHex string, signatureMetadata SignatureMetadata) error {
 	signature, err := hexutil.Decode(signatureHex)
 	if err != nil {
 		return errors.Wrap(err, "decoding signature")
@@ -202,7 +202,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	modelRootHashes, err := storage.UploadToStorage(ctx, encryptFile, task.IsTurbo)
+	modelRootHashes, err := storage.UploadToStorage(ctx, encryptFile, constant.IS_TURBO)
 	if err != nil {
 		return nil, err
 	}

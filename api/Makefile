@@ -69,7 +69,6 @@ package-inference-router-all-in-one: generate-inference-router-api
 	
 package-fine-tuning:
 	@mkdir -p /tmp/fine-tuning-broker && \
-	cp ./fine-tuning/integration/README.md /tmp/fine-tuning-broker/ && \
 	rsync -av --exclude '**.local.*' ./fine-tuning/integration/provider/ /tmp/fine-tuning-broker && \
 	cp ./fine-tuning/doc/api/index.html /tmp/fine-tuning-broker/api.html && \
 	tar -czf /tmp/fine-tuning-broker.tar.gz -C /tmp fine-tuning-broker && \
@@ -80,5 +79,6 @@ install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
 	go install -v github.com/swaggo/swag/cmd/swag@v1.8.10
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
+	go install github.com/ethereum/go-ethereum/cmd/abigen@v1.14.5
 
 .PHONY: lint build clean oci release hardhat-env install-tools

@@ -15,6 +15,23 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/quote": {
+            "get": {
+                "description": "This endpoint allows you to get quote",
+                "tags": [
+                    "quote"
+                ],
+                "operationId": "getQuote",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/task": {
             "post": {
                 "description": "This endpoint allows you to create fine tune task",
@@ -65,6 +82,33 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/tasks/{taskID}/progress": {
+            "get": {
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "taskID",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "progress.log",
+                        "schema": {
+                            "type": "file"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -72,8 +116,7 @@ const docTemplate = `{
             "type": "object",
             "required": [
                 "customerAddress",
-                "datasetHash",
-                "isTurbo",
+                "datasetkHash",
                 "preTrainedModelHash",
                 "trainingParams"
             ],
@@ -85,23 +128,42 @@ const docTemplate = `{
                 "customerAddress": {
                     "type": "string"
                 },
-                "datasetHash": {
+                "datasetkHash": {
+                    "type": "string"
+                },
+                "deliverIndex": {
+                    "type": "integer"
+                },
+                "encryptedSecret": {
+                    "type": "string"
+                },
+                "fee": {
                     "type": "string"
                 },
                 "id": {
                     "type": "string",
                     "readOnly": true
                 },
-                "isTurbo": {
-                    "type": "boolean"
+                "nonce": {
+                    "type": "string"
                 },
                 "outputRootHash": {
-                    "type": "string"
+                    "type": "string",
+                    "readOnly": true
                 },
                 "preTrainedModelHash": {
                     "type": "string"
                 },
-                "progress": {
+                "serviceName": {
+                    "type": "string"
+                },
+                "signature": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "teeSignature": {
                     "type": "string"
                 },
                 "trainingParams": {

@@ -61,8 +61,8 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 //	@Description  This endpoint allows you to get quote
 //	@ID			getQuote
 //	@Tags		quote
-//	@Router		/quote [post]
-//	@Success	200		{object}	quote
+//	@Router		/quote [get]
+//	@Success	200		{string}	string
 func (h *Handler) GetQuote(ctx *gin.Context) {
 	quote, err := h.ctrl.GetQuote(ctx)
 	if err != nil {
@@ -73,6 +73,13 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, quote)
 }
 
+// GetTaskProgress
+//
+// @Tags tasks
+// @Produce application/octet-stream
+// @Param taskID path string true "Task ID"
+// @Success 200 {file} file "progress.log"
+// @Router /tasks/{taskID}/progress [get]
 func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 	id, err := uuid.Parse(ctx.Param("taskID"))
 	if err != nil {

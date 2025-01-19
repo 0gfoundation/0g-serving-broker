@@ -7,18 +7,31 @@ definitions:
         type: string
       customerAddress:
         type: string
-      datasetHash:
+      datasetkHash:
+        type: string
+      deliverIndex:
+        type: integer
+      encryptedSecret:
+        type: string
+      fee:
         type: string
       id:
         readOnly: true
         type: string
-      isTurbo:
-        type: boolean
+      nonce:
+        type: string
       outputRootHash:
+        readOnly: true
         type: string
       preTrainedModelHash:
         type: string
-      progress:
+      serviceName:
+        type: string
+      signature:
+        type: string
+      status:
+        type: string
+      teeSignature:
         type: string
       trainingParams:
         type: string
@@ -27,8 +40,7 @@ definitions:
         type: string
     required:
     - customerAddress
-    - datasetHash
-    - isTurbo
+    - datasetkHash
     - preTrainedModelHash
     - trainingParams
     type: object
@@ -40,6 +52,17 @@ info:
   title: 0G Serving Provider Broker API
   version: 0.2.0
 paths:
+  /quote:
+    get:
+      description: This endpoint allows you to get quote
+      operationId: getQuote
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      tags:
+      - quote
   /task:
     post:
       description: This endpoint allows you to create fine tune task
@@ -73,4 +96,21 @@ paths:
             $ref: '#/definitions/schema.Task'
       tags:
       - task
+  /tasks/{taskID}/progress:
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskID
+        required: true
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: progress.log
+          schema:
+            type: file
+      tags:
+      - tasks
 swagger: "2.0"

@@ -78,7 +78,7 @@ func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
 }
 
 func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPaths) error {
-	if err := c.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, task.IsTurbo); err != nil {
+	if err := c.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO); err != nil {
 		c.logger.Errorf("Error creating dataset folder: %v\n", err)
 		return err
 	}
@@ -92,7 +92,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPat
 		return err
 	}
 
-	if err := c.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, task.IsTurbo); err != nil {
+	if err := c.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, constant.IS_TURBO); err != nil {
 		c.logger.Errorf("Error creating pre-trained model folder: %v\n", err)
 		return err
 	}
