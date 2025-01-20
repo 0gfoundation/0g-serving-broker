@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -50,7 +51,7 @@ func NewTaskPaths(basePath string) *TaskPaths {
 	}
 }
 
-func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
+func (c *Ctrl) Execute(ctx context.Context, task *db.Task) error {
 	baseDir := os.TempDir()
 	tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, task.ID)
 	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
@@ -77,7 +78,7 @@ func (c *Ctrl) Execute(ctx context.Context, task schema.Task) error {
 	return c.handleContainerLifecycle(ctx, paths, task)
 }
 
-func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPaths) error {
+func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {
 	if err := c.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO); err != nil {
 		c.logger.Errorf("Error creating dataset folder: %v\n", err)
 		return err
@@ -88,7 +89,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPat
 	if err != nil {
 		return err
 	}
-	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.services[0].PricePerToken, &task); err != nil {
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.services[0].PricePerToken, task); err != nil {
 		return err
 	}
 
@@ -105,7 +106,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task schema.Task, paths *TaskPat
 	return nil
 }
 
-func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, task schema.Task) error {
+func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, task *db.Task) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		c.logger.Errorf("Failed to create Docker client: %v", err)
@@ -185,17 +186,23 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		c.logger.Errorf("Error reading logs: %v", err)
 	}
 
-	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, &task, c.storage)
+	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
+	if err != nil {
+		return err
+	}
+
+	account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
 	if err != nil {
 		return err
 	}
 
 	err = c.db.UpdateTask(task.ID,
-		schema.Task{
-			Progress:        schema.ProgressStateDelivered.String(),
+		db.Task{
+			Progress:        db.ProgressStateDelivered.String(),
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
 			EncryptedSecret: string(settlementMetadata.EncryptedSecret),
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
+			DeliverIndex:    uint64(len(account.Deliverables) - 1),
 		})
 	if err != nil {
 		c.logger.Errorf("Failed to update task: %v", err)

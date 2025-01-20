@@ -25,7 +25,7 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 		return
 	}
 
-	id, err := h.ctrl.CreateTask(ctx, task)
+	id, err := h.ctrl.CreateTask(ctx, &task)
 	if err != nil {
 		handleBrokerError(ctx, err, "register service")
 		return

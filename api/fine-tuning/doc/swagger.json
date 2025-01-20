@@ -1,229 +1,217 @@
 {
-    "swagger": "2.0",
-    "info": {
-        "description": "These APIs allows customers to interact with the 0G Compute Fine Tune Service",
-        "title": "0G Serving Provider Broker API",
-        "contact": {},
-        "version": "0.2.0"
-    },
-    "host": "localhost:3080",
-    "basePath": "/v1",
-    "paths": {
-        "/quote": {
-            "get": {
-                "description": "This endpoint allows you to get a quote",
-                "tags": [
-                    "quote"
-                ],
-                "operationId": "getQuote",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                }
+  "swagger": "2.0",
+  "info": {
+    "description": "These APIs allows customers to interact with the 0G Compute Fine Tune Service",
+    "title": "0G Serving Provider Broker API",
+    "contact": {},
+    "version": "0.2.0"
+  },
+  "host": "localhost:3080",
+  "basePath": "/v1",
+  "paths": {
+    "/quote": {
+      "get": {
+        "description": "This endpoint allows you to get a quote",
+        "tags": ["quote"],
+        "operationId": "getQuote",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "string"
             }
-        },
-        "/user/{userAddress}/task": {
-            "get": {
-                "description": "This endpoint allows you to list tasks by user address",
-                "tags": [
-                    "task"
-                ],
-                "operationId": "listTask",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "user address",
-                        "name": "userAddress",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "latest tasks",
-                        "name": "latest",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/schema.Task"
-                            }
-                        }
-                    }
-                }
-            },
-            "post": {
-                "description": "This endpoint allows you to create a fine-tuning task",
-                "tags": [
-                    "task"
-                ],
-                "operationId": "createTask",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "user address",
-                        "name": "userAddress",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "body",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/schema.Task"
-                        }
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": "No Content - success without response body"
-                    }
-                }
-            }
-        },
-        "/user/{userAddress}/task/{taskID}": {
-            "get": {
-                "description": "This endpoint allows you to get a task by ID",
-                "tags": [
-                    "task"
-                ],
-                "operationId": "getTask",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "user address",
-                        "name": "userAddress",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "task ID",
-                        "name": "taskID",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/schema.Task"
-                        }
-                    }
-                }
-            }
-        },
-        "/user/{userAddress}/task/{taskID}/log": {
-            "get": {
-                "description": "This endpoint allows you to get the progress log of a task by ID",
-                "produces": [
-                    "application/octet-stream"
-                ],
-                "tags": [
-                    "task"
-                ],
-                "operationId": "getTaskProgress",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "user address",
-                        "name": "userAddress",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "task ID",
-                        "name": "taskID",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "progress.log",
-                        "schema": {
-                            "type": "file"
-                        }
-                    }
-                }
-            }
+          }
         }
+      }
     },
-    "definitions": {
-        "schema.Task": {
-            "type": "object",
-            "required": [
-                "datasetkHash",
-                "preTrainedModelHash",
-                "trainingParams",
-                "userAddress"
-            ],
-            "properties": {
-                "createdAt": {
-                    "type": "string",
-                    "readOnly": true
-                },
-                "datasetkHash": {
-                    "type": "string"
-                },
-                "deliverIndex": {
-                    "type": "integer"
-                },
-                "encryptedSecret": {
-                    "type": "string"
-                },
-                "fee": {
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string",
-                    "readOnly": true
-                },
-                "nonce": {
-                    "type": "string"
-                },
-                "outputRootHash": {
-                    "type": "string",
-                    "readOnly": true
-                },
-                "preTrainedModelHash": {
-                    "type": "string"
-                },
-                "serviceName": {
-                    "type": "string"
-                },
-                "signature": {
-                    "type": "string"
-                },
-                "status": {
-                    "type": "string"
-                },
-                "teeSignature": {
-                    "type": "string"
-                },
-                "trainingParams": {
-                    "type": "string"
-                },
-                "updatedAt": {
-                    "type": "string",
-                    "readOnly": true
-                },
-                "userAddress": {
-                    "type": "string"
-                }
+    "/user/{userAddress}/task": {
+      "get": {
+        "description": "This endpoint allows you to list tasks by user address",
+        "tags": ["task"],
+        "operationId": "listTask",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "user address",
+            "name": "userAddress",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "latest tasks",
+            "name": "latest",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/db.Task"
+              }
             }
+          }
         }
+      },
+      "post": {
+        "description": "This endpoint allows you to create a fine-tuning task",
+        "tags": ["task"],
+        "operationId": "createTask",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "user address",
+            "name": "userAddress",
+            "in": "path",
+            "required": true
+          },
+          {
+            "description": "body",
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/db.Task"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content - success without response body"
+          }
+        }
+      }
+    },
+    "/user/{userAddress}/task/{taskID}": {
+      "get": {
+        "description": "This endpoint allows you to get a task by ID",
+        "tags": ["task"],
+        "operationId": "getTask",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "user address",
+            "name": "userAddress",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "task ID",
+            "name": "taskID",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/db.Task"
+            }
+          }
+        }
+      }
+    },
+    "/user/{userAddress}/task/{taskID}/log": {
+      "get": {
+        "description": "This endpoint allows you to get the progress log of a task by ID",
+        "produces": ["application/octet-stream"],
+        "tags": ["task"],
+        "operationId": "getTaskProgress",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "user address",
+            "name": "userAddress",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "task ID",
+            "name": "taskID",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "progress.log",
+            "schema": {
+              "type": "file"
+            }
+          }
+        }
+      }
     }
+  },
+  "definitions": {
+    "db.Task": {
+      "type": "object",
+      "required": [
+        "datasetkHash",
+        "preTrainedModelHash",
+        "trainingParams",
+        "userAddress"
+      ],
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "readOnly": true
+        },
+        "datasetkHash": {
+          "type": "string"
+        },
+        "deliverIndex": {
+          "type": "integer"
+        },
+        "encryptedSecret": {
+          "type": "string"
+        },
+        "fee": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "readOnly": true
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "outputRootHash": {
+          "type": "string",
+          "readOnly": true
+        },
+        "preTrainedModelHash": {
+          "type": "string"
+        },
+        "serviceName": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "teeSignature": {
+          "type": "string"
+        },
+        "trainingParams": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "readOnly": true
+        },
+        "userAddress": {
+          "type": "string"
+        }
+      }
+    }
+  }
 }

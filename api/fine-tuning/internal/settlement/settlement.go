@@ -11,7 +11,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
-	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
@@ -62,7 +61,7 @@ func (s *Settlement) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Settlement) getPendingSettlementTask(ctx context.Context) *schema.Task {
+func (s *Settlement) getPendingSettlementTask(ctx context.Context) *db.Task {
 	tasks, err := s.db.GetDeliveredTasks()
 	if err != nil {
 		s.logger.Error("error getting delivered tasks", "err", err)
@@ -83,8 +82,8 @@ func (s *Settlement) getPendingSettlementTask(ctx context.Context) *schema.Task 
 		return nil
 	}
 	err = s.db.UpdateTask(task.ID,
-		schema.Task{
-			Progress: schema.ProgressStateUserAckDelivered.String(),
+		db.Task{
+			Progress: db.ProgressStateUserAckDelivered.String(),
 		})
 	if err != nil {
 		s.logger.Error("error updating task", "err", err)
@@ -94,7 +93,7 @@ func (s *Settlement) getPendingSettlementTask(ctx context.Context) *schema.Task 
 	return &task
 }
 
-func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error {
+func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	modelRootHash, err := hexutil.Decode(task.OutputRootHash)
 	if err != nil {
 		return err
@@ -131,8 +130,8 @@ func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error 
 	}
 
 	err = s.db.UpdateTask(task.ID,
-		schema.Task{
-			Progress: schema.ProgressStateFinished.String(),
+		db.Task{
+			Progress: db.ProgressStateFinished.String(),
 		})
 	if err != nil {
 		return err

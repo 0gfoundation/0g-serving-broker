@@ -1,13 +1,27 @@
-package schema
+package db
 
 import (
 	"time"
 
-	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"gorm.io/plugin/soft_delete"
 )
+
+type ProgressState int
+
+const (
+	ProgressStateUnknown ProgressState = iota
+	ProgressStateInProgress
+	ProgressStateDelivered
+	ProgressStateUserAckDelivered
+	ProgressStateFinished
+	ProgressStateFailed
+)
+
+func (p ProgressState) String() string {
+	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "Finished", "Failed"}[p]
+}
 
 type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
@@ -21,66 +35,20 @@ type Task struct {
 	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee" binding:"required"`
 	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce" binding:"required"`
 	Signature           string                `gorm:"type:varchar(132);not null" json:"signature" binding:"required"`
+	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash" readonly:"true"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"status" readonly:"true"`
+	Secret              string                `gorm:"type:varchar(40)" json:"secret" readonly:"true"`
+	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret" readonly:"true"`
+	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
 
-func (d *Task) Bind(ctx *gin.Context) error {
-	var r Task
-	if err := ctx.ShouldBindJSON(&r); err != nil {
-		return err
+// BeforeCreate hook for generating a UUID
+func (t *Task) BeforeCreate(tx *gorm.DB) (err error) {
+	if t.ID == nil {
+		id := uuid.New()
+		t.ID = &id
 	}
-
-	d.UserAddress = r.UserAddress
-	d.ServiceName = r.ServiceName
-	d.PreTrainedModelHash = r.PreTrainedModelHash
-	d.DatasetHash = r.DatasetHash
-	d.TrainingParams = r.TrainingParams
-	d.Fee = r.Fee
-	d.Nonce = r.Nonce
-	d.Signature = r.Signature
-	return nil
-}
-
-func (d *Task) BindWithReadonly(ctx *gin.Context, old Task) error {
-	if err := d.Bind(ctx); err != nil {
-		return err
-	}
-	if d.ID == nil {
-		d.ID = old.ID
-	}
-
-	return nil
-}
-
-func (t *Task) GenerateDBTask() *db.Task {
-	return &db.Task{
-		UserAddress:         t.UserAddress,
-		ServiceName:         t.ServiceName,
-		PreTrainedModelHash: t.PreTrainedModelHash,
-		DatasetHash:         t.DatasetHash,
-		TrainingParams:      t.TrainingParams,
-		Fee:                 t.Fee,
-		Nonce:               t.Nonce,
-		Signature:           t.Signature,
-	}
-}
-
-func GenerateSchemaTask(t *db.Task) *Task {
-	return &Task{
-		ID:                  t.ID,
-		CreatedAt:           t.CreatedAt,
-		UpdatedAt:           t.UpdatedAt,
-		UserAddress:         t.UserAddress,
-		ServiceName:         t.ServiceName,
-		PreTrainedModelHash: t.PreTrainedModelHash,
-		DatasetHash:         t.DatasetHash,
-		TrainingParams:      t.TrainingParams,
-		Fee:                 t.Fee,
-		Nonce:               t.Nonce,
-		Signature:           t.Signature,
-		Progress:            t.Progress,
-		DeliverIndex:        t.DeliverIndex,
-	}
+	return
 }

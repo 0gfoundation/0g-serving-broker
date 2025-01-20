@@ -1,6 +1,6 @@
 basePath: /v1
 definitions:
-  schema.Task:
+  db.Task:
     properties:
       createdAt:
         readOnly: true
@@ -39,15 +39,16 @@ definitions:
       userAddress:
         type: string
     required:
-    - datasetkHash
-    - preTrainedModelHash
-    - trainingParams
-    - userAddress
+      - datasetkHash
+      - preTrainedModelHash
+      - trainingParams
+      - userAddress
     type: object
 host: localhost:3080
 info:
   contact: {}
-  description: These APIs allows customers to interact with the 0G Compute Fine Tune
+  description:
+    These APIs allows customers to interact with the 0G Compute Fine Tune
     Service
   title: 0G Serving Provider Broker API
   version: 0.2.0
@@ -62,94 +63,94 @@ paths:
           schema:
             type: string
       tags:
-      - quote
+        - quote
   /user/{userAddress}/task:
     get:
       description: This endpoint allows you to list tasks by user address
       operationId: listTask
       parameters:
-      - description: user address
-        in: path
-        name: userAddress
-        required: true
-        type: string
-      - description: latest tasks
-        in: query
-        name: latest
-        type: string
+        - description: user address
+          in: path
+          name: userAddress
+          required: true
+          type: string
+        - description: latest tasks
+          in: query
+          name: latest
+          type: string
       responses:
         "200":
           description: OK
           schema:
             items:
-              $ref: '#/definitions/schema.Task'
+              $ref: "#/definitions/db.Task"
             type: array
       tags:
-      - task
+        - task
     post:
       description: This endpoint allows you to create a fine-tuning task
       operationId: createTask
       parameters:
-      - description: user address
-        in: path
-        name: userAddress
-        required: true
-        type: string
-      - description: body
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/schema.Task'
+        - description: user address
+          in: path
+          name: userAddress
+          required: true
+          type: string
+        - description: body
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/db.Task"
       responses:
         "204":
           description: No Content - success without response body
       tags:
-      - task
+        - task
   /user/{userAddress}/task/{taskID}:
     get:
       description: This endpoint allows you to get a task by ID
       operationId: getTask
       parameters:
-      - description: user address
-        in: path
-        name: userAddress
-        required: true
-        type: string
-      - description: task ID
-        in: path
-        name: taskID
-        required: true
-        type: string
+        - description: user address
+          in: path
+          name: userAddress
+          required: true
+          type: string
+        - description: task ID
+          in: path
+          name: taskID
+          required: true
+          type: string
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/schema.Task'
+            $ref: "#/definitions/db.Task"
       tags:
-      - task
+        - task
   /user/{userAddress}/task/{taskID}/log:
     get:
       description: This endpoint allows you to get the progress log of a task by ID
       operationId: getTaskProgress
       parameters:
-      - description: user address
-        in: path
-        name: userAddress
-        required: true
-        type: string
-      - description: task ID
-        in: path
-        name: taskID
-        required: true
-        type: string
+        - description: user address
+          in: path
+          name: userAddress
+          required: true
+          type: string
+        - description: task ID
+          in: path
+          name: taskID
+          required: true
+          type: string
       produces:
-      - application/octet-stream
+        - application/octet-stream
       responses:
         "200":
           description: progress.log
           schema:
             type: file
       tags:
-      - task
+        - task
 swagger: "2.0"

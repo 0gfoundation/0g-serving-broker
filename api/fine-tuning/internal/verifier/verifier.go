@@ -15,8 +15,8 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
-	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -79,7 +79,7 @@ func New(contract *providercontract.ProviderContract, BalanceThresholdInEther in
 	}, nil
 }
 
-func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey, tokenSize int64, pricePerToken int64, task *schema.Task) error {
+func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey, tokenSize int64, pricePerToken int64, task *db.Task) error {
 	balance, err := v.contract.Contract.GetBalance(ctx, common.HexToAddress(v.contract.ProviderAddress), nil)
 	if err != nil {
 		return err
@@ -168,7 +168,7 @@ func (v *Verifier) verifyUserSignature(signatureHex string, signatureMetadata Si
 	return nil
 }
 
-func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, task *schema.Task, storage *storage.Client) (*SettlementMetadata, error) {
+func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, task *db.Task, storage *storage.Client) (*SettlementMetadata, error) {
 	plaintext, err := util.ZipAndGetContent(sourceDir)
 	if err != nil {
 		return nil, err

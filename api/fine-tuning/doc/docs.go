@@ -60,7 +60,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/schema.Task"
+                                "$ref": "#/definitions/db.Task"
                             }
                         }
                     }
@@ -86,7 +86,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/schema.Task"
+                            "$ref": "#/definitions/db.Task"
                         }
                     }
                 ],
@@ -124,7 +124,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/schema.Task"
+                            "$ref": "#/definitions/db.Task"
                         }
                     }
                 }
@@ -168,7 +168,7 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "schema.Task": {
+        "db.Task": {
             "type": "object",
             "required": [
                 "datasetkHash",

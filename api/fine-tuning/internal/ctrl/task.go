@@ -6,11 +6,13 @@ import (
 	"os"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	"github.com/google/uuid"
 )
 
-func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) (*uuid.UUID, error) {
+func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, error) {
+	dbTask := task.GenerateDBTask()
 	count, err := c.db.InProgressTaskCount()
 	if err != nil {
 		return nil, err
@@ -20,33 +22,34 @@ func (c *Ctrl) CreateTask(ctx context.Context, task schema.Task) (*uuid.UUID, er
 		return nil, errors.New("cannot create a new task while there is an in-progress task")
 	}
 
-	task.Progress = schema.ProgressStateUnknown.String()
-	err = c.db.AddTask(&task)
+	dbTask.Progress = db.ProgressStateInProgress.String()
+	err = c.db.AddTask(dbTask)
 	if err != nil {
 		return nil, errors.Wrap(err, "create task in db")
 	}
 
 	go func() {
-		if err := c.Execute(ctx, task); err != nil {
+		if err := c.Execute(ctx, dbTask); err != nil {
 			c.logger.Error("Error executing task: %v", err)
-			if err := c.db.UpdateTask(task.ID, schema.Task{
-				Progress: schema.ProgressStateFailed.String(),
+			if err := c.db.UpdateTask(dbTask.ID, db.Task{
+				Progress: db.ProgressStateFailed.String(),
 			}); err != nil {
 				c.logger.Error("Error updating task: %v", err)
 			}
 		}
 	}()
 
-	return task.ID, nil
+	return dbTask.ID, nil
 }
 
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	task, err := c.db.GetTask(id)
+	taskRes := schema.GenerateSchemaTask(&task)
 	if err != nil {
-		return task, errors.Wrap(err, "get service from db")
+		return *taskRes, errors.Wrap(err, "get service from db")
 	}
 
-	return task, errors.Wrap(err, "get service from db")
+	return *taskRes, errors.Wrap(err, "get service from db")
 }
 
 func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([]schema.Task, error) {
@@ -54,8 +57,12 @@ func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([
 	if err != nil {
 		return nil, errors.Wrap(err, "get delivered tasks")
 	}
+	taskRes := make([]schema.Task, len(tasks))
+	for i := range tasks {
+		taskRes[i] = *schema.GenerateSchemaTask((&tasks[i]))
+	}
 
-	return tasks, nil
+	return taskRes, nil
 }
 
 func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
