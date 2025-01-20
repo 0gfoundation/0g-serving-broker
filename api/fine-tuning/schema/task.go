@@ -28,7 +28,7 @@ type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
-	CustomerAddress     string                `gorm:"type:varchar(255);not null" json:"customerAddress" binding:"required"`
+	UserAddress         string                `gorm:"type:varchar(255);not null" json:"userAddress" binding:"required"`
 	PreTrainedModelHash string                `gorm:"type:text;not null" json:"preTrainedModelHash" binding:"required"`
 	DatasetHash         string                `gorm:"type:text;not null" json:"datasetkHash" binding:"required"`
 	TrainingParams      string                `gorm:"type:text;not null" json:"trainingParams" binding:"required"`
@@ -59,7 +59,7 @@ func (d *Task) Bind(ctx *gin.Context) error {
 		return err
 	}
 
-	d.CustomerAddress = r.CustomerAddress
+	d.UserAddress = r.UserAddress
 	d.PreTrainedModelHash = r.PreTrainedModelHash
 	d.DatasetHash = r.DatasetHash
 	d.TrainingParams = r.TrainingParams

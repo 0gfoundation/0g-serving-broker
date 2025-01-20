@@ -21,7 +21,7 @@ func (d *DB) Migrate() error {
 					ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
 					CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
-					CustomerAddress     string                `gorm:"type:text;not null"`
+					UserAddress         string                `gorm:"type:text;not null"`
 					PreTrainedModelHash string                `gorm:"type:text;not null"`
 					DatasetHash         string                `gorm:"type:text;not null"`
 					TrainingParams      string                `gorm:"type:text;not null"`

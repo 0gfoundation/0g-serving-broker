@@ -16,6 +16,16 @@ func (d *DB) GetTask(id *uuid.UUID) (schema.Task, error) {
 	return svc, ret.Error
 }
 
+func (d *DB) ListTask(userAddress string, latest bool) ([]schema.Task, error) {
+	var tasks []schema.Task
+	query := d.db.Where(&schema.Task{UserAddress: userAddress})
+	if latest {
+		query = query.Order("created_at DESC").Limit(1)
+	}
+	ret := query.Find(&tasks)
+	return tasks, ret.Error
+}
+
 func (d *DB) UpdateTask(id *uuid.UUID, new schema.Task) error {
 	ret := d.db.Where(&schema.Task{ID: id}).Updates(new)
 	return ret.Error

@@ -49,6 +49,15 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	return task, errors.Wrap(err, "get service from db")
 }
 
+func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([]schema.Task, error) {
+	tasks, err := c.db.ListTask(userAddress, latest)
+	if err != nil {
+		return nil, errors.Wrap(err, "get delivered tasks")
+	}
+
+	return tasks, nil
+}
+
 func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 	task, err := c.db.GetTask(id)
 	if err != nil {

@@ -23,11 +23,13 @@ func New(ctrl *ctrl.Ctrl, logger log.Logger) *Handler {
 func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
-	group.POST("/task", h.CreateTask)
-	group.GET("/task/:taskID", h.GetTask)
+	group.POST("/user/:userAddress/task", h.CreateTask)
+	group.GET("/user/:userAddress/task", h.ListTask)
+	group.GET("/user/:userAddress/task/:taskID", h.GetTask)
+
+	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
 
 	group.GET("/quote", h.GetQuote)
-	group.GET("/task-progress/:taskID", h.GetTaskProgress)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

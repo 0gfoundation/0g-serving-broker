@@ -98,8 +98,8 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return errors.New("not enough task fee")
 	}
 
-	customerAddress := common.HexToAddress(task.CustomerAddress)
-	account, err := v.contract.GetUserAccount(ctx, customerAddress)
+	userAddress := common.HexToAddress(task.UserAddress)
+	account, err := v.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	return v.verifyUserSignature(task.Signature, SignatureMetadata{
 		taskFee:      fee,
 		fileRootHash: datasetHash,
-		userAddress:  customerAddress,
+		userAddress:  userAddress,
 		nonce:        nonce,
 	})
 }
@@ -211,7 +211,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.New(fmt.Sprintf("invalid model root hashes: %v", modelRootHashes))
 	}
 
-	user := common.HexToAddress(task.CustomerAddress)
+	user := common.HexToAddress(task.UserAddress)
 	err = v.contract.AddDeliverable(ctx, user, modelRootHashes[0].Bytes())
 	if err != nil {
 		return nil, err

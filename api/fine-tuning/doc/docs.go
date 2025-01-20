@@ -17,7 +17,7 @@ const docTemplate = `{
     "paths": {
         "/quote": {
             "get": {
-                "description": "This endpoint allows you to get quote",
+                "description": "This endpoint allows you to get a quote",
                 "tags": [
                     "quote"
                 ],
@@ -32,14 +32,54 @@ const docTemplate = `{
                 }
             }
         },
-        "/task": {
+        "/user/{userAddress}/task": {
+            "get": {
+                "description": "This endpoint allows you to list tasks by user address",
+                "tags": [
+                    "task"
+                ],
+                "operationId": "listTask",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "user address",
+                        "name": "userAddress",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "latest tasks",
+                        "name": "latest",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/schema.Task"
+                            }
+                        }
+                    }
+                }
+            },
             "post": {
-                "description": "This endpoint allows you to create fine tune task",
+                "description": "This endpoint allows you to create a fine-tuning task",
                 "tags": [
                     "task"
                 ],
                 "operationId": "createTask",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "user address",
+                        "name": "userAddress",
+                        "in": "path",
+                        "required": true
+                    },
                     {
                         "description": "body",
                         "name": "body",
@@ -57,14 +97,21 @@ const docTemplate = `{
                 }
             }
         },
-        "/task/{id}": {
+        "/user/{userAddress}/task/{taskID}": {
             "get": {
-                "description": "This endpoint allows you to get task by name",
+                "description": "This endpoint allows you to get a task by ID",
                 "tags": [
                     "task"
                 ],
                 "operationId": "getTask",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "user address",
+                        "name": "userAddress",
+                        "in": "path",
+                        "required": true
+                    },
                     {
                         "type": "string",
                         "description": "task ID",
@@ -83,18 +130,27 @@ const docTemplate = `{
                 }
             }
         },
-        "/tasks/{taskID}/progress": {
+        "/user/{userAddress}/task/{taskID}/log": {
             "get": {
+                "description": "This endpoint allows you to get the progress log of a task by ID",
                 "produces": [
                     "application/octet-stream"
                 ],
                 "tags": [
-                    "tasks"
+                    "task"
                 ],
+                "operationId": "getTaskProgress",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Task ID",
+                        "description": "user address",
+                        "name": "userAddress",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "task ID",
                         "name": "taskID",
                         "in": "path",
                         "required": true
@@ -115,18 +171,15 @@ const docTemplate = `{
         "schema.Task": {
             "type": "object",
             "required": [
-                "customerAddress",
                 "datasetkHash",
                 "preTrainedModelHash",
-                "trainingParams"
+                "trainingParams",
+                "userAddress"
             ],
             "properties": {
                 "createdAt": {
                     "type": "string",
                     "readOnly": true
-                },
-                "customerAddress": {
-                    "type": "string"
                 },
                 "datasetkHash": {
                     "type": "string"
@@ -172,6 +225,9 @@ const docTemplate = `{
                 "updatedAt": {
                     "type": "string",
                     "readOnly": true
+                },
+                "userAddress": {
+                    "type": "string"
                 }
             }
         }

@@ -5,8 +5,6 @@ definitions:
       createdAt:
         readOnly: true
         type: string
-      customerAddress:
-        type: string
       datasetkHash:
         type: string
       deliverIndex:
@@ -38,11 +36,13 @@ definitions:
       updatedAt:
         readOnly: true
         type: string
+      userAddress:
+        type: string
     required:
-    - customerAddress
     - datasetkHash
     - preTrainedModelHash
     - trainingParams
+    - userAddress
     type: object
 host: localhost:3080
 info:
@@ -54,7 +54,7 @@ info:
 paths:
   /quote:
     get:
-      description: This endpoint allows you to get quote
+      description: This endpoint allows you to get a quote
       operationId: getQuote
       responses:
         "200":
@@ -63,11 +63,38 @@ paths:
             type: string
       tags:
       - quote
-  /task:
+  /user/{userAddress}/task:
+    get:
+      description: This endpoint allows you to list tasks by user address
+      operationId: listTask
+      parameters:
+      - description: user address
+        in: path
+        name: userAddress
+        required: true
+        type: string
+      - description: latest tasks
+        in: query
+        name: latest
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/schema.Task'
+            type: array
+      tags:
+      - task
     post:
-      description: This endpoint allows you to create fine tune task
+      description: This endpoint allows you to create a fine-tuning task
       operationId: createTask
       parameters:
+      - description: user address
+        in: path
+        name: userAddress
+        required: true
+        type: string
       - description: body
         in: body
         name: body
@@ -79,11 +106,16 @@ paths:
           description: No Content - success without response body
       tags:
       - task
-  /task/{id}:
+  /user/{userAddress}/task/{taskID}:
     get:
-      description: This endpoint allows you to get task by name
+      description: This endpoint allows you to get a task by ID
       operationId: getTask
       parameters:
+      - description: user address
+        in: path
+        name: userAddress
+        required: true
+        type: string
       - description: task ID
         in: path
         name: taskID
@@ -96,10 +128,17 @@ paths:
             $ref: '#/definitions/schema.Task'
       tags:
       - task
-  /tasks/{taskID}/progress:
+  /user/{userAddress}/task/{taskID}/log:
     get:
+      description: This endpoint allows you to get the progress log of a task by ID
+      operationId: getTaskProgress
       parameters:
-      - description: Task ID
+      - description: user address
+        in: path
+        name: userAddress
+        required: true
+        type: string
+      - description: task ID
         in: path
         name: taskID
         required: true
@@ -112,5 +151,5 @@ paths:
           schema:
             type: file
       tags:
-      - tasks
+      - task
 swagger: "2.0"

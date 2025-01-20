@@ -74,7 +74,7 @@ func (s *Settlement) getPendingSettlementTask(ctx context.Context) *schema.Task 
 	// The provider processes tasks single-threaded,
 	// so theoretically only one task is Delivered in DB.
 	task := tasks[0]
-	account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.CustomerAddress))
+	account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
 	if err != nil {
 		s.logger.Error("error getting user account from contract", "err", err)
 		return nil
@@ -123,7 +123,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *schema.Task) error 
 		ProviderSigner:  s.providerSigner,
 		Signature:       signature,
 		TaskFee:         fee,
-		User:            common.HexToAddress(task.CustomerAddress),
+		User:            common.HexToAddress(task.UserAddress),
 	}
 
 	if err := s.contract.SettleFees(ctx, input); err != nil {
