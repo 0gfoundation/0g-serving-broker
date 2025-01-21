@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"encoding/gob"
 	"fmt"
 	"math/big"
@@ -17,12 +16,12 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
+	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/crypto/ecies"
 	"github.com/ethereum/go-ethereum/params"
 	"golang.org/x/crypto/sha3"
 )
@@ -226,8 +225,12 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 		return nil, errors.New(fmt.Sprintf("public key for user %v not exist", user))
 	}
 
-	eciesPublicKey := ecies.ImportECDSAPublic(publicKey)
-	encryptedSecret, err := ecies.Encrypt(rand.Reader, eciesPublicKey, aesKey, nil, nil)
+	eciesPublicKey, err := ecies.NewPublicKeyFromBytes(ethcrypto.FromECDSAPub(publicKey))
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedSecret, err := ecies.Encrypt(eciesPublicKey, aesKey)
 	if err != nil {
 		return nil, errors.Wrap(err, "encrypting secret")
 	}
