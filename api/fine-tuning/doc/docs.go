@@ -60,7 +60,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/db.Task"
+                                "$ref": "#/definitions/schema.Task"
                             }
                         }
                     }
@@ -86,7 +86,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/db.Task"
+                            "$ref": "#/definitions/schema.Task"
                         }
                     }
                 ],
@@ -124,7 +124,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/db.Task"
+                            "$ref": "#/definitions/schema.Task"
                         }
                     }
                 }
@@ -168,11 +168,15 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "db.Task": {
+        "schema.Task": {
             "type": "object",
             "required": [
-                "datasetkHash",
+                "datasetHash",
+                "fee",
+                "nonce",
                 "preTrainedModelHash",
+                "serviceName",
+                "signature",
                 "trainingParams",
                 "userAddress"
             ],
@@ -181,14 +185,12 @@ const docTemplate = `{
                     "type": "string",
                     "readOnly": true
                 },
-                "datasetkHash": {
+                "datasetHash": {
                     "type": "string"
                 },
                 "deliverIndex": {
-                    "type": "integer"
-                },
-                "encryptedSecret": {
-                    "type": "string"
+                    "type": "integer",
+                    "readOnly": true
                 },
                 "fee": {
                     "type": "string"
@@ -200,10 +202,6 @@ const docTemplate = `{
                 "nonce": {
                     "type": "string"
                 },
-                "outputRootHash": {
-                    "type": "string",
-                    "readOnly": true
-                },
                 "preTrainedModelHash": {
                     "type": "string"
                 },
@@ -214,10 +212,8 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "status": {
-                    "type": "string"
-                },
-                "teeSignature": {
-                    "type": "string"
+                    "type": "string",
+                    "readOnly": true
                 },
                 "trainingParams": {
                     "type": "string"
