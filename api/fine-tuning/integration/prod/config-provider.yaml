@@ -13,7 +13,7 @@ networks:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
-      - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+      - 1111111111111111111111111111111111111111111111111111111111
     transactionLimit: 10000000
     gasEstimationBuffer: 100000
 services:

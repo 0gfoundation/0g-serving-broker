@@ -32,12 +32,18 @@ func (d *DB) UpdateTask(id *uuid.UUID, new Task) error {
 
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
-	d.db.Model(&Task{}).Where("Progress <> ?", ProgressStateFinished.String()).Count(&count)
+	ret := d.db.Model(&Task{}).Where("Progress = ?", ProgressStateInProgress.String()).Count(&count)
+	if ret.Error != nil {
+		return 0, ret.Error
+	}
 	return count, nil
 }
 
 func (d *DB) GetDeliveredTasks() ([]Task, error) {
 	var filteredTasks []Task
-	d.db.Where(&Task{Progress: ProgressStateDelivered.String()}).Find(&filteredTasks)
+	ret := d.db.Where(&Task{Progress: ProgressStateDelivered.String()}).Find(&filteredTasks)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
 	return filteredTasks, nil
 }

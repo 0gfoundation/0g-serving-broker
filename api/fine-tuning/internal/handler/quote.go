@@ -20,5 +20,5 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, quote)
+	ctx.String(http.StatusOK, quote)
 }

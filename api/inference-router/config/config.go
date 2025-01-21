@@ -57,7 +57,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0xE7F0998C83a81f04871BEdfD89aB5f2DAcDBf435",
+			ContractAddress: "0x3dF34461017f22eA871d7FFD4e98191794F8053d",
 			Database: struct {
 				Router string `yaml:"router"`
 			}{
