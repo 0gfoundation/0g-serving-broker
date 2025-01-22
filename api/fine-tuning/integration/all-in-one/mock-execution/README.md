@@ -19,6 +19,18 @@
       "Nonce": "nonce",
       "Signature": ""
    }'
+
+
+   curl -X POST  http://192.168.1.104:8081/v1/user/0x960E74Fc0AF1a6fBcADA3eEFCBe3152fA5E87A52/task -d '{
+   "userAddress": "0x960E74Fc0AF1a6fBcADA3eEFCBe3152fA5E87A52",
+   "serviceName": "fine-tune-service1",
+   "datasetHash": "0xaae9b4e031e06f84b20f10ec629f36c57719ea512992a6b7e2baea93f447a5fa",
+   "trainingParams": "{}\n",
+   "preTrainedModelHash": "0x7f2244b25cd2219dfd9d14c052982ecce409356e0f08e839b79796e270d110a7",
+   "fee": "5",
+   "nonce": "0",
+   "signature": "0x"
+   }'
    ```
 
 3. Get task

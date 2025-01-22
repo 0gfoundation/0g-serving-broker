@@ -99,12 +99,12 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 		return err
 	}
 
-	nonce, err := util.HexadecimalStringToBigInt(task.Nonce)
+	nonce, err := util.ConvertToBigInt(task.Nonce)
 	if err != nil {
 		return err
 	}
 
-	fee, err := util.HexadecimalStringToBigInt(task.Fee)
+	fee, err := util.ConvertToBigInt(task.Fee)
 	if err != nil {
 		return err
 	}

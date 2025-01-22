@@ -86,6 +86,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 
 	// Todo: what's the better way to calculate the token size
 	tokenSize, err := util.FileContentSize(paths.Dataset)
+	fmt.Println("tokenSize: ", tokenSize)
 	if err != nil {
 		return err
 	}

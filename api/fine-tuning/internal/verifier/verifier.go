@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
@@ -17,33 +18,30 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	ecies "github.com/ecies/go/v2"
-	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
-	"golang.org/x/crypto/sha3"
 )
 
 const aesKeySize = 32 // 256-bit AES key (32 bytes)
 
 type SignatureMetadata struct {
 	taskFee      *big.Int
-	fileRootHash []byte
+	fileRootHash string
 	userAddress  common.Address
 	nonce        *big.Int
 }
 
-func (s *SignatureMetadata) Serialize() ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(s)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
+// func (s *SignatureMetadata) Serialize() ([]byte, error) {
+// 	var buf bytes.Buffer
+// 	enc := gob.NewEncoder(&buf)
+// 	err := enc.Encode(s)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return buf.Bytes(), nil
+// }
 
 type SettlementMetadata struct {
 	ModelRootHash   []byte
@@ -88,7 +86,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	}
 
 	totalFee := new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken))
-	fee, err := util.HexadecimalStringToBigInt(task.Fee)
+	fee, err := util.ConvertToBigInt(task.Fee)
 	if err != nil {
 		return err
 	}
@@ -107,65 +105,160 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return errors.New("not enough balance")
 	}
 
-	nonce, err := util.HexadecimalStringToBigInt(task.Nonce)
+	nonce, err := util.ConvertToBigInt(task.Nonce)
 	if err != nil {
 		return err
 	}
 	if account.Nonce.Cmp(nonce) >= 0 {
 		return errors.New("invalid nonce")
 	}
-
 	if account.ProviderSigner != ethcrypto.PubkeyToAddress(providerPriv.PublicKey) {
 		return errors.New("user not acknowledged")
 	}
 
-	datasetHash, err := hexutil.Decode(task.DatasetHash)
-	if err != nil {
-		return errors.Wrap(err, "decoding DatasetHash")
-	}
+	// datasetHash, err := hexutil.Decode(task.DatasetHash)
+	// if err != nil {
+	// 	return errors.Wrap(err, "decoding DatasetHash")
+	// }
 
 	return v.verifyUserSignature(task.Signature, SignatureMetadata{
 		taskFee:      fee,
-		fileRootHash: datasetHash,
+		fileRootHash: task.DatasetHash,
 		userAddress:  userAddress,
 		nonce:        nonce,
 	})
 }
 
-func (v *Verifier) verifyUserSignature(signatureHex string, signatureMetadata SignatureMetadata) error {
-	signature, err := hexutil.Decode(signatureHex)
+func (v *Verifier) getHash(s SignatureMetadata) common.Hash {
+	buf := new(bytes.Buffer)
+	buf.Write(s.userAddress.Bytes())
+	buf.Write(common.LeftPadBytes(s.nonce.Bytes(), 32))
+	buf.Write([]byte(s.fileRootHash))
+	buf.Write(common.LeftPadBytes(s.taskFee.Bytes(), 32))
+
+	msg := crypto.Keccak256Hash(buf.Bytes())
+	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), msg.Bytes())
+
+	return prefixedMsg
+}
+
+// func (v *Verifier) getHash(s SignatureMetadata) (common.Hash, error) {
+// 	dataType, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+// 		{
+// 			Name: "userAddress",
+// 			Type: "address",
+// 		},
+// 		{
+// 			Name: "nonce",
+// 			Type: "uint256",
+// 		},
+// 		{
+// 			Name: "fileRootHash",
+// 			Type: "bytes",
+// 		},
+// 		{
+// 			Name: "taskFee",
+// 			Type: "uint256",
+// 		},
+// 	})
+// 	if err != nil {
+// 		return [32]byte{}, err
+// 	}
+
+// 	arguments := abi.Arguments{
+// 		{
+// 			Type: dataType,
+// 		},
+// 	}
+
+// 	o := struct {
+// 		UserAddress  common.Address
+// 		Nonce        *big.Int
+// 		FileRootHash []byte
+// 		TaskFee      *big.Int
+// 	}{
+// 		UserAddress:  s.userAddress,
+// 		Nonce:        s.nonce,
+// 		FileRootHash: []byte(s.fileRootHash),
+// 		TaskFee:      s.taskFee,
+// 	}
+
+// 	bytes, err := arguments.Pack(o)
+// 	if err != nil {
+// 		return [32]byte{}, err
+// 	}
+
+// 	var headerHash [32]byte
+// 	hasher := sha3.NewLegacyKeccak256()
+// 	hasher.Write(bytes)
+// 	copy(headerHash[:], hasher.Sum(nil)[:32])
+
+// 	return headerHash, nil
+// }
+
+func (v *Verifier) verifyUserSignature(signature string, signatureMetadata SignatureMetadata) error {
+	messageHash := v.getHash(signatureMetadata)
+	sigBytes, err := hex.DecodeString(signature[2:])
 	if err != nil {
-		return errors.Wrap(err, "decoding signature")
-	}
-	if len(signature) != 65 {
-		return errors.Wrap(err, "invalid signature length")
+		return err
 	}
 
-	if signature[64] != 27 && signature[64] != 28 {
-		return errors.Wrap(err, "invalid recovery ID")
+	if len(sigBytes) != 65 {
+		return errors.New("invalid signature length")
 	}
-	signature[64] -= 27
 
-	message, err := signatureMetadata.Serialize()
+	v1 := sigBytes[64] - 27
+	pubKey, err := crypto.SigToPub(messageHash.Bytes(), append(sigBytes[:64], v1))
 	if err != nil {
-		return errors.Wrap(err, "serialize signature metadata")
-	}
-	messageHash := ethcrypto.Keccak256Hash([]byte(message))
+		return err
 
-	publicKey, err := ethcrypto.SigToPub(messageHash.Bytes(), signature)
-	if err != nil {
-		return errors.Wrap(err, "recovering public key")
 	}
 
-	address := ethcrypto.PubkeyToAddress(*publicKey)
-	if address != signatureMetadata.userAddress {
-		return errors.Wrap(err, "signature verification failed")
+	recoveredAddress := crypto.PubkeyToAddress(*pubKey).Hex()
+	if !bytes.EqualFold([]byte(recoveredAddress), []byte(signatureMetadata.userAddress.Hex())) {
+		return errors.New("signature verification failed")
 	}
 
-	v.users[address] = publicKey
+	address := ethcrypto.PubkeyToAddress(*pubKey)
+	v.users[address] = pubKey
 
 	return nil
 }
+
+// func (v *Verifier) verifyUserSignature(signatureHex string, signatureMetadata SignatureMetadata) error {
+// 	signature, err := hexutil.Decode(signatureHex)
+// 	if err != nil {
+// 		return errors.Wrap(err, "decoding signature")
+// 	}
+// 	if len(signature) != 65 {
+// 		return errors.Wrap(err, "invalid signature length")
+// 	}
+
+// 	if signature[64] != 27 && signature[64] != 28 {
+// 		return errors.Wrap(err, "invalid recovery ID")
+// 	}
+// 	signature[64] -= 27
+
+// 	message, err := signatureMetadata.Serialize()
+// 	if err != nil {
+// 		return errors.Wrap(err, "serialize signature metadata")
+// 	}
+// 	messageHash := ethcrypto.Keccak256Hash([]byte(message))
+
+// 	publicKey, err := ethcrypto.SigToPub(messageHash.Bytes(), signature)
+// 	if err != nil {
+// 		return errors.Wrap(err, "recovering public key")
+// 	}
+
+// 	address := ethcrypto.PubkeyToAddress(*publicKey)
+// 	if address != signatureMetadata.userAddress {
+// 		return errors.Wrap(err, "signature verification failed")
+// 	}
+
+// 	v.users[address] = publicKey
+
+// 	return nil
+// }
 
 func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, task *db.Task, storage *storage.Client) (*SettlementMetadata, error) {
 	plaintext, err := util.ZipAndGetContent(sourceDir)
@@ -240,10 +333,15 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 		return nil, err
 	}
 
-	sig, err := ethcrypto.Sign(accounts.TextHash(settlementHash[:]), providerPriv)
+	sig, err := getSignature(settlementHash, providerPriv)
 	if err != nil {
 		return nil, err
 	}
+
+	// sig, err := ethcrypto.Sign(accounts.TextHash(settlementHash[:]), providerPriv)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	return &SettlementMetadata{
 		ModelRootHash:   modelRootHash,
@@ -253,78 +351,117 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 	}, nil
 }
 
-func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) ([32]byte, error) {
-	dataType, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
-		{
-			Name: "encryptedSecret",
-			Type: "bytes",
-		},
-		{
-			Name: "modelRootHash",
-			Type: "bytes",
-		},
-		{
-			Name: "nonce",
-			Type: "uint256",
-		},
-		{
-			Name: "providerSigner",
-			Type: "address",
-		},
-		{
-			Name: "taskFee",
-			Type: "uint256",
-		},
-		{
-			Name: "user",
-			Type: "address",
-		},
-	})
+func getSignature(settlementHash common.Hash, key *ecdsa.PrivateKey) ([]byte, error) {
+	sig, err := crypto.Sign(settlementHash.Bytes(), key)
 	if err != nil {
-		return [32]byte{}, err
+		return nil, err
 	}
 
-	arguments := abi.Arguments{
-		{
-			Type: dataType,
-		},
+	// https://github.com/ethereum/go-ethereum/issues/19751#issuecomment-504900739
+	if sig[64] == 0 || sig[64] == 1 {
+		sig[64] += 27
 	}
 
-	fee, err := util.HexadecimalStringToBigInt(taskFee)
+	return sig, nil
+}
+
+func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) (common.Hash, error) {
+	fee, err := util.ConvertToBigInt(taskFee)
 	if err != nil {
 		return [32]byte{}, errors.Wrap(err, "task fee")
 	}
 
-	inputNonce, err := util.HexadecimalStringToBigInt(nonce)
+	inputNonce, err := util.ConvertToBigInt(nonce)
 	if err != nil {
 		return [32]byte{}, errors.Wrap(err, "nonce")
 	}
 
-	o := struct {
-		encryptedSecret []byte
-		modelRootHash   []byte
-		nonce           *big.Int
-		providerSigner  common.Address
-		taskFee         *big.Int
-		user            common.Address
-	}{
-		encryptedSecret: encryptedSecret,
-		modelRootHash:   modelRootHash,
-		nonce:           inputNonce,
-		providerSigner:  providerSigner,
-		taskFee:         fee,
-		user:            user,
-	}
+	buf := new(bytes.Buffer)
+	buf.Write(encryptedSecret)
+	buf.Write(modelRootHash)
+	buf.Write(common.LeftPadBytes(inputNonce.Bytes(), 32))
+	buf.Write(providerSigner.Bytes())
+	buf.Write(common.LeftPadBytes(fee.Bytes(), 32))
+	buf.Write(user.Bytes())
 
-	bytes, err := arguments.Pack(o)
-	if err != nil {
-		return [32]byte{}, err
-	}
+	msg := crypto.Keccak256Hash(buf.Bytes())
+	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), msg.Bytes())
 
-	var headerHash [32]byte
-	hasher := sha3.NewLegacyKeccak256()
-	hasher.Write(bytes)
-	copy(headerHash[:], hasher.Sum(nil)[:32])
-
-	return headerHash, nil
+	return prefixedMsg, nil
 }
+
+// func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) ([32]byte, error) {
+// 	dataType, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+// 		{
+// 			Name: "encryptedSecret",
+// 			Type: "bytes",
+// 		},
+// 		{
+// 			Name: "modelRootHash",
+// 			Type: "bytes",
+// 		},
+// 		{
+// 			Name: "nonce",
+// 			Type: "uint256",
+// 		},
+// 		{
+// 			Name: "providerSigner",
+// 			Type: "address",
+// 		},
+// 		{
+// 			Name: "taskFee",
+// 			Type: "uint256",
+// 		},
+// 		{
+// 			Name: "user",
+// 			Type: "address",
+// 		},
+// 	})
+// 	if err != nil {
+// 		return [32]byte{}, err
+// 	}
+
+// 	arguments := abi.Arguments{
+// 		{
+// 			Type: dataType,
+// 		},
+// 	}
+
+// 	fee, err := util.ConvertToBigInt(taskFee)
+// 	if err != nil {
+// 		return [32]byte{}, errors.Wrap(err, "task fee")
+// 	}
+
+// 	inputNonce, err := util.ConvertToBigInt(nonce)
+// 	if err != nil {
+// 		return [32]byte{}, errors.Wrap(err, "nonce")
+// 	}
+
+// 	o := struct {
+// 		encryptedSecret []byte
+// 		modelRootHash   []byte
+// 		nonce           *big.Int
+// 		providerSigner  common.Address
+// 		taskFee         *big.Int
+// 		user            common.Address
+// 	}{
+// 		encryptedSecret: encryptedSecret,
+// 		modelRootHash:   modelRootHash,
+// 		nonce:           inputNonce,
+// 		providerSigner:  providerSigner,
+// 		taskFee:         fee,
+// 		user:            user,
+// 	}
+
+// 	bytes, err := arguments.Pack(o)
+// 	if err != nil {
+// 		return [32]byte{}, err
+// 	}
+
+// 	var headerHash [32]byte
+// 	hasher := sha3.NewLegacyKeccak256()
+// 	hasher.Write(bytes)
+// 	copy(headerHash[:], hasher.Sum(nil)[:32])
+
+// 	return headerHash, nil
+// }
