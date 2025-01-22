@@ -183,7 +183,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	tagSig, err := ethcrypto.Sign(tag[:], providerPriv)
+	tagSig, err := ethcrypto.Sign(ethcrypto.Keccak256(tag[:]), providerPriv)
 	if err != nil {
 		return nil, errors.Wrap(err, "sign tag")
 	}
