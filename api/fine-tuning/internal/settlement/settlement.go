@@ -2,6 +2,7 @@ package settlement
 
 import (
 	"context"
+	"encoding/hex"
 	"math/big"
 	"time"
 
@@ -99,12 +100,12 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 		return err
 	}
 
-	nonce, err := util.HexadecimalStringToBigInt(task.Nonce)
+	nonce, err := util.ConvertToBigInt(task.Nonce)
 	if err != nil {
 		return err
 	}
 
-	fee, err := util.HexadecimalStringToBigInt(task.Fee)
+	fee, err := util.ConvertToBigInt(task.Fee)
 	if err != nil {
 		return err
 	}
@@ -114,9 +115,14 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 		return err
 	}
 
+	retrievedSecret, err := hex.DecodeString(task.EncryptedSecret)
+	if err != nil {
+		return err
+	}
+
 	input := contract.VerifierInput{
 		Index:           big.NewInt(int64(task.DeliverIndex)),
-		EncryptedSecret: []byte(task.EncryptedSecret),
+		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,
 		ProviderSigner:  s.providerSigner,
@@ -136,7 +142,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	if err != nil {
 		return err
 	}
-
 	for _, srv := range s.services {
 		if srv.Name == task.ServiceName {
 			s.contract.AddOrUpdateService(ctx, srv, false)

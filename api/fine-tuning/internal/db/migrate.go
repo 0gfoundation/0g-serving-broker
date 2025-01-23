@@ -32,7 +32,7 @@ func (d *DB) Migrate() error {
 					OutputRootHash      string                `gorm:"type:text;"`
 					Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress"`
 					Secret              string                `gorm:"type:varchar(40)"`
-					EncryptedSecret     string                `gorm:"type:varchar(100)"`
+					EncryptedSecret     string                `gorm:"type:text"`
 					TeeSignature        string                `gorm:"type:varchar(132)"`
 					DeliverIndex        uint64                `gorm:"type:bigint"`
 					DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`

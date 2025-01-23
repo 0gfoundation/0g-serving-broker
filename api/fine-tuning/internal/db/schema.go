@@ -38,7 +38,7 @@ type Task struct {
 	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash" readonly:"true"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"status" readonly:"true"`
 	Secret              string                `gorm:"type:varchar(40)" json:"secret" readonly:"true"`
-	EncryptedSecret     string                `gorm:"type:varchar(100)" json:"encryptedSecret" readonly:"true"`
+	EncryptedSecret     string                `gorm:"type:text" json:"encryptedSecret" readonly:"true"`
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`

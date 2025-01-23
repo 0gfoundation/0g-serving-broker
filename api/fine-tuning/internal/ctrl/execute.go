@@ -3,6 +3,7 @@ package ctrl
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 
@@ -196,11 +197,13 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 
+	encodedSecret := hex.EncodeToString(settlementMetadata.EncryptedSecret)
+
 	err = c.db.UpdateTask(task.ID,
 		db.Task{
 			Progress:        db.ProgressStateDelivered.String(),
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
-			EncryptedSecret: string(settlementMetadata.EncryptedSecret),
+			EncryptedSecret: encodedSecret,
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 			DeliverIndex:    uint64(len(account.Deliverables) - 1),
 		})

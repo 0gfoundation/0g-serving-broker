@@ -74,13 +74,13 @@ def main():
 
     # Simulate the training process
     callback.on_train_begin()
-    num_steps = 10  # Simulated number of training steps
+    num_steps = 2  # Simulated number of training steps
 
     for step in range(num_steps):
         # Log every simulated step
         # Dummy values for logs
         callback.on_log(step, logs={"loss": 0.0, "accuracy": 100.0})
-        time.sleep(10)
+        time.sleep(1)
         print(f"Simulated training step {step + 1}/{num_steps}")
 
     callback.on_train_end()
