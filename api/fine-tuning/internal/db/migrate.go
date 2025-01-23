@@ -31,7 +31,7 @@ func (d *DB) Migrate() error {
 					Signature           string                `gorm:"type:varchar(132);not null"`
 					OutputRootHash      string                `gorm:"type:text;"`
 					Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress"`
-					Secret              string                `gorm:"type:varchar(40)"`
+					Secret              string                `gorm:"type:text"`
 					EncryptedSecret     string                `gorm:"type:text"`
 					TeeSignature        string                `gorm:"type:varchar(132)"`
 					DeliverIndex        uint64                `gorm:"type:bigint"`

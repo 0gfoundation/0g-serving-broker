@@ -36,8 +36,8 @@ type Task struct {
 	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce" binding:"required"`
 	Signature           string                `gorm:"type:varchar(132);not null" json:"signature" binding:"required"`
 	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash" readonly:"true"`
-	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"status" readonly:"true"`
-	Secret              string                `gorm:"type:varchar(40)" json:"secret" readonly:"true"`
+	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress" readonly:"true"`
+	Secret              string                `gorm:"type:text" json:"secret" readonly:"true"`
 	EncryptedSecret     string                `gorm:"type:text" json:"encryptedSecret" readonly:"true"`
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`

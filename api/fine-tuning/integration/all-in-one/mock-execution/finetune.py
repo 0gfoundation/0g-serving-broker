@@ -87,8 +87,17 @@ def main():
 
     # Simulate saving the model
     os.makedirs(args.output_dir, exist_ok=True)
-    with open(os.path.join(args.output_dir, "mock_model.txt"), "w") as f:
-        f.write("This is a mock model. No actual training occurred.\n")
+
+    output_file = os.path.join(args.output_dir, "mock_model")
+
+    with open(output_file, "wb") as f:
+        f.seek((1 * 1024 * 1024 * 1024) - 1)
+        f.write(b'\0')
+
+    # os.makedirs(args.output_dir, exist_ok=True)
+    # with open(os.path.join(args.output_dir, "mock_model.txt"), "w") as f:
+    #     f.write("This is a mock model. No actual training occurred.\n")
+    os.chmod(output_file, 0o666)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ type Task struct {
 	Fee                 string                `gorm:"type:varchar(66);not null" json:"fee" binding:"required"`
 	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce" binding:"required"`
 	Signature           string                `gorm:"type:varchar(132);not null" json:"signature" binding:"required"`
-	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"status" readonly:"true"`
+	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress" readonly:"true"`
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }

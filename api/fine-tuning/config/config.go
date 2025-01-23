@@ -95,6 +95,7 @@ func GetConfig() *Config {
 				RotationCount: 50,
 			},
 			SettlementCheckIntervalSecs: 60,
+			BalanceThresholdInEther:     1,
 		}
 
 		if err := loadConfig(instance); err != nil {

@@ -13,7 +13,7 @@ import (
 )
 
 func GenerateRandomString() (string, error) {
-	randomBytes := make([]byte, 16)
+	randomBytes := make([]byte, 8)
 	_, err := rand.Read(randomBytes)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate random bytes: %v", err)

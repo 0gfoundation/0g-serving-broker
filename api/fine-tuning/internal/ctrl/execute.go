@@ -203,6 +203,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		db.Task{
 			Progress:        db.ProgressStateDelivered.String(),
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
+			Secret:          hexutil.Encode(settlementMetadata.Secret),
 			EncryptedSecret: encodedSecret,
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 			DeliverIndex:    uint64(len(account.Deliverables) - 1),
