@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 func GenerateRandomString() (string, error) {
@@ -18,7 +19,7 @@ func GenerateRandomString() (string, error) {
 		return "", fmt.Errorf("failed to generate random bytes: %v", err)
 	}
 
-	return string(randomBytes), nil
+	return hexutil.Encode(randomBytes)[2:], nil
 }
 
 func GetFileName(prefix, extension string) (string, error) {
