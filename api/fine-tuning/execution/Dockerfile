@@ -13,6 +13,7 @@ WORKDIR /app
 
 # mount point for data
 RUN mkdir /app/mnt
+COPY transformer/finetune-img.py /app/finetune-img.py
 COPY transformer/finetune.py /app/finetune.py
 
 # Install additional Python libraries

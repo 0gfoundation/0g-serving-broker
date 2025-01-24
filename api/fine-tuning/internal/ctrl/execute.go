@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 )
@@ -115,11 +116,18 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		runTime = ""
 	}
 
+	trainScript := ScriptMap[task.PreTrainedModelHash]
+	if trainScript == "" {
+		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
+		return errors.New("no training script found")
+	}
+
+
 	containerConfig := &container.Config{
 		Image: image,
 		Cmd: []string{
 			"python",
-			"/app/finetune.py",
+			trainScript,
 			"--data_path", paths.ContainerDataset,
 			"--model_path", paths.ContainerPretrainedModel,
 			"--config_path", paths.ContainerTrainingConfig,
