@@ -2,6 +2,7 @@ package providercontract
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -46,7 +47,6 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	}
 	tx, err := c.Contract.AddOrUpdateService(
 		opts,
-		service.Name,
 		service.ServingUrl,
 		quota,
 		pricePerToken,
@@ -62,13 +62,13 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	return err
 }
 
-func (c *ProviderContract) DeleteService(ctx context.Context, name string) error {
+func (c *ProviderContract) DeleteService(ctx context.Context) error {
 	opt, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
 	}
 
-	tx, err := c.Contract.RemoveService(opt, name)
+	tx, err := c.Contract.RemoveService(opt)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func (c *ProviderContract) DeleteService(ctx context.Context, name string) error
 	return err
 }
 
-func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service, error) {
+func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, error) {
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
@@ -85,52 +85,29 @@ func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service,
 	if err != nil {
 		return nil, err
 	}
-	ret := []contract.Service{}
 	for i := range list {
 		if list[i].Provider.String() != c.ProviderAddress {
-			continue
+			return &list[i], nil
 		}
-		ret = append(ret, list[i])
 	}
 
-	return ret, nil
+	return nil, fmt.Errorf("service not found")
 }
 
-func (c *ProviderContract) SyncServices(ctx context.Context, news []config.Service) error {
-	olds, err := c.ListService(ctx)
-	if err != nil {
+func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service) error {
+	old, err := c.GetService(ctx)
+	if err != nil && err.Error() != "service not found" {
 		return err
 	}
-	oldMap := make(map[string]contract.Service, len(olds))
-	for i, old := range olds {
-		oldMap[old.Name] = olds[i]
+
+	if old != nil && identicalService(*old, new) {
+		return nil
 	}
 
-	var toAddOrUpdate []config.Service
-	var toRemove []string
-	for i, new := range news {
-		key := new.Name
-		if old, ok := oldMap[key]; ok {
-			delete(oldMap, key)
-			if identicalService(old, new) {
-				continue
-			}
-		}
-		toAddOrUpdate = append(toAddOrUpdate, news[i])
+	if err := c.AddOrUpdateService(ctx, new, false); err != nil {
+		return errors.Wrap(err, "add or update service in contract")
 	}
-	for k := range oldMap {
-		toRemove = append(toRemove, k)
-	}
-	for i := range toAddOrUpdate {
-		if err := c.AddOrUpdateService(ctx, toAddOrUpdate[i], false); err != nil {
-			return errors.Wrap(err, "add service in contract")
-		}
-	}
-	for i := range toRemove {
-		if err := c.DeleteService(ctx, toRemove[i]); err != nil {
-			return errors.Wrap(err, "delete service in contract")
-		}
-	}
+
 	return nil
 }
 

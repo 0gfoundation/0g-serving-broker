@@ -175,7 +175,6 @@ const docTemplate = `{
                 "fee",
                 "nonce",
                 "preTrainedModelHash",
-                "serviceName",
                 "signature",
                 "trainingParams",
                 "userAddress"
@@ -205,15 +204,12 @@ const docTemplate = `{
                 "preTrainedModelHash": {
                     "type": "string"
                 },
-                "serviceName": {
-                    "type": "string"
+                "progress": {
+                    "type": "string",
+                    "readOnly": true
                 },
                 "signature": {
                     "type": "string"
-                },
-                "status": {
-                    "type": "string",
-                    "readOnly": true
                 },
                 "trainingParams": {
                     "type": "string"

@@ -21,17 +21,17 @@ type Settlement struct {
 	contract       *providercontract.ProviderContract
 	checkInterval  time.Duration
 	providerSigner common.Address
-	services       []config.Service
+	service        config.Service
 	logger         log.Logger
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, services []config.Service, logger log.Logger) (*Settlement, error) {
+func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, service config.Service, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
 		db:             db,
 		contract:       contract,
 		checkInterval:  checkInterval,
 		providerSigner: providerSigner,
-		services:       services,
+		service:        service,
 		logger:         logger,
 	}, nil
 }
@@ -142,12 +142,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	if err != nil {
 		return err
 	}
-	for _, srv := range s.services {
-		if srv.Name == task.ServiceName {
-			s.contract.AddOrUpdateService(ctx, srv, false)
-			break
-		}
-	}
+	s.contract.AddOrUpdateService(ctx, s.service, false)
 
 	return nil
 }

@@ -28,7 +28,6 @@ type Task struct {
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 	UserAddress         string                `gorm:"type:varchar(255);not null" json:"userAddress" binding:"required"`
-	ServiceName         string                `gorm:"type:varchar(200);not null" json:"serviceName" binding:"required"`
 	PreTrainedModelHash string                `gorm:"type:text;not null" json:"preTrainedModelHash" binding:"required"`
 	DatasetHash         string                `gorm:"type:text;not null" json:"datasetHash" binding:"required"`
 	TrainingParams      string                `gorm:"type:text;not null" json:"trainingParams" binding:"required"`

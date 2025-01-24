@@ -169,7 +169,6 @@
                 "fee",
                 "nonce",
                 "preTrainedModelHash",
-                "serviceName",
                 "signature",
                 "trainingParams",
                 "userAddress"
@@ -199,15 +198,12 @@
                 "preTrainedModelHash": {
                     "type": "string"
                 },
-                "serviceName": {
-                    "type": "string"
+                "progress": {
+                    "type": "string",
+                    "readOnly": true
                 },
                 "signature": {
                     "type": "string"
-                },
-                "status": {
-                    "type": "string",
-                    "readOnly": true
                 },
                 "trainingParams": {
                     "type": "string"

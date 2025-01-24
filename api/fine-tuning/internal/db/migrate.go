@@ -22,7 +22,6 @@ func (d *DB) Migrate() error {
 					CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 					UserAddress         string                `gorm:"type:text;not null"`
-					ServiceName         string                `gorm:"type:varchar(255);not null"`
 					PreTrainedModelHash string                `gorm:"type:text;not null"`
 					DatasetHash         string                `gorm:"type:text;not null"`
 					TrainingParams      string                `gorm:"type:text;not null"`

@@ -19,12 +19,10 @@ definitions:
         type: string
       preTrainedModelHash:
         type: string
-      serviceName:
+      progress:
+        readOnly: true
         type: string
       signature:
-        type: string
-      status:
-        readOnly: true
         type: string
       trainingParams:
         type: string
@@ -38,7 +36,6 @@ definitions:
     - fee
     - nonce
     - preTrainedModelHash
-    - serviceName
     - signature
     - trainingParams
     - userAddress

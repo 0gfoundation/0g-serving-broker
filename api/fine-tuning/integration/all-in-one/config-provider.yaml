@@ -1,4 +1,4 @@
-contractAddress: 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
+contractAddress: 0x38ae6632E63B61153A6FbCD163E79af1855EDa8B
 database:
   fineTune: root:123456@tcp(localhost:33060)/fineTune?parseTime=true
 networks:
@@ -16,16 +16,15 @@ networks:
       - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
     transactionLimit: 10000000
     gasEstimationBuffer: 100000
-services:
-  - name: "fine-tune-service1"
-    servingUrl: "http://192.168.1.103:3080"
-    pricePerToken: 1
-    quota:
-      cpuCount: 8
-      memory: 16
-      storage: 10
-      gpuType: "H200"
-      gpuCount: 1
+service:
+  servingUrl: "http://192.168.1.103:3080"
+  pricePerToken: 1
+  quota:
+    cpuCount: 8
+    memory: 16
+    storage: 10
+    gpuType: "H200"
+    gpuCount: 1
 storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
   indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"

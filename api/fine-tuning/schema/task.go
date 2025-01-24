@@ -14,7 +14,6 @@ type Task struct {
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 	UserAddress         string                `gorm:"type:varchar(255);not null" json:"userAddress" binding:"required"`
-	ServiceName         string                `gorm:"type:varchar(200);not null" json:"serviceName" binding:"required"`
 	PreTrainedModelHash string                `gorm:"type:text;not null" json:"preTrainedModelHash" binding:"required"`
 	DatasetHash         string                `gorm:"type:text;not null" json:"datasetHash" binding:"required"`
 	TrainingParams      string                `gorm:"type:text;not null" json:"trainingParams" binding:"required"`
@@ -33,7 +32,6 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	}
 
 	d.UserAddress = r.UserAddress
-	d.ServiceName = r.ServiceName
 	d.PreTrainedModelHash = r.PreTrainedModelHash
 	d.DatasetHash = r.DatasetHash
 	d.TrainingParams = r.TrainingParams
@@ -57,7 +55,6 @@ func (d *Task) BindWithReadonly(ctx *gin.Context, old Task) error {
 func (t *Task) GenerateDBTask() *db.Task {
 	return &db.Task{
 		UserAddress:         t.UserAddress,
-		ServiceName:         t.ServiceName,
 		PreTrainedModelHash: t.PreTrainedModelHash,
 		DatasetHash:         t.DatasetHash,
 		TrainingParams:      t.TrainingParams,
@@ -73,7 +70,6 @@ func GenerateSchemaTask(t *db.Task) *Task {
 		CreatedAt:           t.CreatedAt,
 		UpdatedAt:           t.UpdatedAt,
 		UserAddress:         t.UserAddress,
-		ServiceName:         t.ServiceName,
 		PreTrainedModelHash: t.PreTrainedModelHash,
 		DatasetHash:         t.DatasetHash,
 		TrainingParams:      t.TrainingParams,

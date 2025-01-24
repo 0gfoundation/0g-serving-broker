@@ -80,23 +80,14 @@ func Main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Services, logger)
+	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Service, logger)
 	if err != nil {
 		panic(err)
 	}
 	settlement.Start(ctx)
 
-	go func() {
-		// Listen and Serve, config port with PORT=X
-		if err := engine.Run(); err != nil {
-			panic(err)
-		}
-	}()
-
-	logger.Info("Server started")
-	<-stop
-
-	if err := ctrl.DeleteAllService(ctx); err != nil {
-		logger.Errorf("Error deleting all services: %v", err)
+	// Listen and Serve, config port with PORT=X
+	if err := engine.Run(); err != nil {
+		panic(err)
 	}
 }

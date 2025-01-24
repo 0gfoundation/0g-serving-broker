@@ -74,7 +74,7 @@ def main():
 
     # Simulate the training process
     callback.on_train_begin()
-    num_steps = 2  # Simulated number of training steps
+    num_steps = 20  # Simulated number of training steps
 
     for step in range(num_steps):
         # Log every simulated step
@@ -86,18 +86,16 @@ def main():
     callback.on_train_end()
 
     # Simulate saving the model
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    output_file = os.path.join(args.output_dir, "mock_model")
-
-    with open(output_file, "wb") as f:
-        f.seek((1 * 1024 * 1024 * 1024) - 1)
-        f.write(b'\0')
-
     # os.makedirs(args.output_dir, exist_ok=True)
-    # with open(os.path.join(args.output_dir, "mock_model.txt"), "w") as f:
-    #     f.write("This is a mock model. No actual training occurred.\n")
-    os.chmod(output_file, 0o666)
+    # output_file = os.path.join(args.output_dir, "mock_model")
+    # with open(output_file, "wb") as f:
+    #     f.seek((1 * 1024 * 1024 * 1024) - 1)
+    #     f.write(b'\0')
+    # os.chmod(output_file, 0o666)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "mock_model.txt"), "w") as f:
+        f.write("This is a mock model. No actual training occurred.\n")
 
 
 if __name__ == "__main__":

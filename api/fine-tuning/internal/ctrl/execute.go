@@ -68,13 +68,7 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task) error {
 		c.logger.Errorf("Error processing data: %v\n", err)
 		return err
 	}
-
-	for _, s := range c.services {
-		if s.Name == task.ServiceName {
-			c.contract.AddOrUpdateService(ctx, s, true)
-			break
-		}
-	}
+	c.contract.AddOrUpdateService(ctx, c.service, true)
 
 	return c.handleContainerLifecycle(ctx, paths, task)
 }
@@ -90,7 +84,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 	if err != nil {
 		return err
 	}
-	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.services[0].PricePerToken, task); err != nil {
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.service.PricePerToken, task); err != nil {
 		return err
 	}
 

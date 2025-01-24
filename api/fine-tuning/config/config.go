@@ -12,7 +12,6 @@ import (
 )
 
 type Service struct {
-	Name       string `yaml:"name"`
 	ServingUrl string `yaml:"servingUrl"`
 	Quota      struct {
 		CpuCount int64  `yaml:"cpuCount"`
@@ -32,7 +31,7 @@ type Config struct {
 	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks"`
 	StorageClientConfig         StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
 	ServingUrl                  string              `yaml:"servingUrl"`
-	Services                    []Service           `mapstructure:"services" yaml:"services"`
+	Service                     Service             `yaml:"service"`
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
 	Logger                      config.LoggerConfig `yaml:"logger"`
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
@@ -82,7 +81,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x3A018CDD9DC4401375653cde0aa517ffeb1E27c4",
+			ContractAddress: "0x38ae6632E63B61153A6FbCD163E79af1855EDa8B",
 			Database: struct {
 				FineTune string `yaml:"fineTune"`
 			}{
