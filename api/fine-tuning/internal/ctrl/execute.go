@@ -116,12 +116,11 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		runTime = ""
 	}
 
-	trainScript := ScriptMap[task.PreTrainedModelHash]
+	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
 	if trainScript == "" {
 		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
 		return errors.New("no training script found")
 	}
-
 
 	containerConfig := &container.Config{
 		Image: image,
