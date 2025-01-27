@@ -1,0 +1,16 @@
+services:
+  myservice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cocktailsdg
+    command: ["bash", "-c", "tail -f /dev/null"]
+    volumes:
+      - ./data:/app/mnt
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
