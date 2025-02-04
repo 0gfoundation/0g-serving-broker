@@ -86,7 +86,7 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 		return nil, err
 	}
 	for i := range list {
-		if list[i].Provider.String() != c.ProviderAddress {
+		if list[i].Provider.String() == c.ProviderAddress {
 			return &list[i], nil
 		}
 	}
