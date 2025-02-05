@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -55,15 +54,16 @@ func Main() {
 	}
 
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
-	ctrl := ctrl.New(db, contract, zk, config.ServingUrl, config.Interval.AutoSettleBufferTime, svcCache)
+	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache)
 	ctx := context.Background()
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
 	}
 	settleFeesErr := ctrl.SettleFees(ctx)
 	if settleFeesErr != nil {
-		log.Printf("settle fee failed: %s", settleFeesErr.Error())
-	} else if err := ctrl.SyncServices(ctx); err != nil {
+		panic(settleFeesErr)
+	}
+	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
 	}
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable)

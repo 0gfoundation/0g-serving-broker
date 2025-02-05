@@ -15,21 +15,6 @@ func (d *DB) Migrate() error {
 
 	m := gormigrate.New(d.db, &gormigrate.Options{UseTransaction: false}, []*gormigrate.Migration{
 		{
-			ID: "create-service",
-			Migrate: func(tx *gorm.DB) error {
-				type Service struct {
-					model.Model
-					Name        string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_name"`
-					Type        string                `gorm:"type:varchar(255);not null"`
-					URL         string                `gorm:"type:varchar(255);not null"`
-					InputPrice  string                `gorm:"type:varchar(255);not null"`
-					OutputPrice string                `gorm:"type:varchar(255);not null"`
-					DeletedAt   soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
-				}
-				return tx.AutoMigrate(&Service{})
-			},
-		},
-		{
 			ID: "create-user",
 			Migrate: func(tx *gorm.DB) error {
 				type User struct {
@@ -61,24 +46,6 @@ func (d *DB) Migrate() error {
 					Processed         *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
 				}
 				return tx.AutoMigrate(&Request{})
-			},
-		},
-		{
-			ID: "alter-table-service-add-column-model",
-			Migrate: func(tx *gorm.DB) error {
-				type Service struct {
-					ModelType string `gorm:"type:varchar(255);not null;default:''"`
-				}
-				return tx.AutoMigrate(&Service{})
-			},
-		},
-		{
-			ID: "alter-table-service-add-column-verifiability",
-			Migrate: func(tx *gorm.DB) error {
-				type Service struct {
-					Verifiability string `gorm:"type:varchar(255);not null;default:''"`
-				}
-				return tx.AutoMigrate(&Service{})
 			},
 		},
 	})

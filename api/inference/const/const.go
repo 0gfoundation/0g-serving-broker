@@ -15,7 +15,6 @@ var (
 		"Input-Fee":           {},
 		"Nonce":               {},
 		"Previous-Output-Fee": {},
-		"Service-Name":        {},
 		"Signature":           {},
 	}
 )

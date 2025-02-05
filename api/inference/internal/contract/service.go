@@ -2,17 +2,17 @@ package providercontract
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
-	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
-func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model.Service, servingUrl string) error {
+func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service) error {
 	opts, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
@@ -27,9 +27,8 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service model
 	}
 	tx, err := c.Contract.AddOrUpdateService(
 		opts,
-		service.Name,
 		service.Type,
-		servingUrl,
+		service.ServingURL,
 		service.ModelType,
 		service.Verifiability,
 		inputPrice,
@@ -49,7 +48,7 @@ func (c *ProviderContract) DeleteService(ctx context.Context, name string) error
 		return err
 	}
 
-	tx, err := c.Contract.RemoveService(opt, name)
+	tx, err := c.Contract.RemoveService(opt)
 	if err != nil {
 		return err
 	}
@@ -57,15 +56,7 @@ func (c *ProviderContract) DeleteService(ctx context.Context, name string) error
 	return err
 }
 
-func (c *ProviderContract) GetService(ctx context.Context, name string) (contract.Service, error) {
-	callOpts := &bind.CallOpts{
-		Context: ctx,
-	}
-
-	return c.Contract.GetService(callOpts, common.HexToAddress(c.ProviderAddress), name)
-}
-
-func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service, error) {
+func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, error) {
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
@@ -74,56 +65,33 @@ func (c *ProviderContract) ListService(ctx context.Context) ([]contract.Service,
 	if err != nil {
 		return nil, err
 	}
-	ret := []contract.Service{}
 	for i := range list {
-		if list[i].Provider.String() != c.ProviderAddress {
-			continue
+		if list[i].Provider.String() == c.ProviderAddress {
+			return &list[i], nil
 		}
-		ret = append(ret, list[i])
 	}
 
-	return ret, nil
+	return nil, fmt.Errorf("service not found")
 }
 
-func (c *ProviderContract) BatchUpdateService(ctx context.Context, news []model.Service, servingURL string) error {
-	olds, err := c.ListService(ctx)
-	if err != nil {
+func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {
+	old, err := c.GetService(ctx)
+	if err != nil && err.Error() != "service not found" {
 		return err
 	}
-	oldMap := make(map[string]contract.Service, len(olds))
-	for i, old := range olds {
-		oldMap[old.Name] = olds[i]
+
+	if old != nil && identicalService(*old, new) {
+		return nil
 	}
 
-	var toAddOrUpdate []model.Service
-	var toRemove []string
-	for i, new := range news {
-		key := new.Name
-		if old, ok := oldMap[key]; ok {
-			delete(oldMap, key)
-			if identicalService(old, new) {
-				continue
-			}
-		}
-		toAddOrUpdate = append(toAddOrUpdate, news[i])
+	if err := c.AddOrUpdateService(ctx, new); err != nil {
+		return errors.Wrap(err, "add or update service in contract")
 	}
-	for k := range oldMap {
-		toRemove = append(toRemove, k)
-	}
-	for i := range toAddOrUpdate {
-		if err := c.AddOrUpdateService(ctx, toAddOrUpdate[i], servingURL); err != nil {
-			return errors.Wrap(err, "add service in contract")
-		}
-	}
-	for i := range toRemove {
-		if err := c.DeleteService(ctx, toRemove[i]); err != nil {
-			return errors.Wrap(err, "delete service in contract")
-		}
-	}
+
 	return nil
 }
 
-func identicalService(old contract.Service, new model.Service) bool {
+func identicalService(old contract.Service, new config.Service) bool {
 	if old.Model != new.ModelType {
 		return false
 	}
@@ -137,6 +105,9 @@ func identicalService(old contract.Service, new model.Service) bool {
 		return false
 	}
 	if old.ServiceType != new.Type {
+		return false
+	}
+	if old.Url != new.ServingURL {
 		return false
 	}
 	return true

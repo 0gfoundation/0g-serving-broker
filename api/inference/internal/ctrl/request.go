@@ -193,8 +193,6 @@ func updateRequestField(req *model.Request, key, value string) error {
 		req.Nonce = value
 	case "Previous-Output-Fee":
 		req.PreviousOutputFee = value
-	case "Service-Name":
-		req.ServiceName = value
 	case "Signature":
 		req.Signature = value
 	default:

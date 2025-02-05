@@ -24,21 +24,17 @@ type Proxy struct {
 	ctrl *ctrl.Ctrl
 
 	allowOrigins      []string
-	serviceRoutes     map[string]bool
 	serviceRoutesLock sync.RWMutex
-	serviceTargets    map[string]string
-	serviceTypes      map[string]string
+	serviceTarget     string
+	serviceType       string
 	serviceGroup      *gin.RouterGroup
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
 	p := &Proxy{
-		allowOrigins:   allowOrigins,
-		ctrl:           ctrl,
-		serviceRoutes:  make(map[string]bool),
-		serviceTargets: make(map[string]string),
-		serviceTypes:   make(map[string]string),
-		serviceGroup:   engine.Group(constant.ServicePrefix),
+		allowOrigins: allowOrigins,
+		ctrl:         ctrl,
+		serviceGroup: engine.Group(constant.ServicePrefix),
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -46,7 +42,6 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowHeaders: []string{"*"},
 	}))
-	p.serviceGroup.Use(p.routeFilterMiddleware)
 
 	if enableMonitor {
 		p.serviceGroup.Use(monitor.TrackMetrics())
@@ -56,51 +51,22 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 }
 
 func (p *Proxy) Start() error {
-	svcs, err := p.ctrl.ListService()
-	if err != nil {
-		return errors.Wrap(err, "Provider: start proxy service, list service in db")
-	}
-	for _, svc := range svcs {
-		switch svc.Type {
-		case "zgStorage", "chatbot":
-			p.AddHTTPRoute(svc.Name, svc.URL, svc.Type)
-		default:
-			return errors.New("invalid service type")
-		}
+	switch p.ctrl.Service.Type {
+	case "zgStorage", "chatbot":
+		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
+	default:
+		return errors.New("invalid service type")
 	}
 	return nil
 }
 
-func (p *Proxy) routeFilterMiddleware(ctx *gin.Context) {
-	route := strings.TrimPrefix(ctx.Request.URL.Path, constant.ServicePrefix+"/")
-	segments := strings.Split(route, "/")
-	if len(segments) == 0 || segments[0] == "" {
-		handleBrokerError(ctx, errors.New("route is invalid"), "route filter middleware")
-		return
-	}
-
-	p.serviceRoutesLock.RLock()
-	valid, exists := p.serviceRoutes[segments[0]]
-	p.serviceRoutesLock.RUnlock()
-	if !exists {
-		handleBrokerError(ctx, errors.New("route is not exist"), "route filter middleware")
-		return
-	}
-	if !valid {
-		handleBrokerError(ctx, errors.New("route is deleted"), "route filter middleware")
-		return
-	}
-	ctx.Next()
-}
-
-func (p *Proxy) AddHTTPRoute(route, targetURL, svcType string) {
+func (p *Proxy) AddHTTPRoute(targetURL, svcType string) {
 	//TODO: Add a URL validation
-	_, exists := p.serviceRoutes[route]
+	exists := p.serviceTarget == targetURL
 
 	p.serviceRoutesLock.Lock()
-	p.serviceRoutes[route] = true
-	p.serviceTargets[route] = targetURL
-	p.serviceTypes[route] = svcType
+	p.serviceTarget = targetURL
+	p.serviceType = svcType
 	p.serviceRoutesLock.Unlock()
 
 	if exists {
@@ -108,45 +74,18 @@ func (p *Proxy) AddHTTPRoute(route, targetURL, svcType string) {
 	}
 
 	h := func(ctx *gin.Context) {
-		p.proxyHTTPRequest(ctx, route)
+		p.proxyHTTPRequest(ctx)
 	}
-	p.serviceGroup.Any(route+"/*any", h)
+	p.serviceGroup.Any("*any", h)
 }
 
-func (p *Proxy) DeleteRoute(route string) {
-	p.serviceRoutesLock.Lock()
-	p.serviceRoutes[route] = false
-	delete(p.serviceTargets, route)
-	delete(p.serviceTypes, route)
-	p.serviceRoutesLock.Unlock()
-}
-
-func (p *Proxy) UpdateRoute(route string, newTargetURL, newSvcType string) error {
-	//TODO: Add a URL validation
-	valid, exists := p.serviceRoutes[route]
-	if !exists {
-		return errors.New("route is not exist")
-	}
-	if !valid {
-		return errors.New("route is deleted")
-	}
-
-	p.serviceRoutesLock.Lock()
-	p.serviceRoutes[route] = true
-	p.serviceTargets[route] = newTargetURL
-	p.serviceTypes[route] = newSvcType
-	p.serviceRoutesLock.Unlock()
-
-	return nil
-}
-
-func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
+func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	p.serviceRoutesLock.RLock()
-	targetURL := p.serviceTargets[route]
-	svcType := p.serviceTypes[route]
+	targetURL := p.serviceTarget
+	svcType := p.serviceType
 	p.serviceRoutesLock.RUnlock()
 
-	targetRoute := strings.TrimPrefix(ctx.Request.RequestURI, constant.ServicePrefix+"/"+route)
+	targetRoute := strings.TrimPrefix(ctx.Request.RequestURI, constant.ServicePrefix)
 	if targetRoute != "/" {
 		targetURL += targetRoute
 	}
@@ -169,7 +108,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetRoute]; !ok {
-		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, route, reqBody)
+		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 		if err != nil {
 			handleBrokerError(ctx, err, "prepare HTTP request")
 			return
@@ -188,11 +127,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
-	svc, err := p.ctrl.GetService(route)
-	if err != nil {
-		handleBrokerError(ctx, err, "get service")
-		return
-	}
 
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
@@ -206,7 +140,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		return
 	}
 
-	expectedInputFee, err := util.Multiply(inputCount, svc.InputPrice)
+	expectedInputFee, err := util.Multiply(inputCount, p.ctrl.Service.InputPrice)
 	if err != nil {
 		handleBrokerError(ctx, err, "multiply input count and input fee")
 		return
@@ -221,12 +155,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context, route string) {
 		return
 	}
 
-	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, route, reqBody)
+	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 	if err != nil {
 		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, req.Fee, svc.OutputPrice, true)
+	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, req.Fee, p.ctrl.Service.OutputPrice, true)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
