@@ -42,7 +42,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	return err
 }
 
-func (c *ProviderContract) DeleteService(ctx context.Context, name string) error {
+func (c *ProviderContract) DeleteService(ctx context.Context) error {
 	opt, err := c.Contract.CreateTransactOpts()
 	if err != nil {
 		return err
@@ -75,6 +75,9 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {
+	if new.ServingURL == "" {
+		return c.DeleteService(ctx)
+	}
 	old, err := c.GetService(ctx)
 	if err != nil && err.Error() != "service not found" {
 		return err

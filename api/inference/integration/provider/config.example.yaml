@@ -2,7 +2,6 @@ interval:
   autoSettleBufferTime: 60
   forceSettlementProcessor: 600
   settlementProcessor: 300
-servingUrl: http://<Public_IP_Address>:<PORT>
 networks:
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"
@@ -11,3 +10,11 @@ networks:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
+service:
+  servingUrl: <Serving URL>
+  targetUrl: <Target URL>
+  inputPrice: 1
+  outputPrice: 1
+  type: "chatbot"
+  model: <Model>
+  verifiability: "TeeML"
