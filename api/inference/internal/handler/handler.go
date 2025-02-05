@@ -25,13 +25,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
 	// service
-	group.GET("/service", h.ListService)
-	group.GET("/service/:service", h.GetService)
-	group.POST("/service", h.RegisterService)
-	group.PUT("/service/:service", h.UpdateService)
-	group.DELETE("/service/:service", h.DeleteService)
-	group.GET("contract-service", h.ListServiceInContract)
-	group.POST("sync-service", h.SyncServices)
+	group.GET("/service", h.GetService)
 
 	// settle
 	group.POST("/settle", h.SettleFees)

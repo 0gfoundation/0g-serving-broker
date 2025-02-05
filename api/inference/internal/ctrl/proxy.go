@@ -17,7 +17,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
-func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL, route string, reqBody []byte) (*http.Request, error) {
+func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
 	if err != nil {
 		return nil, err
@@ -54,7 +54,6 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 	}
 
 	ctx.Writer.Header().Add("provider", c.contract.ProviderAddress)
-	ctx.Writer.Header().Add("service-name", reqModel.ServiceName)
 	c.addExposeHeaders(ctx)
 
 	ctx.Status(resp.StatusCode)
@@ -198,7 +197,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 	// Set 'Access-Control-Expose-Headers' for CORS
-	exposeHeaders := []string{"Provider", "content-encoding", "service-name"}
+	exposeHeaders := []string{"Provider", "content-encoding"}
 	existing := ctx.Writer.Header().Get("Access-Control-Expose-Headers")
 	var newHeaders string
 	if existing != "" {

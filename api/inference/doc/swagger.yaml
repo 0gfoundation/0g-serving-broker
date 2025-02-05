@@ -134,17 +134,6 @@ info:
   title: 0G Serving Provider Broker API
   version: 0.1.0
 paths:
-  /contract-service:
-    get:
-      description: This endpoint allows you to list all services in the contract
-      operationId: listServiceInContract
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/model.ServiceList'
-      tags:
-      - service
   /request:
     get:
       description: This endpoint allows you to list requests
@@ -163,82 +152,13 @@ paths:
       - request
   /service:
     get:
-      description: This endpoint allows you to list all services in the database.
-        Compared to the output from listServiceInContract, the service.url from this
-        endpoint is the original URL of the service, which is not public.
-      operationId: listService
+      description: This endpoint allows you to list all services in the contract
+      operationId: getService
       responses:
         "200":
           description: OK
           schema:
             $ref: '#/definitions/model.ServiceList'
-      tags:
-      - service
-    post:
-      description: This endpoint allows you to register service in the contract
-      operationId: registerService
-      parameters:
-      - description: body
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/model.Service'
-      responses:
-        "204":
-          description: No Content - success without response body
-      tags:
-      - service
-  /service/{service}:
-    delete:
-      description: This endpoint allows you to delete service in the contract
-      operationId: deleteService
-      parameters:
-      - description: Service name
-        in: path
-        name: service
-        required: true
-        type: string
-      responses:
-        "202":
-          description: Accepted
-      tags:
-      - service
-    get:
-      description: This endpoint allows you to get service by name
-      operationId: getService
-      parameters:
-      - description: Service name
-        in: path
-        name: service
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/model.Service'
-      tags:
-      - service
-    put:
-      description: This endpoint allows you to update service in the contract. The
-        name attribute cannot be updated
-      operationId: updateService
-      parameters:
-      - description: Service name
-        in: path
-        name: service
-        required: true
-        type: string
-      - description: body
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/model.Service'
-      responses:
-        "202":
-          description: Accepted
       tags:
       - service
   /settle:
@@ -260,16 +180,6 @@ paths:
           description: Accepted
       tags:
       - user
-  /sync-service:
-    post:
-      description: This endpoint allows you to synchronize all services from local
-        database to the contract
-      operationId: syncServices
-      responses:
-        "202":
-          description: Accepted
-      tags:
-      - service
   /user:
     get:
       description: This endpoint allows you to list all users who have created accounts

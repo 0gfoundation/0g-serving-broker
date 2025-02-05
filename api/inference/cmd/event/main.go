@@ -16,47 +16,47 @@ import (
 )
 
 func Main() {
-	config := config.GetConfig()
+	conf := config.GetConfig()
 
-	if config.Monitor.Enable {
+	if conf.Monitor.Enable {
 		monitor.InitPrometheus()
-		go monitor.StartMetricsServer(config.Monitor.EventAddress)
+		go monitor.StartMetricsServer(conf.Monitor.EventAddress)
 	}
 
-	db, err := database.NewDB(config)
+	db, err := database.NewDB(conf)
 	if err != nil {
 		panic(err)
 	}
-	contract, err := providercontract.NewProviderContract(config)
+	contract, err := providercontract.NewProviderContract(conf)
 	if err != nil {
 		panic(err)
 	}
-	if config.Interval.AutoSettleBufferTime > int(contract.LockTime) {
+	if conf.Interval.AutoSettleBufferTime > int(contract.LockTime) {
 		panic(errors.New("Interval.AutoSettleBufferTime grater than refund LockTime"))
 	}
-	if config.Interval.AutoSettleBufferTime > config.Interval.ForceSettlementProcessor {
+	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
 		panic(errors.New("Interval.AutoSettleBufferTime grater than forceSettlement Interval"))
 	}
-	if int(contract.LockTime)-config.Interval.AutoSettleBufferTime < 60 {
+	if int(contract.LockTime)-conf.Interval.AutoSettleBufferTime < 60 {
 		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
 	}
-	if config.Interval.ForceSettlementProcessor < 60 {
+	if conf.Interval.ForceSettlementProcessor < 60 {
 		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
 	}
 
 	cfg := &rest.Config{}
 	mgr, err := controller.NewManager(cfg, controller.Options{
 		Metrics: metricserver.Options{
-			BindAddress: config.Event.ProviderAddr,
+			BindAddress: conf.Event.ProviderAddr,
 		},
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
-	ctrl := ctrl.New(db, contract, zk, "", config.Interval.AutoSettleBufferTime, nil)
-	settlementProcessor := event.NewSettlementProcessor(ctrl, config.Interval.SettlementProcessor, config.Interval.ForceSettlementProcessor, config.Monitor.Enable)
+	zk := zkclient.NewZKClient(conf.ZKProver.Provider, conf.ZKProver.RequestLength)
+	ctrl := ctrl.New(db, contract, zk, config.Service{}, conf.Interval.AutoSettleBufferTime, nil)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}

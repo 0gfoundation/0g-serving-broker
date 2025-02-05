@@ -9,6 +9,16 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+type Service struct {
+	ServingURL    string `yaml:"servingUrl"`
+	TargetURL     string `yaml:"targetUrl"`
+	InputPrice    string `yaml:"inputPrice"`
+	OutputPrice   string `yaml:"outputPrice"`
+	Type          string `yaml:"type"`
+	ModelType     string `yaml:"model"`
+	Verifiability string `yaml:"verifiability"`
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
@@ -23,16 +33,16 @@ type Config struct {
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
 	} `yaml:"interval"`
-	Networks   config.Networks `mapstructure:"networks" yaml:"networks"`
-	ServingUrl string          `yaml:"servingUrl"`
-	ZKProver   struct {
-		Provider      string `yaml:"provider"`
-		RequestLength int    `yaml:"requestLength"`
-	} `yaml:"zkProver"`
-	Monitor struct {
+	Service  Service         `yaml:"service"`
+	Networks config.Networks `mapstructure:"networks" yaml:"networks"`
+	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
 		EventAddress string `yaml:"eventAddress"`
 	} `yaml:"monitor"`
+	ZKProver struct {
+		Provider      string `yaml:"provider"`
+		RequestLength int    `yaml:"requestLength"`
+	} `yaml:"zkProver"`
 }
 
 var (
@@ -63,7 +73,7 @@ func GetConfig() *Config {
 			AllowOrigins: []string{
 				"http://localhost:4000",
 			},
-			ContractAddress: "0x3dF34461017f22eA871d7FFD4e98191794F8053d",
+			ContractAddress: "0x03394Fcd07d2A8d251d4e6e6E814b0b6892F1f3c",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
@@ -83,19 +93,19 @@ func GetConfig() *Config {
 				ForceSettlementProcessor: 600,
 				SettlementProcessor:      300,
 			},
-			ZKProver: struct {
-				Provider      string `yaml:"provider"`
-				RequestLength int    `yaml:"requestLength"`
-			}{
-				Provider:      "zk-provider-server:3000",
-				RequestLength: 40,
-			},
 			Monitor: struct {
 				Enable       bool   `yaml:"enable"`
 				EventAddress string `yaml:"eventAddress"`
 			}{
 				Enable:       false,
 				EventAddress: "0g-serving-provider-event:3081",
+			},
+			ZKProver: struct {
+				Provider      string `yaml:"provider"`
+				RequestLength int    `yaml:"requestLength"`
+			}{
+				Provider:      "zk-provider-server:3000",
+				RequestLength: 40,
 			},
 		}
 

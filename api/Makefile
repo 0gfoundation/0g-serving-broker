@@ -38,7 +38,7 @@ release: oci
 	done
 
 hardhat-env:
-	docker build -f ./libs/0g-serving-contract/integrate/Dockerfile -t hardhat-node-with-contract:dev ./libs/0g-serving-contract
+	docker build -f ./libs/0g-serving-contract/integrate/Dockerfile -t raven20241/hardhat-compute-network-contract:dev ./libs/0g-serving-contract
 
 generate-inference-api:
 	docker run --rm -v ./inference/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 

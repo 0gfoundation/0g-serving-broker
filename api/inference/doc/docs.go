@@ -15,23 +15,6 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
-        "/contract-service": {
-            "get": {
-                "description": "This endpoint allows you to list all services in the contract",
-                "tags": [
-                    "service"
-                ],
-                "operationId": "listServiceInContract",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/model.ServiceList"
-                        }
-                    }
-                }
-            }
-        },
         "/request": {
             "get": {
                 "description": "This endpoint allows you to list requests",
@@ -59,117 +42,17 @@ const docTemplate = `{
         },
         "/service": {
             "get": {
-                "description": "This endpoint allows you to list all services in the database. Compared to the output from listServiceInContract, the service.url from this endpoint is the original URL of the service, which is not public.",
+                "description": "This endpoint allows you to list all services in the contract",
                 "tags": [
                     "service"
                 ],
-                "operationId": "listService",
+                "operationId": "getService",
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/model.ServiceList"
                         }
-                    }
-                }
-            },
-            "post": {
-                "description": "This endpoint allows you to register service in the contract",
-                "tags": [
-                    "service"
-                ],
-                "operationId": "registerService",
-                "parameters": [
-                    {
-                        "description": "body",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/model.Service"
-                        }
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": "No Content - success without response body"
-                    }
-                }
-            }
-        },
-        "/service/{service}": {
-            "get": {
-                "description": "This endpoint allows you to get service by name",
-                "tags": [
-                    "service"
-                ],
-                "operationId": "getService",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Service name",
-                        "name": "service",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/model.Service"
-                        }
-                    }
-                }
-            },
-            "put": {
-                "description": "This endpoint allows you to update service in the contract. The name attribute cannot be updated",
-                "tags": [
-                    "service"
-                ],
-                "operationId": "updateService",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Service name",
-                        "name": "service",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "body",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/model.Service"
-                        }
-                    }
-                ],
-                "responses": {
-                    "202": {
-                        "description": "Accepted"
-                    }
-                }
-            },
-            "delete": {
-                "description": "This endpoint allows you to delete service in the contract",
-                "tags": [
-                    "service"
-                ],
-                "operationId": "deleteService",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Service name",
-                        "name": "service",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "202": {
-                        "description": "Accepted"
                     }
                 }
             }
@@ -195,20 +78,6 @@ const docTemplate = `{
                     "user"
                 ],
                 "operationId": "syncUserAccounts",
-                "responses": {
-                    "202": {
-                        "description": "Accepted"
-                    }
-                }
-            }
-        },
-        "/sync-service": {
-            "post": {
-                "description": "This endpoint allows you to synchronize all services from local database to the contract",
-                "tags": [
-                    "service"
-                ],
-                "operationId": "syncServices",
                 "responses": {
                     "202": {
                         "description": "Accepted"
