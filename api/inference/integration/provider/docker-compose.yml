@@ -65,6 +65,8 @@ services:
   zk:
     image: ghcr.io/0glabs/zk:0.1.0
     container_name: zk-provider-server
+    ports:
+      - "3002:3000"
     healthcheck:
       test:
         [
