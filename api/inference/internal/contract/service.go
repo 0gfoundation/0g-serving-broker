@@ -37,9 +37,10 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	if err != nil {
 		return err
 	}
+	fmt.Printf("tx hash: %s\n", tx.Hash().String())
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
 
-	return err
+	return errors.Wrapf(err, "wait for receipt of tx %s", tx.Hash().String())
 }
 
 func (c *ProviderContract) DeleteService(ctx context.Context) error {
@@ -75,18 +76,19 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {
-	if new.ServingURL == "" {
-		return c.DeleteService(ctx)
-	}
 	old, err := c.GetService(ctx)
 	if err != nil && err.Error() != "service not found" {
 		return err
 	}
-
+	if old == nil && new.ServingURL == "" {
+		return nil
+	}
+	if old != nil && new.ServingURL == "" {
+		return c.DeleteService(ctx)
+	}
 	if old != nil && identicalService(*old, new) {
 		return nil
 	}
-
 	if err := c.AddOrUpdateService(ctx, new); err != nil {
 		return errors.Wrap(err, "add or update service in contract")
 	}

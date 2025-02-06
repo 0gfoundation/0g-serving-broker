@@ -1,4 +1,3 @@
-contractAddress: 0x38ae6632E63B61153A6FbCD163E79af1855EDa8B
 database:
   fineTune: root:123456@tcp(localhost:33060)/fineTune?parseTime=true
 networks:
