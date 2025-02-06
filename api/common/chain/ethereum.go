@@ -39,11 +39,13 @@ func (e *EthereumClient) TransactionCallMessage(
 	value *big.Int,
 	data []byte,
 ) (*ethereum.CallMsg, error) {
-	gasPrice, err := e.Client.SuggestGasPrice(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	log.Debug().Str("Suggested Gas Price", gasPrice.String())
+	// gasPrice, err := e.Client.SuggestGasPrice(context.Background())
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// log.Debug().Str("Suggested Gas Price", gasPrice.String())
+	// TODO: Add SuggestGasPrice
+	gasPrice := big.NewInt(10000000000)
 	msg := ethereum.CallMsg{
 		From:     common.HexToAddress(from.Address()),
 		To:       &to,
