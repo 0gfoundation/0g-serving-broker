@@ -41,16 +41,17 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		handleServiceError(ctx, resp.Body)
-		return
-	}
-
 	for k, v := range resp.Header {
 		if k == "Content-Length" {
 			continue
 		}
 		ctx.Writer.Header()[k] = v
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		ctx.Writer.WriteHeader(resp.StatusCode)
+		handleServiceError(ctx, resp.Body)
+		return
 	}
 
 	ctx.Writer.Header().Add("provider", c.contract.ProviderAddress)
