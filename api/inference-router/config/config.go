@@ -18,6 +18,7 @@ type Config struct {
 	Event struct {
 		RouterAddr string `yaml:"routerAddr"`
 	} `yaml:"event"`
+	GasPrice string `yaml:"gasPrice"`
 	Interval struct {
 		RefundProcessor int `yaml:"refundProcessor"`
 	} `yaml:"interval"`
@@ -57,7 +58,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x3dF34461017f22eA871d7FFD4e98191794F8053d",
+			ContractAddress: "0xAdDe2e52114E1eA5D911334efe07751B1EB2058B",
 			Database: struct {
 				Router string `yaml:"router"`
 			}{
@@ -68,6 +69,7 @@ func GetConfig() *Config {
 			}{
 				RouterAddr: ":8089",
 			},
+			GasPrice: "",
 			Interval: struct {
 				RefundProcessor int `yaml:"refundProcessor"`
 			}{

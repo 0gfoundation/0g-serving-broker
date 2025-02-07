@@ -27,7 +27,7 @@ type RetryOption struct {
 	Interval time.Duration
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Networks, network string) (*ServingContract, error) {
+func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice string) (*ServingContract, error) {
 	var networkConfig client.BlockchainNetwork
 	var err error
 	if network == "hardhat" {
@@ -39,7 +39,7 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 		return nil, err
 	}
 
-	ethereumClient, err := client.NewEthereumClient(networkConfig)
+	ethereumClient, err := client.NewEthereumClient(networkConfig, gasPrice)
 	if err != nil {
 		return nil, err
 	}
