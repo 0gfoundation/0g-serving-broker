@@ -3,8 +3,10 @@ package db
 import (
 	"strings"
 
-	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/pkg/errors"
+
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 func (d *DB) GetUserAccount(userAddress string) (model.User, error) {
@@ -25,8 +27,8 @@ func (d *DB) ListUserAccount(opt *model.UserListOptions) ([]model.User, error) {
 	tx := d.db.Model(model.User{})
 
 	if opt != nil {
-		if opt.LowBalanceRisk != nil {
-			tx = tx.Where("((lock_balance - unsettled_fee) < 0 OR last_balance_check_time < ?)", *opt.LowBalanceRisk)
+		if opt.LowBalanceRisk != nil && opt.SettleTriggerThreshold != nil {
+			tx = tx.Where("((lock_balance - unsettled_fee) < ? OR last_balance_check_time < ?)", constant.SettleTriggerThreshold, *opt.LowBalanceRisk)
 		}
 		if opt.MinUnsettledFee != nil {
 			tx = tx.Where("unsettled_fee > ?", *opt.MinUnsettledFee)

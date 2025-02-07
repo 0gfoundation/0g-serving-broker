@@ -17,4 +17,7 @@ var (
 		"Previous-Output-Fee": {},
 		"Signature":           {},
 	}
+
+	// Should align with the topUpTriggerThreshold in the client sdk
+	SettleTriggerThreshold = int64(5000)
 )
