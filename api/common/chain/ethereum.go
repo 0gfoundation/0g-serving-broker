@@ -15,20 +15,22 @@ import (
 
 // EthereumClient wraps the client and the BlockChain network to interact with an EVM based Blockchain
 type EthereumClient struct {
-	Client  *ethclient.Client
-	Network BlockchainNetwork
+	Client   *ethclient.Client
+	Network  BlockchainNetwork
+	GasPrice string
 }
 
 // NewEthereumClient returns an instantiated instance of the Ethereum client that has connected to the server
-func NewEthereumClient(network BlockchainNetwork) (*EthereumClient, error) {
+func NewEthereumClient(network BlockchainNetwork, gasPrice string) (*EthereumClient, error) {
 	cl, err := ethclient.Dial(network.URL())
 	if err != nil {
 		return nil, err
 	}
 
 	return &EthereumClient{
-		Client:  cl,
-		Network: network,
+		Client:   cl,
+		Network:  network,
+		GasPrice: gasPrice,
 	}, nil
 }
 
@@ -39,13 +41,21 @@ func (e *EthereumClient) TransactionCallMessage(
 	value *big.Int,
 	data []byte,
 ) (*ethereum.CallMsg, error) {
-	// gasPrice, err := e.Client.SuggestGasPrice(context.Background())
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// log.Debug().Str("Suggested Gas Price", gasPrice.String())
-	// TODO: Add SuggestGasPrice
-	gasPrice := big.NewInt(10000000000)
+	var gasPrice *big.Int
+	var err error
+	var ok bool
+	if e.GasPrice == "" {
+		gasPrice, err = e.Client.SuggestGasPrice(context.Background())
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		gasPrice, ok = new(big.Int).SetString(e.GasPrice, 10)
+		if !ok {
+			return nil, fmt.Errorf("invalid gas price: %s", e.GasPrice)
+		}
+	}
+	log.Debug().Str("Suggested Gas Price", gasPrice.String())
 	msg := ethereum.CallMsg{
 		From:     common.HexToAddress(from.Address()),
 		To:       &to,

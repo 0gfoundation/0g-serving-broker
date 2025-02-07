@@ -36,6 +36,7 @@ type Config struct {
 	Logger                      config.LoggerConfig `yaml:"logger"`
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
 	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
+	GasPrice                    string              `yaml:"gasPrice"`
 }
 
 type StorageClientConfig struct {
@@ -87,6 +88,7 @@ func GetConfig() *Config {
 			}{
 				FineTune: "root:123456@tcp(0g-fine-tune-broker-db:3306)/fineTune?parseTime=true",
 			},
+			GasPrice: "",
 			Logger: config.LoggerConfig{
 				Format:        "text",
 				Level:         "info",
