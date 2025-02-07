@@ -29,10 +29,10 @@ monitor:
   enable: true
   eventAddress: "0g-serving-provider-event:3081"
 service:
-  servingUrl: <Serving URL>
-  targetUrl: <Target URL>
+  servingUrl: http://192.168.1.105:3080
+  targetUrl: https://api.openai.com/v1
   inputPrice: 1
   outputPrice: 1
   type: "chatbot"
-  model: <Model>
+  model: "gpt-3.5-turbo"
   verifiability: "TeeML"

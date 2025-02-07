@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"log"
 	"math/big"
+	"strconv"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
@@ -150,9 +152,20 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 }
 
 func (c Ctrl) ProcessSettlement(ctx context.Context) error {
+	inputPrice, err := strconv.ParseInt(c.Service.InputPrice, 10, 64)
+	if err != nil {
+		return err
+	}
+	outputPrice, err := strconv.ParseInt(c.Service.OutputPrice, 10, 64)
+	if err != nil {
+		return err
+	}
+	settleTriggerThreshold := (inputPrice + outputPrice) * constant.SettleTriggerThreshold
+
 	accounts, err := c.db.ListUserAccount(&model.UserListOptions{
-		LowBalanceRisk:  model.PtrOf(time.Now().Add(-c.contract.LockTime - c.autoSettleBufferTime)),
-		MinUnsettledFee: model.PtrOf(int64(0)),
+		LowBalanceRisk:         model.PtrOf(time.Now().Add(-c.contract.LockTime + c.autoSettleBufferTime)),
+		MinUnsettledFee:        model.PtrOf(int64(0)),
+		SettleTriggerThreshold: &settleTriggerThreshold,
 	})
 	if err != nil {
 		return errors.Wrap(err, "list accounts that need to be settled in db")
@@ -167,8 +180,9 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 		return errors.Wrap(err, "synchronize accounts from the contract to the database")
 	}
 	accounts, err = c.db.ListUserAccount(&model.UserListOptions{
-		MinUnsettledFee: model.PtrOf(int64(0)),
-		LowBalanceRisk:  model.PtrOf(time.Now()),
+		MinUnsettledFee:        model.PtrOf(int64(0)),
+		LowBalanceRisk:         model.PtrOf(time.Now()),
+		SettleTriggerThreshold: &settleTriggerThreshold,
 	})
 	if err != nil {
 		return errors.Wrap(err, "list accounts that need to be settled in db")
