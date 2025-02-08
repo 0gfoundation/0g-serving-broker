@@ -74,7 +74,7 @@ func GetConfig() *Config {
 			AllowOrigins: []string{
 				"http://localhost:4000",
 			},
-			ContractAddress: "0xAdDe2e52114E1eA5D911334efe07751B1EB2058B",
+			ContractAddress: "0x46e8a02d609CaEfC1747197da1F38272d5E46c77",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
