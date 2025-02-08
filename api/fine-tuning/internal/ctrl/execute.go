@@ -25,6 +25,7 @@ const (
 	TrainingConfigPath  = "config.json"
 	OutputPath          = "output_model"
 	ContainerBasePath   = "/app/mnt"
+	TaskLogFileName     = "progress.log"
 )
 
 type TaskPaths struct {
@@ -53,23 +54,17 @@ func NewTaskPaths(basePath string) *TaskPaths {
 	}
 }
 
-func (c *Ctrl) Execute(ctx context.Context, task *db.Task) error {
-	baseDir := os.TempDir()
-	tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, task.ID)
-	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
-		c.logger.Errorf("Error creating temporary folder: %v\n", err)
-		return err
-	}
-
-	c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
-
+func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
 	if err := c.prepareData(ctx, task, paths); err != nil {
 		c.logger.Errorf("Error processing data: %v\n", err)
 		return err
 	}
-	c.contract.AddOrUpdateService(ctx, c.service, true)
+
+	if err := c.contract.AddOrUpdateService(ctx, c.service, true); err != nil {
+		return err
+	}
 
 	return c.handleContainerLifecycle(ctx, paths, task)
 }

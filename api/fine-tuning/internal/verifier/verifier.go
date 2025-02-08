@@ -72,7 +72,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return err
 	}
 	if balance.Cmp(v.balanceThresholdInEther) < 0 {
-		return errors.New("insufficient balance")
+		return fmt.Errorf("insufficient provider balance: expected %v, got %v", v.balanceThresholdInEther, balance)
 	}
 
 	totalFee := new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken))
@@ -82,7 +82,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	}
 
 	if totalFee.Cmp(fee) > 0 {
-		return errors.New("not enough task fee")
+		return fmt.Errorf("insufficient task fee: expected %v, got %v", totalFee, fee)
 	}
 
 	userAddress := common.HexToAddress(task.UserAddress)
@@ -92,7 +92,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	}
 
 	if account.Balance.Cmp(fee) < 0 {
-		return errors.New("not enough balance")
+		return fmt.Errorf("insufficient account balance: expected %v, got %v", fee, account.Balance)
 	}
 
 	nonce, err := util.ConvertToBigInt(task.Nonce)
@@ -100,10 +100,10 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return err
 	}
 	if account.Nonce.Cmp(nonce) >= 0 {
-		return errors.New("invalid nonce")
+		return fmt.Errorf("invalid nonce: expected %v, got %v", account.Nonce, nonce)
 	}
 	if account.ProviderSigner != ethcrypto.PubkeyToAddress(providerPriv.PublicKey) {
-		return errors.New("user not acknowledged")
+		return errors.New("user not acknowledged yet")
 	}
 
 	return v.verifyUserSignature(task.Signature, SignatureMetadata{
@@ -174,7 +174,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 
 	tagSig, err := ethcrypto.Sign(ethcrypto.Keccak256(tag[:]), providerPriv)
 	if err != nil {
-		return nil, errors.Wrap(err, "sign tag")
+		return nil, errors.Wrap(err, "sign tag failed")
 	}
 
 	encryptFile, err := util.WriteToFile(sourceDir, ciphertext, tagSig)

@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
@@ -103,7 +104,7 @@ func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 		return
 	}
 
-	ctx.FileAttachment(filePath, "progress.log")
+	ctx.FileAttachment(filePath, ctrl.TaskLogFileName)
 
 	ctx.Status(http.StatusOK)
 }
