@@ -29,12 +29,42 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	}
 
 	go func() {
-		if err := c.Execute(ctx, dbTask); err != nil {
-			c.logger.Error("Error executing task: %v", err)
+		baseDir := os.TempDir()
+		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, task.ID)
+		if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
+			c.logger.Errorf("Error creating temporary folder: %v\n", err)
+			return
+		}
+		c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
+
+		var taskLog string
+		if err := c.Execute(ctx, dbTask, tmpFolderPath); err != nil {
+			errMsg := fmt.Sprintf("Error executing task: %v", err)
+			c.logger.Error(errMsg)
+			taskLog = errMsg
+
 			if err := c.db.UpdateTask(dbTask.ID, db.Task{
 				Progress: db.ProgressStateFailed.String(),
 			}); err != nil {
-				c.logger.Error("Error updating task: %v", err)
+				errMsg := fmt.Sprintf("Error updating task: %v", err)
+				c.logger.Error(errMsg)
+
+				taskLog = fmt.Sprintf("%s\n%s", taskLog, errMsg)
+			}
+		} else {
+			taskLog = fmt.Sprintf("Training model for task %s completed successfully", task.ID)
+		}
+
+		// write to task log file
+		taskLogFile := fmt.Sprintf("%s/%s", tmpFolderPath, TaskLogFileName)
+		file, err := os.OpenFile(taskLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			c.logger.Errorf("Unable to open file: %v", err)
+		} else {
+			defer file.Close()
+
+			if _, err := file.WriteString(taskLog); err != nil {
+				c.logger.Errorf("Write into task log failed: %v", err)
 			}
 		}
 	}()
@@ -71,5 +101,5 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 	baseDir := os.TempDir()
-	return fmt.Sprintf("%s/%s/progress.log", baseDir, task.ID), nil
+	return fmt.Sprintf("%s/%s/", baseDir, task.ID), nil
 }
