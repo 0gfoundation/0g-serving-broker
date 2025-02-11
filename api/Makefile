@@ -47,6 +47,13 @@ generate-inference-api-md:
 	docker run --rm -v ./inference/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
 	asciidoctor-pdf ./inference/doc/swagger.adoc -o ./inference/doc/0G-Serving-Inference-Broker-API.pdf
 
+generate-fine-tuning-api:
+	docker run --rm -v ./fine-tuning/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
+
+generate-fine-tuning-api-md:
+	docker run --rm -v ./fine-tuning/doc:/opt swagger2markup/swagger2markup convert -i /opt/swagger.yaml -f /opt/swagger
+	asciidoctor-pdf ./fine-tuning/doc/swagger.adoc -o ./fine-tuning/doc/0G-Serving-Fine-Tuning-Broker-API.pdf
+
 generate-inference-router-api:
 	docker run --rm -v ./inference-router/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
 
@@ -69,7 +76,7 @@ package-inference-router-all-in-one: generate-inference-router-api
 	
 package-fine-tuning:
 	@mkdir -p /tmp/fine-tuning-broker && \
-	rsync -av --exclude '**.local.*' ./fine-tuning/integration/provider/ /tmp/fine-tuning-broker && \
+	rsync -av --exclude '**.local.*' ./fine-tuning/integration/prod/ /tmp/fine-tuning-broker && \
 	cp ./fine-tuning/doc/api/index.html /tmp/fine-tuning-broker/api.html && \
 	tar -czf /tmp/fine-tuning-broker.tar.gz -C /tmp fine-tuning-broker && \
 	rm -rf /tmp/fine-tuning-broker && \

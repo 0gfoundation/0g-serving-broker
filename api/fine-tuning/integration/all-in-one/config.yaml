@@ -1,9 +1,9 @@
-contractAddress: 0x38ae6632E63B61153A6FbCD163E79af1855EDa8B
+contractAddress: 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
 database:
-  fineTune: root:123456@tcp(localhost:33060)/fineTune?parseTime=true
+  fineTune: root:123456@tcp(0g-fine-tune-broker-db:3306)/fineTune?parseTime=true
 networks:
   ethereumHardhat:
-    url: "http://127.0.0.1:8545/"
+    url: "http://hardhat-node-with-contract:8545"
     chainID: 31337
     privateKeys:
       - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
@@ -17,7 +17,7 @@ networks:
     transactionLimit: 10000000
     gasEstimationBuffer: 100000
 service:
-  servingUrl: "http://192.168.1.103:3080"
+  servingUrl: "http://192.168.1.105:3080"
   pricePerToken: 1
   quota:
     cpuCount: 8
