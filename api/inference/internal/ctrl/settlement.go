@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"math/big"
-	"strconv"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -152,15 +151,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 }
 
 func (c Ctrl) ProcessSettlement(ctx context.Context) error {
-	inputPrice, err := strconv.ParseInt(c.Service.InputPrice, 10, 64)
-	if err != nil {
-		return err
-	}
-	outputPrice, err := strconv.ParseInt(c.Service.OutputPrice, 10, 64)
-	if err != nil {
-		return err
-	}
-	settleTriggerThreshold := (inputPrice + outputPrice) * constant.SettleTriggerThreshold
+	settleTriggerThreshold := (c.Service.InputPrice + c.Service.OutputPrice) * constant.SettleTriggerThreshold
 
 	accounts, err := c.db.ListUserAccount(&model.UserListOptions{
 		LowBalanceRisk:         model.PtrOf(time.Now().Add(-c.contract.LockTime + c.autoSettleBufferTime)),

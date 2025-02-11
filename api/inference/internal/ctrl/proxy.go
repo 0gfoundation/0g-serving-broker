@@ -32,7 +32,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee, outputPrice string, charing bool) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee string, outputPrice int64, charing bool) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -98,7 +98,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
 	}
 }
 
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice string) {
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		handleBrokerError(ctx, err, "read from body")
@@ -134,7 +134,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, ext
 	}
 }
 
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice string) {
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
 	ctx.Stream(func(w io.Writer) bool {
 		var chunkBuf bytes.Buffer
 		var output [][]byte
