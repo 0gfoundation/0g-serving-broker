@@ -29,6 +29,14 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			continue
 		}
 	}
+
+	// may need additional secret to access the target service
+	if additionalSecret := c.Service.AdditionalSecret; additionalSecret != nil {
+		for k, v := range additionalSecret {
+			req.Header.Set(k, v)
+		}
+	}
+
 	return req, nil
 }
 
