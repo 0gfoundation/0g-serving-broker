@@ -8,6 +8,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 )
 
@@ -26,6 +27,16 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	err = c.db.AddTask(dbTask)
 	if err != nil {
 		return nil, errors.Wrap(err, "create task in db")
+	}
+
+	userAddress := common.HexToAddress(task.UserAddress)
+	account, err := c.contract.GetUserAccount(ctx, userAddress)
+	if err != nil {
+		return nil, errors.Wrap(err, "get account in contract")
+	}
+
+	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
+		return nil, errors.New("provider signer is not acknowledged")
 	}
 
 	go func() {
