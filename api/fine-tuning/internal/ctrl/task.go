@@ -30,7 +30,7 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 	go func() {
 		baseDir := os.TempDir()
-		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, task.ID)
+		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, dbTask.ID)
 		if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
 			c.logger.Errorf("Error creating temporary folder: %v\n", err)
 			return
@@ -52,7 +52,7 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 				taskLog = fmt.Sprintf("%s\n%s", taskLog, errMsg)
 			}
 		} else {
-			taskLog = fmt.Sprintf("Training model for task %s completed successfully", task.ID)
+			taskLog = fmt.Sprintf("Training model for task %s completed successfully", dbTask.ID)
 		}
 
 		// write to task log file
