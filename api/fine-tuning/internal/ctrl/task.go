@@ -101,5 +101,5 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 	baseDir := os.TempDir()
-	return fmt.Sprintf("%s/%s/", baseDir, task.ID), nil
+	return fmt.Sprintf("%s/%s/%s", baseDir, task.ID, TaskLogFileName), nil
 }

@@ -1,12 +1,13 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
@@ -104,7 +105,12 @@ func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 		return
 	}
 
-	ctx.FileAttachment(filePath, ctrl.TaskLogFileName)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		h.logger.Errorf("read file %v, err: %v", filePath, err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to read file: %s", err.Error())})
+		return
+	}
 
-	ctx.Status(http.StatusOK)
+	ctx.Data(http.StatusOK, "text/plain", data)
 }

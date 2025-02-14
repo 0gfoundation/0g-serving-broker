@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/user"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
@@ -117,6 +118,12 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return errors.New("no training script found")
 	}
 
+	currentUser, err := user.Current()
+	if err != nil {
+		c.logger.Errorf("Failed to get current user %v", err)
+		return err
+	}
+
 	containerConfig := &container.Config{
 		Image: image,
 		Cmd: []string{
@@ -127,6 +134,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			"--config_path", paths.ContainerTrainingConfig,
 			"--output_dir", paths.ContainerOutput,
 		},
+		User: fmt.Sprintf("%v:%v", currentUser.Uid, currentUser.Gid),
 	}
 
 	hostConfig := &container.HostConfig{
