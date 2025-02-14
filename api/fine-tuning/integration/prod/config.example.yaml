@@ -1,22 +1,13 @@
-database:
-  fineTune: root:123456@tcp(localhost:33060)/fineTune?parseTime=true
 networks:
-  ethereumHardhat:
-    url: "http://127.0.0.1:8545/"
-    chainID: 31337
-    privateKeys:
-      - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
-    transactionLimit: 9500000
-    gasEstimationBuffer: 0
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16600
     privateKeys:
-      - 1111111111111111111111111111111111111111111111111111111111
-    transactionLimit: 10000000
-    gasEstimationBuffer: 100000
+      - 1111111111111111111111111111111111111111111111111111111111111111
+    transactionLimit: 1000000
+    gasEstimationBuffer: 10000
 service:
-  servingUrl: "http://192.168.1.103:3080"
+  servingUrl: "<Serving_URL>"
   pricePerToken: 1
   quota:
     cpuCount: 8
@@ -37,3 +28,4 @@ storageClient:
     routines: 4
 logger:
   level: "debug"
+  path: "/tmp/fine-tuning.log"

@@ -1,7 +1,7 @@
 services:
-  hardhat-node-with-compute-network-contract:
+  hardhat-node-with-contract:
     image: raven20241/hardhat-compute-network-contract:dev
-    container_name: hardhat-node-with-compute-network-contract
+    container_name: hardhat-node-with-contract
     ports:
       - "8545:8545"
     healthcheck:
@@ -28,23 +28,26 @@ services:
     networks:
       - localhost
 
-  # 0g-fine-tune-broker:
-  #   image: ghcr.io/0glabs/0g-fine-tune-broker:dev-amd64
-  #   container_name: 0g-fine-tune-broker
-  #   environment:
-  #     - PORT=3080
-  #     - CONFIG_FILE=/etc/config.yaml
-  #     - NETWORK=hardhat
-  #   volumes:
-  #     - ./config-provider.yaml:/etc/config.yaml
-  #   command: broker-server
-  #   networks:
-  #     - localhost
-  #   depends_on:
-  #     mysql:
-  #       condition: service_healthy
-  #     hardhat-node-with-compute-network-contract:
-  #       condition: service_healthy
+  0g-fine-tune-broker:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-fine-tune-broker
+    ports:
+      - "3080:3080"
+    environment:
+      - PORT=3080
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config.yaml:/etc/config.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: 0g-fine-tuning-server
+    networks:
+      - localhost
+    depends_on:
+      mysql:
+        condition: service_healthy
+      hardhat-node-with-contract:
+        condition: service_healthy
 
 volumes:
   mysql-data:

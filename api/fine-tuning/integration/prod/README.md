@@ -13,9 +13,6 @@ Please visit the [releases page](https://github.com/0glabs/0g-serving-broker/rel
 - Copy the `config.example.yaml` file.
 - Modify `servingUrl` to point to your publicly exposed URL.
 - Set `privateKeys` to your wallet's private key for the 0G blockchain.
-- Set `servingUrl` to your service's public URL.
-- Set `targetUrl` to your internal URL corresponding to the prepared LLM service.
-- Set `model` to the model name of your LLM service.
 - Save the file as `config.local.yaml`.
 - Replace `#PORT#` in `docker-compose.yml` with the port you want to use. It should be the same as the port of `servingUrl` in `config.local.yaml`.
 
@@ -25,7 +22,7 @@ Please visit the [releases page](https://github.com/0glabs/0g-serving-broker/rel
 docker compose -f docker-compose.yml up -d
 ```
 
-The provider broker has an automatic settlement engine that ensures you can collect fees promptly before your customer's account balance is insufficient, while also minimizing the frequency of charges to reduce gas consumption.
+The provider broker has an automatic settlement engine that ensures you can collect fees promptly after fine-tuning is completed and acknowledged by the consumer.
 
 ## Documentation
 

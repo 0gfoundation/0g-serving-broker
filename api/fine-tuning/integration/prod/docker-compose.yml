@@ -16,20 +16,20 @@ services:
     networks:
       - localhost
 
-  # 0g-fine-tune-broker:
-  #   image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-  #   container_name: 0g-fine-tune-broker
-  #   environment:
-  #     - PORT=3080
-  #     - CONFIG_FILE=/etc/config.yaml
-  #   volumes:
-  #     - ./config.local.yaml:/etc/config.yaml
-  #   command: 0g-fine-tuning-server
-  #   networks:
-  #     - localhost
-  #   depends_on:
-  #     mysql:
-  #       condition: service_healthy
+  0g-fine-tune-broker:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-fine-tune-broker
+    environment:
+      - PORT=##PORT##
+      - CONFIG_FILE=/etc/config.yaml
+    volumes:
+      - ./config.local.yaml:/etc/config.yaml
+    command: 0g-fine-tuning-server
+    networks:
+      - localhost
+    depends_on:
+      mysql:
+        condition: service_healthy
 
 volumes:
   mysql-data:

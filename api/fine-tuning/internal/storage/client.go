@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 
 	"github.com/0glabs/0g-serving-broker/common/chain"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -49,6 +50,13 @@ func New(config *config.Config, logger log.Logger) (*Client, error) {
 	}).Info("Wallet and URL")
 
 	w3client := blockchain.MustNewWeb3(zgConfig.URL(), wallet.PrivateKey(), config.ProviderOption)
+	if config.GasPrice != "" {
+		gasPrice, err := strconv.ParseUint(config.GasPrice, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid gas price: %v", err)
+		}
+		blockchain.CustomGasPrice = gasPrice
+	}
 	defer w3client.Close()
 
 	indexerStandardClient, err := indexer.NewClient(config.StorageClientConfig.IndexerStandard, indexer.IndexerClientOption{

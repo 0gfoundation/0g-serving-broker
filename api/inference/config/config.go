@@ -10,13 +10,14 @@ import (
 )
 
 type Service struct {
-	ServingURL    string `yaml:"servingUrl"`
-	TargetURL     string `yaml:"targetUrl"`
-	InputPrice    string `yaml:"inputPrice"`
-	OutputPrice   string `yaml:"outputPrice"`
-	Type          string `yaml:"type"`
-	ModelType     string `yaml:"model"`
-	Verifiability string `yaml:"verifiability"`
+	ServingURL       string            `yaml:"servingUrl"`
+	TargetURL        string            `yaml:"targetUrl"`
+	InputPrice       int64             `yaml:"inputPrice"`
+	OutputPrice      int64             `yaml:"outputPrice"`
+	Type             string            `yaml:"type"`
+	ModelType        string            `yaml:"model"`
+	Verifiability    string            `yaml:"verifiability"`
+	AdditionalSecret map[string]string `yaml:"additionalSecret"`
 }
 
 type Config struct {
@@ -74,7 +75,7 @@ func GetConfig() *Config {
 			AllowOrigins: []string{
 				"http://localhost:4000",
 			},
-			ContractAddress: "0xAdDe2e52114E1eA5D911334efe07751B1EB2058B",
+			ContractAddress: "0x46e8a02d609CaEfC1747197da1F38272d5E46c77",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{

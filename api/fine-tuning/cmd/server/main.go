@@ -22,9 +22,9 @@ import (
 //go:generate swag fmt
 //go:generate swag init --dir ./,../../ --output ../../doc
 
-//	@title			0G Serving Provider Broker API
-//	@version		0.2.0
-//	@description	These APIs allows customers to interact with the 0G Compute Fine Tune Service
+//	@title			0G Compute Network Fine-tuning Provider API
+//	@version		0.1.0
+//	@description	These APIs allows providers to interact with the 0G Compute Fine Tune Service
 //	@host			localhost:3080
 //	@BasePath		/v1
 //	@in				header

@@ -81,9 +81,10 @@ func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
 	// if err != nil {
 	// 	return nil, errors.Wrap(err, "new tapped client")
 	// }
-	key, err := crypto.GenerateKey()
+	keyHex := "4c0883a69102937d6231471b5dbb6204fe512961708279b7e1a8d7d7a3c2b9e3"
+	key, err := crypto.HexToECDSA(keyHex)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "converting hex to ECDSA key")
 	}
 
 	privateKeyBytes := crypto.FromECDSA(key)

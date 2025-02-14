@@ -103,10 +103,10 @@ func identicalService(old contract.Service, new config.Service) bool {
 	if old.Verifiability != new.Verifiability {
 		return false
 	}
-	if old.InputPrice.String() != new.InputPrice {
+	if old.InputPrice.Int64() != new.InputPrice {
 		return false
 	}
-	if old.OutputPrice.String() != new.OutputPrice {
+	if old.OutputPrice.Int64() != new.OutputPrice {
 		return false
 	}
 	if old.ServiceType != new.Type {
