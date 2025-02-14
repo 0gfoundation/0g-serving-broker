@@ -39,9 +39,29 @@ func (d *DB) InProgressTaskCount() (int64, error) {
 	return count, nil
 }
 
+func (d *DB) UnFinishedTaskCount(userAddress string) (int64, error) {
+	var count int64
+	ret := d.db.Model(&Task{}).
+		Where("progress NOT IN (?, ?) AND user_address = ?", ProgressStateFinished.String(), ProgressStateFailed.String(), userAddress).
+		Count(&count)
+	if ret.Error != nil {
+		return 0, ret.Error
+	}
+	return count, nil
+}
+
 func (d *DB) GetDeliveredTasks() ([]Task, error) {
 	var filteredTasks []Task
 	ret := d.db.Where(&Task{Progress: ProgressStateDelivered.String()}).Find(&filteredTasks)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
+	return filteredTasks, nil
+}
+
+func (d *DB) GetUseAckDeliveredTasks() ([]Task, error) {
+	var filteredTasks []Task
+	ret := d.db.Where(&Task{Progress: ProgressStateUserAckDelivered.String()}).Find(&filteredTasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 )
 
@@ -20,6 +21,25 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 	if count != 0 {
 		return nil, errors.New("cannot create a new task while there is an in-progress task")
+	}
+
+	count, err = c.db.UnFinishedTaskCount(task.UserAddress)
+	if err != nil {
+		return nil, err
+	}
+	if count != 0 {
+		// For each customer, we process tasks single-threaded
+		return nil, errors.New("cannot create a new task while there is an unfinished task")
+	}
+
+	userAddress := common.HexToAddress(task.UserAddress)
+	account, err := c.contract.GetUserAccount(ctx, userAddress)
+	if err != nil {
+		return nil, errors.Wrap(err, "get account in contract")
+	}
+
+	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
+		return nil, errors.New("provider signer should be acknowledged before creating a task")
 	}
 
 	dbTask.Progress = db.ProgressStateInProgress.String()
