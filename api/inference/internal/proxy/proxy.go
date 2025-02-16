@@ -113,7 +113,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
-		p.ctrl.ProcessHTTPRequest(ctx, httpReq, model.Request{}, nil, "0", 0, false)
+		p.ctrl.ProcessHTTPRequest(ctx, httpReq, model.Request{}, "0", 0, false)
 		return
 	}
 
@@ -160,7 +160,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, req.Fee, p.ctrl.Service.OutputPrice, true)
+	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, req.Fee, p.ctrl.Service.OutputPrice, true)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

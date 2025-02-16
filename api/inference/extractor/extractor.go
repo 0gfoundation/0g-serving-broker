@@ -5,7 +5,4 @@ package extractor
 
 type ProviderReqRespExtractor interface {
 	GetInputCount(reqBody []byte) (int64, error)
-	GetOutputCount(respBody [][]byte) (int64, error)
-	GetRespContent(resp []byte, encodingType string) ([]byte, error)
-	StreamCompleted(output []byte) (bool, error)
 }
