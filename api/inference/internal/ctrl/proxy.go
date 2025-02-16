@@ -1,7 +1,6 @@
 package ctrl
 
 import (
-	"bufio"
 	"bytes"
 	"io"
 	"log"
@@ -13,9 +12,10 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"github.com/0glabs/0g-serving-broker/inference/extractor"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
@@ -40,8 +40,17 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel model.Request, extractor extractor.ProviderReqRespExtractor, fee string, outputPrice int64, charing bool) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, fee string, outputPrice int64, charing bool) {
 	client := &http.Client{}
+
+	// back up body for other usage
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		handleBrokerError(ctx, err, "failed to read request body")
+		return
+	}
+	req.Body = io.NopCloser(bytes.NewBuffer(body))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		handleBrokerError(ctx, err, "call proxied service")
@@ -88,10 +97,12 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, req *http.Request, reqModel 
 		LastRequestNonce: &reqModel.Nonce,
 		UnsettledFee:     model.PtrOf(unsettledFee.String()),
 	}
-	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		c.handleChargingResponse(ctx, resp, extractor, account, outputPrice)
-	} else {
-		c.handleChargingStreamResponse(ctx, resp, extractor, account, outputPrice)
+
+	switch svcType {
+	case "chatbot":
+		c.handleChatbotResponse(ctx, resp, account, outputPrice, body)
+	default:
+		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 	}
 }
 
@@ -104,104 +115,6 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
 	if _, err := ctx.Writer.Write(body); err != nil {
 		handleBrokerError(ctx, err, "write response body")
 	}
-}
-
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		handleBrokerError(ctx, err, "read from body")
-		return
-	}
-
-	contentEncoding := resp.Header.Get("Content-Encoding")
-	outputContent, err := extractor.GetRespContent(body, contentEncoding)
-	if err != nil {
-		handleBrokerError(ctx, err, "extract content")
-		return
-	}
-
-	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
-	if err != nil {
-		handleBrokerError(ctx, err, "extract count")
-		return
-	}
-	lastResponseFee, err := util.Multiply(outputPrice, outputCount)
-	if err != nil {
-		handleBrokerError(ctx, err, "multiply")
-		return
-	}
-
-	account.LastResponseFee = model.PtrOf(lastResponseFee.String())
-	if err = c.UpdateUserAccount(account.User, account); err != nil {
-		handleBrokerError(ctx, err, "update user account in db")
-		return
-	}
-
-	if _, err := ctx.Writer.Write(body); err != nil {
-		handleBrokerError(ctx, err, "write response body")
-	}
-}
-
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, extractor extractor.ProviderReqRespExtractor, account model.User, outputPrice int64) {
-	ctx.Stream(func(w io.Writer) bool {
-		var chunkBuf bytes.Buffer
-		var output [][]byte
-		reader := bufio.NewReader(resp.Body)
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					return false
-				}
-				handleBrokerError(ctx, err, "read from body")
-				return false
-			}
-
-			chunkBuf.WriteString(line)
-			if line == "\n" || line == "\r\n" {
-				_, err := w.Write(chunkBuf.Bytes())
-				if err != nil {
-					handleBrokerError(ctx, err, "write to stream")
-					return false
-				}
-
-				encoding := resp.Header.Get("Content-Encoding")
-				content, err := extractor.GetRespContent(chunkBuf.Bytes(), encoding)
-				if err != nil {
-					handleBrokerError(ctx, err, "extract content")
-					return false
-				}
-
-				completed, err := extractor.StreamCompleted(content)
-				if err != nil {
-					handleBrokerError(ctx, err, "check stream completed")
-					return false
-				}
-				if completed {
-					outputCount, err := extractor.GetOutputCount(output)
-					if err != nil {
-						handleBrokerError(ctx, err, "extract output count")
-						return false
-					}
-					lastResponseFee, err := util.Multiply(outputPrice, outputCount)
-					if err != nil {
-						handleBrokerError(ctx, err, "multiply")
-						return false
-					}
-
-					account.LastResponseFee = model.PtrOf(lastResponseFee.String())
-					err = c.UpdateUserAccount(account.User, account)
-					if err != nil {
-						handleBrokerError(ctx, err, "update user account in db")
-						return false
-					}
-				}
-				output = append(output, content)
-				ctx.Writer.Flush()
-				chunkBuf.Reset()
-			}
-		}
-	})
 }
 
 func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
