@@ -73,7 +73,7 @@ def main():
 
     # Tokenize the dataset
     def tokenize_function(examples):
-        return tokenizer(examples["text"], padding="max_length", truncation=True)
+        return tokenizer(examples["text"], padding="max_length", max_length=config.get("max_length", 200), truncation=True)
 
     tokenized_datasets = dataset.map(tokenize_function, batched=True)
 
