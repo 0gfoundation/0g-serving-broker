@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/user"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
@@ -25,6 +26,7 @@ const (
 	TrainingConfigPath  = "config.json"
 	OutputPath          = "output_model"
 	ContainerBasePath   = "/app/mnt"
+	TaskLogFileName     = "progress.log"
 )
 
 type TaskPaths struct {
@@ -53,23 +55,17 @@ func NewTaskPaths(basePath string) *TaskPaths {
 	}
 }
 
-func (c *Ctrl) Execute(ctx context.Context, task *db.Task) error {
-	baseDir := os.TempDir()
-	tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, task.ID)
-	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
-		c.logger.Errorf("Error creating temporary folder: %v\n", err)
-		return err
-	}
-
-	c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
-
+func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
 	if err := c.prepareData(ctx, task, paths); err != nil {
 		c.logger.Errorf("Error processing data: %v\n", err)
 		return err
 	}
-	c.contract.AddOrUpdateService(ctx, c.service, true)
+
+	if err := c.contract.AddOrUpdateService(ctx, c.service, true); err != nil {
+		return err
+	}
 
 	return c.handleContainerLifecycle(ctx, paths, task)
 }
@@ -122,6 +118,12 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return errors.New("no training script found")
 	}
 
+	currentUser, err := user.Current()
+	if err != nil {
+		c.logger.Errorf("Failed to get current user %v", err)
+		return err
+	}
+
 	containerConfig := &container.Config{
 		Image: image,
 		Cmd: []string{
@@ -132,6 +134,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			"--config_path", paths.ContainerTrainingConfig,
 			"--output_dir", paths.ContainerOutput,
 		},
+		User: fmt.Sprintf("%v:%v", currentUser.Uid, currentUser.Gid),
 	}
 
 	hostConfig := &container.HostConfig{
