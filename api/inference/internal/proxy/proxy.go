@@ -10,11 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"github.com/0glabs/0g-serving-broker/inference/extractor"
-	"github.com/0glabs/0g-serving-broker/inference/extractor/chatbot"
-	"github.com/0glabs/0g-serving-broker/inference/extractor/zgstorage"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -113,18 +109,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
-		p.ctrl.ProcessHTTPRequest(ctx, httpReq, model.Request{}, nil, "0", 0, false)
-		return
-	}
-
-	var extractor extractor.ProviderReqRespExtractor
-	switch svcType {
-	case "zgStorage":
-		extractor = &zgstorage.ProviderZgStorage{}
-	case "chatbot":
-		extractor = &chatbot.ProviderChatBot{}
-	default:
-		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", 0, false)
 		return
 	}
 
@@ -134,19 +119,22 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	inputCount, err := extractor.GetInputCount(reqBody)
-	if err != nil {
-		handleBrokerError(ctx, err, "get input count")
+	var expectedInputFee string
+	switch svcType {
+	case "zgStorage":
+		expectedInputFee = "0"
+	case "chatbot":
+		expectedInputFee, err = p.ctrl.GetChatbotInputFee(reqBody)
+		if err != nil {
+			handleBrokerError(ctx, err, "get input fee")
+			return
+		}
+	default:
+		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
 
-	expectedInputFee, err := util.Multiply(inputCount, p.ctrl.Service.InputPrice)
-	if err != nil {
-		handleBrokerError(ctx, err, "multiply input count and input fee")
-		return
-	}
-
-	if err := p.ctrl.ValidateRequest(ctx, req, req.Fee, expectedInputFee.String()); err != nil {
+	if err := p.ctrl.ValidateRequest(ctx, req, req.Fee, expectedInputFee); err != nil {
 		handleBrokerError(ctx, err, "validate request")
 		return
 	}
@@ -160,7 +148,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, httpReq, req, extractor, req.Fee, p.ctrl.Service.OutputPrice, true)
+	p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, req.Fee, p.ctrl.Service.OutputPrice, true)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

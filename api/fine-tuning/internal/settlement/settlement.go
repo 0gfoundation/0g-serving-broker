@@ -47,14 +47,21 @@ func (s *Settlement) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				task := s.getPendingSettlementTask(ctx)
+				task := s.getPendingDeliveredTask(ctx)
 				if task != nil {
 					err := s.doSettlement(ctx, task)
 					if err != nil {
 						s.logger.Error("error during do settlement", "err", err)
 					}
+					return
 				}
-
+				task = s.getPendingUserAcknowledgedTask()
+				if task != nil {
+					err := s.doSettlement(ctx, task)
+					if err != nil {
+						s.logger.Error("error during do settlement for tasks failed once", "err", err)
+					}
+				}
 			}
 		}
 	}()
@@ -62,7 +69,7 @@ func (s *Settlement) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Settlement) getPendingSettlementTask(ctx context.Context) *db.Task {
+func (s *Settlement) getPendingDeliveredTask(ctx context.Context) *db.Task {
 	tasks, err := s.db.GetDeliveredTasks()
 	if err != nil {
 		s.logger.Error("error getting delivered tasks", "err", err)
@@ -71,8 +78,7 @@ func (s *Settlement) getPendingSettlementTask(ctx context.Context) *db.Task {
 	if len(tasks) == 0 {
 		return nil
 	}
-	// The provider processes tasks single-threaded,
-	// so theoretically only one task is Delivered in DB.
+	// one task at a time
 	task := tasks[0]
 	account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
 	if err != nil {
@@ -92,6 +98,21 @@ func (s *Settlement) getPendingSettlementTask(ctx context.Context) *db.Task {
 	}
 
 	return &task
+}
+
+// Theoretically, userAcknowledgedTasks should be settled with getPendingDeliveredTask
+// We have getPendingUserAcknowledgedTask to settle task in case of any failure in getPendingDeliveredTask
+func (s *Settlement) getPendingUserAcknowledgedTask() *db.Task {
+	tasks, err := s.db.GetUseAckDeliveredTasks()
+	if err != nil {
+		s.logger.Error("error getting user acknowledged tasks", "err", err)
+		return nil
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	// one task at a time
+	return &tasks[0]
 }
 
 func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
