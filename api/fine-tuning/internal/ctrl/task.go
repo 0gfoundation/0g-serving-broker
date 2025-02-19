@@ -57,6 +57,15 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		}
 		c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
 
+		// create log file
+		taskLogFile := fmt.Sprintf("%s/%s", tmpFolderPath, TaskLogFileName)
+		file, err := os.Create(taskLogFile)
+		if err != nil {
+			c.logger.Errorf("Error creating file:", err)
+			return
+		}
+		file.Close()
+
 		var taskLog string
 		if err := c.Execute(ctx, dbTask, tmpFolderPath); err != nil {
 			errMsg := fmt.Sprintf("Error executing task: %v", err)
@@ -76,8 +85,7 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		}
 
 		// write to task log file
-		taskLogFile := fmt.Sprintf("%s/%s", tmpFolderPath, TaskLogFileName)
-		file, err := os.OpenFile(taskLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		file, err = os.OpenFile(taskLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			c.logger.Errorf("Unable to open file: %v", err)
 		} else {
