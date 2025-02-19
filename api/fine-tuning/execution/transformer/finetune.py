@@ -21,7 +21,11 @@ class ProgressCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
         logs = logs or {}
         if state.is_local_process_zero:  # Only log for the main process in distributed training
-            log_message = f"Step: {state.global_step}, Logs: {logs}\n"
+            if "error" in logs:
+            # You can optionally do more detailed formatting
+                log_message = f"[ERROR] Step: {state.global_step}, Error: {logs['error']}, Other logs: {logs}\n"
+            else:
+                log_message = f"Step: {state.global_step}, Logs: {logs}\n"
             try:
                 self.log_file.write(log_message)
                 self.log_file.flush()  # Ensure the log is written immediately
@@ -35,6 +39,28 @@ class ProgressCallback(TrainerCallback):
                 self.log_file.close()
             except Exception as e:
                 print(f"Error closing log file: {e}")
+
+
+def safe_train(trainer, max_retries=3):
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            trainer.train(resume_from_checkpoint=True)
+
+            # If train finishes successfully, break
+            return
+        except Exception as e:
+            attempt += 1
+            print(f"Training failed with error: {e}. Retrying... ({attempt}/{max_retries})")
+            trainer.callback_handler.on_log(
+                args=trainer.args,
+                state=trainer.state,
+                control=trainer.control,
+                logs={"error": str(e), "retry_attempt": attempt}
+            )
+            if attempt == max_retries:
+                print("Max retries reached. Training failed permanently.")
+                raise e
 
 
 def load_config(config_path):
@@ -115,7 +141,7 @@ def main():
     )
 
     # Fine-tune the model
-    trainer.train()
+    safe_train(trainer, max_retries=config.get("max_retries", 3))
 
     # Save the model
     trainer.save_model(args.output_dir)
