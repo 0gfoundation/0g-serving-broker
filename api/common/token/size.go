@@ -15,17 +15,6 @@ const (
 	Image DataSetType = "image"
 )
 
-type ModelName string
-
-const (
-	DeepSeekV3 ModelName = "deepseek v3"
-	GPT4       ModelName = "gpt-4"
-)
-
-func (d ModelName) String() string {
-	return string(d)
-}
-
 func runCommand(command string, args []string, logger log.Logger) (string, error) {
 	cmd := exec.Command(command, args...)
 	var stdoutBuf, stderrBuf bytes.Buffer
