@@ -195,12 +195,21 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	if len(modelRootHashes) != 1 {
-		return nil, errors.New(fmt.Sprintf("invalid model root hashes: %v", modelRootHashes))
+	user := common.HexToAddress(task.UserAddress)
+	var data []byte
+
+	switch len(modelRootHashes) {
+	case 1:
+		data = modelRootHashes[0].Bytes()
+	case 2:
+		// Create a combined byte slice with a comma separator
+		data = append(modelRootHashes[0].Bytes(), ',')
+		data = append(data, modelRootHashes[1].Bytes()...)
+	default:
+		return nil, fmt.Errorf("invalid model root hashes: %v", modelRootHashes)
 	}
 
-	user := common.HexToAddress(task.UserAddress)
-	err = v.contract.AddDeliverable(ctx, user, modelRootHashes[0].Bytes())
+	err = v.contract.AddDeliverable(ctx, user, data)
 	if err != nil {
 		return nil, err
 	}
