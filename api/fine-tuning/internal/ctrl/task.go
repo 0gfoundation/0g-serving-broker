@@ -51,8 +51,18 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	go func() {
 		baseDir := os.TempDir()
 		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, dbTask.ID)
+
+		updateTaskAndLogError := func(errMsg string) {
+			c.logger.Errorf("Error: %v", errMsg)
+			if err := c.db.UpdateTask(dbTask.ID, db.Task{
+				Progress: db.ProgressStateFailed.String(),
+			}); err != nil {
+				c.logger.Error(fmt.Sprintf("Error updating task: %v", err))
+			}
+		}
+
 		if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
-			c.logger.Errorf("Error creating temporary folder: %v\n", err)
+			updateTaskAndLogError(fmt.Sprintf("Error creating temporary folder: %v\n", err))
 			return
 		}
 		c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
@@ -61,7 +71,13 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		taskLogFile := fmt.Sprintf("%s/%s", tmpFolderPath, TaskLogFileName)
 		file, err := os.Create(taskLogFile)
 		if err != nil {
-			c.logger.Errorf("Error creating file:", err)
+			updateTaskAndLogError(fmt.Sprintf("Error creating file: %v", err))
+			return
+		}
+
+		if _, err := file.WriteString("creating task....\n"); err != nil {
+			updateTaskAndLogError(fmt.Sprintf("Error writing to file: %v", err))
+			file.Close()
 			return
 		}
 		file.Close()

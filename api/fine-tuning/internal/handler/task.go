@@ -105,17 +105,10 @@ func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 		return
 	}
 
-	_, err = os.Stat(filePath)
-	if os.IsNotExist(err) {
-		h.logger.Errorf("file %v does not exist, err: %v", filePath, err)
-		ctx.String(http.StatusOK, "The fine-tuning task is in preparation for creation.")
-		return
-	}
-
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		h.logger.Errorf("read file %v, err: %v", filePath, err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to read file: %s", err.Error())})
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to read log file: %s, please ensure the task is running", err.Error())})
 		return
 	}
 
