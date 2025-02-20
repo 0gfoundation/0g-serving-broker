@@ -29,8 +29,8 @@ func runCommand(command string, args []string, logger log.Logger) (string, error
 	if err != nil {
 		return "", fmt.Errorf("Error executing script: %v, stderr %s", err, stderr)
 	} else {
-		logger.Infof("%v stdout: %s", command, stdout)
-		logger.Errorf("%v stderr: %s", command, stderr)
+		logger.Info(command, args, " stdout: ", stdout)
+		logger.Error(command, args, " stderr: ", stderr)
 
 		return string(stdout), err
 	}
