@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/token"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
@@ -34,6 +35,10 @@ func Main() {
 
 	logger, err := log.GetLogger(&config.Logger)
 	if err != nil {
+		panic(err)
+	}
+
+	if err := token.CheckPythonEnv(logger); err != nil {
 		panic(err)
 	}
 
