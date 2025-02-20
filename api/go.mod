@@ -5,7 +5,7 @@ go 1.22.7
 toolchain go1.22.10
 
 require (
-	github.com/0glabs/0g-storage-client v0.6.2
+	github.com/0glabs/0g-storage-client v0.6.3
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20250210094218-5e83c01229db
 	github.com/andybalholm/brotli v1.1.0
 	github.com/docker/docker v27.4.1+incompatible
@@ -30,7 +30,6 @@ require (
 	github.com/rs/zerolog v1.33.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/swaggo/swag v1.16.3
-	golang.org/x/crypto v0.31.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/net v0.32.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -183,6 +182,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.33.0 // indirect
 	go.opentelemetry.io/otel/trace v1.33.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/oauth2 v0.21.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect

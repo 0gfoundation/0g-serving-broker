@@ -57,6 +57,8 @@ func NewTaskPaths(basePath string) *TaskPaths {
 func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
+	defer c.CleanUp(paths)
+
 	if err := c.prepareData(ctx, task, paths); err != nil {
 		c.logger.Errorf("Error processing data: %v\n", err)
 		return err
@@ -66,7 +68,29 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 		return err
 	}
 
-	return c.handleContainerLifecycle(ctx, paths, task)
+	if err := c.handleContainerLifecycle(ctx, paths, task); err != nil {
+		return err
+	}
+
+	return c.CleanUp(paths)
+}
+
+func (c *Ctrl) CleanUp(paths *TaskPaths) error {
+	// remove data, model, output model path, but keep the config.json and progress.log
+	var err error
+	if err = os.RemoveAll(paths.Dataset); err != nil {
+		c.logger.Errorf("error removing dataset folder: %v", err)
+	}
+
+	if err = os.RemoveAll(paths.PretrainedModel); err != nil {
+		c.logger.Errorf("error removing pre-trained model folder: %v", err)
+	}
+
+	if err = os.RemoveAll(paths.Output); err != nil {
+		c.logger.Errorf("error removing output model folder: %v", err)
+	}
+
+	return err
 }
 
 func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {
@@ -149,6 +173,15 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 	containerID := resp.ID
 	c.logger.Infof("Container %s created successfully. Now Starting...\n", containerID)
+
+	defer func() error {
+		// remove the container
+		if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+			c.logger.Errorf("Failed to remove container: %v", err)
+			return err
+		}
+		return nil
+	}()
 
 	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		c.logger.Errorf("Failed to start container: %v", err)
