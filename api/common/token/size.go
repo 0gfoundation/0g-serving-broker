@@ -62,11 +62,7 @@ func CheckPythonEnv(logger log.Logger) error {
 }
 
 func CountTokens(dataSetType DataSetType, datasetPath, pretrainedModelPath string, logger log.Logger) (int64, error) {
-	if dataSetType == Image {
-		return 0, fmt.Errorf("image not supported yet.")
-	}
-
-	output, err := runCommand("python3", []string{"common/token/token_counter.py", datasetPath, pretrainedModelPath}, logger)
+	output, err := runCommand("python3", []string{"common/token/token_counter.py", datasetPath, string(dataSetType), pretrainedModelPath}, logger)
 	if err != nil {
 		return 0, err
 	}
