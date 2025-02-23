@@ -39,6 +39,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.yaml:/etc/config.yaml
       - /tmp:/tmp

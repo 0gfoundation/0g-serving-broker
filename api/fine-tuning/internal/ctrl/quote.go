@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"os"
 
 	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/ethereum/go-ethereum/common"
@@ -23,7 +24,13 @@ func (c *Ctrl) SyncQuote(ctx context.Context) error {
 	c.providerSigner = signer
 
 	address := crypto.PubkeyToAddress(signer.PublicKey)
-	quote, err := phala.QuoteMock(ctx, address.Hex())
+
+	var quote string
+	if os.Getenv("NETWORK") == "hardhat" {
+		quote, err = phala.QuoteMock(ctx, address.Hex())
+	} else {
+		quote, err = phala.Quote(ctx, address.Hex())
+	}
 	if err != nil {
 		return err
 	}

@@ -23,10 +23,10 @@ services:
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
-      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "3080:3080"
     volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.local.yaml:/etc/config.yaml
       - /tmp:/tmp

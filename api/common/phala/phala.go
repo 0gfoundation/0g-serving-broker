@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -73,15 +75,17 @@ func Quote(ctx context.Context, reportData string) (string, error) {
 }
 
 func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
-	// Todo: Uncomment this code
-	// client := tappd.NewTappdClient()
-
-	// deriveKeyResp, err := client.DeriveKey(ctx, "/")
-
-	// if err != nil {
-	// 	return nil, errors.Wrap(err, "new tapped client")
-	// }
 	keyHex := "4c0883a69102937d6231471b5dbb6204fe512961708279b7e1a8d7d7a3c2b9e3"
+	if os.Getenv("NETWORK") != "hardhat" {
+		client := tappd.NewTappdClient()
+
+		deriveKeyResp, err := client.DeriveKey(ctx, "/")
+
+		if err != nil {
+			return nil, errors.Wrap(err, "new tapped client")
+		}
+		keyHex = deriveKeyResp.Key
+	}
 	key, err := crypto.HexToECDSA(keyHex)
 	if err != nil {
 		return nil, errors.Wrap(err, "converting hex to ECDSA key")
