@@ -41,6 +41,20 @@ func GetFileName(prefix, extension string) (string, error) {
 	}
 }
 
+func Zip(sourceDir string) (string, error) {
+	zipFile, err := GetFileName(sourceDir, ".zip")
+	if err != nil {
+		return "", err
+	}
+
+	err = ZipDirectory(sourceDir, zipFile)
+	if err != nil {
+		return "", err
+	}
+
+	return zipFile, nil
+}
+
 func ZipAndGetContent(sourceDir string) ([]byte, error) {
 	zipFile, err := GetFileName(sourceDir, ".zip")
 	if err != nil {
@@ -160,6 +174,21 @@ func WriteToFile(sourceDir string, ciphertext []byte, tagSig []byte) (string, er
 	}
 
 	return encryptFile, nil
+}
+
+func WriteToFileHead(filename string, tagSig []byte) error {
+	file, err := os.OpenFile(filename, os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	_, err = file.Write(tagSig)
+	if err != nil {
+		return fmt.Errorf("failed to write data: %v", err)
+	}
+
+	return nil
 }
 
 func FileContentSize(filePath string) (int64, error) {

@@ -157,17 +157,29 @@ func (v *Verifier) verifyUserSignature(signature string, signatureMetadata Signa
 }
 
 func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, task *db.Task, storage *storage.Client) (*SettlementMetadata, error) {
-	plaintext, err := util.ZipAndGetContent(sourceDir)
-	if err != nil {
-		return nil, err
-	}
-
 	aesKey, err := util.GenerateAESKey(aesKeySize)
 	if err != nil {
 		return nil, err
 	}
 
-	ciphertext, tag, err := util.AesEncrypt(aesKey, plaintext)
+	plainFile, err := util.Zip(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_, err := os.Stat(plainFile)
+		if err != nil && os.IsNotExist(err) {
+			return
+		}
+		_ = os.Remove(plainFile)
+	}()
+
+	encryptFile, err := util.GetFileName(sourceDir, ".data")
+	if err != nil {
+		return nil, err
+	}
+
+	tag, err := util.AesEncryptLargeFile(aesKey, plainFile, encryptFile)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +189,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.Wrap(err, "sign tag failed")
 	}
 
-	encryptFile, err := util.WriteToFile(sourceDir, ciphertext, tagSig)
+	err = util.WriteToFileHead(encryptFile, tagSig)
 	defer func() {
 		_, err := os.Stat(encryptFile)
 		if err != nil && os.IsNotExist(err) {
