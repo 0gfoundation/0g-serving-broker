@@ -51,7 +51,7 @@ func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
 			return nil, errors.Wrap(err, "converting hex to ECDSA key")
 		}
 
-		privateKeyBytes := crypto.FromECDSA(key)
+		privateKeyBytes = crypto.FromECDSA(key)
 		if len(privateKeyBytes) != 32 {
 			return nil, errors.New("Error: private key must be 32 bytes long")
 		}
