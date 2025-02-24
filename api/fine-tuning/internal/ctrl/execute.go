@@ -1,11 +1,11 @@
 package ctrl
 
 import (
-	"bufio"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
@@ -78,6 +78,28 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 	return nil
 }
 
+// removeAllZipFiles removes all .zip files in the specified directory.
+func removeAllZipFiles(dir string) error {
+    // Construct a pattern like "/path/to/dir/*.zip"
+    pattern := filepath.Join(dir, "*.zip")
+
+    // Find all matching zip files
+    matches, err := filepath.Glob(pattern)
+    if err != nil {
+        return fmt.Errorf("failed to glob pattern: %v", err)
+    }
+
+    // Iterate and remove each file
+    for _, zipFile := range matches {
+        fmt.Printf("Removing: %s\n", zipFile)
+        if err := os.Remove(zipFile); err != nil {
+            return fmt.Errorf("failed to remove %s: %v", zipFile, err)
+        }
+    }
+
+    return nil
+}
+
 func (c *Ctrl) CleanUp(paths *TaskPaths) {
 	// remove data, model, output model path, but keep the config.json and progress.log
 	var err error
@@ -93,6 +115,11 @@ func (c *Ctrl) CleanUp(paths *TaskPaths) {
 		c.logger.Errorf("error removing output model folder: %v", err)
 	}
 
+	if err = removeAllZipFiles(paths.BasePath); err != nil {
+		c.logger.Errorf("error removing zip files: %v", err)
+    }
+
+	return nil
 }
 
 func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {
@@ -117,6 +144,11 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 
 	if err := os.WriteFile(paths.TrainingConfig, []byte(task.TrainingParams), os.ModePerm); err != nil {
 		c.logger.Errorf("Error writing training params file: %v\n", err)
+		return err
+	}
+
+	if err = os.Mkdir(paths.Output, os.ModePerm); err != nil {
+		c.logger.Errorf("Error creating output model folder: %v\n", err)
 		return err
 	}
 
@@ -233,6 +265,9 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			c.logger.Errorf("Failed to remove container: %v", err)
 			return err
 		}
+
+		c.logger.Infof("Container %s removed successfully\n", containerID)
+
 		return nil
 	}()
 
@@ -259,15 +294,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 	defer out.Close()
-
-	c.logger.Debug("Container logs:")
-	scanner := bufio.NewScanner(out)
-	for scanner.Scan() {
-		c.logger.Debug(scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		c.logger.Errorf("Error reading logs: %v", err)
-	}
 
 	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
 	if err != nil {
