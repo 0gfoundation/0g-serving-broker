@@ -1,16 +1,12 @@
 package phala
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/hex"
+	"crypto/sha256"
 	"encoding/json"
-	"io"
-	"net"
-	"net/http"
+	"encoding/pem"
 	"os"
-	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
@@ -36,47 +32,30 @@ func Quote(ctx context.Context, reportData string) (string, error) {
 		return "", errors.Wrap(err, "encoding json")
 	}
 
-	socket, err := net.Dial(SocketNetworkType, SocketAddress)
+	client := tappd.NewTappdClient()
+	tdxQuoteResp, err := client.TdxQuote(context.Background(), jsonData)
 	if err != nil {
-		return "", errors.Wrap(err, "creating socket")
-	}
-	defer socket.Close()
-
-	transport := &http.Transport{
-		Dial: func(network, addr string) (net.Conn, error) {
-			return socket, nil
-		},
+		return "", errors.Wrap(err, "tdx quote")
 	}
 
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-	}
-
-	req, err := http.NewRequest(http.MethodPost, Url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", errors.Wrap(err, "creating request")
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", errors.Wrap(err, "sending request")
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", errors.Wrap(err, "reading response body")
-	}
-
-	return hex.EncodeToString(body), nil
+	return tdxQuoteResp.Quote, nil
 }
 
 func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
-	keyHex := "4c0883a69102937d6231471b5dbb6204fe512961708279b7e1a8d7d7a3c2b9e3"
-	if os.Getenv("NETWORK") != "hardhat" {
+	var keyHex string
+	var privateKeyBytes []byte
+	if os.Getenv("NETWORK") == "hardhat" {
+		keyHex = "4c0883a69102937d6231471b5dbb6204fe512961708279b7e1a8d7d7a3c2b9e3"
+		key, err := crypto.HexToECDSA(keyHex)
+		if err != nil {
+			return nil, errors.Wrap(err, "converting hex to ECDSA key")
+		}
+
+		privateKeyBytes := crypto.FromECDSA(key)
+		if len(privateKeyBytes) != 32 {
+			return nil, errors.New("Error: private key must be 32 bytes long")
+		}
+	} else {
 		client := tappd.NewTappdClient()
 
 		deriveKeyResp, err := client.DeriveKey(ctx, "/")
@@ -84,16 +63,14 @@ func SigningKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "new tapped client")
 		}
-		keyHex = deriveKeyResp.Key
-	}
-	key, err := crypto.HexToECDSA(keyHex)
-	if err != nil {
-		return nil, errors.Wrap(err, "converting hex to ECDSA key")
-	}
 
-	privateKeyBytes := crypto.FromECDSA(key)
-	if len(privateKeyBytes) != 32 {
-		return nil, errors.New("Error: private key must be 32 bytes long")
+		block, _ := pem.Decode([]byte(deriveKeyResp.Key))
+		if block == nil || block.Type != "PRIVATE KEY" {
+			return nil, errors.New("Error: failed to decode PEM block containing the key")
+		}
+
+		hash := sha256.Sum256(block.Bytes)
+		privateKeyBytes = hash[:]
 	}
 
 	privateKey, err := crypto.ToECDSA(privateKeyBytes)
