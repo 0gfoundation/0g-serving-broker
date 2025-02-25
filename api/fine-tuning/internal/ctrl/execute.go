@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/quota"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
@@ -130,10 +131,38 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	}
 
 	image := constant.EXECUTION_IMAGE_NAME
-	runTime := "nvidia"
+
+	info, err := cli.Info(ctx)
+	if err != nil {
+		return err
+	}
+
+	storageOpt := make(map[string]string)
+	if info.Driver == "overlay2" && info.DriverStatus[0][1] == "xfs" {
+		if _, err = quota.NewControl(paths.BasePath); err == nil {
+			storageOpt["size"] = fmt.Sprintf("%vG", c.service.Quota.Storage)
+		} else {
+			c.logger.Warn("Filesystem does not support pquota mount option.")
+		}
+	} else {
+		c.logger.Warn("Storage Option only supported for backingFS XFS.")
+	}
+
+	runtime := ""
+	deviceRequests := make([]container.DeviceRequest, 0)
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
 		image = constant.EXECUTION_MOCK_IMAGE_NAME
-		runTime = ""
+		runtime = ""
+	} else {
+		if _, ok := info.Runtimes["nvidia"]; ok {
+			runtime = "nvidia"
+			deviceRequests = append(deviceRequests, container.DeviceRequest{
+				Count:        int(c.service.Quota.GpuCount),
+				Capabilities: [][]string{{"gpu"}},
+			})
+		} else {
+			c.logger.Warn("nvidia runtime not found.")
+		}
 	}
 
 	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
@@ -162,7 +191,13 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 				Target: ContainerBasePath,
 			},
 		},
-		Runtime: runTime,
+		Runtime: runtime,
+		Resources: container.Resources{
+			Memory:         c.service.Quota.Memory * 1024 * 1024 * 1024,
+			NanoCPUs:       c.service.Quota.CpuCount * 1e9,
+			DeviceRequests: deviceRequests,
+		},
+		StorageOpt: storageOpt,
 	}
 
 	// TODO: need to set the quotas according to api/fine-tuning/config/config.go Service.Quota
