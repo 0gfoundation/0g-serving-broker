@@ -200,11 +200,10 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 
 	switch len(modelRootHashes) {
 	case 1:
-		data = modelRootHashes[0].Bytes()
+		data = []byte(modelRootHashes[0].Hex())
 	case 2:
-		// Create a combined byte slice with a comma separator
-		data = append(modelRootHashes[0].Bytes(), ',')
-		data = append(data, modelRootHashes[1].Bytes()...)
+		data = append([]byte(modelRootHashes[0].Hex()), ',')
+		data = append(data, []byte(modelRootHashes[1].Hex())...)
 	default:
 		return nil, fmt.Errorf("invalid model root hashes: %v", modelRootHashes)
 	}
