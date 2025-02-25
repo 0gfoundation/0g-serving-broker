@@ -130,7 +130,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 	image := constant.EXECUTION_IMAGE_NAME
 	runTime := "nvidia"
-	if os.Getenv("NETWORK") == "hardhat" || task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
 		image = constant.EXECUTION_MOCK_IMAGE_NAME
 		runTime = ""
 	}
