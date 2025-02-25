@@ -156,10 +156,15 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	} else {
 		if _, ok := info.Runtimes["nvidia"]; ok {
 			runtime = "nvidia"
-			deviceRequests = append(deviceRequests, container.DeviceRequest{
-				Count:        int(c.service.Quota.GpuCount),
-				Capabilities: [][]string{{"gpu"}},
-			})
+
+			if info.OSType == "linux" {
+				deviceRequests = append(deviceRequests, container.DeviceRequest{
+					Count:        int(c.service.Quota.GpuCount),
+					Capabilities: [][]string{{"gpu"}},
+				})
+			} else {
+				c.logger.Warn("DeviceRequests is only supported on Linux. Current os type: %v.", info.OSType)
+			}
 		} else {
 			c.logger.Warn("nvidia runtime not found.")
 		}
@@ -183,6 +188,18 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		},
 	}
 
+	cpuCount := c.service.Quota.CpuCount
+	if cpuCount > int64(info.NCPU) {
+		cpuCount = int64(info.NCPU)
+		c.logger.Warn("Limit CPU count to total CPU %v, expected: %v.", info.NCPU, cpuCount)
+	}
+
+	memory := c.service.Quota.Memory * 1024 * 1024 * 1024
+	if memory > info.MemTotal {
+		memory = info.MemTotal
+		c.logger.Warn("Limit memory to total memory %v, expected: %v.", info.MemTotal, memory)
+	}
+
 	hostConfig := &container.HostConfig{
 		Mounts: []mount.Mount{
 			{
@@ -193,8 +210,8 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		},
 		Runtime: runtime,
 		Resources: container.Resources{
-			Memory:         c.service.Quota.Memory * 1024 * 1024 * 1024,
-			NanoCPUs:       c.service.Quota.CpuCount * 1e9,
+			Memory:         memory,
+			NanoCPUs:       cpuCount * 1e9,
 			DeviceRequests: deviceRequests,
 		},
 		StorageOpt: storageOpt,
