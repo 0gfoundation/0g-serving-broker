@@ -210,14 +210,15 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 	user := common.HexToAddress(task.UserAddress)
 	var data []byte
 
-	switch len(modelRootHashes) {
-	case 1:
-		data = []byte(modelRootHashes[0].Hex())
-	case 2:
-		data = append([]byte(modelRootHashes[0].Hex()), ',')
-		data = append(data, []byte(modelRootHashes[1].Hex())...)
-	default:
-		return nil, fmt.Errorf("invalid model root hashes: %v", modelRootHashes)
+	if len(modelRootHashes) == 0 {
+		return nil, fmt.Errorf("no model root hashes provided")
+	}
+
+	for i, hash := range modelRootHashes {
+		if i > 0 {
+			data = append(data, ',')
+		}
+		data = append(data, []byte(hash.Hex())...)
 	}
 
 	err = v.contract.AddDeliverable(ctx, user, data)
@@ -225,7 +226,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	return v.GenerateTeeSignature(ctx, user, aesKey, modelRootHashes[0].Bytes(), task.Fee, task.Nonce, providerPriv)
+	return v.GenerateTeeSignature(ctx, user, aesKey, data, task.Fee, task.Nonce, providerPriv)
 }
 
 func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
