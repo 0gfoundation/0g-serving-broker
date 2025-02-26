@@ -193,7 +193,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 					Capabilities: [][]string{{"gpu"}},
 				})
 			} else {
-				c.logger.Warn("DeviceRequests is only supported on Linux. Current os type: %v.", info.OSType)
+				c.logger.Warnf("DeviceRequests is only supported on Linux. Current os type: %v.", info.OSType)
 			}
 		} else {
 			c.logger.Warn("nvidia runtime not found.")
@@ -224,14 +224,14 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 	cpuCount := c.service.Quota.CpuCount
 	if cpuCount > int64(info.NCPU) {
+		c.logger.Warnf("Limit CPU count to total CPU %v, expected: %v.", info.NCPU, cpuCount)
 		cpuCount = int64(info.NCPU)
-		c.logger.Warn("Limit CPU count to total CPU %v, expected: %v.", info.NCPU, cpuCount)
 	}
 
 	memory := c.service.Quota.Memory * 1024 * 1024 * 1024
 	if memory > info.MemTotal {
+		c.logger.Warnf("Limit memory to total memory %v, expected: %v.", info.MemTotal, memory)
 		memory = info.MemTotal
-		c.logger.Warn("Limit memory to total memory %v, expected: %v.", info.MemTotal, memory)
 	}
 
 	hostConfig := &container.HostConfig{
