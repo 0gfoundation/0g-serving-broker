@@ -41,7 +41,7 @@ services:
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./config.yaml:/etc/config.yaml
+      - ./config.local.yaml:/etc/config.yaml
       - /tmp:/tmp
     command: 0g-fine-tuning-server
     networks:

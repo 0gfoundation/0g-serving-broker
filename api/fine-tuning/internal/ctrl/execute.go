@@ -216,10 +216,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			"--config_path", paths.ContainerTrainingConfig,
 			"--output_dir", paths.ContainerOutput,
 		},
-		Env: []string{
-			"PYTHONPATH=/root/miniconda3/envs/cocktail/lib/python3.10/site-packages/:/app/CocktailSGD", // Update to match Python version
-			"PATH=/root/miniconda3/envs/cocktail/bin:$PATH",
-		},
+		Env: constant.ENV_MAP[task.PreTrainedModelHash],
 	}
 
 	cpuCount := c.service.Quota.CpuCount

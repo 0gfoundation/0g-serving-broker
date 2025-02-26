@@ -126,6 +126,11 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	return *taskRes, errors.Wrap(err, "get service from db")
 }
 
+func (c *Ctrl) MarkInProgressTasksAsFailed() error {
+	err := c.db.MarkInProgressTasksAsFailed()
+	return errors.Wrap(err, "mark InProgress tasks as failed in db")
+}
+
 func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([]schema.Task, error) {
 	tasks, err := c.db.ListTask(userAddress, latest)
 	if err != nil {

@@ -30,6 +30,14 @@ func (d *DB) UpdateTask(id *uuid.UUID, new Task) error {
 	return ret.Error
 }
 
+func (d *DB) MarkInProgressTasksAsFailed() error {
+	ret := d.db.Model(&Task{}).
+		Where("progress = ?", ProgressStateInProgress.String()).
+		Update("progress", ProgressStateFailed.String())
+
+	return ret.Error
+}
+
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
 	ret := d.db.Model(&Task{}).Where("Progress = ?", ProgressStateInProgress.String()).Count(&count)
