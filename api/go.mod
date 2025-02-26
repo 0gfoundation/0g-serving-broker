@@ -8,7 +8,7 @@ require (
 	github.com/0glabs/0g-storage-client v0.6.3
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20250210094218-5e83c01229db
 	github.com/andybalholm/brotli v1.1.0
-	github.com/docker/docker v27.4.1+incompatible
+	github.com/docker/docker v28.0.0+incompatible
 	github.com/ecies/go/v2 v2.0.10
 	github.com/ethereum/go-ethereum v1.14.12
 	github.com/gin-contrib/cors v1.7.2
@@ -140,6 +140,7 @@ require (
 	github.com/mitchellh/pointerstructure v1.2.0 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/moby/term v0.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect

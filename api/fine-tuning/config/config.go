@@ -15,8 +15,8 @@ type Service struct {
 	ServingUrl string `yaml:"servingUrl"`
 	Quota      struct {
 		CpuCount int64  `yaml:"cpuCount"`
-		Memory   int64  `yaml:"memory"`
-		Storage  int64  `yaml:"storage"`
+		Memory   int64  `yaml:"memory"`  // Memory limit in GB
+		Storage  int64  `yaml:"storage"` // Storage limit in GB
 		GpuType  string `yaml:"gpuType"`
 		GpuCount int64  `yaml:"gpuCount"`
 	} `yaml:"quota"`
