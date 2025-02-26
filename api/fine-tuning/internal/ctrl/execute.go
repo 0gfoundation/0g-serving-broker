@@ -72,10 +72,12 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 		return err
 	}
 
-	return c.CleanUp(paths)
+	c.CleanUp(paths)
+
+	return nil
 }
 
-func (c *Ctrl) CleanUp(paths *TaskPaths) error {
+func (c *Ctrl) CleanUp(paths *TaskPaths) {
 	// remove data, model, output model path, but keep the config.json and progress.log
 	var err error
 	if err = os.RemoveAll(paths.Dataset); err != nil {
@@ -90,7 +92,6 @@ func (c *Ctrl) CleanUp(paths *TaskPaths) error {
 		c.logger.Errorf("error removing output model folder: %v", err)
 	}
 
-	return err
 }
 
 func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {

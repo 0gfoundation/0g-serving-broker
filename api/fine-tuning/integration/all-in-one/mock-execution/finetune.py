@@ -74,7 +74,7 @@ def main():
 
     # Simulate the training process
     callback.on_train_begin()
-    num_steps = 20  # Simulated number of training steps
+    num_steps = 1  # Simulated number of training steps
 
     for step in range(num_steps):
         # Log every simulated step
