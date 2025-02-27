@@ -132,6 +132,11 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
+	if err := os.WriteFile(paths.TrainingConfig, []byte(task.TrainingParams), os.ModePerm); err != nil {
+		c.logger.Errorf("Error writing training params file: %v\n", err)
+		return err
+	}
+
 	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
 	var dataSetType token.DataSetType
 	if strings.HasSuffix(trainScript, "finetune-img.py") {
@@ -140,17 +145,12 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		dataSetType = token.Text
 	}
 
-	tokenSize, err := token.CountTokens(dataSetType, paths.Dataset, paths.PretrainedModel, c.logger)
+	tokenSize, trainEpochs, err := token.CountTokens(dataSetType, paths.Dataset, paths.PretrainedModel, paths.TrainingConfig, c.logger)
 	if err != nil {
 		return err
 	}
 
-	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.service.PricePerToken, task); err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(paths.TrainingConfig, []byte(task.TrainingParams), os.ModePerm); err != nil {
-		c.logger.Errorf("Error writing training params file: %v\n", err)
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, trainEpochs, c.service.PricePerToken, task); err != nil {
 		return err
 	}
 

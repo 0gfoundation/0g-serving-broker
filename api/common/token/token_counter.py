@@ -1,11 +1,26 @@
 import transformers
-import os, sys
+import os, sys, json
 
 from datasets import load_from_disk
 
 
 current_directory = os.path.dirname(os.path.abspath(__file__))
 default_model_path = os.path.join(current_directory, "deepseek_v3")
+
+
+def get_num_train_epochs(training_config):
+    num_train_epochs = 3
+    if os.path.exists(training_config):
+        try:
+            with open(training_config, "r") as file:
+                config = json.load(file)
+                num_train_epochs = config.get("num_train_epochs", 3)
+        except Exception as e:
+            print(
+                f"An error occurred during read training config: {e}", file=sys.stderr
+            )
+
+    return num_train_epochs
 
 
 def count_tokens(dataset_path, model_path, dataset_type):
@@ -64,5 +79,11 @@ if __name__ == "__main__":
     dataset_path = sys.argv[1]
     dataset_type = sys.argv[2]
     model_path = sys.argv[3]
+
+    num_train_epochs = 0
+    if len(sys.argv) == 5:
+        training_config = sys.argv[4]
+        num_train_epochs = get_num_train_epochs(training_config)
+
     token_count = count_tokens(dataset_path, model_path, dataset_type)
-    print(token_count)
+    print(token_count, num_train_epochs)

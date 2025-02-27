@@ -61,17 +61,17 @@ func CheckPythonEnv(logger log.Logger) error {
 	return nil
 }
 
-func CountTokens(dataSetType DataSetType, datasetPath, pretrainedModelPath string, logger log.Logger) (int64, error) {
-	output, err := runCommand("python3", []string{"common/token/token_counter.py", datasetPath, string(dataSetType), pretrainedModelPath}, logger)
+func CountTokens(dataSetType DataSetType, datasetPath, pretrainedModelPath, trainingConfig string, logger log.Logger) (int64, int64, error) {
+	output, err := runCommand("python3", []string{"common/token/token_counter.py", datasetPath, string(dataSetType), pretrainedModelPath, trainingConfig}, logger)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
-	var tokenCount int64
-	_, err = fmt.Sscanf(string(output), "%d", &tokenCount)
+	var tokenCount, numTrainEpochs int64
+	_, err = fmt.Sscanf(string(output), "%d %d", &tokenCount, &numTrainEpochs)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
-	return tokenCount, nil
+	return tokenCount, numTrainEpochs, nil
 }
