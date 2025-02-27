@@ -5,9 +5,10 @@ go 1.22.7
 toolchain go1.22.10
 
 require (
-	github.com/0glabs/0g-storage-client v0.6.2
+	github.com/0glabs/0g-storage-client v0.6.3
+	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20250210094218-5e83c01229db
 	github.com/andybalholm/brotli v1.1.0
-	github.com/docker/docker v27.4.1+incompatible
+	github.com/docker/docker v28.0.0+incompatible
 	github.com/ecies/go/v2 v2.0.10
 	github.com/ethereum/go-ethereum v1.14.12
 	github.com/gin-contrib/cors v1.7.2
@@ -29,7 +30,6 @@ require (
 	github.com/rs/zerolog v1.33.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/swaggo/swag v1.16.3
-	golang.org/x/crypto v0.31.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/net v0.32.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -140,6 +140,7 @@ require (
 	github.com/mitchellh/pointerstructure v1.2.0 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/moby/term v0.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
@@ -182,6 +183,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.33.0 // indirect
 	go.opentelemetry.io/otel/trace v1.33.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/oauth2 v0.21.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect

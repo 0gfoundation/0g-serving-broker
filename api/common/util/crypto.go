@@ -1,11 +1,13 @@
 package util
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"fmt"
 	"io"
+	"os"
 )
 
 func GenerateAESKey(keySize int) ([]byte, error) {
@@ -42,6 +44,62 @@ func AesEncrypt(key []byte, plaintext []byte) ([]byte, []byte, error) {
 	tag := ciphertext[len(ciphertext)-gcm.Overhead():]
 
 	return ciphertext, tag, nil
+}
+
+func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, error) {
+	inFile, err := os.Open(inputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open input file: %v", err)
+	}
+	defer inFile.Close()
+
+	outFile, err := os.Create(outputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output file: %v", err)
+	}
+	defer outFile.Close()
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM cipher: %v", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %v", err)
+	}
+
+	signature := make([]byte, 65)
+	if _, err := outFile.Write(append(signature, nonce...)); err != nil {
+		return nil, fmt.Errorf("failed to write nonce to output file: %v", err)
+	}
+
+	buf := make([]byte, 64*1024*1024)
+	tagBuf := new(bytes.Buffer)
+
+	for {
+		n, err := inFile.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read input file: %v", err)
+		}
+
+		ciphertext := gcm.Seal(nil, nonce, buf[:n], nil)
+		tagBuf.Write(ciphertext[len(ciphertext)-gcm.Overhead():])
+
+		if _, err := outFile.Write(ciphertext); err != nil {
+			return nil, fmt.Errorf("failed to write ciphertext to output file: %v", err)
+		}
+	}
+
+	return tagBuf.Bytes(), nil
 }
 
 func AesDecrypt(key, ciphertext []byte) ([]byte, error) {

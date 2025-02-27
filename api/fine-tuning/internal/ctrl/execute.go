@@ -1,17 +1,18 @@
 package ctrl
 
 import (
-	"bufio"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/quota"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
@@ -58,6 +59,8 @@ func NewTaskPaths(basePath string) *TaskPaths {
 func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
+	defer c.CleanUp(paths)
+
 	if err := c.prepareData(ctx, task, paths); err != nil {
 		c.logger.Errorf("Error processing data: %v\n", err)
 		return err
@@ -67,7 +70,55 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 		return err
 	}
 
-	return c.handleContainerLifecycle(ctx, paths, task)
+	if err := c.handleContainerLifecycle(ctx, paths, task); err != nil {
+		return err
+	}
+
+	c.CleanUp(paths)
+
+	return nil
+}
+
+// removeAllZipFiles removes all .zip files in the specified directory.
+func removeAllZipFiles(dir string) error {
+	// Construct a pattern like "/path/to/dir/*.zip"
+	pattern := filepath.Join(dir, "*.zip")
+
+	// Find all matching zip files
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("failed to glob pattern: %v", err)
+	}
+
+	// Iterate and remove each file
+	for _, zipFile := range matches {
+		fmt.Printf("Removing: %s\n", zipFile)
+		if err := os.Remove(zipFile); err != nil {
+			return fmt.Errorf("failed to remove %s: %v", zipFile, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *Ctrl) CleanUp(paths *TaskPaths) {
+	// remove data, model, output model path, but keep the config.json and progress.log
+	var err error
+	if err = os.RemoveAll(paths.Dataset); err != nil {
+		c.logger.Errorf("error removing dataset folder: %v", err)
+	}
+
+	if err = os.RemoveAll(paths.PretrainedModel); err != nil {
+		c.logger.Errorf("error removing pre-trained model folder: %v", err)
+	}
+
+	if err = os.RemoveAll(paths.Output); err != nil {
+		c.logger.Errorf("error removing output model folder: %v", err)
+	}
+
+	if err = removeAllZipFiles(paths.BasePath); err != nil {
+		c.logger.Errorf("error removing zip files: %v", err)
+	}
 }
 
 func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {
@@ -103,6 +154,11 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
+	if err = os.Mkdir(paths.Output, os.ModePerm); err != nil {
+		c.logger.Errorf("Error creating output model folder: %v\n", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -114,10 +170,43 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	}
 
 	image := constant.EXECUTION_IMAGE_NAME
-	runTime := "nvidia"
-	if os.Getenv("NETWORK") == "hardhat" || task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+
+	info, err := cli.Info(ctx)
+	if err != nil {
+		return err
+	}
+
+	storageOpt := make(map[string]string)
+	if info.Driver == "overlay2" && info.DriverStatus[0][1] == "xfs" {
+		if _, err = quota.NewControl(paths.BasePath); err == nil {
+			storageOpt["size"] = fmt.Sprintf("%vG", c.service.Quota.Storage)
+		} else {
+			c.logger.Warn("Filesystem does not support pquota mount option.")
+		}
+	} else {
+		c.logger.Warn("Storage Option only supported for backingFS XFS.")
+	}
+
+	runtime := ""
+	deviceRequests := make([]container.DeviceRequest, 0)
+	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
 		image = constant.EXECUTION_MOCK_IMAGE_NAME
-		runTime = ""
+		runtime = ""
+	} else {
+		if _, ok := info.Runtimes["nvidia"]; ok {
+			runtime = "nvidia"
+
+			if info.OSType == "linux" {
+				deviceRequests = append(deviceRequests, container.DeviceRequest{
+					Count:        int(c.service.Quota.GpuCount),
+					Capabilities: [][]string{{"gpu"}},
+				})
+			} else {
+				c.logger.Warnf("DeviceRequests is only supported on Linux. Current os type: %v.", info.OSType)
+			}
+		} else {
+			c.logger.Warn("nvidia runtime not found.")
+		}
 	}
 
 	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
@@ -136,6 +225,19 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			"--config_path", paths.ContainerTrainingConfig,
 			"--output_dir", paths.ContainerOutput,
 		},
+		Env: constant.ENV_MAP[task.PreTrainedModelHash],
+	}
+
+	cpuCount := c.service.Quota.CpuCount
+	if cpuCount > int64(info.NCPU) {
+		c.logger.Warnf("Limit CPU count to total CPU %v, expected: %v.", info.NCPU, cpuCount)
+		cpuCount = int64(info.NCPU)
+	}
+
+	memory := c.service.Quota.Memory * 1024 * 1024 * 1024
+	if memory > info.MemTotal {
+		c.logger.Warnf("Limit memory to total memory %v, expected: %v.", info.MemTotal, memory)
+		memory = info.MemTotal
 	}
 
 	hostConfig := &container.HostConfig{
@@ -146,7 +248,13 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 				Target: ContainerBasePath,
 			},
 		},
-		Runtime: runTime,
+		Runtime: runtime,
+		Resources: container.Resources{
+			Memory:         memory,
+			NanoCPUs:       cpuCount * 1e9,
+			DeviceRequests: deviceRequests,
+		},
+		StorageOpt: storageOpt,
 	}
 
 	// TODO: need to set the quotas according to api/fine-tuning/config/config.go Service.Quota
@@ -158,6 +266,18 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 	containerID := resp.ID
 	c.logger.Infof("Container %s created successfully. Now Starting...\n", containerID)
+
+	defer func() error {
+		// remove the container
+		if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+			c.logger.Errorf("Failed to remove container: %v", err)
+			return err
+		}
+
+		c.logger.Infof("Container %s removed successfully\n", containerID)
+
+		return nil
+	}()
 
 	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		c.logger.Errorf("Failed to start container: %v", err)
@@ -182,15 +302,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 	defer out.Close()
-
-	c.logger.Debug("Container logs:")
-	scanner := bufio.NewScanner(out)
-	for scanner.Scan() {
-		c.logger.Debug(scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		c.logger.Errorf("Error reading logs: %v", err)
-	}
 
 	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
 	if err != nil {

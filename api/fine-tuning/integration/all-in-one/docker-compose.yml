@@ -30,6 +30,7 @@ services:
 
   0g-fine-tune-broker:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    privileged: true
     container_name: 0g-fine-tune-broker
     ports:
       - "3080:3080"
@@ -38,8 +39,10 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config.yaml:/etc/config.yaml
+      - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.local.yaml:/etc/config.yaml
+      - /tmp:/tmp
     command: 0g-fine-tuning-server
     networks:
       - localhost

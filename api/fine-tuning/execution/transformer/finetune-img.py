@@ -54,6 +54,50 @@ def load_config(config_path):
     except Exception as e:
         print(f"Error reading config file: {e}")
         exit(1)
+        
+        
+
+def get_last_checkpoint(output_dir):
+    # Check if 'checkpoint-XXXX' folders exist in `output_dir`
+    checkpoints = []
+    if os.path.isdir(output_dir):
+        for folder_name in os.listdir(output_dir):
+            if folder_name.startswith("checkpoint-"):
+                checkpoints.append(os.path.join(output_dir, folder_name))
+    if not checkpoints:
+        return None
+    
+    # Sort by checkpoint step number
+    checkpoints.sort(key=lambda x: int(x.split("-")[-1]))
+    return checkpoints[-1]  # The latest checkpoint
+
+def safe_train(trainer, max_retries=3):
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            
+            last_ckpt = get_last_checkpoint(trainer.args.output_dir)
+            if last_ckpt is not None:
+                print(f"Resuming from checkpoint: {last_ckpt}")
+                trainer.train(resume_from_checkpoint=last_ckpt)
+            else:
+                print("No checkpoint found. Training from scratch.")
+                trainer.train()
+
+            # If train finishes successfully, we exit the loop
+            return
+        except Exception as e:
+            attempt += 1
+            print(f"Training failed with error: {e}. Retrying... ({attempt}/{max_retries})")
+            trainer.callback_handler.on_log(
+                args=trainer.args,
+                state=trainer.state,
+                control=trainer.control,
+                logs={"error": str(e), "retry_attempt": attempt}
+            )
+            if attempt == max_retries:
+                print("Max retries reached. Training failed permanently.")
+                raise e
 
 
 def main():
@@ -181,7 +225,7 @@ def main():
     )
 
     # Fine-tune the model
-    trainer.train()
+    safe_train(trainer, max_retries=config.get("max_retries", 3))
 
     # Save the final model
     trainer.save_model(args.output_dir)

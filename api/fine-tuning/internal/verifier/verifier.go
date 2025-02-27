@@ -157,17 +157,29 @@ func (v *Verifier) verifyUserSignature(signature string, signatureMetadata Signa
 }
 
 func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPriv *ecdsa.PrivateKey, task *db.Task, storage *storage.Client) (*SettlementMetadata, error) {
-	plaintext, err := util.ZipAndGetContent(sourceDir)
-	if err != nil {
-		return nil, err
-	}
-
 	aesKey, err := util.GenerateAESKey(aesKeySize)
 	if err != nil {
 		return nil, err
 	}
 
-	ciphertext, tag, err := util.AesEncrypt(aesKey, plaintext)
+	plainFile, err := util.Zip(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_, err := os.Stat(plainFile)
+		if err != nil && os.IsNotExist(err) {
+			return
+		}
+		_ = os.Remove(plainFile)
+	}()
+
+	encryptFile, err := util.GetFileName(sourceDir, ".data")
+	if err != nil {
+		return nil, err
+	}
+
+	tag, err := util.AesEncryptLargeFile(aesKey, plainFile, encryptFile)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +189,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.Wrap(err, "sign tag failed")
 	}
 
-	encryptFile, err := util.WriteToFile(sourceDir, ciphertext, tagSig)
+	err = util.WriteToFileHead(encryptFile, tagSig)
 	defer func() {
 		_, err := os.Stat(encryptFile)
 		if err != nil && os.IsNotExist(err) {
@@ -195,17 +207,26 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	if len(modelRootHashes) != 1 {
-		return nil, errors.New(fmt.Sprintf("invalid model root hashes: %v", modelRootHashes))
+	user := common.HexToAddress(task.UserAddress)
+	var data []byte
+
+	if len(modelRootHashes) == 0 {
+		return nil, fmt.Errorf("no model root hashes provided")
 	}
 
-	user := common.HexToAddress(task.UserAddress)
-	err = v.contract.AddDeliverable(ctx, user, modelRootHashes[0].Bytes())
+	for i, hash := range modelRootHashes {
+		if i > 0 {
+			data = append(data, ',')
+		}
+		data = append(data, []byte(hash.Hex())...)
+	}
+
+	err = v.contract.AddDeliverable(ctx, user, data)
 	if err != nil {
 		return nil, err
 	}
 
-	return v.GenerateTeeSignature(ctx, user, aesKey, modelRootHashes[0].Bytes(), task.Fee, task.Nonce, providerPriv)
+	return v.GenerateTeeSignature(ctx, user, aesKey, data, task.Fee, task.Nonce, providerPriv)
 }
 
 func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {

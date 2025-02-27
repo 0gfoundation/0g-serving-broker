@@ -41,13 +41,35 @@ class ProgressCallback(TrainerCallback):
                 print(f"Error closing log file: {e}")
 
 
+def get_last_checkpoint(output_dir):
+    # Check if 'checkpoint-XXXX' folders exist in `output_dir`
+    checkpoints = []
+    if os.path.isdir(output_dir):
+        print("output_dir exists", output_dir)
+        for folder_name in os.listdir(output_dir):
+            if folder_name.startswith("checkpoint-"):
+                checkpoints.append(os.path.join(output_dir, folder_name))
+    if not checkpoints:
+        return None
+    
+    # Sort by checkpoint step number
+    checkpoints.sort(key=lambda x: int(x.split("-")[-1]))
+    return checkpoints[-1]  # The latest checkpoint
+
 def safe_train(trainer, max_retries=3):
     attempt = 0
     while attempt < max_retries:
         try:
-            trainer.train(resume_from_checkpoint=True)
+            
+            last_ckpt = get_last_checkpoint(trainer.args.output_dir)
+            if last_ckpt is not None:
+                print(f"Resuming from checkpoint: {last_ckpt}")
+                trainer.train(resume_from_checkpoint=last_ckpt)
+            else:
+                print("No checkpoint found. Training from scratch.")
+                trainer.train()
 
-            # If train finishes successfully, break
+            # If train finishes successfully, we exit the loop
             return
         except Exception as e:
             attempt += 1

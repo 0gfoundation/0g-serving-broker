@@ -17,7 +17,7 @@ networks:
     transactionLimit: 10000000
     gasEstimationBuffer: 100000
 service:
-  servingUrl: "http://192.168.1.105:3080"
+  servingUrl: "http://192.168.1.107:3080"
   pricePerToken: 1
   quota:
     cpuCount: 8
