@@ -1,0 +1,6 @@
+transformers
+datasets
+evaluate
+accelerate
+toml
+pillow
