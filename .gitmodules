@@ -1,3 +1,6 @@
 [submodule "api/libs/0g-serving-contract"]
 	path = api/libs/0g-serving-contract
 	url = https://github.com/0glabs/0g-serving-contract.git
+[submodule "api/token-counter"]
+	path = api/token-counter
+	url = https://github.com/0glabs/0g-serving-token-counter.git
