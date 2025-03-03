@@ -22,7 +22,7 @@ func (c *Ctrl) DeleteService(ctx context.Context) error {
 }
 
 func (c *Ctrl) SyncServices(ctx context.Context) error {
-	if err := c.contract.SyncServices(ctx, c.service); err != nil {
+	if err := c.contract.SyncServices(ctx, c.config.Service); err != nil {
 		return errors.Wrap(err, "sync services in contract")
 	}
 	return nil
