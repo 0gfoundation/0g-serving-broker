@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
+	dockerImg "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/quota"
@@ -66,7 +68,7 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 	}
 
 	if err := c.contract.AddOrUpdateService(ctx, c.config.Service, true); err != nil {
-		return err
+		return errors.Wrap(err, "set service as occupied state in contract")
 	}
 
 	if err := c.handleContainerLifecycle(ctx, paths, task); err != nil {
@@ -150,6 +152,38 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
+	return nil
+}
+
+func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag string) error {
+	images, err := cli.ImageList(ctx, dockerImg.ListOptions{})
+	if err != nil {
+		c.logger.Errorf("Failed to list Docker images: %v", err)
+		return err
+	}
+
+	imageExists := false
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if tag == expectImag {
+				imageExists = true
+				break
+			}
+		}
+		if imageExists {
+			break
+		}
+	}
+
+	if !imageExists {
+		out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
+		if err != nil {
+			c.logger.Errorf("Failed to pull Docker image %s: %v", expectImag, err)
+			return err
+		}
+		defer out.Close()
+		io.Copy(os.Stdout, out)
+	}
 	return nil
 }
 
@@ -248,7 +282,12 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		StorageOpt: storageOpt,
 	}
 
-	// TODO: need to set the quotas according to api/fine-tuning/config/config.go Service.Quota
+	err = c.pullImage(ctx, cli, image)
+	if err != nil {
+		c.logger.Errorf("Failed to create container: %v", err)
+		return err
+	}
+
 	resp, err := cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		c.logger.Errorf("Failed to create container: %v", err)

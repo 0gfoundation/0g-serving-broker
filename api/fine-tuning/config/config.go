@@ -96,8 +96,8 @@ func GetConfig() *Config {
 			},
 			GasPrice: "",
 			Images: Images{
-				ExecutionMockImageName: "mock-fine-tuning",
-				ExecutionImageName:     "execution-test-pytorch",
+				ExecutionMockImageName: "mock-fine-tuning:latest",
+				ExecutionImageName:     "execution-test-pytorch:v1",
 			},
 			Logger: config.LoggerConfig{
 				Format:        "text",
