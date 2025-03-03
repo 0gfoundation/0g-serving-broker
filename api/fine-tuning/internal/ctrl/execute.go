@@ -65,7 +65,7 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 		return err
 	}
 
-	if err := c.contract.AddOrUpdateService(ctx, c.service, true); err != nil {
+	if err := c.contract.AddOrUpdateService(ctx, c.config.Service, true); err != nil {
 		return err
 	}
 
@@ -131,7 +131,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 	if err != nil {
 		return err
 	}
-	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.service.PricePerToken, task); err != nil {
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.config.Service.PricePerToken, task); err != nil {
 		return err
 	}
 
@@ -160,7 +160,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 
-	image := constant.EXECUTION_IMAGE_NAME
+	image := c.config.Images.ExecutionImageName
 
 	info, err := cli.Info(ctx)
 	if err != nil {
@@ -170,7 +170,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	storageOpt := make(map[string]string)
 	if info.Driver == "overlay2" && info.DriverStatus[0][1] == "xfs" {
 		if _, err = quota.NewControl(paths.BasePath); err == nil {
-			storageOpt["size"] = fmt.Sprintf("%vG", c.service.Quota.Storage)
+			storageOpt["size"] = fmt.Sprintf("%vG", c.config.Service.Quota.Storage)
 		} else {
 			c.logger.Warn("Filesystem does not support pquota mount option.")
 		}
@@ -181,7 +181,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	runtime := ""
 	deviceRequests := make([]container.DeviceRequest, 0)
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
-		image = constant.EXECUTION_MOCK_IMAGE_NAME
+		image = c.config.Images.ExecutionMockImageName
 		runtime = ""
 	} else {
 		if _, ok := info.Runtimes["nvidia"]; ok {
@@ -189,7 +189,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 
 			if info.OSType == "linux" {
 				deviceRequests = append(deviceRequests, container.DeviceRequest{
-					Count:        int(c.service.Quota.GpuCount),
+					Count:        int(c.config.Service.Quota.GpuCount),
 					Capabilities: [][]string{{"gpu"}},
 				})
 			} else {
@@ -219,13 +219,13 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		Env: constant.ENV_MAP[task.PreTrainedModelHash],
 	}
 
-	cpuCount := c.service.Quota.CpuCount
+	cpuCount := c.config.Service.Quota.CpuCount
 	if cpuCount > int64(info.NCPU) {
 		c.logger.Warnf("Limit CPU count to total CPU %v, expected: %v.", info.NCPU, cpuCount)
 		cpuCount = int64(info.NCPU)
 	}
 
-	memory := c.service.Quota.Memory * 1024 * 1024 * 1024
+	memory := c.config.Service.Quota.Memory * 1024 * 1024 * 1024
 	if memory > info.MemTotal {
 		c.logger.Warnf("Limit memory to total memory %v, expected: %v.", info.MemTotal, memory)
 		memory = info.MemTotal
