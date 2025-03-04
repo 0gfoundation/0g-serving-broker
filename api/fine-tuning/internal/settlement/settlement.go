@@ -53,7 +53,7 @@ func (s *Settlement) Start(ctx context.Context) error {
 					if err != nil {
 						s.logger.Error("error during do settlement", "err", err)
 					}
-					return
+					continue
 				}
 				task = s.getPendingUserAcknowledgedTask()
 				if task != nil {
