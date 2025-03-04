@@ -45,10 +45,23 @@ func (s *Settlement) Start(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
+				s.logger.Info("settlement service stopped")
 				return
 			case <-ticker.C:
+				count, err := s.db.InProgressTaskCount()
+				if err != nil {
+					s.logger.Error("error during check in progress task", "err", err)
+				}
+				if count != 0 {
+					err := s.contract.AddOrUpdateService(ctx, s.service, false)
+					if err != nil {
+						s.logger.Error("error update service to available", "err", err)
+					}
+				}
+
 				task := s.getPendingDeliveredTask(ctx)
-				if task != nil {
+				if task != nil && task.ID != nil {
+					s.logger.Info("settle for task", "task", task.ID.String())
 					err := s.doSettlement(ctx, task)
 					if err != nil {
 						s.logger.Error("error during do settlement", "err", err)
@@ -56,7 +69,8 @@ func (s *Settlement) Start(ctx context.Context) error {
 					continue
 				}
 				task = s.getPendingUserAcknowledgedTask()
-				if task != nil {
+				if task != nil && task.ID != nil {
+					s.logger.Info("settle for task", "task", task.ID.String())
 					err := s.doSettlement(ctx, task)
 					if err != nil {
 						s.logger.Error("error during do settlement for tasks failed once", "err", err)
@@ -163,7 +177,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	if err != nil {
 		return err
 	}
-	s.contract.AddOrUpdateService(ctx, s.service, false)
 
 	return nil
 }
