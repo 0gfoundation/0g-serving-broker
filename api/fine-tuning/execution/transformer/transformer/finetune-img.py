@@ -212,6 +212,7 @@ def main():
         metric_for_best_model=config.get("metric_for_best_model", "accuracy"),
         greater_is_better=config.get("greater_is_better", True),
         report_to=config.get("report_to", ["none"]),
+        save_total_limit=1,
     )
 
     # Define the Trainer
