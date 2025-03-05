@@ -47,7 +47,7 @@ func CheckPythonEnv(logger log.Logger) error {
 		return err
 	}
 
-	requiredPackages := []string{"transformers"}
+	requiredPackages := []string{"transformers", "datasets"}
 	for _, packageName := range requiredPackages {
 		_, err := runCommand("pip", []string{"show", packageName}, logger)
 		if err != nil {
