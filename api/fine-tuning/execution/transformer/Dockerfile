@@ -9,7 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
     && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
+RUN conda install -c conda-forge cupy
+
 WORKDIR /app
+
+RUN git clone https://github.com/0glabs/CocktailSGD.git
 
 # mount point for data
 RUN mkdir /app/mnt
@@ -17,7 +21,7 @@ COPY transformer/finetune-img.py /app/finetune-img.py
 COPY transformer/finetune.py /app/finetune.py
 
 # Install additional Python libraries
-RUN pip install transformers datasets evaluate accelerate toml
+RUN pip install transformers datasets evaluate accelerate toml netifaces zstandard
 
 # Set default command
 CMD ["bash"]

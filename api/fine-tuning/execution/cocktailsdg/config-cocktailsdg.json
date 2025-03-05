@@ -69,7 +69,7 @@
     "data_path" : "./data/",
     "warmup_steps": 10,
     "train_warmup_steps": 0,
-    "total_steps": 1000,
+    "total_steps": 20,
     "total_scheduler_steps": null,
     "scheduler": "linear",
     "load_pretrained_model": true,
@@ -80,7 +80,7 @@
     "evaluation_steps": 0,
     "evaluation_data": null,
     "evaluation_num_batch": null,
-    "checkpoint_steps": 100,
+    "checkpoint_steps": 10,
     "net_interface": "lo",
     "job_id": "0"
 }
