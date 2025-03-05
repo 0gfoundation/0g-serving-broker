@@ -7,36 +7,46 @@ import (
 )
 
 var (
+	EventSettleCount           prometheus.Counter
+	EventSettleErrorCount      prometheus.Counter
+	EventForceSettleCount      prometheus.Counter
+	EventForceSettleErrorCount prometheus.Counter
+)
+
+// InitPrometheus initializes Prometheus metrics with a given server name.
+func InitPrometheus(serverName string) {
+	if serverName == "" {
+		panic("server name must be provided")
+	}
+
 	EventSettleCount = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "event_settle_count_total",
-			Help: "Total number of settlement processed",
-		},
-	)
+			Name:        "event_settle_count_total",
+			Help:        "Total number of settlement processed",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		})
 
 	EventSettleErrorCount = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "event_settle_errors_total",
-			Help: "Total number of error when settlement processed",
-		},
-	)
+			Name:        "event_settle_errors_total",
+			Help:        "Total number of errors when settlement processed",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		})
 
 	EventForceSettleCount = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "event_force_settle_count_total",
-			Help: "Total number of force settlement processed",
-		},
-	)
+			Name:        "event_force_settle_count_total",
+			Help:        "Total number of force settlement processed",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		})
 
 	EventForceSettleErrorCount = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "event_force_settle_errors_total",
-			Help: "Total number of error when force settlement processed",
-		},
-	)
-)
+			Name:        "event_force_settle_errors_total",
+			Help:        "Total number of errors when force settlement processed",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		})
 
-func InitPrometheus() {
 	prometheus.MustRegister(EventSettleCount)
 	prometheus.MustRegister(EventSettleErrorCount)
 	prometheus.MustRegister(EventForceSettleCount)

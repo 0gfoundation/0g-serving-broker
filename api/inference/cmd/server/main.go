@@ -49,7 +49,7 @@ func Main() {
 	engine := gin.New()
 
 	if config.Monitor.Enable {
-		monitor.PrometheusInit()
+		monitor.PrometheusInit(config.Service.ServingURL)
 		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	}
 

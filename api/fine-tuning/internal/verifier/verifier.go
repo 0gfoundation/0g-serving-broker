@@ -223,7 +223,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 
 	err = v.contract.AddDeliverable(ctx, user, data)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "add deliverable failed: %v", data)
 	}
 
 	return v.GenerateTeeSignature(ctx, user, aesKey, data, task.Fee, task.Nonce, providerPriv)
@@ -237,7 +237,7 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 
 	eciesPublicKey, err := ecies.NewPublicKeyFromBytes(ethcrypto.FromECDSAPub(publicKey))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "creating ECIES public key from bytes")
 	}
 
 	encryptedSecret, err := ecies.Encrypt(eciesPublicKey, aesKey)
@@ -247,12 +247,12 @@ func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address
 
 	settlementHash, err := getSettlementMessageHash(modelRootHash, taskFee, nonce, user, ethcrypto.PubkeyToAddress(providerPriv.PublicKey), encryptedSecret)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "getting settlement message hash")
 	}
 
 	sig, err := getSignature(settlementHash, providerPriv)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "getting signature")
 	}
 
 	return &SettlementMetadata{

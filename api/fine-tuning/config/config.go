@@ -23,12 +23,18 @@ type Service struct {
 	PricePerToken int64 `yaml:"pricePerToken"`
 }
 
+type Images struct {
+	ExecutionMockImageName string `yaml:"executionMockImageName"`
+	ExecutionImageName     string `yaml:"executionImageName"`
+}
+
 type Config struct {
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
 	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks"`
+	Images                      Images              `yaml:"images"`
 	StorageClientConfig         StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
 	ServingUrl                  string              `yaml:"servingUrl"`
 	Service                     Service             `yaml:"service"`
@@ -89,6 +95,10 @@ func GetConfig() *Config {
 				FineTune: "root:123456@tcp(0g-fine-tune-broker-db:3306)/fineTune?parseTime=true",
 			},
 			GasPrice: "",
+			Images: Images{
+				ExecutionMockImageName: "mock-fine-tuning:latest",
+				ExecutionImageName:     "execution-test-pytorch:v1",
+			},
 			Logger: config.LoggerConfig{
 				Format:        "text",
 				Level:         "info",

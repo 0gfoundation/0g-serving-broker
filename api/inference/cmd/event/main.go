@@ -19,7 +19,7 @@ func Main() {
 	conf := config.GetConfig()
 
 	if conf.Monitor.Enable {
-		monitor.InitPrometheus()
+		monitor.InitPrometheus(conf.Service.ServingURL)
 		go monitor.StartMetricsServer(conf.Monitor.EventAddress)
 	}
 

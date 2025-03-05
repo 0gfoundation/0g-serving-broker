@@ -15,7 +15,7 @@ type Ctrl struct {
 	db       *db.DB
 	contract *providercontract.ProviderContract
 	storage  *storage.Client
-	service  config.Service
+	config   *config.Config
 	verifier *verifier.Verifier
 	logger   log.Logger
 
@@ -28,7 +28,7 @@ func New(db *db.DB, config *config.Config, contract *providercontract.ProviderCo
 		db:       db,
 		contract: contract,
 		storage:  storage,
-		service:  config.Service,
+		config:   config,
 		verifier: verifier,
 		logger:   logger,
 	}
