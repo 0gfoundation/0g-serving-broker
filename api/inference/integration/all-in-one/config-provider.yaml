@@ -22,9 +22,6 @@ networks:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
-zkProver:
-  provider: "zk-server:3000"
-  requestLength: 40
 monitor:
   enable: true
   eventAddress: "0g-serving-provider-event:3081"
