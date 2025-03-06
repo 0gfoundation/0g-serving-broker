@@ -32,7 +32,7 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      zk:
+      zk-prover:
         condition: service_healthy
 
   0g-serving-provider-event:
@@ -48,6 +48,8 @@ services:
     depends_on:
       0g-serving-provider-broker:
         condition: service_started
+      zk-settlement:
+        condition: service_healthy
 
   nginx:
     image: nginx:1.27.0
@@ -62,11 +64,30 @@ services:
       0g-serving-provider-broker:
         condition: service_started
 
-  zk:
+  zk-prover:
     image: ghcr.io/0glabs/zk:0.1.0
-    container_name: zk-provider-server
+    container_name: zk-prover
+    environment:
+      JS_PROVER_PORT: 3001
     ports:
-      - "3002:3000"
+      - "3001:3001"
+    healthcheck:
+      test:
+        ["CMD", "curl", "-f", "-X", "GET", "http://zk-prover:3001/sign-keypair"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - localhost
+
+  zk-settlement:
+    image: ghcr.io/0glabs/zk:0.1.0
+    container_name: zk-settlement
+    environment:
+      JS_PROVER_PORT: 3002
+    ports:
+      - "3002:3002"
     healthcheck:
       test:
         [
@@ -75,7 +96,7 @@ services:
           "-f",
           "-X",
           "GET",
-          "http://zk-provider-server:3000/sign-keypair",
+          "http://zk-settlement:3002/sign-keypair",
         ]
       interval: 30s
       timeout: 10s
