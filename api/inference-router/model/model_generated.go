@@ -66,7 +66,6 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	}
 	d.ProviderAddress = r.ProviderAddress
 	d.Nonce = r.Nonce
-	d.ServiceName = r.ServiceName
 	d.InputFee = r.InputFee
 	d.PreviousOutputFee = r.PreviousOutputFee
 	d.Fee = r.Fee

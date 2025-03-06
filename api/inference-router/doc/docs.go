@@ -56,95 +56,6 @@ const docTemplate = `{
         "/provider/{provider}": {
             "get": {
                 "tags": [
-                    "provider"
-                ],
-                "operationId": "getProviderAccount",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Provider address",
-                        "name": "provider",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/model.Provider"
-                        }
-                    }
-                }
-            }
-        },
-        "/provider/{provider}/charge": {
-            "post": {
-                "description": "This endpoint allows you to add fund to an account",
-                "tags": [
-                    "provider"
-                ],
-                "operationId": "charge",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Provider address",
-                        "name": "provider",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "body",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/model.Provider"
-                        }
-                    }
-                ],
-                "responses": {
-                    "202": {
-                        "description": "Accepted"
-                    }
-                }
-            }
-        },
-        "/provider/{provider}/refund": {
-            "post": {
-                "description": "This endpoint allows you to refund from an account",
-                "tags": [
-                    "refund"
-                ],
-                "operationId": "refund",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Provider address",
-                        "name": "provider",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "body",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/model.Refund"
-                        }
-                    }
-                ],
-                "responses": {
-                    "202": {
-                        "description": "Accepted"
-                    }
-                }
-            }
-        },
-        "/provider/{provider}/service/{service}": {
-            "get": {
-                "tags": [
                     "service"
                 ],
                 "operationId": "getService",
@@ -186,13 +97,6 @@ const docTemplate = `{
                         "name": "provider",
                         "in": "path",
                         "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "Service name",
-                        "name": "service",
-                        "in": "path",
-                        "required": true
                     }
                 ],
                 "responses": {
@@ -205,13 +109,13 @@ const docTemplate = `{
                 }
             }
         },
-        "/provider/{provider}/service/{service}/{suffix}": {
+        "/provider/{provider}/charge": {
             "post": {
-                "description": "This endpoint acts as a proxy to retrieve data from various external services based on the provided ` + "`" + `provider` + "`" + ` and ` + "`" + `service` + "`" + ` parameters. The response type can vary depending on the external service being accessed. An optional ` + "`" + `suffix` + "`" + ` parameter can be appended to further specify the request for external services",
+                "description": "This endpoint allows you to add fund to an account",
                 "tags": [
-                    "data"
+                    "provider"
                 ],
-                "operationId": "getDataWithSuffix",
+                "operationId": "charge",
                 "parameters": [
                     {
                         "type": "string",
@@ -221,9 +125,34 @@ const docTemplate = `{
                         "required": true
                     },
                     {
+                        "description": "body",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/model.Provider"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted"
+                    }
+                }
+            }
+        },
+        "/provider/{provider}/service/{service}/{suffix}": {
+            "post": {
+                "description": "This endpoint acts as a proxy to retrieve data from various external services based on the provided ` + "`" + `provider` + "`" + ` parameter. The response type can vary depending on the external service being accessed. An optional ` + "`" + `suffix` + "`" + ` parameter can be appended to further specify the request for external services",
+                "tags": [
+                    "data"
+                ],
+                "operationId": "getDataWithSuffix",
+                "parameters": [
+                    {
                         "type": "string",
-                        "description": "Service name",
-                        "name": "service",
+                        "description": "Provider address",
+                        "name": "provider",
                         "in": "path",
                         "required": true
                     },
@@ -264,30 +193,6 @@ const docTemplate = `{
                 "responses": {
                     "202": {
                         "description": "Accepted"
-                    }
-                }
-            }
-        },
-        "/refund": {
-            "get": {
-                "tags": [
-                    "refund"
-                ],
-                "operationId": "listRefund",
-                "parameters": [
-                    {
-                        "type": "boolean",
-                        "description": "Processed",
-                        "name": "processed",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/model.RefundList"
-                        }
                     }
                 }
             }
@@ -416,23 +321,6 @@ const docTemplate = `{
                 }
             }
         },
-        "model.RefundList": {
-            "type": "object",
-            "properties": {
-                "fee": {
-                    "type": "integer"
-                },
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/model.Refund"
-                    }
-                },
-                "metadata": {
-                    "$ref": "#/definitions/model.ListMeta"
-                }
-            }
-        },
         "model.Request": {
             "type": "object",
             "required": [
@@ -441,7 +329,6 @@ const docTemplate = `{
                 "nonce",
                 "previousOutputFee",
                 "providerAddress",
-                "serviceName",
                 "signature"
             ],
             "properties": {
@@ -458,9 +345,6 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "providerAddress": {
-                    "type": "string"
-                },
-                "serviceName": {
                     "type": "string"
                 },
                 "signature": {

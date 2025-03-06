@@ -18,7 +18,7 @@ import (
 //go:generate swag fmt
 //go:generate swag init --dir ./,../../ --output ../../doc
 
-//	@title		0G Serving User Broker API
+//	@title		0G Serving Router Broker API
 //	@version	1.0
 //	@BasePath	/v1
 
@@ -50,7 +50,7 @@ func Main() {
 	if err := ctrl.SyncProviderAccounts(ctx); err != nil {
 		panic(err)
 	}
-	h := handler.New(ctrl, config.PresetService.ProviderAddress, config.PresetService.ServiceName)
+	h := handler.New(ctrl, config.PresetService.ProviderAddress)
 	h.Register(r)
 
 	// Listen and Serve, config port with PORT=X

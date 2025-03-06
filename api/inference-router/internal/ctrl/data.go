@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -26,7 +27,12 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference-router/zkclient/models"
 )
 
+var nonceLock sync.Mutex
+
 func (c *Ctrl) IncreaseAccountNonce(providerAddress string) (model.Provider, error) {
+	nonceLock.Lock()
+	defer nonceLock.Unlock()
+
 	ret, err := c.db.GetProviderAccount(providerAddress)
 	if err != nil {
 		return ret, errors.Wrap(err, "get provider from db")
@@ -44,8 +50,8 @@ func (c *Ctrl) IncreaseAccountNonce(providerAddress string) (model.Provider, err
 	return ret, c.db.UpdateProviderAccount(providerAddress, ret)
 }
 
-func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress, svcName string) (extractor.UserReqRespExtractor, error) {
-	key := providerAddress + svcName
+func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress string) (extractor.UserReqRespExtractor, error) {
+	key := providerAddress
 	value, found := c.svcCache.Get(key)
 	if found {
 		extractor, ok := value.(extractor.UserReqRespExtractor)
@@ -55,7 +61,7 @@ func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress, svcName string
 		return extractor, nil
 	}
 
-	svc, err := c.contract.GetService(ctx, common.HexToAddress(providerAddress), svcName)
+	svc, err := c.contract.GetService(ctx, common.HexToAddress(providerAddress))
 	if err != nil {
 		return nil, errors.Wrap(err, "get service from contract")
 	}
@@ -74,13 +80,11 @@ func (c *Ctrl) GetExtractor(ctx context.Context, providerAddress, svcName string
 }
 
 func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider model.Provider, extractor extractor.UserReqRespExtractor, suffix string, reqBody map[string]interface{}) (*http.Request, error) {
-	svcName := svc.Name
-
 	reqBodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}
-	targetURL := svc.Url + constant.ServicePrefix + "/" + svcName
+	targetURL := svc.Url + constant.ServicePrefix
 	if suffix != "" {
 		targetURL += suffix
 	}
@@ -117,7 +121,6 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 		"Input-Fee":           strconv.FormatInt(inputFee, 10),
 		"Nonce":               strconv.FormatInt(*provider.Nonce, 10),
 		"Previous-Output-Fee": strconv.FormatInt(previousOutputFee, 10),
-		"Service-Name":        svcName,
 		"Signature":           string(sigJson),
 	}
 	util.SetHeaders(req, headers)
@@ -125,7 +128,6 @@ func (c *Ctrl) PrepareRequest(ctx *gin.Context, svc contract.Service, provider m
 	reqInDB := model.Request{
 		ProviderAddress:   provider.Provider,
 		Nonce:             *provider.Nonce,
-		ServiceName:       svcName,
 		InputFee:          inputFee,
 		PreviousOutputFee: previousOutputFee,
 		Fee:               fee,
@@ -186,10 +188,11 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response, extractor e
 		handleBrokerError(ctx, err, "get resp content")
 		return
 	}
-	if err := c.VerifyChat(ctx, providerAddress, extractor.GetSvcInfo().Name, [][]byte{outputContent}, signingAddress, extractor.GetSvcInfo().Model, secretHeader); err != nil {
-		handleBrokerError(ctx, err, "verify chat")
-		return
-	}
+	// TODO: verify chat when tee inference is stable
+	// if err := c.VerifyChat(ctx, providerAddress, [][]byte{outputContent}, signingAddress, extractor.GetSvcInfo().Model, secretHeader); err != nil {
+	// 	handleBrokerError(ctx, err, "verify chat")
+	// 	return
+	// }
 
 	outputCount, err := extractor.GetOutputCount([][]byte{outputContent})
 	if err != nil {
@@ -245,10 +248,10 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 					return false
 				}
 				if completed {
-					if err := c.VerifyChat(ctx, providerAddress, extractor.GetSvcInfo().Name, output, signingAddress, extractor.GetSvcInfo().Model, secretHeader); err != nil {
-						handleBrokerError(ctx, err, "verify chat")
-						return false
-					}
+					// if err := c.VerifyChat(ctx, providerAddress, output, signingAddress, extractor.GetSvcInfo().Model, secretHeader); err != nil {
+					// 	handleBrokerError(ctx, err, "verify chat")
+					// 	return false
+					// }
 					outputCount, err := extractor.GetOutputCount(output)
 					if err != nil {
 						handleBrokerError(ctx, err, "get response output count")
@@ -273,7 +276,7 @@ func (c *Ctrl) handleStreamResponse(ctx *gin.Context, resp *http.Response, extra
 	})
 }
 
-func (c *Ctrl) VerifyChat(ctx *gin.Context, providerAddress, svcName string, output [][]byte, signingAddress, modelName, secretHeader string) error {
+func (c *Ctrl) VerifyChat(ctx *gin.Context, providerAddress string, output [][]byte, signingAddress, modelName, secretHeader string) error {
 	ids := []string{}
 	for _, output := range output {
 		var response struct {
@@ -288,7 +291,7 @@ func (c *Ctrl) VerifyChat(ctx *gin.Context, providerAddress, svcName string, out
 		return nil
 	}
 	randomID := ids[rand.Intn(len(ids))]
-	responseSignature, err := c.FetchSignatureByChatID(ctx, providerAddress, svcName, randomID, modelName, secretHeader)
+	responseSignature, err := c.FetchSignatureByChatID(ctx, providerAddress, randomID, modelName, secretHeader)
 	if err != nil {
 		return err
 	}

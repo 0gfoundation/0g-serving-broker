@@ -1,4 +1,5 @@
-contractAddress: 0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
+servingCA: 0x0165878A594ca255338adfa4d48449f69242Eb8F
+ledgerCA: 0x8A791620dd6260079BF849Dc5567aDC3F2FdC318
 database:
   router: root:123456@tcp(0g-serving-broker-db:3306)/router?parseTime=true
 event:
@@ -21,8 +22,7 @@ networks:
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
 zkProver:
-  router: "zk-server:3000"
+  router: "zk-prover:3001"
   requestLength: 40
 presetService:
   providerAddress: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-  serviceName: "local-router-only"

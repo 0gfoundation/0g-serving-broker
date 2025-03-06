@@ -62,10 +62,6 @@ func (c Ctrl) ChargeProviderAccount(ctx context.Context, providerAddress common.
 	if account.Balance == nil {
 		return fmt.Errorf("nil account.Balance")
 	}
-	_, err := c.getProviderAccountFromContract(ctx, providerAddress)
-	if err != nil {
-		return err
-	}
 	amount := big.NewInt(0)
 	amount.SetInt64(*account.Balance)
 	if err := c.contract.DepositFund(ctx, providerAddress, *amount); err != nil {
@@ -113,7 +109,7 @@ func (c Ctrl) SyncProviderAccount(ctx context.Context, providerAddress common.Ad
 	if err != nil {
 		return err
 	}
-	if err := c.db.UpdateProviderAccount(account.Provider, account); err != nil {
+	if err := c.db.CreateOrUpdateProviderAccount(account.Provider, account); err != nil {
 		return err
 	}
 
