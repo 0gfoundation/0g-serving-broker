@@ -19,6 +19,8 @@ services:
   0g-serving-router:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     container_name: 0g-serving-router
+    ports:
+      - "1034:1034"
     environment:
       - PORT=1034
       - CONFIG_FILE=/etc/config.yaml
@@ -33,7 +35,7 @@ services:
         condition: service_healthy
       # hardhat-node-with-contract:
       #   condition: service_healthy
-      zk-router:
+      zk-prover:
         condition: service_healthy
 
   nginx-router:
@@ -52,27 +54,22 @@ services:
       0g-serving-router:
         condition: service_started
 
-  zk-router:
+  zk-prover:
     image: ghcr.io/0glabs/zk:0.1.0
-    container_name: zk-server-router
+    container_name: zk-prover
+    environment:
+      JS_PROVER_PORT: 3001
     ports:
-      - "3002:3000"
+      - "3001:3001"
     healthcheck:
       test:
-        [
-          "CMD",
-          "curl",
-          "-f",
-          "-X",
-          "GET",
-          "http://zk-server-router:3000/sign-keypair",
-        ]
+        ["CMD", "curl", "-f", "-X", "GET", "http://zk-prover:3001/sign-keypair"]
       interval: 30s
       timeout: 10s
       retries: 20
       start_period: 30s
     networks:
-      - router-network
+      - localhost
 
 volumes:
   mysql-data-router:

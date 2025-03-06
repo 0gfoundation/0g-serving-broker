@@ -8,11 +8,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func (c *UserContract) GetService(ctx context.Context, providerAddress common.Address, svcName string) (contract.Service, error) {
+func (c *UserContract) GetService(ctx context.Context, providerAddress common.Address) (contract.Service, error) {
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
-	return c.Contract.GetService(callOpts, providerAddress, svcName)
+	return c.Contract.GetService(callOpts, providerAddress)
 }
 
 func (c *UserContract) ListService(ctx context.Context) ([]contract.Service, error) {

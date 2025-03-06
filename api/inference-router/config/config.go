@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	AllowOrigins    []string `yaml:"allowOrigins"`
-	ContractAddress string   `yaml:"contractAddress"`
-	Database        struct {
+	AllowOrigins []string `yaml:"allowOrigins"`
+	LedgerCA     string   `yaml:"ledgerCA"`
+	ServingCA    string   `yaml:"servingCA"`
+	Database     struct {
 		Router string `yaml:"router"`
 	} `yaml:"database"`
 	Event struct {
@@ -29,8 +30,8 @@ type Config struct {
 	} `yaml:"zkProver"`
 	PresetService struct {
 		ProviderAddress string `yaml:"providerAddress"`
-		ServiceName     string `yaml:"serviceName"`
 	} `yaml:"presetService"`
+	TargetBalance int `yaml:"targetBalance"` // in A0GI
 }
 
 var (
@@ -58,7 +59,8 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x46e8a02d609CaEfC1747197da1F38272d5E46c77",
+			LedgerCA:  "0x0c0D02e4E849C711B2388A829366B5bf3f9c53e7",
+			ServingCA: "0x46e8a02d609CaEfC1747197da1F38272d5E46c77",
 			Database: struct {
 				Router string `yaml:"router"`
 			}{
@@ -82,6 +84,7 @@ func GetConfig() *Config {
 				Router:        "zk-server-router:3000",
 				RequestLength: 40,
 			},
+			TargetBalance: 10,
 		}
 
 		if err := loadConfig(instance); err != nil {

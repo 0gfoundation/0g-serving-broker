@@ -51,7 +51,15 @@ func (c *UserContract) AddAccount(ctx context.Context, provider common.Address, 
 	}
 
 	opts.Value = &balance
-	tx, err := c.Contract.AddAccount(opts, provider, signer, settleSignerEncryptedPrivateKey)
+	tx, err := c.Contract.AddLedger(opts, signer, settleSignerEncryptedPrivateKey)
+	if err != nil {
+		return err
+	}
+	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	if err != nil {
+		return err
+	}
+	tx, err = c.Contract.LedgerManager.TransferFund(opts, provider, "inference", &balance)
 	if err != nil {
 		return err
 	}
@@ -65,8 +73,7 @@ func (c *UserContract) DepositFund(ctx context.Context, provider common.Address,
 		return err
 	}
 
-	opts.Value = &balance
-	tx, err := c.Contract.DepositFund(opts, provider)
+	tx, err := c.Contract.LedgerManager.TransferFund(opts, provider, "inference", &balance)
 	if err != nil {
 		return err
 	}
@@ -74,32 +81,32 @@ func (c *UserContract) DepositFund(ctx context.Context, provider common.Address,
 	return err
 }
 
-func (c *UserContract) RequestRefund(ctx context.Context, provider common.Address, refund *big.Int) (*contract.ServingRefundRequested, error) {
-	opts, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return nil, err
-	}
-	tx, err := c.Contract.RequestRefund(opts, provider, refund)
-	if err != nil {
-		return nil, err
-	}
-	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
-	if err != nil {
-		return nil, err
-	}
+// func (c *UserContract) RequestRefund(ctx context.Context, provider common.Address, refund *big.Int) (*contract.ServingRefundRequested, error) {
+// 	opts, err := c.Contract.CreateTransactOpts()
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	tx, err := c.Contract.RequestRefund(opts, provider, refund)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
+// 	if err != nil {
+// 		return nil, err
+// 	}
 
-	return c.Contract.Serving.ParseRefundRequested(*receipt.Logs[0])
-}
+// 	return c.Contract.Serving.ParseRefundRequested(*receipt.Logs[0])
+// }
 
-func (c *UserContract) ProcessRefund(ctx context.Context, provider common.Address, indices []*big.Int) error {
-	opts, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return err
-	}
-	tx, err := c.Contract.ProcessRefund(opts, provider, indices)
-	if err != nil {
-		return err
-	}
-	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
-	return err
-}
+// func (c *UserContract) ProcessRefund(ctx context.Context, provider common.Address, indices []*big.Int) error {
+// 	opts, err := c.Contract.CreateTransactOpts()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	tx, err := c.Contract.ProcessRefund(opts, provider, indices)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+// 	return err
+// }

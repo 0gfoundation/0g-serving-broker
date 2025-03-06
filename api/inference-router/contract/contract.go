@@ -19,7 +19,8 @@ import (
 // ServingContract wraps the EthereumClient to interact with the serving contract deployed in EVM based Blockchain
 type ServingContract struct {
 	*Contract
-	*Serving
+	*InferenceServing
+	*LedgerManager
 }
 
 type RetryOption struct {
@@ -27,7 +28,7 @@ type RetryOption struct {
 	Interval time.Duration
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice string) (*ServingContract, error) {
+func NewContract(ledgerAddress, servingAddress common.Address, conf *config.Networks, network string, gasPrice string) (*ServingContract, error) {
 	var networkConfig client.BlockchainNetwork
 	var err error
 	if network == "hardhat" {
@@ -49,12 +50,17 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 		address: servingAddress,
 	}
 
-	serving, err := NewServing(servingAddress, ethereumClient.Client)
+	serving, err := NewInferenceServing(servingAddress, ethereumClient.Client)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ServingContract{contract, serving}, nil
+	ledger, err := NewLedgerManager(ledgerAddress, ethereumClient.Client)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ServingContract{contract, serving, ledger}, nil
 }
 
 type Contract struct {

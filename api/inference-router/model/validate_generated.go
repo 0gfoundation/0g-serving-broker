@@ -47,9 +47,6 @@ func ValidateUpdateRequest(oldVal, newVal Request) error {
 	if !apiequality.Semantic.DeepEqual(newVal.Nonce, oldVal.Nonce){
 		fields = append(fields, "nonce")
 	}
-	if !apiequality.Semantic.DeepEqual(newVal.ServiceName, oldVal.ServiceName){
-		fields = append(fields, "serviceName")
-	}
 	if !apiequality.Semantic.DeepEqual(newVal.InputFee, oldVal.InputFee){
 		fields = append(fields, "inputFee")
 	}

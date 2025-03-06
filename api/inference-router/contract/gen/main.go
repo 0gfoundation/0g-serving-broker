@@ -18,14 +18,17 @@ func camelToSnakeCase(s string) string {
 }
 
 func main() {
-	err := extractAndGenerate()
+	err := extractAndGenerate("../../libs/0g-serving-contract/artifacts/contracts/inference")
+	if err != nil {
+		fmt.Println("Error:", err)
+	}
+	err = extractAndGenerate("../../libs/0g-serving-contract/artifacts/contracts/ledger")
 	if err != nil {
 		fmt.Println("Error:", err)
 	}
 }
 
-func extractAndGenerate() error {
-	mainFolder := "../../libs/0g-serving-contract/artifacts/contracts/"
+func extractAndGenerate(mainFolder string) error {
 	abiFolder := "abis"
 
 	folders, err := os.ReadDir(mainFolder)

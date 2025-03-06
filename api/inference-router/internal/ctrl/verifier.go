@@ -23,8 +23,8 @@ type AttestationReport struct {
 	IntelQuote     string `json:"intel_quote"`
 }
 
-func (c *Ctrl) GetSigningAddress(ctx *gin.Context, providerAddress, svcName, model string) (string, error) {
-	key := providerAddress + svcName + model + "signing_address"
+func (c *Ctrl) GetSigningAddress(ctx *gin.Context, providerAddress, model string) (string, error) {
+	key := providerAddress + model + "signing_address"
 	value, found := c.svcCache.Get(key)
 	if found {
 		signingAddress, ok := value.(string)
@@ -34,7 +34,7 @@ func (c *Ctrl) GetSigningAddress(ctx *gin.Context, providerAddress, svcName, mod
 		return signingAddress, nil
 	}
 
-	body, err := c.FetchAttestationReport(ctx, providerAddress, svcName, model)
+	body, err := c.FetchAttestationReport(ctx, providerAddress, model)
 	if err != nil {
 		handleBrokerError(ctx, err, "fetch attestation report")
 		return "", err
@@ -49,15 +49,15 @@ func (c *Ctrl) GetSigningAddress(ctx *gin.Context, providerAddress, svcName, mod
 	return report.SigningAddress, nil
 }
 
-func (c *Ctrl) FetchAttestationReport(ctx *gin.Context, providerAddress, svcName, model string) ([]byte, error) {
-	extractor, err := c.GetExtractor(ctx, providerAddress, svcName)
+func (c *Ctrl) FetchAttestationReport(ctx *gin.Context, providerAddress, model string) ([]byte, error) {
+	extractor, err := c.GetExtractor(ctx, providerAddress)
 	if err != nil {
 		return nil, errors.Wrap(err, "get extractor")
 	}
 	svc := extractor.GetSvcInfo()
 
 	// Build the target URL with query parameters
-	targetURL := svc.Url + constant.ServicePrefix + "/" + svcName
+	targetURL := svc.Url + constant.ServicePrefix
 	targetURL += "/attestation/report?model=" + model
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
@@ -98,14 +98,14 @@ type ResponseSignature struct {
 	Text      string `json:"text"`
 }
 
-func (c *Ctrl) FetchSignatureByChatID(ctx context.Context, providerAddress, svcName, chatID, modelName, secretHeader string) (*ResponseSignature, error) {
-	extractor, err := c.GetExtractor(ctx, providerAddress, svcName)
+func (c *Ctrl) FetchSignatureByChatID(ctx context.Context, providerAddress, chatID, modelName, secretHeader string) (*ResponseSignature, error) {
+	extractor, err := c.GetExtractor(ctx, providerAddress)
 	if err != nil {
 		return nil, errors.Wrap(err, "get extractor")
 	}
 	svc := extractor.GetSvcInfo()
 
-	url := fmt.Sprintf("%s%s/%s/signature/%s?model=%s", svc.Url, constant.ServicePrefix, svcName, chatID, modelName)
+	url := fmt.Sprintf("%s%s/signature/%s?model=%s", svc.Url, constant.ServicePrefix, chatID, modelName)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)

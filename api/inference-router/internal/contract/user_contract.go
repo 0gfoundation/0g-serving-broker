@@ -18,7 +18,7 @@ type UserContract struct {
 }
 
 func NewUserContract(conf *config.Config) (*UserContract, error) {
-	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, os.Getenv("NETWORK"), conf.GasPrice)
+	contract, err := contract.NewContract(common.HexToAddress(conf.LedgerCA), common.HexToAddress(conf.ServingCA), &conf.Networks, os.Getenv("NETWORK"), conf.GasPrice)
 	if err != nil {
 		return nil, err
 	}

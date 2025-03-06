@@ -10,8 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func (c *Ctrl) GetService(ctx context.Context, providerAddress, svcName string) (model.Service, error) {
-	svc, err := c.contract.GetService(ctx, common.HexToAddress(providerAddress), svcName)
+func (c *Ctrl) GetService(ctx context.Context, providerAddress string) (model.Service, error) {
+	svc, err := c.contract.GetService(ctx, common.HexToAddress(providerAddress))
 	if err != nil {
 		return model.Service{}, errors.Wrap(err, "get service from contract")
 	}
@@ -35,7 +35,6 @@ func parseService(svc contract.Service) model.Service {
 	return model.Service{
 		UpdatedAt:   model.PtrOf(time.Unix(svc.UpdatedAt.Int64(), 0)),
 		Provider:    svc.Provider.String(),
-		Name:        svc.Name,
 		Type:        svc.ServiceType,
 		URL:         svc.Url,
 		ModelType:   svc.Model,
