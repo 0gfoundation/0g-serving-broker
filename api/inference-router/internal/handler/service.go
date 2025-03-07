@@ -11,14 +11,13 @@ import (
 //
 //	@ID			getService
 //	@Tags		service
-//	@Router		/provider/{provider}/service/{service} [get]
+//	@Router		/provider/{provider} [get]
 //	@Param		provider	path	string	true	"Provider address"
 //	@Param		service	path	string	true	"Service name"
 //	@Success	200	{object}	model.Service
 func (h *Handler) GetService(ctx *gin.Context) {
-	name := ctx.Param("service")
 	providerAddress := ctx.Param("provider")
-	svc, err := h.ctrl.GetService(ctx, providerAddress, name)
+	svc, err := h.ctrl.GetService(ctx, providerAddress)
 	if err != nil {
 		handleBrokerError(ctx, err, "get service from db")
 		return

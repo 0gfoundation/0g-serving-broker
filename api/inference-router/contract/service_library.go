@@ -31,7 +31,7 @@ var (
 
 // ServiceLibraryMetaData contains all meta data concerning the ServiceLibrary contract.
 var ServiceLibraryMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"name\",\"type\":\"string\"}],\"name\":\"ServiceNotexist\",\"type\":\"error\"}]",
+	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"}]",
 }
 
 // ServiceLibraryABI is the input ABI used to generate the binding from.

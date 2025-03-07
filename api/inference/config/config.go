@@ -45,6 +45,10 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkProver"`
+	ZKSettlement struct {
+		Provider      string `yaml:"provider"`
+		RequestLength int    `yaml:"requestLength"`
+	} `yaml:"zkSettlement"`
 }
 
 var (
@@ -107,7 +111,14 @@ func GetConfig() *Config {
 				Provider      string `yaml:"provider"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Provider:      "zk-provider-server:3000",
+				Provider:      "zk-prover:3001",
+				RequestLength: 40,
+			},
+			ZKSettlement: struct {
+				Provider      string `yaml:"provider"`
+				RequestLength int    `yaml:"requestLength"`
+			}{
+				Provider:      "zk-settlement:3002",
 				RequestLength: 40,
 			},
 		}

@@ -1,6 +1,6 @@
 services:
   hardhat-node-with-contract:
-    image: hardhat-node-with-contract:dev-bak
+    image: raven20241/hardhat-compute-network-contract:dev
     container_name: hardhat-node-with-contract
     ports:
       - "8545:8545"
@@ -38,7 +38,7 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config-provider.yaml:/etc/config.yaml
+      - ./config-provider.local.yaml:/etc/config.yaml
     command: 0g-inference-server
     networks:
       - localhost
@@ -47,7 +47,7 @@ services:
         condition: service_healthy
       hardhat-node-with-contract:
         condition: service_healthy
-      zk:
+      zk-prover:
         condition: service_healthy
 
   0g-serving-provider-event:
@@ -57,22 +57,50 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - ./config-provider.yaml:/etc/config.yaml
+      - ./config-provider.local.yaml:/etc/config.yaml
     command: 0g-inference-event
     networks:
       - localhost
     depends_on:
       0g-serving-provider-broker:
         condition: service_started
+      zk-settlement:
+        condition: service_healthy
 
-  zk:
+  zk-prover:
     image: ghcr.io/0glabs/zk:0.1.0
-    container_name: zk-server
+    container_name: zk-prover
+    environment:
+      JS_PROVER_PORT: 3001
     ports:
-      - "3000:3000"
+      - "3001:3001"
     healthcheck:
       test:
-        ["CMD", "curl", "-f", "-X", "GET", "http://zk-server:3000/sign-keypair"]
+        ["CMD", "curl", "-f", "-X", "GET", "http://zk-prover:3001/sign-keypair"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - localhost
+
+  zk-settlement:
+    image: ghcr.io/0glabs/zk:0.1.0
+    container_name: zk-settlement
+    environment:
+      JS_PROVER_PORT: 3002
+    ports:
+      - "3002:3002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "-X",
+          "GET",
+          "http://zk-settlement:3002/sign-keypair",
+        ]
       interval: 30s
       timeout: 10s
       retries: 20
@@ -97,7 +125,7 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards
     container_name: grafana
     ports:
-      - "3001:3000"
+      - "3003:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
@@ -131,6 +159,8 @@ services:
   0g-serving-router:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     container_name: 0g-serving-router
+    ports:
+      - "1034:1034"
     environment:
       - PORT=1034
       - CONFIG_FILE=/etc/config.yaml
@@ -145,24 +175,8 @@ services:
         condition: service_healthy
       hardhat-node-with-contract:
         condition: service_healthy
-      zk:
+      zk-prover:
         condition: service_healthy
-
-  nginx-router:
-    image: nginx:1.27.0
-    container_name: nginx-router-server
-    ports:
-      - "3082:80"
-      - "30445:443"
-    volumes:
-      - ./nginx-router.conf:/etc/nginx/nginx.conf
-      - ./certificate.pem:/etc/nginx/certificate.pem
-      - ./privatekey.pem:/etc/nginx/privatekey.pem
-    networks:
-      - localhost
-    depends_on:
-      0g-serving-router:
-        condition: service_started
 
 volumes:
   mysql-data:

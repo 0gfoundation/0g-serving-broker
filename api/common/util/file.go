@@ -98,6 +98,8 @@ func ZipDirectory(sourceDir, destinationZip string) error {
 		return err
 	}
 
+	baseName := filepath.Base(sourceDir)
+
 	if info.IsDir() {
 		err = filepath.Walk(sourceDir, func(file string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -127,7 +129,7 @@ func ZipDirectory(sourceDir, destinationZip string) error {
 			if err != nil {
 				return err
 			}
-			header.Name = relPath
+			header.Name = filepath.Join(baseName, relPath)
 
 			writer, err := zipWriter.CreateHeader(header)
 			if err != nil {

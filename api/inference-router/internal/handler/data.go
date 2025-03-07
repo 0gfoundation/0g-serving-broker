@@ -10,20 +10,18 @@ import (
 
 // getDataWithSuffix
 //
-// @Description  This endpoint acts as a proxy to retrieve data from various external services based on the provided `provider` and `service` parameters. The response type can vary depending on the external service being accessed. An optional `suffix` parameter can be appended to further specify the request for external services
+// @Description  This endpoint acts as a proxy to retrieve data from various external services based on the provided `provider` parameter. The response type can vary depending on the external service being accessed. An optional `suffix` parameter can be appended to further specify the request for external services
 // @ID           getDataWithSuffix
 // @Tags         data
 // @Router       /provider/{provider}/service/{service}/{suffix} [post]
 // @Param        provider    path     string  true   "Provider address"
-// @Param        service     path     string  true   "Service name"
 // @Param        suffix      path     string  true  "Suffix"
 // @Success      200  {string}  string             "Plain text response"
 // @Success      200  {string}  binary             "Binary stream response"
 func (h *Handler) GetDataWithSuffix(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
-	svcName := ctx.Param("service")
 	suffix := ctx.Param("suffix")
-	h.getData(ctx, providerAddress, svcName, suffix, "", nil)
+	h.getData(ctx, providerAddress, suffix, "", nil)
 }
 
 // getData
@@ -31,19 +29,17 @@ func (h *Handler) GetDataWithSuffix(ctx *gin.Context) {
 // @Description  This endpoint allows you to retrieve data based on provider and service. This endpoint acts as a proxy to retrieve data from various external services. The response type can vary depending on the service being accessed
 // @ID           getData
 // @Tags         data
-// @Router       /provider/{provider}/service/{service} [post]
+// @Router       /provider/{provider} [post]
 // @Param        provider    path     string  true   "Provider address"
-// @Param        service     path     string  true   "Service name"
 // @Success      200  {string}  string             "Plain text response"
 // @Success      200  {string}  binary             "Binary stream response"
 func (h *Handler) GetData(ctx *gin.Context) {
 	providerAddress := ctx.Param("provider")
-	svcName := ctx.Param("service")
-	h.getData(ctx, providerAddress, svcName, "", "", nil)
+	h.getData(ctx, providerAddress, "", "", nil)
 }
 
-func (h *Handler) getData(ctx *gin.Context, providerAddress, svcName, suffix, signingAddress string, reqBody map[string]interface{}) {
-	extractor, err := h.ctrl.GetExtractor(ctx, providerAddress, svcName)
+func (h *Handler) getData(ctx *gin.Context, providerAddress, suffix, signingAddress string, reqBody map[string]interface{}) {
+	extractor, err := h.ctrl.GetExtractor(ctx, providerAddress)
 	if err != nil {
 		handleBrokerError(ctx, errors.Wrap(err, "get extractor"), "get data")
 		return
@@ -68,7 +64,6 @@ func (h *Handler) getData(ctx *gin.Context, providerAddress, svcName, suffix, si
 // All preset services should implement interfaces for compute network TEE service requirements.
 func (h *Handler) getChatCompletions(ctx *gin.Context) {
 	providerAddress := h.presetProviderAddress
-	svcName := h.serviceName
 
 	var reqBody map[string]interface{}
 
@@ -81,13 +76,13 @@ func (h *Handler) getChatCompletions(ctx *gin.Context) {
 		return
 	}
 
-	signingAddress, err := h.ctrl.GetSigningAddress(ctx, providerAddress, svcName, reqBody["model"].(string))
+	signingAddress, err := h.ctrl.GetSigningAddress(ctx, providerAddress, reqBody["model"].(string))
 	if err != nil {
 		handleBrokerError(ctx, err, "get signing address")
 		return
 	}
 
-	h.getData(ctx, providerAddress, svcName, "/chat/completions", signingAddress, reqBody)
+	h.getData(ctx, providerAddress, "/chat/completions", signingAddress, reqBody)
 }
 
 func (h *Handler) GetAttestationReport(ctx *gin.Context) {
@@ -98,9 +93,8 @@ func (h *Handler) GetAttestationReport(ctx *gin.Context) {
 	}
 
 	providerAddress := h.presetProviderAddress
-	svcName := h.serviceName
 
-	body, err := h.ctrl.FetchAttestationReport(ctx, providerAddress, svcName, model)
+	body, err := h.ctrl.FetchAttestationReport(ctx, providerAddress, model)
 	if err != nil {
 		handleBrokerError(ctx, err, "fetch attestation report")
 		return

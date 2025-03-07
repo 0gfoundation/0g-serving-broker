@@ -11,15 +11,13 @@ type Handler struct {
 	ctrl *ctrl.Ctrl
 
 	presetProviderAddress string
-	serviceName           string
 }
 
-func New(ctrl *ctrl.Ctrl, presetProviderAddress, serviceName string) *Handler {
+func New(ctrl *ctrl.Ctrl, presetProviderAddress string) *Handler {
 	h := &Handler{
 		ctrl: ctrl,
 
 		presetProviderAddress: presetProviderAddress,
-		serviceName:           serviceName,
 	}
 	return h
 }
@@ -45,10 +43,6 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// request
 	group.GET("/request", h.ListRequest)
-
-	// refund
-	group.POST("/provider/:provider/refund", h.Refund)
-	group.GET("/refund", h.ListRefund)
 
 	// expose
 	group.POST("chat/completions", h.getChatCompletions)

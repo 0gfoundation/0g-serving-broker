@@ -1,7 +1,10 @@
 package db
 
 import (
+	"errors"
 	"strings"
+
+	"gorm.io/gorm"
 
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference-router/model"
@@ -31,6 +34,22 @@ func (d *DB) DeleteProviderAccounts(providerAddresses []string) error {
 		return nil
 	}
 	return d.db.Where("provider IN (?)", providerAddresses).Delete(&model.Provider{}).Error
+}
+
+func (d *DB) CreateOrUpdateProviderAccount(providerAddress string, new model.Provider) error {
+	old, err := d.GetProviderAccount(providerAddress)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return d.CreateProviderAccounts([]model.Provider{new})
+	}
+	if err := model.ValidateUpdateProvider(old, new); err != nil {
+		return err
+	}
+	new.Nonce = util.Max(old.Nonce, new.Nonce)
+	ret := d.db.Where(&model.Provider{Provider: old.Provider}).Updates(new)
+	return ret.Error
 }
 
 func (d *DB) UpdateProviderAccount(providerAddress string, new model.Provider) error {
