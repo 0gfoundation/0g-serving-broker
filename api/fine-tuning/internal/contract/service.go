@@ -45,15 +45,16 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		GpuType:     service.Quota.GpuType,
 		GpuCount:    gpuCount,
 	}
-	tx, err := c.Contract.AddOrUpdateService(
-		opts,
-		service.ServingUrl,
-		quota,
-		pricePerToken,
-		// TODO: replace by real provider signer address
-		common.HexToAddress("0x111111"),
-		occupied,
-	)
+	// tx, err := c.Contract.AddOrUpdateService(
+	// 	opts,
+	// 	service.ServingUrl,
+	// 	quota,
+	// 	pricePerToken,
+	// 	// TODO: replace by real provider signer address
+	// 	common.HexToAddress("0x111111"),
+	// 	occupied,
+	// )
+	tx, err := contract.TransactWithGasAdjustment(c.Contract, "AddOrUpdateService", opts, nil, service.ServingUrl, quota, pricePerToken, common.HexToAddress("0x111111"), occupied)
 	if err != nil {
 		return err
 	}
@@ -117,7 +118,8 @@ func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Addre
 		return err
 	}
 
-	tx, err := c.Contract.AddDeliverable(opt, user, modelRootHash)
+	// tx, err := c.Contract.AddDeliverable(opt, user, modelRootHash)
+	tx, err := contract.TransactWithGasAdjustment(c.Contract, "AddDeliverable", opt, nil, user, modelRootHash)
 	if err != nil {
 		return err
 	}

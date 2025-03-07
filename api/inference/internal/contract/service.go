@@ -25,15 +25,16 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	if err != nil {
 		return errors.Wrap(err, "convert input price")
 	}
-	tx, err := c.Contract.AddOrUpdateService(
-		opts,
-		service.Type,
-		service.ServingURL,
-		service.ModelType,
-		service.Verifiability,
-		inputPrice,
-		outputPrice,
-	)
+	// tx, err := c.Contract.AddOrUpdateService(
+	// 	opts,
+	// 	service.Type,
+	// 	service.ServingURL,
+	// 	service.ModelType,
+	// 	service.Verifiability,
+	// 	inputPrice,
+	// 	outputPrice,
+	// )
+	tx, err := contract.TransactWithGasAdjustment(c.Contract, "AddOrUpdateService", opts, nil, service.Type, service.ServingURL, service.ModelType, service.Verifiability, inputPrice, outputPrice)
 	if err != nil {
 		return err
 	}

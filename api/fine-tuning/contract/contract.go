@@ -2,20 +2,28 @@ package contract
 
 import (
 	"context"
+	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	client "github.com/0glabs/0g-serving-broker/common/chain"
 	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-storage-client/contract"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
 //go:generate go run ./gen
+
+var specifiedBlockError = "Specified block header does not exist"
+var defaultTimeout = 30 * time.Second
+var defaultMaxNonGasRetries = 10
 
 // ServingContract wraps the EthereumClient to interact with the serving contract deployed in EVM based Blockchain
 type ServingContract struct {
@@ -56,6 +64,10 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 	}
 
 	return &ServingContract{contract, serving}, nil
+}
+
+func (sc *ServingContract) getInnerContract() *bind.BoundContract {
+	return sc.FineTuningServingTransactor.contract
 }
 
 type Contract struct {
@@ -114,4 +126,83 @@ func (c *Contract) GetBalance(ctx context.Context, account common.Address, block
 
 func (c *Contract) Close() {
 	c.Client.Client.Close()
+}
+
+func (s *ServingContract) GetGasPrice() (*big.Int, error) {
+	gasPrice, err := s.Client.Client.SuggestGasPrice(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	return gasPrice, nil
+}
+
+func TransactWithGasAdjustment(
+	sc *ServingContract,
+	method string,
+	opts *bind.TransactOpts,
+	retryOpts *contract.TxRetryOption,
+	params ...interface{},
+) (*types.Transaction, error) {
+	// Set timeout and max non-gas retries from retryOpts if provided.
+	if retryOpts == nil {
+		retryOpts = &contract.TxRetryOption{
+			Timeout:          defaultTimeout,
+			MaxNonGasRetries: defaultMaxNonGasRetries,
+		}
+	}
+
+	if opts.GasPrice == nil {
+		// Get the current gas price if not set.
+		gasPrice, err := sc.GetGasPrice()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get gas price: %w", err)
+		}
+		opts.GasPrice = gasPrice
+		logrus.WithField("gasPrice", opts.GasPrice).Debug("Receive current gas price from chain node")
+	}
+
+	logrus.WithField("gasPrice", opts.GasPrice).Info("Set gas price")
+
+	nRetries := 0
+	for {
+		// Create a fresh context per iteration.
+		ctx, cancel := context.WithTimeout(context.Background(), retryOpts.Timeout)
+		opts.Context = ctx
+		tx, err := sc.FineTuningServingTransactor.contract.Transact(opts, method, params...)
+		cancel() // cancel this iteration's context
+		if err == nil {
+			return tx, nil
+		}
+
+		errStr := strings.ToLower(err.Error())
+
+		if !contract.IsRetriableSubmitLogEntryError(errStr) {
+			return nil, fmt.Errorf("failed to send transaction: %w", err)
+		}
+
+		if strings.Contains(errStr, "mempool") || strings.Contains(errStr, "timeout") {
+			if retryOpts.MaxGasPrice == nil {
+				return nil, fmt.Errorf("mempool full and no max gas price is set, failed to send transaction: %w", err)
+			} else {
+				newGasPrice := new(big.Int).Mul(opts.GasPrice, big.NewInt(11))
+				newGasPrice.Div(newGasPrice, big.NewInt(10))
+				if newGasPrice.Cmp(retryOpts.MaxGasPrice) > 0 {
+					opts.GasPrice = new(big.Int).Set(retryOpts.MaxGasPrice)
+				} else {
+					opts.GasPrice = newGasPrice
+				}
+				logrus.WithError(err).Infof("Increasing gas price to %v due to mempool/timeout error", opts.GasPrice)
+			}
+		} else {
+			nRetries++
+			if nRetries >= retryOpts.MaxNonGasRetries {
+				return nil, fmt.Errorf("failed to send transaction after %d retries: %w", nRetries, err)
+			}
+			logrus.WithError(err).Infof("Retrying with same gas price %v, attempt %d", opts.GasPrice, nRetries)
+		}
+
+		time.Sleep(10 * time.Second)
+	}
+
 }
