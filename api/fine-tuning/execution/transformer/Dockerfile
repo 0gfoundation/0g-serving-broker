@@ -20,8 +20,8 @@ RUN mkdir /app/mnt
 COPY transformer/finetune-img.py /app/finetune-img.py
 COPY transformer/finetune.py /app/finetune.py
 
-# Install additional Python libraries
-RUN pip install transformers datasets evaluate accelerate toml netifaces zstandard
+# Install additional Python libraries 
+RUN pip install transformers datasets evaluate accelerate toml sentencepiece netifaces zstandard 
 
 # Set default command
 CMD ["bash"]
