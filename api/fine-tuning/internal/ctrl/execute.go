@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -332,6 +333,15 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		return err
 	}
 	defer out.Close()
+
+	c.logger.Debug("Container logs:")
+	scanner := bufio.NewScanner(out)
+	for scanner.Scan() {
+		c.logger.Debug(scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		c.logger.Errorf("Error reading logs: %v", err)
+	}
 
 	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
 	if err != nil {

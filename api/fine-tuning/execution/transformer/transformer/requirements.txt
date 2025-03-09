@@ -4,3 +4,5 @@ evaluate
 accelerate
 toml
 pillow
+netifaces
+zstandard
