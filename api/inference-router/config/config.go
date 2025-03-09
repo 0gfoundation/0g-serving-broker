@@ -64,7 +64,7 @@ func GetConfig() *Config {
 			Database: struct {
 				Router string `yaml:"router"`
 			}{
-				Router: "root:123456@tcp(0g-serving-router-db:3306)/router?parseTime=true",
+				Router: "root:123456@tcp(router-0g-serving-broker-db:3306)/router?parseTime=true",
 			},
 			Event: struct {
 				RouterAddr string `yaml:"routerAddr"`
@@ -81,7 +81,7 @@ func GetConfig() *Config {
 				Router        string `yaml:"router"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Router:        "zk-server-router:3000",
+				Router:        "router-zk-prover:3001",
 				RequestLength: 40,
 			},
 			TargetBalance: 10,

@@ -55,6 +55,7 @@ func (e *EthereumClient) TransactionCallMessage(
 			return nil, fmt.Errorf("invalid gas price: %s", e.GasPrice)
 		}
 	}
+	fmt.Println("Suggested Gas Price", gasPrice.String())
 	log.Debug().Str("Suggested Gas Price", gasPrice.String())
 	msg := ethereum.CallMsg{
 		From:     common.HexToAddress(from.Address()),

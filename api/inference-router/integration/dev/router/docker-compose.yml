@@ -33,8 +33,6 @@ services:
     depends_on:
       mysql-router:
         condition: service_healthy
-      # hardhat-node-with-contract:
-      #   condition: service_healthy
       zk-prover:
         condition: service_healthy
 
