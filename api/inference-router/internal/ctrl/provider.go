@@ -76,17 +76,17 @@ func (c Ctrl) SyncProviderAccounts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	refunds := []model.Refund{}
-	for i := range accounts {
-		refunds = append(refunds, accounts[i].Refunds...)
-	}
+	// refunds := []model.Refund{}
+	// for i := range accounts {
+	// 	refunds = append(refunds, accounts[i].Refunds...)
+	// }
 
 	if err := c.db.BatchUpdateProviderAccount(accounts); err != nil {
 		return err
 	}
-	if err := c.db.BatchUpdateRefund(refunds); err != nil {
-		return err
-	}
+	// if err := c.db.BatchUpdateRefund(refunds); err != nil {
+	// 	return err
+	// }
 
 	dbAccounts, err := c.db.ListProviderAccount()
 	if err != nil {
@@ -95,7 +95,7 @@ func (c Ctrl) SyncProviderAccounts(ctx context.Context) error {
 	nonceMap := map[string]int64{}
 	for i := range dbAccounts {
 		nonceMap[dbAccounts[i].Provider] = *dbAccounts[i].Nonce
-		refunds = append(refunds, dbAccounts[i].Refunds...)
+		// refunds = append(refunds, dbAccounts[i].Refunds...)
 	}
 	// Delete requests sent to deprecated provider
 	//
