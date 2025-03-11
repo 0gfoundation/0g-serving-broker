@@ -1,7 +1,7 @@
 services:
-  hardhat-node-with-contract:
+  router-hardhat-node-with-contract:
     image: raven20241/hardhat-compute-network-contract:dev
-    container_name: hardhat-node-with-contract
+    container_name: router-hardhat-node-with-contract
     ports:
       - "8545:8545"
     healthcheck:
@@ -9,28 +9,28 @@ services:
       interval: 10s
       retries: 5
     networks:
-      - localhost
+      - router
 
-  mysql:
+  router-mysql:
     image: mysql:8.0
-    container_name: 0g-serving-broker-db
+    container_name: router-0g-serving-broker-db
     ports:
       - "33060:3306"
     environment:
       MYSQL_ROOT_PASSWORD: 123456
     volumes:
-      - mysql-data:/var/lib/mysql
+      - router-mysql-data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
       interval: 10s
       retries: 5
     networks:
-      - localhost
+      - router
 
-  0g-serving-provider-broker:
+  router-0g-serving-provider-broker:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-broker
+    container_name: router-0g-serving-provider-broker
     ports:
       - "3080:3080"
     environment:
@@ -41,18 +41,18 @@ services:
       - ./config-provider.local.yaml:/etc/config.yaml
     command: 0g-inference-server
     networks:
-      - localhost
+      - router
     depends_on:
-      mysql:
+      router-mysql:
         condition: service_healthy
-      hardhat-node-with-contract:
+      router-hardhat-node-with-contract:
         condition: service_healthy
-      zk-prover:
+      router-zk-prover:
         condition: service_healthy
 
-  0g-serving-provider-event:
+  router-0g-serving-provider-event:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-event
+    container_name: router-0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
@@ -60,33 +60,44 @@ services:
       - ./config-provider.local.yaml:/etc/config.yaml
     command: 0g-inference-event
     networks:
-      - localhost
+      - router
     depends_on:
-      0g-serving-provider-broker:
+      router-0g-serving-provider-broker:
         condition: service_started
-      zk-settlement:
+      router-zk-settlement:
         condition: service_healthy
 
-  zk-prover:
+  router-zk-prover:
     image: ghcr.io/0glabs/zk:0.1.0
-    container_name: zk-prover
+    container_name: router-zk-prover
+    volumes:
+      - ./logs:/app/logs
     environment:
       JS_PROVER_PORT: 3001
     ports:
       - "3001:3001"
     healthcheck:
       test:
-        ["CMD", "curl", "-f", "-X", "GET", "http://zk-prover:3001/sign-keypair"]
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "-X",
+          "GET",
+          "http://router-zk-prover:3001/sign-keypair",
+        ]
       interval: 30s
       timeout: 10s
       retries: 20
       start_period: 30s
     networks:
-      - localhost
+      - router
 
-  zk-settlement:
+  router-zk-settlement:
     image: ghcr.io/0glabs/zk:0.1.0
-    container_name: zk-settlement
+    container_name: router-zk-settlement
+    volumes:
+      - ./logs:/app/logs
     environment:
       JS_PROVER_PORT: 3002
     ports:
@@ -99,45 +110,45 @@ services:
           "-f",
           "-X",
           "GET",
-          "http://zk-settlement:3002/sign-keypair",
+          "http://router-zk-settlement:3002/sign-keypair",
         ]
       interval: 30s
       timeout: 10s
       retries: 20
       start_period: 30s
     networks:
-      - localhost
+      - router
 
-  prometheus:
+  router-prometheus:
     image: prom/prometheus:v2.45.2
-    container_name: prometheus
+    container_name: router-prometheus
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
       - "9090:9090"
     networks:
-      - localhost
+      - router
 
-  grafana:
+  router-grafana:
     image: grafana/grafana-oss:11.4.0
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
-    container_name: grafana
+    container_name: router-grafana
     ports:
       - "3003:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
-      - localhost
+      - router
     depends_on:
-      - prometheus
+      - router-prometheus
 
   # source https://github.com/prometheus/node_exporter
   # https://github.com/vegasbrianc/prometheus/
-  prometheus-node-exporter:
+  router-prometheus-node-exporter:
     image: prom/node-exporter:v1.7.0
-    container_name: prometheus-node-exporter
+    container_name: router-prometheus-node-exporter
     restart: always
     volumes:
       - /proc:/host/proc:ro
@@ -149,16 +160,16 @@ services:
       - --collector.filesystem.ignored-mount-points
       - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
     networks:
-      - localhost
+      - router
     privileged: true
     depends_on:
-      - prometheus
+      - router-prometheus
     expose:
       - 9100
 
-  0g-serving-router:
+  router-0g-serving-router:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-router
+    container_name: router-0g-serving-router
     ports:
       - "1034:1034"
     environment:
@@ -169,19 +180,19 @@ services:
       - ./config-router.yaml:/etc/config.yaml
     command: 0g-inference-router-server
     networks:
-      - localhost
+      - router
     depends_on:
-      mysql:
+      router-mysql:
         condition: service_healthy
-      hardhat-node-with-contract:
+      router-hardhat-node-with-contract:
         condition: service_healthy
-      zk-prover:
+      router-zk-prover:
         condition: service_healthy
 
 volumes:
-  mysql-data:
+  router-mysql-data:
 
 networks:
-  localhost:
-    name: localhost
+  router:
+    name: router
     external: false

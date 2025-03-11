@@ -1,7 +1,0 @@
-{
-  "CustomerAddress": "0xabc",
-  "PreTrainedModelHash": "0x8645816c17a8a70ebf32bcc7e621c659e8d0150b1a6bfca27f48f83010c6d12e",
-  "DatasetHash": "0xc4526be4be2960a0eaee7f1cc65e24a86a01331b4bea830d10215a39a3177a54",
-  "IsTurbo": true,
-  "TrainingParams": "{\"num_train_epochs\": 3, \"per_device_train_batch_size\": 16, \"per_device_eval_batch_size\": 16, \"warmup_steps\": 500, \"weight_decay\": 0.01, \"logging_dir\": \"./logs\", \"logging_steps\": 100, \"evaluation_strategy\": \"no\", \"save_strategy\": \"steps\", \"save_steps\": 500, \"eval_steps\": 500, \"load_best_model_at_end\": false, \"metric_for_best_model\": \"accuracy\", \"greater_is_better\": true, \"report_to\": [\"none\"]}"
-}
