@@ -2,6 +2,9 @@ package contract
 
 import (
 	"context"
+	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
@@ -16,18 +19,28 @@ import (
 
 //go:generate go run ./gen
 
+var SpecifiedBlockError = "Specified block header does not exist"
+var defaultTimeout = 30 * time.Second
+var defaultMaxNonGasRetries = 10
+var defaultInterval = 10 * time.Second
+
 // ServingContract wraps the EthereumClient to interact with the serving contract deployed in EVM based Blockchain
 type ServingContract struct {
 	*Contract
 	*InferenceServing
+	maxGasPrice *big.Int
 }
 
 type RetryOption struct {
 	Rounds   uint
 	Interval time.Duration
+
+	Timeout          time.Duration
+	MaxNonGasRetries int
+	MaxGasPrice      *big.Int
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice string) (*ServingContract, error) {
+func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice, maxGasPrice string) (*ServingContract, error) {
 	var networkConfig client.BlockchainNetwork
 	var err error
 	if network == "hardhat" {
@@ -53,8 +66,71 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 	if err != nil {
 		return nil, err
 	}
+	var defaultMaxGasPrice *big.Int = nil
+	if maxGasPrice != "" {
+		price, ok := new(big.Int).SetString(maxGasPrice, 10)
+		if !ok {
+			return nil, fmt.Errorf("invalid max gas price: %s", maxGasPrice)
+		}
+		defaultMaxGasPrice = price
+	}
 
-	return &ServingContract{contract, serving}, nil
+	return &ServingContract{contract, serving, defaultMaxGasPrice}, nil
+}
+
+func (s *ServingContract) Transact(ctx context.Context, retryOpts *RetryOption, method string, params ...interface{}) (*types.Transaction, error) {
+	// Set timeout and max non-gas retries from retryOpts if provided.
+	if retryOpts == nil {
+		retryOpts = &RetryOption{
+			Interval:         defaultInterval,
+			Timeout:          defaultTimeout,
+			MaxNonGasRetries: defaultMaxNonGasRetries,
+			MaxGasPrice:      s.maxGasPrice,
+		}
+	}
+
+	opts, err := s.CreateTransactOpts()
+	if err != nil {
+		return nil, err
+	}
+
+	nRetries := 0
+	for {
+		// Create a fresh context per iteration.
+		ctx, cancel := context.WithTimeout(ctx, retryOpts.Timeout)
+		defer cancel() // cancel this iteration's context
+
+		opts.Context = ctx
+		tx, err := s.InferenceServingTransactor.contract.Transact(opts, method, params...)
+		if err == nil {
+			return tx, nil
+		}
+
+		errStr := strings.ToLower(err.Error())
+
+		if strings.Contains(errStr, "mempool") || strings.Contains(errStr, "timeout") {
+			if retryOpts.MaxGasPrice == nil {
+				return nil, fmt.Errorf("mempool full and no max gas price is set, failed to send transaction: %w", err)
+			} else {
+				newGasPrice := new(big.Int).Mul(opts.GasPrice, big.NewInt(11))
+				newGasPrice.Div(newGasPrice, big.NewInt(10))
+				if newGasPrice.Cmp(retryOpts.MaxGasPrice) > 0 {
+					opts.GasPrice = new(big.Int).Set(retryOpts.MaxGasPrice)
+				} else {
+					opts.GasPrice = newGasPrice
+				}
+			}
+		} else if strings.Contains(errStr, SpecifiedBlockError) {
+			nRetries++
+			if nRetries >= retryOpts.MaxNonGasRetries {
+				return nil, fmt.Errorf("failed to send transaction after %d retries: %w", nRetries, err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to send transaction: %w", err)
+		}
+
+		time.Sleep(retryOpts.Interval)
+	}
 }
 
 type Contract struct {
@@ -72,6 +148,15 @@ func (c *Contract) CreateTransactOpts() (*bind.TransactOpts, error) {
 		return nil, err
 	}
 	return opt, nil
+}
+
+func (c *Contract) GetGasPrice(ctx context.Context) (*big.Int, error) {
+	gasPrice, err := c.Client.Client.SuggestGasPrice(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return gasPrice, nil
 }
 
 func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts ...RetryOption) (receipt *types.Receipt, err error) {

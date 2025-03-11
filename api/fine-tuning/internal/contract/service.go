@@ -14,10 +14,6 @@ import (
 )
 
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
-	opts, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return err
-	}
 	cpuCount, err := util.ConvertToBigInt(service.Quota.CpuCount)
 	if err != nil {
 		return errors.Wrap(err, "convert cpuCount")
@@ -45,8 +41,10 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		GpuType:     service.Quota.GpuType,
 		GpuCount:    gpuCount,
 	}
-	tx, err := c.Contract.AddOrUpdateService(
-		opts,
+
+	tx, err := c.Contract.Transact(ctx,
+		nil,
+		"addOrUpdateService",
 		service.ServingUrl,
 		quota,
 		pricePerToken,
@@ -63,12 +61,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 }
 
 func (c *ProviderContract) DeleteService(ctx context.Context) error {
-	opt, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return err
-	}
-
-	tx, err := c.Contract.RemoveService(opt)
+	tx, err := c.Contract.Transact(ctx, nil, "removeService")
 	if err != nil {
 		return err
 	}
@@ -112,12 +105,8 @@ func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service)
 }
 
 func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, modelRootHash []byte) error {
-	opt, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return err
-	}
+	tx, err := c.Contract.Transact(ctx, nil, "addDeliverable", user, modelRootHash)
 
-	tx, err := c.Contract.AddDeliverable(opt, user, modelRootHash)
 	if err != nil {
 		return err
 	}

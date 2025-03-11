@@ -29,8 +29,9 @@ type Config struct {
 	Event struct {
 		ProviderAddr string `yaml:"providerAddr"`
 	} `yaml:"event"`
-	GasPrice string `yaml:"gasPrice"`
-	Interval struct {
+	GasPrice    string `yaml:"gasPrice"`
+	MaxGasPrice string `yaml:"maxGasPrice"`
+	Interval    struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
@@ -90,7 +91,8 @@ func GetConfig() *Config {
 			}{
 				ProviderAddr: ":8088",
 			},
-			GasPrice: "",
+			GasPrice:    "",
+			MaxGasPrice: "",
 			Interval: struct {
 				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
 				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
