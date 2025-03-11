@@ -108,7 +108,7 @@ func GetConfig() *Config {
 			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,
-			MaxGasPrice:                 "100000000000",
+			MaxGasPrice:                 "1000000000000",
 		}
 
 		if err := loadConfig(instance); err != nil {
