@@ -22,8 +22,9 @@ import (
 
 var SpecifiedBlockError = "Specified block header does not exist"
 var defaultTimeout = 30 * time.Second
-var defaultMaxNonGasRetries = 10
+var defaultMaxNonGasRetries = 50
 var defaultInterval = 10 * time.Second
+var defaultMaxReceiptRetries = 100
 
 // ServingContract wraps the EthereumClient to interact with the serving contract deployed in EVM based Blockchain
 type ServingContract struct {
@@ -96,6 +97,7 @@ func (s *ServingContract) Transact(ctx context.Context, retryOpts *RetryOption, 
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Info("current method ", method)
 	s.logger.Info("current gas price ", opts.GasPrice)
 
 	nRetries := 0
@@ -107,6 +109,7 @@ func (s *ServingContract) Transact(ctx context.Context, retryOpts *RetryOption, 
 		opts.Context = ctx
 		tx, err := s.FineTuningServingTransactor.contract.Transact(opts, method, params...)
 		if err == nil {
+			s.logger.Infof("current tx: %v", tx.Hash())
 			return tx, nil
 		}
 
@@ -171,7 +174,7 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 	if len(opts) > 0 {
 		opt = opts[0]
 	} else {
-		opt.Rounds = 10
+		opt.Rounds = uint(defaultMaxReceiptRetries)
 		opt.Interval = defaultInterval
 	}
 
