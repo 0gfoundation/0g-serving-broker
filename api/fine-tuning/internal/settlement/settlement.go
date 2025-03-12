@@ -53,7 +53,7 @@ func (s *Settlement) Start(ctx context.Context) error {
 					s.logger.Error("error during check in progress task", "err", err)
 				}
 				if count == 0 {
-					err := s.contract.AddOrUpdateService(ctx, s.service, false)
+					err := s.contract.SyncServices(ctx, s.service)
 					if err != nil {
 						s.logger.Error("error update service to available", "err", err)
 					}
