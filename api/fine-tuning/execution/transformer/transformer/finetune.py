@@ -127,10 +127,7 @@ def main():
 
     # Prepare train and validation datasets
     train_dataset = tokenized_datasets["train"]
-    eval_dataset = tokenized_datasets["validation"] if "validation" in tokenized_datasets else None
-
-    small_train_dataset = tokenized_datasets["train"].shuffle(seed=42).select(range(1000))
-    small_eval_dataset = tokenized_datasets["test"].shuffle(seed=42).select(range(1000))
+    eval_dataset = tokenized_datasets["validation"] if "validation" in tokenized_datasets else tokenized_datasets["test"]
 
     # Training arguments from config file
     training_args = TrainingArguments(
@@ -157,8 +154,8 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=small_train_dataset,
-        eval_dataset=small_eval_dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         callbacks=[ProgressCallback()],
     )

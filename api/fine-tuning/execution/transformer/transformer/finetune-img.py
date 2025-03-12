@@ -183,16 +183,7 @@ def main():
     # Split into train/validation/test subsets as needed
     # Here, we assume train/validation/test exist in the dataset
     train_dataset = dataset["train"]
-    eval_dataset = dataset["validation"] if "validation" in dataset else None
-    test_dataset = dataset["test"] if "test" in dataset else None
-
-    # Small subsets for quick debugging (optional)
-    small_train_dataset = train_dataset.shuffle(seed=42).select(range(min(1000, len(train_dataset))))
-    small_eval_dataset = (
-        eval_dataset.shuffle(seed=42).select(range(min(1000, len(eval_dataset))))
-        if eval_dataset is not None
-        else None
-    )
+    eval_dataset = dataset["validation"] if "validation" in dataset else dataset["test"]
 
     # Training arguments
     training_args = TrainingArguments(
@@ -219,8 +210,8 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=small_train_dataset,
-        eval_dataset=small_eval_dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         tokenizer=None,  # For image tasks, we usually don't need a tokenizer
         callbacks=[ProgressCallback()],
     )
