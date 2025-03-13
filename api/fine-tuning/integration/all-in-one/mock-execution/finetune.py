@@ -85,17 +85,31 @@ def main():
 
     callback.on_train_end()
 
-    # Simulate saving the model
+    # # Simulate saving the model
     # os.makedirs(args.output_dir, exist_ok=True)
     # output_file = os.path.join(args.output_dir, "mock_model")
     # with open(output_file, "wb") as f:
-    #     f.seek((1 * 1024 * 1024 * 1024) - 1)
+    #     f.seek((3 * 1024 * 1024 * 1024) - 1)
     #     f.write(b'\0')
     # os.chmod(output_file, 0o666)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    with open(os.path.join(args.output_dir, "mock_model.txt"), "w") as f:
-        f.write("This is a mock model. No actual training occurred.\n")
+    size_in_gb = 3
+    size_in_bytes = size_in_gb * 1024 * 1024 * 1024
+    chunk_size = 1024 * 1024  # Write in 1 MB chunks
+
+    output_file = os.path.join(args.output_dir, "mock_model")
+    with open(output_file, "wb") as f:
+        for _ in range(size_in_bytes // chunk_size):
+            # Write 1 MB of random data
+            f.write(os.urandom(chunk_size))
+        # Write any remaining bytes
+        remaining_bytes = size_in_bytes % chunk_size
+        if remaining_bytes > 0:
+            f.write(os.urandom(remaining_bytes))
+
+    # os.makedirs(args.output_dir, exist_ok=True)
+    # with open(os.path.join(args.output_dir, "mock_model.txt"), "w") as f:
+    #     f.write("This is a mock model. No actual training occurred.\n")
 
 
 if __name__ == "__main__":
