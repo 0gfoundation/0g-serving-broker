@@ -203,7 +203,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 600*time.Minute)
 	defer cancel()
 
 	modelRootHashes, err := storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)

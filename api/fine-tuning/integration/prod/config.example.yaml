@@ -23,6 +23,7 @@ storageClient:
     tags: "0x"
     expectedReplica: 1
     skipTx: false
+    fragmentSize: 4294967296
 logger:
   level: "debug"
   path: "/tmp/fine-tuning.log"
