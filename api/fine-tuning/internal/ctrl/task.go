@@ -48,6 +48,12 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, errors.Wrap(err, "create task in db")
 	}
 
+	c.ExecuteTask(ctx, dbTask)
+
+	return dbTask.ID, nil
+}
+
+func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
 	go func() {
 		baseDir := os.TempDir()
 		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, dbTask.ID)
@@ -82,8 +88,24 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		}
 		file.Close()
 
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, c.contract.LockTime/2)
+		defer cancel()
+
+		done := make(chan bool)
+		go func() {
+			err = c.Execute(ctxWithTimeout, dbTask, tmpFolderPath)
+			done <- true
+		}()
+
 		var taskLog string
-		if err := c.Execute(ctx, dbTask, tmpFolderPath); err != nil {
+		select {
+		case <-done:
+			c.logger.Infof("Task %s finished", dbTask.ID)
+		case <-ctxWithTimeout.Done():
+			err = errors.New(fmt.Sprintf("Task %s timeout reached!", dbTask.ID))
+		}
+
+		if err != nil {
 			errMsg := fmt.Sprintf("Error executing task: %v", err)
 			c.logger.Error(errMsg)
 			taskLog = errMsg
@@ -112,8 +134,6 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 			}
 		}
 	}()
-
-	return dbTask.ID, nil
 }
 
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
