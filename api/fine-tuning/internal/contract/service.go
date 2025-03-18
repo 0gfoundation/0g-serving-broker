@@ -93,6 +93,13 @@ func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service)
 		return err
 	}
 
+	if new.ServingUrl == "" && old != nil {
+		err = c.DeleteService(ctx)
+		if err != nil {
+			return errors.Wrap(err, "delete service in contract")
+		}
+	}
+
 	if old != nil && identicalService(*old, new) {
 		return nil
 	}
