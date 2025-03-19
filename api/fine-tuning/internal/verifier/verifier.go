@@ -206,9 +206,21 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, 600*time.Minute)
 	defer cancel()
 
-	modelRootHashes, err := storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)
-	if err != nil {
-		return nil, err
+	var modelRootHashes []common.Hash
+	uploadChan := make(chan bool)
+	go func() {
+		modelRootHashes, err = storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)
+		uploadChan <- true
+	}()
+
+	select {
+	case <-uploadChan:
+		if err != nil {
+			return nil, err
+		}
+
+	case <-ctxWithTimeout.Done():
+		return nil, errors.New("Timeout reached! Upload to storage did not complete in time.")
 	}
 
 	user := common.HexToAddress(task.UserAddress)
