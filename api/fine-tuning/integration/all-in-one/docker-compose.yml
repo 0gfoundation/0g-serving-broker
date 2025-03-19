@@ -43,6 +43,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.local.yaml:/etc/config.yaml
       - /tmp:/tmp
+      - ../../../fine-tuning/execution/transformer:/fine-tuning/execution/transformer
     command: 0g-fine-tuning-server
     networks:
       - localhost
