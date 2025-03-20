@@ -74,6 +74,15 @@ func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, erro
 		return nil, fmt.Errorf("failed to generate nonce: %v", err)
 	}
 
+	incrementNonce := func(counter []byte) {
+		for i := len(counter) - 1; i >= 0; i-- {
+			counter[i]++
+			if counter[i] != 0 {
+				break
+			}
+		}
+	}
+
 	signature := make([]byte, 65)
 	if _, err := outFile.Write(append(signature, nonce...)); err != nil {
 		return nil, fmt.Errorf("failed to write nonce to output file: %v", err)
@@ -97,6 +106,8 @@ func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, erro
 		if _, err := outFile.Write(ciphertext); err != nil {
 			return nil, fmt.Errorf("failed to write ciphertext to output file: %v", err)
 		}
+
+		incrementNonce(nonce)
 	}
 
 	return tagBuf.Bytes(), nil
