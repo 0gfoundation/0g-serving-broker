@@ -35,8 +35,16 @@ func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval t
 		logger:         logger,
 	}, nil
 }
+func (s *Settlement) Start(ctx context.Context, imageChan <-chan bool) error {
+	go func() {
+		<-imageChan
+		s.start(ctx)
+	}()
 
-func (s *Settlement) Start(ctx context.Context) error {
+	return nil
+}
+
+func (s *Settlement) start(ctx context.Context) error {
 	go func() {
 		s.logger.Info("settlement service started")
 		ticker := time.NewTicker(s.checkInterval)
