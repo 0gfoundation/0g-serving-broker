@@ -5,7 +5,7 @@ go 1.22.7
 toolchain go1.22.10
 
 require (
-	github.com/0glabs/0g-storage-client v0.6.6
+	github.com/0glabs/0g-storage-client v0.6.8
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20250210094218-5e83c01229db
 	github.com/andybalholm/brotli v1.1.0
 	github.com/docker/docker v28.0.0+incompatible
@@ -31,7 +31,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/swaggo/swag v1.16.3
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
-	golang.org/x/net v0.32.0
+	golang.org/x/net v0.33.0
 	gopkg.in/yaml.v2 v2.4.0
 	gorm.io/datatypes v1.2.5
 	gorm.io/driver/mysql v1.5.7
@@ -88,7 +88,7 @@ require (
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/felixge/httpsnoop v1.0.3 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.4 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
