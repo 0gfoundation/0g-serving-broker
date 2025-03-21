@@ -26,6 +26,8 @@ type Service struct {
 type Images struct {
 	ExecutionMockImageName string `yaml:"executionMockImageName"`
 	ExecutionImageName     string `yaml:"executionImageName"`
+	BuildImage             bool   `yaml:"buildImage"`
+	OverrideImage          bool   `yaml:"overrideImage"`
 }
 
 type Config struct {
@@ -99,6 +101,8 @@ func GetConfig() *Config {
 			Images: Images{
 				ExecutionMockImageName: "mock-fine-tuning:latest",
 				ExecutionImageName:     "execution-test-pytorch:v1",
+				BuildImage:             true,
+				OverrideImage:          false,
 			},
 			Logger: config.LoggerConfig{
 				Format:        "text",
