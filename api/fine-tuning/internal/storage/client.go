@@ -105,13 +105,14 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 		indexerClient = c.indexerStandardClient
 	}
 	fileName := fmt.Sprintf("%s.zip", filePath)
+	c.logger.Infof("Begin downloading and unzipping %s\n, with root: %v", fileName, hash)
 	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
-		c.logger.Errorf("Error downloading dataset: %v\n", err)
+		c.logger.Errorf("Error downloading data with root: %v,%v \n", hash, err)
 		return err
 	}
 
 	if err := util.Unzip(fileName, filepath.Dir(filePath)); err != nil {
-		c.logger.Errorf("Error unzipping dataset: %v\n", err)
+		c.logger.Errorf("Error unzipping data: %v\n", err)
 		return err
 	}
 
@@ -150,7 +151,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
-	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil)
+	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, "random")
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
 		return nil, err
