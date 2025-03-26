@@ -4,6 +4,8 @@ github.com/0glabs/0g-storage-client v0.6.6 h1:BZ3KW4u/cQVqbQTZO/ONm10qD5q3naQkt1
 github.com/0glabs/0g-storage-client v0.6.6/go.mod h1:Qt5AuIUPODYRu6/H/vsUTOVR14aAxI9G2FwxmRugZds=
 github.com/0glabs/0g-storage-client v0.6.8 h1:yVfOj8rDOvXisCLtbhif0jjDgcrzahAwNbZKGk4cZf4=
 github.com/0glabs/0g-storage-client v0.6.8/go.mod h1:Qt5AuIUPODYRu6/H/vsUTOVR14aAxI9G2FwxmRugZds=
+github.com/0glabs/0g-storage-client v0.6.9 h1:w8gl9+5HL4By4sqFb5nXG+MUoZJ7mpDTXtgLKJXk9Iw=
+github.com/0glabs/0g-storage-client v0.6.9/go.mod h1:Qt5AuIUPODYRu6/H/vsUTOVR14aAxI9G2FwxmRugZds=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8afgbRMd7mFxO99hRNu+6tazq8nFF9lIwo9JFroBk=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6/go.mod h1:8o94RPi1/7XTJvwPpRSzSUedZrtlirdB3r9Z20bi2f8=
 github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 h1:UQHMgLO+TxOElx5B5HZ4hJQsoJ/PvUvKRhJHDQXO8P8=

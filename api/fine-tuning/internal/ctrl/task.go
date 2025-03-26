@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/google/uuid"
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, error) {
@@ -38,6 +39,8 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, errors.Wrap(err, "get account in contract")
 	}
 
+	c.logger.Info(fmt.Sprintf("account.ProviderSigner: %s", account.ProviderSigner.String()))
+	c.logger.Info(fmt.Sprintf("inner provider address: %s", c.GetProviderSignerAddress(ctx).String()))
 	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
 		return nil, errors.New("provider signer should be acknowledged before creating a task")
 	}
