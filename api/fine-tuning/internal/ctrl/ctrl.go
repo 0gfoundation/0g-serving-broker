@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"crypto/ecdsa"
+	"sync"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
@@ -21,6 +22,8 @@ type Ctrl struct {
 
 	providerSigner *ecdsa.PrivateKey
 	quote          string
+
+	taskMutex sync.Mutex
 }
 
 func New(db *db.DB, config *config.Config, contract *providercontract.ProviderContract, storage *storage.Client, verifier *verifier.Verifier, logger log.Logger) *Ctrl {

@@ -35,6 +35,7 @@ func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval t
 		logger:         logger,
 	}, nil
 }
+
 func (s *Settlement) Start(ctx context.Context, imageChan <-chan bool) error {
 	go func() {
 		<-imageChan
@@ -44,37 +45,35 @@ func (s *Settlement) Start(ctx context.Context, imageChan <-chan bool) error {
 	return nil
 }
 
-func (s *Settlement) start(ctx context.Context) error {
-	go func() {
-		s.logger.Info("settlement service started")
-		ticker := time.NewTicker(s.checkInterval)
-		defer ticker.Stop()
+func (s *Settlement) start(ctx context.Context) {
+	s.logger.Info("settlement service started")
+	defer s.logger.Info("settlement service stopped")
 
-		for {
-			select {
-			case <-ctx.Done():
-				s.logger.Info("settlement service stopped")
-				return
-			case <-ticker.C:
-				count, err := s.db.InProgressTaskCount()
-				if err != nil {
-					s.logger.Error("error during check in progress task", "err", err)
-				}
-				if count == 0 {
-					err := s.contract.SyncServices(ctx, s.service)
-					if err != nil {
-						s.logger.Error("error update service to available", "err", err)
-					}
-				}
+	ticker := time.NewTicker(s.checkInterval)
+	defer ticker.Stop()
 
-				s.handleFinishedTask(ctx)
-
-				s.handleFailedTask(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			count, err := s.db.InProgressTaskCount()
+			if err != nil {
+				s.logger.Error("error during check in progress task", "err", err)
+				continue
 			}
-		}
-	}()
+			if count == 0 {
+				err := s.contract.SyncServices(ctx, s.service)
+				if err != nil {
+					s.logger.Error("error update service to available", "err", err)
+					continue
+				}
+			}
 
-	return nil
+			s.processFinishedTasks(ctx)
+			s.processFailedTasks(ctx)
+		}
+	}
 }
 
 func (s *Settlement) getPendingDeliveredTask(ctx context.Context) *db.Task {
@@ -96,11 +95,10 @@ func (s *Settlement) getPendingDeliveredTask(ctx context.Context) *db.Task {
 	if !account.Deliverables[len(account.Deliverables)-1].Acknowledged {
 		return nil
 	}
-	err = s.db.UpdateTask(task.ID,
+	if err := s.db.UpdateTask(task.ID,
 		db.Task{
 			Progress: db.ProgressStateUserAckDelivered.String(),
-		})
-	if err != nil {
+		}); err != nil {
 		s.logger.Error("error updating task", "err", err)
 		return nil
 	}
@@ -176,7 +174,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	return nil
 }
 
-func (s *Settlement) handleFinishedTask(ctx context.Context) {
+func (s *Settlement) processFinishedTasks(ctx context.Context) {
 	task := s.getPendingDeliveredTask(ctx)
 	if task != nil && task.ID != nil {
 		s.logger.Info("settle for task", "task", task.ID.String())
@@ -221,18 +219,17 @@ func (s *Settlement) chargeFailedTask(ctx context.Context, task *db.Task) error 
 		return err
 	}
 
-	err = s.db.UpdateTask(task.ID,
+	if err = s.db.UpdateTask(task.ID,
 		db.Task{
 			Paid: true,
-		})
-	if err != nil {
+		}); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *Settlement) handleFailedTask(ctx context.Context) {
+func (s *Settlement) processFailedTasks(ctx context.Context) {
 	task := s.getUnPaidFailedCustomizedTasks()
 	if task != nil && task.ID != nil {
 		s.logger.Info("charge for task", "task", task.ID.String())

@@ -33,6 +33,7 @@ func ImageBuild(ctx context.Context, cli *client.Client, buildDirectory, tag str
 	if err != nil {
 		return err
 	}
+	defer tar.Close()
 
 	buildOptions := types.ImageBuildOptions{
 		Dockerfile: "Dockerfile",  // Name of the Dockerfile

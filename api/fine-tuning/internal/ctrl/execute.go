@@ -27,12 +27,13 @@ import (
 )
 
 const (
-	DatasetPath         = "data"
-	PretrainedModelPath = "model"
-	TrainingConfigPath  = "config.json"
-	OutputPath          = "output_model"
-	ContainerBasePath   = "/app/mnt"
-	TaskLogFileName     = "progress.log"
+	DatasetPath          = "data"
+	PretrainedModelPath  = "model"
+	TrainingConfigPath   = "config.json"
+	OutputPath           = "output_model"
+	ContainerBasePath    = "/app/mnt"
+	TaskLogFileName      = "progress.log"
+	BalanceCheckInterval = 5 * time.Minute
 )
 
 type TaskPaths struct {
@@ -50,18 +51,102 @@ type TaskPaths struct {
 func NewTaskPaths(basePath string) *TaskPaths {
 	return &TaskPaths{
 		BasePath:                 basePath,
-		Dataset:                  fmt.Sprintf("%s/%s", basePath, DatasetPath),
-		PretrainedModel:          fmt.Sprintf("%s/%s", basePath, PretrainedModelPath),
-		TrainingConfig:           fmt.Sprintf("%s/%s", basePath, TrainingConfigPath),
-		Output:                   fmt.Sprintf("%s/%s", basePath, OutputPath),
-		ContainerDataset:         fmt.Sprintf("%s/%s", ContainerBasePath, DatasetPath),
-		ContainerPretrainedModel: fmt.Sprintf("%s/%s", ContainerBasePath, PretrainedModelPath),
-		ContainerTrainingConfig:  fmt.Sprintf("%s/%s", ContainerBasePath, TrainingConfigPath),
-		ContainerOutput:          fmt.Sprintf("%s/%s", ContainerBasePath, OutputPath),
+		Dataset:                  filepath.Join(basePath, DatasetPath),
+		PretrainedModel:          filepath.Join(basePath, PretrainedModelPath),
+		TrainingConfig:           filepath.Join(basePath, TrainingConfigPath),
+		Output:                   filepath.Join(basePath, OutputPath),
+		ContainerDataset:         filepath.Join(ContainerBasePath, DatasetPath),
+		ContainerPretrainedModel: filepath.Join(ContainerBasePath, PretrainedModelPath),
+		ContainerTrainingConfig:  filepath.Join(ContainerBasePath, TrainingConfigPath),
+		ContainerOutput:          filepath.Join(ContainerBasePath, OutputPath),
 	}
 }
 
-func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
+func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
+	tmpFolderPath := filepath.Join(os.TempDir(), dbTask.ID.String())
+	taskLogFile := filepath.Join(tmpFolderPath, TaskLogFileName)
+	if err := c.setupTaskEnvironment(tmpFolderPath, taskLogFile); err != nil {
+		c.handleTaskFailure(dbTask, taskLogFile, err)
+		return
+	}
+
+	err := c.executeWithTimeout(ctx, dbTask, tmpFolderPath)
+
+	if err != nil {
+		c.handleTaskFailure(dbTask, taskLogFile, err)
+	} else {
+		successMsg := fmt.Sprintf("Training model for task %s completed successfully", dbTask.ID)
+		if err := c.writeToLogFile(taskLogFile, successMsg); err != nil {
+			c.logger.Errorf("Write success message failed: %v", err)
+		}
+	}
+}
+
+func (c *Ctrl) setupTaskEnvironment(tmpFolderPath, taskLogFile string) error {
+	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
+		return errors.Wrap(err, "create temporary folder")
+	}
+	c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
+
+	// create log file
+	if err := c.writeToLogFile(taskLogFile, "creating task....\n"); err != nil {
+		return errors.Wrap(err, "initialize task log")
+	}
+
+	return nil
+}
+
+func (c *Ctrl) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolderPath string) error {
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, c.contract.LockTime/2)
+	defer cancel()
+
+	done := make(chan error)
+	go func() {
+		done <- c.execute(ctxWithTimeout, dbTask, tmpFolderPath)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return errors.Wrap(err, "task execution failed")
+		}
+		c.logger.Infof("Task %s finished", dbTask.ID)
+		return nil
+	case <-ctxWithTimeout.Done():
+		return fmt.Errorf("task %s timeout reached", dbTask.ID)
+	}
+}
+
+func (c *Ctrl) handleTaskFailure(dbTask *db.Task, taskLogFile string, err error) {
+	errMsg := fmt.Sprintf("Error executing task: %v", err)
+	c.logger.Error(errMsg)
+
+	if err := c.db.UpdateTask(dbTask.ID, db.Task{
+		Progress: db.ProgressStateFailed.String(),
+	}); err != nil {
+		c.logger.Errorf("Error updating task: %v", err)
+		errMsg = fmt.Sprintf("%s\n%s", errMsg, err.Error())
+	}
+
+	if logErr := c.writeToLogFile(taskLogFile, errMsg); logErr != nil {
+		c.logger.Errorf("Write into task log failed: %v", logErr)
+	}
+}
+
+func (c *Ctrl) writeToLogFile(filePath, content string) error {
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return errors.Wrap(err, "open log file")
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(content); err != nil {
+		return errors.Wrap(err, "write to log file")
+	}
+	return nil
+}
+
+func (c *Ctrl) execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
 	defer c.CleanUp(paths)
@@ -90,14 +175,14 @@ func removeAllZipFiles(dir string) error {
 	// Find all matching zip files
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return fmt.Errorf("failed to glob pattern: %v", err)
+		return errors.Wrap(err, "failed to glob pattern")
 	}
 
 	// Iterate and remove each file
 	for _, zipFile := range matches {
 		fmt.Printf("Removing: %s\n", zipFile)
 		if err := os.Remove(zipFile); err != nil {
-			return fmt.Errorf("failed to remove %s: %v", zipFile, err)
+			return errors.Wrapf(err, "failed to remove %s", zipFile)
 		}
 	}
 
@@ -170,7 +255,7 @@ func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag str
 
 	if !imageExists {
 		if c.config.Images.BuildImage && !customizedImage {
-			return fmt.Errorf("Failed to found image: %v", expectImag)
+			return fmt.Errorf("failed to found image: %v", expectImag)
 		} else {
 			out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
 			if err != nil {
@@ -391,16 +476,16 @@ func (*Ctrl) calculateFee(startTime time.Time, pricePerHour int64) *big.Int {
 	return usedBalance
 }
 
-func (c *Ctrl) monitorBalance(ctx context.Context, userAddr common.Address, startTime time.Time, quit chan bool, runOutOfBalance chan *big.Int) bool {
-	ticker := time.NewTicker(5 * time.Minute)
+func (c *Ctrl) monitorBalance(ctx context.Context, userAddr common.Address, startTime time.Time, quit chan bool, runOutOfBalance chan *big.Int) {
+	ticker := time.NewTicker(BalanceCheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-quit:
-			return true
+			return
 		case <-ctx.Done():
-			return true
+			return
 		case <-ticker.C:
 			account, err := c.contract.GetUserAccount(ctx, userAddr)
 			if err != nil {
