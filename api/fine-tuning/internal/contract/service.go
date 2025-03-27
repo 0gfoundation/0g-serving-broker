@@ -34,6 +34,10 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	if err != nil {
 		return errors.Wrap(err, "convert PricePerToken")
 	}
+	pricePerHour, err := util.ConvertToBigInt(service.PricePerHour)
+	if err != nil {
+		return errors.Wrap(err, "convert PricePerHour")
+	}
 	quota := contract.Quota{
 		CpuCount:    cpuCount,
 		NodeMemory:  memory,
@@ -51,6 +55,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		// TODO: replace by real provider signer address
 		common.HexToAddress("0x111111"),
 		occupied,
+		pricePerHour,
 	)
 	if err != nil {
 		return err
@@ -128,6 +133,9 @@ func identicalService(old contract.Service, new config.Service) bool {
 		return false
 	}
 	if old.PricePerToken.Int64() != new.PricePerToken {
+		return false
+	}
+	if old.PricePerHour.Int64() != new.PricePerHour {
 		return false
 	}
 	if old.Occupied {

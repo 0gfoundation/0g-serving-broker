@@ -117,6 +117,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 			if err != nil {
 				panic(err)
 			}
+			defer cli.Close()
 
 			imageName := config.Images.ExecutionImageName
 			buildImage := true

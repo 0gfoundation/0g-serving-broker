@@ -13,11 +13,6 @@ import (
 )
 
 func ImageExists(ctx context.Context, cli *client.Client, imageName string) (bool, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return false, err
-	}
-
 	images, err := cli.ImageList(ctx, image.ListOptions{})
 	if err != nil {
 		return false, fmt.Errorf("failed to list images: %v", err)
@@ -34,7 +29,6 @@ func ImageExists(ctx context.Context, cli *client.Client, imageName string) (boo
 	return false, nil
 }
 func ImageBuild(ctx context.Context, cli *client.Client, buildDirectory, tag string) error {
-
 	tar, err := archive.TarWithOptions(buildDirectory, &archive.TarOptions{})
 	if err != nil {
 		return err

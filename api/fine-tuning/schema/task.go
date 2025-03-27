@@ -23,6 +23,8 @@ type Task struct {
 	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress" readonly:"true"`
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+	ImageName           string                `gorm:"type:varchar(255)" json:"imageName"`
+	DockerRunCmd        string                `gorm:"type:varchar(255)" json:"dockerRunCmd"`
 }
 
 func (d *Task) Bind(ctx *gin.Context) error {
@@ -38,6 +40,8 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	d.Fee = r.Fee
 	d.Nonce = r.Nonce
 	d.Signature = r.Signature
+	d.ImageName = r.ImageName
+	d.DockerRunCmd = r.DockerRunCmd
 	return nil
 }
 
@@ -61,6 +65,8 @@ func (t *Task) GenerateDBTask() *db.Task {
 		Fee:                 t.Fee,
 		Nonce:               t.Nonce,
 		Signature:           t.Signature,
+		ImageName:           t.ImageName,
+		DockerRunCmd:        t.DockerRunCmd,
 	}
 }
 
@@ -78,5 +84,7 @@ func GenerateSchemaTask(t *db.Task) *Task {
 		Signature:           t.Signature,
 		Progress:            t.Progress,
 		DeliverIndex:        t.DeliverIndex,
+		ImageName:           t.ImageName,
+		DockerRunCmd:        t.DockerRunCmd,
 	}
 }

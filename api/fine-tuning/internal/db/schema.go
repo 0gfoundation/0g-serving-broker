@@ -41,6 +41,9 @@ type Task struct {
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+	ImageName           string                `gorm:"type:varchar(255)" json:"imageName"`
+	DockerRunCmd        string                `gorm:"type:varchar(255)" json:"dockerRunCmd"`
+	Paid                bool                  `gorm:"type:bool;not null;default:false" json:"paid"`
 }
 
 // BeforeCreate hook for generating a UUID

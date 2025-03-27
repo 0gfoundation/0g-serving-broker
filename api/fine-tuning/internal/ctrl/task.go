@@ -58,13 +58,16 @@ func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
 		baseDir := os.TempDir()
 		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, dbTask.ID)
 
-		updateTaskAndLogError := func(errMsg string) {
+		updateTaskAndLogError := func(errMsg string) error {
 			c.logger.Errorf("Error: %v", errMsg)
 			if err := c.db.UpdateTask(dbTask.ID, db.Task{
 				Progress: db.ProgressStateFailed.String(),
 			}); err != nil {
 				c.logger.Error(fmt.Sprintf("Error updating task: %v", err))
+				return err
 			}
+
+			return nil
 		}
 
 		if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
@@ -107,16 +110,9 @@ func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
 
 		if err != nil {
 			errMsg := fmt.Sprintf("Error executing task: %v", err)
-			c.logger.Error(errMsg)
 			taskLog = errMsg
-
-			if err := c.db.UpdateTask(dbTask.ID, db.Task{
-				Progress: db.ProgressStateFailed.String(),
-			}); err != nil {
-				errMsg := fmt.Sprintf("Error updating task: %v", err)
-				c.logger.Error(errMsg)
-
-				taskLog = fmt.Sprintf("%s\n%s", taskLog, errMsg)
+			if err := updateTaskAndLogError(errMsg); err != nil {
+				taskLog = fmt.Sprintf("%s\n%s", taskLog, fmt.Sprintf("%v", err))
 			}
 		} else {
 			taskLog = fmt.Sprintf("Training model for task %s completed successfully", dbTask.ID)

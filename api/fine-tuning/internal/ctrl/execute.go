@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
@@ -77,8 +79,6 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 		return err
 	}
 
-	c.CleanUp(paths)
-
 	return nil
 }
 
@@ -130,10 +130,15 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
-	// Todo: what's the better way to calculate the token size
-	tokenSize, err := util.FileContentSize(paths.Dataset)
-	if err != nil {
-		return err
+	tokenSize := int64(0)
+	if task.ImageName != "" {
+		// Todo: what's the better way to calculate the token size
+		v, err := util.FileContentSize(paths.Dataset)
+		if err != nil {
+			return err
+		}
+
+		tokenSize = v
 	}
 	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.config.Service.PricePerToken, task); err != nil {
 		return err
@@ -149,7 +154,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
-	if err = os.Mkdir(paths.Output, os.ModePerm); err != nil {
+	if err := os.Mkdir(paths.Output, os.ModePerm); err != nil {
 		c.logger.Errorf("Error creating output model folder: %v\n", err)
 		return err
 	}
@@ -157,14 +162,14 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 	return nil
 }
 
-func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag string) error {
+func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag string, customizedImage bool) error {
 	imageExists, err := image.ImageExists(ctx, cli, expectImag)
 	if err != nil {
 		return err
 	}
 
 	if !imageExists {
-		if c.config.Images.BuildImage {
+		if c.config.Images.BuildImage && !customizedImage {
 			return fmt.Errorf("Failed to found image: %v", expectImag)
 		} else {
 			out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
@@ -185,12 +190,74 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		c.logger.Errorf("Failed to create Docker client: %v", err)
 		return err
 	}
+	defer cli.Close()
 
-	image := c.config.Images.ExecutionImageName
-
-	info, err := cli.Info(ctx)
+	hostConfig, err := c.generateHostConfig(ctx, cli, paths, task)
 	if err != nil {
 		return err
+	}
+
+	image, trainScript, customizedImage, err := c.getContainerImage(task)
+	if err != nil {
+		return err
+	}
+
+	if err := c.pullImage(ctx, cli, image, customizedImage); err != nil {
+		c.logger.Errorf("Failed to create container: %v", err)
+		return err
+	}
+
+	containerID, err := c.createContainer(ctx, cli, image, trainScript, paths, hostConfig, task)
+	if err != nil {
+		return err
+	}
+	defer c.cleanupContainer(ctx, cli, containerID)
+
+	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		c.logger.Errorf("Failed to start container: %v", err)
+		return err
+	}
+
+	startTime := time.Now()
+	quit := make(chan bool)
+	runOutOfBalance := make(chan *big.Int)
+
+	userAddr := common.HexToAddress(task.UserAddress)
+	if customizedImage {
+		go c.monitorBalance(ctx, userAddr, startTime, quit, runOutOfBalance)
+	}
+
+	usedBalance, err := c.waitForContainer(ctx, cli, containerID, runOutOfBalance, task, quit)
+	if customizedImage {
+		if usedBalance == nil {
+			usedBalance = c.calculateFee(startTime, c.config.Service.PricePerHour)
+		}
+
+		if err = c.db.UpdateTask(task.ID,
+			db.Task{
+				Fee: usedBalance.String(),
+			}); err != nil {
+			c.logger.Errorf("Failed to update task: %v", err)
+		}
+
+		task.Fee = usedBalance.String()
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if err := c.fetchContainerLogs(ctx, cli, containerID); err != nil {
+		return err
+	}
+
+	return c.finalizeTask(ctx, paths, task, userAddr)
+}
+
+func (c *Ctrl) generateHostConfig(ctx context.Context, cli *client.Client, paths *TaskPaths, task *db.Task) (*container.HostConfig, error) {
+	info, err := cli.Info(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	storageOpt := make(map[string]string)
@@ -207,7 +274,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	runtime := ""
 	deviceRequests := make([]container.DeviceRequest, 0)
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
-		image = c.config.Images.ExecutionMockImageName
 		runtime = ""
 	} else {
 		if _, ok := info.Runtimes["nvidia"]; ok {
@@ -224,25 +290,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		} else {
 			c.logger.Warn("nvidia runtime not found.")
 		}
-	}
-
-	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
-	if trainScript == "" {
-		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
-		return errors.New("no training script found")
-	}
-
-	containerConfig := &container.Config{
-		Image: image,
-		Cmd: []string{
-			"python",
-			trainScript,
-			"--data_path", paths.ContainerDataset,
-			"--model_path", paths.ContainerPretrainedModel,
-			"--config_path", paths.ContainerTrainingConfig,
-			"--output_dir", paths.ContainerOutput,
-		},
-		Env: constant.ENV_MAP[task.PreTrainedModelHash],
 	}
 
 	cpuCount := c.config.Service.Quota.CpuCount
@@ -273,51 +320,131 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		},
 		StorageOpt: storageOpt,
 	}
+	return hostConfig, nil
+}
 
-	err = c.pullImage(ctx, cli, image)
-	if err != nil {
-		c.logger.Errorf("Failed to create container: %v", err)
-		return err
+func (c *Ctrl) getContainerImage(task *db.Task) (string, string, bool, error) {
+	image := ""
+	trainScript := ""
+	customizedImage := false
+
+	if task.ImageName != "" {
+		image = task.ImageName
+		trainScript = task.DockerRunCmd
+		customizedImage = true
+	} else {
+		if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+			image = c.config.Images.ExecutionMockImageName
+		} else {
+			image = c.config.Images.ExecutionImageName
+		}
+
+		trainScript = constant.SCRIPT_MAP[task.PreTrainedModelHash]
+	}
+
+	if trainScript == "" {
+		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
+		return "", "", false, errors.New("no training script found")
+	}
+
+	return image, trainScript, customizedImage, nil
+}
+
+func (c *Ctrl) createContainer(ctx context.Context, cli *client.Client, image string, trainScript string, paths *TaskPaths, hostConfig *container.HostConfig, task *db.Task) (string, error) {
+	containerConfig := &container.Config{
+		Image: image,
+		Cmd: []string{
+			"python",
+			trainScript,
+			"--data_path", paths.ContainerDataset,
+			"--model_path", paths.ContainerPretrainedModel,
+			"--config_path", paths.ContainerTrainingConfig,
+			"--output_dir", paths.ContainerOutput,
+		},
+		Env: constant.ENV_MAP[task.PreTrainedModelHash],
 	}
 
 	resp, err := cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		c.logger.Errorf("Failed to create container: %v", err)
-		return err
+		return "", err
 	}
 
-	containerID := resp.ID
-	c.logger.Infof("Container %s created successfully. Now Starting...\n", containerID)
+	c.logger.Infof("Container %s created successfully. Now starting...", resp.ID)
+	return resp.ID, nil
+}
 
-	defer func() error {
-		// remove the container
-		if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
-			c.logger.Errorf("Failed to remove container: %v", err)
-			return err
-		}
-
+func (c *Ctrl) cleanupContainer(ctx context.Context, cli *client.Client, containerID string) {
+	// remove the container
+	err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true})
+	if err != nil {
+		c.logger.Errorf("Failed to remove container: %v", err)
+	} else {
 		c.logger.Infof("Container %s removed successfully\n", containerID)
-
-		return nil
-	}()
-
-	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		c.logger.Errorf("Failed to start container: %v", err)
-		return err
 	}
-	c.logger.Infof("Container %s started successfully\n", containerID)
+}
 
+func (*Ctrl) calculateFee(startTime time.Time, pricePerHour int64) *big.Int {
+	elapsed := time.Since(startTime)
+	usedBalance := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(float64(pricePerHour)), big.NewFloat(elapsed.Hours())).Int(usedBalance)
+	return usedBalance
+}
+
+func (c *Ctrl) monitorBalance(ctx context.Context, userAddr common.Address, startTime time.Time, quit chan bool, runOutOfBalance chan *big.Int) bool {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-quit:
+			return true
+		case <-ctx.Done():
+			return true
+		case <-ticker.C:
+			account, err := c.contract.GetUserAccount(ctx, userAddr)
+			if err != nil {
+				c.logger.Errorf("Failed to get user account: %v", err)
+				continue
+			}
+
+			usedBalance := c.calculateFee(startTime, c.config.Service.PricePerHour)
+			if account.Balance.Cmp(usedBalance) < 0 {
+				runOutOfBalance <- account.Balance
+			}
+		}
+	}
+}
+
+func (c *Ctrl) waitForContainer(ctx context.Context, cli *client.Client, containerID string, runOutOfBalance chan *big.Int, task *db.Task, quit chan bool) (*big.Int, error) {
 	statusCh, errCh := cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
 	select {
+	case fee := <-runOutOfBalance:
+		if err := cli.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+			c.logger.Errorf("Error stopping container: %v", err)
+		}
+
+		return fee, errors.New(fmt.Sprintf("Task %s run out of balance", task.ID))
 	case err := <-errCh:
+		quit <- true
 		if err != nil {
 			c.logger.Errorf("Error waiting for container: %v", err)
-			return err
+			return nil, err
 		}
 	case <-statusCh:
+		quit <- true
 		c.logger.Infof("Container %s has stopped\n", containerID)
+	case <-ctx.Done():
+		if err := cli.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+			c.logger.Errorf("Error stopping container: %v", err)
+		}
+		return nil, errors.New(fmt.Sprintf("Task %v was canceled or timed out", task.ID))
 	}
 
+	return nil, nil
+}
+
+func (c *Ctrl) fetchContainerLogs(ctx context.Context, cli *client.Client, containerID string) error {
 	out, err := cli.ContainerLogs(ctx, containerID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
 	if err != nil {
 		c.logger.Printf("Failed to fetch logs: %v", err)
@@ -330,16 +457,21 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	for scanner.Scan() {
 		c.logger.Debug(scanner.Text())
 	}
+
 	if err := scanner.Err(); err != nil {
 		c.logger.Errorf("Error reading logs: %v", err)
 	}
 
+	return nil
+}
+
+func (c *Ctrl) finalizeTask(ctx context.Context, paths *TaskPaths, task *db.Task, userAddr common.Address) error {
 	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
 	if err != nil {
 		return err
 	}
 
-	account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
+	account, err := c.contract.GetUserAccount(ctx, userAddr)
 	if err != nil {
 		return err
 	}
@@ -354,6 +486,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			EncryptedSecret: encodedSecret,
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 			DeliverIndex:    uint64(len(account.Deliverables) - 1),
+			Fee:             task.Fee,
 		})
 	if err != nil {
 		c.logger.Errorf("Failed to update task: %v", err)

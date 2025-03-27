@@ -67,9 +67,18 @@ func (d *DB) GetDeliveredTasks() ([]Task, error) {
 	return filteredTasks, nil
 }
 
-func (d *DB) GetUseAckDeliveredTasks() ([]Task, error) {
+func (d *DB) GetUserAckDeliveredTasks() ([]Task, error) {
 	var filteredTasks []Task
 	ret := d.db.Where(&Task{Progress: ProgressStateUserAckDelivered.String()}).Find(&filteredTasks)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
+	return filteredTasks, nil
+}
+
+func (d *DB) GetUnPaidFailedCustomizedTasks() ([]Task, error) {
+	var filteredTasks []Task
+	ret := d.db.Model(&Task{}).Where("progress = ? AND paid = ? AND ImageName <> ''", ProgressStateFailed.String(), false).Find(&filteredTasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}

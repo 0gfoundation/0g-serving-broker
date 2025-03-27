@@ -25,6 +25,7 @@ service:
     storage: 10
     gpuType: "H200"
     gpuCount: 1
+  pricePerHour: 2
 storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
   indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"

@@ -21,6 +21,7 @@ type Service struct {
 		GpuCount int64  `yaml:"gpuCount"`
 	} `yaml:"quota"`
 	PricePerToken int64 `yaml:"pricePerToken"`
+	PricePerHour  int64 `yaml:"pricePerHour"`
 }
 
 type Images struct {

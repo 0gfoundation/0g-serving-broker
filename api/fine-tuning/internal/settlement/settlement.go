@@ -67,23 +67,9 @@ func (s *Settlement) start(ctx context.Context) error {
 					}
 				}
 
-				task := s.getPendingDeliveredTask(ctx)
-				if task != nil && task.ID != nil {
-					s.logger.Info("settle for task", "task", task.ID.String())
-					err := s.doSettlement(ctx, task)
-					if err != nil {
-						s.logger.Error("error during do settlement", "err", err)
-					}
-					continue
-				}
-				task = s.getPendingUserAcknowledgedTask()
-				if task != nil && task.ID != nil {
-					s.logger.Info("settle for task", "task", task.ID.String())
-					err := s.doSettlement(ctx, task)
-					if err != nil {
-						s.logger.Error("error during do settlement for tasks failed once", "err", err)
-					}
-				}
+				s.handleFinishedTask(ctx)
+
+				s.handleFailedTask(ctx)
 			}
 		}
 	}()
@@ -125,7 +111,7 @@ func (s *Settlement) getPendingDeliveredTask(ctx context.Context) *db.Task {
 // Theoretically, userAcknowledgedTasks should be settled with getPendingDeliveredTask
 // We have getPendingUserAcknowledgedTask to settle task in case of any failure in getPendingDeliveredTask
 func (s *Settlement) getPendingUserAcknowledgedTask() *db.Task {
-	tasks, err := s.db.GetUseAckDeliveredTasks()
+	tasks, err := s.db.GetUserAckDeliveredTasks()
 	if err != nil {
 		s.logger.Error("error getting user acknowledged tasks", "err", err)
 		return nil
@@ -181,10 +167,78 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	err = s.db.UpdateTask(task.ID,
 		db.Task{
 			Progress: db.ProgressStateFinished.String(),
+			Paid:     true,
 		})
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (s *Settlement) handleFinishedTask(ctx context.Context) {
+	task := s.getPendingDeliveredTask(ctx)
+	if task != nil && task.ID != nil {
+		s.logger.Info("settle for task", "task", task.ID.String())
+		err := s.doSettlement(ctx, task)
+		if err != nil {
+			s.logger.Error("error during do settlement", "err", err)
+		}
+
+		return
+	}
+
+	task = s.getPendingUserAcknowledgedTask()
+	if task != nil && task.ID != nil {
+		s.logger.Info("settle for task", "task", task.ID.String())
+		err := s.doSettlement(ctx, task)
+		if err != nil {
+			s.logger.Error("error during do settlement for tasks failed once", "err", err)
+		}
+	}
+}
+
+func (s *Settlement) getUnPaidFailedCustomizedTasks() *db.Task {
+	tasks, err := s.db.GetUnPaidFailedCustomizedTasks()
+	if err != nil {
+		s.logger.Error("error getting user acknowledged tasks", "err", err)
+		return nil
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	return &tasks[0]
+}
+
+func (s *Settlement) chargeFailedTask(ctx context.Context, task *db.Task) error {
+	fee, err := util.ConvertToBigInt(task.Fee)
+	if err != nil {
+		return err
+	}
+
+	if err := s.contract.SettleFailedTaskFees(ctx, common.HexToAddress(task.UserAddress), fee); err != nil {
+		return err
+	}
+
+	err = s.db.UpdateTask(task.ID,
+		db.Task{
+			Paid: true,
+		})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Settlement) handleFailedTask(ctx context.Context) {
+	task := s.getUnPaidFailedCustomizedTasks()
+	if task != nil && task.ID != nil {
+		s.logger.Info("charge for task", "task", task.ID.String())
+		err := s.chargeFailedTask(ctx, task)
+		if err != nil {
+			s.logger.Error("error during do settlement for tasks failed once", "err", err)
+		}
+	}
 }
