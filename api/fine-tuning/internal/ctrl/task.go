@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/google/uuid"
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, error) {
@@ -38,6 +39,8 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, errors.Wrap(err, "get account in contract")
 	}
 
+	c.logger.Info(fmt.Sprintf("account.ProviderSigner: %s", account.ProviderSigner.String()))
+	c.logger.Info(fmt.Sprintf("inner provider address: %s", c.GetProviderSignerAddress(ctx).String()))
 	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
 		return nil, errors.New("provider signer should be acknowledged before creating a task")
 	}
@@ -48,6 +51,12 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, errors.Wrap(err, "create task in db")
 	}
 
+	c.ExecuteTask(ctx, dbTask)
+
+	return dbTask.ID, nil
+}
+
+func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
 	go func() {
 		baseDir := os.TempDir()
 		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, dbTask.ID)
@@ -82,8 +91,24 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		}
 		file.Close()
 
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, c.contract.LockTime/2)
+		defer cancel()
+
+		done := make(chan bool)
+		go func() {
+			err = c.Execute(ctxWithTimeout, dbTask, tmpFolderPath)
+			done <- true
+		}()
+
 		var taskLog string
-		if err := c.Execute(ctx, dbTask, tmpFolderPath); err != nil {
+		select {
+		case <-done:
+			c.logger.Infof("Task %s finished", dbTask.ID)
+		case <-ctxWithTimeout.Done():
+			err = errors.New(fmt.Sprintf("Task %s timeout reached!", dbTask.ID))
+		}
+
+		if err != nil {
 			errMsg := fmt.Sprintf("Error executing task: %v", err)
 			c.logger.Error(errMsg)
 			taskLog = errMsg
@@ -112,8 +137,6 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 			}
 		}
 	}()
-
-	return dbTask.ID, nil
 }
 
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {

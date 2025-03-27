@@ -3,10 +3,12 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"path/filepath"
 	"strconv"
 
 	"github.com/0glabs/0g-serving-broker/common/chain"
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
@@ -21,12 +23,16 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var nRetriesToUpload = 10
+
 type Client struct {
 	w3Client              *web3go.Client
 	storageUploadUrgs     *config.UploadArgs
 	indexerStandardClient *indexer.Client
 	indexerTurboClient    *indexer.Client
 	logger                log.Logger
+	MaxGasPrice           *big.Int
+	NRetries              int
 }
 
 func New(config *config.Config, logger log.Logger) (*Client, error) {
@@ -75,12 +81,19 @@ func New(config *config.Config, logger log.Logger) (*Client, error) {
 		return nil, err
 	}
 
+	maxGasPrice, err := util.ConvertToBigInt(config.MaxGasPrice)
+	if err != nil {
+		return nil, errors.Wrapf(err, "invalid max gas price: %v", config.MaxGasPrice)
+	}
+
 	return &Client{
 		w3Client:              w3client,
 		storageUploadUrgs:     &config.StorageClientConfig.UploadArgs,
 		indexerStandardClient: indexerStandardClient,
 		indexerTurboClient:    indexerTurboClient,
 		logger:                logger,
+		MaxGasPrice:           maxGasPrice,
+		NRetries:              nRetriesToUpload,
 	}, nil
 }
 
@@ -92,13 +105,14 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 		indexerClient = c.indexerStandardClient
 	}
 	fileName := fmt.Sprintf("%s.zip", filePath)
+	c.logger.Infof("Begin downloading and unzipping %s\n, with root: %v", fileName, hash)
 	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
-		c.logger.Errorf("Error downloading dataset: %v\n", err)
+		c.logger.Errorf("Error downloading data with root: %v,%v \n", hash, err)
 		return err
 	}
 
 	if err := util.Unzip(fileName, filepath.Dir(filePath)); err != nil {
-		c.logger.Errorf("Error unzipping dataset: %v\n", err)
+		c.logger.Errorf("Error unzipping data: %v\n", err)
 		return err
 	}
 
@@ -119,6 +133,8 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		TaskSize:         c.storageUploadUrgs.TaskSize,
 		ExpectedReplica:  c.storageUploadUrgs.ExpectedReplica,
 		SkipTx:           c.storageUploadUrgs.SkipTx,
+		MaxGasPrice:      c.MaxGasPrice,
+		NRetries:         c.NRetries,
 	}
 
 	file, err := core.Open(fileName)
@@ -135,7 +151,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
-	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil)
+	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, "random")
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
 		return nil, err

@@ -43,20 +43,22 @@ func (e *EthereumClient) TransactionCallMessage(
 ) (*ethereum.CallMsg, error) {
 	var gasPrice *big.Int
 	var err error
-	var ok bool
-	if e.GasPrice == "" {
-		gasPrice, err = e.Client.SuggestGasPrice(context.Background())
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		gasPrice, ok = new(big.Int).SetString(e.GasPrice, 10)
+	gasPrice, err = e.Client.SuggestGasPrice(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Str("Suggested Gas Price", gasPrice.String())
+	if e.GasPrice != "" {
+		GasPriceConfig, ok := new(big.Int).SetString(e.GasPrice, 10)
 		if !ok {
 			return nil, fmt.Errorf("invalid gas price: %s", e.GasPrice)
 		}
+		log.Info().Str("Config Gas Price", GasPriceConfig.String())
+		if gasPrice != nil && GasPriceConfig.Cmp(gasPrice) == 1 {
+			gasPrice = GasPriceConfig
+		}
 	}
-	fmt.Println("Suggested Gas Price", gasPrice.String())
-	log.Debug().Str("Suggested Gas Price", gasPrice.String())
+	log.Info().Str("Final Gas Price", gasPrice.String())
 	msg := ethereum.CallMsg{
 		From:     common.HexToAddress(from.Address()),
 		To:       &to,

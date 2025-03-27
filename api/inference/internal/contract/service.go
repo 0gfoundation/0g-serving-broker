@@ -13,10 +13,6 @@ import (
 )
 
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service) error {
-	opts, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return err
-	}
 	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
 	if err != nil {
 		return errors.Wrap(err, "convert input price")
@@ -25,8 +21,10 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	if err != nil {
 		return errors.Wrap(err, "convert input price")
 	}
-	tx, err := c.Contract.AddOrUpdateService(
-		opts,
+
+	tx, err := c.Contract.Transact(ctx,
+		nil,
+		"addOrUpdateService",
 		service.Type,
 		service.ServingURL,
 		service.ModelType,
@@ -34,6 +32,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		inputPrice,
 		outputPrice,
 	)
+
 	if err != nil {
 		return err
 	}
@@ -44,12 +43,10 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 }
 
 func (c *ProviderContract) DeleteService(ctx context.Context) error {
-	opt, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return err
-	}
-
-	tx, err := c.Contract.RemoveService(opt)
+	tx, err := c.Contract.Transact(ctx,
+		nil,
+		"removeService",
+	)
 	if err != nil {
 		return err
 	}

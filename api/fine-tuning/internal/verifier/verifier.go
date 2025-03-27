@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -202,9 +203,24 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	modelRootHashes, err := storage.UploadToStorage(ctx, encryptFile, constant.IS_TURBO)
-	if err != nil {
-		return nil, err
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 600*time.Minute)
+	defer cancel()
+
+	var modelRootHashes []common.Hash
+	uploadChan := make(chan bool)
+	go func() {
+		modelRootHashes, err = storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)
+		uploadChan <- true
+	}()
+
+	select {
+	case <-uploadChan:
+		if err != nil {
+			return nil, err
+		}
+
+	case <-ctxWithTimeout.Done():
+		return nil, errors.New("Timeout reached! Upload to storage did not complete in time.")
 	}
 
 	user := common.HexToAddress(task.UserAddress)

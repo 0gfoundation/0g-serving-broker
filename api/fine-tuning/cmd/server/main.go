@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
@@ -17,6 +18,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/settlement"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/verifier"
+	"github.com/docker/docker/client"
 	"github.com/gin-gonic/gin"
 )
 
@@ -41,6 +43,9 @@ func Main() {
 	if err := token.CheckPythonEnv(logger); err != nil {
 		panic(err)
 	}
+
+	ctx := context.Background()
+	imageChan := buildImageIfNeeded(ctx, config, logger)
 
 	db, err := db.NewDB(config, logger)
 	if err != nil {
@@ -67,10 +72,16 @@ func Main() {
 	}
 
 	ctrl := ctrl.New(db, config, contract, storageClient, verifier, logger)
-	ctx := context.Background()
-	err = ctrl.SyncServices(ctx)
-	if err != nil {
-		panic(err)
+	if !config.Images.BuildImage {
+		err = ctrl.SyncServices(ctx)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		err = ctrl.DeleteService(ctx)
+		if err != nil {
+			logger.Warn(err)
+		}
 	}
 
 	err = ctrl.SyncQuote(ctx)
@@ -94,10 +105,50 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	settlement.Start(ctx)
+	settlement.Start(ctx, imageChan)
 
 	// Listen and Serve, config port with PORT=X
 	if err := engine.Run(); err != nil {
 		panic(err)
 	}
+}
+
+func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.Logger) chan bool {
+	imageChan := make(chan bool)
+
+	go func() {
+		if config.Images.BuildImage {
+			cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+			if err != nil {
+				panic(err)
+			}
+
+			imageName := config.Images.ExecutionImageName
+			buildImage := true
+			if !config.Images.OverrideImage {
+				exists, err := image.ImageExists(ctx, cli, imageName)
+				if err != nil {
+					panic(err)
+				}
+
+				logger.Debugf("Image %s status %v.", imageName, exists)
+				if exists {
+					buildImage = false
+				}
+			}
+
+			if buildImage {
+				logger.Debugf("Build image %s", imageName)
+				err := image.ImageBuild(ctx, cli, "./fine-tuning/execution/transformer", imageName)
+				if err != nil {
+					panic(err)
+				}
+
+				logger.Debugf("Docker image %s built successfully!", imageName)
+			}
+		}
+
+		imageChan <- true
+	}()
+	return imageChan
 }

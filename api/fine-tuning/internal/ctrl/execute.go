@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
@@ -166,33 +167,23 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 }
 
 func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag string) error {
-	images, err := cli.ImageList(ctx, dockerImg.ListOptions{})
+	imageExists, err := image.ImageExists(ctx, cli, expectImag)
 	if err != nil {
-		c.logger.Errorf("Failed to list Docker images: %v", err)
 		return err
 	}
 
-	imageExists := false
-	for _, img := range images {
-		for _, tag := range img.RepoTags {
-			if tag == expectImag {
-				imageExists = true
-				break
-			}
-		}
-		if imageExists {
-			break
-		}
-	}
-
 	if !imageExists {
-		out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
-		if err != nil {
-			c.logger.Errorf("Failed to pull Docker image %s: %v", expectImag, err)
-			return err
+		if c.config.Images.BuildImage {
+			return fmt.Errorf("Failed to found image: %v", expectImag)
+		} else {
+			out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
+			if err != nil {
+				c.logger.Errorf("Failed to pull Docker image %s: %v", expectImag, err)
+				return err
+			}
+			defer out.Close()
+			io.Copy(os.Stdout, out)
 		}
-		defer out.Close()
-		io.Copy(os.Stdout, out)
 	}
 	return nil
 }

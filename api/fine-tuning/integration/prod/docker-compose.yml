@@ -15,7 +15,7 @@ services:
       - localhost
 
   0g-fine-tune-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:0.2.0
     privileged: true
     container_name: 0g-fine-tune-broker
     environment:
@@ -28,6 +28,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.local.yaml:/etc/config.yaml
       - /tmp:/tmp
+      - ../../../fine-tuning/execution/transformer:/fine-tuning/execution/transformer
     command: 0g-fine-tuning-server
     networks:
       - localhost

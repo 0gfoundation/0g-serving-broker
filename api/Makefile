@@ -84,7 +84,6 @@ package-inference-router-all-in-one: generate-inference-router-api
 package-fine-tuning:
 	@mkdir -p /tmp/fine-tuning-broker && \
 	rsync -av --exclude '**.local.*' ./fine-tuning/integration/prod/ /tmp/fine-tuning-broker && \
-	cp ./fine-tuning/doc/api/index.html /tmp/fine-tuning-broker/api.html && \
 	tar -czf /tmp/fine-tuning-broker.tar.gz -C /tmp fine-tuning-broker && \
 	rm -rf /tmp/fine-tuning-broker && \
 	echo "Package created at /tmp/fine-tuning-broker.tar.gz"

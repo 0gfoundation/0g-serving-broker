@@ -20,7 +20,7 @@ type ProviderContract struct {
 }
 
 func NewProviderContract(conf *config.Config, logger log.Logger) (*ProviderContract, error) {
-	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, os.Getenv("NETWORK"), conf.GasPrice)
+	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, os.Getenv("NETWORK"), conf.GasPrice, conf.MaxGasPrice, logger)
 	if err != nil {
 		return nil, err
 	}

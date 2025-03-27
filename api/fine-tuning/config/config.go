@@ -26,6 +26,8 @@ type Service struct {
 type Images struct {
 	ExecutionMockImageName string `yaml:"executionMockImageName"`
 	ExecutionImageName     string `yaml:"executionImageName"`
+	BuildImage             bool   `yaml:"buildImage"`
+	OverrideImage          bool   `yaml:"overrideImage"`
 }
 
 type Config struct {
@@ -43,6 +45,7 @@ type Config struct {
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
 	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 	GasPrice                    string              `yaml:"gasPrice"`
+	MaxGasPrice                 string              `yaml:"maxGasPrice"`
 }
 
 type StorageClientConfig struct {
@@ -98,6 +101,8 @@ func GetConfig() *Config {
 			Images: Images{
 				ExecutionMockImageName: "mock-fine-tuning:latest",
 				ExecutionImageName:     "execution-test-pytorch:v1",
+				BuildImage:             true,
+				OverrideImage:          false,
 			},
 			Logger: config.LoggerConfig{
 				Format:        "text",
@@ -107,6 +112,7 @@ func GetConfig() *Config {
 			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,
+			MaxGasPrice:                 "1000000000000",
 		}
 
 		if err := loadConfig(instance); err != nil {

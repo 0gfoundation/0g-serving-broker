@@ -26,7 +26,7 @@ func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
 }
 
 func (d *DB) UpdateTask(id *uuid.UUID, new Task) error {
-	ret := d.db.Where(&Task{ID: id}).Updates(new)
+	ret := d.db.Where(&Task{ID: id}).Where("progress <> ?", ProgressStateFailed.String()).Updates(new)
 	return ret.Error
 }
 

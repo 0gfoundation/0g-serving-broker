@@ -8,11 +8,7 @@ import (
 )
 
 func (c *ProviderContract) SettleFees(ctx context.Context, verifierInput contract.VerifierInput) error {
-	opt, err := c.Contract.CreateTransactOpts()
-	if err != nil {
-		return errors.Wrap(err, "create transact opts")
-	}
-	tx, err := c.Contract.SettleFees(opt, verifierInput)
+	tx, err := c.Contract.Transact(ctx, nil, "settleFees", verifierInput)
 	if err != nil {
 		return errors.Wrap(err, "call settleFees")
 	}
