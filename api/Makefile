@@ -13,7 +13,7 @@ build: clean
 	for arch in $(ARCH); do \
 		mkdir -p ./build/$$arch; \
 		GOOS=linux GOARCH=$$arch \
-			go build -trimpath \
+			go build -trimpath -buildvcs=false \
 			-o ./build/$$arch/broker . ; \
 	done
 
