@@ -67,7 +67,7 @@ func New(contract *providercontract.ProviderContract, BalanceThresholdInEther in
 	}, nil
 }
 
-func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey, tokenSize int64, pricePerToken int64, task *db.Task) error {
+func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey, tokenSize, trainEpochs int64, pricePerToken int64, task *db.Task) error {
 	balance, err := v.contract.Contract.GetBalance(ctx, common.HexToAddress(v.contract.ProviderAddress), nil)
 	if err != nil {
 		return err
@@ -76,7 +76,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 		return fmt.Errorf("insufficient provider balance: expected %v, got %v", v.balanceThresholdInEther, balance)
 	}
 
-	totalFee := new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken))
+	totalFee := new(big.Int).Mul(new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(pricePerToken)), big.NewInt(trainEpochs))
 	fee, err := util.ConvertToBigInt(task.Fee)
 	if err != nil {
 		return err

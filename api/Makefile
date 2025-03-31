@@ -1,6 +1,6 @@
 IMAGE_DEST ?= docker-daemon:ghcr.io/0glabs/0g-serving-broker
 VERSION	?= $(shell git describe --tags --abbrev=8)
-BASE_IMAGE ?= gcr.io/distroless/static:latest
+BASE_IMAGE ?= 0g-serving-broker:latest
 ARCH	   ?= amd64
 
 export GO111MODULE := on
@@ -13,18 +13,25 @@ build: clean
 	for arch in $(ARCH); do \
 		mkdir -p ./build/$$arch; \
 		GOOS=linux GOARCH=$$arch \
-			go build -trimpath \
+			go build -trimpath -buildvcs=false \
 			-o ./build/$$arch/broker . ; \
 	done
 
 clean:
 	rm -rf ./build
 
-oci: build
+submodules:
+	git submodule update --init --recursive	
+
+base-image:
+	docker build -t 0g-serving-broker .
+
+oci: build base-image submodules
 	for arch in $(ARCH); do \
 		skopeo --insecure-policy copy --src-tls-verify=false \
-			docker://$(BASE_IMAGE) oci:build/oci:$(VERSION)-$$arch; \
+			docker-daemon:$(BASE_IMAGE) oci:build/oci:$(VERSION)-$$arch; \
 		umoci insert --image build/oci:$(VERSION)-$$arch build/$$arch/broker /usr/bin/broker; \
+		umoci insert --image build/oci:$(VERSION)-$$arch token-counter/ /token-counter; \
 		umoci config --image build/oci:$(VERSION)-$$arch \
 			--config.entrypoint /usr/bin/broker \
 			--author 0glab --created $$(date -u +%FT%T.%NZ) \
