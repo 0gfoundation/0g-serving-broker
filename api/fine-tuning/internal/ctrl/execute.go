@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
@@ -22,7 +23,7 @@ import (
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/common/token"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 )
 
@@ -215,20 +216,6 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
-	tokenSize := int64(0)
-	if task.ImageName != "" {
-		// Todo: what's the better way to calculate the token size
-		v, err := util.FileContentSize(paths.Dataset)
-		if err != nil {
-			return err
-		}
-
-		tokenSize = v
-	}
-	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, c.config.Service.PricePerToken, task); err != nil {
-		return err
-	}
-
 	if err := c.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, constant.IS_TURBO); err != nil {
 		c.logger.Errorf("Error creating pre-trained model folder: %v\n", err)
 		return err
@@ -236,6 +223,28 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 
 	if err := os.WriteFile(paths.TrainingConfig, []byte(task.TrainingParams), os.ModePerm); err != nil {
 		c.logger.Errorf("Error writing training params file: %v\n", err)
+		return err
+	}
+
+	tokenSize := int64(0)
+	trainEpochs := int64(0)
+	if task.ImageName != "" {
+		trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+		var dataSetType token.DataSetType
+		if strings.HasSuffix(trainScript, "finetune-img.py") {
+			dataSetType = token.Image
+		} else {
+			dataSetType = token.Text
+		}
+
+		var err error
+		tokenSize, trainEpochs, err = token.CountTokens(dataSetType, paths.Dataset, paths.PretrainedModel, paths.TrainingConfig, c.logger)
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, trainEpochs, c.config.Service.PricePerToken, task); err != nil {
 		return err
 	}
 
