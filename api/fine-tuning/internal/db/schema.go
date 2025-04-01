@@ -44,6 +44,7 @@ type Task struct {
 	ImageName           string                `gorm:"type:varchar(255)" json:"imageName"`
 	DockerRunCmd        string                `gorm:"type:varchar(255)" json:"dockerRunCmd"`
 	Paid                bool                  `gorm:"type:bool;not null;default:false" json:"paid"`
+	NumRetries          uint                  `gorm:"type:int" json:"numRetries"`
 }
 
 // BeforeCreate hook for generating a UUID

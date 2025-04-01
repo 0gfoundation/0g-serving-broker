@@ -47,6 +47,7 @@ type Config struct {
 	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 	GasPrice                    string              `yaml:"gasPrice"`
 	MaxGasPrice                 string              `yaml:"maxGasPrice"`
+	MaxNumRetriesPerTask        uint                `yaml:"maxNumRetriesPerTask"`
 }
 
 type StorageClientConfig struct {
@@ -114,6 +115,7 @@ func GetConfig() *Config {
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,
 			MaxGasPrice:                 "1000000000000",
+			MaxNumRetriesPerTask:        10,
 		}
 
 		if err := loadConfig(instance); err != nil {

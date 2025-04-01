@@ -17,22 +17,24 @@ import (
 )
 
 type Settlement struct {
-	db             *db.DB
-	contract       *providercontract.ProviderContract
-	checkInterval  time.Duration
-	providerSigner common.Address
-	service        config.Service
-	logger         log.Logger
+	db                   *db.DB
+	contract             *providercontract.ProviderContract
+	checkInterval        time.Duration
+	providerSigner       common.Address
+	service              config.Service
+	logger               log.Logger
+	maxNumRetriesPerTask uint
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, service config.Service, logger log.Logger) (*Settlement, error) {
+func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, service config.Service, logger log.Logger, maxNumRetriesPerTask uint) (*Settlement, error) {
 	return &Settlement{
-		db:             db,
-		contract:       contract,
-		checkInterval:  checkInterval,
-		providerSigner: providerSigner,
-		service:        service,
-		logger:         logger,
+		db:                   db,
+		contract:             contract,
+		checkInterval:        checkInterval,
+		providerSigner:       providerSigner,
+		service:              service,
+		logger:               logger,
+		maxNumRetriesPerTask: maxNumRetriesPerTask,
 	}, nil
 }
 
@@ -70,8 +72,13 @@ func (s *Settlement) start(ctx context.Context) {
 				}
 			}
 
-			s.processFinishedTasks(ctx)
-			s.processFailedTasks(ctx)
+			if err := s.processFinishedTasks(ctx); err != nil {
+				s.logger.Error("error handling task", "err", err)
+			}
+
+			if err := s.processFailedTasks(ctx); err != nil {
+				s.logger.Error("error handling task", "err", err)
+			}
 		}
 	}
 }
@@ -174,16 +181,17 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	return nil
 }
 
-func (s *Settlement) processFinishedTasks(ctx context.Context) {
+func (s *Settlement) processFinishedTasks(ctx context.Context) error {
 	task := s.getPendingDeliveredTask(ctx)
 	if task != nil && task.ID != nil {
 		s.logger.Info("settle for task", "task", task.ID.String())
 		err := s.doSettlement(ctx, task)
 		if err != nil {
 			s.logger.Error("error during do settlement", "err", err)
+			return s.handleFailure(task, s.maxNumRetriesPerTask)
 		}
 
-		return
+		return nil
 	}
 
 	task = s.getPendingUserAcknowledgedTask()
@@ -192,8 +200,10 @@ func (s *Settlement) processFinishedTasks(ctx context.Context) {
 		err := s.doSettlement(ctx, task)
 		if err != nil {
 			s.logger.Error("error during do settlement for tasks failed once", "err", err)
+			return s.handleFailure(task, s.maxNumRetriesPerTask)
 		}
 	}
+	return nil
 }
 
 func (s *Settlement) getUnPaidFailedCustomizedTasks() *db.Task {
@@ -229,13 +239,24 @@ func (s *Settlement) chargeFailedTask(ctx context.Context, task *db.Task) error 
 	return nil
 }
 
-func (s *Settlement) processFailedTasks(ctx context.Context) {
+func (s *Settlement) processFailedTasks(ctx context.Context) error {
 	task := s.getUnPaidFailedCustomizedTasks()
 	if task != nil && task.ID != nil {
 		s.logger.Info("charge for task", "task", task.ID.String())
 		err := s.chargeFailedTask(ctx, task)
 		if err != nil {
 			s.logger.Error("error during do settlement for tasks failed once", "err", err)
+			return s.handleFailure(task, s.maxNumRetriesPerTask)
 		}
+	}
+
+	return nil
+}
+
+func (s *Settlement) handleFailure(task *db.Task, maxRetry uint) error {
+	if task.NumRetries < maxRetry {
+		return s.db.IncrementRetryCount(task)
+	} else {
+		return s.db.MarkTaskFailed(task)
 	}
 }

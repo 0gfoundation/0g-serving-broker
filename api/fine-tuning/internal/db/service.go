@@ -84,3 +84,15 @@ func (d *DB) GetUnPaidFailedCustomizedTasks() ([]Task, error) {
 	}
 	return filteredTasks, nil
 }
+
+func (s *DB) IncrementRetryCount(task *Task) error {
+	return s.UpdateTask(task.ID, Task{
+		NumRetries: task.NumRetries + 1,
+	})
+}
+
+func (s *DB) MarkTaskFailed(task *Task) error {
+	return s.UpdateTask(task.ID, Task{
+		Progress: ProgressStateFailed.String(),
+	})
+}

@@ -96,7 +96,7 @@ func Main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Service, logger)
+	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Service, logger, config.MaxNumRetriesPerTask)
 	if err != nil {
 		panic(err)
 	}
