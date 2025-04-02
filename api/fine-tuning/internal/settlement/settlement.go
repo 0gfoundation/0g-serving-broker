@@ -17,24 +17,28 @@ import (
 )
 
 type Settlement struct {
-	db                   *db.DB
-	contract             *providercontract.ProviderContract
-	checkInterval        time.Duration
-	providerSigner       common.Address
-	service              config.Service
-	logger               log.Logger
-	maxNumRetriesPerTask uint
+	db                      *db.DB
+	contract                *providercontract.ProviderContract
+	checkInterval           time.Duration
+	providerSigner          common.Address
+	service                 config.Service
+	logger                  log.Logger
+	maxNumRetriesPerTask    uint
+	settlementBatchSize     uint
+	deliveredTaskAckTimeout uint
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, service config.Service, logger log.Logger, maxNumRetriesPerTask uint) (*Settlement, error) {
+func New(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, providerSigner common.Address, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
-		db:                   db,
-		contract:             contract,
-		checkInterval:        checkInterval,
-		providerSigner:       providerSigner,
-		service:              service,
-		logger:               logger,
-		maxNumRetriesPerTask: maxNumRetriesPerTask,
+		db:                      db,
+		contract:                contract,
+		checkInterval:           time.Duration(config.SettlementCheckIntervalSecs) * time.Second,
+		providerSigner:          providerSigner,
+		service:                 config.Service,
+		logger:                  logger,
+		maxNumRetriesPerTask:    config.MaxNumRetriesPerTask,
+		settlementBatchSize:     config.SettlementBatchSize,
+		deliveredTaskAckTimeout: config.DeliveredTaskAckTimeoutSecs,
 	}, nil
 }
 
@@ -72,50 +76,109 @@ func (s *Settlement) start(ctx context.Context) {
 				}
 			}
 
-			if err := s.processFinishedTasks(ctx); err != nil {
+			batchSize := int(s.settlementBatchSize)
+			size, err := s.processFinishedTasks(ctx, batchSize)
+			if err != nil {
 				s.logger.Error("error handling task", "err", err)
 			}
 
-			if err := s.processFailedTasks(ctx); err != nil {
+			batchSize -= size
+			if err := s.processFailedTasks(ctx, batchSize); err != nil {
 				s.logger.Error("error handling task", "err", err)
 			}
 		}
 	}
 }
 
-func (s *Settlement) getPendingDeliveredTask(ctx context.Context) *db.Task {
+func (s *Settlement) processFinishedTasks(ctx context.Context, batchSize int) (int, error) {
+	s.processPendingUserAckTasks(ctx)
+
+	tasks := s.getPendingSettlementTask(batchSize)
+	counter := 0
+	for _, task := range tasks {
+		if task.ID != nil {
+			s.logger.Info("settle for task", "task", task.ID.String())
+			if err := s.doSettlement(ctx, &task, true); err != nil {
+				s.logger.Error("error during do settlement for tasks failed once", "err", err)
+				if err := s.handleFailure(&task, s.maxNumRetriesPerTask); err != nil {
+					s.logger.Error("error handling failure task", "err", err)
+				}
+			}
+
+			counter += 1
+		}
+	}
+
+	tasks = s.getUserAckTimeoutTask(batchSize - counter)
+	for _, task := range tasks {
+		if task.ID != nil {
+			s.logger.Info("settle for task", "task", task.ID.String())
+			if err := s.doSettlement(ctx, &task, false); err != nil {
+				s.logger.Error("error during do settlement for tasks failed once", "err", err)
+				if err := s.handleFailure(&task, s.maxNumRetriesPerTask); err != nil {
+					s.logger.Error("error handling failure task", "err", err)
+				}
+			}
+
+			counter += 1
+		}
+	}
+
+	return counter, nil
+}
+
+func (s *Settlement) processPendingUserAckTasks(ctx context.Context) {
 	tasks, err := s.db.GetDeliveredTasks()
 	if err != nil {
 		s.logger.Error("error getting delivered tasks", "err", err)
-		return nil
+		return
 	}
 	if len(tasks) == 0 {
-		return nil
-	}
-	// one task at a time
-	task := tasks[0]
-	account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
-	if err != nil {
-		s.logger.Error("error getting user account from contract", "err", err)
-		return nil
-	}
-	if !account.Deliverables[len(account.Deliverables)-1].Acknowledged {
-		return nil
-	}
-	if err := s.db.UpdateTask(task.ID,
-		db.Task{
-			Progress: db.ProgressStateUserAckDelivered.String(),
-		}); err != nil {
-		s.logger.Error("error updating task", "err", err)
-		return nil
+		return
 	}
 
-	return &task
+	lockTime, err := s.contract.GetLockTime(ctx)
+	if err != nil {
+		s.logger.Error("error getting lock time from contract", "err", err)
+	}
+
+	ackTimeout := int64(s.deliveredTaskAckTimeout)
+	if ackTimeout > lockTime/2 {
+		ackTimeout = lockTime / 2
+	}
+
+	for _, task := range tasks {
+		account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
+		if err != nil {
+			s.logger.Error("error getting user account from contract", "id", task.ID, "err", err)
+			continue
+		}
+
+		if !account.Deliverables[len(account.Deliverables)-1].Acknowledged {
+			if time.Now().Unix() >= task.DeliverTime+ackTimeout {
+				if err := s.db.UpdateTask(task.ID,
+					db.Task{
+						Progress: db.ProgressStateUserAckTimeout.String(),
+					}); err != nil {
+					s.logger.Error("error updating task to UserAckTimeout", "id", task.ID, "err", err)
+				}
+			}
+			continue
+		}
+
+		if err := s.db.UpdateTask(task.ID,
+			db.Task{
+				Progress: db.ProgressStateUserAckDelivered.String(),
+			}); err != nil {
+			s.logger.Error("error updating task to UserAckDelivered", "id", task.ID, "err", err)
+			continue
+		}
+	}
 }
 
 // Theoretically, userAcknowledgedTasks should be settled with getPendingDeliveredTask
-// We have getPendingUserAcknowledgedTask to settle task in case of any failure in getPendingDeliveredTask
-func (s *Settlement) getPendingUserAcknowledgedTask() *db.Task {
+// We have getPendingSettlementTask to settle task in case of any failure in getPendingDeliveredTask
+func (s *Settlement) getPendingSettlementTask(batchSize int) []db.Task {
 	tasks, err := s.db.GetUserAckDeliveredTasks()
 	if err != nil {
 		s.logger.Error("error getting user acknowledged tasks", "err", err)
@@ -125,10 +188,31 @@ func (s *Settlement) getPendingUserAcknowledgedTask() *db.Task {
 		return nil
 	}
 	// one task at a time
-	return &tasks[0]
+	if len(tasks) > batchSize {
+		return tasks[:batchSize]
+	} else {
+		return tasks
+	}
 }
 
-func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
+func (s *Settlement) getUserAckTimeoutTask(batchSize int) []db.Task {
+	tasks, err := s.db.GetUserAckTimeoutTasks()
+	if err != nil {
+		s.logger.Error("error getting user acknowledged tasks", "err", err)
+		return nil
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	// one task at a time
+	if len(tasks) > batchSize {
+		return tasks[:batchSize]
+	} else {
+		return tasks
+	}
+}
+
+func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked bool) error {
 	modelRootHash, err := hexutil.Decode(task.OutputRootHash)
 	if err != nil {
 		return err
@@ -149,9 +233,12 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 		return err
 	}
 
-	retrievedSecret, err := hex.DecodeString(task.EncryptedSecret)
-	if err != nil {
-		return err
+	retrievedSecret := []byte{}
+	if useAcked {
+		retrievedSecret, err = hex.DecodeString(task.EncryptedSecret)
+		if err != nil {
+			return err
+		}
 	}
 
 	input := contract.VerifierInput{
@@ -181,32 +268,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 	return nil
 }
 
-func (s *Settlement) processFinishedTasks(ctx context.Context) error {
-	task := s.getPendingDeliveredTask(ctx)
-	if task != nil && task.ID != nil {
-		s.logger.Info("settle for task", "task", task.ID.String())
-		err := s.doSettlement(ctx, task)
-		if err != nil {
-			s.logger.Error("error during do settlement", "err", err)
-			return s.handleFailure(task, s.maxNumRetriesPerTask)
-		}
-
-		return nil
-	}
-
-	task = s.getPendingUserAcknowledgedTask()
-	if task != nil && task.ID != nil {
-		s.logger.Info("settle for task", "task", task.ID.String())
-		err := s.doSettlement(ctx, task)
-		if err != nil {
-			s.logger.Error("error during do settlement for tasks failed once", "err", err)
-			return s.handleFailure(task, s.maxNumRetriesPerTask)
-		}
-	}
-	return nil
-}
-
-func (s *Settlement) getUnPaidFailedCustomizedTasks() *db.Task {
+func (s *Settlement) getUnPaidFailedCustomizedTasks(batchSize int) []db.Task {
 	tasks, err := s.db.GetUnPaidFailedCustomizedTasks()
 	if err != nil {
 		s.logger.Error("error getting user acknowledged tasks", "err", err)
@@ -216,7 +278,11 @@ func (s *Settlement) getUnPaidFailedCustomizedTasks() *db.Task {
 		return nil
 	}
 
-	return &tasks[0]
+	if len(tasks) > batchSize {
+		return tasks[:batchSize]
+	} else {
+		return tasks
+	}
 }
 
 func (s *Settlement) chargeFailedTask(ctx context.Context, task *db.Task) error {
@@ -239,14 +305,16 @@ func (s *Settlement) chargeFailedTask(ctx context.Context, task *db.Task) error 
 	return nil
 }
 
-func (s *Settlement) processFailedTasks(ctx context.Context) error {
-	task := s.getUnPaidFailedCustomizedTasks()
-	if task != nil && task.ID != nil {
-		s.logger.Info("charge for task", "task", task.ID.String())
-		err := s.chargeFailedTask(ctx, task)
-		if err != nil {
-			s.logger.Error("error during do settlement for tasks failed once", "err", err)
-			return s.handleFailure(task, s.maxNumRetriesPerTask)
+func (s *Settlement) processFailedTasks(ctx context.Context, batchSize int) error {
+	tasks := s.getUnPaidFailedCustomizedTasks(batchSize)
+	for _, task := range tasks {
+		if task.ID != nil {
+			s.logger.Info("charge for task", "task", task.ID.String())
+			err := s.chargeFailedTask(ctx, &task)
+			if err != nil {
+				s.logger.Error("error during do settlement for tasks failed once", "err", err)
+				return s.handleFailure(&task, s.maxNumRetriesPerTask)
+			}
 		}
 	}
 

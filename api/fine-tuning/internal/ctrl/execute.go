@@ -98,7 +98,12 @@ func (c *Ctrl) setupTaskEnvironment(tmpFolderPath, taskLogFile string) error {
 }
 
 func (c *Ctrl) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolderPath string) error {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, c.contract.LockTime/2)
+	lockTime, err := c.contract.GetLockTime(ctx)
+	if err != nil {
+		return err
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, (time.Duration(lockTime)*time.Second)/2)
 	defer cancel()
 
 	done := make(chan error)
@@ -228,7 +233,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 
 	tokenSize := int64(0)
 	trainEpochs := int64(0)
-	if task.ImageName != "" {
+	if task.ModelType == db.PreDefinedModel {
 		trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
 		var dataSetType token.DataSetType
 		if strings.HasSuffix(trainScript, "finetune-img.py") {
@@ -422,11 +427,8 @@ func (c *Ctrl) getContainerImage(task *db.Task) (string, string, bool, error) {
 	trainScript := ""
 	customizedImage := false
 
-	if task.ImageName != "" {
-		image = task.ImageName
-		trainScript = task.DockerRunCmd
-		customizedImage = true
-	} else {
+	switch task.ModelType {
+	case db.PreDefinedModel:
 		if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
 			image = c.config.Images.ExecutionMockImageName
 		} else {
@@ -434,6 +436,12 @@ func (c *Ctrl) getContainerImage(task *db.Task) (string, string, bool, error) {
 		}
 
 		trainScript = constant.SCRIPT_MAP[task.PreTrainedModelHash]
+	case db.CustomizedModel:
+		image = task.ImageName
+		trainScript = task.DockerRunCmd
+		customizedImage = true
+	default:
+		return "", "", false, errors.New("unknown model type")
 	}
 
 	if trainScript == "" {
@@ -502,8 +510,9 @@ func (c *Ctrl) monitorBalance(ctx context.Context, userAddr common.Address, star
 				continue
 			}
 
+			balance := new(big.Int).Sub(account.Balance, account.PendingRefund)
 			usedBalance := c.calculateFee(startTime, c.config.Service.PricePerHour)
-			if account.Balance.Cmp(usedBalance) < 0 {
+			if balance.Cmp(usedBalance) < 0 {
 				runOutOfBalance <- account.Balance
 			}
 		}

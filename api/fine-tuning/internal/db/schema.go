@@ -15,13 +15,21 @@ const (
 	ProgressStateInProgress
 	ProgressStateDelivered
 	ProgressStateUserAckDelivered
+	ProgressStateUserAckTimeout
 	ProgressStateFinished
 	ProgressStateFailed
 )
 
 func (p ProgressState) String() string {
-	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "Finished", "Failed"}[p]
+	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "UserAckTimeout", "Finished", "Failed"}[p]
 }
+
+type ModelType uint8
+
+const (
+	PreDefinedModel ModelType = iota
+	CustomizedModel
+)
 
 type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
@@ -45,6 +53,8 @@ type Task struct {
 	DockerRunCmd        string                `gorm:"type:varchar(255)" json:"dockerRunCmd"`
 	Paid                bool                  `gorm:"type:bool;not null;default:false" json:"paid"`
 	NumRetries          uint                  `gorm:"type:int" json:"numRetries"`
+	ModelType           ModelType             `gorm:"type:tinyint" json:"modelType"`
+	DeliverTime         int64                 `gorm:"type:timestamp" json:"deliverTime"`
 }
 
 // BeforeCreate hook for generating a UUID

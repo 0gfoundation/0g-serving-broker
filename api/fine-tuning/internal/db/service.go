@@ -40,7 +40,7 @@ func (d *DB) MarkInProgressTasksAsFailed() error {
 
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
-	ret := d.db.Model(&Task{}).Where("Progress = ?", ProgressStateInProgress.String()).Count(&count)
+	ret := d.db.Model(&Task{}).Where("progress = ?", ProgressStateInProgress.String()).Count(&count)
 	if ret.Error != nil {
 		return 0, ret.Error
 	}
@@ -69,7 +69,16 @@ func (d *DB) GetDeliveredTasks() ([]Task, error) {
 
 func (d *DB) GetUserAckDeliveredTasks() ([]Task, error) {
 	var filteredTasks []Task
-	ret := d.db.Where(&Task{Progress: ProgressStateUserAckDelivered.String()}).Find(&filteredTasks)
+	ret := d.db.Where(&Task{Progress: ProgressStateUserAckDelivered.String()}).Order("created_at DESC").Find(&filteredTasks)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
+	return filteredTasks, nil
+}
+
+func (d *DB) GetUserAckTimeoutTasks() ([]Task, error) {
+	var filteredTasks []Task
+	ret := d.db.Where(&Task{Progress: ProgressStateUserAckTimeout.String()}).Order("created_at DESC").Find(&filteredTasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}
@@ -78,7 +87,7 @@ func (d *DB) GetUserAckDeliveredTasks() ([]Task, error) {
 
 func (d *DB) GetUnPaidFailedCustomizedTasks() ([]Task, error) {
 	var filteredTasks []Task
-	ret := d.db.Model(&Task{}).Where("progress = ? AND paid = ? AND ImageName <> ''", ProgressStateFailed.String(), false).Find(&filteredTasks)
+	ret := d.db.Model(&Task{}).Where("progress = ? AND paid = ? AND image_name <> ''", ProgressStateFailed.String(), false).Find(&filteredTasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}

@@ -57,6 +57,11 @@ func (d *Task) BindWithReadonly(ctx *gin.Context, old Task) error {
 }
 
 func (t *Task) GenerateDBTask() *db.Task {
+	modelType := db.PreDefinedModel
+	if t.ImageName != "" {
+		modelType = db.CustomizedModel
+	}
+
 	return &db.Task{
 		UserAddress:         t.UserAddress,
 		PreTrainedModelHash: t.PreTrainedModelHash,
@@ -67,6 +72,7 @@ func (t *Task) GenerateDBTask() *db.Task {
 		Signature:           t.Signature,
 		ImageName:           t.ImageName,
 		DockerRunCmd:        t.DockerRunCmd,
+		ModelType:           modelType,
 	}
 }
 
