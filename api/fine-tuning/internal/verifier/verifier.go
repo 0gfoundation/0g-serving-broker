@@ -25,7 +25,10 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-const aesKeySize = 32 // 256-bit AES key (32 bytes)
+const (
+	aesKeySize    = 32 // 256-bit AES key (32 bytes)
+	uploadTimeout = 60 * time.Minute
+)
 
 type SignatureMetadata struct {
 	taskFee      *big.Int
@@ -168,11 +171,9 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 	defer func() {
-		_, err := os.Stat(plainFile)
-		if err != nil && os.IsNotExist(err) {
-			return
+		if err := os.Remove(plainFile); err != nil && !os.IsNotExist(err) {
+			v.logger.Errorf("Failed to remove temporary file %s: %v", plainFile, err)
 		}
-		_ = os.Remove(plainFile)
 	}()
 
 	encryptFile, err := util.GetFileName(sourceDir, ".data")
@@ -192,29 +193,27 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 
 	err = util.WriteToFileHead(encryptFile, tagSig)
 	defer func() {
-		_, err := os.Stat(encryptFile)
-		if err != nil && os.IsNotExist(err) {
-			return
+		if err := os.Remove(encryptFile); err != nil && !os.IsNotExist(err) {
+			v.logger.Errorf("Failed to remove temporary file %s: %v", encryptFile, err)
 		}
-		_ = os.Remove(encryptFile)
 	}()
 
 	if err != nil {
 		return nil, err
 	}
 
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 600*time.Minute)
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
 
 	var modelRootHashes []common.Hash
-	uploadChan := make(chan bool)
+	uploadChan := make(chan error)
 	go func() {
 		modelRootHashes, err = storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)
-		uploadChan <- true
+		uploadChan <- err
 	}()
 
 	select {
-	case <-uploadChan:
+	case err := <-uploadChan:
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +226,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 	var data []byte
 
 	if len(modelRootHashes) == 0 {
-		return nil, fmt.Errorf("no model root hashes provided")
+		return nil, errors.New("no model root hashes provided")
 	}
 
 	for i, hash := range modelRootHashes {

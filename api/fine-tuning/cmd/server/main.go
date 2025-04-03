@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -101,7 +100,7 @@ func Main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Service, logger)
+	settlement, err := settlement.New(db, contract, config, ctrl.GetProviderSignerAddress(ctx), logger)
 	if err != nil {
 		panic(err)
 	}
@@ -122,6 +121,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 			if err != nil {
 				panic(err)
 			}
+			defer cli.Close()
 
 			imageName := config.Images.ExecutionImageName
 			buildImage := true

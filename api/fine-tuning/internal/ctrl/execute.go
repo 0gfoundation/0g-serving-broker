@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/docker/docker/api/types/container"
@@ -26,12 +28,13 @@ import (
 )
 
 const (
-	DatasetPath         = "data"
-	PretrainedModelPath = "model"
-	TrainingConfigPath  = "config.json"
-	OutputPath          = "output_model"
-	ContainerBasePath   = "/app/mnt"
-	TaskLogFileName     = "progress.log"
+	DatasetPath          = "data"
+	PretrainedModelPath  = "model"
+	TrainingConfigPath   = "config.json"
+	OutputPath           = "output_model"
+	ContainerBasePath    = "/app/mnt"
+	TaskLogFileName      = "progress.log"
+	BalanceCheckInterval = 5 * time.Minute
 )
 
 type TaskPaths struct {
@@ -49,18 +52,107 @@ type TaskPaths struct {
 func NewTaskPaths(basePath string) *TaskPaths {
 	return &TaskPaths{
 		BasePath:                 basePath,
-		Dataset:                  fmt.Sprintf("%s/%s", basePath, DatasetPath),
-		PretrainedModel:          fmt.Sprintf("%s/%s", basePath, PretrainedModelPath),
-		TrainingConfig:           fmt.Sprintf("%s/%s", basePath, TrainingConfigPath),
-		Output:                   fmt.Sprintf("%s/%s", basePath, OutputPath),
-		ContainerDataset:         fmt.Sprintf("%s/%s", ContainerBasePath, DatasetPath),
-		ContainerPretrainedModel: fmt.Sprintf("%s/%s", ContainerBasePath, PretrainedModelPath),
-		ContainerTrainingConfig:  fmt.Sprintf("%s/%s", ContainerBasePath, TrainingConfigPath),
-		ContainerOutput:          fmt.Sprintf("%s/%s", ContainerBasePath, OutputPath),
+		Dataset:                  filepath.Join(basePath, DatasetPath),
+		PretrainedModel:          filepath.Join(basePath, PretrainedModelPath),
+		TrainingConfig:           filepath.Join(basePath, TrainingConfigPath),
+		Output:                   filepath.Join(basePath, OutputPath),
+		ContainerDataset:         filepath.Join(ContainerBasePath, DatasetPath),
+		ContainerPretrainedModel: filepath.Join(ContainerBasePath, PretrainedModelPath),
+		ContainerTrainingConfig:  filepath.Join(ContainerBasePath, TrainingConfigPath),
+		ContainerOutput:          filepath.Join(ContainerBasePath, OutputPath),
 	}
 }
 
-func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
+func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
+	tmpFolderPath := filepath.Join(os.TempDir(), dbTask.ID.String())
+	taskLogFile := filepath.Join(tmpFolderPath, TaskLogFileName)
+	if err := c.setupTaskEnvironment(tmpFolderPath, taskLogFile); err != nil {
+		c.handleTaskFailure(dbTask, taskLogFile, err)
+		return
+	}
+
+	err := c.executeWithTimeout(ctx, dbTask, tmpFolderPath)
+
+	if err != nil {
+		c.handleTaskFailure(dbTask, taskLogFile, err)
+	} else {
+		successMsg := fmt.Sprintf("Training model for task %s completed successfully", dbTask.ID)
+		if err := c.writeToLogFile(taskLogFile, successMsg); err != nil {
+			c.logger.Errorf("Write success message failed: %v", err)
+		}
+	}
+}
+
+func (c *Ctrl) setupTaskEnvironment(tmpFolderPath, taskLogFile string) error {
+	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
+		return errors.Wrap(err, "create temporary folder")
+	}
+	c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
+
+	// create log file
+	if err := c.writeToLogFile(taskLogFile, "creating task....\n"); err != nil {
+		return errors.Wrap(err, "initialize task log")
+	}
+
+	return nil
+}
+
+func (c *Ctrl) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolderPath string) error {
+	lockTime, err := c.contract.GetLockTime(ctx)
+	if err != nil {
+		return err
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, (time.Duration(lockTime)*time.Second)/2)
+	defer cancel()
+
+	done := make(chan error)
+	go func() {
+		done <- c.execute(ctxWithTimeout, dbTask, tmpFolderPath)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return errors.Wrap(err, "task execution failed")
+		}
+		c.logger.Infof("Task %s finished", dbTask.ID)
+		return nil
+	case <-ctxWithTimeout.Done():
+		return fmt.Errorf("task %s timeout reached", dbTask.ID)
+	}
+}
+
+func (c *Ctrl) handleTaskFailure(dbTask *db.Task, taskLogFile string, err error) {
+	errMsg := fmt.Sprintf("Error executing task: %v", err)
+	c.logger.Error(errMsg)
+
+	if err := c.db.UpdateTask(dbTask.ID, db.Task{
+		Progress: db.ProgressStateFailed.String(),
+	}); err != nil {
+		c.logger.Errorf("Error updating task: %v", err)
+		errMsg = fmt.Sprintf("%s\n%s", errMsg, err.Error())
+	}
+
+	if logErr := c.writeToLogFile(taskLogFile, errMsg); logErr != nil {
+		c.logger.Errorf("Write into task log failed: %v", logErr)
+	}
+}
+
+func (c *Ctrl) writeToLogFile(filePath, content string) error {
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return errors.Wrap(err, "open log file")
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(content); err != nil {
+		return errors.Wrap(err, "write to log file")
+	}
+	return nil
+}
+
+func (c *Ctrl) execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
 	defer c.CleanUp(paths)
@@ -78,8 +170,6 @@ func (c *Ctrl) Execute(ctx context.Context, task *db.Task, tmpFolderPath string)
 		return err
 	}
 
-	c.CleanUp(paths)
-
 	return nil
 }
 
@@ -91,14 +181,14 @@ func removeAllZipFiles(dir string) error {
 	// Find all matching zip files
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return fmt.Errorf("failed to glob pattern: %v", err)
+		return errors.Wrap(err, "failed to glob pattern")
 	}
 
 	// Iterate and remove each file
 	for _, zipFile := range matches {
 		fmt.Printf("Removing: %s\n", zipFile)
 		if err := os.Remove(zipFile); err != nil {
-			return fmt.Errorf("failed to remove %s: %v", zipFile, err)
+			return errors.Wrapf(err, "failed to remove %s", zipFile)
 		}
 	}
 
@@ -158,7 +248,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
-	if err = os.Mkdir(paths.Output, os.ModePerm); err != nil {
+	if err := os.Mkdir(paths.Output, os.ModePerm); err != nil {
 		c.logger.Errorf("Error creating output model folder: %v\n", err)
 		return err
 	}
@@ -174,7 +264,7 @@ func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag str
 
 	if !imageExists {
 		if c.config.Images.BuildImage {
-			return fmt.Errorf("Failed to found image: %v", expectImag)
+			return fmt.Errorf("failed to found image: %v", expectImag)
 		} else {
 			out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
 			if err != nil {
@@ -194,12 +284,50 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		c.logger.Errorf("Failed to create Docker client: %v", err)
 		return err
 	}
+	defer cli.Close()
 
-	image := c.config.Images.ExecutionImageName
-
-	info, err := cli.Info(ctx)
+	hostConfig, err := c.generateHostConfig(ctx, cli, paths, task)
 	if err != nil {
 		return err
+	}
+
+	image, trainScript, err := c.getContainerImage(task)
+	if err != nil {
+		return err
+	}
+
+	if err := c.pullImage(ctx, cli, image); err != nil {
+		c.logger.Errorf("Failed to create container: %v", err)
+		return err
+	}
+
+	containerID, err := c.createContainer(ctx, cli, image, trainScript, paths, hostConfig, task)
+	if err != nil {
+		return err
+	}
+	defer c.cleanupContainer(ctx, cli, containerID)
+
+	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		c.logger.Errorf("Failed to start container: %v", err)
+		return err
+	}
+
+	userAddr := common.HexToAddress(task.UserAddress)
+	if err := c.waitForContainer(ctx, cli, containerID, task); err != nil {
+		return err
+	}
+
+	if err := c.fetchContainerLogs(ctx, cli, containerID); err != nil {
+		return err
+	}
+
+	return c.finalizeTask(ctx, paths, task, userAddr)
+}
+
+func (c *Ctrl) generateHostConfig(ctx context.Context, cli *client.Client, paths *TaskPaths, task *db.Task) (*container.HostConfig, error) {
+	info, err := cli.Info(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	storageOpt := make(map[string]string)
@@ -216,7 +344,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	runtime := ""
 	deviceRequests := make([]container.DeviceRequest, 0)
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
-		image = c.config.Images.ExecutionMockImageName
 		runtime = ""
 	} else {
 		if _, ok := info.Runtimes["nvidia"]; ok {
@@ -233,25 +360,6 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		} else {
 			c.logger.Warn("nvidia runtime not found.")
 		}
-	}
-
-	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
-	if trainScript == "" {
-		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
-		return errors.New("no training script found")
-	}
-
-	containerConfig := &container.Config{
-		Image: image,
-		Cmd: []string{
-			"python",
-			trainScript,
-			"--data_path", paths.ContainerDataset,
-			"--model_path", paths.ContainerPretrainedModel,
-			"--config_path", paths.ContainerTrainingConfig,
-			"--output_dir", paths.ContainerOutput,
-		},
-		Env: constant.ENV_MAP[task.PreTrainedModelHash],
 	}
 
 	cpuCount := c.config.Service.Quota.CpuCount
@@ -282,40 +390,71 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		},
 		StorageOpt: storageOpt,
 	}
+	return hostConfig, nil
+}
 
-	err = c.pullImage(ctx, cli, image)
-	if err != nil {
-		c.logger.Errorf("Failed to create container: %v", err)
-		return err
+func (c *Ctrl) getContainerImage(task *db.Task) (string, string, error) {
+	image := ""
+	trainScript := ""
+
+	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+		image = c.config.Images.ExecutionMockImageName
+	} else {
+		image = c.config.Images.ExecutionImageName
+	}
+
+	trainScript = constant.SCRIPT_MAP[task.PreTrainedModelHash]
+
+	if trainScript == "" {
+		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
+		return "", "", errors.New("no training script found")
+	}
+
+	return image, trainScript, nil
+}
+
+func (c *Ctrl) createContainer(ctx context.Context, cli *client.Client, image string, trainScript string, paths *TaskPaths, hostConfig *container.HostConfig, task *db.Task) (string, error) {
+	containerConfig := &container.Config{
+		Image: image,
+		Cmd: []string{
+			"python",
+			trainScript,
+			"--data_path", paths.ContainerDataset,
+			"--model_path", paths.ContainerPretrainedModel,
+			"--config_path", paths.ContainerTrainingConfig,
+			"--output_dir", paths.ContainerOutput,
+		},
+		Env: constant.ENV_MAP[task.PreTrainedModelHash],
 	}
 
 	resp, err := cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		c.logger.Errorf("Failed to create container: %v", err)
-		return err
+		return "", err
 	}
 
-	containerID := resp.ID
-	c.logger.Infof("Container %s created successfully. Now Starting...\n", containerID)
+	c.logger.Infof("Container %s created successfully. Now starting...", resp.ID)
+	return resp.ID, nil
+}
 
-	defer func() error {
-		// remove the container
-		if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
-			c.logger.Errorf("Failed to remove container: %v", err)
-			return err
-		}
-
+func (c *Ctrl) cleanupContainer(ctx context.Context, cli *client.Client, containerID string) {
+	// remove the container
+	err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true})
+	if err != nil {
+		c.logger.Errorf("Failed to remove container: %v", err)
+	} else {
 		c.logger.Infof("Container %s removed successfully\n", containerID)
-
-		return nil
-	}()
-
-	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		c.logger.Errorf("Failed to start container: %v", err)
-		return err
 	}
-	c.logger.Infof("Container %s started successfully\n", containerID)
+}
 
+func (*Ctrl) calculateFee(startTime time.Time, pricePerHour int64) *big.Int {
+	elapsed := time.Since(startTime)
+	usedBalance := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(float64(pricePerHour)), big.NewFloat(elapsed.Hours())).Int(usedBalance)
+	return usedBalance
+}
+
+func (c *Ctrl) waitForContainer(ctx context.Context, cli *client.Client, containerID string, task *db.Task) error {
 	statusCh, errCh := cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
 	select {
 	case err := <-errCh:
@@ -325,8 +464,17 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 		}
 	case <-statusCh:
 		c.logger.Infof("Container %s has stopped\n", containerID)
+	case <-ctx.Done():
+		if err := cli.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+			c.logger.Errorf("Error stopping container: %v", err)
+		}
+		return errors.New(fmt.Sprintf("Task %v was canceled or timed out", task.ID))
 	}
 
+	return nil
+}
+
+func (c *Ctrl) fetchContainerLogs(ctx context.Context, cli *client.Client, containerID string) error {
 	out, err := cli.ContainerLogs(ctx, containerID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
 	if err != nil {
 		c.logger.Printf("Failed to fetch logs: %v", err)
@@ -339,16 +487,21 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	for scanner.Scan() {
 		c.logger.Debug(scanner.Text())
 	}
+
 	if err := scanner.Err(); err != nil {
 		c.logger.Errorf("Error reading logs: %v", err)
 	}
 
+	return nil
+}
+
+func (c *Ctrl) finalizeTask(ctx context.Context, paths *TaskPaths, task *db.Task, userAddr common.Address) error {
 	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
 	if err != nil {
 		return err
 	}
 
-	account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
+	account, err := c.contract.GetUserAccount(ctx, userAddr)
 	if err != nil {
 		return err
 	}
@@ -363,6 +516,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 			EncryptedSecret: encodedSecret,
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 			DeliverIndex:    uint64(len(account.Deliverables) - 1),
+			Fee:             task.Fee,
 		})
 	if err != nil {
 		c.logger.Errorf("Failed to update task: %v", err)

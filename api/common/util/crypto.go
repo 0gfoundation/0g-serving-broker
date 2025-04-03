@@ -10,9 +10,13 @@ import (
 	"os"
 )
 
+const (
+	defaultBufferSize = 64 * 1024 * 1024
+)
+
 func GenerateAESKey(keySize int) ([]byte, error) {
 	if keySize != 16 && keySize != 24 && keySize != 32 {
-		return nil, fmt.Errorf("invalid AES key size. Supported sizes are 16, 24, or 32 bytes.")
+		return nil, fmt.Errorf("invalid AES key size. Supported sizes are 16, 24, or 32 bytes")
 	}
 
 	key := make([]byte, keySize)
@@ -88,7 +92,7 @@ func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, erro
 		return nil, fmt.Errorf("failed to write nonce to output file: %v", err)
 	}
 
-	buf := make([]byte, 64*1024*1024)
+	buf := make([]byte, defaultBufferSize)
 	tagBuf := new(bytes.Buffer)
 
 	for {

@@ -13,6 +13,18 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 )
 
+func (c *ProviderContract) GetLockTime(ctx context.Context) (int64, error) {
+	lockTime, err := c.Contract.LockTime(&bind.CallOpts{
+		Context: context.Background(),
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return lockTime.Int64(), nil
+}
+
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
 	cpuCount, err := util.ConvertToBigInt(service.Quota.CpuCount)
 	if err != nil {

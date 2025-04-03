@@ -25,13 +25,13 @@ type Settlement struct {
 	logger         log.Logger
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, service config.Service, logger log.Logger) (*Settlement, error) {
+func New(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, providerSigner common.Address, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
 		db:             db,
 		contract:       contract,
-		checkInterval:  checkInterval,
+		checkInterval:  time.Duration(config.SettlementCheckIntervalSecs) * time.Second,
 		providerSigner: providerSigner,
-		service:        service,
+		service:        config.Service,
 		logger:         logger,
 	}, nil
 }

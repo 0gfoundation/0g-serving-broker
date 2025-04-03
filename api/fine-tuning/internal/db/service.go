@@ -40,7 +40,7 @@ func (d *DB) MarkInProgressTasksAsFailed() error {
 
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
-	ret := d.db.Model(&Task{}).Where("Progress = ?", ProgressStateInProgress.String()).Count(&count)
+	ret := d.db.Model(&Task{}).Where("progress = ?", ProgressStateInProgress.String()).Count(&count)
 	if ret.Error != nil {
 		return 0, ret.Error
 	}

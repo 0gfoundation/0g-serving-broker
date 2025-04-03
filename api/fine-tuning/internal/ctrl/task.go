@@ -2,8 +2,8 @@ package ctrl
 
 import (
 	"context"
-	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -14,144 +14,46 @@ import (
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, error) {
+	if err := c.validateProviderSigner(ctx, task.UserAddress); err != nil {
+		return nil, err
+	}
+
+	c.taskMutex.Lock()
+	defer c.taskMutex.Unlock()
+
+	if err := c.validateNoInProgressTasks(); err != nil {
+		return nil, err
+	}
+
+	if err := c.validateNoUnfinishedTasks(task); err != nil {
+		return nil, err
+	}
+
 	dbTask := task.GenerateDBTask()
-	count, err := c.db.InProgressTaskCount()
-	if err != nil {
-		return nil, err
-	}
-
-	if count != 0 {
-		return nil, errors.New("cannot create a new task while there is an in-progress task")
-	}
-
-	count, err = c.db.UnFinishedTaskCount(task.UserAddress)
-	if err != nil {
-		return nil, err
-	}
-	if count != 0 {
-		// For each customer, we process tasks single-threaded
-		return nil, errors.New("cannot create a new task while there is an unfinished task")
-	}
-
-	userAddress := common.HexToAddress(task.UserAddress)
-	account, err := c.contract.GetUserAccount(ctx, userAddress)
-	if err != nil {
-		return nil, errors.Wrap(err, "get account in contract")
-	}
-
-	c.logger.Info(fmt.Sprintf("account.ProviderSigner: %s", account.ProviderSigner.String()))
-	c.logger.Info(fmt.Sprintf("inner provider address: %s", c.GetProviderSignerAddress(ctx).String()))
-	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
-		return nil, errors.New("provider signer should be acknowledged before creating a task")
-	}
-
 	dbTask.Progress = db.ProgressStateInProgress.String()
-	err = c.db.AddTask(dbTask)
-	if err != nil {
+	if err := c.db.AddTask(dbTask); err != nil {
 		return nil, errors.Wrap(err, "create task in db")
 	}
 
-	c.ExecuteTask(ctx, dbTask)
+	go c.ExecuteTask(ctx, dbTask)
 
 	return dbTask.ID, nil
 }
 
-func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
-	go func() {
-		baseDir := os.TempDir()
-		tmpFolderPath := fmt.Sprintf("%s/%s", baseDir, dbTask.ID)
-
-		updateTaskAndLogError := func(errMsg string) {
-			c.logger.Errorf("Error: %v", errMsg)
-			if err := c.db.UpdateTask(dbTask.ID, db.Task{
-				Progress: db.ProgressStateFailed.String(),
-			}); err != nil {
-				c.logger.Error(fmt.Sprintf("Error updating task: %v", err))
-			}
-		}
-
-		if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
-			updateTaskAndLogError(fmt.Sprintf("Error creating temporary folder: %v\n", err))
-			return
-		}
-		c.logger.Infof("Created temporary folder %s\n", tmpFolderPath)
-
-		// create log file
-		taskLogFile := fmt.Sprintf("%s/%s", tmpFolderPath, TaskLogFileName)
-		file, err := os.Create(taskLogFile)
-		if err != nil {
-			updateTaskAndLogError(fmt.Sprintf("Error creating file: %v", err))
-			return
-		}
-
-		if _, err := file.WriteString("creating task....\n"); err != nil {
-			updateTaskAndLogError(fmt.Sprintf("Error writing to file: %v", err))
-			file.Close()
-			return
-		}
-		file.Close()
-
-		ctxWithTimeout, cancel := context.WithTimeout(ctx, c.contract.LockTime/2)
-		defer cancel()
-
-		done := make(chan bool)
-		go func() {
-			err = c.Execute(ctxWithTimeout, dbTask, tmpFolderPath)
-			done <- true
-		}()
-
-		var taskLog string
-		select {
-		case <-done:
-			c.logger.Infof("Task %s finished", dbTask.ID)
-		case <-ctxWithTimeout.Done():
-			err = errors.New(fmt.Sprintf("Task %s timeout reached!", dbTask.ID))
-		}
-
-		if err != nil {
-			errMsg := fmt.Sprintf("Error executing task: %v", err)
-			c.logger.Error(errMsg)
-			taskLog = errMsg
-
-			if err := c.db.UpdateTask(dbTask.ID, db.Task{
-				Progress: db.ProgressStateFailed.String(),
-			}); err != nil {
-				errMsg := fmt.Sprintf("Error updating task: %v", err)
-				c.logger.Error(errMsg)
-
-				taskLog = fmt.Sprintf("%s\n%s", taskLog, errMsg)
-			}
-		} else {
-			taskLog = fmt.Sprintf("Training model for task %s completed successfully", dbTask.ID)
-		}
-
-		// write to task log file
-		file, err = os.OpenFile(taskLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			c.logger.Errorf("Unable to open file: %v", err)
-		} else {
-			defer file.Close()
-
-			if _, err := file.WriteString(taskLog); err != nil {
-				c.logger.Errorf("Write into task log failed: %v", err)
-			}
-		}
-	}()
-}
-
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	task, err := c.db.GetTask(id)
-	taskRes := schema.GenerateSchemaTask(&task)
 	if err != nil {
-		return *taskRes, errors.Wrap(err, "get service from db")
+		return schema.Task{}, errors.Wrap(err, "get service from db")
 	}
 
-	return *taskRes, errors.Wrap(err, "get service from db")
+	return *schema.GenerateSchemaTask(&task), nil
 }
 
 func (c *Ctrl) MarkInProgressTasksAsFailed() error {
-	err := c.db.MarkInProgressTasksAsFailed()
-	return errors.Wrap(err, "mark InProgress tasks as failed in db")
+	if err := c.db.MarkInProgressTasksAsFailed(); err != nil {
+		return errors.Wrap(err, "mark InProgress tasks as failed in db")
+	}
+	return nil
 }
 
 func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([]schema.Task, error) {
@@ -168,10 +70,48 @@ func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([
 }
 
 func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
-	task, err := c.db.GetTask(id)
-	if err != nil {
+	if _, err := c.db.GetTask(id); err != nil {
 		return "", err
 	}
-	baseDir := os.TempDir()
-	return fmt.Sprintf("%s/%s/%s", baseDir, task.ID, TaskLogFileName), nil
+
+	return filepath.Join(os.TempDir(), id.String(), TaskLogFileName), nil
+}
+
+func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string) error {
+	userAddress := common.HexToAddress(userAddressHex)
+	account, err := c.contract.GetUserAccount(ctx, userAddress)
+	if err != nil {
+		return errors.Wrap(err, "get account in contract")
+	}
+
+	c.logger.Infof("account.ProviderSigner: %s", account.ProviderSigner.String())
+	c.logger.Infof("inner provider address: %s", c.GetProviderSignerAddress(ctx).String())
+	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
+		return errors.New("provider signer should be acknowledged before creating a task")
+	}
+	return nil
+}
+
+func (c *Ctrl) validateNoInProgressTasks() error {
+	count, err := c.db.InProgressTaskCount()
+	if err != nil {
+		return err
+	}
+
+	if count != 0 {
+		return errors.New("cannot create a new task while there is an in-progress task")
+	}
+	return nil
+}
+
+func (c *Ctrl) validateNoUnfinishedTasks(task *schema.Task) error {
+	count, err := c.db.UnFinishedTaskCount(task.UserAddress)
+	if err != nil {
+		return err
+	}
+	if count != 0 {
+		// For each customer, we process tasks single-threaded
+		return errors.New("cannot create a new task while there is an unfinished task")
+	}
+	return nil
 }
