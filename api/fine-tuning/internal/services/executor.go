@@ -33,6 +33,8 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 )
 
+var errNoTask = errors.New("no task found")
+
 type TaskPaths struct {
 	BasePath                 string
 	Dataset                  string
@@ -98,8 +100,8 @@ func NewExecutor(
 
 func (c *Executor) Start(ctx context.Context) error {
 	go func() {
-		c.logger.Info("executor started")
-		defer c.logger.Info("executor stopped")
+		c.logger.Info("executor service started")
+		defer c.logger.Info("executor service stopped")
 
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
@@ -111,13 +113,16 @@ func (c *Executor) Start(ctx context.Context) error {
 			case <-ticker.C:
 				task, err := c.getNextTask(ctx)
 				if err != nil {
-					c.logger.Warn("error get next task", "err", err)
+					if !errors.Is(err, errNoTask) {
+						c.logger.Warnf("error get next task: %v", err)
+					}
+
 					continue
 				}
 
 				err = c.submitTask(ctx, task)
 				if err != nil {
-					c.logger.Warn("error submit task", "err", err)
+					c.logger.Warnf("error submit task: %v", err)
 				}
 			}
 		}
@@ -136,13 +141,14 @@ func (c *Executor) getNextTask(ctx context.Context) (*db.Task, error) {
 	}
 
 	if task.ID == nil {
-		return nil, errors.New("no task found")
+		return nil, errNoTask
 	}
 
 	if err := c.db.UpdateTaskProgress(task.ID, db.ProgressStateUnknown, db.ProgressStateInProgress); err != nil {
 		return nil, errors.Wrap(err, "update task progress")
 	}
 
+	c.logger.Infof("get next task %s", task.ID)
 	return &task, nil
 }
 
@@ -155,6 +161,7 @@ func (c *Executor) submitTask(ctx context.Context, dbTask *db.Task) error {
 }
 
 func (c *Executor) executeTask(ctx context.Context, dbTask *db.Task) {
+	c.logger.Infof("execute task %s", dbTask.ID)
 	tmpFolderPath := filepath.Join(os.TempDir(), dbTask.ID.String())
 	taskLogFile := filepath.Join(tmpFolderPath, constant.TaskLogFileName)
 	if err := c.setupTaskEnvironment(tmpFolderPath, taskLogFile); err != nil {

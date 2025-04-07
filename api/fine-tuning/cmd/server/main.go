@@ -42,7 +42,8 @@ func Main() {
 		panic(err)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	imageChan := buildImageIfNeeded(ctx, cfg, logger)
 
 	services, err := initializeServices(ctx, cfg, logger)
@@ -86,7 +87,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 
 		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 		if err != nil {
-			logger.Errorf("Failed to create docker client: %v", err)
+			logger.Errorf("failed to create docker client: %v", err)
 			return
 		}
 		defer cli.Close()
@@ -96,25 +97,25 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 		if !config.Images.OverrideImage {
 			exists, err := image.ImageExists(ctx, cli, imageName)
 			if err != nil {
-				logger.Errorf("Failed to check image existence: %v", err)
+				logger.Errorf("failed to check image existence: %v", err)
 				return
 			}
 
-			logger.Debugf("Image %s status %v.", imageName, exists)
+			logger.Debugf("image: %s status %v.", imageName, exists)
 			if exists {
 				buildImage = false
 			}
 		}
 
 		if buildImage {
-			logger.Debugf("Build image %s", imageName)
+			logger.Debugf("build image %s", imageName)
 			err := image.ImageBuild(ctx, cli, "./fine-tuning/execution/transformer", imageName)
 			if err != nil {
-				logger.Errorf("Failed to build image: %v", err)
+				logger.Errorf("failed to build image: %v", err)
 				return
 			}
 
-			logger.Debugf("Docker image %s built successfully!", imageName)
+			logger.Debugf("docker image %s built successfully!", imageName)
 		}
 
 		imageChan <- true
@@ -176,6 +177,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 }
 
 func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
+	logger.Info("sync quote")
 	if err := services.phalaService.SyncQuote(ctx); err != nil {
 		return err
 	}
@@ -209,6 +211,7 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 
 	// Listen and Serve, config port with PORT=X
 	go func() {
+		logger.Info("starting http server...")
 		if err := engine.Run(); err != nil {
 			logger.Errorf("HTTP server error: %v", err)
 			stop <- os.Interrupt
@@ -216,6 +219,6 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 	}()
 
 	<-stop
-	logger.Info("Shutting down server...")
+	logger.Info("shutting down server...")
 	return nil
 }

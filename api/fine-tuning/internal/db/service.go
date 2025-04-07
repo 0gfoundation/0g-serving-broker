@@ -17,12 +17,12 @@ func (d *DB) GetTask(id *uuid.UUID) (Task, error) {
 
 func (d *DB) GetNextTask() (Task, error) {
 	svc := Task{}
-	ret := d.db.Where(&Task{Progress: ProgressStateUnknown.String()}).Order("created_at DESC").First(&svc)
+	ret := d.db.Where(&Task{Progress: ProgressStateUnknown.String()}).Order("created_at DESC").Limit(1).Find(&svc)
 	return svc, ret.Error
 }
 
 func (d *DB) UpdateTaskProgress(id *uuid.UUID, oldProgress, newProgress ProgressState) error {
-	ret := d.db.Where(&Task{ID: id, Progress: oldProgress.String()}).Update("progress", newProgress.String())
+	ret := d.db.Model(&Task{}).Where(&Task{ID: id, Progress: oldProgress.String()}).Update("progress", newProgress.String())
 	return ret.Error
 }
 

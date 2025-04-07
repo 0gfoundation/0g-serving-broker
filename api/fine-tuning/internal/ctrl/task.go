@@ -36,6 +36,7 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, errors.Wrap(err, "create task in db")
 	}
 
+	c.logger.Infof("create task: %s", dbTask.ID.String())
 	return dbTask.ID, nil
 }
 
