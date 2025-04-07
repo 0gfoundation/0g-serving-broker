@@ -114,7 +114,7 @@ definitions:
     type: object
 info:
   contact: {}
-  title: 0G Serving User Broker API
+  title: 0G Serving Router Broker API
   version: "1.0"
 paths:
   /provider:

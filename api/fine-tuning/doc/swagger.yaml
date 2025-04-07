@@ -43,10 +43,10 @@ definitions:
 host: localhost:3080
 info:
   contact: {}
-  description: These APIs allows customers to interact with the 0G Compute Fine Tune
+  description: These APIs allows providers to interact with the 0G Compute Fine Tune
     Service
-  title: 0G Serving Provider Broker API
-  version: 0.2.0
+  title: 0G Compute Network Fine-tuning Provider API
+  version: 0.1.0
 paths:
   /quote:
     get:

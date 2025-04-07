@@ -80,7 +80,7 @@ func GetConfig() *Config {
 			AllowOrigins: []string{
 				"http://localhost:4000",
 			},
-			ContractAddress: "0x46e8a02d609CaEfC1747197da1F38272d5E46c77",
+			ContractAddress: "0x9A34fE4E3E29A6EB7e90b84b963E44591A58Ecc6",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{

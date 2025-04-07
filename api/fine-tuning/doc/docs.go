@@ -228,12 +228,12 @@ const docTemplate = `{
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "0.2.0",
+	Version:          "0.1.0",
 	Host:             "localhost:3080",
 	BasePath:         "/v1",
 	Schemes:          []string{},
-	Title:            "0G Serving Provider Broker API",
-	Description:      "These APIs allows customers to interact with the 0G Compute Fine Tune Service",
+	Title:            "0G Compute Network Fine-tuning Provider API",
+	Description:      "These APIs allows providers to interact with the 0G Compute Fine Tune Service",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 }
