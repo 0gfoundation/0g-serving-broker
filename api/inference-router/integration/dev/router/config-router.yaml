@@ -14,7 +14,7 @@ networks:
     transactionLimit: 9500000
     gasEstimationBuffer: 0
   ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
+    url: "http://8.218.94.246:8545"
     chainID: 16600
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
