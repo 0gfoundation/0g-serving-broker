@@ -17,7 +17,7 @@ networks:
     gasEstimationBuffer: 0
   ethereum0g:
     url: "http://8.218.94.246:8545"
-    chainID: 16600
+    chainID: 80087
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000

@@ -1,7 +1,7 @@
 networks:
   ethereum0g:
     url: "http://8.218.94.246:8545"
-    chainID: 16600
+    chainID: 80087
     privateKeys:
       - 1111111111111111111111111111111111111111111111111111111111111111
     transactionLimit: 1000000
