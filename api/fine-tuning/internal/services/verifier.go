@@ -1,4 +1,4 @@
-package verifier
+package services
 
 import (
 	"bytes"
@@ -61,7 +61,7 @@ type Verifier struct {
 	logger                  log.Logger
 }
 
-func New(contract *providercontract.ProviderContract, BalanceThresholdInEther int64, logger log.Logger) (*Verifier, error) {
+func NewVerifier(contract *providercontract.ProviderContract, BalanceThresholdInEther int64, logger log.Logger) (*Verifier, error) {
 	return &Verifier{
 		contract:                contract,
 		users:                   make(map[common.Address]*ecdsa.PublicKey),
@@ -206,7 +206,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 	defer cancel()
 
 	var modelRootHashes []common.Hash
-	uploadChan := make(chan error)
+	uploadChan := make(chan error, 1)
 	go func() {
 		modelRootHashes, err = storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)
 		uploadChan <- err

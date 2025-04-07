@@ -19,3 +19,12 @@ var (
 			"PYTHONPATH=/app/CocktailSGD", // Update to match Python version
 		}}
 )
+
+const (
+	DatasetPath         = "data"
+	PretrainedModelPath = "model"
+	TrainingConfigPath  = "config.json"
+	OutputPath          = "output_model"
+	ContainerBasePath   = "/app/mnt"
+	TaskLogFileName     = "progress.log"
+)

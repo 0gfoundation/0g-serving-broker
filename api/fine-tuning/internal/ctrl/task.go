@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
@@ -30,12 +31,10 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	}
 
 	dbTask := task.GenerateDBTask()
-	dbTask.Progress = db.ProgressStateInProgress.String()
+	dbTask.Progress = db.ProgressStateUnknown.String()
 	if err := c.db.AddTask(dbTask); err != nil {
 		return nil, errors.Wrap(err, "create task in db")
 	}
-
-	go c.ExecuteTask(ctx, dbTask)
 
 	return dbTask.ID, nil
 }
@@ -47,13 +46,6 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	}
 
 	return *schema.GenerateSchemaTask(&task), nil
-}
-
-func (c *Ctrl) MarkInProgressTasksAsFailed() error {
-	if err := c.db.MarkInProgressTasksAsFailed(); err != nil {
-		return errors.Wrap(err, "mark InProgress tasks as failed in db")
-	}
-	return nil
 }
 
 func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([]schema.Task, error) {
@@ -74,7 +66,7 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(os.TempDir(), id.String(), TaskLogFileName), nil
+	return filepath.Join(os.TempDir(), id.String(), constant.TaskLogFileName), nil
 }
 
 func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string) error {
@@ -101,6 +93,16 @@ func (c *Ctrl) validateNoInProgressTasks() error {
 	if count != 0 {
 		return errors.New("cannot create a new task while there is an in-progress task")
 	}
+
+	count, err = c.db.InitialTaskCount()
+	if err != nil {
+		return err
+	}
+
+	if count != 0 {
+		return errors.New("cannot create a new task while there is an initial task")
+	}
+
 	return nil
 }
 

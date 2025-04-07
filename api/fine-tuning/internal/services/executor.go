@@ -1,4 +1,4 @@
-package ctrl
+package services
 
 import (
 	"bufio"
@@ -6,13 +6,17 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/docker/docker/api/types/container"
 	dockerImg "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
@@ -20,21 +24,13 @@ import (
 	"github.com/docker/docker/quota"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/gammazero/workerpool"
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
-)
-
-const (
-	DatasetPath          = "data"
-	PretrainedModelPath  = "model"
-	TrainingConfigPath   = "config.json"
-	OutputPath           = "output_model"
-	ContainerBasePath    = "/app/mnt"
-	TaskLogFileName      = "progress.log"
-	BalanceCheckInterval = 5 * time.Minute
+	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 )
 
 type TaskPaths struct {
@@ -52,20 +48,115 @@ type TaskPaths struct {
 func NewTaskPaths(basePath string) *TaskPaths {
 	return &TaskPaths{
 		BasePath:                 basePath,
-		Dataset:                  filepath.Join(basePath, DatasetPath),
-		PretrainedModel:          filepath.Join(basePath, PretrainedModelPath),
-		TrainingConfig:           filepath.Join(basePath, TrainingConfigPath),
-		Output:                   filepath.Join(basePath, OutputPath),
-		ContainerDataset:         filepath.Join(ContainerBasePath, DatasetPath),
-		ContainerPretrainedModel: filepath.Join(ContainerBasePath, PretrainedModelPath),
-		ContainerTrainingConfig:  filepath.Join(ContainerBasePath, TrainingConfigPath),
-		ContainerOutput:          filepath.Join(ContainerBasePath, OutputPath),
+		Dataset:                  filepath.Join(basePath, constant.DatasetPath),
+		PretrainedModel:          filepath.Join(basePath, constant.PretrainedModelPath),
+		TrainingConfig:           filepath.Join(basePath, constant.TrainingConfigPath),
+		Output:                   filepath.Join(basePath, constant.OutputPath),
+		ContainerDataset:         filepath.Join(constant.ContainerBasePath, constant.DatasetPath),
+		ContainerPretrainedModel: filepath.Join(constant.ContainerBasePath, constant.PretrainedModelPath),
+		ContainerTrainingConfig:  filepath.Join(constant.ContainerBasePath, constant.TrainingConfigPath),
+		ContainerOutput:          filepath.Join(constant.ContainerBasePath, constant.OutputPath),
 	}
 }
 
-func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
+type Executor struct {
+	config       *config.Config
+	contract     *providercontract.ProviderContract
+	db           *db.DB
+	storage      *storage.Client
+	verifier     *Verifier
+	phalaService *phala.PhalaService
+	logger       log.Logger
+	mu           sync.RWMutex
+	pool         *workerpool.WorkerPool
+}
+
+func NewExecutor(
+	db *db.DB,
+	config *config.Config,
+	contract *providercontract.ProviderContract,
+	logger log.Logger,
+	storage *storage.Client,
+	phalaService *phala.PhalaService,
+) (*Executor, error) {
+	verifier, err := NewVerifier(contract, config.BalanceThresholdInEther, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Executor{
+		config:       config,
+		contract:     contract,
+		db:           db,
+		storage:      storage,
+		verifier:     verifier,
+		phalaService: phalaService,
+		logger:       logger,
+		pool:         workerpool.New(config.TrainingWorkerCount),
+	}, nil
+}
+
+func (c *Executor) Start(ctx context.Context) error {
+	go func() {
+		c.logger.Info("executor started")
+		defer c.logger.Info("executor stopped")
+
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				task, err := c.getNextTask(ctx)
+				if err != nil {
+					c.logger.Warn("error get next task", "err", err)
+					continue
+				}
+
+				err = c.submitTask(ctx, task)
+				if err != nil {
+					c.logger.Warn("error submit task", "err", err)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (c *Executor) getNextTask(ctx context.Context) (*db.Task, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	task, err := c.db.GetNextTask()
+	if err != nil {
+		return nil, errors.Wrap(err, "get task from db")
+	}
+
+	if task.ID == nil {
+		return nil, errors.New("no task found")
+	}
+
+	if err := c.db.UpdateTaskProgress(task.ID, db.ProgressStateUnknown, db.ProgressStateInProgress); err != nil {
+		return nil, errors.Wrap(err, "update task progress")
+	}
+
+	return &task, nil
+}
+
+func (c *Executor) submitTask(ctx context.Context, dbTask *db.Task) error {
+	c.pool.Submit(func() {
+		c.executeTask(ctx, dbTask)
+	})
+
+	return nil
+}
+
+func (c *Executor) executeTask(ctx context.Context, dbTask *db.Task) {
 	tmpFolderPath := filepath.Join(os.TempDir(), dbTask.ID.String())
-	taskLogFile := filepath.Join(tmpFolderPath, TaskLogFileName)
+	taskLogFile := filepath.Join(tmpFolderPath, constant.TaskLogFileName)
 	if err := c.setupTaskEnvironment(tmpFolderPath, taskLogFile); err != nil {
 		c.handleTaskFailure(dbTask, taskLogFile, err)
 		return
@@ -83,7 +174,7 @@ func (c *Ctrl) ExecuteTask(ctx context.Context, dbTask *db.Task) {
 	}
 }
 
-func (c *Ctrl) setupTaskEnvironment(tmpFolderPath, taskLogFile string) error {
+func (c *Executor) setupTaskEnvironment(tmpFolderPath, taskLogFile string) error {
 	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
 		return errors.Wrap(err, "create temporary folder")
 	}
@@ -97,7 +188,7 @@ func (c *Ctrl) setupTaskEnvironment(tmpFolderPath, taskLogFile string) error {
 	return nil
 }
 
-func (c *Ctrl) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolderPath string) error {
+func (c *Executor) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolderPath string) error {
 	lockTime, err := c.contract.GetLockTime(ctx)
 	if err != nil {
 		return err
@@ -106,7 +197,7 @@ func (c *Ctrl) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolde
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, (time.Duration(lockTime)*time.Second)/2)
 	defer cancel()
 
-	done := make(chan error)
+	done := make(chan error, 1)
 	go func() {
 		done <- c.execute(ctxWithTimeout, dbTask, tmpFolderPath)
 	}()
@@ -123,7 +214,7 @@ func (c *Ctrl) executeWithTimeout(ctx context.Context, dbTask *db.Task, tmpFolde
 	}
 }
 
-func (c *Ctrl) handleTaskFailure(dbTask *db.Task, taskLogFile string, err error) {
+func (c *Executor) handleTaskFailure(dbTask *db.Task, taskLogFile string, err error) {
 	errMsg := fmt.Sprintf("Error executing task: %v", err)
 	c.logger.Error(errMsg)
 
@@ -139,7 +230,7 @@ func (c *Ctrl) handleTaskFailure(dbTask *db.Task, taskLogFile string, err error)
 	}
 }
 
-func (c *Ctrl) writeToLogFile(filePath, content string) error {
+func (c *Executor) writeToLogFile(filePath, content string) error {
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return errors.Wrap(err, "open log file")
@@ -152,7 +243,7 @@ func (c *Ctrl) writeToLogFile(filePath, content string) error {
 	return nil
 }
 
-func (c *Ctrl) execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
+func (c *Executor) execute(ctx context.Context, task *db.Task, tmpFolderPath string) error {
 	paths := NewTaskPaths(tmpFolderPath)
 
 	defer c.CleanUp(paths)
@@ -195,7 +286,7 @@ func removeAllZipFiles(dir string) error {
 	return nil
 }
 
-func (c *Ctrl) CleanUp(paths *TaskPaths) {
+func (c *Executor) CleanUp(paths *TaskPaths) {
 	// remove data, model, output model path, but keep the config.json and progress.log
 	var err error
 	if err = os.RemoveAll(paths.Dataset); err != nil {
@@ -215,7 +306,7 @@ func (c *Ctrl) CleanUp(paths *TaskPaths) {
 	}
 }
 
-func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {
+func (c *Executor) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths) error {
 	if err := c.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO); err != nil {
 		c.logger.Errorf("Error creating dataset folder: %v\n", err)
 		return err
@@ -244,7 +335,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 		return err
 	}
 
-	if err := c.verifier.PreVerify(ctx, c.providerSigner, tokenSize, trainEpochs, c.config.Service.PricePerToken, task); err != nil {
+	if err := c.verifier.PreVerify(ctx, c.phalaService.ProviderSigner, tokenSize, trainEpochs, c.config.Service.PricePerToken, task); err != nil {
 		return err
 	}
 
@@ -256,7 +347,7 @@ func (c *Ctrl) prepareData(ctx context.Context, task *db.Task, paths *TaskPaths)
 	return nil
 }
 
-func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag string) error {
+func (c *Executor) pullImage(ctx context.Context, cli *client.Client, expectImag string) error {
 	imageExists, err := image.ImageExists(ctx, cli, expectImag)
 	if err != nil {
 		return err
@@ -278,7 +369,7 @@ func (c *Ctrl) pullImage(ctx context.Context, cli *client.Client, expectImag str
 	return nil
 }
 
-func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, task *db.Task) error {
+func (c *Executor) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, task *db.Task) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		c.logger.Errorf("Failed to create Docker client: %v", err)
@@ -324,7 +415,7 @@ func (c *Ctrl) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, t
 	return c.finalizeTask(ctx, paths, task, userAddr)
 }
 
-func (c *Ctrl) generateHostConfig(ctx context.Context, cli *client.Client, paths *TaskPaths, task *db.Task) (*container.HostConfig, error) {
+func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, paths *TaskPaths, task *db.Task) (*container.HostConfig, error) {
 	info, err := cli.Info(ctx)
 	if err != nil {
 		return nil, err
@@ -379,7 +470,7 @@ func (c *Ctrl) generateHostConfig(ctx context.Context, cli *client.Client, paths
 			{
 				Type:   mount.TypeBind,
 				Source: paths.BasePath,
-				Target: ContainerBasePath,
+				Target: constant.ContainerBasePath,
 			},
 		},
 		Runtime: runtime,
@@ -393,7 +484,7 @@ func (c *Ctrl) generateHostConfig(ctx context.Context, cli *client.Client, paths
 	return hostConfig, nil
 }
 
-func (c *Ctrl) getContainerImage(task *db.Task) (string, string, error) {
+func (c *Executor) getContainerImage(task *db.Task) (string, string, error) {
 	image := ""
 	trainScript := ""
 
@@ -413,7 +504,7 @@ func (c *Ctrl) getContainerImage(task *db.Task) (string, string, error) {
 	return image, trainScript, nil
 }
 
-func (c *Ctrl) createContainer(ctx context.Context, cli *client.Client, image string, trainScript string, paths *TaskPaths, hostConfig *container.HostConfig, task *db.Task) (string, error) {
+func (c *Executor) createContainer(ctx context.Context, cli *client.Client, image string, trainScript string, paths *TaskPaths, hostConfig *container.HostConfig, task *db.Task) (string, error) {
 	containerConfig := &container.Config{
 		Image: image,
 		Cmd: []string{
@@ -437,7 +528,7 @@ func (c *Ctrl) createContainer(ctx context.Context, cli *client.Client, image st
 	return resp.ID, nil
 }
 
-func (c *Ctrl) cleanupContainer(ctx context.Context, cli *client.Client, containerID string) {
+func (c *Executor) cleanupContainer(ctx context.Context, cli *client.Client, containerID string) {
 	// remove the container
 	err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true})
 	if err != nil {
@@ -447,14 +538,7 @@ func (c *Ctrl) cleanupContainer(ctx context.Context, cli *client.Client, contain
 	}
 }
 
-func (*Ctrl) calculateFee(startTime time.Time, pricePerHour int64) *big.Int {
-	elapsed := time.Since(startTime)
-	usedBalance := new(big.Int)
-	new(big.Float).Mul(big.NewFloat(float64(pricePerHour)), big.NewFloat(elapsed.Hours())).Int(usedBalance)
-	return usedBalance
-}
-
-func (c *Ctrl) waitForContainer(ctx context.Context, cli *client.Client, containerID string, task *db.Task) error {
+func (c *Executor) waitForContainer(ctx context.Context, cli *client.Client, containerID string, task *db.Task) error {
 	statusCh, errCh := cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
 	select {
 	case err := <-errCh:
@@ -474,7 +558,7 @@ func (c *Ctrl) waitForContainer(ctx context.Context, cli *client.Client, contain
 	return nil
 }
 
-func (c *Ctrl) fetchContainerLogs(ctx context.Context, cli *client.Client, containerID string) error {
+func (c *Executor) fetchContainerLogs(ctx context.Context, cli *client.Client, containerID string) error {
 	out, err := cli.ContainerLogs(ctx, containerID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
 	if err != nil {
 		c.logger.Printf("Failed to fetch logs: %v", err)
@@ -495,8 +579,8 @@ func (c *Ctrl) fetchContainerLogs(ctx context.Context, cli *client.Client, conta
 	return nil
 }
 
-func (c *Ctrl) finalizeTask(ctx context.Context, paths *TaskPaths, task *db.Task, userAddr common.Address) error {
-	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.providerSigner, task, c.storage)
+func (c *Executor) finalizeTask(ctx context.Context, paths *TaskPaths, task *db.Task, userAddr common.Address) error {
+	settlementMetadata, err := c.verifier.PostVerify(ctx, paths.Output, c.phalaService.ProviderSigner, task, c.storage)
 	if err != nil {
 		return err
 	}
