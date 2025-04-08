@@ -24,6 +24,7 @@ import (
 )
 
 var nRetriesToUpload = 10
+var uploadMethod = "max"
 
 type Client struct {
 	w3Client              *web3go.Client
@@ -33,6 +34,7 @@ type Client struct {
 	logger                log.Logger
 	MaxGasPrice           *big.Int
 	NRetries              int
+	Method                string
 }
 
 func New(config *config.Config, logger log.Logger) (*Client, error) {
@@ -94,6 +96,7 @@ func New(config *config.Config, logger log.Logger) (*Client, error) {
 		logger:                logger,
 		MaxGasPrice:           maxGasPrice,
 		NRetries:              nRetriesToUpload,
+		Method:                uploadMethod,
 	}, nil
 }
 
@@ -135,6 +138,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		SkipTx:           c.storageUploadUrgs.SkipTx,
 		MaxGasPrice:      c.MaxGasPrice,
 		NRetries:         c.NRetries,
+		Method:           c.Method,
 	}
 
 	file, err := core.Open(fileName)
@@ -151,7 +155,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
-	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, "random")
+	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method)
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
 		return nil, err
