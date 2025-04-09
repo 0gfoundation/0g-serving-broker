@@ -22,6 +22,7 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	c.taskMutex.Lock()
 	defer c.taskMutex.Unlock()
 
+	// TODO: removed when support parallel tasks
 	if err := c.validateNoInProgressTasks(); err != nil {
 		return nil, err
 	}
