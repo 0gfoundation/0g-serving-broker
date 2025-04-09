@@ -28,3 +28,5 @@ const (
 	ContainerBasePath   = "/app/mnt"
 	TaskLogFileName     = "progress.log"
 )
+
+const FineTuningDockerfilePath = "./fine-tuning/execution/transformer"

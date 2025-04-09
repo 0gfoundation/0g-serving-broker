@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -42,16 +41,6 @@ type SettlementMetadata struct {
 	Secret          []byte
 	EncryptedSecret []byte
 	Signature       []byte
-}
-
-func (s *SettlementMetadata) Serialize() ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(s)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 type Verifier struct {
@@ -241,10 +230,10 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.Wrapf(err, "add deliverable failed: %v", data)
 	}
 
-	return v.GenerateTeeSignature(ctx, user, aesKey, data, task.Fee, task.Nonce, providerPriv)
+	return v.generateTeeSignature(user, aesKey, data, task.Fee, task.Nonce, providerPriv)
 }
 
-func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
+func (v *Verifier) generateTeeSignature(user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
 	publicKey, ok := v.users[user]
 	if !ok {
 		return nil, errors.New(fmt.Sprintf("public key for user %v not exist", user))
