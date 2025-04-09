@@ -1,10 +1,9 @@
-package verifier
+package services
 
 import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -25,7 +24,10 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-const aesKeySize = 32 // 256-bit AES key (32 bytes)
+const (
+	aesKeySize    = 32 // 256-bit AES key (32 bytes)
+	uploadTimeout = 60 * time.Minute
+)
 
 type SignatureMetadata struct {
 	taskFee      *big.Int
@@ -41,16 +43,6 @@ type SettlementMetadata struct {
 	Signature       []byte
 }
 
-func (s *SettlementMetadata) Serialize() ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(s)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
 type Verifier struct {
 	contract                *providercontract.ProviderContract
 	users                   map[common.Address]*ecdsa.PublicKey
@@ -58,7 +50,7 @@ type Verifier struct {
 	logger                  log.Logger
 }
 
-func New(contract *providercontract.ProviderContract, BalanceThresholdInEther int64, logger log.Logger) (*Verifier, error) {
+func NewVerifier(contract *providercontract.ProviderContract, BalanceThresholdInEther int64, logger log.Logger) (*Verifier, error) {
 	return &Verifier{
 		contract:                contract,
 		users:                   make(map[common.Address]*ecdsa.PublicKey),
@@ -168,11 +160,9 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 	defer func() {
-		_, err := os.Stat(plainFile)
-		if err != nil && os.IsNotExist(err) {
-			return
+		if err := os.Remove(plainFile); err != nil && !os.IsNotExist(err) {
+			v.logger.Errorf("Failed to remove temporary file %s: %v", plainFile, err)
 		}
-		_ = os.Remove(plainFile)
 	}()
 
 	encryptFile, err := util.GetFileName(sourceDir, ".data")
@@ -192,29 +182,27 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 
 	err = util.WriteToFileHead(encryptFile, tagSig)
 	defer func() {
-		_, err := os.Stat(encryptFile)
-		if err != nil && os.IsNotExist(err) {
-			return
+		if err := os.Remove(encryptFile); err != nil && !os.IsNotExist(err) {
+			v.logger.Errorf("Failed to remove temporary file %s: %v", encryptFile, err)
 		}
-		_ = os.Remove(encryptFile)
 	}()
 
 	if err != nil {
 		return nil, err
 	}
 
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 600*time.Minute)
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
 
 	var modelRootHashes []common.Hash
-	uploadChan := make(chan bool)
+	uploadChan := make(chan error, 1)
 	go func() {
 		modelRootHashes, err = storage.UploadToStorage(ctxWithTimeout, encryptFile, constant.IS_TURBO)
-		uploadChan <- true
+		uploadChan <- err
 	}()
 
 	select {
-	case <-uploadChan:
+	case err := <-uploadChan:
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +215,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 	var data []byte
 
 	if len(modelRootHashes) == 0 {
-		return nil, fmt.Errorf("no model root hashes provided")
+		return nil, errors.New("no model root hashes provided")
 	}
 
 	for i, hash := range modelRootHashes {
@@ -242,10 +230,10 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.Wrapf(err, "add deliverable failed: %v", data)
 	}
 
-	return v.GenerateTeeSignature(ctx, user, aesKey, data, task.Fee, task.Nonce, providerPriv)
+	return v.generateTeeSignature(user, aesKey, data, task.Fee, task.Nonce, providerPriv)
 }
 
-func (v *Verifier) GenerateTeeSignature(ctx context.Context, user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
+func (v *Verifier) generateTeeSignature(user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
 	publicKey, ok := v.users[user]
 	if !ok {
 		return nil, errors.New(fmt.Sprintf("public key for user %v not exist", user))

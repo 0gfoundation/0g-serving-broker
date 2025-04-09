@@ -11,6 +11,7 @@ require (
 	github.com/docker/docker v28.0.0+incompatible
 	github.com/ecies/go/v2 v2.0.10
 	github.com/ethereum/go-ethereum v1.14.12
+	github.com/gammazero/workerpool v1.1.3
 	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-gormigrate/gormigrate/v2 v2.1.2
@@ -89,6 +90,7 @@ require (
 	github.com/felixge/httpsnoop v1.0.3 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
+	github.com/gammazero/deque v0.2.0 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect

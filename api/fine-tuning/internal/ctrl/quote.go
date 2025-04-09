@@ -2,11 +2,8 @@ package ctrl
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"encoding/json"
-	"os"
 
-	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -16,33 +13,10 @@ type QuoteResponse struct {
 	ProviderSigner string `json:"provider_signer"`
 }
 
-func (c *Ctrl) SyncQuote(ctx context.Context) error {
-	signer, err := phala.SigningKey(ctx)
-	if err != nil {
-		return err
-	}
-	c.providerSigner = signer
-
-	address := crypto.PubkeyToAddress(signer.PublicKey)
-
-	var quote string
-	if os.Getenv("NETWORK") == "hardhat" {
-		quote, err = phala.QuoteMock(ctx, address.Hex())
-	} else {
-		quote, err = phala.Quote(ctx, address.Hex())
-	}
-	if err != nil {
-		return err
-	}
-
-	c.quote = quote
-	return nil
-}
-
 func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 	jsonData, err := json.Marshal(QuoteResponse{
-		Quote:          c.quote,
-		ProviderSigner: crypto.PubkeyToAddress(c.providerSigner.PublicKey).Hex(),
+		Quote:          c.phalaService.Quote,
+		ProviderSigner: crypto.PubkeyToAddress(c.phalaService.ProviderSigner.PublicKey).Hex(),
 	})
 	if err != nil {
 		return "", err
@@ -51,10 +25,6 @@ func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 	return string(jsonData), nil
 }
 
-func (c *Ctrl) GetProviderSigner(ctx context.Context) (*ecdsa.PrivateKey, error) {
-	return c.providerSigner, nil
-}
-
-func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
-	return crypto.PubkeyToAddress(c.providerSigner.PublicKey)
+func (c *Ctrl) getProviderSignerAddress(ctx context.Context) common.Address {
+	return crypto.PubkeyToAddress(c.phalaService.ProviderSigner.PublicKey)
 }
