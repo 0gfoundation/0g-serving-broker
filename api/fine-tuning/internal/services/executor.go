@@ -607,7 +607,7 @@ func (c *Executor) finalizeTask(ctx context.Context, paths *TaskPaths, task *db.
 			EncryptedSecret: encodedSecret,
 			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 			DeliverIndex:    uint64(len(account.Deliverables) - 1),
-			Fee:             task.Fee,
+			DeliverTime:     time.Now().Unix(),
 		})
 	if err != nil {
 		c.logger.Errorf("Failed to update task: %v", err)
