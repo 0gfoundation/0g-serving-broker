@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
@@ -109,7 +110,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 
 		if buildImage {
 			logger.Debugf("build image %s", imageName)
-			err := image.ImageBuild(ctx, cli, "./fine-tuning/execution/transformer", imageName)
+			err := image.ImageBuild(ctx, cli, constant.FineTuningDockerfilePath, imageName)
 			if err != nil {
 				logger.Errorf("failed to build image: %v", err)
 				return

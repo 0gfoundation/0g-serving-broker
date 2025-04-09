@@ -78,8 +78,8 @@ func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string
 	}
 
 	c.logger.Infof("account.ProviderSigner: %s", account.ProviderSigner.String())
-	c.logger.Infof("inner provider address: %s", c.GetProviderSignerAddress(ctx).String())
-	if account.ProviderSigner != c.GetProviderSignerAddress(ctx) {
+	c.logger.Infof("inner provider address: %s", c.getProviderSignerAddress(ctx).String())
+	if account.ProviderSigner != c.getProviderSignerAddress(ctx) {
 		return errors.New("provider signer should be acknowledged before creating a task")
 	}
 	return nil

@@ -153,6 +153,10 @@ func (c *Executor) getNextTask(ctx context.Context) (*db.Task, error) {
 }
 
 func (c *Executor) submitTask(ctx context.Context, dbTask *db.Task) error {
+	if c.pool.WaitingQueueSize() > 0 {
+		c.logger.Infof("Waiting queue size: %d", c.pool.WaitingQueueSize())
+	}
+
 	c.pool.Submit(func() {
 		c.executeTask(ctx, dbTask)
 	})
