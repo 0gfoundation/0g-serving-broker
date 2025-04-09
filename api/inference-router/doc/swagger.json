@@ -1,7 +1,7 @@
 {
     "swagger": "2.0",
     "info": {
-        "title": "0G Serving User Broker API",
+        "title": "0G Serving Router Broker API",
         "contact": {},
         "version": "1.0"
     },

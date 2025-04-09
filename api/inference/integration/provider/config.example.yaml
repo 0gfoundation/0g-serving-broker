@@ -4,8 +4,8 @@ interval:
   settlementProcessor: 300
 networks:
   ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16600
+    url: "http://8.218.94.246:8545"
+    chainID: 80087
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000

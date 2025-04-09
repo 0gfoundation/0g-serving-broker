@@ -1,10 +1,10 @@
 {
     "swagger": "2.0",
     "info": {
-        "description": "These APIs allows customers to interact with the 0G Compute Fine Tune Service",
-        "title": "0G Serving Provider Broker API",
+        "description": "These APIs allows providers to interact with the 0G Compute Fine Tune Service",
+        "title": "0G Compute Network Fine-tuning Provider API",
         "contact": {},
-        "version": "0.2.0"
+        "version": "0.1.0"
     },
     "host": "localhost:3080",
     "basePath": "/v1",

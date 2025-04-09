@@ -10,8 +10,8 @@ networks:
     transactionLimit: 9500000
     gasEstimationBuffer: 0
   ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16600
+    url: "http://8.218.94.246:8545"
+    chainID: 80087
     privateKeys:
       - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
     transactionLimit: 10000000
@@ -27,7 +27,7 @@ service:
     gpuCount: 1
 storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
-  indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"
+  indexerTurbo: "http://47.251.40.189:12345"
   uploadArgs:
     finalityRequired: true
     tags: "0x"
