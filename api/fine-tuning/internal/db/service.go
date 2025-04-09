@@ -15,6 +15,17 @@ func (d *DB) GetTask(id *uuid.UUID) (Task, error) {
 	return svc, ret.Error
 }
 
+func (d *DB) GetNextTask() (Task, error) {
+	svc := Task{}
+	ret := d.db.Where(&Task{Progress: ProgressStateUnknown.String()}).Order("created_at DESC").Limit(1).Find(&svc)
+	return svc, ret.Error
+}
+
+func (d *DB) UpdateTaskProgress(id *uuid.UUID, oldProgress, newProgress ProgressState) error {
+	ret := d.db.Model(&Task{}).Where(&Task{ID: id, Progress: oldProgress.String()}).Update("progress", newProgress.String())
+	return ret.Error
+}
+
 func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
 	var tasks []Task
 	query := d.db.Where(&Task{UserAddress: userAddress})
@@ -40,7 +51,16 @@ func (d *DB) MarkInProgressTasksAsFailed() error {
 
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
-	ret := d.db.Model(&Task{}).Where("Progress = ?", ProgressStateInProgress.String()).Count(&count)
+	ret := d.db.Model(&Task{}).Where("progress = ?", ProgressStateInProgress.String()).Count(&count)
+	if ret.Error != nil {
+		return 0, ret.Error
+	}
+	return count, nil
+}
+
+func (d *DB) InitialTaskCount() (int64, error) {
+	var count int64
+	ret := d.db.Model(&Task{}).Where("progress = ?", ProgressStateUnknown.String()).Count(&count)
 	if ret.Error != nil {
 		return 0, ret.Error
 	}

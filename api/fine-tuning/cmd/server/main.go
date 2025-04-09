@@ -2,22 +2,23 @@ package server
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/handler"
-	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/settlement"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/services"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
-	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/verifier"
 	"github.com/docker/docker/client"
 	"github.com/gin-gonic/gin"
 )
@@ -33,9 +34,7 @@ import (
 //	@in				header
 
 func Main() {
-	config := config.GetConfig()
-
-	logger, err := log.GetLogger(&config.Logger)
+	cfg, logger, err := initializeBaseComponents()
 	if err != nil {
 		panic(err)
 	}
@@ -44,111 +43,183 @@ func Main() {
 		panic(err)
 	}
 
-	ctx := context.Background()
-	imageChan := buildImageIfNeeded(ctx, config, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	imageChan := buildImageIfNeeded(ctx, cfg, logger)
 
-	db, err := db.NewDB(config, logger)
+	services, err := initializeServices(ctx, cfg, logger)
 	if err != nil {
 		panic(err)
 	}
-	if err := db.Migrate(); err != nil {
-		panic(err)
-	}
+	defer services.contract.Close()
 
-	storageClient, err := storage.New(config, logger)
-	if err != nil {
-		panic(err)
-	}
-
-	contract, err := providercontract.NewProviderContract(config, logger)
-	if err != nil {
-		panic(err)
-	}
-	defer contract.Close()
-
-	verifier, err := verifier.New(contract, config.BalanceThresholdInEther, logger)
-	if err != nil {
-		panic(err)
-	}
-
-	ctrl := ctrl.New(db, config, contract, storageClient, verifier, logger)
-	if !config.Images.BuildImage {
-		err = ctrl.SyncServices(ctx)
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		err = ctrl.DeleteService(ctx)
-		if err != nil {
-			logger.Warn(err)
-		}
-	}
-
-	err = ctrl.SyncQuote(ctx)
-	if err != nil {
-		panic(err)
-	}
-
-	err = ctrl.MarkInProgressTasksAsFailed()
-	if err != nil {
-		panic(err)
-	}
-
-	engine := gin.New()
-	h := handler.New(ctrl, logger)
-	h.Register(engine)
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	settlement, err := settlement.New(db, contract, time.Duration(config.SettlementCheckIntervalSecs)*time.Second, ctrl.GetProviderSignerAddress(ctx), config.Service, logger)
-	if err != nil {
-		panic(err)
-	}
-	settlement.Start(ctx, imageChan)
-
-	// Listen and Serve, config port with PORT=X
-	if err := engine.Run(); err != nil {
+	if err := runApplication(ctx, services, logger, imageChan); err != nil {
 		panic(err)
 	}
 }
 
+type ApplicationServices struct {
+	db            *db.DB
+	storageClient *storage.Client
+	contract      *providercontract.ProviderContract
+	phalaService  *phala.PhalaService
+	ctrl          *ctrl.Ctrl
+	executor      *services.Executor
+	settlement    *services.Settlement
+}
+
+func initializeBaseComponents() (*config.Config, log.Logger, error) {
+	config := config.GetConfig()
+	logger, err := log.GetLogger(&config.Logger)
+	return config, logger, err
+}
+
 func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.Logger) chan bool {
-	imageChan := make(chan bool)
+	imageChan := make(chan bool, 1)
+
+	if !config.Images.BuildImage {
+		imageChan <- true
+		close(imageChan)
+		return imageChan
+	}
 
 	go func() {
-		if config.Images.BuildImage {
-			cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		defer close(imageChan)
+
+		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		if err != nil {
+			logger.Errorf("failed to create docker client: %v", err)
+			return
+		}
+		defer cli.Close()
+
+		imageName := config.Images.ExecutionImageName
+		buildImage := true
+		if !config.Images.OverrideImage {
+			exists, err := image.ImageExists(ctx, cli, imageName)
 			if err != nil {
-				panic(err)
+				logger.Errorf("failed to check image existence: %v", err)
+				return
 			}
 
-			imageName := config.Images.ExecutionImageName
-			buildImage := true
-			if !config.Images.OverrideImage {
-				exists, err := image.ImageExists(ctx, cli, imageName)
-				if err != nil {
-					panic(err)
-				}
+			logger.Debugf("image: %s status %v.", imageName, exists)
+			if exists {
+				buildImage = false
+			}
+		}
 
-				logger.Debugf("Image %s status %v.", imageName, exists)
-				if exists {
-					buildImage = false
-				}
+		if buildImage {
+			logger.Debugf("build image %s", imageName)
+			err := image.ImageBuild(ctx, cli, constant.FineTuningDockerfilePath, imageName)
+			if err != nil {
+				logger.Errorf("failed to build image: %v", err)
+				return
 			}
 
-			if buildImage {
-				logger.Debugf("Build image %s", imageName)
-				err := image.ImageBuild(ctx, cli, "./fine-tuning/execution/transformer", imageName)
-				if err != nil {
-					panic(err)
-				}
-
-				logger.Debugf("Docker image %s built successfully!", imageName)
-			}
+			logger.Debugf("docker image %s built successfully!", imageName)
 		}
 
 		imageChan <- true
 	}()
+
 	return imageChan
+}
+
+func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logger) (*ApplicationServices, error) {
+	db, err := db.NewDB(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Migrate(); err != nil {
+		return nil, err
+	}
+
+	storageClient, err := storage.New(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	contract, err := providercontract.NewProviderContract(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	phalaClientType := phala.TEE
+	if os.Getenv("NETWORK") == "hardhat" {
+		phalaClientType = phala.Mock
+	}
+
+	phalaService, err := phala.NewPhalaService(phalaClientType)
+	if err != nil {
+		return nil, err
+	}
+
+	ctrl := ctrl.New(db, cfg, contract, phalaService, logger)
+
+	executor, err := services.NewExecutor(db, cfg, contract, logger, storageClient, phalaService)
+	if err != nil {
+		return nil, err
+	}
+
+	settlement, err := services.NewSettlement(db, contract, cfg, phalaService, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ApplicationServices{
+		db:            db,
+		storageClient: storageClient,
+		contract:      contract,
+		phalaService:  phalaService,
+		ctrl:          ctrl,
+		executor:      executor,
+		settlement:    settlement,
+	}, nil
+}
+
+func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
+	logger.Info("sync quote")
+	if err := services.phalaService.SyncQuote(ctx); err != nil {
+		return err
+	}
+
+	if err := services.db.MarkInProgressTasksAsFailed(); err != nil {
+		return err
+	}
+
+	if err := services.executor.Start(ctx); err != nil {
+		return err
+	}
+
+	engine := gin.New()
+	h := handler.New(services.ctrl, logger)
+	h.Register(engine)
+
+	if _, ok := <-imageChan; !ok {
+		return errors.New("image build failed")
+	}
+
+	if err := services.ctrl.SyncServices(ctx); err != nil {
+		return err
+	}
+
+	if err := services.settlement.Start(ctx); err != nil {
+		return err
+	}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// Listen and Serve, config port with PORT=X
+	go func() {
+		logger.Info("starting http server...")
+		if err := engine.Run(); err != nil {
+			logger.Errorf("HTTP server error: %v", err)
+			stop <- os.Interrupt
+		}
+	}()
+
+	<-stop
+	logger.Info("shutting down server...")
+	return nil
 }

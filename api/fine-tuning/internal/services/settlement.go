@@ -1,4 +1,4 @@
-package settlement
+package services
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
@@ -14,46 +15,39 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 type Settlement struct {
-	db             *db.DB
-	contract       *providercontract.ProviderContract
-	checkInterval  time.Duration
-	providerSigner common.Address
-	service        config.Service
-	logger         log.Logger
+	db            *db.DB
+	contract      *providercontract.ProviderContract
+	checkInterval time.Duration
+	phalaService  *phala.PhalaService
+	service       config.Service
+	logger        log.Logger
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, checkInterval time.Duration, providerSigner common.Address, service config.Service, logger log.Logger) (*Settlement, error) {
+func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, phalaService *phala.PhalaService, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
-		db:             db,
-		contract:       contract,
-		checkInterval:  checkInterval,
-		providerSigner: providerSigner,
-		service:        service,
-		logger:         logger,
+		db:            db,
+		contract:      contract,
+		checkInterval: time.Duration(config.SettlementCheckIntervalSecs) * time.Second,
+		phalaService:  phalaService,
+		service:       config.Service,
+		logger:        logger,
 	}, nil
 }
-func (s *Settlement) Start(ctx context.Context, imageChan <-chan bool) error {
-	go func() {
-		<-imageChan
-		s.start(ctx)
-	}()
-
-	return nil
-}
-
-func (s *Settlement) start(ctx context.Context) error {
+func (s *Settlement) Start(ctx context.Context) error {
 	go func() {
 		s.logger.Info("settlement service started")
+		defer s.logger.Info("settlement service stopped")
+
 		ticker := time.NewTicker(s.checkInterval)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
-				s.logger.Info("settlement service stopped")
 				return
 			case <-ticker.C:
 				count, err := s.db.InProgressTaskCount()
@@ -168,7 +162,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task) error {
 		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,
-		ProviderSigner:  s.providerSigner,
+		ProviderSigner:  crypto.PubkeyToAddress(s.phalaService.ProviderSigner.PublicKey),
 		Signature:       signature,
 		TaskFee:         fee,
 		User:            common.HexToAddress(task.UserAddress),
