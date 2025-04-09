@@ -144,6 +144,7 @@ func (c *Executor) getNextTask(ctx context.Context) (*db.Task, error) {
 		return nil, errNoTask
 	}
 
+	// TODO: queue msg when support parallel tasks
 	if err := c.db.UpdateTaskProgress(task.ID, db.ProgressStateUnknown, db.ProgressStateInProgress); err != nil {
 		return nil, errors.Wrap(err, "update task progress")
 	}
@@ -264,6 +265,7 @@ func (c *Executor) execute(ctx context.Context, task *db.Task, tmpFolderPath str
 		return err
 	}
 
+	// TODO: avoid duplicate tx when support parallel tasks
 	if err := c.contract.AddOrUpdateService(ctx, c.config.Service, true); err != nil {
 		return errors.Wrap(err, "set service as occupied state in contract")
 	}
