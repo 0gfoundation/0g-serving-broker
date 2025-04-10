@@ -17,13 +17,8 @@ func (d *DB) GetTask(id *uuid.UUID) (Task, error) {
 
 func (d *DB) GetNextTask() (Task, error) {
 	svc := Task{}
-	ret := d.db.Where(&Task{Progress: ProgressStateUnknown.String()}).Order("created_at DESC").Limit(1).Find(&svc)
+	ret := d.db.Where(&Task{Progress: ProgressStateUnknown.String()}).Order("created_at").Limit(1).Find(&svc)
 	return svc, ret.Error
-}
-
-func (d *DB) UpdateTaskProgress(id *uuid.UUID, oldProgress, newProgress ProgressState) error {
-	ret := d.db.Model(&Task{}).Where(&Task{ID: id, Progress: oldProgress.String()}).Update("progress", newProgress.String())
-	return ret.Error
 }
 
 func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
@@ -38,6 +33,11 @@ func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
 
 func (d *DB) UpdateTask(id *uuid.UUID, new Task) error {
 	ret := d.db.Where(&Task{ID: id}).Where("progress <> ?", ProgressStateFailed.String()).Updates(new)
+	return ret.Error
+}
+
+func (d *DB) UpdateTaskProgress(id *uuid.UUID, oldProgress, newProgress ProgressState) error {
+	ret := d.db.Model(&Task{}).Where(&Task{ID: id, Progress: oldProgress.String()}).Update("progress", newProgress.String())
 	return ret.Error
 }
 
@@ -80,18 +80,30 @@ func (d *DB) UnFinishedTaskCount(userAddress string) (int64, error) {
 
 func (d *DB) GetDeliveredTasks() ([]Task, error) {
 	var filteredTasks []Task
-	ret := d.db.Where(&Task{Progress: ProgressStateDelivered.String()}).Find(&filteredTasks)
+	ret := d.db.Where(&Task{Progress: ProgressStateDelivered.String()}).Order("created_at").Find(&filteredTasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}
 	return filteredTasks, nil
 }
 
-func (d *DB) GetUseAckDeliveredTasks() ([]Task, error) {
+func (d *DB) GetUserAckDeliveredTasks() ([]Task, error) {
 	var filteredTasks []Task
-	ret := d.db.Where(&Task{Progress: ProgressStateUserAckDelivered.String()}).Find(&filteredTasks)
+	ret := d.db.Where(&Task{Progress: ProgressStateUserAckDelivered.String()}).Order("created_at").Find(&filteredTasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}
 	return filteredTasks, nil
+}
+
+func (s *DB) IncrementRetryCount(task *Task) error {
+	return s.UpdateTask(task.ID, Task{
+		NumRetries: task.NumRetries + 1,
+	})
+}
+
+func (s *DB) MarkTaskFailed(task *Task) error {
+	return s.UpdateTask(task.ID, Task{
+		Progress: ProgressStateFailed.String(),
+	})
 }
