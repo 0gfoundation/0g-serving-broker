@@ -29,11 +29,13 @@ func (d *DB) Migrate() error {
 					Nonce               string                `gorm:"type:varchar(66);not null"`
 					Signature           string                `gorm:"type:varchar(132);not null"`
 					OutputRootHash      string                `gorm:"type:text;"`
-					Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress"`
+					Progress            string                `gorm:"type:varchar(255);not null;default:'Unknown'"`
 					Secret              string                `gorm:"type:text"`
 					EncryptedSecret     string                `gorm:"type:text"`
 					TeeSignature        string                `gorm:"type:varchar(132)"`
 					DeliverIndex        uint64                `gorm:"type:bigint"`
+					DeliverTime         int64                 `gorm:"type:bigint;comment:UNIX timestamp in seconds for delivery"`
+					NumRetries          uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
 					DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
 				}
 				return tx.AutoMigrate(&Task{})
