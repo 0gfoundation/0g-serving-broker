@@ -1,11 +1,14 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"math/big"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -213,11 +216,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		return err
 	}
 
-	signature, err := hexutil.Decode(task.TeeSignature)
-	if err != nil {
-		return err
-	}
-
 	retrievedSecret := []byte{}
 	if useAcked {
 		retrievedSecret, err = hex.DecodeString(task.EncryptedSecret)
@@ -226,13 +224,23 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		}
 	}
 
+	settlementHash, err := getSettlementMessageHash(modelRootHash, task.Fee, task.Nonce, common.HexToAddress(task.UserAddress), crypto.PubkeyToAddress(s.phalaService.ProviderSigner.PublicKey), retrievedSecret)
+	if err != nil {
+		return errors.Wrapf(err, "getting settlement message hash")
+	}
+
+	sig, err := getSignature(settlementHash, s.phalaService.ProviderSigner)
+	if err != nil {
+		return errors.Wrapf(err, "getting signature")
+	}
+
 	input := contract.VerifierInput{
 		Index:           big.NewInt(int64(task.DeliverIndex)),
 		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,
 		ProviderSigner:  crypto.PubkeyToAddress(s.phalaService.ProviderSigner.PublicKey),
-		Signature:       signature,
+		Signature:       sig,
 		TaskFee:         fee,
 		User:            common.HexToAddress(task.UserAddress),
 	}
@@ -243,7 +251,8 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 
 	err = s.db.UpdateTask(task.ID,
 		db.Task{
-			Progress: db.ProgressStateFinished.String(),
+			Progress:     db.ProgressStateFinished.String(),
+			TeeSignature: hexutil.Encode(sig),
 		})
 	if err != nil {
 		return err
@@ -258,4 +267,43 @@ func (s *Settlement) handleFailure(task *db.Task) error {
 	} else {
 		return s.db.MarkTaskFailed(task)
 	}
+}
+
+func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) (common.Hash, error) {
+	fee, err := util.ConvertToBigInt(taskFee)
+	if err != nil {
+		return [32]byte{}, errors.Wrap(err, "task fee")
+	}
+
+	inputNonce, err := util.ConvertToBigInt(nonce)
+	if err != nil {
+		return [32]byte{}, errors.Wrap(err, "nonce")
+	}
+
+	buf := new(bytes.Buffer)
+	buf.Write(encryptedSecret)
+	buf.Write(modelRootHash)
+	buf.Write(common.LeftPadBytes(inputNonce.Bytes(), 32))
+	buf.Write(providerSigner.Bytes())
+	buf.Write(common.LeftPadBytes(fee.Bytes(), 32))
+	buf.Write(user.Bytes())
+
+	msg := crypto.Keccak256Hash(buf.Bytes())
+	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), msg.Bytes())
+
+	return prefixedMsg, nil
+}
+
+func getSignature(settlementHash common.Hash, key *ecdsa.PrivateKey) ([]byte, error) {
+	sig, err := crypto.Sign(settlementHash.Bytes(), key)
+	if err != nil {
+		return nil, err
+	}
+
+	// https://github.com/ethereum/go-ethereum/issues/19751#issuecomment-504900739
+	if sig[64] == 0 || sig[64] == 1 {
+		sig[64] += 27
+	}
+
+	return sig, nil
 }

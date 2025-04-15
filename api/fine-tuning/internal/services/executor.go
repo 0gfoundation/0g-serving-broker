@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/docker/docker/api/types/container"
-	dockerImg "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/quota"
@@ -31,6 +29,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/token"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
+	ethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 var errNoTask = errors.New("no task found")
@@ -62,15 +61,16 @@ func NewTaskPaths(basePath string) *TaskPaths {
 }
 
 type Executor struct {
-	config       *config.Config
-	contract     *providercontract.ProviderContract
-	db           *db.DB
-	storage      *storage.Client
-	verifier     *Verifier
-	phalaService *phala.PhalaService
-	logger       log.Logger
-	mu           sync.RWMutex
-	pool         *workerpool.WorkerPool
+	config           *config.Config
+	contract         *providercontract.ProviderContract
+	db               *db.DB
+	storage          *storage.Client
+	verifier         *Verifier
+	phalaService     *phala.PhalaService
+	logger           log.Logger
+	mu               sync.RWMutex
+	pool             *workerpool.WorkerPool
+	customizedModels map[ethcommon.Hash]config.CustomizedModel
 }
 
 func NewExecutor(
@@ -87,14 +87,15 @@ func NewExecutor(
 	}
 
 	return &Executor{
-		config:       config,
-		contract:     contract,
-		db:           db,
-		storage:      storage,
-		verifier:     verifier,
-		phalaService: phalaService,
-		logger:       logger,
-		pool:         workerpool.New(config.TrainingWorkerCount),
+		config:           config,
+		contract:         contract,
+		db:               db,
+		storage:          storage,
+		verifier:         verifier,
+		phalaService:     phalaService,
+		logger:           logger,
+		pool:             workerpool.New(config.TrainingWorkerCount),
+		customizedModels: config.Service.GetCustomizedModels(),
 	}, nil
 }
 
@@ -149,7 +150,7 @@ func (c *Executor) getNextTask(ctx context.Context) (*db.Task, error) {
 		return nil, errors.Wrap(err, "update task progress")
 	}
 
-	c.logger.Infof("get next task %s", task.ID)
+	c.logger.Infof("get next executing task: %s", task.ID)
 	return &task, nil
 }
 
@@ -166,7 +167,7 @@ func (c *Executor) submitTask(ctx context.Context, dbTask *db.Task) error {
 }
 
 func (c *Executor) executeTask(ctx context.Context, dbTask *db.Task) {
-	c.logger.Infof("execute task %s", dbTask.ID)
+	c.logger.Infof("execute task: %s", dbTask.ID)
 	tmpFolderPath := filepath.Join(os.TempDir(), dbTask.ID.String())
 	taskLogFile := filepath.Join(tmpFolderPath, constant.TaskLogFileName)
 	if err := c.setupTaskEnvironment(tmpFolderPath, taskLogFile); err != nil {
@@ -335,12 +336,9 @@ func (c *Executor) prepareData(ctx context.Context, task *db.Task, paths *TaskPa
 		return err
 	}
 
-	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
-	var dataSetType token.DataSetType
-	if strings.HasSuffix(trainScript, "finetune-img.py") {
-		dataSetType = token.Image
-	} else {
-		dataSetType = token.Text
+	dataSetType, err := c.getDataSetType(task)
+	if err != nil {
+		return err
 	}
 
 	tokenSize, trainEpochs, err := token.CountTokens(dataSetType, paths.Dataset, paths.PretrainedModel, paths.TrainingConfig, c.logger)
@@ -360,26 +358,36 @@ func (c *Executor) prepareData(ctx context.Context, task *db.Task, paths *TaskPa
 	return nil
 }
 
-func (c *Executor) pullImage(ctx context.Context, cli *client.Client, expectImag string) error {
-	imageExists, err := image.ImageExists(ctx, cli, expectImag)
-	if err != nil {
-		return err
+func (c *Executor) getDataSetType(task *db.Task) (token.DataSetType, error) {
+	var dataSetType token.DataSetType
+
+	switch task.ModelType {
+	case db.PreDefinedModel:
+		trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+		if strings.HasSuffix(trainScript, "finetune-img.py") {
+			dataSetType = token.Image
+		} else {
+			dataSetType = token.Text
+		}
+	case db.CustomizedModel:
+		customizedModel, ok := c.customizedModels[ethcommon.HexToHash(task.PreTrainedModelHash)]
+		if !ok {
+			return "", errors.New("customized model not found")
+		}
+
+		switch customizedModel.DataType {
+		case config.Text:
+			dataSetType = token.Text
+		case config.Image:
+			dataSetType = token.Image
+		default:
+			return "", errors.New("unknown training data type")
+		}
+	default:
+		return "", errors.New("unknown model type")
 	}
 
-	if !imageExists {
-		if c.config.Images.BuildImage {
-			return fmt.Errorf("failed to found image: %v", expectImag)
-		} else {
-			out, err := cli.ImagePull(ctx, expectImag, dockerImg.PullOptions{})
-			if err != nil {
-				c.logger.Errorf("Failed to pull Docker image %s: %v", expectImag, err)
-				return err
-			}
-			defer out.Close()
-			io.Copy(os.Stdout, out)
-		}
-	}
-	return nil
+	return dataSetType, nil
 }
 
 func (c *Executor) handleContainerLifecycle(ctx context.Context, paths *TaskPaths, task *db.Task) error {
@@ -395,17 +403,17 @@ func (c *Executor) handleContainerLifecycle(ctx context.Context, paths *TaskPath
 		return err
 	}
 
-	image, trainScript, err := c.getContainerImage(task)
+	img, trainScript, pull, err := c.getContainerImage(task)
 	if err != nil {
 		return err
 	}
 
-	if err := c.pullImage(ctx, cli, image); err != nil {
-		c.logger.Errorf("Failed to create container: %v", err)
+	if err := image.PullImage(ctx, cli, img, pull); err != nil {
+		c.logger.Errorf("Failed to pull image %v: %v", img, err)
 		return err
 	}
 
-	containerID, err := c.createContainer(ctx, cli, image, trainScript, paths, hostConfig, task)
+	containerID, err := c.createContainer(ctx, cli, img, trainScript, paths, hostConfig, task)
 	if err != nil {
 		return err
 	}
@@ -497,24 +505,37 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 	return hostConfig, nil
 }
 
-func (c *Executor) getContainerImage(task *db.Task) (string, string, error) {
+func (c *Executor) getContainerImage(task *db.Task) (string, string, bool, error) {
 	image := ""
-	trainScript := ""
+	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+	needPull := !c.config.Images.BuildImage
 
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
 		image = c.config.Images.ExecutionMockImageName
 	} else {
-		image = c.config.Images.ExecutionImageName
-	}
+		switch task.ModelType {
+		case db.PreDefinedModel:
+			image = c.config.Images.ExecutionImageName
+		case db.CustomizedModel:
+			customizedModel, ok := c.customizedModels[ethcommon.HexToHash(task.PreTrainedModelHash)]
+			if !ok {
+				return "", "", false, errors.New("customized model not found")
+			}
 
-	trainScript = constant.SCRIPT_MAP[task.PreTrainedModelHash]
+			image = customizedModel.Image
+			trainScript = customizedModel.TrainingScript
+			needPull = true
+		default:
+			return "", "", false, errors.New("unknown model type")
+		}
+	}
 
 	if trainScript == "" {
 		c.logger.Errorf("No training script found for model %s", task.PreTrainedModelHash)
-		return "", "", errors.New("no training script found")
+		return "", "", false, errors.New("no training script found")
 	}
 
-	return image, trainScript, nil
+	return image, trainScript, needPull, nil
 }
 
 func (c *Executor) createContainer(ctx context.Context, cli *client.Client, image string, trainScript string, paths *TaskPaths, hostConfig *container.HostConfig, task *db.Task) (string, error) {
@@ -611,7 +632,6 @@ func (c *Executor) finalizeTask(ctx context.Context, paths *TaskPaths, task *db.
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
 			Secret:          hexutil.Encode(settlementMetadata.Secret),
 			EncryptedSecret: encodedSecret,
-			TeeSignature:    hexutil.Encode(settlementMetadata.Signature),
 			DeliverIndex:    uint64(len(account.Deliverables) - 1),
 			DeliverTime:     time.Now().Unix(), // TODO: better use tx timestamp
 		})

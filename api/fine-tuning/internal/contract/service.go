@@ -26,6 +26,7 @@ func (c *ProviderContract) GetLockTime(ctx context.Context) (int64, error) {
 }
 
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
+	c.logger.Debugf("update service %s to occupied: %v", service.ServingUrl, occupied)
 	cpuCount, err := util.ConvertToBigInt(service.Quota.CpuCount)
 	if err != nil {
 		return errors.Wrap(err, "convert cpuCount")
@@ -63,6 +64,7 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		// TODO: replace by real provider signer address
 		common.HexToAddress("0x111111"),
 		occupied,
+		service.GetCustomizedModelName(),
 	)
 	if err != nil {
 		return err
@@ -160,5 +162,16 @@ func identicalService(old contract.Service, new config.Service) bool {
 	if old.Quota.GpuType != new.Quota.GpuType {
 		return false
 	}
+
+	if len(old.Models) != len(new.CustomizedModels) {
+		return false
+	}
+	modelsNames := new.GetCustomizedModelName()
+	for i := range old.Models {
+		if old.Models[i] != modelsNames[i] {
+			return false
+		}
+	}
+
 	return true
 }

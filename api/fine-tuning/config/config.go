@@ -1,13 +1,18 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v2"
 
 	"github.com/0glabs/0g-serving-broker/common/config"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	providers "github.com/openweb3/go-rpc-provider/provider_wrapper"
 )
 
@@ -20,7 +25,68 @@ type Service struct {
 		GpuType  string `yaml:"gpuType"`
 		GpuCount int64  `yaml:"gpuCount"`
 	} `yaml:"quota"`
-	PricePerToken int64 `yaml:"pricePerToken"`
+	PricePerToken    int64             `yaml:"pricePerToken"`
+	CustomizedModels []CustomizedModel `yaml:"customizedModels"`
+}
+
+func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
+	customizedModels := make(map[ethcommon.Hash]CustomizedModel)
+	for _, model := range s.CustomizedModels {
+		hash := ethcommon.HexToHash(model.Hash)
+		customizedModels[hash] = model
+	}
+
+	return customizedModels
+}
+
+func (s *Service) GetCustomizedModelName() []string {
+	modelNames := make([]string, 0, len(s.CustomizedModels))
+	for _, model := range s.CustomizedModels {
+		modelNames = append(modelNames, model.Name)
+	}
+	sort.Strings(modelNames)
+	return modelNames
+}
+
+type TrainingDataType int
+
+const (
+	Text TrainingDataType = iota
+	Image
+)
+
+func (r TrainingDataType) String() string {
+	return [...]string{"text", "image"}[r]
+}
+
+func (r TrainingDataType) MarshalYAML() (interface{}, error) {
+	return r.String(), nil
+}
+
+func (r *TrainingDataType) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var modelType string
+	if err := unmarshal(&modelType); err != nil {
+		return err
+	}
+	switch modelType {
+	case "text":
+		*r = Text
+	case "image":
+		*r = Image
+	default:
+		return fmt.Errorf("unknown model type: %s", modelType)
+	}
+	return nil
+}
+
+type CustomizedModel struct {
+	Name           string           `yaml:"name" json:"name"`
+	Hash           string           `yaml:"hash" json:"hash"`
+	Image          string           `yaml:"image" json:"image"`
+	DataType       TrainingDataType `yaml:"dataType" json:"dataType"`
+	TrainingScript string           `yaml:"trainingScript" json:"trainingScript"`
+	Description    string           `yaml:"description" json:"description"`
+	Tokenizer      string           `yaml:"tokenizer" json:"tokenizer"`
 }
 
 type Images struct {
@@ -130,7 +196,39 @@ func GetConfig() *Config {
 		for _, networkConf := range instance.Networks {
 			networkConf.PrivateKeyStore = config.NewPrivateKeyStore(networkConf)
 		}
+
+		validateCustomizedModels()
 	})
 
 	return instance
+}
+
+func validateCustomizedModels() {
+	modelHashes := make(map[string]bool)
+	modelNames := make(map[string]bool)
+
+	checkDuplicate := func(m map[string]bool, key string, errMsg string) {
+		if _, exists := m[key]; exists {
+			panic(errMsg)
+		}
+		m[key] = true
+	}
+
+	for _, model := range instance.Service.CustomizedModels {
+		hash := strings.ToLower(model.Hash)
+		if !strings.HasPrefix(hash, "0x") {
+			if len(hash)%2 == 1 {
+				hash = "0" + hash
+			} else {
+				hash = "0x" + hash
+			}
+		}
+
+		if _, ok := constant.SCRIPT_MAP[hash]; ok {
+			panic("duplicate customized model hash with predefined models")
+		}
+
+		checkDuplicate(modelHashes, hash, "duplicate customized model hash")
+		checkDuplicate(modelNames, strings.ToLower(model.Name), "duplicate customized model name")
+	}
 }

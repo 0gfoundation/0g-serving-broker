@@ -23,6 +23,13 @@ func (p ProgressState) String() string {
 	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "Finished", "Failed"}[p]
 }
 
+type ModelType uint
+
+const (
+	PreDefinedModel ModelType = iota
+	CustomizedModel
+)
+
 type Task struct {
 	ID                  *uuid.UUID            `gorm:"type:char(36);primaryKey" json:"id" readonly:"true"`
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
@@ -42,6 +49,7 @@ type Task struct {
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeliverTime         int64                 `gorm:"type:bigint" json:"deliverTime"`
 	NumRetries          uint                  `gorm:"type:int" json:"numRetries"`
+	ModelType           ModelType             `gorm:"type:int" json:"modelType"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
 
