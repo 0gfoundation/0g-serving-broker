@@ -8,6 +8,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
+	ethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 type Ctrl struct {
@@ -16,18 +17,20 @@ type Ctrl struct {
 	config   *config.Config
 	logger   log.Logger
 
-	phalaService *phala.PhalaService
+	phalaService     *phala.PhalaService
+	customizedModels map[ethcommon.Hash]config.CustomizedModel
 
 	taskMutex sync.Mutex
 }
 
-func New(db *db.DB, config *config.Config, contract *providercontract.ProviderContract, phalaService *phala.PhalaService, logger log.Logger) *Ctrl {
+func New(db *db.DB, cfg *config.Config, contract *providercontract.ProviderContract, phalaService *phala.PhalaService, logger log.Logger) *Ctrl {
 	p := &Ctrl{
-		db:           db,
-		contract:     contract,
-		config:       config,
-		phalaService: phalaService,
-		logger:       logger,
+		db:               db,
+		contract:         contract,
+		config:           cfg,
+		phalaService:     phalaService,
+		customizedModels: cfg.Service.GetCustomizedModels(),
+		logger:           logger,
 	}
 
 	return p

@@ -23,6 +23,7 @@ type Task struct {
 	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress" readonly:"true"`
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeliverTime         int64                 `gorm:"type:bigint" json:"deliverTime"`
+	ModelType           db.ModelType          `gorm:"type:int" json:"modelType"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
 
@@ -62,6 +63,7 @@ func (t *Task) GenerateDBTask() *db.Task {
 		Fee:                 t.Fee,
 		Nonce:               t.Nonce,
 		Signature:           t.Signature,
+		ModelType:           t.ModelType,
 	}
 }
 
@@ -80,5 +82,6 @@ func GenerateSchemaTask(t *db.Task) *Task {
 		Progress:            t.Progress,
 		DeliverIndex:        t.DeliverIndex,
 		DeliverTime:         t.DeliverTime,
+		ModelType:           t.ModelType,
 	}
 }

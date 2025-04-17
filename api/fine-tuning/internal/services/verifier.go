@@ -20,7 +20,6 @@ import (
 	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -40,7 +39,6 @@ type SettlementMetadata struct {
 	ModelRootHash   []byte
 	Secret          []byte
 	EncryptedSecret []byte
-	Signature       []byte
 }
 
 type Verifier struct {
@@ -95,7 +93,7 @@ func (v *Verifier) PreVerify(ctx context.Context, providerPriv *ecdsa.PrivateKey
 	if account.Nonce.Cmp(nonce) >= 0 {
 		return fmt.Errorf("invalid nonce: expected %v, got %v", account.Nonce, nonce)
 	}
-	if account.ProviderSigner != ethcrypto.PubkeyToAddress(providerPriv.PublicKey) {
+	if account.ProviderSigner != crypto.PubkeyToAddress(providerPriv.PublicKey) {
 		return errors.New("user not acknowledged yet")
 	}
 
@@ -138,13 +136,12 @@ func (v *Verifier) verifyUserSignature(signature string, signatureMetadata Signa
 
 	}
 
-	recoveredAddress := crypto.PubkeyToAddress(*pubKey).Hex()
-	if !bytes.EqualFold([]byte(recoveredAddress), []byte(signatureMetadata.userAddress.Hex())) {
+	recoveredAddress := crypto.PubkeyToAddress(*pubKey)
+	if !bytes.EqualFold([]byte(recoveredAddress.Hex()), []byte(signatureMetadata.userAddress.Hex())) {
 		return errors.New("signature verification failed")
 	}
 
-	address := ethcrypto.PubkeyToAddress(*pubKey)
-	v.users[address] = pubKey
+	v.users[recoveredAddress] = pubKey
 
 	return nil
 }
@@ -175,7 +172,7 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, err
 	}
 
-	tagSig, err := ethcrypto.Sign(ethcrypto.Keccak256(tag[:]), providerPriv)
+	tagSig, err := crypto.Sign(crypto.Keccak256(tag[:]), providerPriv)
 	if err != nil {
 		return nil, errors.Wrap(err, "sign tag failed")
 	}
@@ -230,16 +227,16 @@ func (v *Verifier) PostVerify(ctx context.Context, sourceDir string, providerPri
 		return nil, errors.Wrapf(err, "add deliverable failed: %v", data)
 	}
 
-	return v.generateTeeSignature(user, aesKey, data, task.Fee, task.Nonce, providerPriv)
+	return v.encryptAESKey(user, aesKey, data)
 }
 
-func (v *Verifier) generateTeeSignature(user common.Address, aesKey []byte, modelRootHash []byte, taskFee string, nonce string, providerPriv *ecdsa.PrivateKey) (*SettlementMetadata, error) {
+func (v *Verifier) encryptAESKey(user common.Address, aesKey, modelRootHash []byte) (*SettlementMetadata, error) {
 	publicKey, ok := v.users[user]
 	if !ok {
 		return nil, errors.New(fmt.Sprintf("public key for user %v not exist", user))
 	}
 
-	eciesPublicKey, err := ecies.NewPublicKeyFromBytes(ethcrypto.FromECDSAPub(publicKey))
+	eciesPublicKey, err := ecies.NewPublicKeyFromBytes(crypto.FromECDSAPub(publicKey))
 	if err != nil {
 		return nil, errors.Wrapf(err, "creating ECIES public key from bytes")
 	}
@@ -249,59 +246,9 @@ func (v *Verifier) generateTeeSignature(user common.Address, aesKey []byte, mode
 		return nil, errors.Wrap(err, "encrypting secret")
 	}
 
-	settlementHash, err := getSettlementMessageHash(modelRootHash, taskFee, nonce, user, ethcrypto.PubkeyToAddress(providerPriv.PublicKey), encryptedSecret)
-	if err != nil {
-		return nil, errors.Wrapf(err, "getting settlement message hash")
-	}
-
-	sig, err := getSignature(settlementHash, providerPriv)
-	if err != nil {
-		return nil, errors.Wrapf(err, "getting signature")
-	}
-
 	return &SettlementMetadata{
 		ModelRootHash:   modelRootHash,
 		Secret:          aesKey,
 		EncryptedSecret: encryptedSecret,
-		Signature:       sig,
 	}, nil
-}
-
-func getSignature(settlementHash common.Hash, key *ecdsa.PrivateKey) ([]byte, error) {
-	sig, err := crypto.Sign(settlementHash.Bytes(), key)
-	if err != nil {
-		return nil, err
-	}
-
-	// https://github.com/ethereum/go-ethereum/issues/19751#issuecomment-504900739
-	if sig[64] == 0 || sig[64] == 1 {
-		sig[64] += 27
-	}
-
-	return sig, nil
-}
-
-func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) (common.Hash, error) {
-	fee, err := util.ConvertToBigInt(taskFee)
-	if err != nil {
-		return [32]byte{}, errors.Wrap(err, "task fee")
-	}
-
-	inputNonce, err := util.ConvertToBigInt(nonce)
-	if err != nil {
-		return [32]byte{}, errors.Wrap(err, "nonce")
-	}
-
-	buf := new(bytes.Buffer)
-	buf.Write(encryptedSecret)
-	buf.Write(modelRootHash)
-	buf.Write(common.LeftPadBytes(inputNonce.Bytes(), 32))
-	buf.Write(providerSigner.Bytes())
-	buf.Write(common.LeftPadBytes(fee.Bytes(), 32))
-	buf.Write(user.Bytes())
-
-	msg := crypto.Keccak256Hash(buf.Bytes())
-	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), msg.Bytes())
-
-	return prefixedMsg, nil
 }

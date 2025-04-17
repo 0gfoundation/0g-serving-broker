@@ -30,7 +30,9 @@ func runCommand(command string, args []string, logger log.Logger) (string, error
 		return "", fmt.Errorf("Error executing script: %v, stderr %s", err, stderr)
 	} else {
 		logger.Info(command, args, " stdout: ", stdout)
-		logger.Error(command, args, " stderr: ", stderr)
+		if len(stderr) > 0 {
+			logger.Error(command, args, " stderr: ", stderr)
+		}
 
 		return string(stdout), err
 	}

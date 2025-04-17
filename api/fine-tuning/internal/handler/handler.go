@@ -30,6 +30,9 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
 
 	group.GET("/quote", h.GetQuote)
+
+	group.GET("/model", h.ListModel)
+	group.GET("/model/:name", h.GetModel)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

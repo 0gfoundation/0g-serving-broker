@@ -36,6 +36,7 @@ func (d *DB) Migrate() error {
 					DeliverIndex        uint64                `gorm:"type:bigint"`
 					DeliverTime         int64                 `gorm:"type:bigint;comment:UNIX timestamp in seconds for delivery"`
 					NumRetries          uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
+					ModelType           uint                  `gorm:"type:int"`
 					DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
 				}
 				return tx.AutoMigrate(&Task{})
