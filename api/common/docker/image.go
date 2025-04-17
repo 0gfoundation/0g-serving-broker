@@ -54,3 +54,25 @@ func ImageBuild(ctx context.Context, cli *client.Client, buildDirectory, tag str
 
 	return nil
 }
+
+func PullImage(ctx context.Context, cli *client.Client, expectImag string, pull bool) error {
+	imageExists, err := ImageExists(ctx, cli, expectImag)
+	if err != nil {
+		return err
+	}
+
+	if !imageExists {
+		if pull {
+			out, err := cli.ImagePull(ctx, expectImag, image.PullOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to pull Docker image %s: %v", expectImag, err)
+			}
+			defer out.Close()
+			io.Copy(os.Stdout, out)
+		} else {
+			return fmt.Errorf("failed to found image: %v", expectImag)
+		}
+	}
+
+	return nil
+}

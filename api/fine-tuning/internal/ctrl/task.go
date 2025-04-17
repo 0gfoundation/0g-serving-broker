@@ -12,9 +12,14 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
+	ethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, error) {
+	if err := c.validateModelType(task); err != nil {
+		return nil, err
+	}
+
 	if err := c.validateProviderSigner(ctx, task.UserAddress); err != nil {
 		return nil, err
 	}
@@ -78,8 +83,7 @@ func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string
 		return errors.Wrap(err, "get account in contract")
 	}
 
-	c.logger.Infof("account.ProviderSigner: %s", account.ProviderSigner.String())
-	c.logger.Infof("inner provider address: %s", c.getProviderSignerAddress(ctx).String())
+	c.logger.Infof("contract providerSigner: %s, local provider address: %s", account.ProviderSigner.String(), c.getProviderSignerAddress(ctx).String())
 	if account.ProviderSigner != c.getProviderSignerAddress(ctx) {
 		return errors.New("provider signer should be acknowledged before creating a task")
 	}
@@ -117,5 +121,20 @@ func (c *Ctrl) validateNoUnfinishedTasks(task *schema.Task) error {
 		// For each customer, we process tasks single-threaded
 		return errors.New("cannot create a new task while there is an unfinished task")
 	}
+	return nil
+}
+
+func (c *Ctrl) validateModelType(task *schema.Task) error {
+	modelHash := ethcommon.HexToHash(task.PreTrainedModelHash)
+	if _, ok := c.customizedModels[modelHash]; !ok {
+		if _, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]; !ok {
+			return errors.New("unsupported model")
+		} else {
+			task.ModelType = db.PreDefinedModel
+		}
+	} else {
+		task.ModelType = db.CustomizedModel
+	}
+
 	return nil
 }

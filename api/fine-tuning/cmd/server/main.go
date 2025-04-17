@@ -102,7 +102,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 				return
 			}
 
-			logger.Debugf("image: %s status %v.", imageName, exists)
+			logger.Debugf("Docker image: %s, exist: %v.", imageName, exists)
 			if exists {
 				buildImage = false
 			}
@@ -178,7 +178,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 }
 
 func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
-	logger.Info("sync quote")
+	logger.Info("syncing TEE quote")
 	if err := services.phalaService.SyncQuote(ctx); err != nil {
 		return err
 	}
