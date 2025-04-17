@@ -218,7 +218,7 @@ func validateCustomizedModels() {
 		hash := strings.ToLower(model.Hash)
 		if !strings.HasPrefix(hash, "0x") {
 			if len(hash)%2 == 1 {
-				hash = "0" + hash
+				panic("invalid hash length")
 			} else {
 				hash = "0x" + hash
 			}
