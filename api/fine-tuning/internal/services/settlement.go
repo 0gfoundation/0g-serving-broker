@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/hex"
+	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -16,6 +18,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -35,6 +38,7 @@ type SettlementConfig struct {
 	MaxNumRetriesPerTask    uint
 	SettlementBatchSize     uint
 	DeliveredTaskAckTimeout uint
+	DataRetentionDays       uint
 }
 
 func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, phalaService *phala.PhalaService, logger log.Logger) (*Settlement, error) {
@@ -48,6 +52,7 @@ func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, confi
 			MaxNumRetriesPerTask:    config.MaxNumRetriesPerTask,
 			SettlementBatchSize:     config.SettlementBatchSize,
 			DeliveredTaskAckTimeout: config.DeliveredTaskAckTimeoutSecs,
+			DataRetentionDays:       config.DataRetentionDays,
 		},
 		logger: logger,
 	}, nil
@@ -83,6 +88,8 @@ func (s *Settlement) Start(ctx context.Context) error {
 			}
 		}
 	}()
+
+	go s.startDiskCleanupRoutine(ctx)
 
 	return nil
 }
@@ -171,7 +178,7 @@ func (s *Settlement) processPendingUserAckTasks(ctx context.Context) []db.Task {
 
 		if err := s.db.UpdateTask(task.ID,
 			db.Task{
-				Progress: db.ProgressStateUserAckDelivered.String(),
+				Progress: db.ProgressStateUserAcknowledged.String(),
 			}); err != nil {
 			s.logger.Errorf("error updating task to UserAckDelivered, task %v, err: %v", task.ID, err)
 			continue
@@ -184,7 +191,7 @@ func (s *Settlement) processPendingUserAckTasks(ctx context.Context) []db.Task {
 // Theoretically, userAcknowledgedTasks should be settled with getPendingDeliveredTask
 // We have getPendingSettlementTask to settle task in case of any failure in getPendingDeliveredTask
 func (s *Settlement) getPendingSettlementTask(batchSize int) []db.Task {
-	tasks, err := s.db.GetUserAckDeliveredTasks()
+	tasks, err := s.db.GetUserAcknowledgedTasks()
 	if err != nil {
 		s.logger.Errorf("error getting user acknowledged tasks: %v", err)
 		return nil
@@ -218,7 +225,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 
 	retrievedSecret := []byte{}
 	if useAcked {
-		retrievedSecret, err = hex.DecodeString(task.EncryptedSecret)
+		retrievedSecret, err = hexutil.Decode(task.EncryptedSecret)
 		if err != nil {
 			return err
 		}
@@ -306,4 +313,82 @@ func getSignature(settlementHash common.Hash, key *ecdsa.PrivateKey) ([]byte, er
 	}
 
 	return sig, nil
+}
+
+func (s *Settlement) startDiskCleanupRoutine(ctx context.Context) {
+	s.runDiskCleanup()
+
+	ticker := time.NewTicker(12 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.runDiskCleanup()
+		}
+	}
+}
+
+func (s *Settlement) runDiskCleanup() {
+	today := time.Now().Truncate(24 * time.Hour)
+	start := today.AddDate(0, 0, -int(s.config.DataRetentionDays*2))
+	end := today.AddDate(0, 0, -int(s.config.DataRetentionDays))
+
+	s.logger.Infof("cleaning up tasks created between %v and %v", start, end)
+	tasks, err := s.db.GetTasksByCreatedAtRange(start, end)
+	if err != nil {
+		s.logger.Errorf("error getting tasks by created at range: %v", err)
+		return
+	}
+
+	for _, task := range tasks {
+		tmpFolderPath := utils.GetTaskLogDir(task.ID)
+		paths := utils.NewTaskPaths(tmpFolderPath)
+		s.CleanUp(paths)
+	}
+}
+
+func (s *Settlement) CleanUp(paths *utils.TaskPaths) {
+	// remove data, model, output model path, but keep the config.json and progress.log
+	s.logger.Infof("cleaning up: %v", paths.BasePath)
+	var err error
+	if err = os.RemoveAll(paths.Dataset); err != nil {
+		s.logger.Errorf("error removing dataset folder: %v", err)
+	}
+
+	if err = os.RemoveAll(paths.PretrainedModel); err != nil {
+		s.logger.Errorf("error removing pre-trained model folder: %v", err)
+	}
+
+	if err = os.RemoveAll(paths.Output); err != nil {
+		s.logger.Errorf("error removing output model folder: %v", err)
+	}
+
+	if err = removeAllZipFiles(paths.BasePath); err != nil {
+		s.logger.Errorf("error removing zip files: %v", err)
+	}
+}
+
+// removeAllZipFiles removes all .zip files in the specified directory.
+func removeAllZipFiles(dir string) error {
+	// Construct a pattern like "/path/to/dir/*.zip"
+	pattern := filepath.Join(dir, "*.zip")
+
+	// Find all matching zip files
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return errors.Wrap(err, "failed to glob pattern")
+	}
+
+	// Iterate and remove each file
+	for _, zipFile := range matches {
+		fmt.Printf("Removing: %s\n", zipFile)
+		if err := os.RemoveAll(zipFile); err != nil {
+			return errors.Wrapf(err, "failed to remove %s", zipFile)
+		}
+	}
+
+	return nil
 }

@@ -116,6 +116,7 @@ type Config struct {
 	MaxNumRetriesPerTask        uint                `yaml:"maxNumRetriesPerTask"`
 	SettlementBatchSize         uint                `yaml:"settlementBatchSize"`
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
+	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
 }
 
 type StorageClientConfig struct {
@@ -187,6 +188,7 @@ func GetConfig() *Config {
 			MaxNumRetriesPerTask:        10,
 			SettlementBatchSize:         1,
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
+			DataRetentionDays:           3,
 		}
 
 		if err := loadConfig(instance); err != nil {

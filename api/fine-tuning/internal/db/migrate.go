@@ -22,6 +22,7 @@ func (d *DB) Migrate() error {
 					CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 					UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 					UserAddress         string                `gorm:"type:text;not null"`
+					UserPublicKey       string                `gorm:"type:varchar(132)"`
 					PreTrainedModelHash string                `gorm:"type:text;not null"`
 					DatasetHash         string                `gorm:"type:text;not null"`
 					TrainingParams      string                `gorm:"type:text;not null"`
@@ -29,9 +30,9 @@ func (d *DB) Migrate() error {
 					Nonce               string                `gorm:"type:varchar(66);not null"`
 					Signature           string                `gorm:"type:varchar(132);not null"`
 					OutputRootHash      string                `gorm:"type:text;"`
-					Progress            string                `gorm:"type:varchar(255);not null;default:'Unknown'"`
-					Secret              string                `gorm:"type:text"`
-					EncryptedSecret     string                `gorm:"type:text"`
+					Progress            string                `gorm:"type:varchar(255);not null;default:'Init'"`
+					Secret              string                `gorm:"type:varchar(66)"`
+					EncryptedSecret     string                `gorm:"type:varchar(300)"`
 					TeeSignature        string                `gorm:"type:varchar(132)"`
 					DeliverIndex        uint64                `gorm:"type:bigint"`
 					DeliverTime         int64                 `gorm:"type:bigint;comment:UNIX timestamp in seconds for delivery"`
