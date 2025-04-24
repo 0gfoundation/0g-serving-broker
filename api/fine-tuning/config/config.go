@@ -113,6 +113,8 @@ type Config struct {
 	GasPrice                    string              `yaml:"gasPrice"`
 	MaxGasPrice                 string              `yaml:"maxGasPrice"`
 	TrainingWorkerCount         int                 `yaml:"trainingWorkerCount"`
+	SetupWorkerCount            int                 `yaml:"setupWorkerCount"`
+	FinalizerWorkerCount        int                 `yaml:"finalizerWorkerCount"`
 	MaxNumRetriesPerTask        uint                `yaml:"maxNumRetriesPerTask"`
 	SettlementBatchSize         uint                `yaml:"settlementBatchSize"`
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
@@ -185,6 +187,8 @@ func GetConfig() *Config {
 			BalanceThresholdInEther:     1,
 			MaxGasPrice:                 "1000000000000",
 			TrainingWorkerCount:         1,
+			SetupWorkerCount:            1,
+			FinalizerWorkerCount:        1,
 			MaxNumRetriesPerTask:        10,
 			SettlementBatchSize:         1,
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,

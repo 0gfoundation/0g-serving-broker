@@ -62,7 +62,7 @@ func NewFinalizer(
 			config,
 			database,
 			logger.WithFields(logrus.Fields{"name": "finalizer"}),
-			workerpool.New(config.TrainingWorkerCount),
+			workerpool.New(config.FinalizerWorkerCount),
 		),
 		contract:     contract,
 		storage:      storage,

@@ -58,7 +58,7 @@ func NewSetup(
 			config,
 			database,
 			logger.WithFields(logrus.Fields{"name": "setup"}),
-			workerpool.New(config.TrainingWorkerCount),
+			workerpool.New(config.SetupWorkerCount),
 		),
 		contract:         contract,
 		storage:          storage,
