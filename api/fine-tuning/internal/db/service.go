@@ -116,10 +116,58 @@ func (d *DB) MarkInProgressTasksAsFailed() error {
 	return ret.Error
 }
 
-func (d *DB) IncrementRetryCount(task *Task) error {
-	return d.UpdateTask(task.ID, Task{
-		NumRetries: task.NumRetries + 1,
-	})
+func (d *DB) HandleFailure(task *Task, currentRetry, maxRetry uint, retryUpdate func(uint) *Task, oldProgress, newProgress ProgressState) (bool, error) {
+	if currentRetry < maxRetry {
+		d.logger.Infof("retrying task %s, attempt %d", task.ID, currentRetry)
+		if err := d.UpdateTaskProgress(task.ID, oldProgress, newProgress); err != nil {
+			return true, err
+		}
+
+		return true, d.UpdateTask(task.ID, *retryUpdate(currentRetry + 1))
+
+	} else {
+		return false, d.MarkTaskFailed(task)
+	}
+}
+
+func (d *DB) HandleSetupFailure(task *Task, maxRetry uint, oldProgress, newProgress ProgressState) (bool, error) {
+	return d.HandleFailure(task, task.SetupRetries, maxRetry,
+		func(count uint) *Task {
+			return &Task{
+				SetupRetries: count,
+			}
+		},
+		oldProgress, newProgress)
+}
+
+func (d *DB) HandleExecutorFailure(task *Task, maxRetry uint, oldProgress, newProgress ProgressState) (bool, error) {
+	return d.HandleFailure(task, task.ExecutorRetries, maxRetry,
+		func(count uint) *Task {
+			return &Task{
+				ExecutorRetries: count,
+			}
+		},
+		oldProgress, newProgress)
+}
+
+func (d *DB) HandleFinalizerFailure(task *Task, maxRetry uint, oldProgress, newProgress ProgressState) (bool, error) {
+	return d.HandleFailure(task, task.FinalizerRetries, maxRetry,
+		func(count uint) *Task {
+			return &Task{
+				FinalizerRetries: count,
+			}
+		},
+		oldProgress, newProgress)
+}
+
+func (d *DB) HandleSettlementFailure(task *Task, maxRetry uint) (bool, error) {
+	return d.HandleFailure(task, task.SettlementRetries, maxRetry,
+		func(count uint) *Task {
+			return &Task{
+				SettlementRetries: count,
+			}
+		},
+		ProgressStateInit, ProgressStateInit)
 }
 
 func (d *DB) UpdateUserPublicKey(task *Task, key string) error {

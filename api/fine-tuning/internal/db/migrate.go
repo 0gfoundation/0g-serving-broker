@@ -36,7 +36,10 @@ func (d *DB) Migrate() error {
 					TeeSignature        string                `gorm:"type:varchar(132)"`
 					DeliverIndex        uint64                `gorm:"type:bigint"`
 					DeliverTime         int64                 `gorm:"type:bigint;comment:UNIX timestamp in seconds for delivery"`
-					NumRetries          uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
+					SetupRetries        uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
+					ExecutorRetries     uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
+					FinalizerRetries    uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
+					SettlementRetries   uint                  `gorm:"type:int;default:0;comment:Number of retry attempts"`
 					ModelType           uint                  `gorm:"type:int"`
 					DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name"`
 				}

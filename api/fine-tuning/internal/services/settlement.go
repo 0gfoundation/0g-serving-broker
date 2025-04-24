@@ -49,7 +49,7 @@ func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, confi
 		config: SettlementConfig{
 			CheckInterval:           time.Duration(config.SettlementCheckIntervalSecs) * time.Second,
 			Service:                 config.Service,
-			MaxNumRetriesPerTask:    config.MaxNumRetriesPerTask,
+			MaxNumRetriesPerTask:    config.MaxSettlementRetriesPerTask,
 			SettlementBatchSize:     config.SettlementBatchSize,
 			DeliveredTaskAckTimeout: config.DeliveredTaskAckTimeoutSecs,
 			DataRetentionDays:       config.DataRetentionDays,
@@ -128,7 +128,8 @@ func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool
 	s.logger.Infof("settle for task %v, ack %v", task.ID.String(), userAcked)
 	if err := s.doSettlement(ctx, &task, userAcked); err != nil {
 		s.logger.Errorf("error during do settlement for tasks failed once: %v", err)
-		if err := s.handleFailure(&task); err != nil {
+		_, err := s.db.HandleSettlementFailure(&task, s.config.MaxNumRetriesPerTask)
+		if err != nil {
 			s.logger.Errorf("error handling failure task: %v", err)
 			return err
 		}
@@ -266,14 +267,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 	}
 
 	return nil
-}
-
-func (s *Settlement) handleFailure(task *db.Task) error {
-	if task.NumRetries < s.config.MaxNumRetriesPerTask {
-		return s.db.IncrementRetryCount(task)
-	} else {
-		return s.db.MarkTaskFailed(task)
-	}
 }
 
 func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) (common.Hash, error) {

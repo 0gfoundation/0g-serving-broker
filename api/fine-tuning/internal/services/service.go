@@ -193,20 +193,18 @@ func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
 		return s.db.MarkTaskFailed(dbTask)
 	}
 
-	if dbTask.NumRetries < s.config.MaxNumRetriesPerTask {
-		if err := s.db.IncrementRetryCount(dbTask); err != nil {
-			s.logger.Errorf("failed to increment retry count: %v", err)
-		}
-
-		s.logger.Infof("retrying task %s, attempt %d", dbTask.ID, dbTask.NumRetries)
-		if err := s.db.UpdateTaskProgress(dbTask.ID, s.states.Intermediate, s.states.Initial); err != nil {
-			return err
-		}
-	} else {
-		return s.db.MarkTaskFailed(dbTask)
+	switch s.name {
+	case "setup":
+		_, err = s.db.HandleSetupFailure(dbTask, s.config.MaxSetupRetriesPerTask, s.states.Intermediate, s.states.Initial)
+	case "executor":
+		_, err = s.db.HandleExecutorFailure(dbTask, s.config.MaxExecutorRetriesPerTask, s.states.Intermediate, s.states.Initial)
+	case "finalizer":
+		_, err = s.db.HandleFinalizerFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
+	default:
+		err = fmt.Errorf("unknown service name: %s", s.name)
 	}
 
-	return nil
+	return err
 }
 
 func (s *Service) markTaskCompleted(dbTask *db.Task) error {

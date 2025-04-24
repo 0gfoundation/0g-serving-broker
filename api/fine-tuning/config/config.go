@@ -115,7 +115,10 @@ type Config struct {
 	TrainingWorkerCount         int                 `yaml:"trainingWorkerCount"`
 	SetupWorkerCount            int                 `yaml:"setupWorkerCount"`
 	FinalizerWorkerCount        int                 `yaml:"finalizerWorkerCount"`
-	MaxNumRetriesPerTask        uint                `yaml:"maxNumRetriesPerTask"`
+	MaxSetupRetriesPerTask      uint                `yaml:"maxSetupRetriesPerTask"`
+	MaxExecutorRetriesPerTask   uint                `yaml:"maxExecutorRetriesPerTask"`
+	MaxFinalizerRetriesPerTask  uint                `yaml:"maxFinalizerRetriesPerTask"`
+	MaxSettlementRetriesPerTask uint                `yaml:"maxSettlementRetriesPerTask"`
 	SettlementBatchSize         uint                `yaml:"settlementBatchSize"`
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
 	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
@@ -189,7 +192,10 @@ func GetConfig() *Config {
 			TrainingWorkerCount:         1,
 			SetupWorkerCount:            1,
 			FinalizerWorkerCount:        1,
-			MaxNumRetriesPerTask:        10,
+			MaxSetupRetriesPerTask:      10,
+			MaxExecutorRetriesPerTask:   1,
+			MaxFinalizerRetriesPerTask:  10,
+			MaxSettlementRetriesPerTask: 10,
 			SettlementBatchSize:         1,
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
 			DataRetentionDays:           3,

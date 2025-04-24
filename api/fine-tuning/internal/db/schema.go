@@ -53,7 +53,10 @@ type Task struct {
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeliverTime         int64                 `gorm:"type:bigint" json:"deliverTime"`
-	NumRetries          uint                  `gorm:"type:int" json:"numRetries"`
+	SetupRetries        uint                  `gorm:"type:int" json:"setupRetries"`
+	ExecutorRetries     uint                  `gorm:"type:int" json:"executorRetries"`
+	FinalizerRetries    uint                  `gorm:"type:int" json:"finalizerRetries"`
+	SettlementRetries   uint                  `gorm:"type:int" json:"settlementRetries"`
 	ModelType           ModelType             `gorm:"type:int" json:"modelType"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }
