@@ -25,6 +25,18 @@ func (c *ProviderContract) GetLockTime(ctx context.Context) (int64, error) {
 	return lockTime.Int64(), nil
 }
 
+func (c *ProviderContract) OccupyService(ctx context.Context, service config.Service, occupied bool) error {
+	srv, err := c.GetService(ctx)
+	if err != nil {
+		return err
+	}
+
+	if !srv.Occupied {
+		return c.AddOrUpdateService(ctx, service, true)
+	}
+	return nil
+}
+
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
 	c.logger.Debugf("update service %s to occupied: %v", service.ServingUrl, occupied)
 	cpuCount, err := util.ConvertToBigInt(service.Quota.CpuCount)

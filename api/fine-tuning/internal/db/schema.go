@@ -11,16 +11,20 @@ import (
 type ProgressState int
 
 const (
-	ProgressStateUnknown ProgressState = iota
-	ProgressStateInProgress
+	ProgressStateInit ProgressState = iota
+	ProgressStateSettingUp
+	ProgressStateSetUp
+	ProgressStateTraining
+	ProgressStateTrained
+	ProgressStateDelivering
 	ProgressStateDelivered
-	ProgressStateUserAckDelivered
+	ProgressStateUserAcknowledged
 	ProgressStateFinished
 	ProgressStateFailed
 )
 
 func (p ProgressState) String() string {
-	return [...]string{"Unknown", "InProgress", "Delivered", "UserAckDelivered", "Finished", "Failed"}[p]
+	return [...]string{"Init", "SettingUp", "SetUp", "Training", "Trained", "Delivering", "Delivered", "UserAcknowledged", "Finished", "Failed"}[p]
 }
 
 type ModelType uint
@@ -35,6 +39,7 @@ type Task struct {
 	CreatedAt           *time.Time            `json:"createdAt" readonly:"true" gen:"-"`
 	UpdatedAt           *time.Time            `json:"updatedAt" readonly:"true" gen:"-"`
 	UserAddress         string                `gorm:"type:varchar(255);not null" json:"userAddress" binding:"required"`
+	UserPublicKey       string                `gorm:"type:varchar(132)" json:"userPublicKey" binding:"required"`
 	PreTrainedModelHash string                `gorm:"type:text;not null" json:"preTrainedModelHash" binding:"required"`
 	DatasetHash         string                `gorm:"type:text;not null" json:"datasetHash" binding:"required"`
 	TrainingParams      string                `gorm:"type:text;not null" json:"trainingParams" binding:"required"`
@@ -42,13 +47,16 @@ type Task struct {
 	Nonce               string                `gorm:"type:varchar(66);not null" json:"nonce" binding:"required"`
 	Signature           string                `gorm:"type:varchar(132);not null" json:"signature" binding:"required"`
 	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash" readonly:"true"`
-	Progress            string                `gorm:"type:varchar(255);not null;default 'Unknown'" json:"progress" readonly:"true"`
-	Secret              string                `gorm:"type:text" json:"secret" readonly:"true"`
-	EncryptedSecret     string                `gorm:"type:text" json:"encryptedSecret" readonly:"true"`
+	Progress            string                `gorm:"type:varchar(255);not null;default 'Init'" json:"progress" readonly:"true"`
+	Secret              string                `gorm:"type:varchar(66)" json:"secret" readonly:"true"`
+	EncryptedSecret     string                `gorm:"type:varchar(300)" json:"encryptedSecret" readonly:"true"`
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeliverTime         int64                 `gorm:"type:bigint" json:"deliverTime"`
-	NumRetries          uint                  `gorm:"type:int" json:"numRetries"`
+	SetupRetries        uint                  `gorm:"type:int" json:"setupRetries"`
+	ExecutorRetries     uint                  `gorm:"type:int" json:"executorRetries"`
+	FinalizerRetries    uint                  `gorm:"type:int" json:"finalizerRetries"`
+	SettlementRetries   uint                  `gorm:"type:int" json:"settlementRetries"`
 	ModelType           ModelType             `gorm:"type:int" json:"modelType"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 }

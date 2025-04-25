@@ -11,6 +11,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 	ethcommon "github.com/ethereum/go-ethereum/common"
 )
@@ -37,9 +38,14 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	}
 
 	dbTask := task.GenerateDBTask()
-	dbTask.Progress = db.ProgressStateUnknown.String()
+	dbTask.Progress = db.ProgressStateInit.String()
+
 	if err := c.db.AddTask(dbTask); err != nil {
 		return nil, errors.Wrap(err, "create task in db")
+	}
+
+	if err := utils.InitTaskDirectory(dbTask.ID); err != nil {
+		return nil, errors.Wrap(err, "initialize task log folder")
 	}
 
 	c.logger.Infof("create task: %s", dbTask.ID.String())
@@ -73,7 +79,7 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(os.TempDir(), id.String(), constant.TaskLogFileName), nil
+	return filepath.Join(os.TempDir(), id.String(), utils.TaskLogFileName), nil
 }
 
 func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string) error {
@@ -98,15 +104,6 @@ func (c *Ctrl) validateNoInProgressTasks() error {
 
 	if count != 0 {
 		return errors.New("cannot create a new task while there is an in-progress task")
-	}
-
-	count, err = c.db.InitialTaskCount()
-	if err != nil {
-		return err
-	}
-
-	if count != 0 {
-		return errors.New("cannot create a new task while there is an initial task")
 	}
 
 	return nil
