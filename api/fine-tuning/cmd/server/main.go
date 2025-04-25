@@ -64,7 +64,9 @@ type ApplicationServices struct {
 	contract      *providercontract.ProviderContract
 	phalaService  *phala.PhalaService
 	ctrl          *ctrl.Ctrl
+	setup         *services.Setup
 	executor      *services.Executor
+	finalizer     *services.Finalizer
 	settlement    *services.Settlement
 }
 
@@ -156,7 +158,17 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 
 	ctrl := ctrl.New(db, cfg, contract, phalaService, logger)
 
-	executor, err := services.NewExecutor(db, cfg, contract, logger, storageClient, phalaService)
+	setup, err := services.NewSetup(db, cfg, contract, logger, storageClient, phalaService)
+	if err != nil {
+		return nil, err
+	}
+
+	executor, err := services.NewExecutor(db, cfg, contract, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	finalizer, err := services.NewFinalizer(db, cfg, contract, logger, storageClient, phalaService)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +184,9 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		contract:      contract,
 		phalaService:  phalaService,
 		ctrl:          ctrl,
+		setup:         setup,
 		executor:      executor,
+		finalizer:     finalizer,
 		settlement:    settlement,
 	}, nil
 }
@@ -187,7 +201,15 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 		return err
 	}
 
+	if err := services.finalizer.Start(ctx); err != nil {
+		return err
+	}
+
 	if err := services.executor.Start(ctx); err != nil {
+		return err
+	}
+
+	if err := services.setup.Start(ctx); err != nil {
 		return err
 	}
 

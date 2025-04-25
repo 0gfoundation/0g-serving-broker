@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -108,6 +109,10 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 		indexerClient = c.indexerStandardClient
 	}
 	fileName := fmt.Sprintf("%s.zip", filePath)
+	if err := os.Remove(fileName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
 	c.logger.Infof("Begin downloading and unzipping %s\n, with root: %v", fileName, hash)
 	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
 		c.logger.Errorf("Error downloading data with root: %v,%v \n", hash, err)

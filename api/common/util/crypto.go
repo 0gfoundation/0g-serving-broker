@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -137,4 +141,23 @@ func AesDecrypt(key, ciphertext []byte) ([]byte, error) {
 	}
 
 	return plaintext, nil
+}
+
+func UnmarshalPubkey(pub string) (*ecdsa.PublicKey, error) {
+	bytes, err := hexutil.Decode(pub)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode public key: %v", err)
+	}
+
+	ecdsaPub, err := crypto.UnmarshalPubkey(bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse encoded public key: %v", err)
+	}
+
+	return ecdsaPub, nil
+}
+
+func MarshalPubkey(pub *ecdsa.PublicKey) string {
+	pubKeyBytes := crypto.FromECDSAPub(pub)
+	return hexutil.Encode(pubKeyBytes)
 }

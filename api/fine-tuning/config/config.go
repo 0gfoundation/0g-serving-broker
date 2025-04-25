@@ -113,9 +113,15 @@ type Config struct {
 	GasPrice                    string              `yaml:"gasPrice"`
 	MaxGasPrice                 string              `yaml:"maxGasPrice"`
 	TrainingWorkerCount         int                 `yaml:"trainingWorkerCount"`
-	MaxNumRetriesPerTask        uint                `yaml:"maxNumRetriesPerTask"`
+	SetupWorkerCount            int                 `yaml:"setupWorkerCount"`
+	FinalizerWorkerCount        int                 `yaml:"finalizerWorkerCount"`
+	MaxSetupRetriesPerTask      uint                `yaml:"maxSetupRetriesPerTask"`
+	MaxExecutorRetriesPerTask   uint                `yaml:"maxExecutorRetriesPerTask"`
+	MaxFinalizerRetriesPerTask  uint                `yaml:"maxFinalizerRetriesPerTask"`
+	MaxSettlementRetriesPerTask uint                `yaml:"maxSettlementRetriesPerTask"`
 	SettlementBatchSize         uint                `yaml:"settlementBatchSize"`
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
+	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
 }
 
 type StorageClientConfig struct {
@@ -184,9 +190,15 @@ func GetConfig() *Config {
 			BalanceThresholdInEther:     1,
 			MaxGasPrice:                 "1000000000000",
 			TrainingWorkerCount:         1,
-			MaxNumRetriesPerTask:        10,
+			SetupWorkerCount:            1,
+			FinalizerWorkerCount:        1,
+			MaxSetupRetriesPerTask:      10,
+			MaxExecutorRetriesPerTask:   1,
+			MaxFinalizerRetriesPerTask:  10,
+			MaxSettlementRetriesPerTask: 10,
 			SettlementBatchSize:         1,
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
+			DataRetentionDays:           3,
 		}
 
 		if err := loadConfig(instance); err != nil {
