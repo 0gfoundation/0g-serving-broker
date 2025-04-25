@@ -21,7 +21,7 @@ COPY transformer/finetune-img.py /app/finetune-img.py
 COPY transformer/finetune.py /app/finetune.py
 
 # Install additional Python libraries 
-RUN pip install transformers datasets evaluate accelerate toml sentencepiece netifaces zstandard 
+RUN pip install transformers==4.38.0 datasets evaluate accelerate==0.28.0 toml sentencepiece netifaces zstandard
 
 # Set default command
 CMD ["bash"]
