@@ -60,6 +60,8 @@ func TrackMetrics() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		c.Next() // Process the request
 
+		ignoreError := c.GetBool("ignoreError")
+
 		// Track request duration
 		duration := time.Since(startTime).Seconds()
 		RequestDuration.WithLabelValues(path).Observe(duration)
@@ -67,7 +69,7 @@ func TrackMetrics() gin.HandlerFunc {
 		// Track request count and errors
 		status := c.Writer.Status()
 		RequestCount.WithLabelValues(path, http.StatusText(status)).Inc()
-		if status >= 400 {
+		if !ignoreError && status >= 400 {
 			ErrorCount.WithLabelValues(path, http.StatusText(status)).Inc()
 		}
 	}
