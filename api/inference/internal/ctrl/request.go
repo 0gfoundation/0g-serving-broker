@@ -63,7 +63,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 		return err
 	}
 
-	err = c.validateFee(req, account, expectedFee, expectedInputFee)
+	err = c.validateFee(ctx, req, account, expectedFee, expectedInputFee)
 	if err != nil {
 		return err
 	}
@@ -97,9 +97,10 @@ func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 	return nil
 }
 
-func (c *Ctrl) validateFee(actual model.Request, account model.User, expectedFee, expectedInputFee string) error {
+func (c *Ctrl) validateFee(ctx *gin.Context, actual model.Request, account model.User, expectedFee, expectedInputFee string) error {
 	if err := c.compareFees("previousOutputFee", actual.PreviousOutputFee, account.LastResponseFee); err != nil {
-		return errors.Wrap(err, "Please use 'settleFee' (https://docs.0g.ai/build-with-0g/compute-network/sdk#55-settle-fees-manually) to manually settle the fee first")
+		ctx.Set("ignoreError", true) // ignore error for monitoring since it is most likely caused by incorrect operation
+		return errors.Wrap(err, "Please use 'settleFee' (https://docs.0g.ai/build-with-0g/compute-network/sdk#manual-fee-settlement) to manually settle the fee first")
 	}
 	if err := c.compareFees("inputFee", actual.InputFee, &expectedInputFee); err != nil {
 		return err
@@ -143,7 +144,7 @@ func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce *string) err
 	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, *lastRequestNonce)
 }
 
-func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, fee string) error {
+func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee string) error {
 	if account.UnsettledFee == nil || account.LockBalance == nil {
 		return errors.New("nil unsettledFee or lockBalance in account")
 	}
@@ -178,6 +179,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx context.Context, account model.User, 
 	if cmp2 <= 0 {
 		return nil
 	}
+	ctx.Set("ignoreError", true)
 	return fmt.Errorf("insufficient balance, total fee of %s exceeds the available balance of %s", totalNew.String(), *newAccount.LockBalance)
 }
 
