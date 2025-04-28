@@ -86,7 +86,6 @@ func (d *DB) InProgressTaskCount() (int64, error) {
 func (d *DB) UnFinishedTaskCount(userAddress string) (int64, error) {
 	var count int64
 	finishedStates := []string{
-		ProgressStateUserAcknowledged.String(),
 		ProgressStateFinished.String(),
 		ProgressStateFailed.String(),
 	}

@@ -113,7 +113,7 @@ func (f *Finalizer) HandleNoTask(ctx context.Context) error {
 	return nil
 }
 
-func (f *Finalizer) HandleTaskFailure(err error, dbTask *db.Task) error {
+func (f *Finalizer) HandleExecuteFailure(err error, dbTask *db.Task) error {
 	_, err = f.db.HandleFinalizerFailure(dbTask, f.config.MaxFinalizerRetriesPerTask, f.states.Intermediate, f.states.Initial)
 	return err
 }

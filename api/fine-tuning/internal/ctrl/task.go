@@ -37,6 +37,9 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	if err != nil {
 		return nil, err
 	}
+	if count > int64(c.config.MaxTaskQueueSize) {
+		return nil, errors.New("task queue is full")
+	}
 	if count != 0 && !task.Wait {
 		return nil, errors.New("cannot create a new task while there are in-progress tasks")
 	}
@@ -131,4 +134,8 @@ func (c *Ctrl) validateModelType(task *schema.Task) error {
 	}
 
 	return nil
+}
+
+func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
+	return c.db.PendingTrainingTaskCount()
 }

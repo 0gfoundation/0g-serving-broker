@@ -31,7 +31,7 @@ type TaskProcessor interface {
 	GetTaskTimeout(ctx context.Context) (time.Duration, error)
 	HandleNoTask(ctx context.Context) error
 	Execute(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error
-	HandleTaskFailure(err error, dbTask *db.Task) error
+	HandleExecuteFailure(err error, dbTask *db.Task) error
 }
 
 type TaskStates struct {
@@ -197,7 +197,7 @@ func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
 		return s.db.MarkTaskFailed(dbTask)
 	}
 
-	return s.taskProcessor.HandleTaskFailure(err, dbTask)
+	return s.taskProcessor.HandleExecuteFailure(err, dbTask)
 }
 
 func (s *Service) markTaskCompleted(dbTask *db.Task) error {
