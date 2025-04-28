@@ -109,6 +109,15 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 	return nil
 }
 
+func (f *Finalizer) HandleNoTask(ctx context.Context) error {
+	return nil
+}
+
+func (f *Finalizer) HandleTaskFailure(err error, dbTask *db.Task) error {
+	_, err = f.db.HandleFinalizerFailure(dbTask, f.config.MaxFinalizerRetriesPerTask, f.states.Intermediate, f.states.Initial)
+	return err
+}
+
 func (f *Finalizer) encryptAndUploadModel(ctx context.Context, sourceDir string, task *db.Task) (*SettlementMetadata, error) {
 	aesKey, err := util.GenerateAESKey(aesKeySize)
 	if err != nil {

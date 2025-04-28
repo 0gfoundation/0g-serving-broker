@@ -25,6 +25,7 @@ type Task struct {
 	DeliverTime         int64                 `gorm:"type:bigint" json:"deliverTime"`
 	ModelType           db.ModelType          `gorm:"type:int" json:"modelType"`
 	DeletedAt           soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
+	Wait                bool                  `json:"wait"`
 }
 
 func (d *Task) Bind(ctx *gin.Context) error {
@@ -40,6 +41,7 @@ func (d *Task) Bind(ctx *gin.Context) error {
 	d.Fee = r.Fee
 	d.Nonce = r.Nonce
 	d.Signature = r.Signature
+	d.Wait = r.Wait
 	return nil
 }
 

@@ -51,6 +51,26 @@ func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
 	return tasks, ret.Error
 }
 
+func (d *DB) PendingTrainingTaskCount() (int64, error) {
+	var count int64
+	pendingStates := []string{
+		ProgressStateInit.String(),
+		ProgressStateSettingUp.String(),
+		ProgressStateSetUp.String(),
+		ProgressStateTraining.String(),
+	}
+
+	ret := d.db.Model(&Task{}).
+		Where("progress IN ?", pendingStates).
+		Count(&count)
+
+	if ret.Error != nil {
+		return 0, ret.Error
+	}
+
+	return count, nil
+}
+
 func (d *DB) InProgressTaskCount() (int64, error) {
 	var count int64
 	ret := d.db.Model(&Task{}).
@@ -65,8 +85,14 @@ func (d *DB) InProgressTaskCount() (int64, error) {
 
 func (d *DB) UnFinishedTaskCount(userAddress string) (int64, error) {
 	var count int64
+	finishedStates := []string{
+		ProgressStateUserAcknowledged.String(),
+		ProgressStateFinished.String(),
+		ProgressStateFailed.String(),
+	}
+
 	ret := d.db.Model(&Task{}).
-		Where("progress NOT IN (?, ?) AND user_address = ?", ProgressStateFinished.String(), ProgressStateFailed.String(), userAddress).
+		Where("progress NOT IN ? AND user_address = ?", finishedStates, userAddress).
 		Count(&count)
 	if ret.Error != nil {
 		return 0, ret.Error

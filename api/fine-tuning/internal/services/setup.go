@@ -96,6 +96,15 @@ func (s *Setup) Execute(ctx context.Context, task *db.Task, paths *utils.TaskPat
 	return nil
 }
 
+func (s *Setup) HandleNoTask(ctx context.Context) error {
+	return nil
+}
+
+func (s *Setup) HandleTaskFailure(err error, dbTask *db.Task) error {
+	_, err = s.db.HandleFinalizerFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
+	return err
+}
+
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
 	if err := s.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO); err != nil {
 		s.logger.Errorf("Error creating dataset folder: %v\n", err)
