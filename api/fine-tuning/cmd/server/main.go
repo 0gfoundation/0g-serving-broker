@@ -201,6 +201,10 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 		return err
 	}
 
+	if err := services.ctrl.SyncServices(ctx); err != nil {
+		return err
+	}
+
 	if err := services.finalizer.Start(ctx); err != nil {
 		return err
 	}
@@ -219,10 +223,6 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 
 	if _, ok := <-imageChan; !ok {
 		return errors.New("image build failed")
-	}
-
-	if err := services.ctrl.SyncServices(ctx); err != nil {
-		return err
 	}
 
 	if err := services.settlement.Start(ctx); err != nil {

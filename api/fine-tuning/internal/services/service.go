@@ -29,7 +29,9 @@ var (
 
 type TaskProcessor interface {
 	GetTaskTimeout(ctx context.Context) (time.Duration, error)
+	HandleNoTask(ctx context.Context) error
 	Execute(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error
+	HandleExecuteFailure(err error, dbTask *db.Task) error
 }
 
 type TaskStates struct {
@@ -89,7 +91,9 @@ func (s *Service) Start(ctx context.Context) error {
 			case <-ticker.C:
 				task, err := s.fetchNextTask(ctx)
 				if err != nil {
-					if !errors.Is(err, ErrNoTaskAvailable) {
+					if errors.Is(err, ErrNoTaskAvailable) {
+						s.taskProcessor.HandleNoTask(ctx)
+					} else {
 						s.logger.Warnf("failed to fetch task: %v", err)
 					}
 
@@ -193,18 +197,7 @@ func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
 		return s.db.MarkTaskFailed(dbTask)
 	}
 
-	switch s.name {
-	case "setup":
-		_, err = s.db.HandleSetupFailure(dbTask, s.config.MaxSetupRetriesPerTask, s.states.Intermediate, s.states.Initial)
-	case "executor":
-		_, err = s.db.HandleExecutorFailure(dbTask, s.config.MaxExecutorRetriesPerTask, s.states.Intermediate, s.states.Initial)
-	case "finalizer":
-		_, err = s.db.HandleFinalizerFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
-	default:
-		err = fmt.Errorf("unknown service name: %s", s.name)
-	}
-
-	return err
+	return s.taskProcessor.HandleExecuteFailure(err, dbTask)
 }
 
 func (s *Service) markTaskCompleted(dbTask *db.Task) error {

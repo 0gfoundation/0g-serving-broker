@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -113,4 +114,14 @@ func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 	}
 
 	ctx.Data(http.StatusOK, "text/plain", data)
+}
+
+func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
+	counter, err := h.ctrl.GetPendingTrainingTaskCount(ctx)
+	if err != nil {
+		handleBrokerError(ctx, err, "get task")
+		return
+	}
+
+	ctx.String(http.StatusOK, strconv.Itoa(int(counter)))
 }

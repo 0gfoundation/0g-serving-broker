@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -28,13 +29,19 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 	c.taskMutex.Lock()
 	defer c.taskMutex.Unlock()
 
-	// TODO: removed when support parallel tasks
-	if err := c.validateNoInProgressTasks(); err != nil {
+	if err := c.validateNoUnfinishedTasks(task); err != nil {
 		return nil, err
 	}
 
-	if err := c.validateNoUnfinishedTasks(task); err != nil {
+	count, err := c.db.PendingTrainingTaskCount()
+	if err != nil {
 		return nil, err
+	}
+	if count > int64(c.config.MaxTaskQueueSize) {
+		return nil, errors.New("task queue is full")
+	}
+	if count != 0 && !task.Wait {
+		return nil, errors.New("cannot create a new task while there are in-progress tasks")
 	}
 
 	dbTask := task.GenerateDBTask()
@@ -46,6 +53,12 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 	if err := utils.InitTaskDirectory(dbTask.ID); err != nil {
 		return nil, errors.Wrap(err, "initialize task log folder")
+	}
+
+	if count > 0 {
+		if err := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("There are %v tasks in the queue ahead.\n", count)); err != nil {
+			c.logger.Errorf("failed to write to log file: %v", err)
+		}
 	}
 
 	c.logger.Infof("create task: %s", dbTask.ID.String())
@@ -96,19 +109,6 @@ func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string
 	return nil
 }
 
-func (c *Ctrl) validateNoInProgressTasks() error {
-	count, err := c.db.InProgressTaskCount()
-	if err != nil {
-		return err
-	}
-
-	if count != 0 {
-		return errors.New("cannot create a new task while there is an in-progress task")
-	}
-
-	return nil
-}
-
 func (c *Ctrl) validateNoUnfinishedTasks(task *schema.Task) error {
 	count, err := c.db.UnFinishedTaskCount(task.UserAddress)
 	if err != nil {
@@ -134,4 +134,8 @@ func (c *Ctrl) validateModelType(task *schema.Task) error {
 	}
 
 	return nil
+}
+
+func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
+	return c.db.PendingTrainingTaskCount()
 }

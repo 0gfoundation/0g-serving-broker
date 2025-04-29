@@ -31,8 +31,8 @@ func (c *ProviderContract) OccupyService(ctx context.Context, service config.Ser
 		return err
 	}
 
-	if !srv.Occupied {
-		return c.AddOrUpdateService(ctx, service, true)
+	if srv.Occupied != occupied {
+		return c.AddOrUpdateService(ctx, service, occupied)
 	}
 	return nil
 }

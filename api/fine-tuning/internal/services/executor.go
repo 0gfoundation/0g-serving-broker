@@ -70,17 +70,49 @@ func (s *Executor) GetTaskTimeout(ctx context.Context) (time.Duration, error) {
 }
 
 func (c *Executor) Execute(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-
-	// TODO: avoid duplicate tx when support parallel tasks
 	if err := c.contract.OccupyService(ctx, c.config.Service, true); err != nil {
 		return errors.Wrap(err, "set service as occupied state in contract")
 	}
+	defer c.releaseService(ctx)
 
 	if err := c.handleContainerLifecycle(ctx, paths, task); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (c *Executor) HandleNoTask(ctx context.Context) error {
+	c.releaseService(ctx)
+	return nil
+}
+
+func (c *Executor) HandleExecuteFailure(err error, dbTask *db.Task) error {
+	_, err = c.db.HandleExecutorFailure(dbTask, c.config.MaxExecutorRetriesPerTask, c.states.Intermediate, c.states.Initial)
+	return err
+}
+
+func (c *Executor) releaseService(ctx context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.workerPool.WaitingQueueSize() > 0 {
+		return
+	}
+
+	pendingCount, err := c.db.PendingTrainingTaskCount()
+	if err != nil {
+		c.logger.Errorf("failed to get pending training task count: %v", err)
+		return
+	}
+
+	if pendingCount > 0 {
+		return
+	}
+
+	if err := c.contract.OccupyService(ctx, c.config.Service, false); err != nil {
+		c.logger.Errorf("failed to set service as not occupied in contract: %v", err)
+	}
 }
 
 func (c *Executor) handleContainerLifecycle(ctx context.Context, paths *utils.TaskPaths, task *db.Task) error {
