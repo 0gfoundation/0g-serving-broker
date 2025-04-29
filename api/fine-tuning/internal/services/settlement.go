@@ -71,17 +71,6 @@ func (s *Settlement) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				count, err := s.db.InProgressTaskCount()
-				if err != nil {
-					s.logger.Errorf("error during check in progress task: %v", err)
-				}
-				if count == 0 {
-					err := s.contract.SyncServices(ctx, s.config.Service)
-					if err != nil {
-						s.logger.Errorf("error update service to available: %v", err)
-					}
-				}
-
 				if err := s.processFinishedTasks(ctx); err != nil {
 					s.logger.Errorf("error handling task: %v", err)
 				}
