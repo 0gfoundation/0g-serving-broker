@@ -37,6 +37,19 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 	ctx.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
+// CancelTask godoc
+// @Summary Cancel a task
+// @Description Cancels a task before it starts running. Requires task ID, user address, and a valid signature.
+// @Tags Task
+// @Router /task/cancel [post]
+//
+//	@Param cancelTaskRequest body struct {
+//	    ID          uuid.UUID `json:"id"`
+//	    UserAddress string    `json:"userAddress"`
+//	    Signature   string    `json:"signature"`
+//	} true "Task cancellation request body"
+//
+// @Success 200 {string} string "task <task_id> cancelled"
 func (h *Handler) CancelTask(ctx *gin.Context) {
 	h.logger.Debug("request cancel task")
 	var jsonData struct {
@@ -144,6 +157,12 @@ func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 	ctx.Data(http.StatusOK, "text/plain", data)
 }
 
+// GetPendingTrainingTaskCount godoc
+// @Summary Get pending training task count
+// @Description Returns the number of training tasks that are currently in the pending queue.
+// @Tags Task
+// @Router /task/pending [get]
+// @Success 200 {string} string "5"
 func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 	counter, err := h.ctrl.GetPendingTrainingTaskCount(ctx)
 	if err != nil {
