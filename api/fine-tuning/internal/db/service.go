@@ -1,6 +1,8 @@
 package db
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,6 +41,15 @@ func (d *DB) GetNextTask(state ProgressState) (Task, error) {
 	svc := Task{}
 	ret := d.db.Where(&Task{Progress: state.String()}).Order("created_at").Limit(1).Find(&svc)
 	return svc, ret.Error
+}
+
+func (d *DB) GetTaskProgress(id *uuid.UUID) (string, error) {
+	svc := Task{}
+	ret := d.db.Where(&Task{ID: id}).First(&svc)
+	if ret.Error != nil {
+		return "", ret.Error
+	}
+	return svc.Progress, nil
 }
 
 func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
@@ -124,7 +135,34 @@ func (d *DB) UpdateTask(id *uuid.UUID, new Task) error {
 
 func (d *DB) UpdateTaskProgress(id *uuid.UUID, oldProgress, newProgress ProgressState) error {
 	ret := d.db.Model(&Task{}).Where(&Task{ID: id, Progress: oldProgress.String()}).Update("progress", newProgress.String())
-	return ret.Error
+	if ret.Error != nil {
+		return ret.Error
+	}
+
+	if ret.RowsAffected == 0 {
+		return errors.New(fmt.Sprintf("Failed to update task progress from %v to %v: record not found.", oldProgress, newProgress))
+	}
+
+	return nil
+}
+
+func (d *DB) CancelTask(id *uuid.UUID, userAddress string) error {
+	validStates := []string{
+		ProgressStateInit.String(),
+		ProgressStateSettingUp.String(),
+		ProgressStateSetUp.String(),
+	}
+
+	ret := d.db.Model(&Task{}).Where("progress IN ? AND user_address = ?", validStates, userAddress).Update("progress", ProgressStateFailed.String())
+	if ret.Error != nil {
+		return ret.Error
+	}
+
+	if ret.RowsAffected == 0 {
+		return errors.New(fmt.Sprintf("Failed to cancel task: record not found."))
+	}
+
+	return nil
 }
 
 func (s *DB) MarkTaskFailed(task *Task) error {

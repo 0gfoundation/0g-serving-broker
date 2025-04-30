@@ -37,6 +37,34 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 	ctx.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
+func (h *Handler) CancelTask(ctx *gin.Context) {
+	h.logger.Debug("request cancel task")
+	var jsonData struct {
+		ID          *uuid.UUID `json:"id" binding:"required"`
+		UserAddress string     `json:"userAddress" binding:"required"`
+		Signature   string     `json:"signature" binding:"required"`
+	}
+
+	if err := ctx.Bind(&jsonData); err != nil {
+		handleBrokerError(ctx, err, "bind ctx")
+		return
+	}
+
+	task := schema.Task{
+		ID:          jsonData.ID,
+		UserAddress: jsonData.UserAddress,
+		Signature:   jsonData.Signature,
+	}
+
+	if err := h.ctrl.CancelTask(ctx, &task); err != nil {
+		h.logger.Errorf("cancel task %v, err: %v", task.ID, err)
+		handleBrokerError(ctx, err, "cancel task")
+		return
+	}
+
+	ctx.String(http.StatusOK, fmt.Sprintf("task %v cancelled", task.ID))
+}
+
 // GetTask
 //
 //	@Description  This endpoint allows you to get a task by ID

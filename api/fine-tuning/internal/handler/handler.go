@@ -24,6 +24,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
 	group.POST("/user/:userAddress/task", h.CreateTask)
+	group.POST("/task/cancel", h.CancelTask)
 	group.GET("/user/:userAddress/task", h.ListTask)
 	group.GET("/user/:userAddress/task/:taskID", h.GetTask)
 
