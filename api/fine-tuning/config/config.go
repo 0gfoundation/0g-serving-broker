@@ -87,6 +87,7 @@ type CustomizedModel struct {
 	TrainingScript string           `yaml:"trainingScript" json:"trainingScript"`
 	Description    string           `yaml:"description" json:"description"`
 	Tokenizer      string           `yaml:"tokenizer" json:"tokenizer"`
+	UsageFile      string           `yaml:"usageFile" json:"usageFile"`
 }
 
 type Images struct {
@@ -244,5 +245,10 @@ func validateCustomizedModels() {
 
 		checkDuplicate(modelHashes, hash, "duplicate customized model hash")
 		checkDuplicate(modelNames, strings.ToLower(model.Name), "duplicate customized model name")
+
+		info, err := os.Stat(model.UsageFile)
+		if err != nil || info.IsDir() {
+			panic(fmt.Sprintf("Model %v detail usage file not found", model.Name))
+		}
 	}
 }

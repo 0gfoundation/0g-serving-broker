@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -39,4 +40,22 @@ func (h *Handler) GetModel(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, model)
+}
+
+// GetModel
+//
+//	@Description  This endpoint allows you to get detail usage of a model
+//	@ID			getModelDesc
+//	@Tags		model
+//	@Router		/model/desc/{name} [get]
+//	@Success	200	{object}	config.CustomizedModel
+func (h *Handler) GetModelDesc(ctx *gin.Context) {
+	modelNameOrHash := ctx.Param("name")
+	modelFile, err := h.ctrl.GetModelDesc(ctx, modelNameOrHash)
+	if err != nil {
+		handleBrokerError(ctx, err, "get customized model")
+		return
+	}
+
+	ctx.FileAttachment(modelFile, fmt.Sprintf("%s.zip", modelNameOrHash))
 }
