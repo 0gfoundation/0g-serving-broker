@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -229,7 +230,7 @@ func validateCustomizedModels() {
 		m[key] = true
 	}
 
-	for _, model := range instance.Service.CustomizedModels {
+	for idx, model := range instance.Service.CustomizedModels {
 		hash := strings.ToLower(model.Hash)
 		if !strings.HasPrefix(hash, "0x") {
 			if len(hash)%2 == 1 {
@@ -246,9 +247,16 @@ func validateCustomizedModels() {
 		checkDuplicate(modelHashes, hash, "duplicate customized model hash")
 		checkDuplicate(modelNames, strings.ToLower(model.Name), "duplicate customized model name")
 
-		info, err := os.Stat(model.UsageFile)
+		usageFile := model.UsageFile
+		if usageFile == "" {
+			usageFile = fmt.Sprintf("%s.zip", model.Name)
+		}
+
+		usageFile = filepath.Join(constant.ModelUsagePath, usageFile)
+		info, err := os.Stat(usageFile)
 		if err != nil || info.IsDir() {
 			panic(fmt.Sprintf("Model %v detail usage file not found", model.Name))
 		}
+		instance.Service.CustomizedModels[idx].UsageFile = usageFile
 	}
 }
