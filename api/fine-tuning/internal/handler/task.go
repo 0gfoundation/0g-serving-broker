@@ -41,9 +41,10 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 // @Summary Cancel a task
 // @Description Cancels a task before it starts running. Requires task ID, user address, and a valid signature.
 // @Tags Task
-// @Router /user/{userAddress}/task/cancel [post]
+// @Router /user/{userAddress}/task/:taskID/cancel [post]
 //
 //	@Param		userAddress	path	string	true	"user address"
+//	@Param		taskID		path	string	true	"task ID"
 //	@Param cancelTaskRequest body struct {
 //	    ID          uuid.UUID `json:"id"`
 //	    Signature   string    `json:"signature"`
@@ -53,9 +54,14 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 func (h *Handler) CancelTask(ctx *gin.Context) {
 	h.logger.Debug("request cancel task")
 	userAddress := ctx.Param("userAddress")
+	id, err := uuid.Parse(ctx.Param("taskID"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
+
 	var jsonData struct {
-		ID        *uuid.UUID `json:"id" binding:"required"`
-		Signature string     `json:"signature" binding:"required"`
+		Signature string `json:"signature" binding:"required"`
 	}
 
 	if err := ctx.Bind(&jsonData); err != nil {
@@ -64,7 +70,7 @@ func (h *Handler) CancelTask(ctx *gin.Context) {
 	}
 
 	task := schema.Task{
-		ID:          jsonData.ID,
+		ID:          &id,
 		UserAddress: userAddress,
 		Signature:   jsonData.Signature,
 	}
