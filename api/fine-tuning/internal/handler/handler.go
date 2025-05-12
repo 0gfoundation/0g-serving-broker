@@ -34,6 +34,7 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.GET("/model", h.ListModel)
 	group.GET("/model/:name", h.GetModel)
+	group.GET("/model/desc/:name", h.GetModelDesc)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

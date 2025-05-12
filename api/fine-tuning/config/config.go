@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -87,6 +88,7 @@ type CustomizedModel struct {
 	TrainingScript string           `yaml:"trainingScript" json:"trainingScript"`
 	Description    string           `yaml:"description" json:"description"`
 	Tokenizer      string           `yaml:"tokenizer" json:"tokenizer"`
+	UsageFile      string           `yaml:"usageFile" json:"usageFile"`
 }
 
 type Images struct {
@@ -228,7 +230,7 @@ func validateCustomizedModels() {
 		m[key] = true
 	}
 
-	for _, model := range instance.Service.CustomizedModels {
+	for idx, model := range instance.Service.CustomizedModels {
 		hash := strings.ToLower(model.Hash)
 		if !strings.HasPrefix(hash, "0x") {
 			if len(hash)%2 == 1 {
@@ -244,5 +246,17 @@ func validateCustomizedModels() {
 
 		checkDuplicate(modelHashes, hash, "duplicate customized model hash")
 		checkDuplicate(modelNames, strings.ToLower(model.Name), "duplicate customized model name")
+
+		usageFile := model.UsageFile
+		if usageFile == "" {
+			usageFile = fmt.Sprintf("%s.zip", model.Name)
+		}
+
+		usageFile = filepath.Join(constant.ModelUsagePath, usageFile)
+		info, err := os.Stat(usageFile)
+		if err != nil || info.IsDir() {
+			panic(fmt.Sprintf("Model %v detail usage file not found", model.Name))
+		}
+		instance.Service.CustomizedModels[idx].UsageFile = usageFile
 	}
 }

@@ -21,3 +21,4 @@ var (
 )
 
 const FineTuningDockerfilePath = "./fine-tuning/execution/transformer"
+const ModelUsagePath = "./fine-tuning/execution/models"
