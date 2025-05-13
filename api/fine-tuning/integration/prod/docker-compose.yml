@@ -28,8 +28,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.local.yaml:/etc/config.yaml
       - /tmp:/tmp
-      - ../../../fine-tuning/execution/transformer:/fine-tuning/execution/transformer
-      - ../../../fine-tuning/execution/models:/fine-tuning/execution/models
+      - ./transformer:/fine-tuning/execution/transformer
+      - ./models:/fine-tuning/execution/models
     command: 0g-fine-tuning-server
     networks:
       - localhost
