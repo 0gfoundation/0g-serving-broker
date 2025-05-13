@@ -174,9 +174,7 @@ func (s *Service) runTaskWithTimeout(ctx context.Context, dbTask *db.Task) error
 
 	done := make(chan error, 1)
 	go func() {
-		tmpFolderPath := utils.GetTaskLogDir(dbTask.ID)
-		paths := utils.NewTaskPaths(tmpFolderPath)
-		done <- s.taskProcessor.Execute(ctxWithTimeout, dbTask, paths)
+		done <- s.execute(ctxWithTimeout, dbTask)
 	}()
 
 	select {
@@ -190,6 +188,21 @@ func (s *Service) runTaskWithTimeout(ctx context.Context, dbTask *db.Task) error
 	case <-ctxWithTimeout.Done():
 		return ErrTaskTimeout
 	}
+}
+
+func (s *Service) execute(ctxWithTimeout context.Context, dbTask *db.Task) error {
+	progress, err := s.db.GetTaskProgress(dbTask.ID)
+	if err != nil {
+		return err
+	}
+
+	if progress != s.states.Intermediate.String() {
+		return fmt.Errorf("task %s is not in the expected state: %s", dbTask.ID, progress)
+	}
+
+	tmpFolderPath := utils.GetTaskLogDir(dbTask.ID)
+	paths := utils.NewTaskPaths(tmpFolderPath)
+	return s.taskProcessor.Execute(ctxWithTimeout, dbTask, paths)
 }
 
 func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {

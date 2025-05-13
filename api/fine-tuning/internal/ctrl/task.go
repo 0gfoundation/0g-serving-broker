@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -63,6 +66,49 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 	c.logger.Infof("create task: %s", dbTask.ID.String())
 	return dbTask.ID, nil
+}
+
+func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
+	if err := c.validateSignature(task); err != nil {
+		return err
+	}
+
+	return c.db.CancelTask(task.ID, task.UserAddress)
+}
+
+func (*Ctrl) validateSignature(task *schema.Task) error {
+	id, err := task.ID.MarshalBinary()
+	if err != nil {
+		return err
+	}
+
+	hash := accounts.TextHash(crypto.Keccak256(id)[:])
+
+	sigBytes, err := hexutil.Decode(task.Signature)
+	if err != nil {
+		return err
+	}
+
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
+	}
+
+	if sigBytes[64] != 27 && sigBytes[64] != 28 {
+		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
+	}
+
+	sigBytes[64] -= 27
+	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	if err != nil {
+		return err
+	}
+
+	recoveredAddress := crypto.PubkeyToAddress(*pubKey)
+	if recoveredAddress.Hex() != task.UserAddress {
+		return errors.New("signature verification failed: address mismatch")
+	}
+
+	return nil
 }
 
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
