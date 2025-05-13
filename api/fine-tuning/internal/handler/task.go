@@ -37,6 +37,53 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 	ctx.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
+// CancelTask godoc
+// @Summary Cancel a task
+// @Description Cancels a task before it starts running. Requires task ID, user address, and a valid signature.
+// @Tags Task
+// @Router /user/{userAddress}/task/:taskID/cancel [post]
+//
+//	@Param		userAddress	path	string	true	"user address"
+//	@Param		taskID		path	string	true	"task ID"
+//	@Param cancelTaskRequest body struct {
+//	    ID          uuid.UUID `json:"id"`
+//	    Signature   string    `json:"signature"`
+//	} true "Task cancellation request body"
+//
+// @Success 200 {string} string "task <task_id> cancelled"
+func (h *Handler) CancelTask(ctx *gin.Context) {
+	h.logger.Debug("request cancel task")
+	userAddress := ctx.Param("userAddress")
+	id, err := uuid.Parse(ctx.Param("taskID"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
+
+	var jsonData struct {
+		Signature string `json:"signature" binding:"required"`
+	}
+
+	if err := ctx.Bind(&jsonData); err != nil {
+		handleBrokerError(ctx, err, "bind ctx")
+		return
+	}
+
+	task := schema.Task{
+		ID:          &id,
+		UserAddress: userAddress,
+		Signature:   jsonData.Signature,
+	}
+
+	if err := h.ctrl.CancelTask(ctx, &task); err != nil {
+		h.logger.Errorf("cancel task %v, err: %v", task.ID, err)
+		handleBrokerError(ctx, err, "cancel task")
+		return
+	}
+
+	ctx.String(http.StatusOK, fmt.Sprintf("task %v cancelled", task.ID))
+}
+
 // GetTask
 //
 //	@Description  This endpoint allows you to get a task by ID
@@ -116,6 +163,12 @@ func (h *Handler) GetTaskProgress(ctx *gin.Context) {
 	ctx.Data(http.StatusOK, "text/plain", data)
 }
 
+// GetPendingTrainingTaskCount godoc
+// @Summary Get pending training task count
+// @Description Returns the number of training tasks that are currently in the pending queue.
+// @Tags Task
+// @Router /task/pending [get]
+// @Success 200 {string} string "5"
 func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 	counter, err := h.ctrl.GetPendingTrainingTaskCount(ctx)
 	if err != nil {

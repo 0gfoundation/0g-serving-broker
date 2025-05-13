@@ -101,7 +101,7 @@ func (s *Setup) HandleNoTask(ctx context.Context) error {
 }
 
 func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) error {
-	_, err = s.db.HandleFinalizerFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
+	_, err = s.db.HandleSetupFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
 	return err
 }
 
