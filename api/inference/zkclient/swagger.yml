@@ -35,7 +35,7 @@ paths:
               requests:
                 type: array
                 items:
-                  $ref: "#/definitions/request"
+                  $ref: "#/definitions/requestResponse"
               privkey:
                 $ref: "#/definitions/privateKey"
       responses:
@@ -65,7 +65,7 @@ paths:
               requests:
                 type: array
                 items:
-                  $ref: "#/definitions/request"
+                  $ref: "#/definitions/requestResponse"
               pubkey:
                 $ref: "#/definitions/publicKey"
               signatures:
@@ -92,7 +92,7 @@ paths:
               requests:
                 type: array
                 items:
-                  $ref: "#/definitions/request"
+                  $ref: "#/definitions/requestResponse"
               l:
                 type: integer
               pubkey:
@@ -157,12 +157,16 @@ paths:
               requests:
                 type: array
                 items:
-                  $ref: "#/definitions/request"
+                  $ref: "#/definitions/requestResponse"
               l:
                 type: integer
-              pubkey:
+              userPubkey:
                 $ref: "#/definitions/publicKey"
-              signatures:
+              teeSignerPubkey:
+                $ref: "#/definitions/publicKey"
+              requestSignatures:
+                $ref: "#/definitions/signatures"
+              responseSignatures:
                 $ref: "#/definitions/signatures"
       responses:
         "200":
@@ -209,17 +213,24 @@ definitions:
       type: array
       items:
         type: integer
-  request:
+  requestResponse:
     type: object
     properties:
       nonce:
         type: string
-      fee:
+      requestFee:
+        type: string
+      responseFee:
         type: string
       userAddress:
         type: string
       providerAddress:
         type: string
+      teeSignerAddress:
+        type: string
+      requestHash:
+        type: string
+        description: The hash of the request, generated the combination of nonce, userAddress and providerAddress
   ErrorResponse:
     type: object
     properties:
