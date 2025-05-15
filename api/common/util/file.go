@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -209,17 +210,21 @@ func FileContentSize(filePath string) (int64, error) {
 }
 
 // Unzip extracts a ZIP archive to a specified destination folder.
-func Unzip(src string, dest string) error {
+// In our case, all files are expected to be under the same top-level directory.
+func Unzip(src string, dest string) (string, error) {
+	var topLevelDir string
+	hasTopLevelDir := false
+
 	// Open the zip file
 	r, err := zip.OpenReader(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer r.Close()
 
 	// Ensure the destination folder exists
 	if err := os.MkdirAll(dest, 0755); err != nil {
-		return err
+		return "", err
 	}
 
 	// Extract each file from the zip archive
@@ -228,32 +233,49 @@ func Unzip(src string, dest string) error {
 
 		// Ensure the path is safe (prevent directory traversal)
 		if !filepath.HasPrefix(filePath, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path: %s", filePath)
+			return "", fmt.Errorf("illegal file path: %s", filePath)
+		}
+
+		// Check top-level directory
+		relativePath, err := filepath.Rel(dest, filePath)
+		if err != nil {
+			return "", err
+		}
+
+		parts := strings.Split(relativePath, string(os.PathSeparator))
+		if len(parts) > 0 {
+			currentTopLevel := parts[0]
+			if !hasTopLevelDir {
+				topLevelDir = currentTopLevel
+				hasTopLevelDir = true
+			} else if topLevelDir != currentTopLevel {
+				return "", fmt.Errorf("not all files are under the same top-level directory")
+			}
 		}
 
 		// If it's a directory, create it
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(filePath, f.Mode()); err != nil {
-				return err
+				return "", err
 			}
 			continue
 		}
 
 		// Create the file
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			return err
+			return "", err
 		}
 
 		outFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		// Open the file in the zip archive
 		rc, err := f.Open()
 		if err != nil {
 			outFile.Close()
-			return err
+			return "", err
 		}
 
 		// Copy the contents of the file
@@ -264,9 +286,10 @@ func Unzip(src string, dest string) error {
 		rc.Close()
 
 		if err != nil {
-			return err
+			return "", err
 		}
+
 	}
 
-	return nil
+	return filepath.Join(dest, topLevelDir), nil
 }
