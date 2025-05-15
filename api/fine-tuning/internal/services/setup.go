@@ -106,16 +106,29 @@ func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) error {
 }
 
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-	if err := s.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO); err != nil {
+	datasetTopLevelDir, err := s.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO)
+	if err != nil {
 		s.logger.Errorf("Error creating dataset folder: %v\n", err)
 		return err
 	}
+	if datasetTopLevelDir != paths.Dataset {
+		if err := os.Rename(datasetTopLevelDir, paths.Dataset); err != nil {
+			s.logger.Errorf("Error moving dataset folder: %v\n", err)
+			return err
+		}
+	}
 
-	if err := s.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, constant.IS_TURBO); err != nil {
+	modelTopLevelDir, err := s.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, constant.IS_TURBO)
+	if err != nil {
 		s.logger.Errorf("Error creating pre-trained model folder: %v\n", err)
 		return err
 	}
-
+	if modelTopLevelDir != paths.PretrainedModel {
+		if err := os.Rename(modelTopLevelDir, paths.PretrainedModel); err != nil {
+			s.logger.Errorf("Error moving model folder: %v\n", err)
+			return err
+		}
+	}
 	if err := os.WriteFile(paths.TrainingConfig, []byte(task.TrainingParams), os.ModePerm); err != nil {
 		s.logger.Errorf("Error writing training params file: %v\n", err)
 		return err
