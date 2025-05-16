@@ -188,7 +188,7 @@ type CheckSignatureBody struct {
 	Pubkey models.PublicKey `json:"pubkey"`
 
 	// requests
-	Requests []*models.RequestResponse `json:"requests"`
+	Requests []*models.Request `json:"requests"`
 
 	// signatures
 	Signatures models.Signatures `json:"signatures"`

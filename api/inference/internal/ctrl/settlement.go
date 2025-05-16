@@ -115,7 +115,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 				return err
 			}
 			verifierInput.InProof = append(verifierInput.InProof, proof...)
-			// proofInputs: [userAddress, providerAddress, teeSingerAddress, initNonce, finalNonce, totalFee, userPubkey[0], userPubkey[1], TeeSignerPubKey[0], TeeSignerPubKey[1]]
+			// proofInputs: [userAddress, providerAddress, initNonce, finalNonce, totalFee, signerPubKey[0], signerPubKey[1]]
 			proofInputs, err := flattenAndConvert([][]string{calldata.PubInputs})
 			if err != nil {
 				return err
