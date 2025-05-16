@@ -203,9 +203,9 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 	if err != nil {
 		return err
 	}
-
-	if account.Balance.Cmp(fee) < 0 {
-		return fmt.Errorf("insufficient account balance: expected %v, got %v", fee, account.Balance)
+	remainingBalance := new(big.Int).Sub(account.Balance, account.PendingRefund)
+	if remainingBalance.Cmp(fee) < 0 {
+		return fmt.Errorf("insufficient account balance after pending refund: expected %v, got %v", fee, remainingBalance)
 	}
 
 	nonce, err := util.ConvertToBigInt(task.Nonce)
