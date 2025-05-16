@@ -190,7 +190,7 @@ type GenerateSignatureBody struct {
 	Privkey models.PrivateKey `json:"privkey"`
 
 	// requests
-	Requests []*models.RequestResponse `json:"requests"`
+	Requests []*models.Request `json:"requests"`
 }
 
 // Validate validates this generate signature body
