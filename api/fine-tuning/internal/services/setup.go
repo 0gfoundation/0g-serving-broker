@@ -112,6 +112,11 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 		return err
 	}
 	if datasetTopLevelDir != paths.Dataset {
+		if err := os.RemoveAll(paths.Dataset); err != nil {
+			s.logger.Errorf("Error removing existing dataset folder: %v\n", err)
+			return err
+		}
+
 		if err := os.Rename(datasetTopLevelDir, paths.Dataset); err != nil {
 			s.logger.Errorf("Error moving dataset folder: %v\n", err)
 			return err
@@ -124,6 +129,11 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 		return err
 	}
 	if modelTopLevelDir != paths.PretrainedModel {
+		if err := os.RemoveAll(paths.PretrainedModel); err != nil {
+			s.logger.Errorf("Error removing existing model folder: %v\n", err)
+			return err
+		}
+
 		if err := os.Rename(modelTopLevelDir, paths.PretrainedModel); err != nil {
 			s.logger.Errorf("Error moving model folder: %v\n", err)
 			return err
