@@ -206,6 +206,10 @@ func (s *Service) execute(ctxWithTimeout context.Context, dbTask *db.Task) error
 }
 
 func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
+	if err := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("Error executing task %v: %v", dbTask.ID, err)); err != nil {
+		s.logger.Errorf("Write into task log failed: %v", err)
+	}
+
 	if errors.Is(err, errSignature) {
 		return s.db.MarkTaskFailed(dbTask)
 	}
