@@ -31,7 +31,7 @@ type TaskProcessor interface {
 	GetTaskTimeout(ctx context.Context) (time.Duration, error)
 	HandleNoTask(ctx context.Context) error
 	Execute(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error
-	HandleExecuteFailure(err error, dbTask *db.Task) error
+	HandleExecuteFailure(err error, dbTask *db.Task) (bool, error)
 }
 
 type TaskStates struct {
@@ -206,7 +206,7 @@ func (s *Service) execute(ctxWithTimeout context.Context, dbTask *db.Task) error
 }
 
 func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
-	if err := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("Error executing task %v: %v", dbTask.ID, err)); err != nil {
+	if err := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("Error executing task %v: %v\n", dbTask.ID, err)); err != nil {
 		s.logger.Errorf("Write into task log failed: %v", err)
 	}
 
@@ -214,7 +214,14 @@ func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
 		return s.db.MarkTaskFailed(dbTask)
 	}
 
-	return s.taskProcessor.HandleExecuteFailure(err, dbTask)
+	retry, err := s.taskProcessor.HandleExecuteFailure(err, dbTask)
+	if retry {
+		if err := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("Retrying task %v\n", dbTask.ID)); err != nil {
+			s.logger.Errorf("Write into task log failed: %v", err)
+		}
+	}
+
+	return err
 }
 
 func (s *Service) markTaskCompleted(dbTask *db.Task) error {

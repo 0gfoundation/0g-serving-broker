@@ -100,9 +100,8 @@ func (s *Setup) HandleNoTask(ctx context.Context) error {
 	return nil
 }
 
-func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) error {
-	_, err = s.db.HandleSetupFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
-	return err
+func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
+	return s.db.HandleSetupFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
 }
 
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {

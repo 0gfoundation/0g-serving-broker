@@ -116,7 +116,12 @@ func (s *Settlement) processFinishedTasks(ctx context.Context) error {
 func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool) error {
 	s.logger.Infof("settle for task %v, ack %v", task.ID.String(), userAcked)
 	if err := s.doSettlement(ctx, &task, userAcked); err != nil {
-		s.logger.Errorf("error during do settlement for tasks failed once: %v", err)
+		err = errors.Wrapf(err, "error during do settlement for tasks failed once")
+		s.logger.Errorf("%v", err)
+		if err := utils.WriteToLogFile(task.ID, fmt.Sprintf("Settle task %v failed: %v\n", task.ID, err)); err != nil {
+			s.logger.Errorf("Write into task log failed: %v", err)
+		}
+
 		_, err := s.db.HandleSettlementFailure(&task, s.config.MaxNumRetriesPerTask)
 		if err != nil {
 			s.logger.Errorf("error handling failure task: %v", err)
@@ -124,6 +129,10 @@ func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool
 		}
 
 		return err
+	} else {
+		if err := utils.WriteToLogFile(task.ID, fmt.Sprintf("Settle task %s successfully\n", task.ID)); err != nil {
+			s.logger.Errorf("Write into task log failed: %v", err)
+		}
 	}
 
 	return nil

@@ -87,9 +87,8 @@ func (c *Executor) HandleNoTask(ctx context.Context) error {
 	return nil
 }
 
-func (c *Executor) HandleExecuteFailure(err error, dbTask *db.Task) error {
-	_, err = c.db.HandleExecutorFailure(dbTask, c.config.MaxExecutorRetriesPerTask, c.states.Intermediate, c.states.Initial)
-	return err
+func (c *Executor) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
+	return c.db.HandleExecutorFailure(dbTask, c.config.MaxExecutorRetriesPerTask, c.states.Intermediate, c.states.Initial)
 }
 
 func (c *Executor) releaseService(ctx context.Context) {
