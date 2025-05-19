@@ -115,7 +115,8 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 
 	c.logger.Infof("Begin downloading and unzipping %s\n, with root: %v", fileName, hash)
 	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
-		c.logger.Errorf("Error downloading data with root: %v,%v \n", hash, err)
+		err = errors.Wrapf(err, "Error downloading data with root: %v", hash)
+		c.logger.Error(err)
 		return "", err
 	}
 
