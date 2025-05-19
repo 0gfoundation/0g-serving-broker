@@ -115,7 +115,8 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 
 	c.logger.Infof("Begin downloading and unzipping %s\n, with root: %v", fileName, hash)
 	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
-		c.logger.Errorf("Error downloading data with root: %v,%v \n", hash, err)
+		err = errors.Wrapf(err, "Error downloading data with root: %v", hash)
+		c.logger.Errorf("%v", err)
 		return "", err
 	}
 
@@ -172,7 +173,8 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 
 	_, roots, err := uploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
 	if err != nil {
-		c.logger.Errorf("Error uploading file: %v\n", err)
+		err = errors.Wrapf(err, "Error uploading file: %v", fileName)
+		c.logger.Errorf("%v", err)
 		return nil, err
 	}
 	if len(roots) == 1 {
