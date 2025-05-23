@@ -37,6 +37,8 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// request
 	group.GET("/request", h.ListRequest)
+
+	group.GET("/quote", h.GetQuote)
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
