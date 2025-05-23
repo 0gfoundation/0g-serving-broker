@@ -17,6 +17,7 @@ import (
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
+	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
 )
 
@@ -66,8 +67,20 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService)
 	ctx := context.Background()
+	if err := phalaService.SyncQuote(ctx); err != nil {
+		panic(err)
+	}
+
+	signer, _ := signer.NewSigner()
+	encryptedKey, err := signer.InitialKey(ctx, contract, zk, phalaService.ProviderSigner)
+	if err != nil {
+		panic(err)
+	}
+	contract.EncryptedPrivKey = encryptedKey
+
+	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService, signer)
+
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
 	}

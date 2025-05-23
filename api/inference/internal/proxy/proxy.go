@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"io"
-	"net/http"
+	"log"
 	"strings"
 	"sync"
 
@@ -91,17 +91,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	// handle endpoints not need to be proxy
-	if targetRoute == constant.SettleFeeRoute {
-		err := p.ctrl.SettleUserAccountFee(ctx)
-		if err != nil {
-			handleBrokerError(ctx, err, "settle user account fee")
-			return
-		}
-		ctx.Status(http.StatusAccepted)
-		return
-	}
-
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetRoute]; !ok {
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
@@ -112,7 +101,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", 0, false)
 		return
 	}
-
+	log.Printf("received request %v", ctx.Request)
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
 		handleBrokerError(ctx, err, "get model.request from HTTP request")

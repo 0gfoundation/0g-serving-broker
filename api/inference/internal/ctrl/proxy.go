@@ -10,12 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
-
-
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
@@ -81,26 +78,21 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return
 	}
 
-	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
+	_, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
 		handleBrokerError(ctx, err, "")
-		return
-	}
-	unsettledFee, err := util.Add(fee, oldAccount.UnsettledFee)
-	if err != nil {
-		handleBrokerError(ctx, err, "add unsettled fee")
 		return
 	}
 
 	account := model.User{
 		User:             reqModel.UserAddress,
 		LastRequestNonce: &reqModel.Nonce,
-		UnsettledFee:     model.PtrOf(unsettledFee.String()),
+		UnsettledFee:     model.PtrOf(fee),
 	}
 
 	switch svcType {
 	case "chatbot":
-		c.handleChatbotResponse(ctx, resp, account, outputPrice, body)
+		c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel.RequestHash)
 	default:
 		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 	}

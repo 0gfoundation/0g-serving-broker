@@ -21,7 +21,6 @@ func (d *DB) Migrate() error {
 					model.Model
 					User                 string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
 					LastRequestNonce     *string               `gorm:"type:varchar(255);not null;default:0"`
-					LastResponseFee      *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					LockBalance          *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
 					Signer               model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
@@ -36,14 +35,16 @@ func (d *DB) Migrate() error {
 			Migrate: func(tx *gorm.DB) error {
 				type Request struct {
 					model.Model
-					UserAddress       string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
-					Nonce             string `gorm:"type:varchar(255);not null;index:processed_userAddress_nonce"`
-					ServiceName       string `gorm:"type:varchar(255);not null"`
-					InputFee          string `gorm:"type:varchar(255);not null"`
-					PreviousOutputFee string `gorm:"type:varchar(255);not null"`
-					Fee               string `gorm:"type:varchar(255);not null"`
-					Signature         string `gorm:"type:varchar(255);not null"`
-					Processed         *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
+					UserAddress  string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
+					Nonce        string `gorm:"type:varchar(255);not null;index:processed_userAddress_nonce"`
+					ServiceName  string `gorm:"type:varchar(255);not null"`
+					InputFee     string `gorm:"type:varchar(255);not null"`
+					OutputFee    string `gorm:"type:varchar(255);not null"`
+					Fee          string `gorm:"type:varchar(255);not null"`
+					Signature    string `gorm:"type:varchar(255);not null"`
+					TeeSignature string `gorm:"type:varchar(255);not null"`
+					RequestHash  string `gorm:"type:varchar(255);not null"`
+					Processed    *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

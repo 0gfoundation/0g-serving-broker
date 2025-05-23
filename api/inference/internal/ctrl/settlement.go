@@ -42,8 +42,9 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	}
 	latestReqCreateAt := reqs[0].CreatedAt
 
-	categorizedReqs := make(map[string][]*models.Request)
+	categorizedReqs := make(map[string][]*models.RequestResponse)
 	categorizedSigs := make(map[string][][]int64)
+	categorizedTeeSigs := make(map[string][][]int64)
 	for _, req := range reqs {
 		if latestReqCreateAt.Before(*req.CreatedAt) {
 			latestReqCreateAt = req.CreatedAt
@@ -55,11 +56,19 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			return errors.New("Failed to parse signature")
 		}
 
-		reqInZK := &models.Request{
-			Fee:             req.Fee,
-			Nonce:           req.Nonce,
-			ProviderAddress: c.contract.ProviderAddress,
-			UserAddress:     req.UserAddress,
+		var teeSig []int64
+		err = json.Unmarshal([]byte(req.TeeSignature), &teeSig)
+		if err != nil {
+			return errors.New("Failed to parse signature")
+		}
+
+		reqInZK := &models.RequestResponse{
+			RequestFee:       req.InputFee,
+			ResponseFee:      req.OutputFee,
+			Nonce:            req.Nonce,
+			ProviderAddress:  c.contract.ProviderAddress,
+			UserAddress:      req.UserAddress,
+			TeeSignerAddress: c.GetProviderSignerAddress(ctx).String(),
 		}
 		if v, ok := categorizedSettlementInfo[req.UserAddress]; ok {
 			minNonce := v.MinNonceInSettlement
@@ -87,11 +96,13 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		if _, ok := categorizedReqs[req.UserAddress]; ok {
 			categorizedReqs[req.UserAddress] = append(categorizedReqs[req.UserAddress], reqInZK)
 			categorizedSigs[req.UserAddress] = append(categorizedSigs[req.UserAddress], sig)
+			categorizedTeeSigs[req.UserAddress] = append(categorizedTeeSigs[req.UserAddress], teeSig)
 			continue
 		}
 
-		categorizedReqs[req.UserAddress] = []*models.Request{reqInZK}
+		categorizedReqs[req.UserAddress] = []*models.RequestResponse{reqInZK}
 		categorizedSigs[req.UserAddress] = [][]int64{sig}
+		categorizedTeeSigs[req.UserAddress] = [][]int64{teeSig}
 	}
 
 	verifierInput := contract.VerifierInput{
@@ -101,12 +112,12 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		SegmentSize: []*big.Int{},
 	}
 	for key := range categorizedReqs {
-		reqChunks, sigChunks := splitArray(categorizedReqs[key], c.zk.RequestLength), splitArray(categorizedSigs[key], c.zk.RequestLength)
+		reqChunks, sigChunks, teeSigChunks := splitArray(categorizedReqs[key], c.zk.RequestLength), splitArray(categorizedSigs[key], c.zk.RequestLength), splitArray(categorizedTeeSigs[key], c.zk.RequestLength)
 		verifierInput.NumChunks.Add(verifierInput.NumChunks, big.NewInt(int64(len(reqChunks))))
 
 		segmentSize := 0
 		for i := range reqChunks {
-			calldata, err := c.GenerateSolidityCalldata(ctx, reqChunks[i], sigChunks[i])
+			calldata, err := c.GenerateSolidityCalldata(ctx, reqChunks[i], sigChunks[i], teeSigChunks[i])
 			if err != nil {
 				return err
 			}
@@ -150,7 +161,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 }
 
-func (c Ctrl) ProcessSettlement(ctx context.Context) error {
+func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 	settleTriggerThreshold := (c.Service.InputPrice + c.Service.OutputPrice) * constant.SettleTriggerThreshold
 
 	accounts, err := c.db.ListUserAccount(&model.UserListOptions{
@@ -185,7 +196,7 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 	return errors.Wrap(c.SettleFees(ctx), "settle fees")
 }
 
-func (c Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[string]SettlementInfo) error {
+func (c *Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[string]SettlementInfo) error {
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
 		Sort:      model.PtrOf("nonce ASC"),

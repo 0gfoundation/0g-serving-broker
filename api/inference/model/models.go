@@ -1,6 +1,9 @@
 package model
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -16,3 +19,15 @@ type ListMeta struct {
 }
 
 type StringSlice []string
+
+func (a StringSlice) Value() (driver.Value, error) {
+	return json.Marshal(a)
+}
+
+func (a *StringSlice) Scan(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		return errors.New("failed to scan StringArray: not []byte")
+	}
+	return json.Unmarshal(bytes, a)
+}

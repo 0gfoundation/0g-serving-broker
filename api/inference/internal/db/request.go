@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"gorm.io/gorm"
 )
 
 func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
@@ -46,6 +47,35 @@ func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 		Where("created_at <= ?", *latestReqCreateAt).
 		Updates(model.Request{Processed: true})
 	return ret.Error
+}
+
+func (d *DB) UpdateOutputFeeWithSignature(userAddress, nonce, outputFee, requestFee, unsettledFee, signature string) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.
+			Where(&model.Request{
+				UserAddress: userAddress,
+				Nonce:       nonce,
+			}).
+			Updates(&model.Request{
+				OutputFee:    outputFee,
+				Fee:          requestFee,
+				TeeSignature: signature}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.
+			Where(&model.User{
+				User: userAddress,
+			}).
+			Updates(&model.User{
+				LastRequestNonce: &nonce,
+				UnsettledFee:     &unsettledFee,
+			}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
 }
 
 func (d *DB) CreateRequest(req model.Request) error {
