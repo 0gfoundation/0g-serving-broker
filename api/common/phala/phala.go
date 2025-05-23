@@ -9,8 +9,14 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
+
+type QuoteResponse struct {
+	Quote          string `json:"quote"`
+	ProviderSigner string `json:"provider_signer"`
+}
 
 type ClientType int
 
@@ -45,6 +51,7 @@ type PhalaService struct {
 	clientType ClientType
 
 	ProviderSigner *ecdsa.PrivateKey
+	Address        common.Address
 	Quote          string
 }
 
@@ -70,9 +77,9 @@ func (s *PhalaService) SyncQuote(ctx context.Context) error {
 		return err
 	}
 	s.ProviderSigner = signer
+	s.Address = crypto.PubkeyToAddress(signer.PublicKey)
 
-	address := crypto.PubkeyToAddress(signer.PublicKey)
-	quote, err := s.getQuote(ctx, client, address.Hex())
+	quote, err := s.getQuote(ctx, client, s.Address.Hex())
 	if err != nil {
 		return err
 	}
@@ -128,4 +135,17 @@ func (s *PhalaService) getSigningKey(ctx context.Context, client TappdClient) (*
 	}
 
 	return privateKey, nil
+}
+
+func (s *PhalaService) GetQuote() (string, error) {
+	jsonData, err := json.Marshal(QuoteResponse{
+		Quote:          s.Quote,
+		ProviderSigner: s.Address.Hex(),
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(jsonData), nil
 }

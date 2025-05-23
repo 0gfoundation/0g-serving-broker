@@ -1,11 +1,14 @@
 package event
 
 import (
+	"os"
+
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -55,7 +58,16 @@ func Main() {
 	}
 
 	zk := zkclient.NewZKClient(conf.ZKSettlement.Provider, conf.ZKSettlement.RequestLength)
-	ctrl := ctrl.New(db, contract, zk, config.Service{}, conf.Interval.AutoSettleBufferTime, nil)
+	phalaClientType := phala.TEE
+	if os.Getenv("NETWORK") == "hardhat" {
+		phalaClientType = phala.Mock
+	}
+
+	phalaService, err := phala.NewPhalaService(phalaClientType)
+	if err != nil {
+		panic(err)
+	}
+	ctrl := ctrl.New(db, contract, zk, config.Service{}, conf.Interval.AutoSettleBufferTime, nil, phalaService)
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)

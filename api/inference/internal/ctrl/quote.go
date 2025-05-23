@@ -10,6 +10,6 @@ func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 	return c.phalaService.GetQuote()
 }
 
-func (c *Ctrl) getProviderSignerAddress(ctx context.Context) common.Address {
+func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
 	return c.phalaService.Address
 }

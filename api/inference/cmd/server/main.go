@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"os"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
@@ -54,7 +56,17 @@ func Main() {
 	}
 
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
-	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache)
+	phalaClientType := phala.TEE
+	if os.Getenv("NETWORK") == "hardhat" {
+		phalaClientType = phala.Mock
+	}
+
+	phalaService, err := phala.NewPhalaService(phalaClientType)
+	if err != nil {
+		panic(err)
+	}
+
+	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService)
 	ctx := context.Background()
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
