@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/google/uuid"
 )
 
@@ -14,7 +15,6 @@ const (
 	TrainingConfigPath  = "config.json"
 	OutputPath          = "output_model"
 	ContainerBasePath   = "/app/mnt"
-	TaskLogFileName     = "progress.log"
 )
 
 type TaskPaths struct {
@@ -43,34 +43,16 @@ func NewTaskPaths(basePath string) *TaskPaths {
 	}
 }
 
+var taskLogger = log.NewTaskLogger(os.TempDir())
+
 func GetTaskLogDir(id *uuid.UUID) string {
-	return filepath.Join(os.TempDir(), id.String())
+	return taskLogger.GetTaskLogDir(id)
 }
 
 func InitTaskDirectory(id *uuid.UUID) error {
-	tmpFolderPath := GetTaskLogDir(id)
-	if err := os.Mkdir(tmpFolderPath, os.ModePerm); err != nil {
-		return errors.Wrap(err, "create temporary folder")
-	}
-
-	// create log file
-	if err := WriteToLogFile(id, "creating task....\n"); err != nil {
-		return errors.Wrap(err, "initialize task log")
-	}
-
-	return nil
+	return taskLogger.InitTaskDirectory(id)
 }
 
 func WriteToLogFile(id *uuid.UUID, content string) error {
-	filePath := filepath.Join(GetTaskLogDir(id), TaskLogFileName)
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	if _, err := file.WriteString(content); err != nil {
-		return err
-	}
-	return nil
+	return taskLogger.WriteToLogFile(id, content)
 }
