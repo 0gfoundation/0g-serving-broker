@@ -3,7 +3,6 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"math/big"
 	"time"
 
@@ -132,10 +131,10 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	}
 	settlementInfoJSON, err := json.Marshal(settlementInfos)
 	if err != nil {
-		log.Println("Error marshalling settlement infos:", err)
+		c.logger.Error("Error marshalling settlement infos:", err)
 		settlementInfoJSON = []byte("[]")
 	}
-	log.Printf("Settlement infos: %s", string(settlementInfoJSON))
+	c.logger.Infof("Settlement infos: %s", string(settlementInfoJSON))
 	if err := c.contract.SettleFees(ctx, verifierInput); err != nil {
 		return errors.Wrapf(err, "settle fees in contract, the ")
 	}
@@ -181,7 +180,7 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 	if len(accounts) == 0 {
 		return nil
 	}
-	log.Print("Accounts at risk of having insufficient funds and will be settled immediately.")
+	c.logger.Info("Accounts at risk of having insufficient funds and will be settled immediately.")
 	return errors.Wrap(c.SettleFees(ctx), "settle fees")
 }
 

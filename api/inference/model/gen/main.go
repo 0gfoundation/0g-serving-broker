@@ -4,17 +4,19 @@ import (
 	"fmt"
 	"go/ast"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"text/template"
+
+	"github.com/0glabs/0g-serving-broker/common/log"
 )
 
 func main() {
 	all, bind, immutable, scanValue, err := parse("./")
 	if err != nil {
-		log.Fatal(err)
+		logger := log.GetLogger(log.Settings{})
+		logger.Fatal(err)
 	}
 
 	genModel(all, bind, scanValue)
