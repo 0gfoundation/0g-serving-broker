@@ -1,0 +1,40 @@
+contractAddress: 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
+database:
+  fineTune: root:123456@tcp(localhost:33060)/fineTune?parseTime=true
+networks:
+  ethereumHardhat:
+    url: "http://127.0.0.1:8545/"
+    chainID: 31337
+    privateKeys:
+      - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+    transactionLimit: 9500000
+    gasEstimationBuffer: 0
+  ethereum0g:
+    url: "https://evmrpc-testnet.0g.ai"
+    chainID: 16601
+    privateKeys:
+      - B1FCF837EC3D75946681FC7120E2B75656053E07117113AF3AB3A5E851B20175
+    transactionLimit: 10000000
+    gasEstimationBuffer: 100000
+service:
+  servingUrl: "http://localhost:3010"
+  pricePerToken: 1
+  quota:
+    cpuCount: 8
+    memory: 16
+    storage: 10
+    gpuType: "H200"
+    gpuCount: 1
+storageClient:
+  indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
+  indexerTurbo: "http://47.251.40.189:12345"
+  uploadArgs:
+    finalityRequired: true
+    tags: "0x"
+    expectedReplica: 1
+    skipTx: false
+    fragmentSize: 4294967296
+logger:
+  level: "debug"
+  path: "/tmp/fine-tune.log"
+gasPrice: 59000000000

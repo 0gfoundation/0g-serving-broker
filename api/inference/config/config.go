@@ -1,11 +1,11 @@
 package config
 
 import (
-	"log"
 	"os"
 	"sync"
 
 	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"gopkg.in/yaml.v2"
 )
 
@@ -126,7 +126,8 @@ func GetConfig() *Config {
 		}
 
 		if err := loadConfig(instance); err != nil {
-			log.Fatalf("Error loading configuration: %v", err)
+			logger := log.GetLogger(log.Settings{})
+			logger.Fatalf("Error loading configuration: %v", err)
 		}
 
 		for _, networkConf := range instance.Networks {

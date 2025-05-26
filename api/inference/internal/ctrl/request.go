@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -122,11 +121,11 @@ func (c *Ctrl) compareFees(feeType, actualFee string, expectedFee *string) error
 	if cmp < 0 {
 		expectedFeeA0gi, err := util.NeuronToA0gi(*expectedFee)
 		if err != nil {
-			log.Printf("Failed to convert %s to A0GI: %v", feeType, err)
+			c.logger.Errorf("Failed to convert %s to A0GI: %v", feeType, err)
 		}
 		actualFeeA0gi, err := util.NeuronToA0gi(actualFee)
 		if err != nil {
-			log.Printf("Failed to convert actual.%s to A0GI: %v", feeType, err)
+			c.logger.Errorf("Failed to convert actual.%s to A0GI: %v", feeType, err)
 		}
 		return fmt.Errorf("invalid %s, expected %s A0GI, but received %s A0GI", feeType, expectedFeeA0gi, actualFeeA0gi)
 	}

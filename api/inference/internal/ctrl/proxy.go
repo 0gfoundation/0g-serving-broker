@@ -3,7 +3,6 @@ package ctrl
 import (
 	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
@@ -14,8 +13,6 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
-
-
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
@@ -142,7 +139,6 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
-	// TODO: recorded to log system
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
@@ -150,15 +146,13 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 	errors.Response(ctx, errors.Wrap(err, info))
 }
 
-func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+func (c *Ctrl) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		c.logger.Error("Failed to read response body:", err)
 		return
 	}
 	if _, err := ctx.Writer.Write(respBody); err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		c.logger.Error("Failed to write response body:", err)
 	}
 }

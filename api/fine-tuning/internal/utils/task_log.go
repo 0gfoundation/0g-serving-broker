@@ -50,7 +50,16 @@ func GetTaskLogDir(id *uuid.UUID) string {
 }
 
 func InitTaskDirectory(id *uuid.UUID) error {
-	return taskLogger.InitTaskDirectory(id)
+	if err := taskLogger.InitTaskDirectory(id); err != nil {
+		return errors.Wrap(err, "create temporary folder")
+	}
+
+	// create log file
+	if err := WriteToLogFile(id, "creating task....\n"); err != nil {
+		return errors.Wrap(err, "initialize task log")
+	}
+
+	return nil
 }
 
 func WriteToLogFile(id *uuid.UUID, content string) error {
