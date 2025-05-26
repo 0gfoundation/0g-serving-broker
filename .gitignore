@@ -13,3 +13,6 @@ meili_data_v1.7
 **/grafana
 
 **.local.*
+
+.DS_Store
+**/.DS_Store
