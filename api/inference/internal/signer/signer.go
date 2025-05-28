@@ -158,8 +158,17 @@ func (s *Signer) decryptPrivateKey(encryptedHex string, signer *ecdsa.PrivateKey
 }
 
 func (s *Signer) derivePublicKeyFromPrivate(privKey []string) ([2]*big.Int, error) {
-	p1 := hexutil.MustDecode(privKey[0])
-	p2 := hexutil.MustDecode(privKey[1])
+	// todo: encode issue in ZK
+	privKey0 := privKey[0]
+	if len(privKey0)%2 == 1 {
+		privKey0 = "0x0" + privKey0[2:]
+	}
+	privKey1 := privKey[1]
+	if len(privKey1)%2 == 1 {
+		privKey1 = "0x0" + privKey1[2:]
+	}
+	p1 := hexutil.MustDecode(privKey0)
+	p2 := hexutil.MustDecode(privKey1)
 	p1 = reverseBytes(p1)
 	p2 = reverseBytes(p2)
 

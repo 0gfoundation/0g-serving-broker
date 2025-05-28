@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 type SettlementInfo struct {
@@ -62,13 +63,24 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			return errors.New("Failed to parse signature")
 		}
 
+		hash, err := hexutil.Decode(req.RequestHash)
+		if err != nil {
+			return err
+		}
+
+		int64Hash := make([]int64, len(hash))
+		for i, v := range hash {
+			int64Hash[i] = int64(v)
+		}
+
 		reqInZK := &models.RequestResponse{
-			RequestFee:       req.InputFee,
-			ResponseFee:      req.OutputFee,
+			ReqFee:           req.InputFee,
+			ResFee:           req.OutputFee,
 			Nonce:            req.Nonce,
 			ProviderAddress:  c.contract.ProviderAddress,
 			UserAddress:      req.UserAddress,
 			TeeSignerAddress: c.GetProviderSignerAddress(ctx).String(),
+			RequestHash:      int64Hash,
 		}
 		if v, ok := categorizedSettlementInfo[req.UserAddress]; ok {
 			minNonce := v.MinNonceInSettlement

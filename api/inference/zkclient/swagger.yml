@@ -24,7 +24,7 @@ paths:
           $ref: "#/responses/Error"
   /signature:
     post:
-      operationId: generateSignature
+      operationId: signature
       parameters:
         - name: body
           in: body
@@ -36,8 +36,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/definitions/requestResponse"
-              privkey:
+              privKey:
                 $ref: "#/definitions/privateKey"
+              signResponse:
+                type: boolean
       responses:
         "200":
           description: OK
@@ -61,15 +63,19 @@ paths:
           required: true
           schema:
             type: object
+            required:
+              - signResponse
             properties:
               requests:
                 type: array
                 items:
                   $ref: "#/definitions/requestResponse"
-              pubkey:
+              pubKey:
                 $ref: "#/definitions/publicKey"
               signatures:
                 $ref: "#/definitions/signatures"
+              signResponse:
+                type: boolean
       responses:
         "200":
           description: OK
@@ -160,13 +166,13 @@ paths:
                   $ref: "#/definitions/requestResponse"
               l:
                 type: integer
-              userPubkey:
+              reqPubkey:
                 $ref: "#/definitions/publicKey"
-              teeSignerPubkey:
+              resPubkey:
                 $ref: "#/definitions/publicKey"
-              requestSignatures:
+              reqSignatures:
                 $ref: "#/definitions/signatures"
-              responseSignatures:
+              resSignatures:
                 $ref: "#/definitions/signatures"
       responses:
         "200":
@@ -218,9 +224,9 @@ definitions:
     properties:
       nonce:
         type: string
-      requestFee:
+      reqFee:
         type: string
-      responseFee:
+      resFee:
         type: string
       userAddress:
         type: string
@@ -229,7 +235,9 @@ definitions:
       teeSignerAddress:
         type: string
       requestHash:
-        type: string
+        type: array
+        items:
+          type: integer
         description: The hash of the request, generated the combination of nonce, userAddress and providerAddress
   ErrorResponse:
     type: object

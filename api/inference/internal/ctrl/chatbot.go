@@ -16,6 +16,7 @@ import (
 	"compress/gzip"
 
 	"github.com/andybalholm/brotli"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -105,7 +106,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		return
 	}
 
-	c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, requestHash)
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, requestHash); err != nil {
+		log.Printf("decode and process failed: %v", err)
+	}
 }
 
 func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) {
@@ -247,10 +250,22 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 }
 
 func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, account model.User, requestHash string) (string, error) {
-	reqInZK := &models.RequestResponse{
-		ResponseFee: lastResponseFee.String(),
-		RequestHash: requestHash,
+	hash, err := hexutil.Decode(requestHash)
+	if err != nil {
+		return "", err
 	}
+
+	int64Hash := make([]int64, len(hash))
+	for i, v := range hash {
+		int64Hash[i] = int64(v)
+	}
+
+	reqInZK := &models.RequestResponse{
+		ResFee:      lastResponseFee.String(),
+		RequestHash: int64Hash,
+	}
+
+	log.Printf("request in ZK: %v", reqInZK)
 
 	signatures, err := c.GenerateSignatures(ctx, reqInZK)
 	if err != nil {

@@ -23,14 +23,14 @@ type RequestResponse struct {
 	// provider address
 	ProviderAddress string `json:"providerAddress,omitempty"`
 
-	// request fee
-	RequestFee string `json:"requestFee,omitempty"`
+	// req fee
+	ReqFee string `json:"reqFee,omitempty"`
 
 	// The hash of the request, generated the combination of nonce, userAddress and providerAddress
-	RequestHash string `json:"requestHash,omitempty"`
+	RequestHash []int64 `json:"requestHash"`
 
-	// response fee
-	ResponseFee string `json:"responseFee,omitempty"`
+	// res fee
+	ResFee string `json:"resFee,omitempty"`
 
 	// tee signer address
 	TeeSignerAddress string `json:"teeSignerAddress,omitempty"`

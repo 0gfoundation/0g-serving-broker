@@ -15,6 +15,23 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/quote": {
+            "get": {
+                "description": "This endpoint allows you to get a quote",
+                "tags": [
+                    "quote"
+                ],
+                "operationId": "getQuote",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/request": {
             "get": {
                 "description": "This endpoint allows you to list requests",
@@ -167,9 +184,11 @@ const docTemplate = `{
                 "fee",
                 "inputFee",
                 "nonce",
-                "previousOutputFee",
+                "outputFee",
+                "requestHash",
                 "serviceName",
                 "signature",
+                "teeSignature",
                 "userAddress"
             ],
             "properties": {
@@ -186,16 +205,22 @@ const docTemplate = `{
                 "nonce": {
                     "type": "string"
                 },
-                "previousOutputFee": {
+                "outputFee": {
                     "type": "string"
                 },
                 "processed": {
                     "type": "boolean"
                 },
+                "requestHash": {
+                    "type": "string"
+                },
                 "serviceName": {
                     "type": "string"
                 },
                 "signature": {
+                    "type": "string"
+                },
+                "teeSignature": {
                     "type": "string"
                 },
                 "updatedAt": {
@@ -295,9 +320,6 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "lastRequestNonce": {
-                    "type": "string"
-                },
-                "lastResponseFee": {
                     "type": "string"
                 },
                 "lockBalance": {

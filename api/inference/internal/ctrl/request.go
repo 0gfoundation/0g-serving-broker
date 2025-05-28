@@ -85,7 +85,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 
 func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 	reqInZK := &models.RequestResponse{
-		RequestFee:      req.InputFee,
+		ReqFee:          req.InputFee,
 		Nonce:           req.Nonce,
 		ProviderAddress: c.contract.ProviderAddress,
 		UserAddress:     req.UserAddress,
