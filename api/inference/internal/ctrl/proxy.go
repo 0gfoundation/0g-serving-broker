@@ -3,7 +3,6 @@ package ctrl
 import (
 	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
@@ -14,8 +13,6 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
-
-
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
@@ -46,14 +43,14 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	// back up body for other usage
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "failed to read request body")
+		c.handleBrokerError(ctx, err, "failed to read request body")
 		return
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	resp, err := client.Do(req)
 	if err != nil {
-		handleBrokerError(ctx, err, "call proxied service")
+		c.handleBrokerError(ctx, err, "call proxied service")
 		return
 	}
 	defer resp.Body.Close()
@@ -67,7 +64,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	if resp.StatusCode != http.StatusOK {
 		ctx.Writer.WriteHeader(resp.StatusCode)
-		handleServiceError(ctx, resp.Body)
+		c.handleServiceError(ctx, resp.Body)
 		return
 	}
 
@@ -83,12 +80,12 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
-		handleBrokerError(ctx, err, "")
+		c.handleBrokerError(ctx, err, "")
 		return
 	}
 	unsettledFee, err := util.Add(fee, oldAccount.UnsettledFee)
 	if err != nil {
-		handleBrokerError(ctx, err, "add unsettled fee")
+		c.handleBrokerError(ctx, err, "add unsettled fee")
 		return
 	}
 
@@ -102,18 +99,18 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	case "chatbot":
 		c.handleChatbotResponse(ctx, resp, account, outputPrice, body)
 	default:
-		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		c.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 	}
 }
 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "read from body")
+		c.handleBrokerError(ctx, err, "read from body")
 		return
 	}
 	if _, err := ctx.Writer.Write(body); err != nil {
-		handleBrokerError(ctx, err, "write response body")
+		c.handleBrokerError(ctx, err, "write response body")
 	}
 }
 
@@ -141,24 +138,22 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 	ctx.Writer.Header().Set("Access-Control-Expose-Headers", newHeaders)
 }
 
-func handleBrokerError(ctx *gin.Context, err error, context string) {
-	// TODO: recorded to log system
+func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
 	}
+	c.logger.Errorf("inference error: %s, err: %v", info, err)
 	errors.Response(ctx, errors.Wrap(err, info))
 }
 
-func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+func (c *Ctrl) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		c.logger.Error("read service error body failed: ", err)
 		return
 	}
 	if _, err := ctx.Writer.Write(respBody); err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		c.logger.Error("write service error body failed: ", err)
 	}
 }
