@@ -1,4 +1,4 @@
-package phala
+package tee
 
 import (
 	"context"
@@ -7,47 +7,30 @@ import (
 	"encoding/json"
 	"encoding/pem"
 
-	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/Dstack-TEE/dstack/sdk/go/tappd"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
 )
 
-type QuoteResponse struct {
-	Quote          string `json:"quote"`
-	ProviderSigner string `json:"provider_signer"`
+type TdxQuoteResponse struct {
+	Quote    string `json:"quote"`
+	EventLog string `json:"provider_signer"`
 }
 
 type ClientType int
 
 const (
 	Mock ClientType = iota
-	TEE
+	Phala
 )
 
 type TappdClient interface {
-	TdxQuote(ctx context.Context, jsonData []byte) (*tappd.TdxQuoteResponse, error)
-	DeriveKey(ctx context.Context, path string) (*tappd.DeriveKeyResponse, error)
+	TdxQuote(ctx context.Context, jsonData []byte) (*TdxQuoteResponse, error)
+	DeriveKey(ctx context.Context, path string) (string, error)
 }
 
-type MockTappdClient struct {
-}
-
-func (c *MockTappdClient) TdxQuote(ctx context.Context, jsonData []byte) (*tappd.TdxQuoteResponse, error) {
-	return &tappd.TdxQuoteResponse{
-		Quote:    "mock",
-		EventLog: "",
-	}, nil
-}
-
-func (c *MockTappdClient) DeriveKey(ctx context.Context, path string) (*tappd.DeriveKeyResponse, error) {
-	return &tappd.DeriveKeyResponse{
-		Key:              "4c0883a69102937d6231471b5dbb6204fe512961708279b7e1a8d7d7a3c2b9e3",
-		CertificateChain: []string{},
-	}, nil
-}
-
-type PhalaService struct {
+type TeeService struct {
 	clientType ClientType
 
 	ProviderSigner *ecdsa.PrivateKey
@@ -55,19 +38,25 @@ type PhalaService struct {
 	Quote          string
 }
 
-func NewPhalaService(clientType ClientType) (*PhalaService, error) {
-	return &PhalaService{
+type QuoteResponse struct {
+	Quote          string `json:"quote"`
+	ProviderSigner string `json:"provider_signer"`
+}
+
+func NewTeeService(clientType ClientType) (*TeeService, error) {
+	return &TeeService{
 		clientType: clientType,
 	}, nil
 }
 
-func (s *PhalaService) SyncQuote(ctx context.Context) error {
+// SyncQuote synchronizes the quote and provider signer.
+func (s *TeeService) SyncQuote(ctx context.Context) error {
 	var client TappdClient
 	switch s.clientType {
 	case Mock:
 		client = &MockTappdClient{}
-	case TEE:
-		client = tappd.NewTappdClient()
+	case Phala:
+		client = &PhalaTappdClient{}
 	default:
 		return errors.New("unsupported client type")
 	}
@@ -88,7 +77,7 @@ func (s *PhalaService) SyncQuote(ctx context.Context) error {
 	return nil
 }
 
-func (s *PhalaService) getQuote(ctx context.Context, client TappdClient, reportData string) (string, error) {
+func (s *TeeService) getQuote(ctx context.Context, client TappdClient, reportData string) (string, error) {
 	request := map[string]interface{}{
 		"report_data": reportData,
 	}
@@ -98,16 +87,15 @@ func (s *PhalaService) getQuote(ctx context.Context, client TappdClient, reportD
 		return "", errors.Wrap(err, "encoding json")
 	}
 
-	resp, err := client.TdxQuote(ctx, jsonData)
+	quote, err := client.TdxQuote(ctx, jsonData)
 	if err != nil {
 		return "", errors.Wrap(err, "tdx quote")
 	}
-
-	return resp.Quote, nil
+	return quote.Quote, nil
 }
 
-func (s *PhalaService) getSigningKey(ctx context.Context, client TappdClient) (*ecdsa.PrivateKey, error) {
-	deriveKeyResp, err := client.DeriveKey(ctx, "/")
+func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ecdsa.PrivateKey, error) {
+	key, err := client.DeriveKey(ctx, "/")
 	if err != nil {
 		return nil, errors.Wrap(err, "deriving key")
 	}
@@ -115,12 +103,12 @@ func (s *PhalaService) getSigningKey(ctx context.Context, client TappdClient) (*
 	var privateKey *ecdsa.PrivateKey
 	switch s.clientType {
 	case Mock:
-		privateKey, err = crypto.HexToECDSA(deriveKeyResp.Key)
+		privateKey, err = crypto.HexToECDSA(key)
 		if err != nil {
 			return nil, errors.Wrap(err, "converting hex to ECDSA key")
 		}
-	case TEE:
-		block, _ := pem.Decode([]byte(deriveKeyResp.Key))
+	case Phala:
+		block, _ := pem.Decode([]byte(key))
 		if block == nil || block.Type != "PRIVATE KEY" {
 			return nil, errors.New("failed to decode PEM block containing the key")
 		}
@@ -137,7 +125,7 @@ func (s *PhalaService) getSigningKey(ctx context.Context, client TappdClient) (*
 	return privateKey, nil
 }
 
-func (s *PhalaService) GetQuote() (string, error) {
+func (s *TeeService) GetQuote() (string, error) {
 	jsonData, err := json.Marshal(QuoteResponse{
 		Quote:          s.Quote,
 		ProviderSigner: s.Address.Hex(),

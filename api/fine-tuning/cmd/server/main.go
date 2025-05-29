@@ -9,7 +9,7 @@ import (
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
@@ -62,7 +62,7 @@ type ApplicationServices struct {
 	db            *db.DB
 	storageClient *storage.Client
 	contract      *providercontract.ProviderContract
-	phalaService  *phala.PhalaService
+	teeService    *tee.TeeService
 	ctrl          *ctrl.Ctrl
 	setup         *services.Setup
 	executor      *services.Executor
@@ -146,19 +146,22 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		return nil, err
 	}
 
-	phalaClientType := phala.TEE
-	if os.Getenv("NETWORK") == "hardhat" {
-		phalaClientType = phala.Mock
+	var teeClientType tee.ClientType
+	switch os.Getenv("NETWORK") {
+	case "hardhat":
+		teeClientType = tee.Mock
+	default:
+		teeClientType = tee.Phala
 	}
 
-	phalaService, err := phala.NewPhalaService(phalaClientType)
+	teeService, err := tee.NewTeeService(teeClientType)
 	if err != nil {
 		return nil, err
 	}
 
-	ctrl := ctrl.New(db, cfg, contract, phalaService, logger)
+	ctrl := ctrl.New(db, cfg, contract, teeService, logger)
 
-	setup, err := services.NewSetup(db, cfg, contract, logger, storageClient, phalaService)
+	setup, err := services.NewSetup(db, cfg, contract, logger, storageClient, teeService)
 	if err != nil {
 		return nil, err
 	}
@@ -168,12 +171,12 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		return nil, err
 	}
 
-	finalizer, err := services.NewFinalizer(db, cfg, contract, logger, storageClient, phalaService)
+	finalizer, err := services.NewFinalizer(db, cfg, contract, logger, storageClient, teeService)
 	if err != nil {
 		return nil, err
 	}
 
-	settlement, err := services.NewSettlement(db, contract, cfg, phalaService, logger)
+	settlement, err := services.NewSettlement(db, contract, cfg, teeService, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +185,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		db:            db,
 		storageClient: storageClient,
 		contract:      contract,
-		phalaService:  phalaService,
+		teeService:    teeService,
 		ctrl:          ctrl,
 		setup:         setup,
 		executor:      executor,
@@ -193,7 +196,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 
 func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
 	logger.Info("syncing TEE quote")
-	if err := services.phalaService.SyncQuote(ctx); err != nil {
+	if err := services.teeService.SyncQuote(ctx); err != nil {
 		return err
 	}
 

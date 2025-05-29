@@ -11,7 +11,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	tee "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/token"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
@@ -31,9 +31,9 @@ import (
 type Setup struct {
 	*Service
 
-	contract     *providercontract.ProviderContract
-	storage      *storage.Client
-	phalaService *phala.PhalaService
+	contract   *providercontract.ProviderContract
+	storage    *storage.Client
+	teeService *tee.TeeService
 
 	customizedModels map[common.Hash]config.CustomizedModel
 }
@@ -44,7 +44,7 @@ func NewSetup(
 	contract *providercontract.ProviderContract,
 	logger log.Logger,
 	storage *storage.Client,
-	phalaService *phala.PhalaService,
+	teeService *tee.TeeService,
 ) (*Setup, error) {
 	srv := &Setup{
 		Service: NewService(
@@ -62,7 +62,7 @@ func NewSetup(
 		),
 		contract:         contract,
 		storage:          storage,
-		phalaService:     phalaService,
+		teeService:       teeService,
 		customizedModels: config.Service.GetCustomizedModels(),
 	}
 	srv.taskProcessor = srv
@@ -214,7 +214,7 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 	if account.Nonce.Cmp(nonce) >= 0 {
 		return fmt.Errorf("invalid nonce: expected %v, got %v", account.Nonce, nonce)
 	}
-	if account.ProviderSigner != crypto.PubkeyToAddress(s.phalaService.ProviderSigner.PublicKey) {
+	if account.ProviderSigner != crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey) {
 		return errors.New("user not acknowledged yet")
 	}
 
