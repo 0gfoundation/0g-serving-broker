@@ -284,7 +284,7 @@ func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, 
 	}
 
 	if len(signatures) != 1 {
-		return "", fmt.Errorf("expected exactly one signature, while go %v", len(signatures))
+		return "", fmt.Errorf("expected exactly one signature, while got %v", len(signatures))
 	}
 
 	sig, err := json.Marshal(signatures[0])
