@@ -5,11 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"compress/flate"
@@ -282,13 +282,17 @@ func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, 
 	if err != nil {
 		return "", err
 	}
-	log.Printf("signature len %v", len(signatures))
 
-	strs := make([]string, len(signatures[0]))
-	for i, v := range signatures[0] {
-		strs[i] = strconv.Itoa(int(v))
+	if len(signatures) != 1 {
+		return "", fmt.Errorf("expected exactly one signature, while go %v", len(signatures))
 	}
-	signature := "[" + strings.Join(strs, ",") + "]"
+
+	sig, err := json.Marshal(signatures[0])
+	if err != nil {
+		return "", err
+	}
+
+	signature := string(sig)
 	log.Printf("signature  %v", signature)
 
 	return signature, nil
