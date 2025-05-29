@@ -15,7 +15,7 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	var totalFee sql.NullInt64
 
 	ret := d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed)
+		Where("processed = ? and tee_signature <> ''", q.Processed)
 
 	if q.Sort != nil {
 		ret.Order(*q.Sort)
@@ -29,7 +29,7 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	}
 
 	ret = d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed).
+		Where("processed = ?  and tee_signature <> ''", q.Processed).
 		Select("SUM(CAST(fee AS SIGNED))").Scan(&totalFee)
 
 	var totalFeeInt int
@@ -49,12 +49,11 @@ func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 	return ret.Error
 }
 
-func (d *DB) UpdateOutputFeeWithSignature(userAddress, nonce, outputFee, requestFee, unsettledFee, signature string) error {
+func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, nonce, outputFee, requestFee, unsettledFee, signature string) error {
 	return d.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Where(&model.Request{
-				UserAddress: userAddress,
-				Nonce:       nonce,
+				RequestHash: requestHash,
 			}).
 			Updates(&model.Request{
 				OutputFee:    outputFee,

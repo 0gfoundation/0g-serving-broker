@@ -81,20 +81,20 @@ func getInputCount(reqBody []byte) (int64, error) {
 	return ret, nil
 }
 
-func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, requestHash string) {
+func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, requestHash string) error {
 	isStream, err := isStream(reqBody)
 	if err != nil {
 		handleBrokerError(ctx, err, "check if stream")
-		return
+		return err
 	}
 	if !isStream {
-		c.handleChargingResponse(ctx, resp, account, outputPrice, requestHash)
+		return c.handleChargingResponse(ctx, resp, account, outputPrice, requestHash)
 	} else {
-		c.handleChargingStreamResponse(ctx, resp, account, outputPrice, requestHash)
+		return c.handleChargingStreamResponse(ctx, resp, account, outputPrice, requestHash)
 	}
 }
 
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) {
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) error {
 	defer resp.Body.Close()
 
 	var rawBody bytes.Buffer
@@ -103,19 +103,23 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	_, err := reader.WriteTo(ctx.Writer)
 	if err != nil {
 		handleBrokerError(ctx, err, "read from body")
-		return
+		return err
 	}
 
 	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, requestHash); err != nil {
 		log.Printf("decode and process failed: %v", err)
+		return err
 	}
+
+	return nil
 }
 
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) {
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) error {
 	defer resp.Body.Close()
 
 	var rawBody bytes.Buffer
 
+	var streamErr error = nil
 	ctx.Stream(func(w io.Writer) bool {
 		reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
 
@@ -126,11 +130,12 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					return false
 				}
 				handleBrokerError(ctx, err, "read from body")
+				streamErr = err
 				return false
 			}
 
-			_, err = w.Write([]byte(line))
-			if err != nil {
+			_, streamErr = w.Write([]byte(line))
+			if streamErr != nil {
 				handleBrokerError(ctx, err, "write to stream")
 				return false
 			}
@@ -139,11 +144,17 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 		}
 	})
 
-	// Fully read and then start decoding and processing
-	err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, requestHash)
-	if err != nil {
-		handleBrokerError(ctx, err, "decode and process")
+	if streamErr != nil {
+		return streamErr
 	}
+
+	// Fully read and then start decoding and processing
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, requestHash); err != nil {
+		handleBrokerError(ctx, err, "decode and process")
+		return err
+	}
+
+	return nil
 }
 func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, requestHash string) error {
 	// Decode the raw data
@@ -242,7 +253,7 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 		return err
 	}
 
-	if err := c.db.UpdateOutputFeeWithSignature(account.User, *account.LastRequestNonce, lastResponseFee.String(), requestFee.String(), unsettledFee.String(), signature); err != nil {
+	if err := c.db.UpdateOutputFeeWithSignature(requestHash, account.User, *account.LastRequestNonce, lastResponseFee.String(), requestFee.String(), unsettledFee.String(), signature); err != nil {
 		return errors.Wrap(err, "Error updating request")
 	}
 

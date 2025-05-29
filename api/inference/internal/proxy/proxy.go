@@ -137,7 +137,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, req.Fee, p.ctrl.Service.OutputPrice, true)
+
+	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, req.Fee, p.ctrl.Service.OutputPrice, true); err != nil {
+		log.Printf("process http request failed: %v", err)
+	}
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

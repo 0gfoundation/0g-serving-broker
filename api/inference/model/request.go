@@ -10,7 +10,7 @@ type Request struct {
 	Fee          string `gorm:"type:varchar(255);not null" json:"fee" binding:"required" immutable:"true"`
 	Signature    string `gorm:"type:varchar(255);not null" json:"signature" binding:"required" immutable:"true"`
 	TeeSignature string `gorm:"type:varchar(255);not null" json:"teeSignature" binding:"required" immutable:"true"`
-	RequestHash  string `gorm:"type:varchar(255);not null" json:"requestHash" binding:"required" immutable:"true"`
+	RequestHash  string `gorm:"type:varchar(255);not null;primaryKey" json:"requestHash" binding:"required" immutable:"true"`
 	Processed    bool   `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce" json:"processed"`
 }
 

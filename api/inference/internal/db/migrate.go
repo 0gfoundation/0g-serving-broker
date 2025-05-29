@@ -43,7 +43,7 @@ func (d *DB) Migrate() error {
 					Fee          string `gorm:"type:varchar(255);not null"`
 					Signature    string `gorm:"type:varchar(255);not null"`
 					TeeSignature string `gorm:"type:varchar(255);not null"`
-					RequestHash  string `gorm:"type:varchar(255);not null"`
+					RequestHash  string `gorm:"type:varchar(255);not null;primaryKey"`
 					Processed    *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
 				}
 				return tx.AutoMigrate(&Request{})
