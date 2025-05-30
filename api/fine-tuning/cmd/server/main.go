@@ -150,6 +150,8 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
 		teeClientType = tee.Mock
+	case "gcp":
+		teeClientType = tee.GCP
 	default:
 		teeClientType = tee.Phala
 	}

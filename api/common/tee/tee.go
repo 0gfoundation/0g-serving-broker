@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/elliptic"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -23,6 +26,7 @@ type ClientType int
 const (
 	Mock ClientType = iota
 	Phala
+	GCP
 )
 
 type TappdClient interface {
@@ -57,6 +61,8 @@ func (s *TeeService) SyncQuote(ctx context.Context) error {
 		client = &MockTappdClient{}
 	case Phala:
 		client = &PhalaTappdClient{}
+	case GCP:
+		client = &GcpTappdClient{}
 	default:
 		return errors.New("unsupported client type")
 	}
@@ -118,6 +124,15 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 		if err != nil {
 			return nil, errors.Wrap(err, "converting to ECDSA private key")
 		}
+	case GCP:
+		dBytes, err := hex.DecodeString(key)
+		if err != nil {
+			return nil, errors.Wrap(err, "decode hex D for GCP ECDSA key")
+		}
+		privateKey = new(ecdsa.PrivateKey)
+		privateKey.PublicKey.Curve = elliptic.P256()
+		privateKey.D = new(big.Int).SetBytes(dBytes)
+		privateKey.PublicKey.X, privateKey.PublicKey.Y = privateKey.PublicKey.Curve.ScalarBaseMult(dBytes)
 	default:
 		return nil, errors.New("unsupported key type")
 	}
