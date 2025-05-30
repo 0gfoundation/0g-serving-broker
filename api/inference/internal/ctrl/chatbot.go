@@ -3,8 +3,12 @@ package ctrl
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
+	"math/big"
 	"net/http"
 	"strings"
 
@@ -12,11 +16,13 @@ import (
 	"compress/gzip"
 
 	"github.com/andybalholm/brotli"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
 )
 
 type RequestBody struct {
@@ -75,20 +81,20 @@ func getInputCount(reqBody []byte) (int64, error) {
 	return ret, nil
 }
 
-func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte) {
+func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, requestHash string) error {
 	isStream, err := isStream(reqBody)
 	if err != nil {
 		handleBrokerError(ctx, err, "check if stream")
-		return
+		return err
 	}
 	if !isStream {
-		c.handleChargingResponse(ctx, resp, account, outputPrice)
+		return c.handleChargingResponse(ctx, resp, account, outputPrice, requestHash)
 	} else {
-		c.handleChargingStreamResponse(ctx, resp, account, outputPrice)
+		return c.handleChargingStreamResponse(ctx, resp, account, outputPrice, requestHash)
 	}
 }
 
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64) {
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) error {
 	defer resp.Body.Close()
 
 	var rawBody bytes.Buffer
@@ -97,17 +103,23 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	_, err := reader.WriteTo(ctx.Writer)
 	if err != nil {
 		handleBrokerError(ctx, err, "read from body")
-		return
+		return err
 	}
 
-	c.decodeAndProcess(rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false)
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, requestHash); err != nil {
+		log.Printf("decode and process failed: %v", err)
+		return err
+	}
+
+	return nil
 }
 
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64) {
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) error {
 	defer resp.Body.Close()
 
 	var rawBody bytes.Buffer
 
+	var streamErr error = nil
 	ctx.Stream(func(w io.Writer) bool {
 		reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
 
@@ -118,11 +130,12 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 					return false
 				}
 				handleBrokerError(ctx, err, "read from body")
+				streamErr = err
 				return false
 			}
 
-			_, err = w.Write([]byte(line))
-			if err != nil {
+			_, streamErr = w.Write([]byte(line))
+			if streamErr != nil {
 				handleBrokerError(ctx, err, "write to stream")
 				return false
 			}
@@ -131,13 +144,19 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 		}
 	})
 
-	// Fully read and then start decoding and processing
-	err := c.decodeAndProcess(rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true)
-	if err != nil {
-		handleBrokerError(ctx, err, "decode and process")
+	if streamErr != nil {
+		return streamErr
 	}
+
+	// Fully read and then start decoding and processing
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, requestHash); err != nil {
+		handleBrokerError(ctx, err, "decode and process")
+		return err
+	}
+
+	return nil
 }
-func (c *Ctrl) decodeAndProcess(data []byte, encodingType string, account model.User, outputPrice int64, isStream bool) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, requestHash string) error {
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -148,7 +167,7 @@ func (c *Ctrl) decodeAndProcess(data []byte, encodingType string, account model.
 	var output string
 
 	if !isStream {
-		return c.processSingleResponse(decodedBody, outputPrice, account, &output)
+		return c.processSingleResponse(ctx, decodedBody, outputPrice, account, &output, requestHash)
 	}
 
 	// Parse and decode data line by line for streams
@@ -156,7 +175,7 @@ func (c *Ctrl) decodeAndProcess(data []byte, encodingType string, account model.
 
 	for _, line := range lines {
 		if isStreamDone(line) {
-			return c.finalizeResponse(output, outputPrice, account)
+			return c.finalizeResponse(ctx, output, outputPrice, account, requestHash)
 		}
 
 		// Skip empty lines
@@ -173,7 +192,7 @@ func (c *Ctrl) decodeAndProcess(data []byte, encodingType string, account model.
 	return nil
 }
 
-func (c *Ctrl) processSingleResponse(decodedBody []byte, outputPrice int64, account model.User, output *string) error {
+func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, account model.User, output *string, requestHash string) error {
 	line := bytes.TrimPrefix(decodedBody, []byte("data: "))
 	var chunk CompletionChunk
 	if err := json.Unmarshal(line, &chunk); err != nil {
@@ -183,7 +202,7 @@ func (c *Ctrl) processSingleResponse(decodedBody []byte, outputPrice int64, acco
 	for _, choice := range chunk.Choices {
 		*output += choice.Message.Content
 	}
-	return c.updateAccountWithOutput(*output, outputPrice, account)
+	return c.updateAccountWithOutput(ctx, *output, outputPrice, account, requestHash)
 }
 
 func (c *Ctrl) processLine(line []byte) (string, error) {
@@ -200,22 +219,83 @@ func (c *Ctrl) processLine(line []byte) (string, error) {
 	return outputChunk, nil
 }
 
-func (c *Ctrl) finalizeResponse(output string, outputPrice int64, account model.User) error {
-	return c.updateAccountWithOutput(output, outputPrice, account)
+func (c *Ctrl) finalizeResponse(ctx context.Context, output string, outputPrice int64, account model.User, requestHash string) error {
+	return c.updateAccountWithOutput(ctx, output, outputPrice, account, requestHash)
 }
 
-func (c *Ctrl) updateAccountWithOutput(output string, outputPrice int64, account model.User) error {
+func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outputPrice int64, account model.User, requestHash string) error {
 	outputCount := int64(len(strings.Fields(output)))
 	lastResponseFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
 		return errors.Wrap(err, "Error calculating last response fee")
 	}
 
-	account.LastResponseFee = model.PtrOf(lastResponseFee.String())
-	if err := c.UpdateUserAccount(account.User, account); err != nil {
-		return errors.Wrap(err, "Error updating user account")
+	requestFee, err := util.Add(lastResponseFee, account.UnsettledFee)
+	if err != nil {
+		return err
 	}
+
+	signature, err := c.generateSignature(ctx, lastResponseFee, account, requestHash)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	dbAccount, err := c.db.GetUserAccount(account.User)
+	if err != nil {
+		return err
+	}
+
+	unsettledFee, err := util.Add(requestFee, dbAccount.UnsettledFee)
+	if err != nil {
+		return err
+	}
+
+	if err := c.db.UpdateOutputFeeWithSignature(requestHash, account.User, *account.LastRequestNonce, lastResponseFee.String(), requestFee.String(), unsettledFee.String(), signature); err != nil {
+		return errors.Wrap(err, "Error updating request")
+	}
+
 	return nil
+}
+
+func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, account model.User, requestHash string) (string, error) {
+	hash, err := hexutil.Decode(requestHash)
+	if err != nil {
+		return "", err
+	}
+
+	int64Hash := make([]int64, len(hash))
+	for i, v := range hash {
+		int64Hash[i] = int64(v)
+	}
+
+	reqInZK := &models.RequestResponse{
+		ResFee:      lastResponseFee.String(),
+		RequestHash: int64Hash,
+	}
+
+	log.Printf("request in ZK: %v", reqInZK)
+
+	signatures, err := c.GenerateSignatures(ctx, reqInZK)
+	if err != nil {
+		return "", err
+	}
+
+	if len(signatures) != 1 {
+		return "", fmt.Errorf("expected exactly one signature, while got %v", len(signatures))
+	}
+
+	sig, err := json.Marshal(signatures[0])
+	if err != nil {
+		return "", err
+	}
+
+	signature := string(sig)
+	log.Printf("signature  %v", signature)
+
+	return signature, nil
 }
 
 func isStreamDone(line []byte) bool {

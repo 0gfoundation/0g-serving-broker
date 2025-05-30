@@ -12,6 +12,8 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
 
+var ErrServiceNotFound = errors.New("service not found")
+
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service) error {
 	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
 	if err != nil {
@@ -25,12 +27,15 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	tx, err := c.Contract.Transact(ctx,
 		nil,
 		"addOrUpdateService",
-		service.Type,
-		service.ServingURL,
-		service.ModelType,
-		service.Verifiability,
-		inputPrice,
-		outputPrice,
+		contract.ServiceParams{
+			ServiceType:    service.Type,
+			Url:            service.ServingURL,
+			Model:          service.ModelType,
+			Verifiability:  service.Verifiability,
+			InputPrice:     inputPrice,
+			OutputPrice:    outputPrice,
+			AdditionalInfo: c.EncryptedPrivKey,
+		},
 	)
 
 	if err != nil {
@@ -69,7 +74,7 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 		}
 	}
 
-	return nil, fmt.Errorf("service not found")
+	return nil, ErrServiceNotFound
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {

@@ -10,12 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
-
-
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
@@ -40,21 +37,21 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, fee string, outputPrice int64, charing bool) {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, fee string, outputPrice int64, charing bool) error {
 	client := &http.Client{}
 
 	// back up body for other usage
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		handleBrokerError(ctx, err, "failed to read request body")
-		return
+		return err
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	resp, err := client.Do(req)
 	if err != nil {
 		handleBrokerError(ctx, err, "call proxied service")
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -68,7 +65,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	if resp.StatusCode != http.StatusOK {
 		ctx.Writer.WriteHeader(resp.StatusCode)
 		handleServiceError(ctx, resp.Body)
-		return
+		return err
 	}
 
 	ctx.Writer.Header().Add("provider", c.contract.ProviderAddress)
@@ -77,44 +74,43 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	ctx.Status(resp.StatusCode)
 
 	if !charing {
-		c.handleResponse(ctx, resp)
-		return
+		return c.handleResponse(ctx, resp)
 	}
 
-	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
+	_, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
 		handleBrokerError(ctx, err, "")
-		return
-	}
-	unsettledFee, err := util.Add(fee, oldAccount.UnsettledFee)
-	if err != nil {
-		handleBrokerError(ctx, err, "add unsettled fee")
-		return
+		return err
 	}
 
 	account := model.User{
 		User:             reqModel.UserAddress,
 		LastRequestNonce: &reqModel.Nonce,
-		UnsettledFee:     model.PtrOf(unsettledFee.String()),
+		UnsettledFee:     model.PtrOf(fee),
 	}
 
 	switch svcType {
 	case "chatbot":
-		c.handleChatbotResponse(ctx, resp, account, outputPrice, body)
+		return c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel.RequestHash)
 	default:
-		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		err = errors.New("unknown service type")
+		handleBrokerError(ctx, err, "prepare request extractor")
+		return err
 	}
 }
 
-func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
+func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		handleBrokerError(ctx, err, "read from body")
-		return
+		return err
 	}
 	if _, err := ctx.Writer.Write(body); err != nil {
 		handleBrokerError(ctx, err, "write response body")
+		return err
 	}
+
+	return nil
 }
 
 func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {

@@ -20,9 +20,11 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	d.Nonce = r.Nonce
 	d.ServiceName = r.ServiceName
 	d.InputFee = r.InputFee
-	d.PreviousOutputFee = r.PreviousOutputFee
+	d.OutputFee = r.OutputFee
 	d.Fee = r.Fee
 	d.Signature = r.Signature
+	d.TeeSignature = r.TeeSignature
+	d.RequestHash = r.RequestHash
 	d.Processed = r.Processed
 
 	return nil
@@ -71,7 +73,6 @@ func (d *User) Bind(ctx *gin.Context) error {
 	d.LastRequestNonce = r.LastRequestNonce
 	d.LockBalance = r.LockBalance
 	d.LastBalanceCheckTime = r.LastBalanceCheckTime
-	d.LastResponseFee = r.LastResponseFee
 	d.Signer = r.Signer
 	d.UnsettledFee = r.UnsettledFee
 

@@ -13,9 +13,10 @@ import (
 )
 
 type ProviderContract struct {
-	Contract        *contract.ServingContract
-	ProviderAddress string
-	LockTime        time.Duration
+	Contract         *contract.ServingContract
+	ProviderAddress  string
+	LockTime         time.Duration
+	EncryptedPrivKey string
 }
 
 func NewProviderContract(conf *config.Config) (*ProviderContract, error) {

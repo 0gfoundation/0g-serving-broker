@@ -16,13 +16,17 @@ definitions:
         type: string
       nonce:
         type: string
-      previousOutputFee:
+      outputFee:
         type: string
       processed:
         type: boolean
+      requestHash:
+        type: string
       serviceName:
         type: string
       signature:
+        type: string
+      teeSignature:
         type: string
       updatedAt:
         readOnly: true
@@ -33,9 +37,11 @@ definitions:
     - fee
     - inputFee
     - nonce
-    - previousOutputFee
+    - outputFee
+    - requestHash
     - serviceName
     - signature
+    - teeSignature
     - userAddress
     type: object
   model.RequestList:
@@ -98,8 +104,6 @@ definitions:
         type: string
       lastRequestNonce:
         type: string
-      lastResponseFee:
-        type: string
       lockBalance:
         type: string
       signer:
@@ -134,6 +138,17 @@ info:
   title: 0G Serving Provider Broker API
   version: 0.1.0
 paths:
+  /quote:
+    get:
+      description: This endpoint allows you to get a quote
+      operationId: getQuote
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      tags:
+      - quote
   /request:
     get:
       description: This endpoint allows you to list requests
