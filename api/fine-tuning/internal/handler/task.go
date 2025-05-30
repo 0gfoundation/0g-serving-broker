@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -116,13 +117,19 @@ func (h *Handler) GetTask(ctx *gin.Context) {
 //	@Router		/user/{userAddress}/task [get]
 //	@Param		userAddress	path	string	true	"user address"
 //	@Param		latest		query	string	false	"latest tasks"
+//	@Param		order		query	string	false	"sort order, e.g., asc or desc, default is desc"
 //	@Success	200	{array}	schema.Task
 func (h *Handler) ListTask(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
 	latest := ctx.Query("latest")
 	latestBool := latest == "true"
+	order := ctx.Query("order")
+	desc := true
+	if strings.ToLower(order) == "asc" {
+		desc = false
+	}
 
-	tasks, err := h.ctrl.ListTask(ctx, userAddress, latestBool)
+	tasks, err := h.ctrl.ListTask(ctx, userAddress, latestBool, desc)
 	if err != nil {
 		handleBrokerError(ctx, err, "get delivered tasks")
 		return
