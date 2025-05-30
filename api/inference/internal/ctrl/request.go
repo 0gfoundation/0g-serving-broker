@@ -48,6 +48,14 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 }
 
 func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputFee string) error {
+	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
+	if err != nil {
+		return errors.Wrap(err, "get account from contract")
+	}
+	if !c.signer.IsCurrentSigner(contractAccount.ProviderPubKey) {
+		return errors.New("user not acknowledge the provider")
+	}
+
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
 	if err != nil {
 		return err
@@ -76,8 +84,8 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 }
 
 func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
-	reqInZK := &models.Request{
-		Fee:             req.Fee,
+	reqInZK := &models.RequestResponse{
+		ReqFee:          req.InputFee,
 		Nonce:           req.Nonce,
 		ProviderAddress: c.contract.ProviderAddress,
 		UserAddress:     req.UserAddress,
@@ -98,10 +106,6 @@ func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
 }
 
 func (c *Ctrl) validateFee(ctx *gin.Context, actual model.Request, account model.User, expectedFee, expectedInputFee string) error {
-	if err := c.compareFees("previousOutputFee", actual.PreviousOutputFee, account.LastResponseFee); err != nil {
-		ctx.Set("ignoreError", true) // ignore error for monitoring since it is most likely caused by incorrect operation
-		return errors.Wrap(err, "Please use 'settleFee' (https://docs.0g.ai/build-with-0g/compute-network/sdk#manual-fee-settlement) to manually settle the fee first")
-	}
 	if err := c.compareFees("inputFee", actual.InputFee, &expectedInputFee); err != nil {
 		return err
 	}
@@ -193,10 +197,10 @@ func updateRequestField(req *model.Request, key, value string) error {
 		req.InputFee = value
 	case "Nonce":
 		req.Nonce = value
-	case "Previous-Output-Fee":
-		req.PreviousOutputFee = value
 	case "Signature":
 		req.Signature = value
+	case "Request-Hash":
+		req.RequestHash = value
 	default:
 		return errors.Wrapf(errors.New("unexpected Header"), "%s", key)
 	}

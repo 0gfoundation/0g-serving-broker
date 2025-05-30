@@ -189,21 +189,31 @@ type GenerateSolidityCalldataCombinedBody struct {
 	// l
 	L int64 `json:"l,omitempty"`
 
-	// pubkey
-	Pubkey models.PublicKey `json:"pubkey"`
+	// req pubkey
+	ReqPubkey models.PublicKey `json:"reqPubkey"`
+
+	// req signatures
+	ReqSignatures models.Signatures `json:"reqSignatures"`
 
 	// requests
-	Requests []*models.Request `json:"requests"`
+	Requests []*models.RequestResponse `json:"requests"`
 
-	// signatures
-	Signatures models.Signatures `json:"signatures"`
+	// res pubkey
+	ResPubkey models.PublicKey `json:"resPubkey"`
+
+	// res signatures
+	ResSignatures models.Signatures `json:"resSignatures"`
 }
 
 // Validate validates this generate solidity calldata combined body
 func (o *GenerateSolidityCalldataCombinedBody) Validate(formats strfmt.Registry) error {
 	var res []error
 
-	if err := o.validatePubkey(formats); err != nil {
+	if err := o.validateReqPubkey(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := o.validateReqSignatures(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -211,7 +221,11 @@ func (o *GenerateSolidityCalldataCombinedBody) Validate(formats strfmt.Registry)
 		res = append(res, err)
 	}
 
-	if err := o.validateSignatures(formats); err != nil {
+	if err := o.validateResPubkey(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := o.validateResSignatures(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -221,16 +235,33 @@ func (o *GenerateSolidityCalldataCombinedBody) Validate(formats strfmt.Registry)
 	return nil
 }
 
-func (o *GenerateSolidityCalldataCombinedBody) validatePubkey(formats strfmt.Registry) error {
-	if swag.IsZero(o.Pubkey) { // not required
+func (o *GenerateSolidityCalldataCombinedBody) validateReqPubkey(formats strfmt.Registry) error {
+	if swag.IsZero(o.ReqPubkey) { // not required
 		return nil
 	}
 
-	if err := o.Pubkey.Validate(formats); err != nil {
+	if err := o.ReqPubkey.Validate(formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("body" + "." + "pubkey")
+			return ve.ValidateName("body" + "." + "reqPubkey")
 		} else if ce, ok := err.(*errors.CompositeError); ok {
-			return ce.ValidateName("body" + "." + "pubkey")
+			return ce.ValidateName("body" + "." + "reqPubkey")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (o *GenerateSolidityCalldataCombinedBody) validateReqSignatures(formats strfmt.Registry) error {
+	if swag.IsZero(o.ReqSignatures) { // not required
+		return nil
+	}
+
+	if err := o.ReqSignatures.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("body" + "." + "reqSignatures")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("body" + "." + "reqSignatures")
 		}
 		return err
 	}
@@ -264,16 +295,33 @@ func (o *GenerateSolidityCalldataCombinedBody) validateRequests(formats strfmt.R
 	return nil
 }
 
-func (o *GenerateSolidityCalldataCombinedBody) validateSignatures(formats strfmt.Registry) error {
-	if swag.IsZero(o.Signatures) { // not required
+func (o *GenerateSolidityCalldataCombinedBody) validateResPubkey(formats strfmt.Registry) error {
+	if swag.IsZero(o.ResPubkey) { // not required
 		return nil
 	}
 
-	if err := o.Signatures.Validate(formats); err != nil {
+	if err := o.ResPubkey.Validate(formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("body" + "." + "signatures")
+			return ve.ValidateName("body" + "." + "resPubkey")
 		} else if ce, ok := err.(*errors.CompositeError); ok {
-			return ce.ValidateName("body" + "." + "signatures")
+			return ce.ValidateName("body" + "." + "resPubkey")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (o *GenerateSolidityCalldataCombinedBody) validateResSignatures(formats strfmt.Registry) error {
+	if swag.IsZero(o.ResSignatures) { // not required
+		return nil
+	}
+
+	if err := o.ResSignatures.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("body" + "." + "resSignatures")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("body" + "." + "resSignatures")
 		}
 		return err
 	}
@@ -285,7 +333,11 @@ func (o *GenerateSolidityCalldataCombinedBody) validateSignatures(formats strfmt
 func (o *GenerateSolidityCalldataCombinedBody) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
-	if err := o.contextValidatePubkey(ctx, formats); err != nil {
+	if err := o.contextValidateReqPubkey(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := o.contextValidateReqSignatures(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -293,7 +345,11 @@ func (o *GenerateSolidityCalldataCombinedBody) ContextValidate(ctx context.Conte
 		res = append(res, err)
 	}
 
-	if err := o.contextValidateSignatures(ctx, formats); err != nil {
+	if err := o.contextValidateResPubkey(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := o.contextValidateResSignatures(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -303,13 +359,27 @@ func (o *GenerateSolidityCalldataCombinedBody) ContextValidate(ctx context.Conte
 	return nil
 }
 
-func (o *GenerateSolidityCalldataCombinedBody) contextValidatePubkey(ctx context.Context, formats strfmt.Registry) error {
+func (o *GenerateSolidityCalldataCombinedBody) contextValidateReqPubkey(ctx context.Context, formats strfmt.Registry) error {
 
-	if err := o.Pubkey.ContextValidate(ctx, formats); err != nil {
+	if err := o.ReqPubkey.ContextValidate(ctx, formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("body" + "." + "pubkey")
+			return ve.ValidateName("body" + "." + "reqPubkey")
 		} else if ce, ok := err.(*errors.CompositeError); ok {
-			return ce.ValidateName("body" + "." + "pubkey")
+			return ce.ValidateName("body" + "." + "reqPubkey")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (o *GenerateSolidityCalldataCombinedBody) contextValidateReqSignatures(ctx context.Context, formats strfmt.Registry) error {
+
+	if err := o.ReqSignatures.ContextValidate(ctx, formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("body" + "." + "reqSignatures")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("body" + "." + "reqSignatures")
 		}
 		return err
 	}
@@ -337,13 +407,27 @@ func (o *GenerateSolidityCalldataCombinedBody) contextValidateRequests(ctx conte
 	return nil
 }
 
-func (o *GenerateSolidityCalldataCombinedBody) contextValidateSignatures(ctx context.Context, formats strfmt.Registry) error {
+func (o *GenerateSolidityCalldataCombinedBody) contextValidateResPubkey(ctx context.Context, formats strfmt.Registry) error {
 
-	if err := o.Signatures.ContextValidate(ctx, formats); err != nil {
+	if err := o.ResPubkey.ContextValidate(ctx, formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("body" + "." + "signatures")
+			return ve.ValidateName("body" + "." + "resPubkey")
 		} else if ce, ok := err.(*errors.CompositeError); ok {
-			return ce.ValidateName("body" + "." + "signatures")
+			return ce.ValidateName("body" + "." + "resPubkey")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (o *GenerateSolidityCalldataCombinedBody) contextValidateResSignatures(ctx context.Context, formats strfmt.Registry) error {
+
+	if err := o.ResSignatures.ContextValidate(ctx, formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("body" + "." + "resSignatures")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("body" + "." + "resSignatures")
 		}
 		return err
 	}

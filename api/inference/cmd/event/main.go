@@ -67,7 +67,7 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	ctrl := ctrl.New(db, contract, zk, config.Service{}, conf.Interval.AutoSettleBufferTime, nil, phalaService)
+	ctrl := ctrl.New(db, contract, zk, config.Service{}, conf.Interval.AutoSettleBufferTime, nil, phalaService, nil)
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)

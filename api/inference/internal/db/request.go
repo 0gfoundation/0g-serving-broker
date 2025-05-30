@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"gorm.io/gorm"
 )
 
 func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
@@ -14,7 +15,7 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	var totalFee sql.NullInt64
 
 	ret := d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed)
+		Where("processed = ? and tee_signature <> ''", q.Processed)
 
 	if q.Sort != nil {
 		ret.Order(*q.Sort)
@@ -28,7 +29,7 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	}
 
 	ret = d.db.Model(model.Request{}).
-		Where("processed = ?", q.Processed).
+		Where("processed = ?  and tee_signature <> ''", q.Processed).
 		Select("SUM(CAST(fee AS SIGNED))").Scan(&totalFee)
 
 	var totalFeeInt int
@@ -46,6 +47,34 @@ func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 		Where("created_at <= ?", *latestReqCreateAt).
 		Updates(model.Request{Processed: true})
 	return ret.Error
+}
+
+func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, nonce, outputFee, requestFee, unsettledFee, signature string) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.
+			Where(&model.Request{
+				RequestHash: requestHash,
+			}).
+			Updates(&model.Request{
+				OutputFee:    outputFee,
+				Fee:          requestFee,
+				TeeSignature: signature}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.
+			Where(&model.User{
+				User: userAddress,
+			}).
+			Updates(&model.User{
+				LastRequestNonce: &nonce,
+				UnsettledFee:     &unsettledFee,
+			}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
 }
 
 func (d *DB) CreateRequest(req model.Request) error {

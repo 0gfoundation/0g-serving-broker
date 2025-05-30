@@ -7,15 +7,13 @@ var (
 		"/chat/completions": {},
 	}
 
-	SettleFeeRoute = "/settle-fee"
-
 	RequestMetaData = map[string]struct{}{
-		"Address":             {},
-		"Fee":                 {},
-		"Input-Fee":           {},
-		"Nonce":               {},
-		"Previous-Output-Fee": {},
-		"Signature":           {},
+		"Address":      {},
+		"Fee":          {},
+		"Input-Fee":    {},
+		"Nonce":        {},
+		"Request-Hash": {},
+		"Signature":    {},
 	}
 
 	// Should align with the topUpTriggerThreshold in the client sdk

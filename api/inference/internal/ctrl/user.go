@@ -6,12 +6,10 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/gin-gonic/gin"
 )
 
 func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (model.User, error) {
@@ -37,13 +35,12 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
 		UnsettledFee:         model.PtrOf("0"),
 		Signer:               []string{contractAccount.Signer[0].String(), contractAccount.Signer[1].String()},
-		LastResponseFee:      model.PtrOf("0"),
 	}
 
 	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
 }
 
-func (c Ctrl) GetUserAccount(ctx context.Context, userAddress common.Address) (model.User, error) {
+func (c *Ctrl) GetUserAccount(ctx context.Context, userAddress common.Address) (model.User, error) {
 	account, err := c.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
 		return model.User{}, errors.Wrap(err, "get account from contract")
@@ -52,7 +49,7 @@ func (c Ctrl) GetUserAccount(ctx context.Context, userAddress common.Address) (m
 	return rets[0], err
 }
 
-func (c Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User, error) {
+func (c *Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User, error) {
 	accounts, err := c.contract.ListUserAccount(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "list account from contract")
@@ -67,7 +64,7 @@ func (c Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User, 
 	return list, nil
 }
 
-func (c Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, error) {
+func (c *Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, error) {
 	list := make([]model.User, len(accounts))
 	dbAccounts, err := c.db.ListUserAccount(nil)
 	if err != nil {
@@ -83,7 +80,6 @@ func (c Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, er
 			list[i].LastRequestNonce = v.LastRequestNonce
 			list[i].LastBalanceCheckTime = v.LastBalanceCheckTime
 			list[i].UnsettledFee = v.UnsettledFee
-			list[i].LastResponseFee = v.LastResponseFee
 		}
 	}
 	return list, nil
@@ -117,34 +113,6 @@ func (c *Ctrl) SyncUserAccounts(ctx context.Context) error {
 	}
 
 	return errors.Wrap(c.db.BatchUpdateUserAccount(accounts), "batch update account in db")
-}
-
-func (c *Ctrl) SettleUserAccountFee(ctx *gin.Context) error {
-	req, err := c.GetFromHTTPRequest(ctx)
-	if err != nil {
-		return err
-	}
-	if err := c.ValidateRequest(ctx, req, req.PreviousOutputFee, "0"); err != nil {
-		return err
-	}
-	if err := c.CreateRequest(req); err != nil {
-		return err
-	}
-	oldAccount, err := c.GetOrCreateAccount(ctx, req.UserAddress)
-	if err != nil {
-		return err
-	}
-	unsettledFee, err := util.Add(req.PreviousOutputFee, oldAccount.UnsettledFee)
-	if err != nil {
-		return err
-	}
-	account := model.User{
-		User:             req.UserAddress,
-		LastRequestNonce: &req.Nonce,
-		UnsettledFee:     model.PtrOf(unsettledFee.String()),
-		LastResponseFee:  model.PtrOf("0"),
-	}
-	return c.UpdateUserAccount(account.User, account)
 }
 
 func parse(account contract.Account) model.User {

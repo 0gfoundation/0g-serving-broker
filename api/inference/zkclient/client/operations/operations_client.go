@@ -34,11 +34,11 @@ type ClientService interface {
 
 	GenerateProofInput(params *GenerateProofInputParams, opts ...ClientOption) (*GenerateProofInputOK, error)
 
-	GenerateSignature(params *GenerateSignatureParams, opts ...ClientOption) (*GenerateSignatureOK, error)
-
 	GenerateSolidityCalldata(params *GenerateSolidityCalldataParams, opts ...ClientOption) (*GenerateSolidityCalldataOK, error)
 
 	GenerateSolidityCalldataCombined(params *GenerateSolidityCalldataCombinedParams, opts ...ClientOption) (*GenerateSolidityCalldataCombinedOK, error)
+
+	Signature(params *SignatureParams, opts ...ClientOption) (*SignatureOK, error)
 
 	SetTransport(transport runtime.ClientTransport)
 }
@@ -155,43 +155,6 @@ func (a *Client) GenerateProofInput(params *GenerateProofInputParams, opts ...Cl
 }
 
 /*
-GenerateSignature generate signature API
-*/
-func (a *Client) GenerateSignature(params *GenerateSignatureParams, opts ...ClientOption) (*GenerateSignatureOK, error) {
-	// TODO: Validate the params before sending
-	if params == nil {
-		params = NewGenerateSignatureParams()
-	}
-	op := &runtime.ClientOperation{
-		ID:                 "generateSignature",
-		Method:             "POST",
-		PathPattern:        "/signature",
-		ProducesMediaTypes: []string{"application/json"},
-		ConsumesMediaTypes: []string{"application/json"},
-		Schemes:            []string{"http"},
-		Params:             params,
-		Reader:             &GenerateSignatureReader{formats: a.formats},
-		Context:            params.Context,
-		Client:             params.HTTPClient,
-	}
-	for _, opt := range opts {
-		opt(op)
-	}
-
-	result, err := a.transport.Submit(op)
-	if err != nil {
-		return nil, err
-	}
-	success, ok := result.(*GenerateSignatureOK)
-	if ok {
-		return success, nil
-	}
-	// unexpected success response
-	unexpectedSuccess := result.(*GenerateSignatureDefault)
-	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
-}
-
-/*
 GenerateSolidityCalldata generate solidity calldata API
 */
 func (a *Client) GenerateSolidityCalldata(params *GenerateSolidityCalldataParams, opts ...ClientOption) (*GenerateSolidityCalldataOK, error) {
@@ -262,6 +225,43 @@ func (a *Client) GenerateSolidityCalldataCombined(params *GenerateSolidityCallda
 	}
 	// unexpected success response
 	unexpectedSuccess := result.(*GenerateSolidityCalldataCombinedDefault)
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+/*
+Signature signature API
+*/
+func (a *Client) Signature(params *SignatureParams, opts ...ClientOption) (*SignatureOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewSignatureParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "signature",
+		Method:             "POST",
+		PathPattern:        "/signature",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &SignatureReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+	success, ok := result.(*SignatureOK)
+	if ok {
+		return success, nil
+	}
+	// unexpected success response
+	unexpectedSuccess := result.(*SignatureDefault)
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
 }
 

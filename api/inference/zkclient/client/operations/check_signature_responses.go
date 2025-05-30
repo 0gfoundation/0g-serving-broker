@@ -15,6 +15,7 @@ import (
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
+	"github.com/go-openapi/validate"
 
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
 )
@@ -184,11 +185,15 @@ swagger:model CheckSignatureBody
 */
 type CheckSignatureBody struct {
 
-	// pubkey
-	Pubkey models.PublicKey `json:"pubkey"`
+	// pub key
+	PubKey models.PublicKey `json:"pubKey"`
 
 	// requests
-	Requests []*models.Request `json:"requests"`
+	Requests []*models.RequestResponse `json:"requests"`
+
+	// sign response
+	// Required: true
+	SignResponse *bool `json:"signResponse"`
 
 	// signatures
 	Signatures models.Signatures `json:"signatures"`
@@ -198,11 +203,15 @@ type CheckSignatureBody struct {
 func (o *CheckSignatureBody) Validate(formats strfmt.Registry) error {
 	var res []error
 
-	if err := o.validatePubkey(formats); err != nil {
+	if err := o.validatePubKey(formats); err != nil {
 		res = append(res, err)
 	}
 
 	if err := o.validateRequests(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := o.validateSignResponse(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -216,16 +225,16 @@ func (o *CheckSignatureBody) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
-func (o *CheckSignatureBody) validatePubkey(formats strfmt.Registry) error {
-	if swag.IsZero(o.Pubkey) { // not required
+func (o *CheckSignatureBody) validatePubKey(formats strfmt.Registry) error {
+	if swag.IsZero(o.PubKey) { // not required
 		return nil
 	}
 
-	if err := o.Pubkey.Validate(formats); err != nil {
+	if err := o.PubKey.Validate(formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("body" + "." + "pubkey")
+			return ve.ValidateName("body" + "." + "pubKey")
 		} else if ce, ok := err.(*errors.CompositeError); ok {
-			return ce.ValidateName("body" + "." + "pubkey")
+			return ce.ValidateName("body" + "." + "pubKey")
 		}
 		return err
 	}
@@ -259,6 +268,15 @@ func (o *CheckSignatureBody) validateRequests(formats strfmt.Registry) error {
 	return nil
 }
 
+func (o *CheckSignatureBody) validateSignResponse(formats strfmt.Registry) error {
+
+	if err := validate.Required("body"+"."+"signResponse", "body", o.SignResponse); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (o *CheckSignatureBody) validateSignatures(formats strfmt.Registry) error {
 	if swag.IsZero(o.Signatures) { // not required
 		return nil
@@ -280,7 +298,7 @@ func (o *CheckSignatureBody) validateSignatures(formats strfmt.Registry) error {
 func (o *CheckSignatureBody) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
-	if err := o.contextValidatePubkey(ctx, formats); err != nil {
+	if err := o.contextValidatePubKey(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -298,13 +316,13 @@ func (o *CheckSignatureBody) ContextValidate(ctx context.Context, formats strfmt
 	return nil
 }
 
-func (o *CheckSignatureBody) contextValidatePubkey(ctx context.Context, formats strfmt.Registry) error {
+func (o *CheckSignatureBody) contextValidatePubKey(ctx context.Context, formats strfmt.Registry) error {
 
-	if err := o.Pubkey.ContextValidate(ctx, formats); err != nil {
+	if err := o.PubKey.ContextValidate(ctx, formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("body" + "." + "pubkey")
+			return ve.ValidateName("body" + "." + "pubKey")
 		} else if ce, ok := err.(*errors.CompositeError); ok {
-			return ce.ValidateName("body" + "." + "pubkey")
+			return ce.ValidateName("body" + "." + "pubKey")
 		}
 		return err
 	}

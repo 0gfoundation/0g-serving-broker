@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"sync"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -9,10 +10,12 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
 )
 
 type Ctrl struct {
+	mu       sync.RWMutex
 	db       *db.DB
 	contract *providercontract.ProviderContract
 	zk       zkclient.ZKClient
@@ -23,9 +26,19 @@ type Ctrl struct {
 	Service config.Service
 
 	phalaService *phala.PhalaService
+	signer       *signer.Signer
 }
 
-func New(db *db.DB, contract *providercontract.ProviderContract, zkclient zkclient.ZKClient, service config.Service, autoSettleBufferTime int, svcCache *cache.Cache, phalaService *phala.PhalaService) *Ctrl {
+func New(
+	db *db.DB,
+	contract *providercontract.ProviderContract,
+	zkclient zkclient.ZKClient,
+	service config.Service,
+	autoSettleBufferTime int,
+	svcCache *cache.Cache,
+	phalaService *phala.PhalaService,
+	signer *signer.Signer,
+) *Ctrl {
 	p := &Ctrl{
 		autoSettleBufferTime: time.Duration(autoSettleBufferTime) * time.Second,
 		db:                   db,
@@ -34,6 +47,7 @@ func New(db *db.DB, contract *providercontract.ProviderContract, zkclient zkclie
 		zk:                   zkclient,
 		svcCache:             svcCache,
 		phalaService:         phalaService,
+		signer:               signer,
 	}
 
 	return p
