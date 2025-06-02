@@ -5,11 +5,14 @@ import (
 	"os"
 	"time"
 
+	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -31,18 +34,31 @@ import (
 //	@in				header
 
 func Main() {
+	// Initialize logger
+	logger, err := log.GetLogger(&commonconfig.LoggerConfig{
+		Format: log.TextLogFormat,
+		Level:  "info",
+	})
+	if err != nil {
+		panic("Failed to initialize logger: " + err.Error())
+	}
+	logger.Info("Starting inference service")
+
 	config := config.GetConfig()
 
-	db, err := database.NewDB(config)
+	db, err := database.NewDB(config, logger)
 	if err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to initialize database")
 		panic(err)
 	}
 	if err := db.Migrate(); err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to migrate database")
 		panic(err)
 	}
 
 	contract, err := providercontract.NewProviderContract(config)
 	if err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to initialize provider contract")
 		panic(err)
 	}
 	defer contract.Close()
@@ -53,41 +69,71 @@ func Main() {
 	if config.Monitor.Enable {
 		monitor.PrometheusInit(config.Service.ServingURL)
 		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+		logger.Info("Prometheus monitoring enabled")
 	}
 
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
 	phalaClientType := phala.TEE
 	if os.Getenv("NETWORK") == "hardhat" {
 		phalaClientType = phala.Mock
+		logger.Info("Using mock Phala client for hardhat network")
 	}
 
 	phalaService, err := phala.NewPhalaService(phalaClientType)
 	if err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to initialize Phala service")
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService)
+	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService, logger)
 	ctx := context.Background()
+
+	logger.Info("Starting initial service synchronization")
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to sync user accounts")
 		panic(err)
 	}
+
+	logger.Info("Starting initial fee settlement")
 	settleFeesErr := ctrl.SettleFees(ctx)
 	if settleFeesErr != nil {
+		logger.WithFields(logrus.Fields{"error": settleFeesErr}).Error("Failed to settle fees")
 		panic(settleFeesErr)
 	}
+
 	if err := ctrl.SyncService(ctx); err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to sync service")
 		panic(err)
 	}
+
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable)
 	if err := proxy.Start(); err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to start proxy")
 		panic(err)
 	}
 
 	h := handler.New(ctrl, proxy)
 	h.Register(engine)
 
+	logger.WithFields(logrus.Fields{
+		"port": os.Getenv("PORT"),
+	}).Info("Starting HTTP server")
+
 	// Listen and Serve, config port with PORT=X
 	if err := engine.Run(); err != nil {
+		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to start HTTP server")
 		panic(err)
 	}
+}
+
+// +build main
+
+package main
+
+import (
+	"github.com/0glabs/0g-serving-broker/inference/cmd/server"
+)
+
+func main() {
+	server.Main()
 }
