@@ -3,9 +3,10 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"math/big"
 	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -28,19 +29,33 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 
 	err := c.pruneRequest(ctx, &categorizedSettlementInfo)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to prune request")
 		return errors.Wrap(err, "prune request")
 	}
+
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
 		Sort:      model.PtrOf("nonce ASC"),
 	})
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to list requests from db")
 		return errors.Wrap(err, "list request from db")
 	}
+
 	if len(reqs) == 0 {
+		c.logger.Info("No requests to settle, resetting unsettled fee")
 		return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 	}
+
 	latestReqCreateAt := reqs[0].CreatedAt
+	c.logger.WithFields(logrus.Fields{
+		"request_count": len(reqs),
+		"latest_time":   latestReqCreateAt,
+	}).Info("Starting fee settlement process")
 
 	categorizedReqs := make(map[string][]*models.Request)
 	categorizedSigs := make(map[string][][]int64)
@@ -52,6 +67,12 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		var sig []int64
 		err := json.Unmarshal([]byte(req.Signature), &sig)
 		if err != nil {
+			c.logger.WithFields(logrus.Fields{
+				"error":        err,
+				"user_address": req.UserAddress,
+				"nonce":        req.Nonce,
+				"service_name": req.ServiceName,
+			}).Error("Failed to parse signature")
 			return errors.New("Failed to parse signature")
 		}
 
@@ -61,11 +82,17 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			ProviderAddress: c.contract.ProviderAddress,
 			UserAddress:     req.UserAddress,
 		}
+
 		if v, ok := categorizedSettlementInfo[req.UserAddress]; ok {
 			minNonce := v.MinNonceInSettlement
 
 			cmp, err := util.Compare(minNonce, req.Nonce)
 			if err != nil {
+				c.logger.WithFields(logrus.Fields{
+					"error":     err,
+					"min_nonce": minNonce,
+					"req_nonce": req.Nonce,
+				}).Error("Failed to compare nonces")
 				return errors.Wrap(err, "compare nonce")
 			}
 			if minNonce == "0" || cmp > 0 {
@@ -74,8 +101,14 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 
 			totalFeeInSettlement, err := util.Add(req.Fee, v.TotalFeeInSettlement)
 			if err != nil {
+				c.logger.WithFields(logrus.Fields{
+					"error":     err,
+					"fee":       req.Fee,
+					"total_fee": v.TotalFeeInSettlement,
+				}).Error("Failed to add fees")
 				return errors.Wrap(err, "add fee")
 			}
+
 			categorizedSettlementInfo[req.UserAddress] = SettlementInfo{
 				Account:                   req.UserAddress,
 				RecordedNonceInContract:   v.RecordedNonceInContract,
@@ -84,6 +117,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 				TotalFeeInSettlement:      totalFeeInSettlement.String(),
 			}
 		}
+
 		if _, ok := categorizedReqs[req.UserAddress]; ok {
 			categorizedReqs[req.UserAddress] = append(categorizedReqs[req.UserAddress], reqInZK)
 			categorizedSigs[req.UserAddress] = append(categorizedSigs[req.UserAddress], sig)
@@ -100,6 +134,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		NumChunks:   big.NewInt(0),
 		SegmentSize: []*big.Int{},
 	}
+
 	for key := range categorizedReqs {
 		reqChunks, sigChunks := splitArray(categorizedReqs[key], c.zk.RequestLength), splitArray(categorizedSigs[key], c.zk.RequestLength)
 		verifierInput.NumChunks.Add(verifierInput.NumChunks, big.NewInt(int64(len(reqChunks))))
@@ -108,18 +143,35 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		for i := range reqChunks {
 			calldata, err := c.GenerateSolidityCalldata(ctx, reqChunks[i], sigChunks[i])
 			if err != nil {
+				c.logger.WithFields(logrus.Fields{
+					"error": err,
+					"user":  key,
+					"chunk": i,
+				}).Error("Failed to generate solidity calldata")
 				return err
 			}
+
 			proof, err := flattenAndConvert([][]string{calldata.PA}, calldata.PB, [][]string{calldata.PC})
 			if err != nil {
+				c.logger.WithFields(logrus.Fields{
+					"error": err,
+					"user":  key,
+					"chunk": i,
+				}).Error("Failed to flatten and convert proof")
 				return err
 			}
+
 			verifierInput.InProof = append(verifierInput.InProof, proof...)
-			// proofInputs: [userAddress, providerAddress, initNonce, finalNonce, totalFee, signerPubKey[0], signerPubKey[1]]
 			proofInputs, err := flattenAndConvert([][]string{calldata.PubInputs})
 			if err != nil {
+				c.logger.WithFields(logrus.Fields{
+					"error": err,
+					"user":  key,
+					"chunk": i,
+				}).Error("Failed to flatten and convert proof inputs")
 				return err
 			}
+
 			segmentSize += len(proofInputs)
 			verifierInput.ProofInputs = append(verifierInput.ProofInputs, proofInputs...)
 		}
@@ -130,27 +182,46 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	for k := range categorizedSettlementInfo {
 		settlementInfos = append(settlementInfos, categorizedSettlementInfo[k])
 	}
+
 	settlementInfoJSON, err := json.Marshal(settlementInfos)
 	if err != nil {
-		log.Println("Error marshalling settlement infos:", err)
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to marshal settlement infos")
 		settlementInfoJSON = []byte("[]")
 	}
-	log.Printf("Settlement infos: %s", string(settlementInfoJSON))
+
+	c.logger.WithFields(logrus.Fields{
+		"settlement_infos": string(settlementInfoJSON),
+	}).Info("Settlement information")
+
 	if err := c.contract.SettleFees(ctx, verifierInput); err != nil {
-		return errors.Wrapf(err, "settle fees in contract, the ")
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to settle fees in contract")
+		return errors.Wrapf(err, "settle fees in contract")
 	}
 
 	if err := c.db.UpdateRequest(latestReqCreateAt); err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+			"time":  latestReqCreateAt,
+		}).Error("Failed to update request in db")
 		return errors.Wrap(err, "update request in db")
 	}
+
 	if err := c.SyncUserAccounts(ctx); err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to synchronize accounts from contract to database")
 		return errors.Wrap(err, "synchronize accounts from the contract to the database")
 	}
 
+	c.logger.Info("Successfully completed fee settlement")
 	return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 }
 
-func (c Ctrl) ProcessSettlement(ctx context.Context) error {
+func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 	settleTriggerThreshold := (c.Service.InputPrice + c.Service.OutputPrice) * constant.SettleTriggerThreshold
 
 	accounts, err := c.db.ListUserAccount(&model.UserListOptions{
@@ -159,54 +230,88 @@ func (c Ctrl) ProcessSettlement(ctx context.Context) error {
 		SettleTriggerThreshold: &settleTriggerThreshold,
 	})
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to list accounts that need to be settled")
 		return errors.Wrap(err, "list accounts that need to be settled in db")
 	}
+
 	if len(accounts) == 0 {
+		c.logger.Debug("No accounts need settlement")
 		return nil
 	}
-	// Verify the available balance in the contract.
-	// If it exceeds the fee, no settlement is necessary;
-	// the balance is sufficient for at least the next lock period.
+
+	c.logger.WithFields(logrus.Fields{
+		"account_count": len(accounts),
+	}).Info("Found accounts that need settlement")
+
 	if err := c.SyncUserAccounts(ctx); err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to synchronize accounts from contract")
 		return errors.Wrap(err, "synchronize accounts from the contract to the database")
 	}
+
 	accounts, err = c.db.ListUserAccount(&model.UserListOptions{
 		MinUnsettledFee:        model.PtrOf(int64(0)),
 		LowBalanceRisk:         model.PtrOf(time.Now()),
 		SettleTriggerThreshold: &settleTriggerThreshold,
 	})
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to list accounts after sync")
 		return errors.Wrap(err, "list accounts that need to be settled in db")
 	}
+
 	if len(accounts) == 0 {
+		c.logger.Debug("No accounts need settlement after sync")
 		return nil
 	}
-	log.Print("Accounts at risk of having insufficient funds and will be settled immediately.")
+
+	c.logger.WithFields(logrus.Fields{
+		"account_count": len(accounts),
+	}).Info("Accounts at risk of having insufficient funds, proceeding with immediate settlement")
+
 	return errors.Wrap(c.SettleFees(ctx), "settle fees")
 }
 
-func (c Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[string]SettlementInfo) error {
+func (c *Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[string]SettlementInfo) error {
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed: false,
 		Sort:      model.PtrOf("nonce ASC"),
 	})
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to list requests for pruning")
 		return errors.Wrap(err, "list request from db")
 	}
+
 	if len(reqs) == 0 {
+		c.logger.Debug("No requests to prune")
 		return nil
 	}
-	// accountsInDebt marks the accounts needed to be charged
+
+	c.logger.WithFields(logrus.Fields{
+		"request_count": len(reqs),
+	}).Info("Starting request pruning")
+
 	accountsInDebt := map[string]string{}
 	for _, req := range reqs {
 		if _, ok := accountsInDebt[req.UserAddress]; !ok {
 			accountsInDebt[req.UserAddress] = "1"
 		}
 	}
+
 	accounts, err := c.contract.ListUserAccount(ctx)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to list accounts from contract")
 		return errors.Wrap(err, "list account from contract")
 	}
+
 	for _, account := range accounts {
 		if _, ok := accountsInDebt[account.User.String()]; ok {
 			accountsInDebt[account.User.String()] = account.Nonce.String()
@@ -220,6 +325,11 @@ func (c Ctrl) pruneRequest(ctx context.Context, categorizedSettlementInfo *map[s
 			}
 		}
 	}
+
+	c.logger.WithFields(logrus.Fields{
+		"account_count": len(accountsInDebt),
+	}).Info("Pruning requests in database")
+
 	return errors.Wrap(c.db.PruneRequest(accountsInDebt), "prune request in db")
 }
 

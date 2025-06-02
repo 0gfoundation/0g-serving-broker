@@ -4,21 +4,24 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
+	"github.com/sirupsen/logrus"
 )
 
 type Handler struct {
-	ctrl  *ctrl.Ctrl
-	proxy *proxy.Proxy
+	ctrl   *ctrl.Ctrl
+	proxy  *proxy.Proxy
+	logger log.Logger
 }
 
-func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
-	h := &Handler{
-		ctrl:  ctrl,
-		proxy: proxy,
+func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy, logger log.Logger) *Handler {
+	return &Handler{
+		ctrl:   ctrl,
+		proxy:  proxy,
+		logger: logger,
 	}
-	return h
 }
 
 func (h *Handler) Register(r *gin.Engine) {
@@ -41,10 +44,14 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/quote", h.GetQuote)
 }
 
-func handleBrokerError(ctx *gin.Context, err error, context string) {
+func (h *Handler) handleBrokerError(ctx *gin.Context, err error, context string) {
 	info := "Provider"
 	if context != "" {
 		info += (": " + context)
 	}
+	h.logger.WithFields(logrus.Fields{
+		"error":   err,
+		"context": context,
+	}).Error(info)
 	errors.Response(ctx, errors.Wrap(err, info))
 }

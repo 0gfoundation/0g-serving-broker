@@ -3,11 +3,11 @@ package ctrl
 import (
 	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -15,11 +15,13 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
-
-
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+			"url":   targetURL,
+		}).Error("Failed to create HTTP request")
 		return nil, err
 	}
 
@@ -46,6 +48,10 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	// back up body for other usage
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+			"type":  svcType,
+		}).Error("Failed to read request body")
 		handleBrokerError(ctx, err, "failed to read request body")
 		return
 	}
@@ -53,6 +59,11 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	resp, err := client.Do(req)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+			"type":  svcType,
+			"url":   req.URL.String(),
+		}).Error("Failed to call proxied service")
 		handleBrokerError(ctx, err, "call proxied service")
 		return
 	}
@@ -67,6 +78,11 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	if resp.StatusCode != http.StatusOK {
 		ctx.Writer.WriteHeader(resp.StatusCode)
+		c.logger.WithFields(logrus.Fields{
+			"status_code": resp.StatusCode,
+			"type":        svcType,
+			"url":         req.URL.String(),
+		}).Error("Received non-OK response from proxied service")
 		handleServiceError(ctx, resp.Body)
 		return
 	}
@@ -83,11 +99,20 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	oldAccount, err := c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+			"user":  reqModel.UserAddress,
+		}).Error("Failed to get or create account")
 		handleBrokerError(ctx, err, "")
 		return
 	}
 	unsettledFee, err := util.Add(fee, oldAccount.UnsettledFee)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+			"fee":   fee,
+			"user":  reqModel.UserAddress,
+		}).Error("Failed to add unsettled fee")
 		handleBrokerError(ctx, err, "add unsettled fee")
 		return
 	}
@@ -102,6 +127,9 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	case "chatbot":
 		c.handleChatbotResponse(ctx, resp, account, outputPrice, body)
 	default:
+		c.logger.WithFields(logrus.Fields{
+			"type": svcType,
+		}).Error("Unknown service type")
 		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 	}
 }
@@ -109,10 +137,16 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to read response body")
 		handleBrokerError(ctx, err, "read from body")
 		return
 	}
 	if _, err := ctx.Writer.Write(body); err != nil {
+		c.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to write response body")
 		handleBrokerError(ctx, err, "write response body")
 	}
 }
@@ -142,7 +176,6 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
-	// TODO: recorded to log system
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
@@ -153,12 +186,10 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		// The error is already logged in the calling function
 		return
 	}
 	if _, err := ctx.Writer.Write(respBody); err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		// The error is already logged in the calling function
 	}
 }

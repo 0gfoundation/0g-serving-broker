@@ -10,10 +10,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
+	"github.com/sirupsen/logrus"
 )
 
 type Proxy struct {
@@ -24,13 +26,15 @@ type Proxy struct {
 	serviceTarget     string
 	serviceType       string
 	serviceGroup      *gin.RouterGroup
+	logger            log.Logger
 }
 
-func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
+func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, logger log.Logger) *Proxy {
 	p := &Proxy{
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,
 		serviceGroup: engine.Group(constant.ServicePrefix),
+		logger:       logger,
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -47,6 +51,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 }
 
 func (p *Proxy) Start() error {
+	p.logger.Info("Starting proxy server")
 	switch p.ctrl.Service.Type {
 	case "zgStorage", "chatbot":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
@@ -87,7 +92,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "read request body")
+		p.handleBrokerError(ctx, err, "read request body")
 		return
 	}
 
@@ -95,7 +100,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if targetRoute == constant.SettleFeeRoute {
 		err := p.ctrl.SettleUserAccountFee(ctx)
 		if err != nil {
-			handleBrokerError(ctx, err, "settle user account fee")
+			p.handleBrokerError(ctx, err, "settle user account fee")
 			return
 		}
 		ctx.Status(http.StatusAccepted)
@@ -106,7 +111,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if _, ok := constant.TargetRoute[targetRoute]; !ok {
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 		if err != nil {
-			handleBrokerError(ctx, err, "prepare HTTP request")
+			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
 		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", 0, false)
@@ -115,7 +120,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
-		handleBrokerError(ctx, err, "get model.request from HTTP request")
+		p.handleBrokerError(ctx, err, "get model.request from HTTP request")
 		return
 	}
 
@@ -126,35 +131,54 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	case "chatbot":
 		expectedInputFee, err = p.ctrl.GetChatbotInputFee(reqBody)
 		if err != nil {
-			handleBrokerError(ctx, err, "get input fee")
+			p.handleBrokerError(ctx, err, "get input fee")
 			return
 		}
 	default:
-		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
 
 	if err := p.ctrl.ValidateRequest(ctx, req, req.Fee, expectedInputFee); err != nil {
-		handleBrokerError(ctx, err, "validate request")
+		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}
 	if err := p.ctrl.CreateRequest(req); err != nil {
-		handleBrokerError(ctx, err, "create request")
+		p.handleBrokerError(ctx, err, "create request")
 		return
 	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 	if err != nil {
-		handleBrokerError(ctx, err, "prepare HTTP request")
+		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
 	p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, req.Fee, p.ctrl.Service.OutputPrice, true)
 }
 
-func handleBrokerError(ctx *gin.Context, err error, context string) {
-	info := "Provider proxy: handle proxied service"
+func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {
+	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
 	}
+	p.logger.WithFields(logrus.Fields{
+		"error":   err,
+		"context": context,
+	}).Error(info)
 	errors.Response(ctx, errors.Wrap(err, info))
+}
+
+func (p *Proxy) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+	respBody, err := io.ReadAll(body)
+	if err != nil {
+		p.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to read service error response body")
+		return
+	}
+	if _, err := ctx.Writer.Write(respBody); err != nil {
+		p.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Failed to write service error response body")
+	}
 }

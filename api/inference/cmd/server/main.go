@@ -5,7 +5,6 @@ import (
 	"os"
 	"time"
 
-	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/phala"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -35,10 +34,7 @@ import (
 
 func Main() {
 	// Initialize logger
-	logger, err := log.GetLogger(&commonconfig.LoggerConfig{
-		Format: log.TextLogFormat,
-		Level:  "info",
-	})
+	logger, err := log.GetLogger(&config.GetConfig().Logger)
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
@@ -56,7 +52,7 @@ func Main() {
 		panic(err)
 	}
 
-	contract, err := providercontract.NewProviderContract(config)
+	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
 		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to initialize provider contract")
 		panic(err)
@@ -64,6 +60,8 @@ func Main() {
 	defer contract.Close()
 
 	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
+	zkClient := &zk // Convert to pointer type
+
 	engine := gin.New()
 
 	if config.Monitor.Enable {
@@ -85,7 +83,7 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService, logger)
+	ctrl := ctrl.New(db, contract, zkClient, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService, logger)
 	ctx := context.Background()
 
 	logger.Info("Starting initial service synchronization")
@@ -106,13 +104,13 @@ func Main() {
 		panic(err)
 	}
 
-	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, logger)
 	if err := proxy.Start(); err != nil {
 		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to start proxy")
 		panic(err)
 	}
 
-	h := handler.New(ctrl, proxy)
+	h := handler.New(ctrl, proxy, logger)
 	h.Register(engine)
 
 	logger.WithFields(logrus.Fields{
@@ -124,16 +122,4 @@ func Main() {
 		logger.WithFields(logrus.Fields{"error": err}).Error("Failed to start HTTP server")
 		panic(err)
 	}
-}
-
-// +build main
-
-package main
-
-import (
-	"github.com/0glabs/0g-serving-broker/inference/cmd/server"
-)
-
-func main() {
-	server.Main()
 }

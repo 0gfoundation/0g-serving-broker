@@ -50,6 +50,7 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkSettlement"`
+	Logger config.LoggerConfig `yaml:"logger"`
 }
 
 var (
@@ -122,6 +123,12 @@ func GetConfig() *Config {
 			}{
 				Provider:      "zk-settlement:3002",
 				RequestLength: 40,
+			},
+			Logger: config.LoggerConfig{
+				Format:        "text",
+				Level:         "info",
+				Path:          "/tmp/inference.log",
+				RotationCount: 50,
 			},
 		}
 
