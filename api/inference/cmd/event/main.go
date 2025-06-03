@@ -14,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/event"
+	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
 )
@@ -67,13 +68,27 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	ctrl := ctrl.New(db, contract, zk, config.Service{}, conf.Interval.AutoSettleBufferTime, nil, phalaService, nil)
+
+	ctx := controller.SetupSignalHandler()
+
+	if err := phalaService.SyncQuote(ctx); err != nil {
+		panic(err)
+	}
+
+	signer, _ := signer.NewSigner()
+	encryptedKey, err := signer.InitialKey(ctx, contract, zk, phalaService.ProviderSigner)
+	if err != nil {
+		panic(err)
+	}
+	contract.EncryptedPrivKey = encryptedKey
+
+	ctrl := ctrl.New(db, contract, zk, conf.Service, conf.Interval.AutoSettleBufferTime, nil, phalaService, signer)
+
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}
 
-	ctx := controller.SetupSignalHandler()
 	if err := mgr.Start(ctx); err != nil {
 		panic(err)
 	}
