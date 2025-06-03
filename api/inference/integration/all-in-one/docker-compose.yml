@@ -80,7 +80,7 @@ services:
         condition: service_started
 
   zk-prover:
-    image: ghcr.io/0glabs/zk:0.1.0
+    image: ghcr.io/0glabs/zk:0.2.1
     container_name: zk-prover
     environment:
       JS_PROVER_PORT: 3001
@@ -97,7 +97,7 @@ services:
       - localhost
 
   zk-settlement:
-    image: ghcr.io/0glabs/zk:0.1.0
+    image: ghcr.io/0glabs/zk:0.2.1
     container_name: zk-settlement
     environment:
       JS_PROVER_PORT: 3002

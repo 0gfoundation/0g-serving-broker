@@ -52,7 +52,7 @@ services:
         condition: service_healthy
 
   zk-prover:
-    image: ghcr.io/0glabs/zk:0.1.0
+    image: ghcr.io/0glabs/zk:0.2.1
     container_name: router-zk-prover
     environment:
       JS_PROVER_PORT: 3001
@@ -69,7 +69,7 @@ services:
       - localhost
 
   zk-settlement:
-    image: ghcr.io/0glabs/zk:0.1.0
+    image: ghcr.io/0glabs/zk:0.2.1
     container_name: router-zk-settlement
     environment:
       JS_PROVER_PORT: 3002
