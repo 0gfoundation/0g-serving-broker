@@ -68,7 +68,7 @@ services:
         condition: service_healthy
 
   router-zk-prover:
-    image: ghcr.io/0glabs/zk:0.1.0
+    image: ghcr.io/0glabs/zk:0.2.1
     container_name: router-zk-prover
     volumes:
       - ./logs:/app/logs
@@ -94,7 +94,7 @@ services:
       - router
 
   router-zk-settlement:
-    image: ghcr.io/0glabs/zk:0.1.0
+    image: ghcr.io/0glabs/zk:0.2.1
     container_name: router-zk-settlement
     volumes:
       - ./logs:/app/logs
