@@ -8,7 +8,7 @@ contractAddress:
 
 # 0G storage indexer URLs
 indexerStandardUrl: "https://indexer-storage-testnet-standard.0g.ai"
-indexerTurboUrl: "http://47.251.40.189:12345"
+indexerTurboUrl: "https://indexer-storage-testnet-turbo.0g.ai"
 
 event:
   # The address and port where the provider service listens for events.
