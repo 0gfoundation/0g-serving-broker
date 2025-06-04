@@ -68,7 +68,6 @@ package-inference: generate-inference-api
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
 	rsync -av --exclude '**.local.*' ./inference/integration/provider/ /tmp/inference-broker && \
-	cp ./inference/doc/api/index.html /tmp/inference-broker/api.html && \
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
 	echo "Package created at /tmp/inference-broker.tar.gz"

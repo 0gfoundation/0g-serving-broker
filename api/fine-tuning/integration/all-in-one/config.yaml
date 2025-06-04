@@ -27,7 +27,7 @@ service:
     gpuCount: 1
 storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
-  indexerTurbo: "http://47.251.40.189:12345"
+  indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"
   uploadArgs:
     finalityRequired: true
     tags: "0x"
