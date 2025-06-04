@@ -5,10 +5,16 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trai
 from datasets import load_dataset, load_from_disk
 
 
+import time
+
 class ProgressCallback(TrainerCallback):
     def __init__(self, log_file_path="/app/mnt/progress.log"):
         self.log_file_path = log_file_path
         self.log_file = None
+        self.start_time = None
+        self.max_length = None
+        self.batch_size = None
+        self.total_token_count = 0
 
     def on_train_begin(self, args, state, control, **kwargs):
         # Open the log file at the start of training
@@ -17,12 +23,23 @@ class ProgressCallback(TrainerCallback):
         except Exception as e:
             print(f"Error opening log file: {e}")
             exit(1)
+        self.start_time = time.time()
+        self.batch_size = args.per_device_train_batch_size
+        # Try to get max_length from args or default to 200
+        self.max_length = getattr(args, "max_length", 200)
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         logs = logs or {}
         if state.is_local_process_zero:  # Only log for the main process in distributed training
+            # Estimate total tokens processed so far
+            step = state.global_step
+            # batch_size * step * max_length
+            if self.batch_size is not None and self.max_length is not None:
+                total_tokens = step * self.batch_size * self.max_length
+                elapsed = time.time() - self.start_time if self.start_time else 1
+                tokens_per_second = total_tokens / elapsed if elapsed > 0 else 0
+                logs["tokens_per_second"] = tokens_per_second
             if "error" in logs:
-            # You can optionally do more detailed formatting
                 log_message = f"[ERROR] Step: {state.global_step}, Error: {logs['error']}, Other logs: {logs}\n"
             else:
                 log_message = f"Step: {state.global_step}, Logs: {logs}\n"
@@ -39,6 +56,7 @@ class ProgressCallback(TrainerCallback):
                 self.log_file.close()
             except Exception as e:
                 print(f"Error closing log file: {e}")
+        self.start_time = None
 
 
 def get_last_checkpoint(output_dir):
@@ -122,7 +140,6 @@ def main():
     # Tokenize the dataset
     def tokenize_function(examples):
         return tokenizer(examples["text"], padding="max_length", max_length=config.get("max_length", 200), truncation=True)
-
     tokenized_datasets = dataset.map(tokenize_function, batched=True)
 
     # Prepare train and validation datasets
