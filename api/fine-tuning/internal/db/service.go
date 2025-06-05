@@ -52,11 +52,17 @@ func (d *DB) GetTaskProgress(id *uuid.UUID) (string, error) {
 	return svc.Progress, nil
 }
 
-func (d *DB) ListTask(userAddress string, latest bool) ([]Task, error) {
+func (d *DB) ListTask(userAddress string, latest, desc bool) ([]Task, error) {
 	var tasks []Task
 	query := d.db.Where(&Task{UserAddress: userAddress})
 	if latest {
 		query = query.Order("created_at DESC").Limit(1)
+	} else {
+		if desc {
+			query = query.Order("created_at DESC")
+		} else {
+			query = query.Order("created_at ASC")
+		}
 	}
 	ret := query.Find(&tasks)
 	return tasks, ret.Error

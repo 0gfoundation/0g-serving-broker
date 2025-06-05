@@ -120,8 +120,8 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	return *schema.GenerateSchemaTask(&task), nil
 }
 
-func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest bool) ([]schema.Task, error) {
-	tasks, err := c.db.ListTask(userAddress, latest)
+func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest, desc bool) ([]schema.Task, error) {
+	tasks, err := c.db.ListTask(userAddress, latest, desc)
 	if err != nil {
 		return nil, errors.Wrap(err, "get delivered tasks")
 	}
