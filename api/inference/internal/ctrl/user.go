@@ -13,6 +13,8 @@ import (
 )
 
 func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (model.User, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	dbAccount, err := c.db.GetUserAccount(userAddress)
 	if db.IgnoreNotFound(err) != nil {
 		return dbAccount, errors.Wrap(err, "get account from db")
@@ -112,6 +114,8 @@ func (c *Ctrl) SyncUserAccounts(ctx context.Context) error {
 		return err
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return errors.Wrap(c.db.BatchUpdateUserAccount(accounts), "batch update account in db")
 }
 
