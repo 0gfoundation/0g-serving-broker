@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
@@ -57,29 +57,33 @@ func Main() {
 	}
 
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
-	phalaClientType := phala.TEE
-	if os.Getenv("NETWORK") == "hardhat" {
-		phalaClientType = phala.Mock
+
+	var teeClientType tee.ClientType
+	switch os.Getenv("NETWORK") {
+	case "hardhat":
+		teeClientType = tee.Mock
+	default:
+		teeClientType = tee.Phala
 	}
 
-	phalaService, err := phala.NewPhalaService(phalaClientType)
+	teeService, err := tee.NewTeeService(teeClientType)
 	if err != nil {
 		panic(err)
 	}
 
 	ctx := context.Background()
-	if err := phalaService.SyncQuote(ctx); err != nil {
+	if err := teeService.SyncQuote(ctx); err != nil {
 		panic(err)
 	}
 
 	signer, _ := signer.NewSigner()
-	encryptedKey, err := signer.InitialKey(ctx, contract, zk, phalaService.ProviderSigner)
+	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
 	if err != nil {
 		panic(err)
 	}
 	contract.EncryptedPrivKey = encryptedKey
 
-	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, phalaService, signer)
+	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, teeService, signer)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)

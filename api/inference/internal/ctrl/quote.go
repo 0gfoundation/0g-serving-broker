@@ -15,8 +15,8 @@ type QuoteResponse struct {
 
 func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 	jsonData, err := json.Marshal(QuoteResponse{
-		Quote:          c.phalaService.Quote,
-		ProviderSigner: c.phalaService.Address.Hex(),
+		Quote:          c.teeService.Quote,
+		ProviderSigner: c.teeService.Address.Hex(),
 		Key:            [2]string{c.signer.PublicKey[0].String(), c.signer.PublicKey[1].String()},
 	})
 
@@ -28,5 +28,5 @@ func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
 }
 
 func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
-	return c.phalaService.Address
+	return c.teeService.Address
 }

@@ -6,7 +6,7 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
@@ -25,8 +25,8 @@ type Ctrl struct {
 
 	Service config.Service
 
-	phalaService *phala.PhalaService
-	signer       *signer.Signer
+	teeService *tee.TeeService
+	signer     *signer.Signer
 }
 
 func New(
@@ -36,7 +36,7 @@ func New(
 	service config.Service,
 	autoSettleBufferTime int,
 	svcCache *cache.Cache,
-	phalaService *phala.PhalaService,
+	teeService *tee.TeeService,
 	signer *signer.Signer,
 ) *Ctrl {
 	p := &Ctrl{
@@ -46,7 +46,7 @@ func New(
 		Service:              service,
 		zk:                   zkclient,
 		svcCache:             svcCache,
-		phalaService:         phalaService,
+		teeService:           teeService,
 		signer:               signer,
 	}
 

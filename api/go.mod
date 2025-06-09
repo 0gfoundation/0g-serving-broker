@@ -20,6 +20,7 @@ require (
 	github.com/go-openapi/strfmt v0.23.0
 	github.com/go-openapi/swag v0.23.0
 	github.com/go-openapi/validate v0.24.0
+	github.com/google/go-tdx-guest v0.3.1
 	github.com/google/uuid v1.6.0
 	github.com/iden3/go-iden3-crypto v0.0.17
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
@@ -117,7 +118,9 @@ require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
+	github.com/google/go-configfs-tsm v0.2.2 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
+	github.com/google/logger v1.1.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/go-bexpr v0.1.10 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
@@ -190,6 +193,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.33.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.33.0 // indirect
 	go.opentelemetry.io/otel/trace v1.33.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/oauth2 v0.21.0 // indirect

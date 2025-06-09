@@ -8,7 +8,7 @@ import (
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -59,30 +59,33 @@ func Main() {
 	}
 
 	zk := zkclient.NewZKClient(conf.ZKSettlement.Provider, conf.ZKSettlement.RequestLength)
-	phalaClientType := phala.TEE
-	if os.Getenv("NETWORK") == "hardhat" {
-		phalaClientType = phala.Mock
+	var teeClientType tee.ClientType
+	switch os.Getenv("NETWORK") {
+	case "hardhat":
+		teeClientType = tee.Mock
+	default:
+		teeClientType = tee.Phala
 	}
 
-	phalaService, err := phala.NewPhalaService(phalaClientType)
+	teeService, err := tee.NewTeeService(teeClientType)
 	if err != nil {
 		panic(err)
 	}
 
 	ctx := controller.SetupSignalHandler()
 
-	if err := phalaService.SyncQuote(ctx); err != nil {
+	if err := teeService.SyncQuote(ctx); err != nil {
 		panic(err)
 	}
 
 	signer, _ := signer.NewSigner()
-	encryptedKey, err := signer.InitialKey(ctx, contract, zk, phalaService.ProviderSigner)
+	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
 	if err != nil {
 		panic(err)
 	}
 	contract.EncryptedPrivKey = encryptedKey
 
-	ctrl := ctrl.New(db, contract, zk, conf.Service, conf.Interval.AutoSettleBufferTime, nil, phalaService, signer)
+	ctrl := ctrl.New(db, contract, zk, conf.Service, conf.Interval.AutoSettleBufferTime, nil, teeService, signer)
 
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {

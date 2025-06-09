@@ -7,7 +7,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
@@ -37,9 +37,9 @@ type uploadResult struct {
 type Finalizer struct {
 	*Service
 
-	contract     *providercontract.ProviderContract
-	storage      *storage.Client
-	phalaService *phala.PhalaService
+	contract   *providercontract.ProviderContract
+	storage    *storage.Client
+	teeService *tee.TeeService
 }
 
 func NewFinalizer(
@@ -48,7 +48,7 @@ func NewFinalizer(
 	contract *providercontract.ProviderContract,
 	logger log.Logger,
 	storage *storage.Client,
-	phalaService *phala.PhalaService,
+	teeService *tee.TeeService,
 ) (*Finalizer, error) {
 	srv := &Finalizer{
 		Service: NewService(
@@ -64,9 +64,9 @@ func NewFinalizer(
 			logger.WithFields(logrus.Fields{"name": "finalizer"}),
 			workerpool.New(config.FinalizerWorkerCount),
 		),
-		contract:     contract,
-		storage:      storage,
-		phalaService: phalaService,
+		contract:   contract,
+		storage:    storage,
+		teeService: teeService,
 	}
 
 	srv.taskProcessor = srv
@@ -143,7 +143,7 @@ func (f *Finalizer) encryptAndUploadModel(ctx context.Context, sourceDir string,
 		return nil, err
 	}
 
-	tagSig, err := crypto.Sign(crypto.Keccak256(tag[:]), f.phalaService.ProviderSigner)
+	tagSig, err := crypto.Sign(crypto.Keccak256(tag[:]), f.teeService.ProviderSigner)
 	if err != nil {
 		return nil, errors.Wrap(err, "sign tag failed")
 	}
