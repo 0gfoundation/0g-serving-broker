@@ -17,6 +17,10 @@ import (
 	providers "github.com/openweb3/go-rpc-provider/provider_wrapper"
 )
 
+type Tee struct {
+	ZgTappURL string `yaml:"zgTappURL"`
+}
+
 type Service struct {
 	ServingUrl string `yaml:"servingUrl"`
 	Quota      struct {
@@ -125,6 +129,7 @@ type Config struct {
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
 	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
 	MaxTaskQueueSize            uint                `yaml:"maxTaskQueueSize"`
+	Tee                         Tee                 `yaml:"tee"`
 }
 
 type StorageClientConfig struct {

@@ -3,8 +3,8 @@ package tee
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -27,6 +27,7 @@ const (
 	Mock ClientType = iota
 	Phala
 	GCP
+	ZGTAPP
 )
 
 type TappdClient interface {
@@ -40,6 +41,8 @@ type TeeService struct {
 	ProviderSigner *ecdsa.PrivateKey
 	Address        common.Address
 	Quote          string
+
+	ZgTappURL string // Only used for ZGTAPP client type
 }
 
 type QuoteResponse struct {
@@ -47,9 +50,10 @@ type QuoteResponse struct {
 	ProviderSigner string `json:"provider_signer"`
 }
 
-func NewTeeService(clientType ClientType) (*TeeService, error) {
+func NewTeeService(clientType ClientType, ZgTappURL string) (*TeeService, error) {
 	return &TeeService{
 		clientType: clientType,
+		ZgTappURL:  ZgTappURL,
 	}, nil
 }
 
@@ -63,6 +67,10 @@ func (s *TeeService) SyncQuote(ctx context.Context) error {
 		client = &PhalaTappdClient{}
 	case GCP:
 		client = &GcpTappdClient{}
+	case ZGTAPP:
+		client = &ZgTappdClient{
+			zgTappURL: s.ZgTappURL,
+		}
 	default:
 		return errors.New("unsupported client type")
 	}
@@ -124,7 +132,7 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 		if err != nil {
 			return nil, errors.Wrap(err, "converting to ECDSA private key")
 		}
-	case GCP:
+	case GCP, ZGTAPP:
 		dBytes, err := hex.DecodeString(key)
 		if err != nil {
 			return nil, errors.Wrap(err, "decode hex D for GCP ECDSA key")

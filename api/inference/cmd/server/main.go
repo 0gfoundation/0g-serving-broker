@@ -62,11 +62,15 @@ func Main() {
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
 		teeClientType = tee.Mock
+	case "gcp":
+		teeClientType = tee.GCP
+	case "zgTapp":
+		teeClientType = tee.ZGTAPP
 	default:
 		teeClientType = tee.Phala
 	}
 
-	teeService, err := tee.NewTeeService(teeClientType)
+	teeService, err := tee.NewTeeService(teeClientType, config.Tee.ZgTappURL)
 	if err != nil {
 		panic(err)
 	}

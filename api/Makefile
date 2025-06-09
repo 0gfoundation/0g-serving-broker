@@ -45,7 +45,7 @@ release: oci
 	done
 
 generate-tapp-client:
-	cd api/common/tee/tapp/proto && protoc --go_out=proto --go-grpc_out=proto --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative proto/tapp.proto  
+	cd common/tee/tapp && protoc --go_out=proto --go-grpc_out=proto --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative tapp.proto  
 
 hardhat-env:
 	docker build -f ./libs/0g-serving-contract/integrate/Dockerfile -t raven20241/hardhat-compute-network-contract:dev ./libs/0g-serving-contract

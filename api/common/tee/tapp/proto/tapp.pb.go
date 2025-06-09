@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v3.20.3
-// source: proto/tapp.proto
+// source: tapp.proto
 
 package pb
 
@@ -51,11 +51,11 @@ func (x AttestationMode) String() string {
 }
 
 func (AttestationMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_tapp_proto_enumTypes[0].Descriptor()
+	return file_tapp_proto_enumTypes[0].Descriptor()
 }
 
 func (AttestationMode) Type() protoreflect.EnumType {
-	return &file_proto_tapp_proto_enumTypes[0]
+	return &file_tapp_proto_enumTypes[0]
 }
 
 func (x AttestationMode) Number() protoreflect.EnumNumber {
@@ -64,7 +64,7 @@ func (x AttestationMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AttestationMode.Descriptor instead.
 func (AttestationMode) EnumDescriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{0}
+	return file_tapp_proto_rawDescGZIP(), []int{0}
 }
 
 // Start App Messages
@@ -79,7 +79,7 @@ type StartAppRequest struct {
 
 func (x *StartAppRequest) Reset() {
 	*x = StartAppRequest{}
-	mi := &file_proto_tapp_proto_msgTypes[0]
+	mi := &file_tapp_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -91,7 +91,7 @@ func (x *StartAppRequest) String() string {
 func (*StartAppRequest) ProtoMessage() {}
 
 func (x *StartAppRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tapp_proto_msgTypes[0]
+	mi := &file_tapp_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -104,7 +104,7 @@ func (x *StartAppRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartAppRequest.ProtoReflect.Descriptor instead.
 func (*StartAppRequest) Descriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{0}
+	return file_tapp_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *StartAppRequest) GetComposeContent() string {
@@ -139,7 +139,7 @@ type StartAppResponse struct {
 
 func (x *StartAppResponse) Reset() {
 	*x = StartAppResponse{}
-	mi := &file_proto_tapp_proto_msgTypes[1]
+	mi := &file_tapp_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -151,7 +151,7 @@ func (x *StartAppResponse) String() string {
 func (*StartAppResponse) ProtoMessage() {}
 
 func (x *StartAppResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tapp_proto_msgTypes[1]
+	mi := &file_tapp_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -164,7 +164,7 @@ func (x *StartAppResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartAppResponse.ProtoReflect.Descriptor instead.
 func (*StartAppResponse) Descriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{1}
+	return file_tapp_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *StartAppResponse) GetSuccess() bool {
@@ -198,7 +198,7 @@ type GetQuoteRequest struct {
 
 func (x *GetQuoteRequest) Reset() {
 	*x = GetQuoteRequest{}
-	mi := &file_proto_tapp_proto_msgTypes[2]
+	mi := &file_tapp_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -210,7 +210,7 @@ func (x *GetQuoteRequest) String() string {
 func (*GetQuoteRequest) ProtoMessage() {}
 
 func (x *GetQuoteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tapp_proto_msgTypes[2]
+	mi := &file_tapp_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -223,7 +223,7 @@ func (x *GetQuoteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQuoteRequest.ProtoReflect.Descriptor instead.
 func (*GetQuoteRequest) Descriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{2}
+	return file_tapp_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *GetQuoteRequest) GetReportData() []byte {
@@ -245,7 +245,7 @@ type GetQuoteResponse struct {
 
 func (x *GetQuoteResponse) Reset() {
 	*x = GetQuoteResponse{}
-	mi := &file_proto_tapp_proto_msgTypes[3]
+	mi := &file_tapp_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -257,7 +257,7 @@ func (x *GetQuoteResponse) String() string {
 func (*GetQuoteResponse) ProtoMessage() {}
 
 func (x *GetQuoteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tapp_proto_msgTypes[3]
+	mi := &file_tapp_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -270,7 +270,7 @@ func (x *GetQuoteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQuoteResponse.ProtoReflect.Descriptor instead.
 func (*GetQuoteResponse) Descriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{3}
+	return file_tapp_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetQuoteResponse) GetSuccess() bool {
@@ -310,7 +310,7 @@ type GetPubkeyRequest struct {
 
 func (x *GetPubkeyRequest) Reset() {
 	*x = GetPubkeyRequest{}
-	mi := &file_proto_tapp_proto_msgTypes[4]
+	mi := &file_tapp_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -322,7 +322,7 @@ func (x *GetPubkeyRequest) String() string {
 func (*GetPubkeyRequest) ProtoMessage() {}
 
 func (x *GetPubkeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tapp_proto_msgTypes[4]
+	mi := &file_tapp_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -335,7 +335,7 @@ func (x *GetPubkeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPubkeyRequest.ProtoReflect.Descriptor instead.
 func (*GetPubkeyRequest) Descriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{4}
+	return file_tapp_proto_rawDescGZIP(), []int{4}
 }
 
 type GetPubkeyResponse struct {
@@ -351,7 +351,7 @@ type GetPubkeyResponse struct {
 
 func (x *GetPubkeyResponse) Reset() {
 	*x = GetPubkeyResponse{}
-	mi := &file_proto_tapp_proto_msgTypes[5]
+	mi := &file_tapp_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -363,7 +363,7 @@ func (x *GetPubkeyResponse) String() string {
 func (*GetPubkeyResponse) ProtoMessage() {}
 
 func (x *GetPubkeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tapp_proto_msgTypes[5]
+	mi := &file_tapp_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -376,7 +376,7 @@ func (x *GetPubkeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPubkeyResponse.ProtoReflect.Descriptor instead.
 func (*GetPubkeyResponse) Descriptor() ([]byte, []int) {
-	return file_proto_tapp_proto_rawDescGZIP(), []int{5}
+	return file_tapp_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetPubkeyResponse) GetSuccess() bool {
@@ -414,11 +414,12 @@ func (x *GetPubkeyResponse) GetEthAddressHex() string {
 	return ""
 }
 
-var File_proto_tapp_proto protoreflect.FileDescriptor
+var File_tapp_proto protoreflect.FileDescriptor
 
-const file_proto_tapp_proto_rawDesc = "" +
+const file_tapp_proto_rawDesc = "" +
 	"\n" +
-	"\x10proto/tapp.proto\x12\ftapp_service\"\x8c\x01\n" +
+	"\n" +
+	"tapp.proto\x12\ftapp_service\"\x8c\x01\n" +
 	"\x0fStartAppRequest\x12'\n" +
 	"\x0fcompose_content\x18\x01 \x01(\tR\x0ecomposeContent\x121\n" +
 	"\x04mode\x18\x02 \x01(\x0e2\x1d.tapp_service.AttestationModeR\x04mode\x12\x1d\n" +
@@ -453,23 +454,23 @@ const file_proto_tapp_proto_rawDesc = "" +
 	"\vTappService\x12I\n" +
 	"\bStartApp\x12\x1d.tapp_service.StartAppRequest\x1a\x1e.tapp_service.StartAppResponse\x12I\n" +
 	"\bGetQuote\x12\x1d.tapp_service.GetQuoteRequest\x1a\x1e.tapp_service.GetQuoteResponse\x12L\n" +
-	"\tGetPubkey\x12\x1e.tapp_service.GetPubkeyRequest\x1a\x1f.tapp_service.GetPubkeyResponseB\"Z example.com/tapp-client/proto;pbb\x06proto3"
+	"\tGetPubkey\x12\x1e.tapp_service.GetPubkeyRequest\x1a\x1f.tapp_service.GetPubkeyResponseB>Z<github.com/0glabs/0g-serving-broker/common/tee/tapp/proto;pbb\x06proto3"
 
 var (
-	file_proto_tapp_proto_rawDescOnce sync.Once
-	file_proto_tapp_proto_rawDescData []byte
+	file_tapp_proto_rawDescOnce sync.Once
+	file_tapp_proto_rawDescData []byte
 )
 
-func file_proto_tapp_proto_rawDescGZIP() []byte {
-	file_proto_tapp_proto_rawDescOnce.Do(func() {
-		file_proto_tapp_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_tapp_proto_rawDesc), len(file_proto_tapp_proto_rawDesc)))
+func file_tapp_proto_rawDescGZIP() []byte {
+	file_tapp_proto_rawDescOnce.Do(func() {
+		file_tapp_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_tapp_proto_rawDesc), len(file_tapp_proto_rawDesc)))
 	})
-	return file_proto_tapp_proto_rawDescData
+	return file_tapp_proto_rawDescData
 }
 
-var file_proto_tapp_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_tapp_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
-var file_proto_tapp_proto_goTypes = []any{
+var file_tapp_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_tapp_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_tapp_proto_goTypes = []any{
 	(AttestationMode)(0),      // 0: tapp_service.AttestationMode
 	(*StartAppRequest)(nil),   // 1: tapp_service.StartAppRequest
 	(*StartAppResponse)(nil),  // 2: tapp_service.StartAppResponse
@@ -478,7 +479,7 @@ var file_proto_tapp_proto_goTypes = []any{
 	(*GetPubkeyRequest)(nil),  // 5: tapp_service.GetPubkeyRequest
 	(*GetPubkeyResponse)(nil), // 6: tapp_service.GetPubkeyResponse
 }
-var file_proto_tapp_proto_depIdxs = []int32{
+var file_tapp_proto_depIdxs = []int32{
 	0, // 0: tapp_service.StartAppRequest.mode:type_name -> tapp_service.AttestationMode
 	1, // 1: tapp_service.TappService.StartApp:input_type -> tapp_service.StartAppRequest
 	3, // 2: tapp_service.TappService.GetQuote:input_type -> tapp_service.GetQuoteRequest
@@ -493,27 +494,27 @@ var file_proto_tapp_proto_depIdxs = []int32{
 	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_proto_tapp_proto_init() }
-func file_proto_tapp_proto_init() {
-	if File_proto_tapp_proto != nil {
+func init() { file_tapp_proto_init() }
+func file_tapp_proto_init() {
+	if File_tapp_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_tapp_proto_rawDesc), len(file_proto_tapp_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tapp_proto_rawDesc), len(file_tapp_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_tapp_proto_goTypes,
-		DependencyIndexes: file_proto_tapp_proto_depIdxs,
-		EnumInfos:         file_proto_tapp_proto_enumTypes,
-		MessageInfos:      file_proto_tapp_proto_msgTypes,
+		GoTypes:           file_tapp_proto_goTypes,
+		DependencyIndexes: file_tapp_proto_depIdxs,
+		EnumInfos:         file_tapp_proto_enumTypes,
+		MessageInfos:      file_tapp_proto_msgTypes,
 	}.Build()
-	File_proto_tapp_proto = out.File
-	file_proto_tapp_proto_goTypes = nil
-	file_proto_tapp_proto_depIdxs = nil
+	File_tapp_proto = out.File
+	file_tapp_proto_goTypes = nil
+	file_tapp_proto_depIdxs = nil
 }

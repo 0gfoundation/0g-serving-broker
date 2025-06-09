@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v3.20.3
-// source: proto/tapp.proto
+// source: tapp.proto
 
 package pb
 
@@ -203,5 +203,5 @@ var TappService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/tapp.proto",
+	Metadata: "tapp.proto",
 }

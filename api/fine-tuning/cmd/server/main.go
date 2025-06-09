@@ -152,11 +152,13 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		teeClientType = tee.Mock
 	case "gcp":
 		teeClientType = tee.GCP
+	case "zgTapp":
+		teeClientType = tee.ZGTAPP		
 	default:
 		teeClientType = tee.Phala
 	}
 
-	teeService, err := tee.NewTeeService(teeClientType)
+	teeService, err := tee.NewTeeService(teeClientType, cfg.Tee.ZgTappURL)
 	if err != nil {
 		return nil, err
 	}

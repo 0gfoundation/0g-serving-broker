@@ -9,6 +9,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+type Tee struct {
+	ZgTappURL string `yaml:"zgTappURL"`
+}
+
 type Service struct {
 	ServingURL       string            `yaml:"servingUrl"`
 	TargetURL        string            `yaml:"targetUrl"`
@@ -50,6 +54,7 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkSettlement"`
+	Tee Tee `yaml:"tee"`
 }
 
 var (

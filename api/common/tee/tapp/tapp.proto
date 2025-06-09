@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package tapp_service;
 
-option go_package = "tapp-client/proto;pb";
+option go_package = "github.com/0glabs/0g-serving-broker/common/tee/tapp/proto;pb";
 
 
 // Service definition
