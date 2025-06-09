@@ -12,7 +12,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
-	"github.com/0glabs/0g-serving-broker/common/phala"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
@@ -25,11 +25,11 @@ import (
 )
 
 type Settlement struct {
-	db           *db.DB
-	contract     *providercontract.ProviderContract
-	phalaService *phala.PhalaService
-	config       SettlementConfig
-	logger       log.Logger
+	db         *db.DB
+	contract   *providercontract.ProviderContract
+	teeService *tee.TeeService
+	config     SettlementConfig
+	logger     log.Logger
 }
 
 type SettlementConfig struct {
@@ -41,11 +41,11 @@ type SettlementConfig struct {
 	DataRetentionDays       uint
 }
 
-func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, phalaService *phala.PhalaService, logger log.Logger) (*Settlement, error) {
+func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, teeService *tee.TeeService, logger log.Logger) (*Settlement, error) {
 	return &Settlement{
-		db:           db,
-		contract:     contract,
-		phalaService: phalaService,
+		db:         db,
+		contract:   contract,
+		teeService: teeService,
 		config: SettlementConfig{
 			CheckInterval:           time.Duration(config.SettlementCheckIntervalSecs) * time.Second,
 			Service:                 config.Service,
@@ -230,12 +230,12 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		}
 	}
 
-	settlementHash, err := getSettlementMessageHash(modelRootHash, task.Fee, task.Nonce, common.HexToAddress(task.UserAddress), crypto.PubkeyToAddress(s.phalaService.ProviderSigner.PublicKey), retrievedSecret)
+	settlementHash, err := getSettlementMessageHash(modelRootHash, task.Fee, task.Nonce, common.HexToAddress(task.UserAddress), crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey), retrievedSecret)
 	if err != nil {
 		return errors.Wrapf(err, "getting settlement message hash")
 	}
 
-	sig, err := getSignature(settlementHash, s.phalaService.ProviderSigner)
+	sig, err := getSignature(settlementHash, s.teeService.ProviderSigner)
 	if err != nil {
 		return errors.Wrapf(err, "getting signature")
 	}
@@ -245,7 +245,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,
-		ProviderSigner:  crypto.PubkeyToAddress(s.phalaService.ProviderSigner.PublicKey),
+		ProviderSigner:  crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey),
 		Signature:       sig,
 		TaskFee:         fee,
 		User:            common.HexToAddress(task.UserAddress),
