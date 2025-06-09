@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package tapp_service;
+
+option go_package = "tapp-client/proto;pb";
+
+
+// Service definition
+service TappService {
+    // Start an application using Docker Compose content
+    rpc StartApp(StartAppRequest) returns (StartAppResponse);
+    
+    // Generate and return TDX quote
+    rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse);
+    
+    // Get public key derived from TDX report
+    rpc GetPubkey(GetPubkeyRequest) returns (GetPubkeyResponse);
+}
+
+enum AttestationMode {
+    REPORT_DATA = 0;
+    RTMR = 1;
+}
+
+// Start App Messages
+message StartAppRequest {
+    string compose_content = 1;
+    AttestationMode mode = 2;
+    int32 rtmr_index = 3;  // Optional, defaults to 3
+}
+
+message StartAppResponse {
+    bool success = 1;
+    string message = 2;
+    bytes volumes_hash = 3;  // SHA-256 hash of measured volumes
+}
+
+// Get Quote Messages  
+message GetQuoteRequest {
+    bytes report_data = 1;  // Optional custom report data
+}
+
+message GetQuoteResponse {
+    bool success = 1;
+    string message = 2;
+    bytes quote_data = 3;   // Raw TDX quote bytes
+    uint32 quote_size = 4;
+}
+
+// Get Public Key Messages
+message GetPubkeyRequest {
+    // No parameters needed - derived from TDX report
+}
+
+message GetPubkeyResponse {
+    bool success = 1;
+    string message = 2;
+    bytes public_key = 3;      // 64-byte uncompressed public key
+    bytes eth_address = 4;     // 20-byte Ethereum address
+    string eth_address_hex = 5; // 0x-prefixed hex string
+}

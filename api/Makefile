@@ -44,6 +44,9 @@ release: oci
 			oci:build/oci:$(VERSION)-$$arch $(IMAGE_DEST):$(VERSION)-$$arch; \
 	done
 
+generate-tapp-client:
+	cd api/common/tee/tapp/proto && protoc --go_out=proto --go-grpc_out=proto --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative proto/tapp.proto  
+
 hardhat-env:
 	docker build -f ./libs/0g-serving-contract/integrate/Dockerfile -t raven20241/hardhat-compute-network-contract:dev ./libs/0g-serving-contract
 
@@ -95,5 +98,7 @@ install-tools:
 	go install -v github.com/swaggo/swag/cmd/swag@v1.8.10
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
 	go install github.com/ethereum/go-ethereum/cmd/abigen@v1.14.5
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@1.5.1
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@1.36.6
 
 .PHONY: lint build clean oci release hardhat-env install-tools
