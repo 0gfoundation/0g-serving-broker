@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"log"
 	"os"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/tee"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
@@ -33,6 +35,10 @@ import (
 
 func Main() {
 	config := config.GetConfig()
+
+	if err := util.CheckPythonEnv(util.NvTrustPackages, nil); err != nil {
+		panic(err)
+	}
 
 	db, err := database.NewDB(config)
 	if err != nil {
@@ -76,6 +82,10 @@ func Main() {
 		panic(err)
 	}
 
+	if err := teeService.SyncGPUPayload(ctx, teeClientType == tee.Mock); err != nil {
+		log.Printf("err %v", err)
+	}
+
 	signer, _ := signer.NewSigner()
 	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
 	if err != nil {
@@ -83,7 +93,7 @@ func Main() {
 	}
 	contract.EncryptedPrivKey = encryptedKey
 
-	ctrl := ctrl.New(db, contract, zk, config.Service, config.Interval.AutoSettleBufferTime, svcCache, teeService, signer)
+	ctrl := ctrl.New(db, contract, zk, config, svcCache, teeService, signer)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)

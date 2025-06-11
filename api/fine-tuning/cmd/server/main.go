@@ -10,7 +10,7 @@ import (
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
-	"github.com/0glabs/0g-serving-broker/common/token"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
@@ -39,7 +39,7 @@ func Main() {
 		panic(err)
 	}
 
-	if err := token.CheckPythonEnv(logger); err != nil {
+	if err := util.CheckPythonEnv(util.TrainingPackages, logger); err != nil {
 		panic(err)
 	}
 

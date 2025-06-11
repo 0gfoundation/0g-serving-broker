@@ -3,8 +3,8 @@ package tee
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -40,6 +40,8 @@ type TeeService struct {
 	ProviderSigner *ecdsa.PrivateKey
 	Address        common.Address
 	Quote          string
+
+	Payload *NvidiaPayload
 }
 
 type QuoteResponse struct {
@@ -80,6 +82,16 @@ func (s *TeeService) SyncQuote(ctx context.Context) error {
 	}
 
 	s.Quote = quote
+	return nil
+}
+
+func (s *TeeService) SyncGPUPayload(ctx context.Context, noGpu bool) error {
+	nvidiaPayload, err := GpuPayload(s.Address.Hex(), noGpu, nil)
+	if err != nil {
+		return err
+	}
+
+	s.Payload = nvidiaPayload
 	return nil
 }
 
