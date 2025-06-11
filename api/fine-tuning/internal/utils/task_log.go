@@ -1,8 +1,10 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/google/uuid"
@@ -69,7 +71,7 @@ func WriteToLogFile(id *uuid.UUID, content string) error {
 	}
 	defer file.Close()
 
-	if _, err := file.WriteString(content); err != nil {
+	if _, err := file.WriteString(fmt.Sprintf("[%s] %s", time.Now().Format(time.RFC3339), content)); err != nil {
 		return err
 	}
 	return nil
