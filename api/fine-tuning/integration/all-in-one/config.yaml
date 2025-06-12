@@ -29,7 +29,7 @@ storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
   indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"
   uploadArgs:
-    finalityRequired: true
+    finalityRequired: false
     tags: "0x"
     expectedReplica: 1
     skipTx: false
