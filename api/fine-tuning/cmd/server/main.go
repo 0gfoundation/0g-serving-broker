@@ -112,7 +112,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 
 		if buildImage {
 			logger.Debugf("build image %s", imageName)
-			err := image.ImageBuild(ctx, cli, constant.FineTuningDockerfilePath, imageName)
+			err := image.ImageBuild(ctx, cli, constant.FineTuningDockerfilePath, imageName, logger)
 			if err != nil {
 				logger.Errorf("failed to build image: %v", err)
 				return
