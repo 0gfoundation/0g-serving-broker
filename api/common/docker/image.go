@@ -2,10 +2,12 @@ package image
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
@@ -28,7 +30,7 @@ func ImageExists(ctx context.Context, cli *client.Client, imageName string) (boo
 
 	return false, nil
 }
-func ImageBuild(ctx context.Context, cli *client.Client, buildDirectory, tag string) error {
+func ImageBuild(ctx context.Context, cli *client.Client, buildDirectory, tag string, logger log.Logger) error {
 	tar, err := archive.TarWithOptions(buildDirectory, &archive.TarOptions{})
 	if err != nil {
 		return err
@@ -47,12 +49,37 @@ func ImageBuild(ctx context.Context, cli *client.Client, buildDirectory, tag str
 	}
 	defer buildResponse.Body.Close()
 
-	_, err = io.Copy(os.Stdout, buildResponse.Body)
-	if err != nil {
-		return err
+	decoder := json.NewDecoder(buildResponse.Body)
+	var buildError error = nil
+
+	for {
+		var message struct {
+			Stream      string `json:"stream"`
+			Error       string `json:"error"`
+			ErrorDetail struct {
+				Message string `json:"message"`
+			} `json:"errorDetail"`
+		}
+
+		if err := decoder.Decode(&message); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		if message.Error != "" {
+			buildError = fmt.Errorf("build failed: %s", message.Error)
+		} else if message.ErrorDetail.Message != "" {
+			buildError = fmt.Errorf("build failed: %s", message.ErrorDetail.Message)
+		}
+
+		if message.Stream != "" {
+			logger.Debug(message.Stream)
+		}
 	}
 
-	return nil
+	return buildError
 }
 
 func PullImage(ctx context.Context, cli *client.Client, expectImag string, pull bool) error {
