@@ -221,7 +221,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	}
 
-	if !reqModel.UseProxy {
+	if !reqModel.VLLMProxy {
 		if err := c.signChat(reqBody, data, respChunk); err != nil {
 			return err
 		}

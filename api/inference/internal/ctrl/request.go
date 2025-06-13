@@ -202,14 +202,14 @@ func updateRequestField(req *model.Request, key, value string) error {
 		req.Signature = value
 	case "Request-Hash":
 		req.RequestHash = value
-	case "Use-Proxy":
+	case "VLLM-Proxy":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
 			log.Printf("%v", err)
 			v = false
 		}
 
-		req.UseProxy = v
+		req.VLLMProxy = v
 	default:
 		return errors.Wrapf(errors.New("unexpected Header"), "%s", key)
 	}

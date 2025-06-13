@@ -32,6 +32,7 @@ oci: build base-image submodules
 			docker-daemon:$(BASE_IMAGE) oci:build/oci:$(VERSION)-$$arch; \
 		umoci insert --image build/oci:$(VERSION)-$$arch build/$$arch/broker /usr/bin/broker; \
 		umoci insert --image build/oci:$(VERSION)-$$arch token-counter/ /token-counter; \
+		umoci insert --image build/oci:$(VERSION)-$$arch common/tee/payload.py /common/tee/payload.py; \
 		umoci config --image build/oci:$(VERSION)-$$arch \
 			--config.entrypoint /usr/bin/broker \
 			--author 0glab --created $$(date -u +%FT%T.%NZ) \

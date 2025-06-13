@@ -45,7 +45,7 @@ func (d *DB) Migrate() error {
 					TeeSignature string `gorm:"type:varchar(255);not null"`
 					RequestHash  string `gorm:"type:varchar(255);not null;primaryKey"`
 					Processed    *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
-					UseProxy     *bool  `gorm:"type:tinyint(1);not null;default:0"`
+					VLLMProxy    *bool  `gorm:"type:tinyint(1);not null;default:0"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},

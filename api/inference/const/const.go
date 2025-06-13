@@ -14,7 +14,7 @@ var (
 		"Nonce":        {},
 		"Request-Hash": {},
 		"Signature":    {},
-		"Use-Proxy":    {},
+		"VLLM-Proxy":   {},
 	}
 
 	// Should align with the topUpTriggerThreshold in the client sdk
