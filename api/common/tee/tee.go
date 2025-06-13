@@ -86,7 +86,7 @@ func (s *TeeService) SyncQuote(ctx context.Context) error {
 }
 
 func (s *TeeService) SyncGPUPayload(ctx context.Context, noGpu bool) error {
-	nvidiaPayload, err := GpuPayload(s.Address.Hex(), noGpu, nil)
+	nvidiaPayload, err := GpuPayload(hex.EncodeToString(crypto.Keccak256(crypto.FromECDSAPub(&s.ProviderSigner.PublicKey))), noGpu, nil)
 	if err != nil {
 		return err
 	}
