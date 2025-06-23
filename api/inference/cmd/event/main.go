@@ -85,7 +85,7 @@ func Main() {
 	}
 	contract.EncryptedPrivKey = encryptedKey
 
-	ctrl := ctrl.New(db, contract, zk, conf.Service, conf.Interval.AutoSettleBufferTime, nil, teeService, signer)
+	ctrl := ctrl.New(db, contract, zk, conf, nil, teeService, signer)
 
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {

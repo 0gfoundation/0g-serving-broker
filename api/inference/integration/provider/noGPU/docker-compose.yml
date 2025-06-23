@@ -34,13 +34,6 @@ services:
         condition: service_healthy
       zk-prover:
         condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   0g-serving-provider-event:
     image: ghcr.io/0glabs/0g-serving-broker:0.2.1

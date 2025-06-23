@@ -3,6 +3,7 @@ package proxy
 import (
 	"io"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -93,12 +94,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetRoute]; !ok {
+		if p.handleSignatureRoute(ctx, targetRoute) {
+			return
+		}
+
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 		if err != nil {
 			handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
-		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", 0, false)
+		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, 0, false)
 		return
 	}
 	log.Printf("received request %v", ctx.Request)
@@ -138,9 +143,32 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, req.Fee, p.ctrl.Service.OutputPrice, true); err != nil {
+	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, p.ctrl.Service.OutputPrice, true); err != nil {
 		log.Printf("process http request failed: %v", err)
 	}
+}
+
+func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool {
+	if !strings.HasPrefix(strings.ToLower(targetRoute), "/signature/") {
+		return false
+	}
+
+	vllmProxy := ctx.GetHeader("VLLM-Proxy")
+	relativePath := strings.ToLower(ctx.Param("any"))
+	chatID := strings.TrimPrefix(relativePath, "/signature/")
+
+	if strings.ToLower(vllmProxy) != "true" {
+		sig, err := p.ctrl.GetChatSignature(chatID)
+		if err != nil {
+			handleBrokerError(ctx, err, "prepare HTTP request")
+			return true
+		}
+
+		ctx.JSON(http.StatusOK, sig)
+		return true
+	}
+
+	return false
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

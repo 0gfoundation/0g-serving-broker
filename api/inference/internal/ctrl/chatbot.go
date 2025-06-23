@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,7 +18,10 @@ import (
 	"compress/gzip"
 
 	"github.com/andybalholm/brotli"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -24,6 +29,25 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
 )
+
+const ChatPrefix = "chat"
+
+type SigningAlgo int
+
+const (
+	ECDSA SigningAlgo = iota
+)
+
+func (r SigningAlgo) String() string {
+	return [...]string{"ecdsa"}[r]
+}
+
+type ChatSignature struct {
+	Text                string         `json:"text"`
+	SignatureEcdsa      string         `json:"signature"`
+	SigningAddressEcdsa common.Address `json:"signing_address"`
+	SigningAlgo         string         `json:"signing_algo"`
+}
 
 type RequestBody struct {
 	Messages []Message `json:"messages"`
@@ -81,20 +105,20 @@ func getInputCount(reqBody []byte) (int64, error) {
 	return ret, nil
 }
 
-func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, requestHash string) error {
+func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	isStream, err := isStream(reqBody)
 	if err != nil {
 		handleBrokerError(ctx, err, "check if stream")
 		return err
 	}
 	if !isStream {
-		return c.handleChargingResponse(ctx, resp, account, outputPrice, requestHash)
+		return c.handleChargingResponse(ctx, resp, account, outputPrice, reqBody, reqModel)
 	} else {
-		return c.handleChargingStreamResponse(ctx, resp, account, outputPrice, requestHash)
+		return c.handleChargingStreamResponse(ctx, resp, account, outputPrice, reqBody, reqModel)
 	}
 }
 
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) error {
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	var rawBody bytes.Buffer
@@ -106,7 +130,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		return err
 	}
 
-	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, requestHash); err != nil {
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes()); err != nil {
 		log.Printf("decode and process failed: %v", err)
 		return err
 	}
@@ -114,12 +138,13 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	return nil
 }
 
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, requestHash string) error {
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	var rawBody bytes.Buffer
 
 	var streamErr error = nil
+	var responseChunk []byte = nil
 	ctx.Stream(func(w io.Writer) bool {
 		reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
 
@@ -132,6 +157,10 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				handleBrokerError(ctx, err, "read from body")
 				streamErr = err
 				return false
+			}
+
+			if responseChunk == nil {
+				responseChunk = []byte(strings.TrimSpace(strings.TrimPrefix(line, "data: ")))
 			}
 
 			_, streamErr = w.Write([]byte(line))
@@ -149,14 +178,14 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	}
 
 	// Fully read and then start decoding and processing
-	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, requestHash); err != nil {
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk); err != nil {
 		handleBrokerError(ctx, err, "decode and process")
 		return err
 	}
 
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, requestHash string) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte) error {
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -167,29 +196,81 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	var output string
 
 	if !isStream {
-		return c.processSingleResponse(ctx, decodedBody, outputPrice, account, &output, requestHash)
-	}
-
-	// Parse and decode data line by line for streams
-	lines := bytes.Split(decodedBody, []byte("\n"))
-
-	for _, line := range lines {
-		if isStreamDone(line) {
-			return c.finalizeResponse(ctx, output, outputPrice, account, requestHash)
-		}
-
-		// Skip empty lines
-		if isLineEmpty(line) {
-			continue
-		}
-
-		chunkOutput, err := c.processLine(line)
-		if err != nil {
+		if err := c.processSingleResponse(ctx, decodedBody, outputPrice, account, &output, reqModel.RequestHash); err != nil {
 			return err
 		}
-		output += chunkOutput
+	} else {
+		// Parse and decode data line by line for streams
+		lines := bytes.Split(decodedBody, []byte("\n"))
+
+		for _, line := range lines {
+			if isStreamDone(line) {
+				return c.finalizeResponse(ctx, output, outputPrice, account, reqModel.RequestHash)
+			}
+
+			// Skip empty lines
+			if isLineEmpty(line) {
+				continue
+			}
+
+			chunkOutput, err := c.processLine(line)
+			if err != nil {
+				return err
+			}
+			output += chunkOutput
+		}
 	}
+
+	if !reqModel.VLLMProxy {
+		if err := c.signChat(reqBody, data, respChunk); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func (c *Ctrl) signChat(reqBody, respData, respChunk []byte) error {
+	hashAndEncode := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+
+	requestSha256 := hashAndEncode(reqBody)
+	responseSha256 := hashAndEncode(respData)
+
+	var chatResp CompletionChunk
+	err := json.Unmarshal(respChunk, &chatResp)
+	if err != nil {
+		return errors.Wrap(err, "Chat id could not be extracted from the response")
+	}
+	chatID := chatResp.ID
+
+	text := fmt.Sprintf("%s:%s", requestSha256, responseSha256)
+	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	if err != nil {
+		return err
+	}
+
+	if sig[64] == 0 || sig[64] == 1 {
+		sig[64] += 27
+	}
+
+	chatSignature := ChatSignature{
+		Text:                text,
+		SignatureEcdsa:      hexutil.Encode(sig),
+		SigningAddressEcdsa: c.teeService.Address,
+		SigningAlgo:         ECDSA.String(),
+	}
+
+	key := c.chatCacheKey(chatID)
+	log.Printf("key: %v, chat signature: %v", key, chatSignature)
+	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
+	return nil
+}
+
+func (*Ctrl) chatCacheKey(chatID string) string {
+	return fmt.Sprintf("%s:%s", ChatPrefix, chatID)
 }
 
 func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, account model.User, output *string, requestHash string) error {

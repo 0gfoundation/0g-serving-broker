@@ -37,7 +37,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	return req, nil
 }
 
-func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, fee string, outputPrice int64, charing bool) error {
+func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, outputPrice int64, charing bool) error {
 	client := &http.Client{}
 
 	// back up body for other usage
@@ -86,17 +86,33 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	account := model.User{
 		User:             reqModel.UserAddress,
 		LastRequestNonce: &reqModel.Nonce,
-		UnsettledFee:     model.PtrOf(fee),
+		UnsettledFee:     model.PtrOf(reqModel.Fee),
 	}
 
 	switch svcType {
 	case "chatbot":
-		return c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel.RequestHash)
+		return c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
 		handleBrokerError(ctx, err, "prepare request extractor")
 		return err
 	}
+}
+
+func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
+	key := c.chatCacheKey(chatID)
+	log.Printf("get signature for chat: %v", chatID)
+	val, exist := c.svcCache.Get(key)
+	if !exist {
+		return nil, errors.New("Chat id not found or expired, chat_id_not_found")
+	}
+
+	chatSignature, ok := val.(ChatSignature)
+	if !ok {
+		return nil, errors.New("cached object does not implement ChatSignature")
+	}
+
+	return &chatSignature, nil
 }
 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {

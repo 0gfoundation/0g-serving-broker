@@ -49,6 +49,15 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "add-vllmproxy-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					VLLMProxy *bool `gorm:"type:tinyint(1);not null;default:0"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

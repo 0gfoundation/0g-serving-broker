@@ -32,6 +32,7 @@ oci: build base-image submodules
 			docker-daemon:$(BASE_IMAGE) oci:build/oci:$(VERSION)-$$arch; \
 		umoci insert --image build/oci:$(VERSION)-$$arch build/$$arch/broker /usr/bin/broker; \
 		umoci insert --image build/oci:$(VERSION)-$$arch token-counter/ /token-counter; \
+		umoci insert --image build/oci:$(VERSION)-$$arch common/tee/payload.py /common/tee/payload.py; \
 		umoci config --image build/oci:$(VERSION)-$$arch \
 			--config.entrypoint /usr/bin/broker \
 			--author 0glab --created $$(date -u +%FT%T.%NZ) \
@@ -67,7 +68,9 @@ generate-inference-router-api:
 package-inference: generate-inference-api
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
-	rsync -av --exclude '**.local.*' ./inference/integration/provider/ /tmp/inference-broker && \
+	rsync -av --exclude '**.local.*' --exclude 'noGPU'  ./inference/integration/provider/ /tmp/inference-broker/GPU && \
+	rsync -av --exclude '**.local.*' --exclude 'noGPU' --exclude 'docker-compose.yml'  ./inference/integration/provider/ /tmp/inference-broker/noGPU && \
+	cp ./inference/integration/provider/noGPU/docker-compose.yml /tmp/inference-broker/noGPU/ && \
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
 	echo "Package created at /tmp/inference-broker.tar.gz"

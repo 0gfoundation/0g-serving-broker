@@ -8,6 +8,9 @@
 
 Please visit the [releases page](https://github.com/0glabs/0g-serving-broker/releases) to download and extract the latest version of the installation package.
 
+If the host has an NVIDIA GPU, use the configuration files in the `GPU` folder.
+If the host does not have an NVIDIA GPU, use the  files in the `noGPU` folder.
+
 ## Configuration Setup
 
 - Copy the `config.example.yaml` file.
