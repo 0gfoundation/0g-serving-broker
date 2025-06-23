@@ -45,7 +45,15 @@ func (d *DB) Migrate() error {
 					TeeSignature string `gorm:"type:varchar(255);not null"`
 					RequestHash  string `gorm:"type:varchar(255);not null;primaryKey"`
 					Processed    *bool  `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce"`
-					VLLMProxy    *bool  `gorm:"type:tinyint(1);not null;default:0"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "add-vllmproxy-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					VLLMProxy *bool `gorm:"type:tinyint(1);not null;default:0"`
 				}
 				return tx.AutoMigrate(&Request{})
 			},
