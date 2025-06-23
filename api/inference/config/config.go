@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"gopkg.in/yaml.v2"
@@ -50,6 +51,8 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkSettlement"`
+	ChatCacheExpiration time.Duration `yaml:"chatCacheExpiration"`
+	NvGPU               bool          `yaml:"nvGPU"`
 }
 
 var (
@@ -123,6 +126,8 @@ func GetConfig() *Config {
 				Provider:      "zk-settlement:3002",
 				RequestLength: 40,
 			},
+			ChatCacheExpiration: time.Minute * 20,
+			NvGPU:               false,
 		}
 
 		if err := loadConfig(instance); err != nil {

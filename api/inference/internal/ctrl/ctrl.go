@@ -25,29 +25,30 @@ type Ctrl struct {
 
 	Service config.Service
 
-	teeService *tee.TeeService
-	signer     *signer.Signer
+	teeService          *tee.TeeService
+	signer              *signer.Signer
+	chatCacheExpiration time.Duration
 }
 
 func New(
 	db *db.DB,
 	contract *providercontract.ProviderContract,
 	zkclient zkclient.ZKClient,
-	service config.Service,
-	autoSettleBufferTime int,
+	cfg *config.Config,
 	svcCache *cache.Cache,
 	teeService *tee.TeeService,
 	signer *signer.Signer,
 ) *Ctrl {
 	p := &Ctrl{
-		autoSettleBufferTime: time.Duration(autoSettleBufferTime) * time.Second,
+		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
 		db:                   db,
 		contract:             contract,
-		Service:              service,
+		Service:              cfg.Service,
 		zk:                   zkclient,
 		svcCache:             svcCache,
 		teeService:           teeService,
 		signer:               signer,
+		chatCacheExpiration:  cfg.ChatCacheExpiration,
 	}
 
 	return p

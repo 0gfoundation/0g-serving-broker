@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -201,6 +202,14 @@ func updateRequestField(req *model.Request, key, value string) error {
 		req.Signature = value
 	case "Request-Hash":
 		req.RequestHash = value
+	case "VLLM-Proxy":
+		v, err := strconv.ParseBool(value)
+		if err != nil {
+			log.Printf("%v", err)
+			v = false
+		}
+
+		req.VLLMProxy = v
 	default:
 		return errors.Wrapf(errors.New("unexpected Header"), "%s", key)
 	}
