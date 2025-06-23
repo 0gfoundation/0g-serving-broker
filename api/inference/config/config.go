@@ -52,6 +52,7 @@ type Config struct {
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zkSettlement"`
 	ChatCacheExpiration time.Duration `yaml:"chatCacheExpiration"`
+	NvGPU               bool          `yaml:"nvGPU"`
 }
 
 var (
@@ -126,6 +127,7 @@ func GetConfig() *Config {
 				RequestLength: 40,
 			},
 			ChatCacheExpiration: time.Minute * 20,
+			NvGPU:               false,
 		}
 
 		if err := loadConfig(instance); err != nil {

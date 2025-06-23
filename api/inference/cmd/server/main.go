@@ -36,10 +36,6 @@ import (
 func Main() {
 	config := config.GetConfig()
 
-	if err := util.CheckPythonEnv(util.NvTrustPackages, nil); err != nil {
-		panic(err)
-	}
-
 	db, err := database.NewDB(config)
 	if err != nil {
 		panic(err)
@@ -82,8 +78,14 @@ func Main() {
 		panic(err)
 	}
 
-	if err := teeService.SyncGPUPayload(ctx, teeClientType == tee.Mock); err != nil {
-		log.Printf("err %v", err)
+	if config.NvGPU {
+		if err := util.CheckPythonEnv(util.NvTrustPackages, nil); err != nil {
+			panic(err)
+		}
+
+		if err := teeService.SyncGPUPayload(ctx, teeClientType == tee.Mock); err != nil {
+			log.Printf("err %v", err)
+		}
 	}
 
 	signer, _ := signer.NewSigner()
