@@ -68,7 +68,9 @@ generate-inference-router-api:
 package-inference: generate-inference-api
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
-	rsync -av --exclude '**.local.*' ./inference/integration/provider/ /tmp/inference-broker && \
+	rsync -av --exclude '**.local.*' --exclude 'noGPU'  ./inference/integration/provider/ /tmp/inference-broker/GPU && \
+	rsync -av --exclude '**.local.*' --exclude 'noGPU' --exclude 'docker-compose.yml'  ./inference/integration/provider/ /tmp/inference-broker/noGPU && \
+	cp ./inference/integration/provider/noGPU/docker-compose.yml /tmp/inference-broker/noGPU/ && \
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
 	echo "Package created at /tmp/inference-broker.tar.gz"
