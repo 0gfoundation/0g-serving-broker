@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -67,7 +68,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 		return err
 	}
 
-	err = c.validateNonce(req, account.LastRequestNonce)
+	err = c.validateNonce(req)
 	if err != nil {
 		return err
 	}
@@ -138,15 +139,50 @@ func (c *Ctrl) compareFees(feeType, actualFee string, expectedFee *string) error
 	return nil
 }
 
-func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce *string) error {
-	cmp, err := util.Compare(actual.Nonce, lastRequestNonce)
+func (c *Ctrl) validateNonce(actual model.Request) error {
+	account, err := c.contract.GetUserAccount(context.Background(), common.HexToAddress(actual.UserAddress))
+	if err != nil {
+		return errors.Wrap(err, "get account from contract")
+	}
+	isClose, err := c.isCloseToTime(actual.Nonce)
+	if err != nil {
+		return errors.Wrapf(err, "failed to check if nonce %s is close to current time", actual.Nonce)
+	}
+	if !isClose {
+		return fmt.Errorf("invalid nonce, received nonce %s is not close to current time: %s", actual.Nonce, time.Now().UTC().Format(time.RFC3339))
+	}
+
+	cmp, err := util.Compare(actual.Nonce, account.Nonce)
 	if err != nil {
 		return err
 	}
 	if cmp > 0 {
 		return nil
 	}
-	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, *lastRequestNonce)
+	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, account.Nonce)
+}
+
+func (c *Ctrl) convertNonceToTime(nonce string) (*time.Time, error) {
+	ns, err := strconv.ParseInt(nonce, 10, 64)
+    if err != nil {
+        return nil, errors.Wrapf(err, "failed to parse nonce %s to int64", nonce)
+    }
+
+    // 2) Convert to time.Time
+    //    time.Unix takes (seconds, nanoseconds) and normalizes for you.
+    t := time.Unix(0, ns)
+
+    return &t, nil
+}
+
+func (c *Ctrl) isCloseToTime(nonce string) (bool, error) {
+	// Check if the nonce is close to the current time
+	currentTime := time.Now().UTC()
+	nonceTime, err := c.convertNonceToTime(nonce)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to convert nonce %s to time", nonce)
+	}
+	return currentTime.Sub(*nonceTime) < constant.NonceTimeThreshold, nil
 }
 
 func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee string) error {
