@@ -85,6 +85,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	account := model.User{
 		User:             reqModel.UserAddress,
+		LastRequestNonce: &reqModel.Nonce,
 		UnsettledFee:     model.PtrOf(reqModel.Fee),
 	}
 
