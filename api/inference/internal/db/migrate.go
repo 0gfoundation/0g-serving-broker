@@ -20,6 +20,7 @@ func (d *DB) Migrate() error {
 				type User struct {
 					model.Model
 					User                 string                `gorm:"type:varchar(255);not null;uniqueIndex:deleted_user"`
+					LastRequestNonce     *string               `gorm:"type:varchar(255);not null;default:0"`
 					LockBalance          *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
 					Signer               model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
@@ -35,7 +36,7 @@ func (d *DB) Migrate() error {
 				type Request struct {
 					model.Model
 					UserAddress  string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
-					Nonce        string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
+					Nonce        string `gorm:"type:varchar(255);not null;index:processed_userAddress_nonce"`
 					ServiceName  string `gorm:"type:varchar(255);not null"`
 					InputFee     string `gorm:"type:varchar(255);not null"`
 					OutputFee    string `gorm:"type:varchar(255);not null"`

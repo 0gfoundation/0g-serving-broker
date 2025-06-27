@@ -55,6 +55,9 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 	if new.LastBalanceCheckTime != nil {
 		old.LastBalanceCheckTime = new.LastBalanceCheckTime
 	}
+	if new.LastRequestNonce != nil {
+		old.LastRequestNonce = new.LastRequestNonce
+	}
 	if new.LockBalance != nil {
 		old.LockBalance = new.LockBalance
 	}

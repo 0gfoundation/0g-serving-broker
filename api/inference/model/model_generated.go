@@ -70,6 +70,7 @@ func (d *User) Bind(ctx *gin.Context) error {
 		return err
 	}
 	d.User = r.User
+	d.LastRequestNonce = r.LastRequestNonce
 	d.LockBalance = r.LockBalance
 	d.LastBalanceCheckTime = r.LastBalanceCheckTime
 	d.Signer = r.Signer
