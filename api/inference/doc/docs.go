@@ -229,6 +229,9 @@ const docTemplate = `{
                 },
                 "userAddress": {
                     "type": "string"
+                },
+                "vllmProxy": {
+                    "type": "boolean"
                 }
             }
         },

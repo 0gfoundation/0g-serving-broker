@@ -35,7 +35,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 
 	for k := range constant.RequestMetaData {
 		values := headerMap.Values(k)
-		if len(values) == 0 {
+		if len(values) == 0 && k != "VLLM-Proxy" {
 			return req, errors.Wrapf(errors.New("missing Header"), "%s", k)
 		}
 		value := values[0]

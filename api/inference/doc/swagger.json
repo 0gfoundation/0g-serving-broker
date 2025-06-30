@@ -223,6 +223,9 @@
                 },
                 "userAddress": {
                     "type": "string"
+                },
+                "vllmProxy": {
+                    "type": "boolean"
                 }
             }
         },

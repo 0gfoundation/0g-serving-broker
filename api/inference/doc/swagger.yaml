@@ -33,6 +33,8 @@ definitions:
         type: string
       userAddress:
         type: string
+      vllmProxy:
+        type: boolean
     required:
     - fee
     - inputFee

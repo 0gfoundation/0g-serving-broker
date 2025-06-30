@@ -26,6 +26,7 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	d.TeeSignature = r.TeeSignature
 	d.RequestHash = r.RequestHash
 	d.Processed = r.Processed
+	d.VLLMProxy = r.VLLMProxy
 
 	return nil
 }
