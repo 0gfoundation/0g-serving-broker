@@ -58,6 +58,21 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "drop-last-request-nonce-from-user",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.Exec("ALTER TABLE `user` DROP COLUMN IF EXISTS `last_request_nonce`;").Error
+			},
+		},
+		{
+			ID: "change-uniqueindex-to-userAddress_nonce",
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.Exec("ALTER TABLE `request` DROP INDEX IF EXISTS `processed_userAddress_nonce`;").Error; err != nil {
+					return err
+				}
+				return tx.Exec("ALTER TABLE `request` ADD UNIQUE INDEX `userAddress_nonce` (`UserAddress`, `Nonce`);").Error
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
