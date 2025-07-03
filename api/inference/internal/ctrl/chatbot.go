@@ -77,14 +77,26 @@ type Message struct {
 func (c *Ctrl) GetChatbotInputFee(reqBody []byte) (string, error) {
 	inputCount, err := getInputCount(reqBody)
 	if err != nil {
+		c.logger.Errorf("Failed to get input count: %v", err)
 		return "", errors.Wrap(err, "get input count")
 	}
 
 	expectedInputFee, err := util.Multiply(inputCount, c.Service.InputPrice)
 	if err != nil {
+		c.logger.Errorf("Failed to calculate input fee: %v", err)
 		return "", errors.Wrap(err, "calculate input fee")
 	}
+	c.logger.Infof("Calculated input fee: %s for %d tokens", expectedInputFee.String(), inputCount)
 	return expectedInputFee.String(), nil
+}
+
+func getReqContent(reqBody []byte) (RequestBody, error) {
+	var ret RequestBody
+	err := json.Unmarshal(reqBody, &ret)
+	if err != nil {
+		return ret, errors.Wrap(err, "unmarshal response")
+	}
+	return ret, nil
 }
 
 func getInputCount(reqBody []byte) (int64, error) {
@@ -129,7 +141,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	}
 
 	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes()); err != nil {
-		log.Printf("decode and process failed: %v", err)
+		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
 
@@ -355,7 +367,7 @@ func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, 
 		RequestHash: int64Hash,
 	}
 
-	log.Printf("request in ZK: %v", reqInZK)
+	c.logger.Infof("request in ZK: %v", reqInZK)
 
 	signatures, err := c.GenerateSignatures(ctx, reqInZK)
 	if err != nil {
@@ -372,7 +384,7 @@ func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, 
 	}
 
 	signature := string(sig)
-	log.Printf("signature  %v", signature)
+	c.logger.Infof("signature  %v", signature)
 
 	return signature, nil
 }
