@@ -41,7 +41,7 @@ func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.RequestResponse,
 		}),
 	)
 	if err != nil {
-		log.Printf("check signature from zk server failed: %v", err)
+		c.logger.Errorf("check signature from zk server failed: %v", err)
 		return nil, errors.Wrap(err, "check signature from zk server")
 	}
 
