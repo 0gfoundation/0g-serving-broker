@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -21,6 +22,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
+	"github.com/sirupsen/logrus"
 )
 
 //go:generate swag fmt
@@ -36,16 +38,24 @@ import (
 func Main() {
 	config := config.GetConfig()
 
-	db, err := database.NewDB(config)
+	logger, err := log.GetLogger(&config.Logger)
 	if err != nil {
 		panic(err)
 	}
+
+	db, err := database.NewDB(config)
+	if err != nil {
+		logger.Errorf("Failed to initialize database: %v", err)
+		panic(err)
+	}
 	if err := db.Migrate(); err != nil {
+		logger.Errorf("Failed to migrate database: %v", err)
 		panic(err)
 	}
 
 	contract, err := providercontract.NewProviderContract(config)
 	if err != nil {
+		logger.Errorf("Failed to initialize contract: %v", err)
 		panic(err)
 	}
 	defer contract.Close()
@@ -70,11 +80,13 @@ func Main() {
 
 	teeService, err := tee.NewTeeService(teeClientType)
 	if err != nil {
+		logger.Errorf("Failed to initialize TEE service: %v", err)
 		panic(err)
 	}
 
 	ctx := context.Background()
 	if err := teeService.SyncQuote(ctx); err != nil {
+		logger.Errorf("Failed to sync TEE quote: %v", err)
 		panic(err)
 	}
 
@@ -91,24 +103,30 @@ func Main() {
 	signer, _ := signer.NewSigner()
 	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
 	if err != nil {
+		logger.Errorf("Failed to initialize signer: %v", err)
 		panic(err)
 	}
 	contract.EncryptedPrivKey = encryptedKey
 
-	ctrl := ctrl.New(db, contract, zk, config, svcCache, teeService, signer)
+	logger = logger.WithFields(logrus.Fields{"name": "inference"})
+	ctrl := ctrl.New(db, contract, zk, config, svcCache, teeService, signer, logger)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
+		logger.Errorf("Failed to sync user accounts: %v", err)
 		panic(err)
 	}
 	settleFeesErr := ctrl.SettleFees(ctx)
 	if settleFeesErr != nil {
+		logger.Errorf("Failed to settle fees: %v", settleFeesErr)
 		panic(settleFeesErr)
 	}
 	if err := ctrl.SyncService(ctx); err != nil {
+		logger.Errorf("Failed to sync service: %v", err)
 		panic(err)
 	}
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable)
 	if err := proxy.Start(); err != nil {
+		logger.Errorf("Failed to start proxy: %v", err)
 		panic(err)
 	}
 
@@ -117,6 +135,7 @@ func Main() {
 
 	// Listen and Serve, config port with PORT=X
 	if err := engine.Run(); err != nil {
+		logger.Errorf("Failed to start server: %v", err)
 		panic(err)
 	}
 }
