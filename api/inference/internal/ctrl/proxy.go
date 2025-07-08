@@ -160,18 +160,17 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 		info += (", " + context)
 	}
 	errors.Response(ctx, errors.Wrap(err, info))
-	c.logger.Error(err)
 }
 
 func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		// TODO: recorded to log system
-		c.logger.Error(err)
+		log.Println(err)
 		return
 	}
 	if _, err := ctx.Writer.Write(respBody); err != nil {
 		// TODO: recorded to log system
-		c.logger.Error(err)
+		log.Println(err)
 	}
 }

@@ -13,16 +13,16 @@ import (
 
 type SettlementProcessor struct {
 	ctrl *ctrl.Ctrl
-	logger log.Logger
+
 	checkSettleInterval int
 	forceSettleInterval int
+
 	enableMonitor bool
 }
 
-func NewSettlementProcessor(ctrl *ctrl.Ctrl, logger log.Logger, checkSettleInterval, forceSettleInterval int, enableMonitor bool) *SettlementProcessor {
+func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, enableMonitor bool) *SettlementProcessor {
 	s := &SettlementProcessor{
 		ctrl:                ctrl,
-		logger:              logger,
 		checkSettleInterval: checkSettleInterval,
 		forceSettleInterval: forceSettleInterval,
 		enableMonitor:       enableMonitor,
@@ -32,19 +32,15 @@ func NewSettlementProcessor(ctrl *ctrl.Ctrl, logger log.Logger, checkSettleInter
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
 func (s SettlementProcessor) Start(ctx context.Context) error {
-	s.logger.Infof("Starting settlement processor with intervals: settlement=%d, force=%d", s.checkSettleInterval, s.forceSettleInterval)
-
 	checkSettleTicker := time.NewTicker(time.Duration(s.checkSettleInterval) * time.Second)
-	defer checkSettleTicker.Stop()
-
 	forceSettleTicker := time.NewTicker(time.Duration(s.forceSettleInterval) * time.Second)
+	defer checkSettleTicker.Stop()
 	defer forceSettleTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			s.logger.Info("Settlement processor stopped")
-			return nil
+			return ctx.Err()
 		case <-checkSettleTicker.C:
 			s.handleCheckSettle(ctx)
 		case <-forceSettleTicker.C:
@@ -57,13 +53,13 @@ func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
 	if err := s.ctrl.ProcessSettlement(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventSettleErrorCount, "Process settlement: %s", err)
 	} else {
-		s.logger.Printf("All settlements at risk of failing due to insufficient funds have been successfully executed")
+		log.Printf("All settlements at risk of failing due to insufficient funds have been successfully executed")
 		s.incrementMonitorCounter(monitor.EventSettleCount, "", nil)
 	}
 }
 
 func (s *SettlementProcessor) handleForceSettle(ctx context.Context) {
-	s.logger.Print("Force Settlement")
+	log.Print("Force Settlement")
 	if err := s.ctrl.SettleFees(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventForceSettleErrorCount, "Process settlement: %s", err)
 	} else {
@@ -76,8 +72,6 @@ func (s *SettlementProcessor) incrementMonitorCounter(counter prometheus.Counter
 		counter.Inc()
 	}
 	if err != nil {
-		s.logger.Errorf(logMsg, err.Error())
-	} else {
-		s.logger.Info(logMsg)
+		log.Printf(logMsg, err.Error())
 	}
 }
