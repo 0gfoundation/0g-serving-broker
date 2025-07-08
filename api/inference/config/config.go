@@ -53,7 +53,6 @@ type Config struct {
 	} `yaml:"zkSettlement"`
 	ChatCacheExpiration time.Duration `yaml:"chatCacheExpiration"`
 	NvGPU               bool          `yaml:"nvGPU"`
-	Logger              config.LoggerConfig `yaml:"logger"`
 }
 
 var (
@@ -129,12 +128,6 @@ func GetConfig() *Config {
 			},
 			ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
-			Logger: config.LoggerConfig{
-				Format:        "text",
-				Level:         "info",
-				Path:          "/tmp/inference.log",
-				RotationCount: 50,
-			},
 		}
 
 		if err := loadConfig(instance); err != nil {

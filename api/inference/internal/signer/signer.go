@@ -23,7 +23,6 @@ import (
 type Signer struct {
 	PublicKey [2]*big.Int
 	PrivKey   models.PrivateKey
-	logger    *log.Logger
 }
 
 func NewSigner() (*Signer, error) {
@@ -66,7 +65,7 @@ func (s *Signer) handleNewKeyGeneration(ctx context.Context, zkclient zkclient.Z
 	}
 
 	encryptedSecret, err := s.encryptPrivateKey(priKey, providerSigner)
-	s.logger.Infof("encrypted priv key: %v, public key: %v", encryptedSecret, pubKey)
+	log.Printf("encrypted priv key: %v, public key: %v", encryptedSecret, pubKey)
 
 	s.PublicKey = pubKey
 	s.PrivKey = priKey
@@ -88,7 +87,7 @@ func (s *Signer) handleExistingService(encryptedPrivKey string, providerSigner *
 	s.PrivKey = privKey
 	s.PublicKey = pubKey
 
-	s.logger.Infof("encrypted priv key: %v, decoded public key: %v", encryptedPrivKey, pubKey)
+	log.Printf("encrypted priv key: %v, decoded public key: %v", encryptedPrivKey, pubKey)
 	return nil
 }
 

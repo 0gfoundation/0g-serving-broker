@@ -18,21 +18,14 @@ import (
 )
 
 func (c *Ctrl) CreateRequest(req model.Request) error {
-	if err := c.db.CreateRequest(req); err != nil {
-		c.logger.Errorf("Failed to create request in db: %v", err)
-		return errors.Wrap(err, "create request in db")
-	}
-	c.logger.Infof("Created request for user %s", req.User)
-	return nil
+	return errors.Wrap(c.db.CreateRequest(req), "create request in db")
 }
 
 func (c *Ctrl) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
 	list, fee, err := c.db.ListRequest(q)
 	if err != nil {
-		c.logger.Errorf("Failed to list requests from db: %v", err)
 		return nil, 0, errors.Wrap(err, "list service from db")
 	}
-	c.logger.Infof("Listed %d requests for user %s", len(list), q.User)
 	return list, fee, nil
 }
 
@@ -43,19 +36,15 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 	for k := range constant.RequestMetaData {
 		values := headerMap.Values(k)
 		if len(values) == 0 && k != "VLLM-Proxy" {
-			err := errors.Wrapf(errors.New("missing Header"), "%s", k)
-			c.logger.Errorf("Failed to get request metadata: %v", err)
-			return req, err
+			return req, errors.Wrapf(errors.New("missing Header"), "%s", k)
 		}
 		value := values[0]
 
 		if err := updateRequestField(&req, k, value); err != nil {
-			c.logger.Errorf("Failed to update request field %s: %v", k, err)
 			return req, err
 		}
 	}
 
-	c.logger.Infof("Parsed request metadata for user %s", req.User)
 	return req, nil
 }
 
@@ -138,11 +127,11 @@ func (c *Ctrl) compareFees(feeType, actualFee string, expectedFee *string) error
 	if cmp < 0 {
 		expectedFeeA0gi, err := util.NeuronToA0gi(*expectedFee)
 		if err != nil {
-			c.logger.Errorf("Failed to convert %s to A0GI: %v", feeType, err)
+			log.Printf("Failed to convert %s to A0GI: %v", feeType, err)
 		}
 		actualFeeA0gi, err := util.NeuronToA0gi(actualFee)
 		if err != nil {
-			c.logger.Errorf("Failed to convert actual.%s to A0GI: %v", feeType, err)
+			log.Printf("Failed to convert actual.%s to A0GI: %v", feeType, err)
 		}
 		return fmt.Errorf("invalid %s, expected %s A0GI, but received %s A0GI", feeType, expectedFeeA0gi, actualFeeA0gi)
 	}
