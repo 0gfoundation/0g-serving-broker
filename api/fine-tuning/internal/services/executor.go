@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/quota"
 	"github.com/gammazero/workerpool"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
@@ -152,7 +154,7 @@ func (c *Executor) handleContainerLifecycle(ctx context.Context, paths *utils.Ta
 		return err
 	}
 
-	if err := c.fetchContainerLogs(ctx, cli, containerID); err != nil {
+	if err := c.fetchContainerLogs(ctx, cli, containerID, task.ID); err != nil {
 		return err
 	}
 
@@ -315,7 +317,7 @@ func (c *Executor) waitForContainer(ctx context.Context, cli *client.Client, con
 	return nil
 }
 
-func (c *Executor) fetchContainerLogs(ctx context.Context, cli *client.Client, containerID string) error {
+func (c *Executor) fetchContainerLogs(ctx context.Context, cli *client.Client, containerID string, taskID *uuid.UUID) error {
 	out, err := cli.ContainerLogs(ctx, containerID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
 	if err != nil {
 		c.logger.Printf("Failed to fetch logs: %v", err)
@@ -324,9 +326,22 @@ func (c *Executor) fetchContainerLogs(ctx context.Context, cli *client.Client, c
 	defer out.Close()
 
 	c.logger.Debug("Container logs:")
+	var builder strings.Builder
+	builder.WriteString("Container logs:\n")
+
 	scanner := bufio.NewScanner(out)
 	for scanner.Scan() {
-		c.logger.Debug(scanner.Text())
+		line := scanner.Text()
+		c.logger.Debug(line)
+
+		builder.WriteString(line)
+		if !strings.HasSuffix(line, "\n") {
+			builder.WriteString("\n")
+		}
+	}
+
+	if err := utils.WriteToLogFile(taskID, builder.String()); err != nil {
+		c.logger.Errorf("failed to write container log: %v", err)
 	}
 
 	if err := scanner.Err(); err != nil {
