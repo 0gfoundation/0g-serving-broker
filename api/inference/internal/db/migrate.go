@@ -36,7 +36,7 @@ func (d *DB) Migrate() error {
 				type Request struct {
 					model.Model
 					UserAddress  string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
-					Nonce        string `gorm:"type:varchar(255);not null;index:processed_userAddress_nonce"`
+					Nonce        string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce"`
 					ServiceName  string `gorm:"type:varchar(255);not null"`
 					InputFee     string `gorm:"type:varchar(255);not null"`
 					OutputFee    string `gorm:"type:varchar(255);not null"`
@@ -56,6 +56,26 @@ func (d *DB) Migrate() error {
 					VLLMProxy *bool `gorm:"type:tinyint(1);not null;default:0"`
 				}
 				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "drop-last-request-nonce-from-user",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.Exec("ALTER TABLE `user` DROP COLUMN `last_request_nonce`;").Error
+			},
+		},
+		{
+			ID: "change-uniqueindex-to-userAddress_nonce",
+			Migrate: func(tx *gorm.DB) error {
+				// Check if old index exists and drop it
+				var count int64
+				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'processed_userAddress_nonce'").Scan(&count)
+				if count > 0 {
+					if err := tx.Exec("ALTER TABLE `request` DROP INDEX `processed_userAddress_nonce`;").Error; err != nil {
+						return err
+					}
+				}
+				return tx.Exec("ALTER TABLE `request` ADD UNIQUE INDEX `userAddress_nonce` (`user_address`, `nonce`);").Error
 			},
 		},
 	})

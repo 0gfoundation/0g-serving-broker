@@ -24,4 +24,5 @@ type RequestList struct {
 type RequestListOptions struct {
 	Processed bool    `form:"processed"`
 	Sort      *string `form:"sort"`
+	MaxNonce  *int64
 }
