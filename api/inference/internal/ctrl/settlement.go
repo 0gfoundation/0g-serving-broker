@@ -28,7 +28,7 @@ type SettlementInfo struct {
 func (c *Ctrl) SettleFees(ctx context.Context) error {
 	// -1 minute to avoid the nonce in contract too close to the current time, which could lead to some requests with nonces a little smaller than the recorded nonce being invalid (in concurrent cases)
 	// use `* 10000` since the nonce form should align with the getNonceWithCache in client
-	maxNonce := time.Now().UTC().Add(-1*time.Minute).Unix() * 10000
+	maxNonce := time.Now().UTC().Add(-1*time.Minute).UnixMilli() * 10000
 
 	fmt.Printf("Max nonce: %d\n", maxNonce)
 

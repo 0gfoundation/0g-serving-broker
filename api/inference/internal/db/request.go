@@ -53,7 +53,7 @@ func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 	return ret.Error
 }
 
-func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, nonce, outputFee, requestFee, unsettledFee, signature string) error {
+func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, outputFee, requestFee, unsettledFee, signature string) error {
 	return d.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Where(&model.Request{
