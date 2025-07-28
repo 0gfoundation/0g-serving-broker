@@ -9,7 +9,6 @@ import (
 type User struct {
 	Model
 	User                 string                `gorm:"type:varchar(255);not null;index:deleted_user_provider" json:"user" binding:"required" immutable:"true"`
-	LastRequestNonce     *string               `gorm:"type:varchar(255);default:0" json:"lastRequestNonce"`
 	LockBalance          *string               `gorm:"type:varchar(255);not null;default:0" json:"lockBalance"`
 	LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
 	Signer               StringSlice           `gorm:"type:json;not null;default:('[]')" json:"signer"`

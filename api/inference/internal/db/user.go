@@ -35,7 +35,7 @@ func (d *DB) ListUserAccount(opt *model.UserListOptions) ([]model.User, error) {
 		}
 	}
 	list := []model.User{}
-	ret := tx.Order("last_request_nonce DESC").Find(&list)
+	ret := tx.Find(&list)
 	return list, ret.Error
 }
 
@@ -54,9 +54,6 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 	}
 	if new.LastBalanceCheckTime != nil {
 		old.LastBalanceCheckTime = new.LastBalanceCheckTime
-	}
-	if new.LastRequestNonce != nil {
-		old.LastRequestNonce = new.LastRequestNonce
 	}
 	if new.LockBalance != nil {
 		old.LockBalance = new.LockBalance
