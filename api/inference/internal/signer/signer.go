@@ -65,6 +65,9 @@ func (s *Signer) handleNewKeyGeneration(ctx context.Context, zkclient zkclient.Z
 	}
 
 	encryptedSecret, err := s.encryptPrivateKey(priKey, providerSigner)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt private key: %w", err)
+	}
 	log.Printf("encrypted priv key: %v, public key: %v", encryptedSecret, pubKey)
 
 	s.PublicKey = pubKey

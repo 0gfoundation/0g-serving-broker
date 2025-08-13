@@ -232,7 +232,8 @@ func Unzip(src string, dest string) (string, error) {
 		filePath := filepath.Join(dest, f.Name)
 
 		// Ensure the path is safe (prevent directory traversal)
-		if !filepath.HasPrefix(filePath, filepath.Clean(dest)+string(os.PathSeparator)) {
+		destClean := filepath.Clean(dest)
+		if !strings.HasPrefix(filePath, destClean+string(os.PathSeparator)) {
 			return "", fmt.Errorf("illegal file path: %s", filePath)
 		}
 

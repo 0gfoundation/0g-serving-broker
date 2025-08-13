@@ -69,6 +69,7 @@ linters:
   enable:
     - typecheck        # Type-checking errors
     - gofmt            # Whether the code was gofmt-ed
+    - staticcheck      # Static analysis checks
 
 issues:
   exclude-rules:
