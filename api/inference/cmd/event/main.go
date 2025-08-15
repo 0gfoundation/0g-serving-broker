@@ -1,9 +1,7 @@
 package event
 
 import (
-	"context"
 	"os"
-	"time"
 
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"

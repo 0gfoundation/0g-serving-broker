@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log"
 	"os"
 	"time"
 
@@ -96,7 +95,7 @@ func Main() {
 		}
 
 		if err := teeService.SyncGPUPayload(ctx, teeClientType == tee.Mock); err != nil {
-			log.Printf("err %v", err)
+			logger.Errorf("Failed to sync GPU payload: %v", err)
 		}
 	}
 

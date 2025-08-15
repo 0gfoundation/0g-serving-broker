@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
@@ -23,7 +23,7 @@ import (
 type Signer struct {
 	PublicKey [2]*big.Int
 	PrivKey   models.PrivateKey
-	logger    *log.Logger
+	logger    log.Logger
 }
 
 func NewSigner() (*Signer, error) {

@@ -13,7 +13,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
-	ethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 type Ctrl struct {

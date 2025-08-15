@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -22,7 +21,7 @@ func (c *Ctrl) CreateRequest(req model.Request) error {
 		c.logger.Errorf("Failed to create request in db: %v", err)
 		return errors.Wrap(err, "create request in db")
 	}
-	c.logger.Infof("Created request for user %s", req.User)
+	c.logger.Infof("Created request for user %s", req.UserAddress)
 	return nil
 }
 
@@ -32,7 +31,8 @@ func (c *Ctrl) ListRequest(q model.RequestListOptions) ([]model.Request, int, er
 		c.logger.Errorf("Failed to list requests from db: %v", err)
 		return nil, 0, errors.Wrap(err, "list service from db")
 	}
-	c.logger.Infof("Listed %d requests for user %s", len(list), q.User)
+	// Note: q.UserAddress is not available in RequestListOptions, using generic message
+	c.logger.Infof("Listed %d requests", len(list))
 	return list, fee, nil
 }
 
@@ -55,7 +55,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 		}
 	}
 
-	c.logger.Infof("Parsed request metadata for user %s", req.User)
+	c.logger.Infof("Parsed request metadata for user %s", req.UserAddress)
 	return req, nil
 }
 
@@ -216,7 +216,7 @@ func updateRequestField(req *model.Request, key, value string) error {
 	case "VLLM-Proxy":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			log.Printf("%v", err)
+			// 解析失败时使用默认值false
 			v = false
 		}
 

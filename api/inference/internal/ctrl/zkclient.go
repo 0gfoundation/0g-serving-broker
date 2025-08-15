@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"context"
-	"log"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/patrickmn/go-cache"

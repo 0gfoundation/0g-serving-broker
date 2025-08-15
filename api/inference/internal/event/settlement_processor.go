@@ -2,21 +2,21 @@ package event
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 type SettlementProcessor struct {
-	ctrl *ctrl.Ctrl
-	logger log.Logger
+	ctrl                *ctrl.Ctrl
+	logger              log.Logger
 	checkSettleInterval int
 	forceSettleInterval int
-	enableMonitor bool
+	enableMonitor       bool
 }
 
 func NewSettlementProcessor(ctrl *ctrl.Ctrl, logger log.Logger, checkSettleInterval, forceSettleInterval int, enableMonitor bool) *SettlementProcessor {

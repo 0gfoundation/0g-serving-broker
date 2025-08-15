@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -25,7 +25,7 @@ type Proxy struct {
 	serviceTarget     string
 	serviceType       string
 	serviceGroup      *gin.RouterGroup
-	logger            *log.Logger
+	logger            log.Logger
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
@@ -33,7 +33,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,
 		serviceGroup: engine.Group(constant.ServicePrefix),
-		logger:       log.Default(),
+		logger:       nil, // Will be set later if needed
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
