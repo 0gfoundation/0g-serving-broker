@@ -14,23 +14,27 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	list := []model.Request{}
 	var totalFee sql.NullInt64
 
-	ret := d.db.Model(model.Request{}).
-		Where("processed = ? and tee_signature <> ''", q.Processed)
+	err := d.db.Transaction(func(tx *gorm.DB) error {
+		ret := tx.Model(model.Request{}).
+			Where("processed = ? and tee_signature <> ''", q.Processed)
+		if q.MaxNonce != nil {
+			ret = ret.Where("nonce <= ?", *q.MaxNonce)
+		}
 
-	if q.Sort != nil {
-		ret.Order(*q.Sort)
-	} else {
-		ret.Order("created_at DESC")
-	}
-	ret.Find(&list)
+		if q.Sort != nil {
+			ret = ret.Order(*q.Sort)
+		} else {
+			ret = ret.Order("created_at DESC")
+		}
+		if err := ret.Find(&list).Error; err != nil {
+			return err
+		}
 
-	if ret.Error != nil {
-		return list, 0, ret.Error
-	}
-
-	ret = d.db.Model(model.Request{}).
-		Where("processed = ?  and tee_signature <> ''", q.Processed).
-		Select("SUM(CAST(fee AS SIGNED))").Scan(&totalFee)
+		if err := ret.Select("SUM(CAST(fee AS SIGNED))").Scan(&totalFee).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 
 	var totalFeeInt int
 	if totalFee.Valid {
@@ -38,7 +42,7 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	} else {
 		totalFeeInt = 0
 	}
-	return list, totalFeeInt, ret.Error
+	return list, totalFeeInt, err
 }
 
 func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
@@ -49,7 +53,7 @@ func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 	return ret.Error
 }
 
-func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, nonce, outputFee, requestFee, unsettledFee, signature string) error {
+func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, outputFee, requestFee, unsettledFee, signature string) error {
 	return d.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Where(&model.Request{
@@ -67,8 +71,7 @@ func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, nonce, outpu
 				User: userAddress,
 			}).
 			Updates(&model.User{
-				LastRequestNonce: &nonce,
-				UnsettledFee:     &unsettledFee,
+				UnsettledFee: &unsettledFee,
 			}).Error; err != nil {
 			return err
 		}

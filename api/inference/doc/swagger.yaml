@@ -104,8 +104,6 @@ definitions:
         type: string
       lastBalanceCheckTime:
         type: string
-      lastRequestNonce:
-        type: string
       lockBalance:
         type: string
       signer:

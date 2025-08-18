@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
 )
@@ -78,7 +79,7 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 		return err
 	}
 
-	err = c.validateNonce(req, account.LastRequestNonce)
+	err = c.validateNonce(req, contractAccount)
 	if err != nil {
 		return err
 	}
@@ -149,15 +150,15 @@ func (c *Ctrl) compareFees(feeType, actualFee string, expectedFee *string) error
 	return nil
 }
 
-func (c *Ctrl) validateNonce(actual model.Request, lastRequestNonce *string) error {
-	cmp, err := util.Compare(actual.Nonce, lastRequestNonce)
+func (c *Ctrl) validateNonce(actual model.Request, contractAccount contract.Account) error {
+	cmp, err := util.Compare(actual.Nonce, contractAccount.Nonce)
 	if err != nil {
 		return err
 	}
 	if cmp > 0 {
 		return nil
 	}
-	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, *lastRequestNonce)
+	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, contractAccount.Nonce)
 }
 
 func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee string) error {

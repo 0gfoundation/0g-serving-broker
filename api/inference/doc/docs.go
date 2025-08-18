@@ -322,9 +322,6 @@ const docTemplate = `{
                 "lastBalanceCheckTime": {
                     "type": "string"
                 },
-                "lastRequestNonce": {
-                    "type": "string"
-                },
                 "lockBalance": {
                     "type": "string"
                 },

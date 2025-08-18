@@ -32,7 +32,6 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 
 	dbAccount = model.User{
 		User:                 userAddress,
-		LastRequestNonce:     model.PtrOf(contractAccount.Nonce.String()),
 		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
 		UnsettledFee:         model.PtrOf("0"),
@@ -79,7 +78,6 @@ func (c *Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, e
 	for i, account := range accounts {
 		list[i] = parse(account)
 		if v, ok := accountMap[account.User.String()]; ok {
-			list[i].LastRequestNonce = v.LastRequestNonce
 			list[i].LastBalanceCheckTime = v.LastBalanceCheckTime
 			list[i].UnsettledFee = v.UnsettledFee
 		}

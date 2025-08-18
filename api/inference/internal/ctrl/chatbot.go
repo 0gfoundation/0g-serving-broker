@@ -343,7 +343,7 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 		return err
 	}
 
-	if err := c.db.UpdateOutputFeeWithSignature(requestHash, account.User, *account.LastRequestNonce, lastResponseFee.String(), requestFee.String(), unsettledFee.String(), signature); err != nil {
+	if err := c.db.UpdateOutputFeeWithSignature(requestHash, account.User, lastResponseFee.String(), requestFee.String(), unsettledFee.String(), signature); err != nil {
 		return errors.Wrap(err, "Error updating request")
 	}
 
