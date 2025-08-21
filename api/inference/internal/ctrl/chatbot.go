@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -77,14 +76,26 @@ type Message struct {
 func (c *Ctrl) GetChatbotInputFee(reqBody []byte) (string, error) {
 	inputCount, err := getInputCount(reqBody)
 	if err != nil {
+		c.logger.Errorf("Failed to get input count: %v", err)
 		return "", errors.Wrap(err, "get input count")
 	}
 
 	expectedInputFee, err := util.Multiply(inputCount, c.Service.InputPrice)
 	if err != nil {
+		c.logger.Errorf("Failed to calculate input fee: %v", err)
 		return "", errors.Wrap(err, "calculate input fee")
 	}
+	c.logger.Infof("Calculated input fee: %s for %d tokens", expectedInputFee.String(), inputCount)
 	return expectedInputFee.String(), nil
+}
+
+func getReqContent(reqBody []byte) (RequestBody, error) {
+	var ret RequestBody
+	err := json.Unmarshal(reqBody, &ret)
+	if err != nil {
+		return ret, errors.Wrap(err, "unmarshal response")
+	}
+	return ret, nil
 }
 
 func getInputCount(reqBody []byte) (int64, error) {
@@ -106,7 +117,7 @@ func getInputCount(reqBody []byte) (int64, error) {
 func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	isStream, err := isStream(reqBody)
 	if err != nil {
-		handleBrokerError(ctx, err, "check if stream")
+		handleBrokerError(ctx, err, "check if stream", c.logger)
 		return err
 	}
 	if !isStream {
@@ -124,12 +135,12 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	_, err := reader.WriteTo(ctx.Writer)
 	if err != nil {
-		handleBrokerError(ctx, err, "read from body")
+		handleBrokerError(ctx, err, "read from body", c.logger)
 		return err
 	}
 
 	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes()); err != nil {
-		log.Printf("decode and process failed: %v", err)
+		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
 
@@ -152,7 +163,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				if err == io.EOF {
 					return false
 				}
-				handleBrokerError(ctx, err, "read from body")
+				handleBrokerError(ctx, err, "read from body", c.logger)
 				streamErr = err
 				return false
 			}
@@ -163,7 +174,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 			_, streamErr = w.Write([]byte(line))
 			if streamErr != nil {
-				handleBrokerError(ctx, err, "write to stream")
+				handleBrokerError(ctx, err, "write to stream", c.logger)
 				return false
 			}
 
@@ -177,7 +188,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	// Fully read and then start decoding and processing
 	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk); err != nil {
-		handleBrokerError(ctx, err, "decode and process")
+		handleBrokerError(ctx, err, "decode and process", c.logger)
 		return err
 	}
 
@@ -262,7 +273,7 @@ func (c *Ctrl) signChat(reqBody, respData, respChunk []byte) error {
 	}
 
 	key := c.chatCacheKey(chatID)
-	log.Printf("key: %v, chat signature: %v", key, chatSignature)
+	c.logger.Infof("key: %v, chat signature: %v", key, chatSignature)
 	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
 	return nil
 }
@@ -355,7 +366,7 @@ func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, 
 		RequestHash: int64Hash,
 	}
 
-	log.Printf("request in ZK: %v", reqInZK)
+	c.logger.Infof("request in ZK: %v", reqInZK)
 
 	signatures, err := c.GenerateSignatures(ctx, reqInZK)
 	if err != nil {
@@ -372,7 +383,7 @@ func (c *Ctrl) generateSignature(ctx context.Context, lastResponseFee *big.Int, 
 	}
 
 	signature := string(sig)
-	log.Printf("signature  %v", signature)
+	c.logger.Infof("signature  %v", signature)
 
 	return signature, nil
 }

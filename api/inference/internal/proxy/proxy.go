@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -25,6 +25,7 @@ type Proxy struct {
 	serviceTarget     string
 	serviceType       string
 	serviceGroup      *gin.RouterGroup
+	logger            log.Logger
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
@@ -32,6 +33,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,
 		serviceGroup: engine.Group(constant.ServicePrefix),
+		logger:       nil, // Will be set later if needed
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -106,7 +108,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, 0, false)
 		return
 	}
-	log.Printf("received request %v", ctx.Request)
+	p.logger.Infof("received request %v", ctx.Request)
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
 		handleBrokerError(ctx, err, "get model.request from HTTP request")
@@ -144,7 +146,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, p.ctrl.Service.OutputPrice, true); err != nil {
-		log.Printf("process http request failed: %v", err)
+		p.logger.Errorf("process http request failed: %v", err)
 	}
 }
 

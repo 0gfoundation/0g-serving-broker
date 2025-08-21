@@ -3,13 +3,13 @@ package ctrl
 import (
 	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -43,14 +43,14 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	// back up body for other usage
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "failed to read request body")
+		handleBrokerError(ctx, err, "failed to read request body", c.logger)
 		return err
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	resp, err := client.Do(req)
 	if err != nil {
-		handleBrokerError(ctx, err, "call proxied service")
+		handleBrokerError(ctx, err, "call proxied service", c.logger)
 		return err
 	}
 	defer resp.Body.Close()
@@ -64,7 +64,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	if resp.StatusCode != http.StatusOK {
 		ctx.Writer.WriteHeader(resp.StatusCode)
-		handleServiceError(ctx, resp.Body)
+		handleServiceError(ctx, resp.Body, c.logger)
 		return err
 	}
 
@@ -79,7 +79,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	_, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
-		handleBrokerError(ctx, err, "")
+		handleBrokerError(ctx, err, "", c.logger)
 		return err
 	}
 
@@ -93,14 +93,14 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
-		handleBrokerError(ctx, err, "prepare request extractor")
+		handleBrokerError(ctx, err, "prepare request extractor", c.logger)
 		return err
 	}
 }
 
 func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	key := c.chatCacheKey(chatID)
-	log.Printf("get signature for chat: %v", chatID)
+	c.logger.Infof("get signature for chat: %v", chatID)
 	val, exist := c.svcCache.Get(key)
 	if !exist {
 		return nil, errors.New("Chat id not found or expired, chat_id_not_found")
@@ -117,11 +117,11 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "read from body")
+		handleBrokerError(ctx, err, "read from body", c.logger)
 		return err
 	}
 	if _, err := ctx.Writer.Write(body); err != nil {
-		handleBrokerError(ctx, err, "write response body")
+		handleBrokerError(ctx, err, "write response body", c.logger)
 		return err
 	}
 
@@ -152,24 +152,31 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 	ctx.Writer.Header().Set("Access-Control-Expose-Headers", newHeaders)
 }
 
-func handleBrokerError(ctx *gin.Context, err error, context string) {
+func handleBrokerError(ctx *gin.Context, err error, context string, logger log.Logger) {
 	// TODO: recorded to log system
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
 	}
 	errors.Response(ctx, errors.Wrap(err, info))
+	if logger != nil {
+		logger.Errorf("Broker error: %v, context: %s", err, context)
+	}
 }
 
-func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+func handleServiceError(ctx *gin.Context, body io.ReadCloser, logger log.Logger) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		// TODO: recorded to log system
-		log.Println(err)
+		if logger != nil {
+			logger.Errorf("Service error: %v", err)
+		}
 		return
 	}
 	if _, err := ctx.Writer.Write(respBody); err != nil {
 		// TODO: recorded to log system
-		log.Println(err)
+		if logger != nil {
+			logger.Errorf("Service error: %v", err)
+		}
 	}
 }

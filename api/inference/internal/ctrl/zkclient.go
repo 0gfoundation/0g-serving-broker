@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"context"
-	"log"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/patrickmn/go-cache"
@@ -41,7 +40,7 @@ func (c *Ctrl) CheckSignatures(ctx context.Context, req *models.RequestResponse,
 		}),
 	)
 	if err != nil {
-		log.Printf("check signature from zk server failed: %v", err)
+		c.logger.Errorf("check signature from zk server failed: %v", err)
 		return nil, errors.Wrap(err, "check signature from zk server")
 	}
 

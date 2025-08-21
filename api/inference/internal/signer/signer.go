@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
@@ -23,6 +23,7 @@ import (
 type Signer struct {
 	PublicKey [2]*big.Int
 	PrivKey   models.PrivateKey
+	logger    log.Logger
 }
 
 func NewSigner() (*Signer, error) {
@@ -65,7 +66,7 @@ func (s *Signer) handleNewKeyGeneration(ctx context.Context, zkclient zkclient.Z
 	}
 
 	encryptedSecret, err := s.encryptPrivateKey(priKey, providerSigner)
-	log.Printf("encrypted priv key: %v, public key: %v", encryptedSecret, pubKey)
+	s.logger.Infof("encrypted priv key: %v, public key: %v", encryptedSecret, pubKey)
 
 	s.PublicKey = pubKey
 	s.PrivKey = priKey
@@ -87,7 +88,7 @@ func (s *Signer) handleExistingService(encryptedPrivKey string, providerSigner *
 	s.PrivKey = privKey
 	s.PublicKey = pubKey
 
-	log.Printf("encrypted priv key: %v, decoded public key: %v", encryptedPrivKey, pubKey)
+	s.logger.Infof("encrypted priv key: %v, decoded public key: %v", encryptedPrivKey, pubKey)
 	return nil
 }
 
