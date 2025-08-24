@@ -1,0 +1,107 @@
+run:
+  timeout: 10m
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+  path-prefix: ""
+  sort-results: true
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    
+  exhaustive:
+    check-generated: false
+    default-signifies-exhaustive: false
+    
+  gocyclo:
+    min-complexity: 15
+    
+  gofmt:
+    simplify: true
+    
+  goimports:
+    local-prefixes: "github.com/0glabs/0g-serving-broker"
+    
+  gosimple:
+    checks: ["all"]
+    
+  govet:
+    check-shadowing: true
+    enable-all: true
+    disable:
+      - fieldalignment
+      
+  ineffassign:
+    check-exported: false
+    
+  misspell:
+    locale: US
+    ignore-words:
+      - "cancelled"
+      
+  nakedret:
+    max-func-lines: 30
+    
+  prealloc:
+    simple: true
+    range-loops: true
+    for-loops: false
+    
+  staticcheck:
+    checks: ["all"]
+    
+  unused:
+    check-exported: false
+    
+  whitespace:
+    multi-if: false
+    multi-func: false
+
+linters:
+  disable-all: true
+  enable:
+    - typecheck        # Type-checking errors
+    - gofmt            # Whether the code was gofmt-ed
+    - staticcheck      # Static analysis checks
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - goconst
+        - gocyclo
+    - path: "(.+)_test.go"
+      linters:
+        - revive
+    - path: internal/.*
+      text: "exported .* should have comment"
+      linters:
+        - revive
+    - path: cmd/.*
+      linters:
+        - gocyclo
+    - linters:
+        - staticcheck
+      text: "SA9003:"
+    - linters:
+        - revive
+      text: "unexported-return"
+    - linters:
+        - revive
+      text: "unused-parameter"
+  
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new: false
+
+severity:
+  default-severity: error 

@@ -7,7 +7,10 @@ export GO111MODULE := on
 export CGO_ENABLED := 0
 
 lint:
-	golangci-lint run --timeout 10m -v --max-same-issues 0
+	$(shell go env GOPATH)/bin/golangci-lint run --timeout 10m -v --max-same-issues 0
+
+lint-ci:
+	$(shell go env GOPATH)/bin/golangci-lint run --timeout 10m --max-same-issues 0 --out-format github-actions
 
 build: clean
 	for arch in $(ARCH); do \
@@ -99,4 +102,4 @@ install-tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
 	go install github.com/ethereum/go-ethereum/cmd/abigen@v1.14.5
 
-.PHONY: lint build clean oci release hardhat-env install-tools
+.PHONY: lint lint-ci build clean oci release hardhat-env install-tools
