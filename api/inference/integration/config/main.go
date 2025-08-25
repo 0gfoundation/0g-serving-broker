@@ -206,7 +206,7 @@ const dockerComposeTemplate = `services:
       interval: 10s
       retries: 5
     networks:
-      - localhost
+      - default
 
 {{- end}}
   mysql:
@@ -219,11 +219,13 @@ const dockerComposeTemplate = `services:
       - mysql-data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
-      interval: 10s
-      retries: 5
+      test: ["CMD-SHELL", "mysql -uroot -p123456 -e 'USE provider'"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
     networks:
-      - localhost
+      - default
 
   # Nginx only depends on ZK services, not on broker (to avoid circular dependency)
   # It can start and proxy to broker when broker becomes available
@@ -235,7 +237,7 @@ const dockerComposeTemplate = `services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf
     networks:
-      - localhost
+      - default
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:80/stub_status"]
       interval: 10s
@@ -264,7 +266,7 @@ const dockerComposeTemplate = `services:
 {{- end}}
     command: 0g-inference-server
     networks:
-      - localhost
+      - default
     healthcheck:
       test: ["CMD-SHELL", "test -L /proc/1/exe && readlink /proc/1/exe | grep -q broker"]
       interval: 30s
@@ -280,6 +282,7 @@ const dockerComposeTemplate = `services:
               count: all
               capabilities: [gpu]
 {{- end}}
+    restart: unless-stopped
     depends_on:
       mysql:
         condition: service_healthy
@@ -305,13 +308,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
     command: 0g-inference-event
     networks:
-      - localhost
+      - default
     healthcheck:
       test: ["CMD", "pgrep", "-f", "0g-inference-event"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
     depends_on:
       0g-serving-provider-broker:
         condition: service_healthy
@@ -335,7 +339,7 @@ const dockerComposeTemplate = `services:
       retries: 20
       start_period: 30s
     networks:
-      - localhost
+      - default
 
 {{- end}}
 {{- if .UseMonitoring}}
@@ -346,7 +350,7 @@ const dockerComposeTemplate = `services:
     ports:
       - "{{.Ports.Prometheus}}:9090"
     networks:
-      - localhost
+      - default
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
       interval: 30s
@@ -364,7 +368,7 @@ const dockerComposeTemplate = `services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
-      - localhost
+      - default
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || wget -q --spider http://localhost:3000/api/health"]
       interval: 30s
@@ -388,7 +392,7 @@ const dockerComposeTemplate = `services:
       - --collector.filesystem.ignored-mount-points
       - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
     networks:
-      - localhost
+      - default
     privileged: true
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:9100/metrics || curl -f http://localhost:9100/metrics"]
@@ -407,8 +411,8 @@ volumes:
   mysql-data:
 
 networks:
-  localhost:
-    name: localhost
+  default:
+    name: {{if .ProjectName}}{{.ProjectName}}-network{{else}}0g-serving-network{{end}}
     external: false
 `
 
@@ -424,6 +428,7 @@ type TemplateData struct {
 	UseMonitoring bool
 	ConfigFile    string
 	Ports         PortConfig
+	ProjectName   string
 }
 
 var requiredFields = []RequiredField{
@@ -846,6 +851,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		UseMonitoring: config.UseMonitoring,
 		ConfigFile:    config.ConfigFile,
 		Ports:         config.Ports,
+		ProjectName:   config.ProjectName,
 	}
 
 	// Generate nginx.conf
