@@ -32,6 +32,33 @@ const docTemplate = `{
                 }
             }
         },
+        "/quote/verify/gpu": {
+            "post": {
+                "description": "This endpoint proxies attestation report verification requests to NVIDIA's TEE verification service",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxy"
+                ],
+                "operationId": "VerifyGPU",
+                "parameters": [
+                    {
+                        "description": "Raw request body to forward",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {}
+            }
+        },
         "/request": {
             "get": {
                 "description": "This endpoint allows you to list requests",

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/gin-contrib/cors"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -28,6 +29,11 @@ type Proxy struct {
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
+	// Ensure allowOrigins is not empty
+	if len(allowOrigins) == 0 {
+		allowOrigins = []string{"*"}
+	}
+
 	p := &Proxy{
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,

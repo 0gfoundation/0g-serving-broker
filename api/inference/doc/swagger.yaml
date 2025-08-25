@@ -149,6 +149,25 @@ paths:
             type: string
       tags:
       - quote
+  /quote/verify/gpu:
+    post:
+      consumes:
+      - application/json
+      description: This endpoint proxies attestation report verification requests
+        to NVIDIA's TEE verification service
+      operationId: VerifyGPU
+      parameters:
+      - description: Raw request body to forward
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses: {}
+      tags:
+      - proxy
   /request:
     get:
       description: This endpoint allows you to list requests
