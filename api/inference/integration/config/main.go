@@ -254,9 +254,14 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
+{{- if .UseTest}}
       - NETWORK=hardhat
+{{- end}}
     volumes:
       - ./{{.ConfigFile}}:/etc/config.yaml
+{{- if not .UseTest}}
+      - /var/run/tappd.sock:/var/run/tappd.sock
+{{- end}}
     command: 0g-inference-server
     networks:
       - localhost
@@ -290,9 +295,14 @@ const dockerComposeTemplate = `services:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
     environment:
       - CONFIG_FILE=/etc/config.yaml
+{{- if .UseTest}}
       - NETWORK=hardhat
+{{- end}}
     volumes:
       - ./{{.ConfigFile}}:/etc/config.yaml
+{{- if not .UseTest}}
+      - /var/run/tappd.sock:/var/run/tappd.sock
+{{- end}}
     command: 0g-inference-event
     networks:
       - localhost
