@@ -10,7 +10,6 @@ services:
       retries: 5
     networks:
       - localhost
-
   mysql:
     image: mysql:8.0
     container_name: 0g-serving-broker-db
@@ -28,43 +27,8 @@ services:
     networks:
       - localhost
 
-  0g-serving-provider-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-broker
-    environment:
-      - PORT=3080
-      - CONFIG_FILE=/etc/config.yaml
-      - NETWORK=hardhat
-    volumes:
-      - ./config.local.yaml:/etc/config.yaml
-    command: 0g-inference-server
-    networks:
-      - localhost
-    depends_on:
-      mysql:
-        condition: service_healthy
-      hardhat-node-with-contract:
-        condition: service_healthy
-      zk-prover:
-        condition: service_healthy
-
-  0g-serving-provider-event:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-event
-    environment:
-      - CONFIG_FILE=/etc/config.yaml
-      - NETWORK=hardhat
-    volumes:
-      - ./config.local.yaml:/etc/config.yaml
-    command: 0g-inference-event
-    networks:
-      - localhost
-    depends_on:
-      0g-serving-provider-broker:
-        condition: service_started
-      zk-settlement:
-        condition: service_healthy
-
+  # Nginx only depends on ZK services, not on broker (to avoid circular dependency)
+  # It can start and proxy to broker when broker becomes available
   nginx:
     image: nginx:1.27.0
     container_name: nginx-server
@@ -75,51 +39,123 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf
     networks:
       - localhost
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/stub_status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      zk-service-1:
+        condition: service_healthy
+      zk-service-2:
+        condition: service_healthy
+      zk-service-3:
+        condition: service_healthy
+
+  # Main broker starts after nginx is ready
+  0g-serving-provider-broker:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-serving-provider-broker
+    environment:
+      - PORT=3080
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config.local.yml:/etc/config.yaml
+    command: 0g-inference-server
+    networks:
+      - localhost
+    healthcheck:
+      test: ["CMD-SHELL", "test -L /proc/1/exe && readlink /proc/1/exe | grep -q broker"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      mysql:
+        condition: service_healthy
+      hardhat-node-with-contract:
+        condition: service_healthy
+      nginx:
+        condition: service_healthy
+
+  # Event service starts after broker is ready
+  0g-serving-provider-event:
+    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    container_name: 0g-serving-provider-event
+    environment:
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config.local.yml:/etc/config.yaml
+    command: 0g-inference-event
+    networks:
+      - localhost
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "0g-inference-event"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
       0g-serving-provider-broker:
-        condition: service_started
+        condition: service_healthy
+      nginx:
+        condition: service_healthy
 
-  zk-prover:
+  # ZK service instances - all identical, load balanced by nginx
+  zk-service-1:
     image: ghcr.io/0glabs/zk:0.2.1
-    container_name: zk-prover
+    container_name: zk-service-1
     environment:
       JS_PROVER_PORT: 3001
-    ports:
-      - "3001:3001"
+    volumes:
+      - type: tmpfs
+        target: /app/logs
     healthcheck:
       test:
-        ["CMD", "curl", "-f", "-X", "GET", "http://zk-prover:3001/sign-keypair"]
+        ["CMD", "curl", "-f", "-X", "GET", "http://localhost:3001/sign-keypair"]
       interval: 30s
       timeout: 10s
       retries: 20
       start_period: 30s
     networks:
       - localhost
-
-  zk-settlement:
+  zk-service-2:
     image: ghcr.io/0glabs/zk:0.2.1
-    container_name: zk-settlement
+    container_name: zk-service-2
     environment:
       JS_PROVER_PORT: 3002
-    ports:
-      - "3002:3002"
+    volumes:
+      - type: tmpfs
+        target: /app/logs
     healthcheck:
       test:
-        [
-          "CMD",
-          "curl",
-          "-f",
-          "-X",
-          "GET",
-          "http://zk-settlement:3002/sign-keypair",
-        ]
+        ["CMD", "curl", "-f", "-X", "GET", "http://localhost:3002/sign-keypair"]
       interval: 30s
       timeout: 10s
       retries: 20
       start_period: 30s
     networks:
       - localhost
-
+  zk-service-3:
+    image: ghcr.io/0glabs/zk:0.2.1
+    container_name: zk-service-3
+    environment:
+      JS_PROVER_PORT: 3003
+    volumes:
+      - type: tmpfs
+        target: /app/logs
+    healthcheck:
+      test:
+        ["CMD", "curl", "-f", "-X", "GET", "http://localhost:3003/sign-keypair"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - localhost
   prometheus:
     image: prom/prometheus:v2.45.2
     container_name: prometheus
@@ -129,6 +165,12 @@ services:
       - "9090:9090"
     networks:
       - localhost
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   grafana:
     image: grafana/grafana-oss:11.4.0
@@ -142,11 +184,16 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
       - localhost
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || wget -q --spider http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
 
-  # source https://github.com/prometheus/node_exporter
-  # https://github.com/vegasbrianc/prometheus/
   prometheus-node-exporter:
     image: prom/node-exporter:v1.7.0
     container_name: prometheus-node-exporter
@@ -163,11 +210,17 @@ services:
     networks:
       - localhost
     privileged: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9100/metrics || curl -f http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     expose:
       - 9100
-
 volumes:
   mysql-data:
 

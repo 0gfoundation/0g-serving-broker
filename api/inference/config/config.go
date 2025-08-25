@@ -43,14 +43,10 @@ type Config struct {
 		Enable       bool   `yaml:"enable"`
 		EventAddress string `yaml:"eventAddress"`
 	} `yaml:"monitor"`
-	ZKProver struct {
+	ZK struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
-	} `yaml:"zkProver"`
-	ZKSettlement struct {
-		Provider      string `yaml:"provider"`
-		RequestLength int    `yaml:"requestLength"`
-	} `yaml:"zkSettlement"`
+	} `yaml:"zk"`
 	ChatCacheExpiration time.Duration `yaml:"chatCacheExpiration"`
 	NvGPU               bool          `yaml:"nvGPU"`
 }
@@ -110,18 +106,11 @@ func GetConfig() *Config {
 				Enable:       false,
 				EventAddress: "0g-serving-provider-event:3081",
 			},
-			ZKProver: struct {
+			ZK: struct {
 				Provider      string `yaml:"provider"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Provider:      "zk-prover:3001",
-				RequestLength: 40,
-			},
-			ZKSettlement: struct {
-				Provider      string `yaml:"provider"`
-				RequestLength int    `yaml:"requestLength"`
-			}{
-				Provider:      "zk-settlement:3002",
+				Provider:      "nginx-server/zk",
 				RequestLength: 40,
 			},
 			ChatCacheExpiration: time.Minute * 20,
