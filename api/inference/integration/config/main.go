@@ -90,6 +90,7 @@ type DeploymentConfig struct {
 	UseMonitoring bool
 	ConfigFile    string
 	Ports         PortConfig
+	ProjectName   string  // Docker Compose project name for isolation
 }
 
 // Templates for nginx.conf
@@ -198,7 +199,6 @@ const dockerComposeTemplate = `services:
 {{- if .UseTest}}
   hardhat-node-with-contract:
     image: raven20241/hardhat-compute-network-contract:dev
-    container_name: hardhat-node-with-contract
     ports:
       - "{{.Ports.Hardhat}}:8545"
     healthcheck:
@@ -211,7 +211,6 @@ const dockerComposeTemplate = `services:
 {{- end}}
   mysql:
     image: mysql:8.0
-    container_name: 0g-serving-broker-db
     ports:
       - "{{.Ports.MySQL}}:3306"
     environment:
@@ -230,7 +229,6 @@ const dockerComposeTemplate = `services:
   # It can start and proxy to broker when broker becomes available
   nginx:
     image: nginx:1.27.0
-    container_name: nginx-server
     ports:
       - "{{.Ports.Nginx80}}:80"
       - "{{.Ports.Nginx443}}:443"
@@ -253,7 +251,6 @@ const dockerComposeTemplate = `services:
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-broker
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -291,7 +288,6 @@ const dockerComposeTemplate = `services:
   # Event service starts after broker is ready
   0g-serving-provider-event:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
@@ -316,7 +312,6 @@ const dockerComposeTemplate = `services:
 {{- range .ZKServers}}
   {{.Name}}:
     image: ghcr.io/0glabs/zk:0.2.1
-    container_name: {{.Name}}
     environment:
       JS_PROVER_PORT: {{.Port}}
     volumes:
@@ -336,7 +331,6 @@ const dockerComposeTemplate = `services:
 {{- if .UseMonitoring}}
   prometheus:
     image: prom/prometheus:v2.45.2
-    container_name: prometheus
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
@@ -355,7 +349,6 @@ const dockerComposeTemplate = `services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
-    container_name: grafana
     ports:
       - "{{.Ports.Grafana}}:3000"
     environment:
@@ -374,7 +367,6 @@ const dockerComposeTemplate = `services:
 
   prometheus-node-exporter:
     image: prom/node-exporter:v1.7.0
-    container_name: prometheus-node-exporter
     restart: always
     volumes:
       - /proc:/host/proc:ro
@@ -636,9 +628,21 @@ func promptEnvironmentConfig() (*DeploymentConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	config := &DeploymentConfig{}
 
+	// Ask for Docker Compose project name
+	fmt.Print("\n🏷️  Enter a Docker Compose project name for this deployment (leave empty for default): ")
+	response, _ := reader.ReadString('\n')
+	config.ProjectName = strings.TrimSpace(response)
+	if config.ProjectName != "" {
+		fmt.Printf("   ✓ Project name set to: %s\n", config.ProjectName)
+		fmt.Printf("   ℹ️  Use 'docker compose -p %s up -d' to start services\n", config.ProjectName)
+	} else {
+		fmt.Println("   ✓ Using default project name (directory name)")
+		fmt.Println("   ℹ️  Use 'docker compose up -d' to start services")
+	}
+
 	// Ask about TEE GPU environment
 	fmt.Print("\n🖥️  Are you running in a TEE GPU environment? [y/N]: ")
-	response, _ := reader.ReadString('\n')
+	response, _ = reader.ReadString('\n')
 	config.UseGPU = strings.ToLower(strings.TrimSpace(response)) == "y"
 	if config.UseGPU {
 		fmt.Println("   ✓ GPU support will be enabled")
@@ -856,6 +860,13 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		return fmt.Errorf("failed to generate init.sql: %v", err)
 	}
 
+	// Generate .env file if project name is specified
+	if config.ProjectName != "" {
+		if err := generateEnvFile(config.ProjectName); err != nil {
+			return fmt.Errorf("failed to generate .env file: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -937,12 +948,28 @@ FLUSH PRIVILEGES;
 	return err
 }
 
+func generateEnvFile(projectName string) error {
+	envContent := fmt.Sprintf("# Docker Compose project name for resource isolation\nCOMPOSE_PROJECT_NAME=%s\n", projectName)
+
+	file, err := os.Create(".env")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(envContent)
+	return err
+}
+
 func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Println("\n" + strings.Repeat("=", 50))
 	fmt.Println("🎉 Configuration Complete!")
 	fmt.Println(strings.Repeat("=", 50))
 	
 	fmt.Printf("\n📊 Configuration Summary:\n")
+	if config.ProjectName != "" {
+		fmt.Printf("  • Project Name: %s\n", config.ProjectName)
+	}
 	fmt.Printf("  • ZK Instances: %d (container-only access)\n", config.NumInstances)
 	fmt.Printf("  • GPU Support: %t\n", config.UseGPU)
 	fmt.Printf("  • Test Environment: %t\n", config.UseTest)
@@ -954,12 +981,20 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • docker-compose.yml\n")
 	fmt.Printf("  • %s\n", config.ConfigFile)
 	fmt.Printf("  • init.sql\n")
+	if config.ProjectName != "" {
+		fmt.Printf("  • .env (with project name)\n")
+	}
 	if config.UseMonitoring {
 		fmt.Printf("  • prometheus/prometheus.yml\n")
 	}
 
 	fmt.Printf("\n🚀 To start the services, run:\n")
-	fmt.Printf("  docker compose up -d\n")
+	if config.ProjectName != "" {
+		fmt.Printf("  docker compose up -d  # Uses .env file automatically\n")
+		fmt.Printf("  # Alternative: docker compose -p %s up -d\n", config.ProjectName)
+	} else {
+		fmt.Printf("  docker compose up -d\n")
+	}
 
 	fmt.Printf("\n🌐 After starting, services will be available at:\n")
 	fmt.Printf("  • Main API: http://localhost:%s\n", config.Ports.Nginx80)
@@ -1296,6 +1331,7 @@ func isPlaceholder(value string) bool {
 	}
 	return false
 }
+
 
 func cleanupPlaceholderFields(config *Config) {
 	// Remove placeholder values for optional fields

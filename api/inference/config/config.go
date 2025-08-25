@@ -81,7 +81,7 @@ func GetConfig() *Config {
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
-				Provider: "root:123456@tcp(0g-serving-provider-broker-db:3306)/provider?parseTime=true",
+				Provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
 			},
 			Event: struct {
 				ProviderAddr string `yaml:"providerAddr"`
@@ -110,7 +110,7 @@ func GetConfig() *Config {
 				Provider      string `yaml:"provider"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Provider:      "nginx-server/zk",
+				Provider:      "nginx:3001",
 				RequestLength: 40,
 			},
 			ChatCacheExpiration: time.Minute * 20,

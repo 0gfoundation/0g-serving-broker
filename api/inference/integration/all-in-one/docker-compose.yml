@@ -1,7 +1,6 @@
 services:
   hardhat-node-with-contract:
     image: raven20241/hardhat-compute-network-contract:dev
-    container_name: hardhat-node-with-contract
     ports:
       - "8545:8545"
     healthcheck:
@@ -12,7 +11,6 @@ services:
       - localhost
   mysql:
     image: mysql:8.0
-    container_name: 0g-serving-broker-db
     ports:
       - "33060:3306"
     environment:
@@ -31,7 +29,6 @@ services:
   # It can start and proxy to broker when broker becomes available
   nginx:
     image: nginx:1.27.0
-    container_name: nginx-server
     ports:
       - "3080:80"
       - "30443:443"
@@ -56,7 +53,6 @@ services:
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-broker
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -83,7 +79,6 @@ services:
   # Event service starts after broker is ready
   0g-serving-provider-event:
     image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
-    container_name: 0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
@@ -107,7 +102,6 @@ services:
   # ZK service instances - all identical, load balanced by nginx
   zk-service-1:
     image: ghcr.io/0glabs/zk:0.2.1
-    container_name: zk-service-1
     environment:
       JS_PROVER_PORT: 3001
     volumes:
@@ -124,7 +118,6 @@ services:
       - localhost
   zk-service-2:
     image: ghcr.io/0glabs/zk:0.2.1
-    container_name: zk-service-2
     environment:
       JS_PROVER_PORT: 3002
     volumes:
@@ -141,7 +134,6 @@ services:
       - localhost
   zk-service-3:
     image: ghcr.io/0glabs/zk:0.2.1
-    container_name: zk-service-3
     environment:
       JS_PROVER_PORT: 3003
     volumes:
@@ -158,7 +150,6 @@ services:
       - localhost
   prometheus:
     image: prom/prometheus:v2.45.2
-    container_name: prometheus
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
@@ -177,7 +168,6 @@ services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
-    container_name: grafana
     ports:
       - "3003:3000"
     environment:
@@ -196,7 +186,6 @@ services:
 
   prometheus-node-exporter:
     image: prom/node-exporter:v1.7.0
-    container_name: prometheus-node-exporter
     restart: always
     volumes:
       - /proc:/host/proc:ro

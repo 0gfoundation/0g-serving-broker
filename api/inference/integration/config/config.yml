@@ -2,7 +2,7 @@
 
 # CORS allowed origins for API access
 allowOrigins:
-  - "http://localhost:4000"
+  - "*"
 
 # Smart contract address for the serving broker
 contractAddress: "0x9A30Ae15ee33Bbd777113c9C64b31d7f717C97A0"
@@ -10,7 +10,7 @@ contractAddress: "0x9A30Ae15ee33Bbd777113c9C64b31d7f717C97A0"
 # Database configuration
 database:
   # Database connection string (format: user:password@tcp(host:port)/database?parseTime=true)
-  provider: "root:123456@tcp(0g-serving-provider-broker-db:3306)/provider?parseTime=true"
+  provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true"
 
 # Event service configuration
 event:
@@ -93,7 +93,7 @@ monitor:
 # Zero-knowledge configuration
 zk:
   # Provider URL for ZK service
-  provider: "nginx-server:3001"
+  provider: "nginx:3001"
 
   # Maximum request length for ZK operations
   requestLength: 40
