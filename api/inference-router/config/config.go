@@ -59,8 +59,8 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			LedgerCA:  "0x1a85Dd32da10c170F4f138d082DDc496ab3E5BAa",
-			ServingCA: "0x5299bd255B76305ae08d7F95B270A485c6b95D54",
+			LedgerCA:  "0x20f6E41b27fB6437B6ED61a42DcddB6328749F84",
+			ServingCA: "0x9A30Ae15ee33Bbd777113c9C64b31d7f717C97A0",
 			Database: struct {
 				Router string `yaml:"router"`
 			}{

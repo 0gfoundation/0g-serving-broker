@@ -21,24 +21,48 @@ func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	return h
 }
 
+// corsMiddleware handles CORS for individual routes
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
+
 func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
 	// service
-	group.GET("/service", h.GetService)
+	group.GET("/service", corsMiddleware(), h.GetService)
 
 	// settle
-	group.POST("/settle", h.SettleFees)
+	group.POST("/settle", corsMiddleware(), h.SettleFees)
 
 	// account
-	group.GET("/user", h.ListUserAccount)
-	group.GET("/user/:user", h.GetUserAccount)
-	group.POST("sync-account", h.SyncUserAccounts)
+	group.GET("/user", corsMiddleware(), h.ListUserAccount)
+	group.GET("/user/:user", corsMiddleware(), h.GetUserAccount)
+	group.POST("sync-account", corsMiddleware(), h.SyncUserAccounts)
 
 	// request
-	group.GET("/request", h.ListRequest)
+	group.GET("/request", corsMiddleware(), h.ListRequest)
 
-	group.GET("/quote", h.GetQuote)
+	group.GET("/quote", corsMiddleware(), h.GetQuote)
+
+	//nvidia TEE verification
+	group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)
+	group.OPTIONS("/quote/verify/gpu", corsMiddleware(), func(c *gin.Context) {
+		c.Status(204)
+	})
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

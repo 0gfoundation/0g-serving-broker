@@ -80,10 +80,8 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			AllowOrigins: []string{
-				"http://localhost:4000",
-			},
-			ContractAddress: "0x5299bd255B76305ae08d7F95B270A485c6b95D54",
+			AllowOrigins:    []string{"*"},
+			ContractAddress: "0x9A30Ae15ee33Bbd777113c9C64b31d7f717C97A0",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{

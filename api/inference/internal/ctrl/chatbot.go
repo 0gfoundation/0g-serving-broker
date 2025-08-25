@@ -101,6 +101,7 @@ func getInputCount(reqBody []byte) (int64, error) {
 		return 0, fmt.Errorf("failed to marshal messages: %w", err)
 	}
 	return int64(len(messagesBytes)), nil
+	// return int64(1), nil
 }
 
 func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
