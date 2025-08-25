@@ -13,3 +13,4 @@ meili_data_v1.7
 **/grafana
 
 **.local.*
+node_modules/

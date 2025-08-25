@@ -102,7 +102,7 @@ func Main() {
 	}
 	settleFeesErr := ctrl.SettleFees(ctx)
 	if settleFeesErr != nil {
-		panic(settleFeesErr)
+		log.Printf("error settling fees: %v", settleFeesErr)
 	}
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
