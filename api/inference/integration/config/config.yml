@@ -1,0 +1,105 @@
+# Configuration file for 0g-serving-broker inference service
+
+# CORS allowed origins for API access
+allowOrigins:
+  - "*"
+
+# Smart contract address for the serving broker
+contractAddress: "0x9A30Ae15ee33Bbd777113c9C64b31d7f717C97A0"
+
+# Database configuration
+database:
+  # Database connection string (format: user:password@tcp(host:port)/database?parseTime=true)
+  provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true"
+
+# Event service configuration
+event:
+  # Address where the event service listens
+  providerAddr: ":8088"
+
+# Gas price configuration for blockchain transactions
+# Leave empty for automatic gas price detection
+gasPrice: <gasPrice>
+
+# Maximum gas price willing to pay for transactions
+# Leave empty for no limit
+maxGasPrice: <maxGasPrice>
+
+# Timing intervals for various processing tasks (in seconds)
+interval:
+  # Buffer time before automatic settlement triggers
+  autoSettleBufferTime: 60
+
+  # Interval for forced settlement processor (in seconds)
+  forceSettlementProcessor: 600
+
+  # Interval for regular settlement processor (in seconds)
+  settlementProcessor: 300
+
+# Service configuration for the inference provider
+service:
+  # URL where the serving broker exposes its API (required)
+  servingUrl: <servingUrl>
+
+  # Target URL for the actual model inference backend (required)
+  targetUrl: <targetUrl>
+
+  # Price per input token (in wei or smallest unit) (required)
+  inputPrice: <inputPrice>
+
+  # Price per output token (in wei or smallest unit) (required)
+  outputPrice: <outputPrice>
+
+  # Type of service (e.g., "chatbot", "inference", "training")
+  type: "chatbot"
+
+  # Model type identifier (e.g., "llama", "gpt", etc.) (required)
+  model: <model>
+
+  # Verifiability mode for the service
+  verifiability: "TeeML"
+
+  # Additional secrets/credentials for service authentication
+  additionalSecret: {}
+
+# Network configurations for blockchain connections
+networks:
+  # Example network configuration - 0G testnet
+  ethereum0g:
+    # RPC URL for the blockchain network
+    url: "https://evmrpc-testnet.0g.ai"
+
+    # Chain ID of the network
+    chainID: 16601
+
+    # Private keys for transaction signing (keep secure!)
+    privateKeys:
+      - <privateKey>
+
+    # Maximum number of transactions to process in parallel
+    transactionLimit: 1000000
+
+    # Buffer for gas estimation
+    gasEstimationBuffer: 10000
+
+# Monitoring configuration
+monitor:
+  # Enable/disable monitoring service
+  enable: false
+
+  # Address of the monitoring event service
+  eventAddress: "0g-serving-provider-event:3081"
+
+# Zero-knowledge configuration
+zk:
+  # Provider URL for ZK service
+  provider: "nginx:3001"
+
+  # Maximum request length for ZK operations
+  requestLength: 40
+
+# Chat session cache expiration time (in Go duration format, e.g., "20m" for 20 minutes)
+chatCacheExpiration: "20m"
+
+# Enable NVIDIA GPU support for inference
+nvGPU: false

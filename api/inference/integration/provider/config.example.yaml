@@ -7,14 +7,14 @@ networks:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16601
     privateKeys:
-      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - <Private_Key>
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
 service:
   servingUrl: <Serving URL>
   targetUrl: <Target URL>
-  inputPrice: 1
-  outputPrice: 1
+  inputPrice: <Input Price>
+  outputPrice: <Output Price>
   type: "chatbot"
   model: <Model>
   verifiability: "TeeML"

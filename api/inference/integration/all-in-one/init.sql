@@ -1,1 +1,7 @@
 CREATE DATABASE IF NOT EXISTS provider CHARACTER SET utf8mb4;
+
+CREATE USER IF NOT EXISTS 'provider'@'%' IDENTIFIED BY 'provider';
+
+GRANT ALL PRIVILEGES ON provider.* TO 'provider'@'%';
+
+FLUSH PRIVILEGES;

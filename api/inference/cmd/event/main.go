@@ -58,7 +58,7 @@ func Main() {
 		panic(err)
 	}
 
-	zk := zkclient.NewZKClient(conf.ZKSettlement.Provider, conf.ZKSettlement.RequestLength)
+	zk := zkclient.NewZKClient(conf.ZK.Provider, conf.ZK.RequestLength)
 	var teeClientType tee.ClientType
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
