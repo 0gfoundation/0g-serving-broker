@@ -50,7 +50,7 @@ func Main() {
 	}
 	defer contract.Close()
 
-	zk := zkclient.NewZKClient(config.ZKProver.Provider, config.ZKProver.RequestLength)
+	zk := zkclient.NewZKClient(config.ZK.Provider, config.ZK.RequestLength)
 	engine := gin.New()
 
 	if config.Monitor.Enable {

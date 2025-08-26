@@ -14,3 +14,4 @@ meili_data_v1.7
 
 **.local.*
 node_modules/
+.claude
