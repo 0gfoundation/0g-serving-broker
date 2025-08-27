@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  router-ha:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Required: Provider addresses (comma-separated)
+      PROVIDERS: "0xProvider1,0xProvider2,0xProvider3"
+      
+      # Required: Private keys for high availability (comma-separated)
+      # Each key creates a separate router instance
+      KEYS: "0x1234...,0x5678...,0x9abc..."
+      
+      # Optional: Network configuration
+      RPC_ENDPOINT: "https://evmrpc-testnet.0g.ai"
+      LEDGER_CA: "0xLedgerContractAddress"
+      INFERENCE_CA: "0xInferenceContractAddress"
+      GAS_PRICE: "20"
+      
+      # Optional: Server configuration
+      PORT: "3000"
+      HOST: "0.0.0.0"
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
