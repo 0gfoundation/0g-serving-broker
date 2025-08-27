@@ -18,5 +18,5 @@ var (
 	}
 
 	// Should align with the topUpTriggerThreshold in the client sdk
-	SettleTriggerThreshold = int64(500)
+	SettleTriggerThreshold = int64(10000)
 )
