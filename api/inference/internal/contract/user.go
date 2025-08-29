@@ -2,6 +2,7 @@ package providercontract
 
 import (
 	"context"
+	"math/big"
 
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -19,16 +20,26 @@ func (c *ProviderContract) ListUserAccount(ctx context.Context) ([]contract.Acco
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
-	accounts, err := c.Contract.GetAllAccounts(callOpts)
-	if err != nil {
-		return nil, err
-	}
-	ret := []contract.Account{}
-	for i := range accounts {
-		if accounts[i].Provider.String() != c.ProviderAddress {
-			continue
+	
+	// limit in sol is limited to 50
+	const batchSize = 50
+	offset := big.NewInt(0)
+	limit := big.NewInt(batchSize)
+	
+	var allAccounts []contract.Account
+	
+	for {
+		result, err := c.Contract.GetAccountsByProvider(callOpts, common.HexToAddress(c.ProviderAddress), offset, limit)
+		if err != nil {
+			return nil, err
 		}
-		ret = append(ret, accounts[i])
+		
+		allAccounts = append(allAccounts, result.Accounts...)
+		
+		if offset.Add(offset, limit).Cmp(result.Total) >= 0 {
+			break
+		}
 	}
-	return ret, nil
+	
+	return allAccounts, nil
 }
