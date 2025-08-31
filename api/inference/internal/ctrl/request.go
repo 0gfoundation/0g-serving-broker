@@ -154,10 +154,23 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	if account.UnsettledFee == nil || account.LockBalance == nil {
 		return errors.New("nil unsettledFee or lockBalance in account")
 	}
-	total, err := util.Add(fee, account.UnsettledFee)
+	
+	// Calculate response fee reservation
+	responseFeeReservation, err := util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactor)
+	if err != nil {
+		return errors.Wrap(err, "calculate response fee reservation")
+	}
+	
+	// Add input fee, unsettled fee, and response fee reservation
+	totalWithInput, err := util.Add(fee, account.UnsettledFee)
 	if err != nil {
 		return err
 	}
+	total, err := util.Add(totalWithInput, responseFeeReservation)
+	if err != nil {
+		return err
+	}
+	
 	cmp1, err := util.Compare(total, account.LockBalance)
 	if err != nil {
 		return err
@@ -174,7 +187,11 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	if err != nil {
 		return err
 	}
-	totalNew, err := util.Add(fee, account.UnsettledFee)
+	totalWithInputNew, err := util.Add(fee, account.UnsettledFee)
+	if err != nil {
+		return err
+	}
+	totalNew, err := util.Add(totalWithInputNew, responseFeeReservation)
 	if err != nil {
 		return err
 	}
@@ -186,7 +203,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return nil
 	}
 	ctx.Set("ignoreError", true)
-	return fmt.Errorf("insufficient balance, total fee of %s exceeds the available balance of %s", totalNew.String(), *newAccount.LockBalance)
+	return fmt.Errorf("insufficient balance, total fee of %s (including response reservation) exceeds the available balance of %s", totalNew.String(), *newAccount.LockBalance)
 }
 
 func updateRequestField(req *model.Request, key, value string) error {
