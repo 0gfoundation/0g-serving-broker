@@ -25,7 +25,7 @@ type SettlementInfo struct {
 	TotalFeeInSettlement      string `json:"total_fee_in_settlement"`
 }
 
-func (c *Ctrl) SettleFees(ctx context.Context) error {
+func (c *Ctrl) PrepareSettle(ctx context.Context) error {
 	// -1 minute to avoid the nonce in contract too close to the current time, which could lead to some requests with nonces a little smaller than the recorded nonce being invalid (in concurrent cases)
 	// use `* 10000` since the nonce form should align with the getNonceWithCache in client
 	maxNonce := time.Now().UTC().Add(-1*time.Minute).UnixMilli() * 10000
@@ -47,7 +47,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		return errors.Wrap(err, "list request from db")
 	}
 	if len(reqs) == 0 {
-		return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
+		return errors.New("no reqs")
 	}
 	latestReqCreateAt := reqs[0].CreatedAt
 
@@ -57,6 +57,19 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	for _, req := range reqs {
 		if latestReqCreateAt.Before(*req.CreatedAt) {
 			latestReqCreateAt = req.CreatedAt
+		}
+
+		if progress, ok := c.prepareSettleProgress[req.UserAddress]; ok {
+			cmp, err := util.Compare(progress, req.Nonce)
+			if err != nil {
+				fmt.Printf("%v", errors.Wrap(err, "compare nonce"))
+				continue
+			}
+
+			if cmp >= 0 {
+				fmt.Printf("req %v is processed", req.Nonce)
+				continue
+			}
 		}
 
 		var sig []int64
@@ -97,7 +110,7 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 			if err != nil {
 				return errors.Wrap(err, "compare nonce")
 			}
-			if minNonce == "0" || cmp > 0 {
+			if minNonce == "0" || cmp < 0 {
 				minNonce = req.Nonce
 			}
 
@@ -158,8 +171,22 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 	}
 
 	var settlementInfos []SettlementInfo
-	for k := range categorizedSettlementInfo {
-		settlementInfos = append(settlementInfos, categorizedSettlementInfo[k])
+	for userAddr, info := range categorizedSettlementInfo {
+		if progress, ok := c.prepareSettleProgress[userAddr]; ok {
+			cmp, err := util.Compare(progress, info.MinNonceInSettlement)
+			if err != nil {
+				fmt.Printf("%v", errors.Wrap(err, "compare nonce"))
+				continue
+			}
+
+			if cmp >= 0 {
+				fmt.Printf("skip user %v", userAddr)
+				continue
+			}
+		}
+
+		c.prepareSettleProgress[userAddr] = info.MinNonceInSettlement
+		settlementInfos = append(settlementInfos, categorizedSettlementInfo[userAddr])
 	}
 	settlementInfoJSON, err := json.Marshal(settlementInfos)
 	if err != nil {
@@ -167,18 +194,56 @@ func (c *Ctrl) SettleFees(ctx context.Context) error {
 		settlementInfoJSON = []byte("[]")
 	}
 	log.Printf("Settlement infos: %s", string(settlementInfoJSON))
-	if err := c.contract.SettleFees(ctx, verifierInput); err != nil {
+
+	c.settleMu.Lock()
+	defer c.settleMu.Unlock()
+
+	c.settleVerifierInput.NumChunks.Add(c.settleVerifierInput.NumChunks, verifierInput.NumChunks)
+	c.settleVerifierInput.InProof = append(c.settleVerifierInput.InProof, verifierInput.InProof...)
+	c.settleVerifierInput.ProofInputs = append(c.settleVerifierInput.ProofInputs, verifierInput.ProofInputs...)
+	c.settleVerifierInput.SegmentSize = append(c.settleVerifierInput.SegmentSize, verifierInput.SegmentSize...)
+	for userAddr, info := range categorizedSettlementInfo {
+		if info.TotalFeeInSettlement != "0" {
+			if fee, ok := c.settleVerifierInput.totalFeeInSettlement[userAddr]; ok {
+				newFee, err := util.Add(fee, info.TotalFeeInSettlement)
+				if err != nil {
+					panic("add fee")
+				}
+				c.settleVerifierInput.totalFeeInSettlement[userAddr] = newFee.String()
+			} else {
+				c.settleVerifierInput.totalFeeInSettlement[userAddr] = info.TotalFeeInSettlement
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *Ctrl) SettleFees(ctx context.Context) error {
+	c.settleMu.Lock()
+
+	if err := c.contract.SettleFees(ctx, c.settleVerifierInput.VerifierInput); err != nil {
+		c.settleMu.Unlock()
 		return errors.Wrapf(err, "settle fees in contract, the ")
 	}
 
-	if err := c.db.UpdateRequest(latestReqCreateAt); err != nil {
-		return errors.Wrap(err, "update request in db")
+	c.settleVerifierInput.VerifierInput = contract.VerifierInput{
+		InProof:     []*big.Int{},
+		ProofInputs: []*big.Int{},
+		NumChunks:   big.NewInt(0),
+		SegmentSize: []*big.Int{},
 	}
+
+	// todo: exclude unsettle requests
+	c.db.ResetUnsettledFee()
+
+	c.settleMu.Unlock()
+
 	if err := c.SyncUserAccounts(ctx); err != nil {
 		return errors.Wrap(err, "synchronize accounts from the contract to the database")
 	}
 
-	return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
+	return nil
 }
 
 func (c *Ctrl) ProcessSettlement(ctx context.Context) error {

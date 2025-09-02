@@ -33,9 +33,10 @@ type Config struct {
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
 	Interval    struct {
-		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-		SettlementProcessor      int `yaml:"settlementProcessor"`
+		AutoSettleBufferTime     int           `yaml:"autoSettleBufferTime"`
+		ForceSettlementProcessor int           `yaml:"forceSettlementProcessor"`
+		SettlementProcessor      int           `yaml:"settlementProcessor"`
+		PrepareSettleDuration    time.Duration `yaml:"prepareSettleDuration"`
 	} `yaml:"interval"`
 	Service  Service         `yaml:"service"`
 	Networks config.Networks `mapstructure:"networks" yaml:"networks"`
@@ -91,13 +92,15 @@ func GetConfig() *Config {
 			GasPrice:    "",
 			MaxGasPrice: "",
 			Interval: struct {
-				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-				SettlementProcessor      int `yaml:"settlementProcessor"`
+				AutoSettleBufferTime     int           `yaml:"autoSettleBufferTime"`
+				ForceSettlementProcessor int           `yaml:"forceSettlementProcessor"`
+				SettlementProcessor      int           `yaml:"settlementProcessor"`
+				PrepareSettleDuration    time.Duration `yaml:"prepareSettleDuration"`
 			}{
 				AutoSettleBufferTime:     60,
 				ForceSettlementProcessor: 600,
 				SettlementProcessor:      300,
+				PrepareSettleDuration:    60 * time.Second,
 			},
 			Monitor: struct {
 				Enable       bool   `yaml:"enable"`

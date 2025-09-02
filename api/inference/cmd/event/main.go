@@ -79,15 +79,14 @@ func Main() {
 	}
 
 	signer, _ := signer.NewSigner()
-	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
+	contract.EncryptedPrivKey, err = signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
 	if err != nil {
 		panic(err)
 	}
-	contract.EncryptedPrivKey = encryptedKey
 
 	ctrl := ctrl.New(db, contract, zk, conf, nil, teeService, signer)
 
-	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Interval.PrepareSettleDuration, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}
