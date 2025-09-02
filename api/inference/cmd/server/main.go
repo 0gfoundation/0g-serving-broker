@@ -89,15 +89,17 @@ func Main() {
 	}
 
 	signer, _ := signer.NewSigner()
-	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
+	contract.EncryptedPrivKey, err = signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
 	if err != nil {
 		panic(err)
 	}
-	contract.EncryptedPrivKey = encryptedKey
 
 	ctrl := ctrl.New(db, contract, zk, config, svcCache, teeService, signer)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
+		panic(err)
+	}
+	if err := ctrl.PrepareSettle((ctx)); err != nil {
 		panic(err)
 	}
 	settleFeesErr := ctrl.SettleFees(ctx)

@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"math/big"
 	"sync"
 	"time"
 
@@ -8,11 +9,17 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/zkclient"
 )
+
+type SettleVerifierInput struct {
+	contract.VerifierInput
+	totalFeeInSettlement map[string]string
+}
 
 type Ctrl struct {
 	mu       sync.RWMutex
@@ -28,11 +35,15 @@ type Ctrl struct {
 	teeService          *tee.TeeService
 	signer              *signer.Signer
 	chatCacheExpiration time.Duration
+
+	prepareSettleProgress map[string]string
+	settleMu              sync.RWMutex
+	settleVerifierInput   *SettleVerifierInput
 }
 
 func New(
 	db *db.DB,
-	contract *providercontract.ProviderContract,
+	providerContract *providercontract.ProviderContract,
 	zkclient zkclient.ZKClient,
 	cfg *config.Config,
 	svcCache *cache.Cache,
@@ -40,15 +51,25 @@ func New(
 	signer *signer.Signer,
 ) *Ctrl {
 	p := &Ctrl{
-		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
-		db:                   db,
-		contract:             contract,
-		Service:              cfg.Service,
-		zk:                   zkclient,
-		svcCache:             svcCache,
-		teeService:           teeService,
-		signer:               signer,
-		chatCacheExpiration:  cfg.ChatCacheExpiration,
+		autoSettleBufferTime:  time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
+		db:                    db,
+		contract:              providerContract,
+		Service:               cfg.Service,
+		zk:                    zkclient,
+		svcCache:              svcCache,
+		teeService:            teeService,
+		signer:                signer,
+		chatCacheExpiration:   cfg.ChatCacheExpiration,
+		prepareSettleProgress: make(map[string]string),
+		settleVerifierInput: &SettleVerifierInput{
+			VerifierInput: contract.VerifierInput{
+				InProof:     []*big.Int{},
+				ProofInputs: []*big.Int{},
+				NumChunks:   big.NewInt(0),
+				SegmentSize: []*big.Int{},
+			},
+			totalFeeInSettlement: make(map[string]string),
+		},
 	}
 
 	return p

@@ -17,21 +17,25 @@ type SettlementProcessor struct {
 	checkSettleInterval int
 	forceSettleInterval int
 
+	prepareSettleDuration time.Duration
+
 	enableMonitor bool
 }
 
-func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, enableMonitor bool) *SettlementProcessor {
+func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, prepareSettleDuration time.Duration, enableMonitor bool) *SettlementProcessor {
 	s := &SettlementProcessor{
-		ctrl:                ctrl,
-		checkSettleInterval: checkSettleInterval,
-		forceSettleInterval: forceSettleInterval,
-		enableMonitor:       enableMonitor,
+		ctrl:                  ctrl,
+		checkSettleInterval:   checkSettleInterval,
+		forceSettleInterval:   forceSettleInterval,
+		enableMonitor:         enableMonitor,
+		prepareSettleDuration: prepareSettleDuration,
 	}
 	return s
 }
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
 func (s SettlementProcessor) Start(ctx context.Context) error {
+	prepareSettleTicker := time.NewTicker(s.prepareSettleDuration)
 	checkSettleTicker := time.NewTicker(time.Duration(s.checkSettleInterval) * time.Second)
 	forceSettleTicker := time.NewTicker(time.Duration(s.forceSettleInterval) * time.Second)
 	defer checkSettleTicker.Stop()
@@ -41,11 +45,22 @@ func (s SettlementProcessor) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-prepareSettleTicker.C:
+			s.handlePrepareSettle(ctx)
 		case <-checkSettleTicker.C:
 			s.handleCheckSettle(ctx)
 		case <-forceSettleTicker.C:
 			s.handleForceSettle(ctx)
 		}
+	}
+}
+
+func (s *SettlementProcessor) handlePrepareSettle(ctx context.Context) {
+	log.Printf("prepare settle")
+	if err := s.ctrl.PrepareSettle(ctx); err != nil {
+		s.incrementMonitorCounter(monitor.EventPrepareSettleErrorCount, "Process prepare settlement: %s", err)
+	} else {
+		s.incrementMonitorCounter(monitor.EventPrepareSettleCount, "", nil)
 	}
 }
 
