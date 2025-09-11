@@ -1,8 +1,6 @@
 package ctrl
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -13,9 +11,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
-	"github.com/0glabs/0g-serving-broker/inference/zkclient/models"
 )
 
 func (c *Ctrl) CreateRequest(req model.Request) error {
@@ -49,12 +45,13 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 	return req, nil
 }
 
-func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee, expectedInputFee string) error {
+func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request) error {
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
 	if err != nil {
 		return errors.Wrap(err, "get account from contract")
 	}
-	if !c.signer.IsCurrentSigner(contractAccount.ProviderPubKey) {
+
+	if c.teeService.Address != contractAccount.TeeSignerAddress {
 		return errors.New("user not acknowledge the provider")
 	}
 
@@ -63,104 +60,25 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request, expectedFee,
 		return err
 	}
 
-	err = c.validateSig(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	err = c.validateNonce(req, contractAccount)
-	if err != nil {
-		return err
-	}
-
-	err = c.validateFee(ctx, req, account, expectedFee, expectedInputFee)
-	if err != nil {
-		return err
-	}
-
-	err = c.validateBalanceAdequacy(ctx, account, req.Fee)
+	err = c.validateBalanceAdequacy(ctx, account, req.InputFee)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *Ctrl) validateSig(ctx context.Context, req model.Request) error {
-	reqInZK := &models.RequestResponse{
-		ReqFee:          req.InputFee,
-		Nonce:           req.Nonce,
-		ProviderAddress: c.contract.ProviderAddress,
-		UserAddress:     req.UserAddress,
-	}
-	var sig []int64
-	err := json.Unmarshal([]byte(req.Signature), &sig)
-	if err != nil {
-		return errors.New("Failed to parse signature")
-	}
-	ret, err := c.CheckSignatures(ctx, reqInZK, [][]int64{sig})
-	if err != nil {
-		return errors.Wrapf(err, "check signature")
-	}
-	if len(ret) == 0 || !ret[0] {
-		return errors.New("invalid signature")
-	}
-	return nil
-}
-
-func (c *Ctrl) validateFee(ctx *gin.Context, actual model.Request, account model.User, expectedFee, expectedInputFee string) error {
-	if err := c.compareFees("inputFee", actual.InputFee, &expectedInputFee); err != nil {
-		return err
-	}
-	if err := c.compareFees("fee", actual.Fee, &expectedFee); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Ctrl) compareFees(feeType, actualFee string, expectedFee *string) error {
-	if expectedFee == nil {
-		return nil
-	}
-	cmp, err := util.Compare(actualFee, *expectedFee)
-	if err != nil {
-		return err
-	}
-	if cmp < 0 {
-		expectedFeeA0gi, err := util.NeuronToA0gi(*expectedFee)
-		if err != nil {
-			log.Printf("Failed to convert %s to A0GI: %v", feeType, err)
-		}
-		actualFeeA0gi, err := util.NeuronToA0gi(actualFee)
-		if err != nil {
-			log.Printf("Failed to convert actual.%s to A0GI: %v", feeType, err)
-		}
-		return fmt.Errorf("invalid %s, expected %s A0GI, but received %s A0GI", feeType, expectedFeeA0gi, actualFeeA0gi)
-	}
-	return nil
-}
-
-func (c *Ctrl) validateNonce(actual model.Request, contractAccount contract.Account) error {
-	cmp, err := util.Compare(actual.Nonce, contractAccount.Nonce)
-	if err != nil {
-		return err
-	}
-	if cmp > 0 {
-		return nil
-	}
-	return fmt.Errorf("invalid nonce, received nonce %s not greater than the previous nonce: %s", actual.Nonce, contractAccount.Nonce)
-}
 
 func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee string) error {
 	if account.UnsettledFee == nil || account.LockBalance == nil {
 		return errors.New("nil unsettledFee or lockBalance in account")
 	}
-	
+
 	// Calculate response fee reservation
 	responseFeeReservation, err := util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactor)
 	if err != nil {
 		return errors.Wrap(err, "calculate response fee reservation")
 	}
-	
+
 	// Add input fee, unsettled fee, and response fee reservation
 	totalWithInput, err := util.Add(fee, account.UnsettledFee)
 	if err != nil {
@@ -170,7 +88,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	if err != nil {
 		return err
 	}
-	
+
 	cmp1, err := util.Compare(total, account.LockBalance)
 	if err != nil {
 		return err
@@ -210,16 +128,6 @@ func updateRequestField(req *model.Request, key, value string) error {
 	switch key {
 	case "Address":
 		req.UserAddress = value
-	case "Fee":
-		req.Fee = value
-	case "Input-Fee":
-		req.InputFee = value
-	case "Nonce":
-		req.Nonce = value
-	case "Signature":
-		req.Signature = value
-	case "Request-Hash":
-		req.RequestHash = value
 	case "VLLM-Proxy":
 		v, err := strconv.ParseBool(value)
 		if err != nil {

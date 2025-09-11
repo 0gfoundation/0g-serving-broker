@@ -7,13 +7,19 @@ var (
 		"/chat/completions": {},
 	}
 
-	RequestMetaData = map[string]struct{}{
+	// Keep this as to remove duplicate headers from incoming request
+	RequestMetaDataDuplicate = map[string]struct{}{
 		"Address":      {},
 		"Fee":          {},
 		"Input-Fee":    {},
 		"Nonce":        {},
 		"Request-Hash": {},
 		"Signature":    {},
+		"VLLM-Proxy":   {},
+	}
+
+	RequestMetaData = map[string]struct{}{
+		"Address":      {},
 		"VLLM-Proxy":   {},
 	}
 
