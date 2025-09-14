@@ -7,7 +7,8 @@ var (
 		"/chat/completions": {},
 	}
 
-	RequestMetaData = map[string]struct{}{
+	// Keep this as to remove duplicate headers from incoming request
+	RequestMetaDataDuplicate = map[string]struct{}{
 		"Address":      {},
 		"Fee":          {},
 		"Input-Fee":    {},
@@ -17,9 +18,17 @@ var (
 		"VLLM-Proxy":   {},
 	}
 
+	RequestMetaData = map[string]struct{}{
+		"Address":      {},
+		"VLLM-Proxy":   {},
+	}
+
 	// Should align with the topUpTriggerThreshold in the client sdk
 	SettleTriggerThreshold = int64(10000)
 
 	// Response fee reservation factor for balance adequacy validation
 	ResponseFeeReservationFactor = int64(5000)
+
+	// TEE settlement batch size to avoid gas limit issues
+	TEESettlementBatchSize = 50
 )

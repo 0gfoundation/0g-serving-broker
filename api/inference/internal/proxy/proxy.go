@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/gin-contrib/cors"
+	"github.com/google/uuid"
 
 	"github.com/gin-gonic/gin"
 
@@ -134,7 +135,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	if err := p.ctrl.ValidateRequest(ctx, req, req.Fee, expectedInputFee); err != nil {
+	req.InputFee = expectedInputFee
+	req.Fee = req.InputFee
+	req.Nonce = uuid.New().String()
+	req.RequestHash = req.Nonce
+
+	if err := p.ctrl.ValidateRequest(ctx, req); err != nil {
 		handleBrokerError(ctx, err, "validate request")
 		return
 	}
