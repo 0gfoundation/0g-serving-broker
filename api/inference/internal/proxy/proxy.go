@@ -136,6 +136,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	req.InputFee = expectedInputFee
+	req.Fee = req.InputFee
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 

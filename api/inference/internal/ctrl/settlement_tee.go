@@ -97,28 +97,52 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		settlements = append(settlements, settlementData)
 	}
 
-	// Log settlements for debugging
-	settlementsJSON, err := json.Marshal(settlements)
-	if err != nil {
-		log.Println("Error marshalling TEE settlements:", err)
-	} else {
-		log.Printf("TEE settlements to process: %s", string(settlementsJSON))
-	}
+	// Log total settlements for debugging
+	log.Printf("Total TEE settlements to process: %d users", len(settlements))
 
-	// Call contract with TEE signed settlements
-	failedUsers, err := c.contract.SettleFeesWithTEE(ctx, settlements)
-	if err != nil {
-		return errors.Wrap(err, "settle fees with TEE in contract")
+	// Process settlements in batches to avoid gas limit issues
+	var allFailedUsers []common.Address
+	
+	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
+		// Calculate the end index for this batch
+		end := i + constant.TEESettlementBatchSize
+		if end > len(settlements) {
+			end = len(settlements)
+		}
+		
+		// Get the current batch
+		batch := settlements[i:end]
+		
+		// Log batch for debugging
+		batchJSON, err := json.Marshal(batch)
+		if err != nil {
+			log.Printf("Error marshalling TEE settlements batch %d-%d: %v", i, end-1, err)
+		} else {
+			log.Printf("Processing TEE settlements batch %d-%d (users %d-%d of %d): %s", 
+				i/constant.TEESettlementBatchSize+1, (end-1)/constant.TEESettlementBatchSize+1, i+1, end, len(settlements), string(batchJSON))
+		}
+		
+		// Call contract with the current batch of TEE signed settlements
+		failedUsers, err := c.contract.SettleFeesWithTEE(ctx, batch)
+		if err != nil {
+			return errors.Wrapf(err, "settle fees with TEE in contract for batch %d-%d", i, end-1)
+		}
+		
+		// Accumulate failed users from this batch
+		allFailedUsers = append(allFailedUsers, failedUsers...)
+		
+		// Log progress
+		log.Printf("Completed batch %d-%d: %d failed users", i+1, end, len(failedUsers))
 	}
-
-	// Convert failed users to string slice for database query
+	
+	// Convert all failed users to string slice for database query
 	var failedUserStrings []string
-	for _, user := range failedUsers {
+	for _, user := range allFailedUsers {
 		failedUserStrings = append(failedUserStrings, user.Hex())
 	}
 
 	// Log failed users for debugging
-	if len(failedUsers) > 0 {
+	if len(allFailedUsers) > 0 {
 		log.Printf("Settlement failed for users: %v", failedUserStrings)
 	}
 

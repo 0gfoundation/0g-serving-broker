@@ -28,4 +28,7 @@ var (
 
 	// Response fee reservation factor for balance adequacy validation
 	ResponseFeeReservationFactor = int64(5000)
+
+	// TEE settlement batch size to avoid gas limit issues
+	TEESettlementBatchSize = 50
 )
