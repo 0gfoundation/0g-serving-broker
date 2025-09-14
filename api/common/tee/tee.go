@@ -164,3 +164,27 @@ func (s *TeeService) GetQuote() (string, error) {
 
 	return string(jsonData), nil
 }
+
+// Sign signs the given message hash with the TEE provider signer
+// This matches the signature format expected by Ethereum contracts
+func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
+	if s.ProviderSigner == nil {
+		return nil, errors.New("provider signer not initialized")
+	}
+	
+	// Add Ethereum Signed Message prefix (matching the contract expectation)
+	ethPrefix := []byte("\x19Ethereum Signed Message:\n32")
+	prefixedHash := crypto.Keccak256(ethPrefix, messageHash)
+	
+	signature, err := crypto.Sign(prefixedHash, s.ProviderSigner)
+	if err != nil {
+		return nil, errors.Wrap(err, "signing message")
+	}
+	
+	// Adjust v value to match Ethereum standards (27/28 instead of 0/1)
+	if signature[64] == 0 || signature[64] == 1 {
+		signature[64] += 27
+	}
+	
+	return signature, nil
+}

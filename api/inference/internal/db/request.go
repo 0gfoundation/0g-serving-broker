@@ -10,16 +10,19 @@ import (
 	"gorm.io/gorm"
 )
 
+func (d *DB) GetRequest(requestHash string) (model.Request, error) {
+	req := model.Request{}
+	ret := d.db.Where(&model.Request{RequestHash: requestHash}).First(&req)
+	return req, ret.Error
+}
+
 func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
 	list := []model.Request{}
 	var totalFee sql.NullInt64
 
 	err := d.db.Transaction(func(tx *gorm.DB) error {
 		ret := tx.Model(model.Request{}).
-			Where("processed = ? and tee_signature <> ''", q.Processed)
-		if q.MaxNonce != nil {
-			ret = ret.Where("nonce <= ?", *q.MaxNonce)
-		}
+			Where("processed = ? ", q.Processed)
 
 		if q.Sort != nil {
 			ret = ret.Order(*q.Sort)
@@ -53,16 +56,38 @@ func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
 	return ret.Error
 }
 
-func (d *DB) UpdateOutputFeeWithSignature(requestHash, userAddress, outputFee, requestFee, unsettledFee, signature string) error {
+func (d *DB) DeleteSettledRequests(latestReqCreateAt *time.Time) error {
+	ret := d.db.
+		Where("processed = ?", false).
+		Where("created_at <= ?", *latestReqCreateAt).
+		Delete(&model.Request{})
+	return ret.Error
+}
+
+func (d *DB) DeleteSettledRequestsExcludingUsers(latestReqCreateAt *time.Time, excludedUsers []string) error {
+	if len(excludedUsers) == 0 {
+		// If no users to exclude, delete all settled requests
+		return d.DeleteSettledRequests(latestReqCreateAt)
+	}
+
+	ret := d.db.
+		Where("processed = ?", false).
+		Where("created_at <= ?", *latestReqCreateAt).
+		Where("user_address NOT IN ?", excludedUsers).
+		Delete(&model.Request{})
+	return ret.Error
+}
+
+func (d *DB) UpdateOutputFee(requestHash, userAddress, outputFee, fee, unsettledFee string) error {
 	return d.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Where(&model.Request{
 				RequestHash: requestHash,
 			}).
 			Updates(&model.Request{
-				OutputFee:    outputFee,
-				Fee:          requestFee,
-				TeeSignature: signature}).Error; err != nil {
+				OutputFee: outputFee,
+				Fee:       fee,
+			}).Error; err != nil {
 			return err
 		}
 

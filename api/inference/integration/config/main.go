@@ -57,10 +57,6 @@ type Config struct {
 		Enable       bool   `yaml:"enable,omitempty"`
 		EventAddress string `yaml:"eventAddress,omitempty"`
 	} `yaml:"monitor,omitempty"`
-	ZK struct {
-		Provider      string `yaml:"provider,omitempty"`
-		RequestLength int    `yaml:"requestLength,omitempty"`
-	} `yaml:"zk,omitempty"`
 	ChatCacheExpiration interface{} `yaml:"chatCacheExpiration,omitempty"`
 	NvGPU               bool        `yaml:"nvGPU,omitempty"`
 }
@@ -84,7 +80,6 @@ type PortConfig struct {
 
 // Deployment configuration
 type DeploymentConfig struct {
-	NumInstances  int
 	UseGPU        bool
 	UseTest       bool
 	UseMonitoring bool
@@ -97,42 +92,6 @@ type DeploymentConfig struct {
 const nginxTemplate = `events { }
 
 http {
-    # Unified ZK service cluster with load balancing
-    upstream zk_cluster {
-        # Round-robin load balancing between all zk service instances
-{{- range .ZKServers}}
-        server {{.Name}}:{{.Port}};
-{{- end}}
-    }
-
-    # ZK service proxy on port 3001 for backward compatibility - container access only
-    server {
-        listen 3001;
-        
-        location / {
-            # Only allow access from Docker containers (internal network)
-            allow 172.16.0.0/12;    # Docker default bridge networks
-            allow 10.0.0.0/8;       # Docker custom networks
-            allow 192.168.0.0/16;   # Docker custom networks
-            deny all;
-            
-            proxy_pass http://zk_cluster;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            
-            # Connection pooling and keep-alive
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";
-            
-            # Timeout settings for slow ZK operations
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 120s;
-            proxy_read_timeout 120s;
-        }
-    }
-
     server {
         listen 80;
         
@@ -152,30 +111,6 @@ http {
             proxy_pass http://$broker_backend;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        # Unified ZK service routing with load balancing - container access only
-        location /zk/ {
-            # Only allow access from Docker containers (internal network)
-            allow 172.16.0.0/12;    # Docker default bridge networks
-            allow 10.0.0.0/8;       # Docker custom networks
-            allow 192.168.0.0/16;   # Docker custom networks
-            deny all;
-            
-            proxy_pass http://zk_cluster/;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            
-            # Connection pooling and keep-alive
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";
-            
-            # Timeout settings for slow ZK operations
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 120s;
-            proxy_read_timeout 120s;
         }
 
         location / {
@@ -227,8 +162,7 @@ const dockerComposeTemplate = `services:
     networks:
       - default
 
-  # Nginx only depends on ZK services, not on broker (to avoid circular dependency)
-  # It can start and proxy to broker when broker becomes available
+  # Nginx load balancer
   nginx:
     image: nginx:1.27.0
     ports:
@@ -244,11 +178,6 @@ const dockerComposeTemplate = `services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    depends_on:
-{{- range .ZKServers}}
-      {{.Name}}:
-        condition: service_healthy
-{{- end}}
 
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
@@ -322,26 +251,6 @@ const dockerComposeTemplate = `services:
       nginx:
         condition: service_healthy
 
-  # ZK service instances - all identical, load balanced by nginx
-{{- range .ZKServers}}
-  {{.Name}}:
-    image: ghcr.io/0glabs/zk:0.2.1
-    environment:
-      JS_PROVER_PORT: {{.Port}}
-    volumes:
-      - type: tmpfs
-        target: /app/logs
-    healthcheck:
-      test:
-        ["CMD", "curl", "-f", "-X", "GET", "http://localhost:{{.Port}}/sign-keypair"]
-      interval: 30s
-      timeout: 10s
-      retries: 20
-      start_period: 30s
-    networks:
-      - default
-
-{{- end}}
 {{- if .UseMonitoring}}
   prometheus:
     image: prom/prometheus:v2.45.2
@@ -416,13 +325,7 @@ networks:
     external: false
 `
 
-type ZKServer struct {
-	Name string
-	Port int
-}
-
 type TemplateData struct {
-	ZKServers     []ZKServer
 	UseGPU        bool
 	UseTest       bool
 	UseMonitoring bool
@@ -679,21 +582,6 @@ func promptEnvironmentConfig() (*DeploymentConfig, error) {
 		fmt.Println("   ✓ Monitoring services will be included")
 	}
 
-	// Ask for ZK instances
-	fmt.Print("\n🔄 How many ZK service instances do you want to deploy? [default: 3]: ")
-	response, _ = reader.ReadString('\n')
-	response = strings.TrimSpace(response)
-	if response == "" {
-		config.NumInstances = 3
-	} else {
-		num, err := strconv.Atoi(response)
-		if err != nil || num < 1 || num > 10 {
-			return nil, fmt.Errorf("number of ZK instances must be between 1 and 10")
-		}
-		config.NumInstances = num
-	}
-
-	fmt.Printf("   ✓ Will deploy %d ZK service instances\n", config.NumInstances)
 
 	// Configure ports based on selected services
 	if err := promptPortConfiguration(config); err != nil {
@@ -835,17 +723,7 @@ func validatePort(port string) error {
 }
 
 func generateDeploymentFiles(config *DeploymentConfig) error {
-	// Generate ZK servers list
-	zkServers := make([]ZKServer, config.NumInstances)
-	for i := 0; i < config.NumInstances; i++ {
-		zkServers[i] = ZKServer{
-			Name: fmt.Sprintf("zk-service-%d", i+1),
-			Port: 3001 + i,
-		}
-	}
-
 	templateData := TemplateData{
-		ZKServers:     zkServers,
 		UseGPU:        config.UseGPU,
 		UseTest:       config.UseTest,
 		UseMonitoring: config.UseMonitoring,
@@ -986,7 +864,6 @@ func printSuccessSummary(config *DeploymentConfig) {
 	if config.ProjectName != "" {
 		fmt.Printf("  • Project Name: %s\n", config.ProjectName)
 	}
-	fmt.Printf("  • ZK Instances: %d (container-only access)\n", config.NumInstances)
 	fmt.Printf("  • GPU Support: %t\n", config.UseGPU)
 	fmt.Printf("  • Test Environment: %t\n", config.UseTest)
 	fmt.Printf("  • Monitoring: %t\n", config.UseMonitoring)
@@ -1015,9 +892,6 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("\n🌐 After starting, services will be available at:\n")
 	fmt.Printf("  • Main API: http://localhost:%s\n", config.Ports.Nginx80)
 	fmt.Printf("  • MySQL Database: localhost:%s\n", config.Ports.MySQL)
-	fmt.Printf("  • ZK Service: Only accessible from within Docker containers\n")
-	fmt.Printf("    - Internal path: http://nginx/zk/ (from containers)\n")
-	fmt.Printf("    - Internal port: http://nginx:3001 (from containers)\n")
 
 	if config.UseTest {
 		fmt.Printf("  • Hardhat Node: http://localhost:%s\n", config.Ports.Hardhat)
@@ -1167,14 +1041,6 @@ func mergeConfigs(base, user *Config) {
 	base.Monitor.Enable = user.Monitor.Enable
 	if user.Monitor.EventAddress != "" {
 		base.Monitor.EventAddress = user.Monitor.EventAddress
-	}
-
-	// Merge ZK
-	if user.ZK.Provider != "" {
-		base.ZK.Provider = user.ZK.Provider
-	}
-	if user.ZK.RequestLength != 0 {
-		base.ZK.RequestLength = user.ZK.RequestLength
 	}
 
 	if user.ChatCacheExpiration != nil {

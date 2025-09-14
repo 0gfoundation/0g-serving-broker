@@ -31,15 +31,16 @@ var (
 
 // Account is an auto generated low-level Go binding around an user-defined struct.
 type Account struct {
-	User           common.Address
-	Provider       common.Address
-	Nonce          *big.Int
-	Balance        *big.Int
-	PendingRefund  *big.Int
-	Signer         [2]*big.Int
-	Refunds        []Refund
-	AdditionalInfo string
-	ProviderPubKey [2]*big.Int
+	User             common.Address
+	Provider         common.Address
+	Nonce            *big.Int
+	Balance          *big.Int
+	PendingRefund    *big.Int
+	Signer           [2]*big.Int
+	Refunds          []Refund
+	AdditionalInfo   string
+	ProviderPubKey   [2]*big.Int
+	TeeSignerAddress common.Address
 }
 
 // Refund is an auto generated low-level Go binding around an user-defined struct.
@@ -74,6 +75,16 @@ type ServiceParams struct {
 	AdditionalInfo string
 }
 
+// TEESettlementData is an auto generated low-level Go binding around an user-defined struct.
+type TEESettlementData struct {
+	User         common.Address
+	Provider     common.Address
+	TotalFee     *big.Int
+	RequestsHash [32]byte
+	Nonce        *big.Int
+	Signature    []byte
+}
+
 // VerifierInput is an auto generated low-level Go binding around an user-defined struct.
 type VerifierInput struct {
 	InProof     []*big.Int
@@ -84,7 +95,7 @@ type VerifierInput struct {
 
 // InferenceServingMetaData contains all meta data concerning the InferenceServing contract.
 var InferenceServingMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountNotExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidProofInputs\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"name\":\"BalanceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"previousOwner\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"OwnershipTransferred\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"name\":\"RefundRequested\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"}],\"name\":\"ServiceRemoved\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"name\":\"ServiceUpdated\",\"type\":\"event\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"accountExists\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"name\":\"acknowledgeProviderSigner\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"name\":\"addAccount\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structServiceParams\",\"name\":\"params\",\"type\":\"tuple\"}],\"name\":\"addOrUpdateService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"batchVerifierAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"deleteAccount\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"cancelRetrievingAmount\",\"type\":\"uint256\"}],\"name\":\"depositFund\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getAccount\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"internalType\":\"structAccount\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByProvider\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"internalType\":\"structAccount[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByUser\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"internalType\":\"structAccount[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllAccounts\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"internalType\":\"structAccount[]\",\"name\":\"\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllServices\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structService[]\",\"name\":\"services\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address[]\",\"name\":\"users\",\"type\":\"address[]\"}],\"name\":\"getBatchAccountsByUsers\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"internalType\":\"structAccount[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getPendingRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getService\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structService\",\"name\":\"service\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"_ledgerAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"}],\"name\":\"initialize\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"initialized\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"ledgerAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"lockTime\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"processRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"totalAmount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"removeService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"renounceOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"requestRefundAll\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"uint256[]\",\"name\":\"inProof\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256[]\",\"name\":\"proofInputs\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256\",\"name\":\"numChunks\",\"type\":\"uint256\"},{\"internalType\":\"uint256[]\",\"name\":\"segmentSize\",\"type\":\"uint256[]\"}],\"internalType\":\"structVerifierInput\",\"name\":\"verifierInput\",\"type\":\"tuple\"}],\"name\":\"settleFees\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"transferOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"}],\"name\":\"updateBatchVerifierAddress\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"}],\"name\":\"updateLockTime\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
+	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountNotExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidProofInputs\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidTEESignature\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"name\":\"BalanceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"previousOwner\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"OwnershipTransferred\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"name\":\"RefundRequested\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"}],\"name\":\"ServiceRemoved\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"service\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"}],\"name\":\"ServiceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"successCount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"failedCount\",\"type\":\"uint256\"}],\"name\":\"TEESettlementCompleted\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"TEESettlementFailed\",\"type\":\"event\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"accountExists\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"}],\"name\":\"acknowledgeProviderSigner\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"name\":\"acknowledgeTEESigner\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"name\":\"addAccount\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structServiceParams\",\"name\":\"params\",\"type\":\"tuple\"}],\"name\":\"addOrUpdateService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"batchVerifierAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"deleteAccount\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"cancelRetrievingAmount\",\"type\":\"uint256\"}],\"name\":\"depositFund\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getAccount\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"internalType\":\"structAccount\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByProvider\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"internalType\":\"structAccount[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByUser\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"internalType\":\"structAccount[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllAccounts\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"internalType\":\"structAccount[]\",\"name\":\"\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllServices\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structService[]\",\"name\":\"services\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address[]\",\"name\":\"users\",\"type\":\"address[]\"}],\"name\":\"getBatchAccountsByUsers\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"uint256[2]\",\"name\":\"signer\",\"type\":\"uint256[2]\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256[2]\",\"name\":\"providerPubKey\",\"type\":\"uint256[2]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"internalType\":\"structAccount[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getPendingRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getService\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"serviceType\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"inputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"outputPrice\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"model\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"verifiability\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"internalType\":\"structService\",\"name\":\"service\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"_ledgerAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"}],\"name\":\"initialize\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"initialized\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"ledgerAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"lockTime\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"processRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"totalAmount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"removeService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"renounceOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"requestRefundAll\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"uint256[]\",\"name\":\"inProof\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256[]\",\"name\":\"proofInputs\",\"type\":\"uint256[]\"},{\"internalType\":\"uint256\",\"name\":\"numChunks\",\"type\":\"uint256\"},{\"internalType\":\"uint256[]\",\"name\":\"segmentSize\",\"type\":\"uint256[]\"}],\"internalType\":\"structVerifierInput\",\"name\":\"\",\"type\":\"tuple\"}],\"name\":\"settleFees\",\"outputs\":[],\"stateMutability\":\"pure\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"totalFee\",\"type\":\"uint256\"},{\"internalType\":\"bytes32\",\"name\":\"requestsHash\",\"type\":\"bytes32\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"}],\"internalType\":\"structTEESettlementData[]\",\"name\":\"settlements\",\"type\":\"tuple[]\"}],\"name\":\"settleFeesWithTEE\",\"outputs\":[{\"internalType\":\"address[]\",\"name\":\"failedUsers\",\"type\":\"address[]\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"transferOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"_batchVerifierAddress\",\"type\":\"address\"}],\"name\":\"updateBatchVerifierAddress\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"}],\"name\":\"updateLockTime\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
 }
 
 // InferenceServingABI is the input ABI used to generate the binding from.
@@ -297,7 +308,7 @@ func (_InferenceServing *InferenceServingCallerSession) BatchVerifierAddress() (
 
 // GetAccount is a free data retrieval call binding the contract method 0xfd590847.
 //
-// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2]))
+// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address))
 func (_InferenceServing *InferenceServingCaller) GetAccount(opts *bind.CallOpts, user common.Address, provider common.Address) (Account, error) {
 	var out []interface{}
 	err := _InferenceServing.contract.Call(opts, &out, "getAccount", user, provider)
@@ -314,21 +325,21 @@ func (_InferenceServing *InferenceServingCaller) GetAccount(opts *bind.CallOpts,
 
 // GetAccount is a free data retrieval call binding the contract method 0xfd590847.
 //
-// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2]))
+// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address))
 func (_InferenceServing *InferenceServingSession) GetAccount(user common.Address, provider common.Address) (Account, error) {
 	return _InferenceServing.Contract.GetAccount(&_InferenceServing.CallOpts, user, provider)
 }
 
 // GetAccount is a free data retrieval call binding the contract method 0xfd590847.
 //
-// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2]))
+// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address))
 func (_InferenceServing *InferenceServingCallerSession) GetAccount(user common.Address, provider common.Address) (Account, error) {
 	return _InferenceServing.Contract.GetAccount(&_InferenceServing.CallOpts, user, provider)
 }
 
 // GetAccountsByProvider is a free data retrieval call binding the contract method 0x1d73b9f5.
 //
-// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts, uint256 total)
+// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts, uint256 total)
 func (_InferenceServing *InferenceServingCaller) GetAccountsByProvider(opts *bind.CallOpts, provider common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []Account
 	Total    *big.Int
@@ -353,7 +364,7 @@ func (_InferenceServing *InferenceServingCaller) GetAccountsByProvider(opts *bin
 
 // GetAccountsByProvider is a free data retrieval call binding the contract method 0x1d73b9f5.
 //
-// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts, uint256 total)
+// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts, uint256 total)
 func (_InferenceServing *InferenceServingSession) GetAccountsByProvider(provider common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []Account
 	Total    *big.Int
@@ -363,7 +374,7 @@ func (_InferenceServing *InferenceServingSession) GetAccountsByProvider(provider
 
 // GetAccountsByProvider is a free data retrieval call binding the contract method 0x1d73b9f5.
 //
-// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts, uint256 total)
+// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts, uint256 total)
 func (_InferenceServing *InferenceServingCallerSession) GetAccountsByProvider(provider common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []Account
 	Total    *big.Int
@@ -373,7 +384,7 @@ func (_InferenceServing *InferenceServingCallerSession) GetAccountsByProvider(pr
 
 // GetAccountsByUser is a free data retrieval call binding the contract method 0x4fe63f4d.
 //
-// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts, uint256 total)
+// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts, uint256 total)
 func (_InferenceServing *InferenceServingCaller) GetAccountsByUser(opts *bind.CallOpts, user common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []Account
 	Total    *big.Int
@@ -398,7 +409,7 @@ func (_InferenceServing *InferenceServingCaller) GetAccountsByUser(opts *bind.Ca
 
 // GetAccountsByUser is a free data retrieval call binding the contract method 0x4fe63f4d.
 //
-// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts, uint256 total)
+// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts, uint256 total)
 func (_InferenceServing *InferenceServingSession) GetAccountsByUser(user common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []Account
 	Total    *big.Int
@@ -408,7 +419,7 @@ func (_InferenceServing *InferenceServingSession) GetAccountsByUser(user common.
 
 // GetAccountsByUser is a free data retrieval call binding the contract method 0x4fe63f4d.
 //
-// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts, uint256 total)
+// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts, uint256 total)
 func (_InferenceServing *InferenceServingCallerSession) GetAccountsByUser(user common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []Account
 	Total    *big.Int
@@ -418,7 +429,7 @@ func (_InferenceServing *InferenceServingCallerSession) GetAccountsByUser(user c
 
 // GetAllAccounts is a free data retrieval call binding the contract method 0x08e93d0a.
 //
-// Solidity: function getAllAccounts() view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[])
+// Solidity: function getAllAccounts() view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[])
 func (_InferenceServing *InferenceServingCaller) GetAllAccounts(opts *bind.CallOpts) ([]Account, error) {
 	var out []interface{}
 	err := _InferenceServing.contract.Call(opts, &out, "getAllAccounts")
@@ -435,14 +446,14 @@ func (_InferenceServing *InferenceServingCaller) GetAllAccounts(opts *bind.CallO
 
 // GetAllAccounts is a free data retrieval call binding the contract method 0x08e93d0a.
 //
-// Solidity: function getAllAccounts() view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[])
+// Solidity: function getAllAccounts() view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[])
 func (_InferenceServing *InferenceServingSession) GetAllAccounts() ([]Account, error) {
 	return _InferenceServing.Contract.GetAllAccounts(&_InferenceServing.CallOpts)
 }
 
 // GetAllAccounts is a free data retrieval call binding the contract method 0x08e93d0a.
 //
-// Solidity: function getAllAccounts() view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[])
+// Solidity: function getAllAccounts() view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[])
 func (_InferenceServing *InferenceServingCallerSession) GetAllAccounts() ([]Account, error) {
 	return _InferenceServing.Contract.GetAllAccounts(&_InferenceServing.CallOpts)
 }
@@ -480,7 +491,7 @@ func (_InferenceServing *InferenceServingCallerSession) GetAllServices() ([]Serv
 
 // GetBatchAccountsByUsers is a free data retrieval call binding the contract method 0xba16a750.
 //
-// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts)
+// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts)
 func (_InferenceServing *InferenceServingCaller) GetBatchAccountsByUsers(opts *bind.CallOpts, users []common.Address) ([]Account, error) {
 	var out []interface{}
 	err := _InferenceServing.contract.Call(opts, &out, "getBatchAccountsByUsers", users)
@@ -497,14 +508,14 @@ func (_InferenceServing *InferenceServingCaller) GetBatchAccountsByUsers(opts *b
 
 // GetBatchAccountsByUsers is a free data retrieval call binding the contract method 0xba16a750.
 //
-// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts)
+// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts)
 func (_InferenceServing *InferenceServingSession) GetBatchAccountsByUsers(users []common.Address) ([]Account, error) {
 	return _InferenceServing.Contract.GetBatchAccountsByUsers(&_InferenceServing.CallOpts, users)
 }
 
 // GetBatchAccountsByUsers is a free data retrieval call binding the contract method 0xba16a750.
 //
-// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2])[] accounts)
+// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,uint256[2],(uint256,uint256,uint256,bool)[],string,uint256[2],address)[] accounts)
 func (_InferenceServing *InferenceServingCallerSession) GetBatchAccountsByUsers(users []common.Address) ([]Account, error) {
 	return _InferenceServing.Contract.GetBatchAccountsByUsers(&_InferenceServing.CallOpts, users)
 }
@@ -695,6 +706,35 @@ func (_InferenceServing *InferenceServingCallerSession) Owner() (common.Address,
 	return _InferenceServing.Contract.Owner(&_InferenceServing.CallOpts)
 }
 
+// SettleFees is a free data retrieval call binding the contract method 0x78c00436.
+//
+// Solidity: function settleFees((uint256[],uint256[],uint256,uint256[]) ) pure returns()
+func (_InferenceServing *InferenceServingCaller) SettleFees(opts *bind.CallOpts, arg0 VerifierInput) error {
+	var out []interface{}
+	err := _InferenceServing.contract.Call(opts, &out, "settleFees", arg0)
+
+	if err != nil {
+		return err
+	}
+
+	return err
+
+}
+
+// SettleFees is a free data retrieval call binding the contract method 0x78c00436.
+//
+// Solidity: function settleFees((uint256[],uint256[],uint256,uint256[]) ) pure returns()
+func (_InferenceServing *InferenceServingSession) SettleFees(arg0 VerifierInput) error {
+	return _InferenceServing.Contract.SettleFees(&_InferenceServing.CallOpts, arg0)
+}
+
+// SettleFees is a free data retrieval call binding the contract method 0x78c00436.
+//
+// Solidity: function settleFees((uint256[],uint256[],uint256,uint256[]) ) pure returns()
+func (_InferenceServing *InferenceServingCallerSession) SettleFees(arg0 VerifierInput) error {
+	return _InferenceServing.Contract.SettleFees(&_InferenceServing.CallOpts, arg0)
+}
+
 // AcknowledgeProviderSigner is a paid mutator transaction binding the contract method 0xd9f4140b.
 //
 // Solidity: function acknowledgeProviderSigner(address provider, uint256[2] providerPubKey) returns()
@@ -714,6 +754,27 @@ func (_InferenceServing *InferenceServingSession) AcknowledgeProviderSigner(prov
 // Solidity: function acknowledgeProviderSigner(address provider, uint256[2] providerPubKey) returns()
 func (_InferenceServing *InferenceServingTransactorSession) AcknowledgeProviderSigner(provider common.Address, providerPubKey [2]*big.Int) (*types.Transaction, error) {
 	return _InferenceServing.Contract.AcknowledgeProviderSigner(&_InferenceServing.TransactOpts, provider, providerPubKey)
+}
+
+// AcknowledgeTEESigner is a paid mutator transaction binding the contract method 0x154d75ef.
+//
+// Solidity: function acknowledgeTEESigner(address provider, address teeSignerAddress) returns()
+func (_InferenceServing *InferenceServingTransactor) AcknowledgeTEESigner(opts *bind.TransactOpts, provider common.Address, teeSignerAddress common.Address) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "acknowledgeTEESigner", provider, teeSignerAddress)
+}
+
+// AcknowledgeTEESigner is a paid mutator transaction binding the contract method 0x154d75ef.
+//
+// Solidity: function acknowledgeTEESigner(address provider, address teeSignerAddress) returns()
+func (_InferenceServing *InferenceServingSession) AcknowledgeTEESigner(provider common.Address, teeSignerAddress common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.AcknowledgeTEESigner(&_InferenceServing.TransactOpts, provider, teeSignerAddress)
+}
+
+// AcknowledgeTEESigner is a paid mutator transaction binding the contract method 0x154d75ef.
+//
+// Solidity: function acknowledgeTEESigner(address provider, address teeSignerAddress) returns()
+func (_InferenceServing *InferenceServingTransactorSession) AcknowledgeTEESigner(provider common.Address, teeSignerAddress common.Address) (*types.Transaction, error) {
+	return _InferenceServing.Contract.AcknowledgeTEESigner(&_InferenceServing.TransactOpts, provider, teeSignerAddress)
 }
 
 // AddAccount is a paid mutator transaction binding the contract method 0x4bc3aff4.
@@ -905,25 +966,25 @@ func (_InferenceServing *InferenceServingTransactorSession) RequestRefundAll(use
 	return _InferenceServing.Contract.RequestRefundAll(&_InferenceServing.TransactOpts, user, provider)
 }
 
-// SettleFees is a paid mutator transaction binding the contract method 0x78c00436.
+// SettleFeesWithTEE is a paid mutator transaction binding the contract method 0x8be74119.
 //
-// Solidity: function settleFees((uint256[],uint256[],uint256,uint256[]) verifierInput) returns()
-func (_InferenceServing *InferenceServingTransactor) SettleFees(opts *bind.TransactOpts, verifierInput VerifierInput) (*types.Transaction, error) {
-	return _InferenceServing.contract.Transact(opts, "settleFees", verifierInput)
+// Solidity: function settleFeesWithTEE((address,address,uint256,bytes32,uint256,bytes)[] settlements) returns(address[] failedUsers)
+func (_InferenceServing *InferenceServingTransactor) SettleFeesWithTEE(opts *bind.TransactOpts, settlements []TEESettlementData) (*types.Transaction, error) {
+	return _InferenceServing.contract.Transact(opts, "settleFeesWithTEE", settlements)
 }
 
-// SettleFees is a paid mutator transaction binding the contract method 0x78c00436.
+// SettleFeesWithTEE is a paid mutator transaction binding the contract method 0x8be74119.
 //
-// Solidity: function settleFees((uint256[],uint256[],uint256,uint256[]) verifierInput) returns()
-func (_InferenceServing *InferenceServingSession) SettleFees(verifierInput VerifierInput) (*types.Transaction, error) {
-	return _InferenceServing.Contract.SettleFees(&_InferenceServing.TransactOpts, verifierInput)
+// Solidity: function settleFeesWithTEE((address,address,uint256,bytes32,uint256,bytes)[] settlements) returns(address[] failedUsers)
+func (_InferenceServing *InferenceServingSession) SettleFeesWithTEE(settlements []TEESettlementData) (*types.Transaction, error) {
+	return _InferenceServing.Contract.SettleFeesWithTEE(&_InferenceServing.TransactOpts, settlements)
 }
 
-// SettleFees is a paid mutator transaction binding the contract method 0x78c00436.
+// SettleFeesWithTEE is a paid mutator transaction binding the contract method 0x8be74119.
 //
-// Solidity: function settleFees((uint256[],uint256[],uint256,uint256[]) verifierInput) returns()
-func (_InferenceServing *InferenceServingTransactorSession) SettleFees(verifierInput VerifierInput) (*types.Transaction, error) {
-	return _InferenceServing.Contract.SettleFees(&_InferenceServing.TransactOpts, verifierInput)
+// Solidity: function settleFeesWithTEE((address,address,uint256,bytes32,uint256,bytes)[] settlements) returns(address[] failedUsers)
+func (_InferenceServing *InferenceServingTransactorSession) SettleFeesWithTEE(settlements []TEESettlementData) (*types.Transaction, error) {
+	return _InferenceServing.Contract.SettleFeesWithTEE(&_InferenceServing.TransactOpts, settlements)
 }
 
 // TransferOwnership is a paid mutator transaction binding the contract method 0xf2fde38b.
@@ -1749,6 +1810,306 @@ func (_InferenceServing *InferenceServingFilterer) WatchServiceUpdated(opts *bin
 func (_InferenceServing *InferenceServingFilterer) ParseServiceUpdated(log types.Log) (*InferenceServingServiceUpdated, error) {
 	event := new(InferenceServingServiceUpdated)
 	if err := _InferenceServing.contract.UnpackLog(event, "ServiceUpdated", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
+// InferenceServingTEESettlementCompletedIterator is returned from FilterTEESettlementCompleted and is used to iterate over the raw logs and unpacked data for TEESettlementCompleted events raised by the InferenceServing contract.
+type InferenceServingTEESettlementCompletedIterator struct {
+	Event *InferenceServingTEESettlementCompleted // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *InferenceServingTEESettlementCompletedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(InferenceServingTEESettlementCompleted)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(InferenceServingTEESettlementCompleted)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *InferenceServingTEESettlementCompletedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *InferenceServingTEESettlementCompletedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// InferenceServingTEESettlementCompleted represents a TEESettlementCompleted event raised by the InferenceServing contract.
+type InferenceServingTEESettlementCompleted struct {
+	Provider     common.Address
+	SuccessCount *big.Int
+	FailedCount  *big.Int
+	Raw          types.Log // Blockchain specific contextual infos
+}
+
+// FilterTEESettlementCompleted is a free log retrieval operation binding the contract event 0x1e13ceddf2221b6edbebc1bb62b84cc8f302100f62ec4dc4c0b56b9914bfd980.
+//
+// Solidity: event TEESettlementCompleted(address indexed provider, uint256 successCount, uint256 failedCount)
+func (_InferenceServing *InferenceServingFilterer) FilterTEESettlementCompleted(opts *bind.FilterOpts, provider []common.Address) (*InferenceServingTEESettlementCompletedIterator, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _InferenceServing.contract.FilterLogs(opts, "TEESettlementCompleted", providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return &InferenceServingTEESettlementCompletedIterator{contract: _InferenceServing.contract, event: "TEESettlementCompleted", logs: logs, sub: sub}, nil
+}
+
+// WatchTEESettlementCompleted is a free log subscription operation binding the contract event 0x1e13ceddf2221b6edbebc1bb62b84cc8f302100f62ec4dc4c0b56b9914bfd980.
+//
+// Solidity: event TEESettlementCompleted(address indexed provider, uint256 successCount, uint256 failedCount)
+func (_InferenceServing *InferenceServingFilterer) WatchTEESettlementCompleted(opts *bind.WatchOpts, sink chan<- *InferenceServingTEESettlementCompleted, provider []common.Address) (event.Subscription, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _InferenceServing.contract.WatchLogs(opts, "TEESettlementCompleted", providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(InferenceServingTEESettlementCompleted)
+				if err := _InferenceServing.contract.UnpackLog(event, "TEESettlementCompleted", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseTEESettlementCompleted is a log parse operation binding the contract event 0x1e13ceddf2221b6edbebc1bb62b84cc8f302100f62ec4dc4c0b56b9914bfd980.
+//
+// Solidity: event TEESettlementCompleted(address indexed provider, uint256 successCount, uint256 failedCount)
+func (_InferenceServing *InferenceServingFilterer) ParseTEESettlementCompleted(log types.Log) (*InferenceServingTEESettlementCompleted, error) {
+	event := new(InferenceServingTEESettlementCompleted)
+	if err := _InferenceServing.contract.UnpackLog(event, "TEESettlementCompleted", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
+// InferenceServingTEESettlementFailedIterator is returned from FilterTEESettlementFailed and is used to iterate over the raw logs and unpacked data for TEESettlementFailed events raised by the InferenceServing contract.
+type InferenceServingTEESettlementFailedIterator struct {
+	Event *InferenceServingTEESettlementFailed // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *InferenceServingTEESettlementFailedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(InferenceServingTEESettlementFailed)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(InferenceServingTEESettlementFailed)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *InferenceServingTEESettlementFailedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *InferenceServingTEESettlementFailedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// InferenceServingTEESettlementFailed represents a TEESettlementFailed event raised by the InferenceServing contract.
+type InferenceServingTEESettlementFailed struct {
+	Provider common.Address
+	User     common.Address
+	Reason   string
+	Raw      types.Log // Blockchain specific contextual infos
+}
+
+// FilterTEESettlementFailed is a free log retrieval operation binding the contract event 0x214b7466a40718c5e72c4ebd7645a645bd520a6097d5e55e96ee687c4562ff0c.
+//
+// Solidity: event TEESettlementFailed(address indexed provider, address indexed user, string reason)
+func (_InferenceServing *InferenceServingFilterer) FilterTEESettlementFailed(opts *bind.FilterOpts, provider []common.Address, user []common.Address) (*InferenceServingTEESettlementFailedIterator, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+	var userRule []interface{}
+	for _, userItem := range user {
+		userRule = append(userRule, userItem)
+	}
+
+	logs, sub, err := _InferenceServing.contract.FilterLogs(opts, "TEESettlementFailed", providerRule, userRule)
+	if err != nil {
+		return nil, err
+	}
+	return &InferenceServingTEESettlementFailedIterator{contract: _InferenceServing.contract, event: "TEESettlementFailed", logs: logs, sub: sub}, nil
+}
+
+// WatchTEESettlementFailed is a free log subscription operation binding the contract event 0x214b7466a40718c5e72c4ebd7645a645bd520a6097d5e55e96ee687c4562ff0c.
+//
+// Solidity: event TEESettlementFailed(address indexed provider, address indexed user, string reason)
+func (_InferenceServing *InferenceServingFilterer) WatchTEESettlementFailed(opts *bind.WatchOpts, sink chan<- *InferenceServingTEESettlementFailed, provider []common.Address, user []common.Address) (event.Subscription, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+	var userRule []interface{}
+	for _, userItem := range user {
+		userRule = append(userRule, userItem)
+	}
+
+	logs, sub, err := _InferenceServing.contract.WatchLogs(opts, "TEESettlementFailed", providerRule, userRule)
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(InferenceServingTEESettlementFailed)
+				if err := _InferenceServing.contract.UnpackLog(event, "TEESettlementFailed", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseTEESettlementFailed is a log parse operation binding the contract event 0x214b7466a40718c5e72c4ebd7645a645bd520a6097d5e55e96ee687c4562ff0c.
+//
+// Solidity: event TEESettlementFailed(address indexed provider, address indexed user, string reason)
+func (_InferenceServing *InferenceServingFilterer) ParseTEESettlementFailed(log types.Log) (*InferenceServingTEESettlementFailed, error) {
+	event := new(InferenceServingTEESettlementFailed)
+	if err := _InferenceServing.contract.UnpackLog(event, "TEESettlementFailed", log); err != nil {
 		return nil, err
 	}
 	event.Raw = log

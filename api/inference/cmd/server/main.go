@@ -19,8 +19,6 @@ import (
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
-	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
-	"github.com/0glabs/0g-serving-broker/inference/zkclient"
 )
 
 //go:generate swag fmt
@@ -50,7 +48,6 @@ func Main() {
 	}
 	defer contract.Close()
 
-	zk := zkclient.NewZKClient(config.ZK.Provider, config.ZK.RequestLength)
 	engine := gin.New()
 
 	if config.Monitor.Enable {
@@ -88,19 +85,12 @@ func Main() {
 		}
 	}
 
-	signer, _ := signer.NewSigner()
-	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
-	if err != nil {
-		panic(err)
-	}
-	contract.EncryptedPrivKey = encryptedKey
-
-	ctrl := ctrl.New(db, contract, zk, config, svcCache, teeService, signer)
+	ctrl := ctrl.New(db, contract, config, svcCache, teeService)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
 	}
-	settleFeesErr := ctrl.SettleFees(ctx)
+	settleFeesErr := ctrl.SettleFeesWithTEE(ctx)
 	if settleFeesErr != nil {
 		log.Printf("error settling fees: %v", settleFeesErr)
 	}

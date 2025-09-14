@@ -14,9 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/event"
-	"github.com/0glabs/0g-serving-broker/inference/internal/signer"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
-	"github.com/0glabs/0g-serving-broker/inference/zkclient"
 )
 
 func Main() {
@@ -58,7 +56,6 @@ func Main() {
 		panic(err)
 	}
 
-	zk := zkclient.NewZKClient(conf.ZK.Provider, conf.ZK.RequestLength)
 	var teeClientType tee.ClientType
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
@@ -78,14 +75,7 @@ func Main() {
 		panic(err)
 	}
 
-	signer, _ := signer.NewSigner()
-	encryptedKey, err := signer.InitialKey(ctx, contract, zk, teeService.ProviderSigner)
-	if err != nil {
-		panic(err)
-	}
-	contract.EncryptedPrivKey = encryptedKey
-
-	ctrl := ctrl.New(db, contract, zk, conf, nil, teeService, signer)
+	ctrl := ctrl.New(db, contract, conf, nil, teeService)
 
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
 	if err := mgr.Add(settlementProcessor); err != nil {

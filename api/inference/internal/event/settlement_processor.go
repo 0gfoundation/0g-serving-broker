@@ -60,7 +60,7 @@ func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
 
 func (s *SettlementProcessor) handleForceSettle(ctx context.Context) {
 	log.Print("Force Settlement")
-	if err := s.ctrl.SettleFees(ctx); err != nil {
+	if err := s.ctrl.SettleFeesWithTEE(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventForceSettleErrorCount, "Process settlement: %s", err)
 	} else {
 		s.incrementMonitorCounter(monitor.EventForceSettleCount, "", nil)
