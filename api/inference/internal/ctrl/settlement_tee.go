@@ -67,8 +67,9 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		// Create hash of all requests for this user
 		requestsHash := c.hashUserRequests(userReqs.Requests)
 
-		// Generate nonce based on timestamp
+		// Generate nonce based on timestamp multiplied by 10000000 to avoid conflicts
 		nonce := big.NewInt(time.Now().Unix())
+		nonce.Mul(nonce, big.NewInt(10000000))
 
 		settlementData := contract.TEESettlementData{
 			User:         common.HexToAddress(userAddr),
