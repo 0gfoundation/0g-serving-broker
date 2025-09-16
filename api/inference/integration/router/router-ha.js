@@ -4,7 +4,12 @@ const { spawn } = require('child_process');
 const http = require('http');
 
 // Configuration from environment variables
-const PROVIDERS = process.env.PROVIDERS ? process.env.PROVIDERS.split(',') : [];
+// PROVIDERS format: "address1,priority1;address2,priority2"
+const PROVIDERS = process.env.PROVIDERS ? process.env.PROVIDERS.split(';').map(p => {
+    const [address, priority] = p.split(',');
+    return { address: address.trim(), priority: priority ? parseInt(priority.trim()) : 100 };
+}) : [];
+const DIRECT_ENDPOINTS = process.env.DIRECT_ENDPOINTS ? process.env.DIRECT_ENDPOINTS.split(';') : []; // Semicolon separated for multiple endpoints
 const KEYS = process.env.KEYS ? process.env.KEYS.split(',') : [];
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -12,6 +17,8 @@ const RPC = process.env.RPC_ENDPOINT;
 const LEDGER_CA = process.env.LEDGER_CA;
 const INFERENCE_CA = process.env.INFERENCE_CA;
 const GAS_PRICE = process.env.GAS_PRICE;
+const DEFAULT_PROVIDER_PRIORITY = process.env.DEFAULT_PROVIDER_PRIORITY || '100';
+const DEFAULT_ENDPOINT_PRIORITY = process.env.DEFAULT_ENDPOINT_PRIORITY || '50';
 
 const HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
 const RESTART_DELAY = 5000; // 5 seconds
@@ -25,30 +32,46 @@ class RouterManager {
     }
 
     async start() {
-        if (!PROVIDERS.length) {
-            console.error('ERROR: No providers specified. Set PROVIDERS environment variable.');
+        // Check if we have either providers or direct endpoints
+        if (!PROVIDERS.length && !DIRECT_ENDPOINTS.length) {
+            console.error('ERROR: No providers or direct endpoints specified.');
+            console.error('Set PROVIDERS or DIRECT_ENDPOINTS environment variables.');
             process.exit(1);
         }
 
-        if (!KEYS.length) {
-            console.error('ERROR: No keys specified. Set KEYS environment variable.');
+        // Only require keys if we have on-chain providers
+        if (PROVIDERS.length > 0 && !KEYS.length) {
+            console.error('ERROR: No keys specified for on-chain providers. Set KEYS environment variable.');
             process.exit(1);
         }
 
         console.log(`Starting Router High-Availability Manager`);
-        console.log(`Providers: ${PROVIDERS.join(', ')}`);
-        console.log(`Keys: ${KEYS.length} keys configured`);
+        if (PROVIDERS.length > 0) {
+            console.log(`On-chain Providers: ${PROVIDERS.map(p => `${p.address}(priority:${p.priority})`).join(', ')}`);
+            console.log(`Keys: ${KEYS.length} keys configured`);
+        }
+        if (DIRECT_ENDPOINTS.length > 0) {
+            console.log(`Direct Endpoints: ${DIRECT_ENDPOINTS.length} configured`);
+        }
         console.log(`Port: ${PORT}, Host: ${HOST}`);
 
-        // Start all instances with different keys
+        // Start instances based on configuration
         // Use ports starting from PORT + 100 to avoid conflicts with main port
-        for (let i = 0; i < KEYS.length; i++) {
-            const key = KEYS[i];
-            const instancePort = parseInt(PORT) + 100 + i; // Start from PORT+100
-            const instanceId = `router-${i}`;
-            
-            await this.startInstance(instanceId, key, instancePort);
-            await this.sleep(2000); // Stagger startup
+        if (KEYS.length > 0) {
+            // Start instances with different keys for on-chain providers
+            for (let i = 0; i < KEYS.length; i++) {
+                const key = KEYS[i];
+                const instancePort = parseInt(PORT) + 100 + i; // Start from PORT+100
+                const instanceId = `router-${i}`;
+                
+                await this.startInstance(instanceId, key, instancePort);
+                await this.sleep(2000); // Stagger startup
+            }
+        } else {
+            // Start a single instance for direct endpoints only
+            const instancePort = parseInt(PORT) + 100;
+            const instanceId = `router-0`;
+            await this.startInstance(instanceId, null, instancePort);
         }
 
         // Setup health monitoring
@@ -73,13 +96,27 @@ class RouterManager {
             // Try with npx or full path
         }
 
-        const args = [
-            'router-serve',
-            '--providers', ...PROVIDERS,
-            '--key', key,
-            '--port', port.toString(),
-            '--host', HOST
-        ];
+        const args = ['router-serve'];
+        
+        // Add on-chain providers with priorities
+        for (const provider of PROVIDERS) {
+            args.push('--add-provider', `${provider.address},${provider.priority}`);
+        }
+        
+        // Add direct endpoints
+        for (const endpoint of DIRECT_ENDPOINTS) {
+            args.push('--add-endpoint', endpoint);
+        }
+        
+        // Add key if provided (for on-chain providers)
+        if (key) {
+            args.push('--key', key);
+        }
+        
+        args.push('--port', port.toString());
+        args.push('--host', HOST);
+        args.push('--default-provider-priority', DEFAULT_PROVIDER_PRIORITY);
+        args.push('--default-endpoint-priority', DEFAULT_ENDPOINT_PRIORITY);
 
         if (RPC) args.push('--rpc', RPC);
         if (LEDGER_CA) args.push('--ledger-ca', LEDGER_CA);
@@ -295,7 +332,8 @@ class RouterManager {
         server.listen(PORT, HOST, () => {
             console.log(`\n🚀 High-Availability Router running on ${HOST}:${PORT}`);
             console.log(`📊 Health check endpoint: http://${HOST}:${PORT}/health`);
-            console.log(`🔀 Load balancing across ${KEYS.length} instances`);
+            const instanceCount = KEYS.length > 0 ? KEYS.length : 1;
+            console.log(`🔀 Load balancing across ${instanceCount} instances`);
         });
     }
 
