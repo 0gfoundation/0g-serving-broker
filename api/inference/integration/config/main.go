@@ -136,6 +136,7 @@ const dockerComposeTemplate = `services:
     image: raven20241/hardhat-compute-network-contract:dev
     ports:
       - "{{.Ports.Hardhat}}:8545"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "/usr/local/bin/healthcheck.sh"]
       interval: 10s
@@ -148,6 +149,7 @@ const dockerComposeTemplate = `services:
     image: mysql:8.0
     ports:
       - "{{.Ports.MySQL}}:3306"
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: 123456
     volumes:
@@ -168,6 +170,7 @@ const dockerComposeTemplate = `services:
     ports:
       - "{{.Ports.Nginx80}}:80"
       - "{{.Ports.Nginx443}}:443"
+    restart: unless-stopped
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf
     networks:
@@ -254,6 +257,7 @@ const dockerComposeTemplate = `services:
 {{- if .UseMonitoring}}
   prometheus:
     image: prom/prometheus:v2.45.2
+    restart: unless-stopped
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
@@ -269,6 +273,7 @@ const dockerComposeTemplate = `services:
 
   grafana:
     image: grafana/grafana-oss:11.4.0
+    restart: unless-stopped
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
