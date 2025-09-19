@@ -19,8 +19,9 @@ import (
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 	// Get unprocessed requests
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
-		Processed: false,
-		Sort:      model.PtrOf("created_at ASC"),
+		Processed:         false,
+		Sort:              model.PtrOf("created_at ASC"),
+		ExcludeZeroOutput: true,
 	})
 	if err != nil {
 		return errors.Wrap(err, "list request from db")

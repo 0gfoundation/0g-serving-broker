@@ -25,6 +25,7 @@ type RequestList struct {
 }
 
 type RequestListOptions struct {
-	Processed bool    `form:"processed"`
-	Sort      *string `form:"sort"`
+	Processed           bool    `form:"processed"`
+	Sort                *string `form:"sort"`
+	ExcludeZeroOutput   bool    `form:"excludeZeroOutput"`
 }

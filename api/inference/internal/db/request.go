@@ -25,6 +25,10 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 		ret := tx.Model(model.Request{}).
 			Where("processed = ? ", q.Processed)
 
+		if q.ExcludeZeroOutput {
+			ret = ret.Where("output_count != ?", 0)
+		}
+
 		if q.Sort != nil {
 			ret = ret.Order(*q.Sort)
 		} else {
