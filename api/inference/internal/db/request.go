@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,10 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 	err := d.db.Transaction(func(tx *gorm.DB) error {
 		ret := tx.Model(model.Request{}).
 			Where("processed = ? ", q.Processed)
+
+		if q.ExcludeZeroOutput {
+			ret = ret.Where("output_count != ?", 0)
+		}
 
 		if q.Sort != nil {
 			ret = ret.Order(*q.Sort)
@@ -105,6 +110,20 @@ func (d *DB) UpdateOutputFee(requestHash, userAddress, outputFee, fee, unsettled
 	})
 }
 
+// UpdateRequestFeesAndCount updates the request's output fee, total fee, and output count
+// This is the optimized version that also updates count fields for efficient aggregation
+func (d *DB) UpdateRequestFeesAndCount(requestHash, outputFee, fee string, outputCount int64) error {
+	return d.db.
+		Where(&model.Request{
+			RequestHash: requestHash,
+		}).
+		Updates(&model.Request{
+			OutputFee:   outputFee,
+			Fee:         fee,
+			OutputCount: outputCount,
+		}).Error
+}
+
 func (d *DB) CreateRequest(req model.Request) error {
 	ret := d.db.Create(&req)
 	return ret.Error
@@ -129,4 +148,35 @@ func (d *DB) PruneRequest(minNonceMap map[string]string) error {
 	condition := strings.Join(whereClauses, " OR ")
 
 	return d.db.Where(condition, args...).Delete(&model.Request{}).Error
+}
+
+// CalculateUnsettledFee calculates unsettled fee using SUM aggregation for optimal performance
+// Uses database aggregation instead of application-level calculation
+func (d *DB) CalculateUnsettledFee(userAddress string, inputPrice, outputPrice int64) (*big.Int, error) {
+	type AggregateResult struct {
+		TotalInputCount  int64
+		TotalOutputCount int64
+	}
+	
+	var result AggregateResult
+	err := d.db.Model(&model.Request{}).
+		Select("COALESCE(SUM(input_count), 0) as total_input_count, COALESCE(SUM(output_count), 0) as total_output_count").
+		Where("user_address = ? AND processed = ?", userAddress, false).
+		Scan(&result).Error
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Calculate total fee: (inputCount * inputPrice) + (outputCount * outputPrice)
+	inputFee := big.NewInt(result.TotalInputCount)
+	inputFee.Mul(inputFee, big.NewInt(inputPrice))
+	
+	outputFee := big.NewInt(result.TotalOutputCount)
+	outputFee.Mul(outputFee, big.NewInt(outputPrice))
+	
+	totalFee := big.NewInt(0)
+	totalFee.Add(inputFee, outputFee)
+	
+	return totalFee, nil
 }

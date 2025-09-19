@@ -1,7 +1,9 @@
 package db
 
 import (
+	"math/big"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -108,4 +110,84 @@ func (d *DB) BatchUpdateUserAccount(news []model.User) error {
 func (d *DB) ResetUnsettledFee() error {
 	ret := d.db.Model(&model.User{}).Where("TRUE").Update("unsettled_fee", model.PtrOf(int64(0)))
 	return ret.Error
+}
+
+func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, outputPrice int64) ([]model.User, error) {
+	if opt == nil {
+		opt = &model.UserListOptions{}
+	}
+
+	// Build the optimized query with JOIN and aggregation
+	query := `
+		SELECT 
+			u.user,
+			u.lock_balance,
+			u.last_balance_check_time,
+			COALESCE(SUM(r.input_count * ? + r.output_count * ?), 0) as calculated_unsettled_fee
+		FROM user u
+		LEFT JOIN request r ON u.user = r.user_address AND r.processed = false
+		WHERE 1=1
+	`
+	args := []interface{}{inputPrice, outputPrice}
+
+	// Group by user fields
+	query += " GROUP BY u.user, u.lock_balance, u.last_balance_check_time"
+
+	// Add HAVING clause for filtering - maintain original OR logic
+	havingClauses := []string{}
+
+	if opt.MinUnsettledFee != nil {
+		havingClauses = append(havingClauses, "calculated_unsettled_fee > ?")
+		args = append(args, *opt.MinUnsettledFee)
+	}
+
+	// Preserve original OR logic: (balance_condition OR time_condition)
+	if opt.LowBalanceRisk != nil && opt.SettleTriggerThreshold != nil {
+		havingClauses = append(havingClauses,
+			"((CAST(u.lock_balance AS SIGNED) - calculated_unsettled_fee) < ? OR u.last_balance_check_time < ?)")
+		args = append(args, *opt.SettleTriggerThreshold, *opt.LowBalanceRisk)
+	} else if opt.SettleTriggerThreshold != nil {
+		// Only check balance condition if no time filter - match original logic
+		havingClauses = append(havingClauses,
+			"(CAST(u.lock_balance AS SIGNED) - calculated_unsettled_fee) < ?")
+		args = append(args, *opt.SettleTriggerThreshold)
+	} else if opt.LowBalanceRisk != nil {
+		// Only check time condition if no threshold
+		havingClauses = append(havingClauses, "u.last_balance_check_time < ?")
+		args = append(args, *opt.LowBalanceRisk)
+	}
+
+	if len(havingClauses) > 0 {
+		query += " HAVING " + havingClauses[0]
+		for i := 1; i < len(havingClauses); i++ {
+			query += " AND " + havingClauses[i]
+		}
+	}
+
+	// Execute the query
+	type QueryResult struct {
+		User                   string
+		LockBalance            *string
+		LastBalanceCheckTime   *time.Time
+		CalculatedUnsettledFee int64
+	}
+
+	var results []QueryResult
+	if err := d.db.Raw(query, args...).Scan(&results).Error; err != nil {
+		return nil, errors.Wrap(err, "query users with unsettled fees")
+	}
+
+	// Convert results to User models
+	users := make([]model.User, 0, len(results))
+	for _, r := range results {
+		unsettledFeeStr := big.NewInt(r.CalculatedUnsettledFee).String()
+		users = append(users, model.User{
+			User:                 r.User,
+			LockBalance:          r.LockBalance,
+			LastBalanceCheckTime: r.LastBalanceCheckTime,
+			UnsettledFee:         &unsettledFeeStr,
+		})
+	}
+
+	return users, nil
 }

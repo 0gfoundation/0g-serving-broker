@@ -54,7 +54,8 @@ func InitPrometheus(serverName string) {
 }
 
 func StartMetricsServer(address string) {
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
 
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 

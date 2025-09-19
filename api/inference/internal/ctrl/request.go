@@ -69,8 +69,8 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request) error {
 
 
 func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee string) error {
-	if account.UnsettledFee == nil || account.LockBalance == nil {
-		return errors.New("nil unsettledFee or lockBalance in account")
+	if account.LockBalance == nil {
+		return errors.New("nil lockBalance in account")
 	}
 
 	// Calculate response fee reservation
@@ -79,8 +79,14 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.Wrap(err, "calculate response fee reservation")
 	}
 
+	// Use optimized calculation for unsettled fee using database aggregation
+	unsettledFee, err := c.db.CalculateUnsettledFee(account.User, c.Service.InputPrice, c.Service.OutputPrice)
+	if err != nil {
+		return errors.Wrap(err, "calculate unsettled fee")
+	}
+
 	// Add input fee, unsettled fee, and response fee reservation
-	totalWithInput, err := util.Add(fee, account.UnsettledFee)
+	totalWithInput, err := util.Add(fee, unsettledFee.String())
 	if err != nil {
 		return err
 	}
@@ -105,7 +111,14 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	if err != nil {
 		return err
 	}
-	totalWithInputNew, err := util.Add(fee, account.UnsettledFee)
+	
+	// Recalculate unsettled fee after sync using optimized method
+	unsettledFeeNew, err := c.db.CalculateUnsettledFee(account.User, c.Service.InputPrice, c.Service.OutputPrice)
+	if err != nil {
+		return errors.Wrap(err, "recalculate unsettled fee")
+	}
+	
+	totalWithInputNew, err := util.Add(fee, unsettledFeeNew.String())
 	if err != nil {
 		return err
 	}

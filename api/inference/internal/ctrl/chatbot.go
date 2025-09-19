@@ -85,6 +85,20 @@ func (c *Ctrl) GetChatbotInputFee(reqBody []byte) (string, error) {
 	return expectedInputFee.String(), nil
 }
 
+// GetChatbotInputFeeAndCount returns both the input fee and count for efficient request creation
+func (c *Ctrl) GetChatbotInputFeeAndCount(reqBody []byte) (string, int64, error) {
+	inputCount, err := getInputCount(reqBody)
+	if err != nil {
+		return "", 0, errors.Wrap(err, "get input count")
+	}
+
+	expectedInputFee, err := util.Multiply(inputCount, c.Service.InputPrice)
+	if err != nil {
+		return "", 0, errors.Wrap(err, "calculate input fee")
+	}
+	return expectedInputFee.String(), inputCount, nil
+}
+
 func getInputCount(reqBody []byte) (int64, error) {
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(reqBody, &bodyMap); err != nil {
@@ -193,7 +207,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	var output string
 
 	if !isStream {
-		if err := c.processSingleResponse(ctx, decodedBody, outputPrice, account, &output, reqModel.RequestHash); err != nil {
+		if err := c.processSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash); err != nil {
 			return err
 		}
 	} else {
@@ -202,7 +216,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 
 		for _, line := range lines {
 			if isStreamDone(line) {
-				return c.finalizeResponse(ctx, output, outputPrice, account, reqModel.RequestHash)
+				return c.finalizeResponse(ctx, output, outputPrice, reqModel.RequestHash)
 			}
 
 			// Skip empty lines
@@ -270,7 +284,7 @@ func (*Ctrl) chatCacheKey(chatID string) string {
 	return fmt.Sprintf("%s:%s", ChatPrefix, chatID)
 }
 
-func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, account model.User, output *string, requestHash string) error {
+func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, output *string, requestHash string) error {
 	line := bytes.TrimPrefix(decodedBody, []byte("data: "))
 	var chunk CompletionChunk
 	if err := json.Unmarshal(line, &chunk); err != nil {
@@ -280,7 +294,7 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	for _, choice := range chunk.Choices {
 		*output += choice.Message.Content
 	}
-	return c.updateAccountWithOutput(ctx, *output, outputPrice, account, requestHash)
+	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
 
 func (c *Ctrl) processLine(line []byte) (string, error) {
@@ -297,11 +311,11 @@ func (c *Ctrl) processLine(line []byte) (string, error) {
 	return outputChunk, nil
 }
 
-func (c *Ctrl) finalizeResponse(ctx context.Context, output string, outputPrice int64, account model.User, requestHash string) error {
-	return c.updateAccountWithOutput(ctx, output, outputPrice, account, requestHash)
+func (c *Ctrl) finalizeResponse(ctx context.Context, output string, outputPrice int64, requestHash string) error {
+	return c.updateAccountWithOutput(ctx, output, outputPrice, requestHash)
 }
 
-func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outputPrice int64, account model.User, requestHash string) error {
+func (c *Ctrl) updateAccountWithOutput(_ context.Context, output string, outputPrice int64, requestHash string) error {
 	outputCount := int64(len(strings.Fields(output)))
 	lastResponseFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
@@ -318,21 +332,10 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 		return err
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	dbAccount, err := c.db.GetUserAccount(account.User)
-	if err != nil {
-		return err
-	}
-
-	unsettledFee, err := util.Add(fee, dbAccount.UnsettledFee)
-	if err != nil {
-		return err
-	}
-
-	if err := c.db.UpdateOutputFee(requestHash, account.User, lastResponseFee.String(), fee.String(), unsettledFee.String()); err != nil {
-		return errors.Wrap(err, "Error updating request")
+	// Update the request's output fee, total fee, and output count
+	// No longer update unsettled fee in user table to avoid concurrency issues
+	if err := c.db.UpdateRequestFeesAndCount(requestHash, lastResponseFee.String(), fee.String(), outputCount); err != nil {
+		return errors.Wrap(err, "Error updating request fees and count")
 	}
 
 	return nil

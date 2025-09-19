@@ -183,7 +183,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:latest
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -226,7 +226,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    image: ghcr.io/0glabs/0g-serving-broker:latest
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if .UseTest}}

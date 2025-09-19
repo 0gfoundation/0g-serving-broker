@@ -121,13 +121,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	var expectedInputFee string
+	var inputCount int64
 	switch svcType {
 	case "zgStorage":
 		expectedInputFee = "0"
+		inputCount = 0
 	case "chatbot":
-		expectedInputFee, err = p.ctrl.GetChatbotInputFee(reqBody)
+		expectedInputFee, inputCount, err = p.ctrl.GetChatbotInputFeeAndCount(reqBody)
 		if err != nil {
-			handleBrokerError(ctx, err, "get input fee")
+			handleBrokerError(ctx, err, "get input fee and count")
 			return
 		}
 	default:
@@ -137,6 +139,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	req.InputFee = expectedInputFee
 	req.Fee = req.InputFee
+	req.InputCount = inputCount
+	req.OutputCount = 0 // Will be updated when response is processed
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 

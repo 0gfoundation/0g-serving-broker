@@ -13,6 +13,9 @@ type Request struct {
 	RequestHash  string `gorm:"type:varchar(255);not null;primaryKey" json:"requestHash" binding:"required" immutable:"true"`
 	Processed    bool   `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce" json:"processed"`
 	VLLMProxy    bool   `gorm:"type:tinyint(1);not null;default:0" json:"vllmProxy"`
+	// Optimized count fields for efficient aggregation
+	InputCount   int64  `gorm:"type:bigint;not null;default:0" json:"inputCount"`
+	OutputCount  int64  `gorm:"type:bigint;not null;default:0" json:"outputCount"`
 }
 
 type RequestList struct {
@@ -22,6 +25,7 @@ type RequestList struct {
 }
 
 type RequestListOptions struct {
-	Processed bool    `form:"processed"`
-	Sort      *string `form:"sort"`
+	Processed           bool    `form:"processed"`
+	Sort                *string `form:"sort"`
+	ExcludeZeroOutput   bool    `form:"excludeZeroOutput"`
 }

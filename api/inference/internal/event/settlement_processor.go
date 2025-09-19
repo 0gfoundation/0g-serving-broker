@@ -53,7 +53,6 @@ func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
 	if err := s.ctrl.ProcessSettlement(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventSettleErrorCount, "Process settlement: %s", err)
 	} else {
-		log.Printf("All settlements at risk of failing due to insufficient funds have been successfully executed")
 		s.incrementMonitorCounter(monitor.EventSettleCount, "", nil)
 	}
 }
