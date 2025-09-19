@@ -103,39 +103,39 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 
 	// Process settlements in batches to avoid gas limit issues
 	var allFailedUsers []common.Address
-	
+
 	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
 		// Calculate the end index for this batch
 		end := i + constant.TEESettlementBatchSize
 		if end > len(settlements) {
 			end = len(settlements)
 		}
-		
+
 		// Get the current batch
 		batch := settlements[i:end]
-		
+
 		// Log batch for debugging
 		batchJSON, err := json.Marshal(batch)
 		if err != nil {
 			log.Printf("Error marshalling TEE settlements batch %d-%d: %v", i, end-1, err)
 		} else {
-			log.Printf("Processing TEE settlements batch %d-%d (users %d-%d of %d): %s", 
+			log.Printf("Processing TEE settlements batch %d-%d (users %d-%d of %d): %s",
 				i/constant.TEESettlementBatchSize+1, (end-1)/constant.TEESettlementBatchSize+1, i+1, end, len(settlements), string(batchJSON))
 		}
-		
+
 		// Call contract with the current batch of TEE signed settlements
 		failedUsers, err := c.contract.SettleFeesWithTEE(ctx, batch)
 		if err != nil {
 			return errors.Wrapf(err, "settle fees with TEE in contract for batch %d-%d", i, end-1)
 		}
-		
+
 		// Accumulate failed users from this batch
 		allFailedUsers = append(allFailedUsers, failedUsers...)
-		
+
 		// Log progress
 		log.Printf("Completed batch %d-%d: %d failed users", i+1, end, len(failedUsers))
 	}
-	
+
 	// Convert all failed users to string slice for database query
 	var failedUserStrings []string
 	for _, user := range allFailedUsers {
@@ -176,11 +176,12 @@ func (c *Ctrl) hashUserRequests(requests []*model.Request) [32]byte {
 func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 	settleTriggerThreshold := (c.Service.InputPrice + c.Service.OutputPrice) * constant.SettleTriggerThreshold
 
-	accounts, err := c.db.ListUserAccount(&model.UserListOptions{
+	// Use the optimized method that calculates unsettled fees with a single query
+	accounts, err := c.db.ListUsersWithUnsettledFees(&model.UserListOptions{
 		LowBalanceRisk:         model.PtrOf(time.Now().Add(-c.contract.LockTime + c.autoSettleBufferTime)),
 		MinUnsettledFee:        model.PtrOf(int64(0)),
 		SettleTriggerThreshold: &settleTriggerThreshold,
-	})
+	}, c.Service.InputPrice, c.Service.OutputPrice)
 	if err != nil {
 		return errors.Wrap(err, "list accounts that need to be settled in db")
 	}
@@ -193,13 +194,14 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 		return errors.Wrap(err, "synchronize accounts from the contract to the database")
 	}
 
-	accounts, err = c.db.ListUserAccount(&model.UserListOptions{
+	// Re-check accounts after sync with current time using optimized query
+	accounts, err = c.db.ListUsersWithUnsettledFees(&model.UserListOptions{
 		MinUnsettledFee:        model.PtrOf(int64(0)),
 		LowBalanceRisk:         model.PtrOf(time.Now()),
 		SettleTriggerThreshold: &settleTriggerThreshold,
-	})
+	}, c.Service.InputPrice, c.Service.OutputPrice)
 	if err != nil {
-		return errors.Wrap(err, "list accounts that need to be settled in db")
+		return errors.Wrap(err, "list accounts that need to be settled in db after sync")
 	}
 	if len(accounts) == 0 {
 		return nil
