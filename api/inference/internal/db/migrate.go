@@ -78,6 +78,21 @@ func (d *DB) Migrate() error {
 				return tx.Exec("ALTER TABLE `request` ADD UNIQUE INDEX `userAddress_nonce` (`user_address`, `nonce`);").Error
 			},
 		},
+		{
+			ID: "add-count-fields-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					InputCount  int64 `gorm:"type:bigint;not null;default:0"`
+					OutputCount int64 `gorm:"type:bigint;not null;default:0"`
+				}
+				if err := tx.AutoMigrate(&Request{}); err != nil {
+					return err
+				}
+				
+				// Add index for optimized queries
+				return tx.Exec("CREATE INDEX `idx_requests_user_processed_counts` ON `request`(`user_address`, `processed`, `input_count`, `output_count`);").Error
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
