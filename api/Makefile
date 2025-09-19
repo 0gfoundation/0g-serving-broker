@@ -65,12 +65,11 @@ generate-fine-tuning-api-md:
 generate-inference-router-api:
 	docker run --rm -v ./inference-router/doc:/local openapitools/openapi-generator-cli generate -i /local/swagger.yaml -g html2 -o /local/api 
 
-package-inference: generate-inference-api
+package-inference:
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
-	rsync -av --exclude '**.local.*' --exclude 'noGPU'  ./inference/integration/provider/ /tmp/inference-broker/GPU && \
-	rsync -av --exclude '**.local.*' --exclude 'noGPU' --exclude 'docker-compose.yml'  ./inference/integration/provider/ /tmp/inference-broker/noGPU && \
-	cp ./inference/integration/provider/noGPU/docker-compose.yml /tmp/inference-broker/noGPU/ && \
+	cp ./inference/integration/config/config.yml /tmp/inference-broker/ && \
+	cp ./inference/integration/config/config /tmp/inference-broker/ && \
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
 	echo "Package created at /tmp/inference-broker.tar.gz"

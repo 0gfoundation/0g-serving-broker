@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -72,7 +73,6 @@ type RequiredField struct {
 type PortConfig struct {
 	MySQL      string
 	Nginx80    string
-	Nginx443   string
 	Hardhat    string
 	Prometheus string
 	Grafana    string
@@ -169,7 +169,6 @@ const dockerComposeTemplate = `services:
     image: nginx:1.27.0
     ports:
       - "{{.Ports.Nginx80}}:80"
-      - "{{.Ports.Nginx443}}:443"
     restart: unless-stopped
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf
@@ -342,27 +341,27 @@ type TemplateData struct {
 var requiredFields = []RequiredField{
 	{
 		Path:        "service.servingUrl",
-		Description: "URL where the serving broker exposes its API (e.g., http://localhost:8080)",
+		Description: "URL where the serving broker exposes its API (e.g., http://192.168.1.1:8080)",
 		Validator:   isValidURL,
 	},
 	{
 		Path:        "service.targetUrl",
-		Description: "Target URL for the actual model inference backend (e.g., http://localhost:8000)",
+		Description: "URL where the LLM service is running (e.g., http://localhost:8000)",
 		Validator:   isValidURL,
 	},
 	{
 		Path:        "service.inputPrice",
-		Description: "Price per input token in wei (e.g., 1000000000000000)",
+		Description: "Price per input token in neuron (e.g., 900000000000)",
 		Validator:   nil,
 	},
 	{
 		Path:        "service.outputPrice",
-		Description: "Price per output token in wei (e.g., 2000000000000000)",
+		Description: "Price per output token in neuron (e.g., 150000000000)",
 		Validator:   nil,
 	},
 	{
 		Path:        "service.model",
-		Description: "Model type identifier (e.g., llama, gpt, etc.)",
+		Description: "Model name, which needs to be consistent with the model field name when sending requests to the LLM (e.g., meta-llama/llama-3.3-70b-instruct)",
 		Validator:   isNotEmpty,
 	},
 	{
@@ -406,7 +405,7 @@ func main() {
 
 	// Step 1: Load and configure YAML config
 	fmt.Println("\n📋 Step 1: Configuration File Setup")
-	configFile, err := generateYAMLConfig(originalDir)
+	configFile, yamlConfig, err := generateYAMLConfig(originalDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -414,7 +413,7 @@ func main() {
 
 	// Step 2: Environment setup
 	fmt.Println("\n🌍 Step 2: Environment Configuration")
-	deployConfig, err := promptEnvironmentConfig()
+	deployConfig, err := promptEnvironmentConfig(yamlConfig)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error configuring environment: %v\n", err)
 		os.Exit(1)
@@ -487,13 +486,13 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string) (string, error) {
+func generateYAMLConfig(originalDir string) (string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 	
 	// Find base config file in original directory
 	baseConfigPath := findBaseConfig(originalDir)
 	if baseConfigPath == "" {
-		return "", fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
+		return "", nil, fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
 	}
 
 	// Ask for existing config file
@@ -530,24 +529,24 @@ func generateYAMLConfig(originalDir string) (string, error) {
 	// Load and merge configs
 	config, err := loadAndMergeConfigs(baseConfigPath, userConfigPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to load configs: %v", err)
+		return "", nil, fmt.Errorf("failed to load configs: %v", err)
 	}
 
 	// Check and prompt for required fields
 	if err := checkAndPromptRequiredFields(config); err != nil {
-		return "", fmt.Errorf("error checking required fields: %v", err)
+		return "", nil, fmt.Errorf("error checking required fields: %v", err)
 	}
 
 	// Save final configuration
 	if err := saveConfig(config, outputPath); err != nil {
-		return "", fmt.Errorf("error saving config: %v", err)
+		return "", nil, fmt.Errorf("error saving config: %v", err)
 	}
 
 	fmt.Printf("✅ Configuration saved to: %s\n", outputPath)
-	return filepath.Base(outputPath), nil
+	return filepath.Base(outputPath), config, nil
 }
 
-func promptEnvironmentConfig() (*DeploymentConfig, error) {
+func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	config := &DeploymentConfig{}
 
@@ -589,15 +588,24 @@ func promptEnvironmentConfig() (*DeploymentConfig, error) {
 
 
 	// Configure ports based on selected services
-	if err := promptPortConfiguration(config); err != nil {
+	if err := promptPortConfiguration(config, yamlConfig); err != nil {
 		return nil, fmt.Errorf("failed to configure ports: %v", err)
 	}
 
 	return config, nil
 }
 
-func promptPortConfiguration(config *DeploymentConfig) error {
+func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error {
 	reader := bufio.NewReader(os.Stdin)
+	
+	// Extract the servingUrl port from the passed config
+	servingPort := "3080" // fallback default
+	
+	if yamlConfig != nil {
+		if port := extractPortFromURL(yamlConfig.Service.ServingURL); port != "" {
+			servingPort = port
+		}
+	}
 	
 	fmt.Println("\n🔌 Port Configuration")
 	fmt.Println("Configure the host ports for each service:")
@@ -617,37 +625,8 @@ func promptPortConfiguration(config *DeploymentConfig) error {
 		config.Ports.MySQL = response
 	}
 	
-	// Nginx ports (always required)
-	fmt.Printf("\n🌐 Nginx Load Balancer")
-	
-	// Main HTTP port
-	defaultPort = "3080"
-	fmt.Printf("\n   Enter host port for HTTP (main API) [default: %s]: ", defaultPort)
-	response, _ = reader.ReadString('\n')
-	response = strings.TrimSpace(response)
-	if response == "" {
-		config.Ports.Nginx80 = defaultPort
-	} else {
-		if err := validatePort(response); err != nil {
-			return fmt.Errorf("invalid Nginx HTTP port: %v", err)
-		}
-		config.Ports.Nginx80 = response
-	}
-	
-	
-	// HTTPS port
-	defaultPort = "30443"
-	fmt.Printf("   Enter host port for HTTPS [default: %s]: ", defaultPort)
-	response, _ = reader.ReadString('\n')
-	response = strings.TrimSpace(response)
-	if response == "" {
-		config.Ports.Nginx443 = defaultPort
-	} else {
-		if err := validatePort(response); err != nil {
-			return fmt.Errorf("invalid Nginx HTTPS port: %v", err)
-		}
-		config.Ports.Nginx443 = response
-	}
+	// Set Nginx HTTP port from service.servingUrl (no user input needed)
+	config.Ports.Nginx80 = servingPort
 	
 	// Hardhat port (if test environment)
 	if config.UseTest {
@@ -704,7 +683,6 @@ func promptPortConfiguration(config *DeploymentConfig) error {
 	fmt.Printf("\n✅ Port configuration completed:\n")
 	fmt.Printf("   MySQL: %s\n", config.Ports.MySQL)
 	fmt.Printf("   HTTP (Main API): %s\n", config.Ports.Nginx80)
-	fmt.Printf("   HTTPS: %s\n", config.Ports.Nginx443)
 	if config.UseTest {
 		fmt.Printf("   Hardhat: %s\n", config.Ports.Hardhat)
 	}
@@ -714,6 +692,33 @@ func promptPortConfiguration(config *DeploymentConfig) error {
 	}
 	
 	return nil
+}
+
+func extractPortFromURL(urlStr string) string {
+	if urlStr == "" {
+		return ""
+	}
+	
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return ""
+	}
+	
+	// Get port from URL
+	port := parsedURL.Port()
+	if port != "" {
+		return port
+	}
+	
+	// If no explicit port, use default based on scheme
+	switch parsedURL.Scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func validatePort(port string) error {
@@ -1091,9 +1096,6 @@ func checkAndPromptRequiredFields(config *Config) error {
 		if needsInput {
 			hasChanges = true
 			fmt.Printf("\n🔧 %s\n", field.Description)
-			if currentValue != "" && currentValue != "1" {
-				fmt.Printf("   Current value: %s\n", currentValue)
-			}
 			
 			var newValue string
 			for {
