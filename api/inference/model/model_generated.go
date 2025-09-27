@@ -27,6 +27,8 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	d.RequestHash = r.RequestHash
 	d.Processed = r.Processed
 	d.VLLMProxy = r.VLLMProxy
+	d.InputCount = r.InputCount
+	d.OutputCount = r.OutputCount
 
 	return nil
 }

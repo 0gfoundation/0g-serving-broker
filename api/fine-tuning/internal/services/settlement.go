@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
-	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -161,13 +160,13 @@ func (s *Settlement) processPendingUserAckTasks(ctx context.Context) []db.Task {
 	}
 
 	for _, task := range tasks {
-		account, err := s.contract.GetUserAccount(ctx, common.HexToAddress(task.UserAddress))
+		deliverable, err := s.contract.GetDeliverable(ctx, common.HexToAddress(task.UserAddress), task.ID.String())
 		if err != nil {
-			s.logger.Errorf("error getting user account from contract, task %V, err: %v", task.ID, err)
+			s.logger.Errorf("error getting deliverable from contract, task %v, err: %v", task.ID, err)
 			continue
 		}
 
-		if !account.Deliverables[len(account.Deliverables)-1].Acknowledged {
+		if !deliverable.Acknowledged {
 			if time.Now().Unix() >= task.DeliverTime+ackTimeout {
 				ackTimeoutTasks = append(ackTimeoutTasks, task)
 				s.logger.Warnf("task %v ack timeout", task.ID)
@@ -241,7 +240,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 	}
 
 	input := contract.VerifierInput{
-		Index:           big.NewInt(int64(task.DeliverIndex)),
+		Id:              task.ID.String(),
 		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,

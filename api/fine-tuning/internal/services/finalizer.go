@@ -84,25 +84,22 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 	}
 
 	userAddr := common.HexToAddress(task.UserAddress)
-	account, err := f.contract.GetUserAccount(ctx, userAddr)
-	if err != nil {
-		return err
-	}
 
-	deliverIndex := len(account.Deliverables)
+	// Note: DeliverIndex is deprecated since we now use task ID for deliverable identification
+	// Setting to 0 for backward compatibility
 	if err = f.db.UpdateTask(task.ID,
 		db.Task{
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
 			Secret:          hexutil.Encode(settlementMetadata.Secret),
 			EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
-			DeliverIndex:    uint64(deliverIndex),
+			DeliverIndex:    0, // Deprecated: now using task ID instead of index
 			DeliverTime:     time.Now().Unix(), // TODO: better use tx timestamp
 		}); err != nil {
 		f.logger.Errorf("Failed to update task: %v", err)
 		return err
 	}
 
-	if err = f.contract.AddDeliverable(ctx, userAddr, settlementMetadata.ModelRootHash); err != nil {
+	if err = f.contract.AddDeliverable(ctx, userAddr, task.ID.String(), settlementMetadata.ModelRootHash); err != nil {
 		return errors.Wrapf(err, "add deliverable failed: %v", settlementMetadata.ModelRootHash)
 	}
 
