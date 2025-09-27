@@ -226,11 +226,18 @@ const docTemplate = `{
                 "fee": {
                     "type": "string"
                 },
+                "inputCount": {
+                    "description": "Optimized count fields for efficient aggregation",
+                    "type": "integer"
+                },
                 "inputFee": {
                     "type": "string"
                 },
                 "nonce": {
                     "type": "string"
+                },
+                "outputCount": {
+                    "type": "integer"
                 },
                 "outputFee": {
                     "type": "string"

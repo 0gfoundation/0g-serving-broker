@@ -137,8 +137,8 @@ func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service)
 	return nil
 }
 
-func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, modelRootHash []byte) error {
-	tx, err := c.Contract.Transact(ctx, nil, "addDeliverable", user, modelRootHash)
+func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, id string, modelRootHash []byte) error {
+	tx, err := c.Contract.Transact(ctx, nil, "addDeliverable", user, id, modelRootHash)
 
 	if err != nil {
 		return err

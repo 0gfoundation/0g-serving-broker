@@ -9,15 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func (c *ProviderContract) SettleFees(ctx context.Context, verifierInput contract.VerifierInput) error {
-	tx, err := c.Contract.Transact(ctx, nil, "settleFees", verifierInput)
-	if err != nil {
-		return errors.Wrap(err, "call settleFees")
-	}
-	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
-	return errors.Wrap(err, "wait for receipt")
-}
-
 type TEESettlementData struct {
 	User         common.Address
 	Provider     common.Address
