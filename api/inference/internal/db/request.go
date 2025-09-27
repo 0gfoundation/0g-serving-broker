@@ -29,6 +29,12 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 			ret = ret.Where("output_count != ?", 0)
 		}
 
+		// Filter for requests that either have output_fee set OR are older than the threshold
+		if q.RequireOutputFeeOrOld && q.OldRequestThreshold > 0 {
+			cutoffTime := time.Now().Add(-q.OldRequestThreshold)
+			ret = ret.Where("(output_fee != '' AND output_fee != '0x0') OR created_at <= ?", cutoffTime)
+		}
+
 		if q.Sort != nil {
 			ret = ret.Order(*q.Sort)
 		} else {

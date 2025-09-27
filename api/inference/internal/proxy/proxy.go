@@ -113,7 +113,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, 0, false)
 		return
 	}
-	log.Printf("received request %v", ctx.Request)
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
 		handleBrokerError(ctx, err, "get model.request from HTTP request")
@@ -188,6 +187,7 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {
+	log.Printf("Proxy error: %v, context: %s", err, ctx.Request)
 	info := "Provider proxy: handle proxied service"
 	if context != "" {
 		info += (", " + context)
