@@ -17,11 +17,13 @@ import (
 )
 
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
-	// Get unprocessed requests
+	// Get unprocessed requests with output_fee set OR created more than 3 minutes ago
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
-		Processed:         false,
-		Sort:              model.PtrOf("created_at ASC"),
-		ExcludeZeroOutput: true,
+		Processed:             false,
+		Sort:                  model.PtrOf("created_at ASC"),
+		ExcludeZeroOutput:     true,
+		RequireOutputFeeOrOld: true,
+		OldRequestThreshold:   10 * time.Minute,
 	})
 	if err != nil {
 		return errors.Wrap(err, "list request from db")

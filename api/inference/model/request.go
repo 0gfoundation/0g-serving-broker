@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 type Request struct {
 	Model
 	UserAddress  string `gorm:"type:varchar(255);not null;uniqueIndex:processed_userAddress_nonce" json:"userAddress" binding:"required" immutable:"true"`
@@ -25,7 +27,9 @@ type RequestList struct {
 }
 
 type RequestListOptions struct {
-	Processed           bool    `form:"processed"`
-	Sort                *string `form:"sort"`
-	ExcludeZeroOutput   bool    `form:"excludeZeroOutput"`
+	Processed             bool          `form:"processed"`
+	Sort                  *string       `form:"sort"`
+	ExcludeZeroOutput     bool          `form:"excludeZeroOutput"`
+	RequireOutputFeeOrOld bool          `form:"requireOutputFeeOrOld"`
+	OldRequestThreshold   time.Duration `form:"oldRequestThreshold"`
 }
