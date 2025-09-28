@@ -37,8 +37,8 @@ type NetworkConfig struct {
 type Networks map[string]*NetworkConfig
 
 type Config struct {
-	AllowOrigins    []string    `yaml:"allowOrigins,omitempty"`
-	ContractAddress string      `yaml:"contractAddress,omitempty"`
+	AllowOrigins    []string `yaml:"allowOrigins,omitempty"`
+	ContractAddress string   `yaml:"contractAddress,omitempty"`
 	Database        struct {
 		Provider string `yaml:"provider,omitempty"`
 	} `yaml:"database,omitempty"`
@@ -85,7 +85,7 @@ type DeploymentConfig struct {
 	UseMonitoring bool
 	ConfigFile    string
 	Ports         PortConfig
-	ProjectName   string  // Docker Compose project name for isolation
+	ProjectName   string // Docker Compose project name for isolation
 }
 
 // Templates for nginx.conf
@@ -183,7 +183,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:latest
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -226,7 +226,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0glabs/0g-serving-broker:latest
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if .UseTest}}
@@ -392,7 +392,7 @@ func main() {
 
 	// Store original directory for accessing config files
 	originalDir, _ := os.Getwd()
-	
+
 	// Change to output directory if not current
 	if outputDir != "." && outputDir != "" {
 		if err := os.Chdir(outputDir); err != nil {
@@ -433,24 +433,24 @@ func main() {
 
 func promptOutputDirectory() (string, error) {
 	reader := bufio.NewReader(os.Stdin)
-	
+
 	fmt.Println("\n📁 Output Directory Configuration")
 	fmt.Print("Enter the directory where configuration files will be created [default: current directory]: ")
-	
+
 	input, err := reader.ReadString('\n')
 	if err != nil {
 		return "", err
 	}
-	
+
 	outputDir := strings.TrimSpace(input)
-	
+
 	// Use current directory if no input
 	if outputDir == "" {
 		outputDir = "."
 		fmt.Println("   ✓ Using current directory")
 		return outputDir, nil
 	}
-	
+
 	// Check if directory exists
 	info, err := os.Stat(outputDir)
 	if err != nil {
@@ -460,7 +460,7 @@ func promptOutputDirectory() (string, error) {
 			fmt.Print("Do you want to create it? [Y/n]: ")
 			response, _ := reader.ReadString('\n')
 			response = strings.ToLower(strings.TrimSpace(response))
-			
+
 			if response == "" || response == "y" || response == "yes" {
 				if err := os.MkdirAll(outputDir, 0755); err != nil {
 					return "", fmt.Errorf("failed to create directory: %v", err)
@@ -475,20 +475,20 @@ func promptOutputDirectory() (string, error) {
 	} else if !info.IsDir() {
 		return "", fmt.Errorf("'%s' exists but is not a directory", outputDir)
 	}
-	
+
 	// Convert to absolute path for clarity
 	absPath, err := filepath.Abs(outputDir)
 	if err != nil {
 		return outputDir, nil // Return relative path if absolute conversion fails
 	}
-	
+
 	fmt.Printf("   ✓ Output directory set to: %s\n", absPath)
 	return outputDir, nil
 }
 
 func generateYAMLConfig(originalDir string) (string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
-	
+
 	// Find base config file in original directory
 	baseConfigPath := findBaseConfig(originalDir)
 	if baseConfigPath == "" {
@@ -499,7 +499,7 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 	fmt.Print("\n📂 Enter path to your existing configuration file (press Enter to skip): ")
 	userConfigPath, _ := reader.ReadString('\n')
 	userConfigPath = strings.TrimSpace(userConfigPath)
-	
+
 	// If user config path is provided and not absolute, check in original directory
 	if userConfigPath != "" && !filepath.IsAbs(userConfigPath) {
 		// First try in original directory
@@ -586,7 +586,6 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 		fmt.Println("   ✓ Monitoring services will be included")
 	}
 
-
 	// Configure ports based on selected services
 	if err := promptPortConfiguration(config, yamlConfig); err != nil {
 		return nil, fmt.Errorf("failed to configure ports: %v", err)
@@ -597,19 +596,19 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 
 func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error {
 	reader := bufio.NewReader(os.Stdin)
-	
+
 	// Extract the servingUrl port from the passed config
 	servingPort := "3080" // fallback default
-	
+
 	if yamlConfig != nil {
 		if port := extractPortFromURL(yamlConfig.Service.ServingURL); port != "" {
 			servingPort = port
 		}
 	}
-	
+
 	fmt.Println("\n🔌 Port Configuration")
 	fmt.Println("Configure the host ports for each service:")
-	
+
 	// MySQL port (always required)
 	defaultPort := "33060"
 	fmt.Printf("\n📊 MySQL Database")
@@ -624,10 +623,10 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		}
 		config.Ports.MySQL = response
 	}
-	
+
 	// Set Nginx HTTP port from service.servingUrl (no user input needed)
 	config.Ports.Nginx80 = servingPort
-	
+
 	// Hardhat port (if test environment)
 	if config.UseTest {
 		fmt.Printf("\n🧪 Hardhat Test Node")
@@ -644,11 +643,11 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 			config.Ports.Hardhat = response
 		}
 	}
-	
+
 	// Monitoring ports (if monitoring enabled)
 	if config.UseMonitoring {
 		fmt.Printf("\n📈 Monitoring Services")
-		
+
 		// Prometheus
 		defaultPort = "9090"
 		fmt.Printf("\n   Enter host port for Prometheus [default: %s]: ", defaultPort)
@@ -662,7 +661,7 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 			}
 			config.Ports.Prometheus = response
 		}
-		
+
 		// Grafana
 		defaultPort = "3003"
 		fmt.Printf("   Enter host port for Grafana [default: %s]: ", defaultPort)
@@ -676,9 +675,9 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 			}
 			config.Ports.Grafana = response
 		}
-		
+
 	}
-	
+
 	// Summary
 	fmt.Printf("\n✅ Port configuration completed:\n")
 	fmt.Printf("   MySQL: %s\n", config.Ports.MySQL)
@@ -690,7 +689,7 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		fmt.Printf("   Prometheus: %s\n", config.Ports.Prometheus)
 		fmt.Printf("   Grafana: %s\n", config.Ports.Grafana)
 	}
-	
+
 	return nil
 }
 
@@ -698,18 +697,18 @@ func extractPortFromURL(urlStr string) string {
 	if urlStr == "" {
 		return ""
 	}
-	
+
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
 		return ""
 	}
-	
+
 	// Get port from URL
 	port := parsedURL.Port()
 	if port != "" {
 		return port
 	}
-	
+
 	// If no explicit port, use default based on scheme
 	switch parsedURL.Scheme {
 	case "http":
@@ -869,7 +868,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Println("\n" + strings.Repeat("=", 50))
 	fmt.Println("🎉 Configuration Complete!")
 	fmt.Println(strings.Repeat("=", 50))
-	
+
 	fmt.Printf("\n📊 Configuration Summary:\n")
 	if config.ProjectName != "" {
 		fmt.Printf("  • Project Name: %s\n", config.ProjectName)
@@ -926,7 +925,7 @@ func findBaseConfig(originalDir string) string {
 		filepath.Join(originalDir, "config.yml"),
 		"config.yml", // Also check current directory as fallback
 	}
-	
+
 	for _, path := range possiblePaths {
 		if _, err := os.Stat(path); err == nil {
 			return path
@@ -994,7 +993,7 @@ func mergeConfigs(base, user *Config) {
 	if user.MaxGasPrice != nil {
 		base.MaxGasPrice = user.MaxGasPrice
 	}
-	
+
 	// Merge intervals
 	if user.Interval.AutoSettleBufferTime != 0 {
 		base.Interval.AutoSettleBufferTime = user.Interval.AutoSettleBufferTime
@@ -1066,7 +1065,7 @@ func checkAndPromptRequiredFields(config *Config) error {
 	// Process fields in a specific order to ensure consistency
 	orderedFields := []string{
 		"service.servingUrl",
-		"service.targetUrl", 
+		"service.targetUrl",
 		"service.inputPrice",
 		"service.outputPrice",
 		"service.model",
@@ -1084,7 +1083,7 @@ func checkAndPromptRequiredFields(config *Config) error {
 			continue
 		}
 		currentValue := getFieldValue(config, field.Path)
-		
+
 		// Check if field needs input
 		needsInput := false
 		if currentValue == "" {
@@ -1092,11 +1091,11 @@ func checkAndPromptRequiredFields(config *Config) error {
 		} else if strings.HasPrefix(currentValue, "<") && strings.HasSuffix(currentValue, ">") {
 			needsInput = true
 		}
-		
+
 		if needsInput {
 			hasChanges = true
 			fmt.Printf("\n🔧 %s\n", field.Description)
-			
+
 			var newValue string
 			for {
 				fmt.Printf("Enter value for %s (required): ", field.Path)
@@ -1105,35 +1104,35 @@ func checkAndPromptRequiredFields(config *Config) error {
 					return err
 				}
 				newValue = strings.TrimSpace(input)
-				
+
 				if newValue == "" {
 					fmt.Printf("❌ Required field cannot be empty!\n")
 					continue
 				}
-				
+
 				if field.Validator != nil && !field.Validator(newValue) {
 					fmt.Printf("❌ Invalid value format. Please try again.\n")
 					continue
 				}
-				
+
 				break
 			}
-			
+
 			if err := setFieldValue(config, field.Path, newValue); err != nil {
 				return fmt.Errorf("failed to set %s: %v", field.Path, err)
 			}
 		}
 	}
-	
+
 	if hasChanges {
 		fmt.Printf("\n✅ All required fields have been configured.\n")
 	} else {
 		fmt.Printf("✅ All required fields are already configured.\n")
 	}
-	
+
 	// Clean up non-required placeholder fields
 	cleanupPlaceholderFields(config)
-	
+
 	return nil
 }
 
@@ -1221,7 +1220,6 @@ func isPlaceholder(value string) bool {
 	return false
 }
 
-
 func cleanupPlaceholderFields(config *Config) {
 	// Remove placeholder values for optional fields
 	if isPlaceholderInterface(config.GasPrice) {
@@ -1233,7 +1231,7 @@ func cleanupPlaceholderFields(config *Config) {
 	if isPlaceholderInterface(config.ChatCacheExpiration) {
 		config.ChatCacheExpiration = nil
 	}
-	
+
 	// Clean service additional secrets
 	if config.Service.AdditionalSecret != nil {
 		cleanedSecrets := make(map[string]interface{})
@@ -1248,12 +1246,12 @@ func cleanupPlaceholderFields(config *Config) {
 			config.Service.AdditionalSecret = cleanedSecrets
 		}
 	}
-	
+
 	// Clean up empty string values that are placeholders
 	if config.ContractAddress != "" && isPlaceholder(config.ContractAddress) {
 		config.ContractAddress = ""
 	}
-	
+
 	// Clean up placeholder private keys in all networks
 	if config.Networks != nil {
 		for networkName, network := range config.Networks {
@@ -1271,7 +1269,7 @@ func cleanupPlaceholderFields(config *Config) {
 					network.PrivateKeys = cleanedKeys
 				}
 			}
-			
+
 			// Remove entire network if it has no meaningful configuration
 			if network.PrivateKeys == nil && network.URL == "" {
 				delete(config.Networks, networkName)
@@ -1284,11 +1282,11 @@ func isPlaceholderInterface(value interface{}) bool {
 	if value == nil {
 		return false
 	}
-	
+
 	if str, ok := value.(string); ok {
 		return isPlaceholder(str)
 	}
-	
+
 	return false
 }
 

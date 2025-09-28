@@ -19,7 +19,7 @@ services:
       - localhost
 
   0g-serving-provider-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:0.2.1
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
     container_name: 0g-serving-provider-broker
     environment:
       - PORT=3080
@@ -43,7 +43,7 @@ services:
               capabilities: [gpu]
 
   0g-serving-provider-event:
-    image: ghcr.io/0glabs/0g-serving-broker:0.2.1
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
     container_name: 0g-serving-provider-event
     environment:
       - CONFIG_FILE=/etc/config.yaml

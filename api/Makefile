@@ -1,4 +1,4 @@
-IMAGE_DEST ?= docker-daemon:ghcr.io/0glabs/0g-serving-broker
+IMAGE_DEST ?= docker-daemon:ghcr.io/0gfoundation/0g-serving-broker
 VERSION	?= $(shell git describe --tags --abbrev=8)
 BASE_IMAGE ?= 0g-serving-broker:latest
 ARCH	   ?= amd64

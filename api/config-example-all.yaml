@@ -57,7 +57,7 @@ networks:
   # Network configuration for 0g blockchain
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16601
+    chainID: 16602
     privateKeys:
       - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     transactionLimit: 1000000

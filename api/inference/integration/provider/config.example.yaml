@@ -5,7 +5,7 @@ interval:
 networks:
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16601
+    chainID: 16602
     privateKeys:
       - <Private_Key>
     transactionLimit: 1000000

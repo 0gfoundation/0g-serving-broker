@@ -29,7 +29,7 @@ services:
       - localhost
 
   0g-fine-tune-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    image: ghcr.io/0gfoundation/0g-serving-broker:dev-amd64
     privileged: true
     container_name: 0g-fine-tune-broker
     ports:
