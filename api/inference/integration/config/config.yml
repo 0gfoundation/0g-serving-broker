@@ -70,7 +70,7 @@ networks:
     url: "https://evmrpc-testnet.0g.ai"
 
     # Chain ID of the network
-    chainID: 16601
+    chainID: 16602
 
     # Private keys for transaction signing (keep secure!)
     privateKeys:

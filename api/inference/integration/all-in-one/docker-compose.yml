@@ -49,7 +49,7 @@ services:
 
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    image: ghcr.io/0gfoundation/0g-serving-broker:dev-amd64
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -60,7 +60,11 @@ services:
     networks:
       - default
     healthcheck:
-      test: ["CMD-SHELL", "test -L /proc/1/exe && readlink /proc/1/exe | grep -q broker"]
+      test:
+        [
+          "CMD-SHELL",
+          "test -L /proc/1/exe && readlink /proc/1/exe | grep -q broker",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -76,7 +80,7 @@ services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0glabs/0g-serving-broker:dev-amd64
+    image: ghcr.io/0gfoundation/0g-serving-broker:dev-amd64
     environment:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat

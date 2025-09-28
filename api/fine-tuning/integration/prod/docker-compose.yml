@@ -15,7 +15,7 @@ services:
       - localhost
 
   0g-fine-tune-broker:
-    image: ghcr.io/0glabs/0g-serving-broker:0.2.1
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
     privileged: true
     container_name: 0g-fine-tune-broker
     environment:
