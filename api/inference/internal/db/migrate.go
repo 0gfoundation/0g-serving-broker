@@ -93,6 +93,15 @@ func (d *DB) Migrate() error {
 				return tx.Exec("CREATE INDEX `idx_requests_user_processed_counts` ON `request`(`user_address`, `processed`, `input_count`, `output_count`);").Error
 			},
 		},
+		{
+			ID: "add-skip-until-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					SkipUntil *time.Time `gorm:"type:datetime;index"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

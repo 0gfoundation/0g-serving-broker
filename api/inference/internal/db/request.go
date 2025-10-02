@@ -35,6 +35,12 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 			ret = ret.Where("(output_fee != '' AND output_fee != '0x0') OR created_at <= ?", cutoffTime)
 		}
 
+		// Exclude temporarily skipped requests unless explicitly included
+		if !q.IncludeSkipped {
+			now := time.Now()
+			ret = ret.Where("skip_until IS NULL OR skip_until <= ?", now)
+		}
+
 		if q.Sort != nil {
 			ret = ret.Order(*q.Sort)
 		} else {
@@ -185,4 +191,32 @@ func (d *DB) CalculateUnsettledFee(userAddress string, inputPrice, outputPrice i
 	totalFee.Add(inputFee, outputFee)
 	
 	return totalFee, nil
+}
+
+// UpdateRequestsSkipUntil updates the skip_until field for multiple requests
+func (d *DB) UpdateRequestsSkipUntil(requestHashes []string, skipUntil *time.Time) error {
+	if len(requestHashes) == 0 {
+		return nil
+	}
+	
+	return d.db.Model(&model.Request{}).
+		Where("request_hash IN ?", requestHashes).
+		Update("skip_until", skipUntil).Error
+}
+
+// ClearRequestsSkipUntil clears the skip_until field for requests whose skip period has expired
+func (d *DB) ClearExpiredSkipUntil() error {
+	now := time.Now()
+	return d.db.Model(&model.Request{}).
+		Where("skip_until IS NOT NULL AND skip_until <= ?", now).
+		Update("skip_until", nil).Error
+}
+
+// DeleteRequestsByHashes deletes specific requests by their hashes
+func (d *DB) DeleteRequestsByHashes(requestHashes []string) error {
+	if len(requestHashes) == 0 {
+		return nil
+	}
+	
+	return d.db.Where("request_hash IN ?", requestHashes).Delete(&model.Request{}).Error
 }

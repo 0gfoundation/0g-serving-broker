@@ -16,8 +16,10 @@ type Request struct {
 	Processed    bool   `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce" json:"processed"`
 	VLLMProxy    bool   `gorm:"type:tinyint(1);not null;default:0" json:"vllmProxy"`
 	// Optimized count fields for efficient aggregation
-	InputCount   int64  `gorm:"type:bigint;not null;default:0" json:"inputCount"`
-	OutputCount  int64  `gorm:"type:bigint;not null;default:0" json:"outputCount"`
+	InputCount   int64      `gorm:"type:bigint;not null;default:0" json:"inputCount"`
+	OutputCount  int64      `gorm:"type:bigint;not null;default:0" json:"outputCount"`
+	// Skip this request in settlement until this time
+	SkipUntil    *time.Time `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
 }
 
 type RequestList struct {
@@ -32,4 +34,5 @@ type RequestListOptions struct {
 	ExcludeZeroOutput     bool          `form:"excludeZeroOutput"`
 	RequireOutputFeeOrOld bool          `form:"requireOutputFeeOrOld"`
 	OldRequestThreshold   time.Duration `form:"oldRequestThreshold"`
+	IncludeSkipped        bool          `form:"includeSkipped"` // Include requests that are temporarily skipped
 }
