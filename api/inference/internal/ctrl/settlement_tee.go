@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/big"
 	"time"
@@ -18,15 +19,16 @@ import (
 )
 
 // SettlementStatus represents the different states of settlement
+// Must match the enum in InferenceServing.sol
 type SettlementStatus uint8
 
 const (
-	SettlementSuccess     SettlementStatus = 0
-	SettlementPartial     SettlementStatus = 1
-	SettlementInsuffBal   SettlementStatus = 2
-	SettlementNoSigner    SettlementStatus = 3
-	SettlementInvalidNonce SettlementStatus = 4
-	SettlementInvalidSig  SettlementStatus = 5
+	SettlementSuccess        SettlementStatus = 0 // Full settlement success
+	SettlementPartial        SettlementStatus = 1 // Partial settlement (insufficient balance)
+	SettlementProviderMismatch SettlementStatus = 2 // Provider mismatch
+	SettlementNoSigner       SettlementStatus = 3 // TEE signer not acknowledged
+	SettlementInvalidNonce   SettlementStatus = 4 // Invalid or duplicate nonce
+	SettlementInvalidSig     SettlementStatus = 5 // Signature verification failed
 )
 
 // String returns the string representation of SettlementStatus
@@ -36,8 +38,8 @@ func (s SettlementStatus) String() string {
 		return "SUCCESS"
 	case SettlementPartial:
 		return "PARTIAL"
-	case SettlementInsuffBal:
-		return "INSUFFICIENT_BALANCE"
+	case SettlementProviderMismatch:
+		return "PROVIDER_MISMATCH"
 	case SettlementNoSigner:
 		return "NO_TEE_SIGNER"
 	case SettlementInvalidNonce:
@@ -77,11 +79,55 @@ type SettlementBatch struct {
 	ExecutableItems []contract.TEESettlementData // items that can be sent to contract
 }
 
+func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
+	settleTriggerThreshold := (c.Service.InputPrice + c.Service.OutputPrice) * constant.SettleTriggerThreshold
+
+	// Use the optimized method that calculates unsettled fees with a single query
+	accounts, err := c.db.ListUsersWithUnsettledFees(&model.UserListOptions{
+		LowBalanceRisk:         model.PtrOf(time.Now().Add(-c.contract.LockTime + c.autoSettleBufferTime)),
+		MinUnsettledFee:        model.PtrOf(int64(0)),
+		SettleTriggerThreshold: &settleTriggerThreshold,
+	}, c.Service.InputPrice, c.Service.OutputPrice)
+	if err != nil {
+		return errors.Wrap(err, "list accounts that need to be settled in db")
+	}
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	// Verify the available balance in the contract
+	if err := c.SyncUserAccounts(ctx); err != nil {
+		return errors.Wrap(err, "synchronize accounts from the contract to the database")
+	}
+
+	// Re-check accounts after sync with current time using optimized query
+	accounts, err = c.db.ListUsersWithUnsettledFees(&model.UserListOptions{
+		MinUnsettledFee:        model.PtrOf(int64(0)),
+		LowBalanceRisk:         model.PtrOf(time.Now()),
+		SettleTriggerThreshold: &settleTriggerThreshold,
+	}, c.Service.InputPrice, c.Service.OutputPrice)
+	if err != nil {
+		return errors.Wrap(err, "list accounts that need to be settled in db after sync")
+	}
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	log.Print("Accounts at risk of having insufficient funds and will be settled immediately with TEE.")
+	return errors.Wrap(c.SettleFeesWithTEE(ctx), "settle fees with TEE")
+}
+
 // SettleFeesWithTEE implements the optimized settlement logic
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 	// Clear expired skipUntil flags
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
 		log.Printf("Warning: failed to clear expired skipUntil: %v", err)
+	}
+
+	// Prune old requests with zero output
+	pruneThreshold := 1 * time.Hour // Prune requests older than 1 hours with zero output
+	if err := c.db.PruneRequest(pruneThreshold); err != nil {
+		log.Printf("Warning: failed to prune old zero-output requests: %v", err)
 	}
 
 	// Main settlement loop with limited iterations
@@ -94,8 +140,6 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			Processed:             false,
 			Sort:                  model.PtrOf("created_at ASC"),
 			ExcludeZeroOutput:     true,
-			RequireOutputFeeOrOld: true,
-			OldRequestThreshold:   10 * time.Minute,
 			IncludeSkipped:        false,
 		})
 		if err != nil {
@@ -222,9 +266,11 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 	// Use the contract's preview function for accurate prediction
 	callOpts := &bind.CallOpts{
 		Context: context.Background(),
+		From:    common.HexToAddress(c.contract.ProviderAddress),
 	}
 
 	log.Printf("Batch previewing %d settlements", len(settlements))
+	log.Println("Settlements:", settlements)
 	result, err := c.contract.Contract.InferenceServing.PreviewSettlementResults(callOpts, settlements)
 	if err != nil {
 		log.Printf("Batch preview settlements failed: %v", err)
@@ -232,7 +278,7 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 		results := make([]*PreviewResult, len(settlements))
 		for i, settlement := range settlements {
 			results[i] = &PreviewResult{
-				Status:          SettlementInsuffBal,
+				Status:          SettlementPartial,
 				UnsettledAmount: settlement.TotalFee,
 			}
 		}
@@ -243,6 +289,8 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 	failureMap := make(map[common.Address]SettlementStatus)
 	for i, user := range result.FailedUsers {
 		if i < len(result.FailureReasons) {
+			fmt.Println("User", user.Hex(), "failed with reason", result.FailureReasons[i])
+			fmt.Println("SettlementStatus(result.FailureReasons[i]", SettlementStatus(result.FailureReasons[i]))
 			failureMap[user] = SettlementStatus(result.FailureReasons[i])
 		}
 	}
@@ -322,7 +370,7 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 
 		if _, failed := actualFailures[outcome.User]; failed {
 			// Execution failed - revert to failed status
-			outcome.Status = SettlementInsuffBal // or specific failure reason
+			outcome.Status = SettlementPartial // insufficient balance or other failure
 			outcome.AdjustedRequest = nil
 			outcome.SettledRequests = nil
 		}
@@ -496,7 +544,7 @@ func (c *Ctrl) executeBatches(ctx context.Context, settlements []contract.TEESet
 		}
 		
 		for _, user := range failedUsers {
-			failures[user] = SettlementInsuffBal
+			failures[user] = SettlementPartial
 		}
 	}
 	
@@ -509,7 +557,6 @@ func (c *Ctrl) getUserRequestsForAddress(userAddress string) (*UserRequests, err
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
 		Processed:         false,
 		IncludeSkipped:    true, // Include skipped requests for permanent failures
-		ExcludeZeroOutput: true,
 		Sort:              model.PtrOf("created_at ASC"),
 	})
 	if err != nil {

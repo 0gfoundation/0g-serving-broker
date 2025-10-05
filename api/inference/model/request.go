@@ -32,7 +32,5 @@ type RequestListOptions struct {
 	Processed             bool          `form:"processed"`
 	Sort                  *string       `form:"sort"`
 	ExcludeZeroOutput     bool          `form:"excludeZeroOutput"`
-	RequireOutputFeeOrOld bool          `form:"requireOutputFeeOrOld"`
-	OldRequestThreshold   time.Duration `form:"oldRequestThreshold"`
 	IncludeSkipped        bool          `form:"includeSkipped"` // Include requests that are temporarily skipped
 }

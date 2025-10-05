@@ -3,8 +3,6 @@ package db
 import (
 	"database/sql"
 	"math/big"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -27,12 +25,6 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 
 		if q.ExcludeZeroOutput {
 			ret = ret.Where("output_count != ?", 0)
-		}
-
-		// Filter for requests that either have output_fee set OR are older than the threshold
-		if q.RequireOutputFeeOrOld && q.OldRequestThreshold > 0 {
-			cutoffTime := time.Now().Add(-q.OldRequestThreshold)
-			ret = ret.Where("(output_fee != '' AND output_fee != '0x0') OR created_at <= ?", cutoffTime)
 		}
 
 		// Exclude temporarily skipped requests unless explicitly included
@@ -141,25 +133,14 @@ func (d *DB) CreateRequest(req model.Request) error {
 	return ret.Error
 }
 
-func (d *DB) PruneRequest(minNonceMap map[string]string) error {
-	var whereClauses []string
-	var args []interface{}
-
-	if len(minNonceMap) == 0 {
-		return nil
+func (d *DB) PruneRequest(pruneThreshold time.Duration) error {
+	// Delete requests where output_count == 0 and creation time is older than threshold
+	if pruneThreshold > 0 {
+		cutoffTime := time.Now().Add(-pruneThreshold)
+		return d.db.Where("output_count = 0 AND created_at <= ?", cutoffTime).
+			Delete(&model.Request{}).Error
 	}
-
-	for address, minNonceStr := range minNonceMap {
-		minNonce, err := strconv.ParseUint(minNonceStr, 10, 64)
-		if err != nil {
-			return err
-		}
-		whereClauses = append(whereClauses, "(user_address = ? AND CAST(nonce AS UNSIGNED) <= ?)")
-		args = append(args, address, minNonce)
-	}
-	condition := strings.Join(whereClauses, " OR ")
-
-	return d.db.Where(condition, args...).Delete(&model.Request{}).Error
+	return nil
 }
 
 // CalculateUnsettledFee calculates unsettled fee using SUM aggregation for optimal performance
