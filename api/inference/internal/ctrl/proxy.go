@@ -50,6 +50,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	resp, err := client.Do(req)
 	if err != nil {
+		//TODO  add error record in log
 		handleBrokerError(ctx, err, "call proxied service")
 		return err
 	}
@@ -161,6 +162,7 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 }
 
 func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+	
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		// TODO: recorded to log system

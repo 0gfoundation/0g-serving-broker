@@ -2,6 +2,7 @@ package providercontract
 
 import (
 	"context"
+	"log"
 	"math/big"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -19,16 +20,6 @@ type TEESettlementData struct {
 }
 
 func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []contract.TEESettlementData) ([]common.Address, error) {
-	// Get user nonces before settlement
-	userNoncesBefore := make(map[common.Address]*big.Int)
-	for _, settlement := range settlements {
-		account, err := c.Contract.GetAccount(nil, settlement.User, settlement.Provider)
-		if err != nil {
-			return nil, errors.Wrap(err, "get account before settlement")
-		}
-		userNoncesBefore[settlement.User] = account.Nonce
-	}
-	
 	// Execute the actual transaction
 	tx, err := c.Contract.Transact(ctx, nil, "settleFeesWithTEE", settlements)
 	if err != nil {
@@ -36,22 +27,27 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 	}
 	
 	// Wait for transaction receipt
-	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
 		return nil, errors.Wrap(err, "wait for receipt")
 	}
 	
-	// Get user nonces after settlement to determine which users failed
+	// Parse TEESettlementResult events from logs to determine failed users
 	var failedUsers []common.Address
-	for _, settlement := range settlements {
-		account, err := c.Contract.GetAccount(nil, settlement.User, settlement.Provider)
+	for _, vLog := range receipt.Logs {
+		// Try to parse the log as a TEESettlementResult event
+		event, err := c.Contract.InferenceServing.ParseTEESettlementResult(*vLog)
 		if err != nil {
-			return nil, errors.Wrap(err, "get account after settlement")
+			// Not a TEESettlementResult event, skip
+			continue
 		}
 		
-		// If nonce didn't change, the settlement failed
-		if account.Nonce.Cmp(userNoncesBefore[settlement.User]) == 0 {
-			failedUsers = append(failedUsers, settlement.User)
+		// Status 0 means SUCCESS, anything else is a failure or partial settlement
+		// For backward compatibility, we treat both failures and partial settlements as "failed"
+		if event.Status != 0 {
+			failedUsers = append(failedUsers, event.User)
+			log.Printf("Settlement for user %s: status=%d (0=SUCCESS, 1=PARTIAL, 2=PROVIDER_MISMATCH, 3=NO_TEE_SIGNER, 4=INVALID_NONCE, 5=INVALID_SIG), unsettledAmount=%s", 
+				event.User.Hex(), event.Status, event.UnsettledAmount.String())
 		}
 	}
 	

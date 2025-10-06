@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"math/big"
 	"time"
@@ -257,7 +256,7 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 	}, nil
 }
 
-// batchPreviewSettlements previews multiple settlements in one RPC call
+// batchPreviewSettlements previews multiple settlements using batching to avoid gas limit issues
 func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData) ([]*PreviewResult, error) {
 	if len(settlements) == 0 {
 		return []*PreviewResult{}, nil
@@ -270,55 +269,69 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 	}
 
 	log.Printf("Batch previewing %d settlements", len(settlements))
-	log.Println("Settlements:", settlements)
-	result, err := c.contract.Contract.InferenceServing.PreviewSettlementResults(callOpts, settlements)
-	if err != nil {
-		log.Printf("Batch preview settlements failed: %v", err)
-		// Default all to failure on error
-		results := make([]*PreviewResult, len(settlements))
-		for i, settlement := range settlements {
-			results[i] = &PreviewResult{
-				Status:          SettlementPartial,
-				UnsettledAmount: settlement.TotalFee,
-			}
-		}
-		return results, nil
-	}
-
-	// Create result map for easier lookup
-	failureMap := make(map[common.Address]SettlementStatus)
-	for i, user := range result.FailedUsers {
-		if i < len(result.FailureReasons) {
-			fmt.Println("User", user.Hex(), "failed with reason", result.FailureReasons[i])
-			fmt.Println("SettlementStatus(result.FailureReasons[i]", SettlementStatus(result.FailureReasons[i]))
-			failureMap[user] = SettlementStatus(result.FailureReasons[i])
-		}
-	}
-
-	partialMap := make(map[common.Address]*big.Int)
-	for i, user := range result.PartialUsers {
-		if i < len(result.PartialAmounts) {
-			partialMap[user] = result.PartialAmounts[i]
-		}
-	}
-
-	// Process results for each settlement
+	
+	// Initialize results for all settlements
 	results := make([]*PreviewResult, len(settlements))
-	for i, settlement := range settlements {
-		if status, isFailed := failureMap[settlement.User]; isFailed {
-			results[i] = &PreviewResult{
-				Status:          status,
-				UnsettledAmount: settlement.TotalFee,
+	
+	// Process in batches to avoid gas limit issues (same as executeBatches)
+	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
+		end := i + constant.TEESettlementBatchSize
+		if end > len(settlements) {
+			end = len(settlements)
+		}
+		
+		batch := settlements[i:end]
+		log.Printf("Previewing settlement batch %d-%d (size: %d)", i+1, end, len(batch))
+		
+		result, err := c.contract.Contract.InferenceServing.PreviewSettlementResults(callOpts, batch)
+		if err != nil {
+			log.Printf("Batch preview settlements failed for batch %d-%d: %v", i+1, end, err)
+			// Default this batch to failure on error
+			for j := i; j < end; j++ {
+				results[j] = &PreviewResult{
+					Status:          SettlementPartial,
+					UnsettledAmount: settlements[j].TotalFee,
+				}
 			}
-		} else if unsettledAmount, isPartial := partialMap[settlement.User]; isPartial {
-			results[i] = &PreviewResult{
-				Status:          SettlementPartial,
-				UnsettledAmount: unsettledAmount,
+			continue // Continue with next batch even if this one fails
+		}
+
+		// Create result maps for easier lookup for this batch
+		failureMap := make(map[common.Address]SettlementStatus)
+		for idx, user := range result.FailedUsers {
+			if idx < len(result.FailureReasons) {
+				log.Printf("User %s failed with reason %s", user.Hex(), SettlementStatus(result.FailureReasons[idx]).String())
+				failureMap[user] = SettlementStatus(result.FailureReasons[idx])
 			}
-		} else {
-			results[i] = &PreviewResult{
-				Status:          SettlementSuccess,
-				UnsettledAmount: big.NewInt(0),
+		}
+
+		partialMap := make(map[common.Address]*big.Int)
+		for idx, user := range result.PartialUsers {
+			if idx < len(result.PartialAmounts) {
+				partialMap[user] = result.PartialAmounts[idx]
+			}
+		}
+
+		// Process results for each settlement in this batch
+		for j := 0; j < len(batch); j++ {
+			settlementIdx := i + j
+			settlement := settlements[settlementIdx]
+			
+			if status, isFailed := failureMap[settlement.User]; isFailed {
+				results[settlementIdx] = &PreviewResult{
+					Status:          status,
+					UnsettledAmount: settlement.TotalFee,
+				}
+			} else if unsettledAmount, isPartial := partialMap[settlement.User]; isPartial {
+				results[settlementIdx] = &PreviewResult{
+					Status:          SettlementPartial,
+					UnsettledAmount: unsettledAmount,
+				}
+			} else {
+				results[settlementIdx] = &PreviewResult{
+					Status:          SettlementSuccess,
+					UnsettledAmount: big.NewInt(0),
+				}
 			}
 		}
 	}
