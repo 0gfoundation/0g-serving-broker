@@ -146,7 +146,7 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		
 		if len(reqs) == 0 {
 			c.logger.Infof("No more requests to settle after %d rounds", round)
-			return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
+			return nil
 		}
 
 		c.logger.Infof("Processing settlement for %d requests", len(reqs))
@@ -225,7 +225,7 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 		case SettlementPartial:
 			// Partial settlement - adjust and split requests
 			adjustedSettlement, settledRequests := c.adjustForPartialSettlement(settlement, userReqs, result.UnsettledAmount)
-			outcome.AdjustedRequest = &adjustedSettlement
+			outcome.AdjustedRequest = adjustedSettlement
 			outcome.SettledRequests = settledRequests
 			outcome.UnsettledAmount = result.UnsettledAmount
 			
@@ -339,19 +339,13 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 }
 
 // adjustForPartialSettlement adjusts settlement for partial payment
-func (c *Ctrl) adjustForPartialSettlement(settlement contract.TEESettlementData, userReqs *UserRequests, unsettledAmount *big.Int) (contract.TEESettlementData, []*model.Request) {
+func (c *Ctrl) adjustForPartialSettlement(settlement contract.TEESettlementData, userReqs *UserRequests, unsettledAmount *big.Int) (*contract.TEESettlementData, []*model.Request) {
 	settleableAmount := new(big.Int).Sub(settlement.TotalFee, unsettledAmount)
-	settledRequests := c.getRequestsWithinBudget(userReqs.Requests, settleableAmount)
-	
-	// Calculate actual total fee of settled requests
-	actualTotalFee := big.NewInt(0)
-	for _, req := range settledRequests {
-		fee, err := util.HexadecimalStringToBigInt(req.Fee)
-		if err != nil {
-			c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
-			continue
-		}
-		actualTotalFee.Add(actualTotalFee, fee)
+	settledRequests, actualTotalFee := c.getRequestsWithinBudget(userReqs.Requests, settleableAmount)
+
+	// If no actual fee can be settled, return nil to indicate failure
+	if actualTotalFee.Cmp(big.NewInt(0)) == 0 {
+		return nil, nil
 	}
 
 	// Create adjusted settlement
@@ -359,7 +353,7 @@ func (c *Ctrl) adjustForPartialSettlement(settlement contract.TEESettlementData,
 	adjustedSettlement.TotalFee = actualTotalFee
 	adjustedSettlement.RequestsHash = c.hashUserRequests(settledRequests)
 
-	return adjustedSettlement, settledRequests
+	return &adjustedSettlement, settledRequests
 }
 
 // executeAndProcessResults executes the settlement batch
@@ -428,7 +422,7 @@ func (c *Ctrl) groupRequestsByUser(reqs []model.Request) map[string]*UserRequest
 	userRequestsMap := make(map[string]*UserRequests)
 	
 	for _, req := range reqs {
-		fee, err := util.HexadecimalStringToBigInt(req.Fee)
+		fee, err := util.ConvertToBigInt(req.Fee)
 		if err != nil {
 			c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
 			continue
@@ -480,12 +474,13 @@ func (c *Ctrl) createUserSettlement(userAddr string, userReqs *UserRequests) (co
 	return settlementData, nil
 }
 
-func (c *Ctrl) getRequestsWithinBudget(requests []*model.Request, budget *big.Int) []*model.Request {
+func (c *Ctrl) getRequestsWithinBudget(requests []*model.Request, budget *big.Int) ([]*model.Request, *big.Int) {
 	var result []*model.Request
 	remaining := new(big.Int).Set(budget)
+	actualTotalFee := big.NewInt(0)
 	
 	for _, req := range requests {
-		fee, err := util.HexadecimalStringToBigInt(req.Fee)
+		fee, err := util.ConvertToBigInt(req.Fee)
 		if err != nil {
 			continue
 		}
@@ -493,12 +488,13 @@ func (c *Ctrl) getRequestsWithinBudget(requests []*model.Request, budget *big.In
 		if remaining.Cmp(fee) >= 0 {
 			result = append(result, req)
 			remaining.Sub(remaining, fee)
+			actualTotalFee.Add(actualTotalFee, fee)
 		} else {
 			break
 		}
 	}
 	
-	return result
+	return result, actualTotalFee
 }
 
 func (c *Ctrl) getUnsettledRequests(allRequests, settledRequests []*model.Request) []*model.Request {
@@ -584,7 +580,7 @@ func (c *Ctrl) getUserRequestsForAddress(userAddress string) (*UserRequests, err
 			reqCopy := req
 			userRequests = append(userRequests, &reqCopy)
 			
-			fee, err := util.HexadecimalStringToBigInt(req.Fee)
+			fee, err := util.ConvertToBigInt(req.Fee)
 			if err != nil {
 				c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
 				continue

@@ -107,11 +107,6 @@ func (d *DB) BatchUpdateUserAccount(news []model.User) error {
 	return d.DeleteUserAccounts(toRemove)
 }
 
-func (d *DB) ResetUnsettledFee() error {
-	ret := d.db.Model(&model.User{}).Where("TRUE").Update("unsettled_fee", model.PtrOf(int64(0)))
-	return ret.Error
-}
-
 func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, outputPrice int64) ([]model.User, error) {
 	if opt == nil {
 		opt = &model.UserListOptions{}
