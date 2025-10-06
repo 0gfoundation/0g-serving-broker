@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -144,7 +143,6 @@ func updateRequestField(req *model.Request, key, value string) error {
 	case "VLLM-Proxy":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			log.Printf("%v", err)
 			v = false
 		}
 

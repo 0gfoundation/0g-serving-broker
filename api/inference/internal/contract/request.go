@@ -2,7 +2,6 @@ package providercontract
 
 import (
 	"context"
-	"log"
 	"math/big"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -46,7 +45,7 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 		// For backward compatibility, we treat both failures and partial settlements as "failed"
 		if event.Status != 0 {
 			failedUsers = append(failedUsers, event.User)
-			log.Printf("Settlement for user %s: status=%d (0=SUCCESS, 1=PARTIAL, 2=PROVIDER_MISMATCH, 3=NO_TEE_SIGNER, 4=INVALID_NONCE, 5=INVALID_SIG), unsettledAmount=%s", 
+			c.logger.Infof("Settlement for user %s: status=%d (0=SUCCESS, 1=PARTIAL, 2=PROVIDER_MISMATCH, 3=NO_TEE_SIGNER, 4=INVALID_NONCE, 5=INVALID_SIG), unsettledAmount=%s", 
 				event.User.Hex(), event.Status, event.UnsettledAmount.String())
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	metricserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -19,6 +20,10 @@ import (
 
 func Main() {
 	conf := config.GetConfig()
+	logger, err := log.GetLogger(conf.Logger)
+	if err != nil {
+		panic(err)
+	}
 
 	if conf.Monitor.Enable {
 		monitor.InitPrometheus(conf.Service.ServingURL)
@@ -29,7 +34,7 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	contract, err := providercontract.NewProviderContract(conf)
+	contract, err := providercontract.NewProviderContract(conf, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -75,9 +80,9 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, conf, nil, teeService)
+	ctrl := ctrl.New(db, contract, conf, nil, teeService, logger)
 
-	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable)
+	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)
 	if err := mgr.Add(settlementProcessor); err != nil {
 		panic(err)
 	}

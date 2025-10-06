@@ -3,7 +3,6 @@ package ctrl
 import (
 	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
@@ -43,15 +42,14 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	// back up body for other usage
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "failed to read request body")
+		c.handleBrokerError(ctx, err, "failed to read request body")
 		return err
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	resp, err := client.Do(req)
 	if err != nil {
-		//TODO  add error record in log
-		handleBrokerError(ctx, err, "call proxied service")
+		c.handleBrokerError(ctx, err, "call proxied service")
 		return err
 	}
 	defer resp.Body.Close()
@@ -65,7 +63,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	if resp.StatusCode != http.StatusOK {
 		ctx.Writer.WriteHeader(resp.StatusCode)
-		handleServiceError(ctx, resp.Body)
+		c.handleServiceError(ctx, resp.Body)
 		return err
 	}
 
@@ -80,7 +78,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	_, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress)
 	if err != nil {
-		handleBrokerError(ctx, err, "")
+		c.handleBrokerError(ctx, err, "")
 		return err
 	}
 
@@ -93,14 +91,14 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
-		handleBrokerError(ctx, err, "prepare request extractor")
+		c.handleBrokerError(ctx, err, "prepare request extractor")
 		return err
 	}
 }
 
 func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	key := c.chatCacheKey(chatID)
-	log.Printf("get signature for chat: %v", chatID)
+	c.logger.Debugf("get signature for chat: %v", chatID)
 	val, exist := c.svcCache.Get(key)
 	if !exist {
 		return nil, errors.New("Chat id not found or expired, chat_id_not_found")
@@ -117,11 +115,11 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "read from body")
+		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
 	if _, err := ctx.Writer.Write(body); err != nil {
-		handleBrokerError(ctx, err, "write response body")
+		c.handleBrokerError(ctx, err, "write response body")
 		return err
 	}
 
@@ -152,8 +150,8 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 	ctx.Writer.Header().Set("Access-Control-Expose-Headers", newHeaders)
 }
 
-func handleBrokerError(ctx *gin.Context, err error, context string) {
-	// TODO: recorded to log system
+func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
+	c.logger.Errorf("Proxy broker error: %v, context: %s", err, context)
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
@@ -161,16 +159,18 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 	errors.Response(ctx, errors.Wrap(err, info))
 }
 
-func handleServiceError(ctx *gin.Context, body io.ReadCloser) {
+func (c *Ctrl) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 	
 	respBody, err := io.ReadAll(body)
 	if err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		c.logger.Errorf("Failed to read service error response body: %v", err)
 		return
 	}
+	
+	// Log the actual service error content for debugging
+	c.logger.Errorf("Service returned error response: %s", string(respBody))
+	
 	if _, err := ctx.Writer.Write(respBody); err != nil {
-		// TODO: recorded to log system
-		log.Println(err)
+		c.logger.Errorf("Failed to write service error response: %v", err)
 	}
 }

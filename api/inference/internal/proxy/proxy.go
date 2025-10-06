@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -20,7 +20,8 @@ import (
 )
 
 type Proxy struct {
-	ctrl *ctrl.Ctrl
+	ctrl   *ctrl.Ctrl
+	logger log.Logger
 
 	allowOrigins      []string
 	serviceRoutesLock sync.RWMutex
@@ -29,7 +30,7 @@ type Proxy struct {
 	serviceGroup      *gin.RouterGroup
 }
 
-func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool) *Proxy {
+func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, logger log.Logger) *Proxy {
 	// Ensure allowOrigins is not empty
 	if len(allowOrigins) == 0 {
 		allowOrigins = []string{"*"}
@@ -38,6 +39,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	p := &Proxy{
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,
+		logger:       logger,
 		serviceGroup: engine.Group(constant.ServicePrefix),
 	}
 
@@ -95,7 +97,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
-		handleBrokerError(ctx, err, "read request body")
+		p.handleBrokerError(ctx, err, "read request body")
 		return
 	}
 
@@ -107,7 +109,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 		if err != nil {
-			handleBrokerError(ctx, err, "prepare HTTP request")
+			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
 		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, 0, false)
@@ -115,7 +117,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 	req, err := p.ctrl.GetFromHTTPRequest(ctx)
 	if err != nil {
-		handleBrokerError(ctx, err, "get model.request from HTTP request")
+		p.handleBrokerError(ctx, err, "get model.request from HTTP request")
 		return
 	}
 
@@ -128,11 +130,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	case "chatbot":
 		expectedInputFee, inputCount, err = p.ctrl.GetChatbotInputFeeAndCount(reqBody)
 		if err != nil {
-			handleBrokerError(ctx, err, "get input fee and count")
+			p.handleBrokerError(ctx, err, "get input fee and count")
 			return
 		}
 	default:
-		handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
+		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
 	}
 
@@ -144,22 +146,22 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.RequestHash = req.Nonce
 
 	if err := p.ctrl.ValidateRequest(ctx, req); err != nil {
-		handleBrokerError(ctx, err, "validate request")
+		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}
 	if err := p.ctrl.CreateRequest(req); err != nil {
-		handleBrokerError(ctx, err, "create request")
+		p.handleBrokerError(ctx, err, "create request")
 		return
 	}
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
 	if err != nil {
-		handleBrokerError(ctx, err, "prepare HTTP request")
+		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
 
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, p.ctrl.Service.OutputPrice, true); err != nil {
-		log.Printf("process http request failed: %v", err)
+		p.logger.Errorf("process http request failed: %v", err)
 	}
 }
 
@@ -175,7 +177,7 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	if strings.ToLower(vllmProxy) != "true" {
 		sig, err := p.ctrl.GetChatSignature(chatID)
 		if err != nil {
-			handleBrokerError(ctx, err, "prepare HTTP request")
+			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return true
 		}
 
@@ -186,8 +188,8 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	return false
 }
 
-func handleBrokerError(ctx *gin.Context, err error, context string) {
-	log.Printf("Proxy error: %v, context: %s", err, ctx.Request)
+func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {
+	p.logger.Errorf("Proxy broker error: %v, context: %s", err, context)
 	info := "Provider proxy: handle proxied service"
 	if context != "" {
 		info += (", " + context)

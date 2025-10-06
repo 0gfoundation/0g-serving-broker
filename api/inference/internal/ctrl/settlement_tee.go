@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"context"
-	"log"
 	"math/big"
 	"time"
 
@@ -112,7 +111,7 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 		return nil
 	}
 
-	log.Print("Accounts at risk of having insufficient funds and will be settled immediately with TEE.")
+	c.logger.Info("Accounts at risk of having insufficient funds and will be settled immediately with TEE.")
 	return errors.Wrap(c.SettleFeesWithTEE(ctx), "settle fees with TEE")
 }
 
@@ -120,19 +119,19 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 	// Clear expired skipUntil flags
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
-		log.Printf("Warning: failed to clear expired skipUntil: %v", err)
+		c.logger.Infof("Warning: failed to clear expired skipUntil: %v", err)
 	}
 
 	// Prune old requests with zero output
 	pruneThreshold := 1 * time.Hour // Prune requests older than 1 hours with zero output
 	if err := c.db.PruneRequest(pruneThreshold); err != nil {
-		log.Printf("Warning: failed to prune old zero-output requests: %v", err)
+		c.logger.Infof("Warning: failed to prune old zero-output requests: %v", err)
 	}
 
 	// Main settlement loop with limited iterations
 	const maxSettlementRounds = 10
 	for round := 1; round <= maxSettlementRounds; round++ {
-		log.Printf("Settlement round %d/%d", round, maxSettlementRounds)
+		c.logger.Infof("Settlement round %d/%d", round, maxSettlementRounds)
 		
 		// Get unprocessed requests (excluding those with active skipUntil)
 		reqs, _, err := c.db.ListRequest(model.RequestListOptions{
@@ -146,11 +145,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		}
 		
 		if len(reqs) == 0 {
-			log.Printf("No more requests to settle after %d rounds", round)
+			c.logger.Infof("No more requests to settle after %d rounds", round)
 			return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 		}
 
-		log.Printf("Processing settlement for %d requests", len(reqs))
+		c.logger.Infof("Processing settlement for %d requests", len(reqs))
 		
 		// Process settlement batch
 		batch, err := c.createSettlementBatch(reqs)
@@ -171,7 +170,7 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 
 		// If no executable items, we're done
 		if len(batch.ExecutableItems) == 0 {
-			log.Printf("No executable settlements remaining after %d rounds", round)
+			c.logger.Infof("No executable settlements remaining after %d rounds", round)
 			break
 		}
 	}
@@ -191,7 +190,7 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 	for userAddr, userReqs := range userRequestsMap {
 		settlement, err := c.createUserSettlement(userAddr, userReqs)
 		if err != nil {
-			log.Printf("Error creating settlement for user %s: %v", userAddr, err)
+			c.logger.Infof("Error creating settlement for user %s: %v", userAddr, err)
 			continue
 		}
 		settlements = append(settlements, settlement)
@@ -268,7 +267,7 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 		From:    common.HexToAddress(c.contract.ProviderAddress),
 	}
 
-	log.Printf("Batch previewing %d settlements", len(settlements))
+	c.logger.Infof("Batch previewing %d settlements", len(settlements))
 	
 	// Initialize results for all settlements
 	results := make([]*PreviewResult, len(settlements))
@@ -281,11 +280,11 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 		}
 		
 		batch := settlements[i:end]
-		log.Printf("Previewing settlement batch %d-%d (size: %d)", i+1, end, len(batch))
+		c.logger.Infof("Previewing settlement batch %d-%d (size: %d)", i+1, end, len(batch))
 		
 		result, err := c.contract.Contract.InferenceServing.PreviewSettlementResults(callOpts, batch)
 		if err != nil {
-			log.Printf("Batch preview settlements failed for batch %d-%d: %v", i+1, end, err)
+			c.logger.Infof("Batch preview settlements failed for batch %d-%d: %v", i+1, end, err)
 			// Default this batch to failure on error
 			for j := i; j < end; j++ {
 				results[j] = &PreviewResult{
@@ -300,7 +299,7 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 		failureMap := make(map[common.Address]SettlementStatus)
 		for idx, user := range result.FailedUsers {
 			if idx < len(result.FailureReasons) {
-				log.Printf("User %s failed with reason %s", user.Hex(), SettlementStatus(result.FailureReasons[idx]).String())
+				c.logger.Infof("User %s failed with reason %s", user.Hex(), SettlementStatus(result.FailureReasons[idx]).String())
 				failureMap[user] = SettlementStatus(result.FailureReasons[idx])
 			}
 		}
@@ -349,7 +348,7 @@ func (c *Ctrl) adjustForPartialSettlement(settlement contract.TEESettlementData,
 	for _, req := range settledRequests {
 		fee, err := util.HexadecimalStringToBigInt(req.Fee)
 		if err != nil {
-			log.Printf("Error parsing fee for request %s: %v", req.RequestHash, err)
+			c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
 			continue
 		}
 		actualTotalFee.Add(actualTotalFee, fee)
@@ -400,7 +399,7 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			if len(outcome.SettledRequests) > 0 {
 				// Delete successfully settled requests
 				c.deleteRequests(outcome.SettledRequests)
-				log.Printf("User %s: deleted %d settled requests", 
+				c.logger.Infof("User %s: deleted %d settled requests", 
 					outcome.User.Hex(), len(outcome.SettledRequests))
 			}
 			
@@ -409,16 +408,16 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			// For permanent failures, we should delete all user's requests (not just settled ones)
 			userReqs, err := c.getUserRequestsForAddress(outcome.User.Hex())
 			if err != nil {
-				log.Printf("Error getting requests for permanent failure user %s: %v", outcome.User.Hex(), err)
+				c.logger.Infof("Error getting requests for permanent failure user %s: %v", outcome.User.Hex(), err)
 			} else if userReqs != nil {
 				c.deleteRequests(userReqs.Requests)
-				log.Printf("User %s: deleted %d requests due to permanent failure", 
+				c.logger.Infof("User %s: deleted %d requests due to permanent failure", 
 					outcome.User.Hex(), len(userReqs.Requests))
 			}
 			
 		default:
 			// Temporary failure - already handled by skipUntil logic
-			log.Printf("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
+			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
 		}
 	}
 }
@@ -431,7 +430,7 @@ func (c *Ctrl) groupRequestsByUser(reqs []model.Request) map[string]*UserRequest
 	for _, req := range reqs {
 		fee, err := util.HexadecimalStringToBigInt(req.Fee)
 		if err != nil {
-			log.Printf("Error parsing fee for request %s: %v", req.RequestHash, err)
+			c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
 			continue
 		}
 
@@ -534,7 +533,7 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) {
 	requestHashes := c.getRequestHashes(requests)
 	err := c.db.DeleteRequestsByHashes(requestHashes)
 	if err != nil {
-		log.Printf("Error deleting requests: %v", err)
+		c.logger.Infof("Error deleting requests: %v", err)
 	}
 }
 
@@ -549,7 +548,7 @@ func (c *Ctrl) executeBatches(ctx context.Context, settlements []contract.TEESet
 		}
 		
 		batch := settlements[i:end]
-		log.Printf("Executing settlement batch %d-%d", i+1, end)
+		c.logger.Infof("Executing settlement batch %d-%d", i+1, end)
 		
 		failedUsers, err := c.contract.SettleFeesWithTEE(ctx, batch)
 		if err != nil {
@@ -587,7 +586,7 @@ func (c *Ctrl) getUserRequestsForAddress(userAddress string) (*UserRequests, err
 			
 			fee, err := util.HexadecimalStringToBigInt(req.Fee)
 			if err != nil {
-				log.Printf("Error parsing fee for request %s: %v", req.RequestHash, err)
+				c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
 				continue
 			}
 			totalFee.Add(totalFee, fee)
@@ -633,6 +632,6 @@ func (c *Ctrl) markRequestsWithSkipUntil(requestHashes []string, skipDuration ti
 		return errors.Wrap(err, "update requests skipUntil")
 	}
 	
-	log.Printf("Marked %d requests to skip until %v", len(requestHashes), skipUntil)
+	c.logger.Infof("Marked %d requests to skip until %v", len(requestHashes), skipUntil)
 	return nil
 }

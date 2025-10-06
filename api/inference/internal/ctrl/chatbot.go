@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
@@ -119,7 +118,7 @@ func getInputCount(reqBody []byte) (int64, error) {
 func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	isStream, err := isStream(reqBody)
 	if err != nil {
-		handleBrokerError(ctx, err, "check if stream")
+		c.handleBrokerError(ctx, err, "check if stream")
 		return err
 	}
 	if !isStream {
@@ -137,12 +136,12 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	_, err := reader.WriteTo(ctx.Writer)
 	if err != nil {
-		handleBrokerError(ctx, err, "read from body")
+		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
 
 	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes()); err != nil {
-		log.Printf("decode and process failed: %v", err)
+		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
 
@@ -165,7 +164,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				if err == io.EOF {
 					return false
 				}
-				handleBrokerError(ctx, err, "read from body")
+				c.handleBrokerError(ctx, err, "read from body")
 				streamErr = err
 				return false
 			}
@@ -176,7 +175,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 			_, streamErr = w.Write([]byte(line))
 			if streamErr != nil {
-				handleBrokerError(ctx, err, "write to stream")
+				c.handleBrokerError(ctx, err, "write to stream")
 				return false
 			}
 
@@ -190,7 +189,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	// Fully read and then start decoding and processing
 	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk); err != nil {
-		handleBrokerError(ctx, err, "decode and process")
+		c.handleBrokerError(ctx, err, "decode and process")
 		return err
 	}
 
@@ -275,7 +274,7 @@ func (c *Ctrl) signChat(reqBody, respData, respChunk []byte) error {
 	}
 
 	key := c.chatCacheKey(chatID)
-	log.Printf("key: %v, chat signature: %v", key, chatSignature)
+	c.logger.Debugf("key: %v, chat signature: %v", key, chatSignature)
 	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
 	return nil
 }
