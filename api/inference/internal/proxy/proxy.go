@@ -122,13 +122,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	var expectedInputFee string
-	var inputCount int64
 	switch svcType {
 	case "zgStorage":
 		expectedInputFee = "0"
-		inputCount = 0
 	case "chatbot":
-		expectedInputFee, inputCount, err = p.ctrl.GetChatbotInputFeeAndCount(reqBody)
+		expectedInputFee, _, err = p.ctrl.GetChatbotInputFeeAndCount(reqBody)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "get input fee and count")
 			return
@@ -138,14 +136,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	req.InputFee = expectedInputFee
-	req.Fee = req.InputFee
-	req.InputCount = inputCount
+	// Use estimated values for validation only
+	// Actual values will be set when LLM response is received
+	req.InputFee = "0"  // Will be set with actual value from LLM response
+	req.Fee = "0"       // Will be set with actual value from LLM response
+	req.InputCount = 0  // Will be set with actual token count from LLM
 	req.OutputCount = 0 // Will be updated when response is processed
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 
-	if err := p.ctrl.ValidateRequest(ctx, req); err != nil {
+	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {
 		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}

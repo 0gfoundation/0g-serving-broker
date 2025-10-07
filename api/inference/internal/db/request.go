@@ -119,6 +119,22 @@ func (d *DB) UpdateRequestFeesAndCount(requestHash, outputFee, fee string, outpu
 		}).Error
 }
 
+// UpdateRequestWithAccurateTokens updates the request with accurate token counts from LLM response
+// This replaces the estimated values with actual values provided by the LLM
+func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, totalFee string, inputCount, outputCount int64) error {
+	return d.db.
+		Where(&model.Request{
+			RequestHash: requestHash,
+		}).
+		Updates(&model.Request{
+			InputFee:    inputFee,
+			OutputFee:   outputFee,
+			Fee:         totalFee,
+			InputCount:  inputCount,
+			OutputCount: outputCount,
+		}).Error
+}
+
 func (d *DB) CreateRequest(req model.Request) error {
 	ret := d.db.Create(&req)
 	return ret.Error

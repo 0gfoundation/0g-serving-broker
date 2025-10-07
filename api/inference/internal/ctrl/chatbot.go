@@ -56,6 +56,13 @@ type CompletionChunk struct {
 	Created int64    `json:"created"`
 	Model   string   `json:"model"`
 	Choices []Choice `json:"choices"`
+	Usage   *Usage   `json:"usage,omitempty"`
+}
+
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 type Choice struct {
@@ -71,20 +78,9 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-func (c *Ctrl) GetChatbotInputFee(reqBody []byte) (string, error) {
-	inputCount, err := getInputCount(reqBody)
-	if err != nil {
-		return "", errors.Wrap(err, "get input count")
-	}
-
-	expectedInputFee, err := util.Multiply(inputCount, c.Service.InputPrice)
-	if err != nil {
-		return "", errors.Wrap(err, "calculate input fee")
-	}
-	return expectedInputFee.String(), nil
-}
-
 // GetChatbotInputFeeAndCount returns both the input fee and count for efficient request creation
+// Note: This returns an ESTIMATE based on message byte size for validation purposes
+// The actual token count will be obtained from the LLM response
 func (c *Ctrl) GetChatbotInputFeeAndCount(reqBody []byte) (string, int64, error) {
 	inputCount, err := getInputCount(reqBody)
 	if err != nil {
@@ -98,6 +94,9 @@ func (c *Ctrl) GetChatbotInputFeeAndCount(reqBody []byte) (string, int64, error)
 	return expectedInputFee.String(), inputCount, nil
 }
 
+// getInputCount provides an estimation of input tokens based on message byte size
+// This is used ONLY for initial balance validation before the request is sent to LLM
+// The actual token count from LLM response will replace this estimate
 func getInputCount(reqBody []byte) (int64, error) {
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(reqBody, &bodyMap); err != nil {
@@ -111,8 +110,8 @@ func getInputCount(reqBody []byte) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal messages: %w", err)
 	}
+	// Estimation based on message byte length for validation only
 	return int64(len(messagesBytes)), nil
-	// return int64(1), nil
 }
 
 func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
@@ -204,9 +203,10 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	}
 
 	var output string
+	var usage *Usage
 
 	if !isStream {
-		if err := c.processSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash); err != nil {
+		if err := c.processSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash, &usage); err != nil {
 			return err
 		}
 	} else {
@@ -215,11 +215,21 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 
 		for _, line := range lines {
 			if isStreamDone(line) {
+				// For stream responses, usage info comes before [DONE]
+				if usage != nil {
+					return c.finalizeResponseWithUsage(ctx, usage, outputPrice, reqModel.RequestHash, c.Service.InputPrice)
+				}
 				return c.finalizeResponse(ctx, output, outputPrice, reqModel.RequestHash)
 			}
 
 			// Skip empty lines
 			if isLineEmpty(line) {
+				continue
+			}
+
+			// Check if this line contains usage information
+			if extractedUsage := c.extractUsageFromLine(line); extractedUsage != nil {
+				usage = extractedUsage
 				continue
 			}
 
@@ -283,7 +293,7 @@ func (*Ctrl) chatCacheKey(chatID string) string {
 	return fmt.Sprintf("%s:%s", ChatPrefix, chatID)
 }
 
-func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, output *string, requestHash string) error {
+func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, output *string, requestHash string, usage **Usage) error {
 	line := bytes.TrimPrefix(decodedBody, []byte("data: "))
 	var chunk CompletionChunk
 	if err := json.Unmarshal(line, &chunk); err != nil {
@@ -293,6 +303,14 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	for _, choice := range chunk.Choices {
 		*output += choice.Message.Content
 	}
+	
+	// For non-stream responses, usage info is in the same response
+	if chunk.Usage != nil {
+		*usage = chunk.Usage
+		return c.updateAccountWithUsage(ctx, chunk.Usage, outputPrice, requestHash, c.Service.InputPrice)
+	}
+	
+	// Fallback to old logic if no usage info
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
 
@@ -314,7 +332,53 @@ func (c *Ctrl) finalizeResponse(ctx context.Context, output string, outputPrice 
 	return c.updateAccountWithOutput(ctx, output, outputPrice, requestHash)
 }
 
+// extractUsageFromLine extracts usage information from a stream response line
+func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
+	line = bytes.TrimPrefix(line, []byte("data: "))
+	var chunk CompletionChunk
+	if err := json.Unmarshal(line, &chunk); err != nil {
+		return nil
+	}
+	return chunk.Usage
+}
+
+// finalizeResponseWithUsage updates the account with accurate token counts from LLM
+func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice int64, requestHash string, inputPrice int64) error {
+	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice)
+}
+
+// updateAccountWithUsage updates the request with accurate token counts from the LLM response
+func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPrice int64, requestHash string, inputPrice int64) error {
+	// Calculate actual fees based on LLM-provided token counts
+	inputFee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
+	if err != nil {
+		return errors.Wrap(err, "Error calculating input fee from actual tokens")
+	}
+	
+	outputFee, err := util.Multiply(outputPrice, int64(usage.CompletionTokens))
+	if err != nil {
+		return errors.Wrap(err, "Error calculating output fee from actual tokens")
+	}
+	
+	totalFee, err := util.Add(inputFee, outputFee)
+	if err != nil {
+		return errors.Wrap(err, "Error calculating total fee")
+	}
+	
+	// Update the request with accurate token counts and fees
+	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(), 
+		int64(usage.PromptTokens), int64(usage.CompletionTokens)); err != nil {
+		return errors.Wrap(err, "Error updating request with accurate tokens")
+	}
+	
+	return nil
+}
+
+// updateAccountWithOutput is the FALLBACK method when LLM doesn't provide usage information
+// It estimates tokens by counting space-separated words (inaccurate but better than nothing)
+// This should only be used when the LLM response doesn't include usage data
 func (c *Ctrl) updateAccountWithOutput(_ context.Context, output string, outputPrice int64, requestHash string) error {
+	// WARNING: This is a rough estimation based on word count, not actual tokens
 	outputCount := int64(len(strings.Fields(output)))
 	lastResponseFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
