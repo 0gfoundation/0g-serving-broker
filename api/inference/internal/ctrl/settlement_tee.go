@@ -117,9 +117,12 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 
 // SettleFeesWithTEE implements the optimized settlement logic
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
-	// Clear expired skipUntil flags
+	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
-		c.logger.Infof("Warning: failed to clear expired skipUntil: %v", err)
+		c.logger.Infof("Warning: failed to clear expired skipUntil for requests: %v", err)
+	}
+	if err := c.db.ClearExpiredUserSkipUntil(); err != nil {
+		c.logger.Infof("Warning: failed to clear expired skipUntil for users: %v", err)
 	}
 
 	// Prune old requests with zero output
@@ -225,13 +228,24 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 		case SettlementPartial:
 			// Partial settlement - adjust and split requests
 			adjustedSettlement, settledRequests := c.adjustForPartialSettlement(settlement, userReqs, result.UnsettledAmount)
+			
+			// Set user-level skip_until since user will have insufficient balance after this settlement
+			userSkipUntil := time.Now().Add(1 * time.Hour)
+			if err := c.db.UpdateUserSkipUntil(settlement.User.Hex(), &userSkipUntil); err != nil {
+				c.logger.Infof("Error setting skip_until for user %s: %v", settlement.User.Hex(), err)
+			} else {
+				c.logger.Infof("User %s will have insufficient balance after settlement, skipping until %v", 
+					settlement.User.Hex(), userSkipUntil)
+			}
+			
+			// Set outcome based on settlement result
 			outcome.AdjustedRequest = adjustedSettlement
 			outcome.SettledRequests = settledRequests
 			outcome.UnsettledAmount = result.UnsettledAmount
 			
-			// Mark unsettled requests with skipUntil
+			// Mark unsettled requests with skipUntil for forceSettlement
 			unsettledRequests := c.getUnsettledRequests(userReqs.Requests, settledRequests)
-			c.markRequestsWithSkipUntil(c.getRequestHashes(unsettledRequests), 5*time.Minute)
+			c.markRequestsWithSkipUntil(c.getRequestHashes(unsettledRequests), 1*time.Hour)
 			
 		default:
 			// Failed settlement - no adjustment needed

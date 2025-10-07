@@ -254,6 +254,10 @@ const docTemplate = `{
                 "signature": {
                     "type": "string"
                 },
+                "skipUntil": {
+                    "description": "Skip this request in settlement until this time",
+                    "type": "string"
+                },
                 "teeSignature": {
                     "type": "string"
                 },
@@ -365,7 +369,7 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
-                "unsettledFee": {
+                "skipUntil": {
                     "type": "string"
                 },
                 "updatedAt": {

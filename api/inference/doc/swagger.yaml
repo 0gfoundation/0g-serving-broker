@@ -31,6 +31,9 @@ definitions:
         type: string
       signature:
         type: string
+      skipUntil:
+        description: Skip this request in settlement until this time
+        type: string
       teeSignature:
         type: string
       updatedAt:
@@ -115,7 +118,7 @@ definitions:
         items:
           type: string
         type: array
-      unsettledFee:
+      skipUntil:
         type: string
       updatedAt:
         readOnly: true

@@ -24,7 +24,6 @@ func (d *DB) Migrate() error {
 					LockBalance          *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
 					Signer               model.StringSlice     `gorm:"type:json;not null;default:('[]')"`
-					UnsettledFee         *string               `gorm:"type:varchar(255);not null;default:'0'"`
 					DeletedAt            soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user"`
 				}
 				return tx.AutoMigrate(&User{})
@@ -100,6 +99,21 @@ func (d *DB) Migrate() error {
 					SkipUntil *time.Time `gorm:"type:datetime;index"`
 				}
 				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "add-skip-until-to-user",
+			Migrate: func(tx *gorm.DB) error {
+				type User struct {
+					SkipUntil *time.Time `gorm:"type:datetime;index"`
+				}
+				return tx.AutoMigrate(&User{})
+			},
+		},
+		{
+			ID: "drop-unsettled-fee-from-user",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.Exec("ALTER TABLE `user` DROP COLUMN `unsettled_fee`;").Error
 			},
 		},
 	})

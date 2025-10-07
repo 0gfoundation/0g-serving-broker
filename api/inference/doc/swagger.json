@@ -248,6 +248,10 @@
                 "signature": {
                     "type": "string"
                 },
+                "skipUntil": {
+                    "description": "Skip this request in settlement until this time",
+                    "type": "string"
+                },
                 "teeSignature": {
                     "type": "string"
                 },
@@ -359,7 +363,7 @@
                         "type": "string"
                     }
                 },
-                "unsettledFee": {
+                "skipUntil": {
                     "type": "string"
                 },
                 "updatedAt": {

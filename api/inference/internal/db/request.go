@@ -100,15 +100,6 @@ func (d *DB) UpdateOutputFee(requestHash, userAddress, outputFee, fee, unsettled
 			return err
 		}
 
-		if err := tx.
-			Where(&model.User{
-				User: userAddress,
-			}).
-			Updates(&model.User{
-				UnsettledFee: &unsettledFee,
-			}).Error; err != nil {
-			return err
-		}
 
 		return nil
 	})

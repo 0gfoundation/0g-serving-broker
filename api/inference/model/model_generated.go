@@ -29,6 +29,7 @@ func (d *Request) Bind(ctx *gin.Context) error {
 	d.VLLMProxy = r.VLLMProxy
 	d.InputCount = r.InputCount
 	d.OutputCount = r.OutputCount
+	d.SkipUntil = r.SkipUntil
 
 	return nil
 }
@@ -76,7 +77,7 @@ func (d *User) Bind(ctx *gin.Context) error {
 	d.LockBalance = r.LockBalance
 	d.LastBalanceCheckTime = r.LastBalanceCheckTime
 	d.Signer = r.Signer
-	d.UnsettledFee = r.UnsettledFee
+	d.SkipUntil = r.SkipUntil
 
 	return nil
 }
