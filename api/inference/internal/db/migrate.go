@@ -60,7 +60,13 @@ func (d *DB) Migrate() error {
 		{
 			ID: "drop-last-request-nonce-from-user",
 			Migrate: func(tx *gorm.DB) error {
-				return tx.Exec("ALTER TABLE `user` DROP COLUMN `last_request_nonce`;").Error
+				// Check if column exists before dropping (for MySQL compatibility)
+				var count int64
+				tx.Raw("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'user' AND column_name = 'last_request_nonce'").Scan(&count)
+				if count > 0 {
+					return tx.Exec("ALTER TABLE `user` DROP COLUMN `last_request_nonce`;").Error
+				}
+				return nil
 			},
 		},
 		{
@@ -74,7 +80,12 @@ func (d *DB) Migrate() error {
 						return err
 					}
 				}
-				return tx.Exec("ALTER TABLE `request` ADD UNIQUE INDEX `userAddress_nonce` (`user_address`, `nonce`);").Error
+				// Check if new index already exists
+				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'userAddress_nonce'").Scan(&count)
+				if count == 0 {
+					return tx.Exec("ALTER TABLE `request` ADD UNIQUE INDEX `userAddress_nonce` (`user_address`, `nonce`);").Error
+				}
+				return nil
 			},
 		},
 		{
@@ -88,8 +99,13 @@ func (d *DB) Migrate() error {
 					return err
 				}
 				
-				// Add index for optimized queries
-				return tx.Exec("CREATE INDEX `idx_requests_user_processed_counts` ON `request`(`user_address`, `processed`, `input_count`, `output_count`);").Error
+				// Add index for optimized queries if it doesn't exist
+				var count int64
+				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'idx_requests_user_processed_counts'").Scan(&count)
+				if count == 0 {
+					return tx.Exec("CREATE INDEX `idx_requests_user_processed_counts` ON `request`(`user_address`, `processed`, `input_count`, `output_count`);").Error
+				}
+				return nil
 			},
 		},
 		{
@@ -113,7 +129,13 @@ func (d *DB) Migrate() error {
 		{
 			ID: "drop-unsettled-fee-from-user",
 			Migrate: func(tx *gorm.DB) error {
-				return tx.Exec("ALTER TABLE `user` DROP COLUMN `unsettled_fee`;").Error
+				// Check if column exists before dropping (for MySQL compatibility)
+				var count int64
+				tx.Raw("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'user' AND column_name = 'unsettled_fee'").Scan(&count)
+				if count > 0 {
+					return tx.Exec("ALTER TABLE `user` DROP COLUMN `unsettled_fee`;").Error
+				}
+				return nil
 			},
 		},
 	})
