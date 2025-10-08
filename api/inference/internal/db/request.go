@@ -3,8 +3,6 @@ package db
 import (
 	"database/sql"
 	"math/big"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -29,10 +27,10 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 			ret = ret.Where("output_count != ?", 0)
 		}
 
-		// Filter for requests that either have output_fee set OR are older than the threshold
-		if q.RequireOutputFeeOrOld && q.OldRequestThreshold > 0 {
-			cutoffTime := time.Now().Add(-q.OldRequestThreshold)
-			ret = ret.Where("(output_fee != '' AND output_fee != '0x0') OR created_at <= ?", cutoffTime)
+		// Exclude temporarily skipped requests unless explicitly included
+		if !q.IncludeSkipped {
+			now := time.Now()
+			ret = ret.Where("skip_until IS NULL OR skip_until <= ?", now)
 		}
 
 		if q.Sort != nil {
@@ -102,15 +100,6 @@ func (d *DB) UpdateOutputFee(requestHash, userAddress, outputFee, fee, unsettled
 			return err
 		}
 
-		if err := tx.
-			Where(&model.User{
-				User: userAddress,
-			}).
-			Updates(&model.User{
-				UnsettledFee: &unsettledFee,
-			}).Error; err != nil {
-			return err
-		}
 
 		return nil
 	})
@@ -130,30 +119,35 @@ func (d *DB) UpdateRequestFeesAndCount(requestHash, outputFee, fee string, outpu
 		}).Error
 }
 
+// UpdateRequestWithAccurateTokens updates the request with accurate token counts from LLM response
+// This replaces the estimated values with actual values provided by the LLM
+func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, totalFee string, inputCount, outputCount int64) error {
+	return d.db.
+		Where(&model.Request{
+			RequestHash: requestHash,
+		}).
+		Updates(&model.Request{
+			InputFee:    inputFee,
+			OutputFee:   outputFee,
+			Fee:         totalFee,
+			InputCount:  inputCount,
+			OutputCount: outputCount,
+		}).Error
+}
+
 func (d *DB) CreateRequest(req model.Request) error {
 	ret := d.db.Create(&req)
 	return ret.Error
 }
 
-func (d *DB) PruneRequest(minNonceMap map[string]string) error {
-	var whereClauses []string
-	var args []interface{}
-
-	if len(minNonceMap) == 0 {
-		return nil
+func (d *DB) PruneRequest(pruneThreshold time.Duration) error {
+	// Delete requests where output_count == 0 and creation time is older than threshold
+	if pruneThreshold > 0 {
+		cutoffTime := time.Now().Add(-pruneThreshold)
+		return d.db.Where("output_count = 0 AND created_at <= ?", cutoffTime).
+			Delete(&model.Request{}).Error
 	}
-
-	for address, minNonceStr := range minNonceMap {
-		minNonce, err := strconv.ParseUint(minNonceStr, 10, 64)
-		if err != nil {
-			return err
-		}
-		whereClauses = append(whereClauses, "(user_address = ? AND CAST(nonce AS UNSIGNED) <= ?)")
-		args = append(args, address, minNonce)
-	}
-	condition := strings.Join(whereClauses, " OR ")
-
-	return d.db.Where(condition, args...).Delete(&model.Request{}).Error
+	return nil
 }
 
 // CalculateUnsettledFee calculates unsettled fee using SUM aggregation for optimal performance
@@ -185,4 +179,32 @@ func (d *DB) CalculateUnsettledFee(userAddress string, inputPrice, outputPrice i
 	totalFee.Add(inputFee, outputFee)
 	
 	return totalFee, nil
+}
+
+// UpdateRequestsSkipUntil updates the skip_until field for multiple requests
+func (d *DB) UpdateRequestsSkipUntil(requestHashes []string, skipUntil *time.Time) error {
+	if len(requestHashes) == 0 {
+		return nil
+	}
+	
+	return d.db.Model(&model.Request{}).
+		Where("request_hash IN ?", requestHashes).
+		Update("skip_until", skipUntil).Error
+}
+
+// ClearRequestsSkipUntil clears the skip_until field for requests whose skip period has expired
+func (d *DB) ClearExpiredSkipUntil() error {
+	now := time.Now()
+	return d.db.Model(&model.Request{}).
+		Where("skip_until IS NOT NULL AND skip_until <= ?", now).
+		Update("skip_until", nil).Error
+}
+
+// DeleteRequestsByHashes deletes specific requests by their hashes
+func (d *DB) DeleteRequestsByHashes(requestHashes []string) error {
+	if len(requestHashes) == 0 {
+		return nil
+	}
+	
+	return d.db.Where("request_hash IN ?", requestHashes).Delete(&model.Request{}).Error
 }

@@ -1,7 +1,6 @@
 package db
 
 import (
-	"math/big"
 	"strings"
 	"time"
 
@@ -60,9 +59,6 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 	if new.LockBalance != nil {
 		old.LockBalance = new.LockBalance
 	}
-	if new.UnsettledFee != nil {
-		old.UnsettledFee = new.UnsettledFee
-	}
 
 	ret = d.db.Where(&model.User{User: old.User}).Updates(old)
 	return ret.Error
@@ -107,11 +103,6 @@ func (d *DB) BatchUpdateUserAccount(news []model.User) error {
 	return d.DeleteUserAccounts(toRemove)
 }
 
-func (d *DB) ResetUnsettledFee() error {
-	ret := d.db.Model(&model.User{}).Where("TRUE").Update("unsettled_fee", model.PtrOf(int64(0)))
-	return ret.Error
-}
-
 func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, outputPrice int64) ([]model.User, error) {
 	if opt == nil {
 		opt = &model.UserListOptions{}
@@ -126,9 +117,9 @@ func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, 
 			COALESCE(SUM(r.input_count * ? + r.output_count * ?), 0) as calculated_unsettled_fee
 		FROM user u
 		LEFT JOIN request r ON u.user = r.user_address AND r.processed = false
-		WHERE 1=1
+		WHERE (u.skip_until IS NULL OR u.skip_until <= ?)
 	`
-	args := []interface{}{inputPrice, outputPrice}
+	args := []interface{}{inputPrice, outputPrice, time.Now()}
 
 	// Group by user fields
 	query += " GROUP BY u.user, u.lock_balance, u.last_balance_check_time"
@@ -180,14 +171,28 @@ func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, 
 	// Convert results to User models
 	users := make([]model.User, 0, len(results))
 	for _, r := range results {
-		unsettledFeeStr := big.NewInt(r.CalculatedUnsettledFee).String()
 		users = append(users, model.User{
 			User:                 r.User,
 			LockBalance:          r.LockBalance,
 			LastBalanceCheckTime: r.LastBalanceCheckTime,
-			UnsettledFee:         &unsettledFeeStr,
 		})
 	}
 
 	return users, nil
 }
+
+// UpdateUserSkipUntil updates the skip_until field for a specific user
+func (d *DB) UpdateUserSkipUntil(userAddress string, skipUntil *time.Time) error {
+	return d.db.Model(&model.User{}).
+		Where("user = ?", userAddress).
+		Update("skip_until", skipUntil).Error
+}
+
+// ClearExpiredUserSkipUntil clears the skip_until field for users whose skip period has expired
+func (d *DB) ClearExpiredUserSkipUntil() error {
+	now := time.Now()
+	return d.db.Model(&model.User{}).
+		Where("skip_until IS NOT NULL AND skip_until <= ?", now).
+		Update("skip_until", nil).Error
+}
+

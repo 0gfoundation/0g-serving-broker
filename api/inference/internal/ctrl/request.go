@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -45,7 +44,9 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 	return req, nil
 }
 
-func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request) error {
+// ValidateRequestWithEstimatedFee validates the request using an estimated fee
+// This is used before the actual token count is known from the LLM
+func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Request, estimatedFee string) error {
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
 	if err != nil {
 		return errors.Wrap(err, "get account from contract")
@@ -60,7 +61,8 @@ func (c *Ctrl) ValidateRequest(ctx *gin.Context, req model.Request) error {
 		return err
 	}
 
-	err = c.validateBalanceAdequacy(ctx, account, req.InputFee)
+	// Use estimated fee for validation
+	err = c.validateBalanceAdequacy(ctx, account, estimatedFee)
 	if err != nil {
 		return err
 	}
@@ -144,7 +146,6 @@ func updateRequestField(req *model.Request, key, value string) error {
 	case "VLLM-Proxy":
 		v, err := strconv.ParseBool(value)
 		if err != nil {
-			log.Printf("%v", err)
 			v = false
 		}
 

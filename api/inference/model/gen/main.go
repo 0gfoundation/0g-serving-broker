@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"go/ast"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,7 +13,7 @@ import (
 func main() {
 	all, bind, immutable, scanValue, err := parse("./")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	genModel(all, bind, scanValue)

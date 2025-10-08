@@ -2,17 +2,18 @@ package event
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 type SettlementProcessor struct {
-	ctrl *ctrl.Ctrl
+	ctrl   *ctrl.Ctrl
+	logger log.Logger
 
 	checkSettleInterval int
 	forceSettleInterval int
@@ -20,9 +21,10 @@ type SettlementProcessor struct {
 	enableMonitor bool
 }
 
-func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, enableMonitor bool) *SettlementProcessor {
+func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, enableMonitor bool, logger log.Logger) *SettlementProcessor {
 	s := &SettlementProcessor{
 		ctrl:                ctrl,
+		logger:              logger,
 		checkSettleInterval: checkSettleInterval,
 		forceSettleInterval: forceSettleInterval,
 		enableMonitor:       enableMonitor,
@@ -58,7 +60,7 @@ func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
 }
 
 func (s *SettlementProcessor) handleForceSettle(ctx context.Context) {
-	log.Print("Force Settlement")
+	s.logger.Info("Force Settlement")
 	if err := s.ctrl.SettleFeesWithTEE(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventForceSettleErrorCount, "Process settlement: %s", err)
 	} else {
@@ -71,6 +73,6 @@ func (s *SettlementProcessor) incrementMonitorCounter(counter prometheus.Counter
 		counter.Inc()
 	}
 	if err != nil {
-		log.Printf(logMsg, err.Error())
+		s.logger.Errorf(logMsg, err.Error())
 	}
 }

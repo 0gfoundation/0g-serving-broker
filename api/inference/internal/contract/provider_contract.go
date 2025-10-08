@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
@@ -17,9 +18,10 @@ type ProviderContract struct {
 	ProviderAddress  string
 	LockTime         time.Duration
 	EncryptedPrivKey string
+	logger           log.Logger
 }
 
-func NewProviderContract(conf *config.Config) (*ProviderContract, error) {
+func NewProviderContract(conf *config.Config, logger log.Logger) (*ProviderContract, error) {
 	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, os.Getenv("NETWORK"), conf.GasPrice, conf.MaxGasPrice)
 	if err != nil {
 		return nil, err
@@ -39,6 +41,7 @@ func NewProviderContract(conf *config.Config) (*ProviderContract, error) {
 		Contract:        contract,
 		ProviderAddress: wallets.Default().Address(),
 		LockTime:        time.Duration(lockTime.Int64()) * time.Second,
+		logger:          logger,
 	}, nil
 }
 

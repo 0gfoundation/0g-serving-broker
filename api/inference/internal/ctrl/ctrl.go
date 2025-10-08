@@ -6,6 +6,7 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -17,6 +18,7 @@ type Ctrl struct {
 	db       *db.DB
 	contract *providercontract.ProviderContract
 	svcCache *cache.Cache
+	logger   log.Logger
 
 	autoSettleBufferTime time.Duration
 
@@ -32,6 +34,7 @@ func New(
 	cfg *config.Config,
 	svcCache *cache.Cache,
 	teeService *tee.TeeService,
+	logger log.Logger,
 ) *Ctrl {
 	p := &Ctrl{
 		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
@@ -41,6 +44,7 @@ func New(
 		svcCache:             svcCache,
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
+		logger:               logger,
 	}
 
 	return p

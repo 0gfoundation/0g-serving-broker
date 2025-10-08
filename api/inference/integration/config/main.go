@@ -60,6 +60,12 @@ type Config struct {
 	} `yaml:"monitor,omitempty"`
 	ChatCacheExpiration interface{} `yaml:"chatCacheExpiration,omitempty"`
 	NvGPU               bool        `yaml:"nvGPU,omitempty"`
+	Logger              struct {
+		Format        string `yaml:"format,omitempty"`
+		Level         string `yaml:"level,omitempty"`
+		Path          string `yaml:"path,omitempty"`
+		RotationCount int    `yaml:"rotationCount,omitempty"`
+	} `yaml:"logger,omitempty"`
 }
 
 // Required fields definition
@@ -192,6 +198,9 @@ const dockerComposeTemplate = `services:
 {{- end}}
     volumes:
       - ./{{.ConfigFile}}:/etc/config.yaml
+{{- if .EnableFileLog}}
+      - ./logs/broker:/var/log/inference
+{{- end}}
 {{- if not .UseTest}}
       - /var/run/tappd.sock:/var/run/tappd.sock
 {{- end}}
@@ -234,6 +243,9 @@ const dockerComposeTemplate = `services:
 {{- end}}
     volumes:
       - ./{{.ConfigFile}}:/etc/config.yaml
+{{- if .EnableFileLog}}
+      - ./logs/event:/var/log/inference
+{{- end}}
 {{- if not .UseTest}}
       - /var/run/tappd.sock:/var/run/tappd.sock
 {{- end}}
@@ -336,6 +348,7 @@ type TemplateData struct {
 	ConfigFile    string
 	Ports         PortConfig
 	ProjectName   string
+	EnableFileLog bool
 }
 
 var requiredFields = []RequiredField{
@@ -537,6 +550,22 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 		return "", nil, fmt.Errorf("error checking required fields: %v", err)
 	}
 
+	// Add logger configuration for Docker deployment
+	// Set default logger configuration if not already set
+	if config.Logger.Path == "" {
+		config.Logger = struct {
+			Format        string `yaml:"format,omitempty"`
+			Level         string `yaml:"level,omitempty"`
+			Path          string `yaml:"path,omitempty"`
+			RotationCount int    `yaml:"rotationCount,omitempty"`
+		}{
+			Format:        "text",
+			Level:         "info",
+			Path:          "/var/log/inference/inference.log",
+			RotationCount: 7,
+		}
+	}
+
 	// Save final configuration
 	if err := saveConfig(config, outputPath); err != nil {
 		return "", nil, fmt.Errorf("error saving config: %v", err)
@@ -585,6 +614,7 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 	if config.UseMonitoring {
 		fmt.Println("   ✓ Monitoring services will be included")
 	}
+
 
 	// Configure ports based on selected services
 	if err := promptPortConfiguration(config, yamlConfig); err != nil {
@@ -739,6 +769,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		ConfigFile:    config.ConfigFile,
 		Ports:         config.Ports,
 		ProjectName:   config.ProjectName,
+		EnableFileLog: true, // Always enable file logging
 	}
 
 	// Generate nginx.conf
@@ -749,6 +780,14 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 	// Generate docker-compose.yml
 	if err := generateDockerCompose(templateData); err != nil {
 		return fmt.Errorf("failed to generate docker compose: %v", err)
+	}
+
+	// Create logs directories for file logging
+	if err := os.MkdirAll("logs/broker", 0755); err != nil {
+		return fmt.Errorf("failed to create logs/broker directory: %v", err)
+	}
+	if err := os.MkdirAll("logs/event", 0755); err != nil {
+		return fmt.Errorf("failed to create logs/event directory: %v", err)
 	}
 
 	// Generate prometheus.yml if monitoring is enabled
@@ -883,6 +922,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • docker-compose.yml\n")
 	fmt.Printf("  • %s\n", config.ConfigFile)
 	fmt.Printf("  • init.sql\n")
+	fmt.Printf("  • logs/ (directory for persistent logs)\n")
 	if config.ProjectName != "" {
 		fmt.Printf("  • .env (with project name)\n")
 	}

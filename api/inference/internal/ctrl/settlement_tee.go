@@ -2,178 +2,79 @@ package ctrl
 
 import (
 	"context"
-	"encoding/json"
-	"log"
 	"math/big"
 	"time"
+
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
-func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
-	// Get unprocessed requests with output_fee set OR created more than 3 minutes ago
-	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
-		Processed:             false,
-		Sort:                  model.PtrOf("created_at ASC"),
-		ExcludeZeroOutput:     true,
-		RequireOutputFeeOrOld: true,
-		OldRequestThreshold:   10 * time.Minute,
-	})
-	if err != nil {
-		return errors.Wrap(err, "list request from db")
+// SettlementStatus represents the different states of settlement
+// Must match the enum in InferenceServing.sol
+type SettlementStatus uint8
+
+const (
+	SettlementSuccess        SettlementStatus = 0 // Full settlement success
+	SettlementPartial        SettlementStatus = 1 // Partial settlement (insufficient balance)
+	SettlementProviderMismatch SettlementStatus = 2 // Provider mismatch
+	SettlementNoSigner       SettlementStatus = 3 // TEE signer not acknowledged
+	SettlementInvalidNonce   SettlementStatus = 4 // Invalid or duplicate nonce
+	SettlementInvalidSig     SettlementStatus = 5 // Signature verification failed
+)
+
+// String returns the string representation of SettlementStatus
+func (s SettlementStatus) String() string {
+	switch s {
+	case SettlementSuccess:
+		return "SUCCESS"
+	case SettlementPartial:
+		return "PARTIAL"
+	case SettlementProviderMismatch:
+		return "PROVIDER_MISMATCH"
+	case SettlementNoSigner:
+		return "NO_TEE_SIGNER"
+	case SettlementInvalidNonce:
+		return "INVALID_NONCE"
+	case SettlementInvalidSig:
+		return "INVALID_SIGNATURE"
+	default:
+		return "UNKNOWN"
 	}
-	if len(reqs) == 0 {
-		return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
-	}
-
-	// Group requests by user
-	type UserRequests struct {
-		Requests []*model.Request
-		TotalFee *big.Int
-	}
-	userRequestsMap := make(map[string]*UserRequests)
-	latestReqCreateAt := reqs[0].CreatedAt
-
-	for _, req := range reqs {
-		if latestReqCreateAt.Before(*req.CreatedAt) {
-			latestReqCreateAt = req.CreatedAt
-		}
-
-		// Parse fee to big.Int
-		fee, err := util.HexadecimalStringToBigInt(req.Fee)
-		if err != nil {
-			return errors.Wrap(err, "parse fee")
-		}
-
-		if userReqs, exists := userRequestsMap[req.UserAddress]; exists {
-			// Add to existing user's requests
-			userReqs.Requests = append(userReqs.Requests, &req)
-			userReqs.TotalFee = new(big.Int).Add(userReqs.TotalFee, fee)
-		} else {
-			// Create new entry for user
-			userRequestsMap[req.UserAddress] = &UserRequests{
-				Requests: []*model.Request{&req},
-				TotalFee: fee,
-			}
-		}
-	}
-
-	// Create settlements for each user
-	var settlements []contract.TEESettlementData
-	for userAddr, userReqs := range userRequestsMap {
-		// Create hash of all requests for this user
-		requestsHash := c.hashUserRequests(userReqs.Requests)
-
-		// Generate nonce based on timestamp multiplied by 10000000 to avoid conflicts
-		nonce := big.NewInt(time.Now().Unix())
-		nonce.Mul(nonce, big.NewInt(10000000))
-
-		settlementData := contract.TEESettlementData{
-			User:         common.HexToAddress(userAddr),
-			Provider:     common.HexToAddress(c.contract.ProviderAddress),
-			TotalFee:     userReqs.TotalFee,
-			RequestsHash: requestsHash,
-			Nonce:        nonce,
-		}
-
-		// Create message hash for signing (matching Solidity order)
-		messageHash := crypto.Keccak256(
-			requestsHash[:],
-			common.LeftPadBytes(nonce.Bytes(), 32),
-			settlementData.Provider.Bytes(),
-			settlementData.User.Bytes(),
-			common.LeftPadBytes(userReqs.TotalFee.Bytes(), 32),
-		)
-
-		// Sign with TEE service
-		signature, err := c.teeService.Sign(messageHash)
-		if err != nil {
-			return errors.Wrap(err, "TEE signing failed")
-		}
-
-		settlementData.Signature = signature
-		settlements = append(settlements, settlementData)
-	}
-
-	// Log total settlements for debugging
-	log.Printf("Total TEE settlements to process: %d users", len(settlements))
-
-	// Process settlements in batches to avoid gas limit issues
-	var allFailedUsers []common.Address
-
-	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
-		// Calculate the end index for this batch
-		end := i + constant.TEESettlementBatchSize
-		if end > len(settlements) {
-			end = len(settlements)
-		}
-
-		// Get the current batch
-		batch := settlements[i:end]
-
-		// Log batch for debugging
-		batchJSON, err := json.Marshal(batch)
-		if err != nil {
-			log.Printf("Error marshalling TEE settlements batch %d-%d: %v", i, end-1, err)
-		} else {
-			log.Printf("Processing TEE settlements batch %d-%d (users %d-%d of %d): %s",
-				i/constant.TEESettlementBatchSize+1, (end-1)/constant.TEESettlementBatchSize+1, i+1, end, len(settlements), string(batchJSON))
-		}
-
-		// Call contract with the current batch of TEE signed settlements
-		failedUsers, err := c.contract.SettleFeesWithTEE(ctx, batch)
-		if err != nil {
-			return errors.Wrapf(err, "settle fees with TEE in contract for batch %d-%d", i, end-1)
-		}
-
-		// Accumulate failed users from this batch
-		allFailedUsers = append(allFailedUsers, failedUsers...)
-
-		// Log progress
-		log.Printf("Completed batch %d-%d: %d failed users", i+1, end, len(failedUsers))
-	}
-
-	// Convert all failed users to string slice for database query
-	var failedUserStrings []string
-	for _, user := range allFailedUsers {
-		failedUserStrings = append(failedUserStrings, user.Hex())
-	}
-
-	// Log failed users for debugging
-	if len(allFailedUsers) > 0 {
-		log.Printf("Settlement failed for users: %v", failedUserStrings)
-	}
-
-	// Delete settled requests from database, excluding failed users
-	if err := c.db.DeleteSettledRequestsExcludingUsers(latestReqCreateAt, failedUserStrings); err != nil {
-		return errors.Wrap(err, "delete settled requests from db")
-	}
-
-	if err := c.SyncUserAccounts(ctx); err != nil {
-		return errors.Wrap(err, "synchronize accounts from the contract to the database")
-	}
-
-	return errors.Wrap(c.db.ResetUnsettledFee(), "reset unsettled fee in db")
 }
 
-func (c *Ctrl) hashUserRequests(requests []*model.Request) [32]byte {
-	// Create a deterministic hash of all requests for a user
-	var requestData []byte
-	for _, req := range requests {
-		// Concatenate request data: RequestHash + UserAddress + Fee + InputFee + OutputFee
-		requestData = append(requestData, []byte(req.RequestHash)...)
-		requestData = append(requestData, []byte(req.UserAddress)...)
-		requestData = append(requestData, []byte(req.Fee)...)
-		requestData = append(requestData, []byte(req.InputFee)...)
-		requestData = append(requestData, []byte(req.OutputFee)...)
-	}
-	return crypto.Keccak256Hash(requestData)
+// UserRequests groups requests for a single user
+type UserRequests struct {
+	Requests []*model.Request
+	TotalFee *big.Int
+}
+
+// PreviewResult represents the result of previewing a single settlement
+type PreviewResult struct {
+	Status          SettlementStatus
+	UnsettledAmount *big.Int
+}
+
+// SettlementOutcome represents the result for a single user's settlement
+type SettlementOutcome struct {
+	User            common.Address
+	Status          SettlementStatus
+	OriginalRequest contract.TEESettlementData
+	AdjustedRequest *contract.TEESettlementData // nil if failed completely
+	SettledRequests []*model.Request            // requests that were actually settled
+	UnsettledAmount *big.Int                    // amount that couldn't be settled (for partial)
+}
+
+// SettlementBatch represents a complete settlement operation
+type SettlementBatch struct {
+	Outcomes        []*SettlementOutcome
+	ExecutableItems []contract.TEESettlementData // items that can be sent to contract
 }
 
 func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
@@ -210,6 +111,537 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 		return nil
 	}
 
-	log.Print("Accounts at risk of having insufficient funds and will be settled immediately with TEE.")
+	c.logger.Info("Accounts at risk of having insufficient funds and will be settled immediately with TEE.")
 	return errors.Wrap(c.SettleFeesWithTEE(ctx), "settle fees with TEE")
+}
+
+// SettleFeesWithTEE implements the optimized settlement logic
+func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
+	// Clear expired skipUntil flags for both requests and users
+	if err := c.db.ClearExpiredSkipUntil(); err != nil {
+		c.logger.Infof("Warning: failed to clear expired skipUntil for requests: %v", err)
+	}
+	if err := c.db.ClearExpiredUserSkipUntil(); err != nil {
+		c.logger.Infof("Warning: failed to clear expired skipUntil for users: %v", err)
+	}
+
+	// Prune old requests with zero output
+	pruneThreshold := 1 * time.Hour // Prune requests older than 1 hours with zero output
+	if err := c.db.PruneRequest(pruneThreshold); err != nil {
+		c.logger.Infof("Warning: failed to prune old zero-output requests: %v", err)
+	}
+
+	// Main settlement loop with limited iterations
+	const maxSettlementRounds = 10
+	for round := 1; round <= maxSettlementRounds; round++ {
+		c.logger.Infof("Settlement round %d/%d", round, maxSettlementRounds)
+		
+		// Get unprocessed requests (excluding those with active skipUntil)
+		reqs, _, err := c.db.ListRequest(model.RequestListOptions{
+			Processed:             false,
+			Sort:                  model.PtrOf("created_at ASC"),
+			ExcludeZeroOutput:     true,
+			IncludeSkipped:        false,
+		})
+		if err != nil {
+			return errors.Wrap(err, "list request from db")
+		}
+		
+		if len(reqs) == 0 {
+			c.logger.Infof("No more requests to settle after %d rounds", round)
+			return nil
+		}
+
+		c.logger.Infof("Processing settlement for %d requests", len(reqs))
+		
+		// Process settlement batch
+		batch, err := c.createSettlementBatch(reqs)
+		if err != nil {
+			return errors.Wrap(err, "create settlement batch")
+		}
+
+		// Execute settlements if we have any
+		if len(batch.ExecutableItems) > 0 {
+			err = c.executeAndProcessResults(ctx, batch)
+			if err != nil {
+				return errors.Wrap(err, "execute settlement batch")
+			}
+		}
+
+		// Process outcomes (delete/skip requests)
+		c.processOutcomes(batch.Outcomes)
+
+		// If no executable items, we're done
+		if len(batch.ExecutableItems) == 0 {
+			c.logger.Infof("No executable settlements remaining after %d rounds", round)
+			break
+		}
+	}
+
+	return nil
+}
+
+// createSettlementBatch creates a batch with preview and adjustment
+func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, error) {
+	// Group requests by user
+	userRequestsMap := c.groupRequestsByUser(reqs)
+	
+	// Create initial settlements for all users
+	var settlements []contract.TEESettlementData
+	userSettlementMap := make(map[common.Address]*UserRequests)
+	
+	for userAddr, userReqs := range userRequestsMap {
+		settlement, err := c.createUserSettlement(userAddr, userReqs)
+		if err != nil {
+			c.logger.Infof("Error creating settlement for user %s: %v", userAddr, err)
+			continue
+		}
+		settlements = append(settlements, settlement)
+		userSettlementMap[settlement.User] = userReqs
+	}
+
+	// Batch preview all settlements at once
+	previewResults, err := c.batchPreviewSettlements(settlements)
+	if err != nil {
+		return nil, errors.Wrap(err, "batch preview settlements")
+	}
+
+	// Process results and create outcomes
+	outcomes := make([]*SettlementOutcome, 0, len(settlements))
+	
+	for i, settlement := range settlements {
+		userReqs := userSettlementMap[settlement.User]
+		result := previewResults[i]
+		
+		outcome := &SettlementOutcome{
+			User:            settlement.User,
+			OriginalRequest: settlement,
+			Status:          result.Status,
+		}
+
+		switch result.Status {
+		case SettlementSuccess:
+			// Full settlement - all requests will be settled
+			outcome.AdjustedRequest = &settlement
+			outcome.SettledRequests = userReqs.Requests
+			
+		case SettlementPartial:
+			// Partial settlement - adjust and split requests
+			adjustedSettlement, settledRequests := c.adjustForPartialSettlement(settlement, userReqs, result.UnsettledAmount)
+			
+			// Set user-level skip_until since user will have insufficient balance after this settlement
+			userSkipUntil := time.Now().Add(1 * time.Hour)
+			if err := c.db.UpdateUserSkipUntil(settlement.User.Hex(), &userSkipUntil); err != nil {
+				c.logger.Infof("Error setting skip_until for user %s: %v", settlement.User.Hex(), err)
+			} else {
+				c.logger.Infof("User %s will have insufficient balance after settlement, skipping until %v", 
+					settlement.User.Hex(), userSkipUntil)
+			}
+			
+			// Set outcome based on settlement result
+			outcome.AdjustedRequest = adjustedSettlement
+			outcome.SettledRequests = settledRequests
+			outcome.UnsettledAmount = result.UnsettledAmount
+			
+			// Mark unsettled requests with skipUntil for forceSettlement
+			unsettledRequests := c.getUnsettledRequests(userReqs.Requests, settledRequests)
+			c.markRequestsWithSkipUntil(c.getRequestHashes(unsettledRequests), 1*time.Hour)
+			
+		default:
+			// Failed settlement - no adjustment needed
+			outcome.UnsettledAmount = settlement.TotalFee
+		}
+
+		outcomes = append(outcomes, outcome)
+	}
+
+	// Create executable items (only successful and partial settlements)
+	var executableItems []contract.TEESettlementData
+	for _, outcome := range outcomes {
+		if outcome.AdjustedRequest != nil {
+			executableItems = append(executableItems, *outcome.AdjustedRequest)
+		}
+	}
+
+	return &SettlementBatch{
+		Outcomes:        outcomes,
+		ExecutableItems: executableItems,
+	}, nil
+}
+
+// batchPreviewSettlements previews multiple settlements using batching to avoid gas limit issues
+func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData) ([]*PreviewResult, error) {
+	if len(settlements) == 0 {
+		return []*PreviewResult{}, nil
+	}
+
+	// Use the contract's preview function for accurate prediction
+	callOpts := &bind.CallOpts{
+		Context: context.Background(),
+		From:    common.HexToAddress(c.contract.ProviderAddress),
+	}
+
+	c.logger.Infof("Batch previewing %d settlements", len(settlements))
+	
+	// Initialize results for all settlements
+	results := make([]*PreviewResult, len(settlements))
+	
+	// Process in batches to avoid gas limit issues (same as executeBatches)
+	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
+		end := i + constant.TEESettlementBatchSize
+		if end > len(settlements) {
+			end = len(settlements)
+		}
+		
+		batch := settlements[i:end]
+		c.logger.Infof("Previewing settlement batch %d-%d (size: %d)", i+1, end, len(batch))
+		
+		result, err := c.contract.Contract.InferenceServing.PreviewSettlementResults(callOpts, batch)
+		if err != nil {
+			c.logger.Infof("Batch preview settlements failed for batch %d-%d: %v", i+1, end, err)
+			// Default this batch to failure on error
+			for j := i; j < end; j++ {
+				results[j] = &PreviewResult{
+					Status:          SettlementPartial,
+					UnsettledAmount: settlements[j].TotalFee,
+				}
+			}
+			continue // Continue with next batch even if this one fails
+		}
+
+		// Create result maps for easier lookup for this batch
+		failureMap := make(map[common.Address]SettlementStatus)
+		for idx, user := range result.FailedUsers {
+			if idx < len(result.FailureReasons) {
+				c.logger.Infof("User %s failed with reason %s", user.Hex(), SettlementStatus(result.FailureReasons[idx]).String())
+				failureMap[user] = SettlementStatus(result.FailureReasons[idx])
+			}
+		}
+
+		partialMap := make(map[common.Address]*big.Int)
+		for idx, user := range result.PartialUsers {
+			if idx < len(result.PartialAmounts) {
+				partialMap[user] = result.PartialAmounts[idx]
+			}
+		}
+
+		// Process results for each settlement in this batch
+		for j := 0; j < len(batch); j++ {
+			settlementIdx := i + j
+			settlement := settlements[settlementIdx]
+			
+			if status, isFailed := failureMap[settlement.User]; isFailed {
+				results[settlementIdx] = &PreviewResult{
+					Status:          status,
+					UnsettledAmount: settlement.TotalFee,
+				}
+			} else if unsettledAmount, isPartial := partialMap[settlement.User]; isPartial {
+				results[settlementIdx] = &PreviewResult{
+					Status:          SettlementPartial,
+					UnsettledAmount: unsettledAmount,
+				}
+			} else {
+				results[settlementIdx] = &PreviewResult{
+					Status:          SettlementSuccess,
+					UnsettledAmount: big.NewInt(0),
+				}
+			}
+		}
+	}
+
+	return results, nil
+}
+
+// adjustForPartialSettlement adjusts settlement for partial payment
+func (c *Ctrl) adjustForPartialSettlement(settlement contract.TEESettlementData, userReqs *UserRequests, unsettledAmount *big.Int) (*contract.TEESettlementData, []*model.Request) {
+	settleableAmount := new(big.Int).Sub(settlement.TotalFee, unsettledAmount)
+	settledRequests, actualTotalFee := c.getRequestsWithinBudget(userReqs.Requests, settleableAmount)
+
+	// If no actual fee can be settled, return nil to indicate failure
+	if actualTotalFee.Cmp(big.NewInt(0)) == 0 {
+		return nil, nil
+	}
+
+	// Create adjusted settlement
+	adjustedSettlement := settlement
+	adjustedSettlement.TotalFee = actualTotalFee
+	adjustedSettlement.RequestsHash = c.hashUserRequests(settledRequests)
+
+	return &adjustedSettlement, settledRequests
+}
+
+// executeAndProcessResults executes the settlement batch
+func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBatch) error {
+	if len(batch.ExecutableItems) == 0 {
+		return nil
+	}
+
+	// Execute settlements in contract batches
+	actualFailures, err := c.executeBatches(ctx, batch.ExecutableItems)
+	if err != nil {
+		return errors.Wrap(err, "execute contract batches")
+	}
+
+	// Update outcomes with execution results
+	for _, outcome := range batch.Outcomes {
+		if outcome.AdjustedRequest == nil {
+			continue // Already marked as failed
+		}
+
+		if _, failed := actualFailures[outcome.User]; failed {
+			// Execution failed - revert to failed status
+			outcome.Status = SettlementPartial // insufficient balance or other failure
+			outcome.AdjustedRequest = nil
+			outcome.SettledRequests = nil
+		}
+	}
+
+	return nil
+}
+
+// processOutcomes handles the final outcome processing
+func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
+	for _, outcome := range outcomes {
+		switch outcome.Status {
+		case SettlementSuccess, SettlementPartial:
+			if len(outcome.SettledRequests) > 0 {
+				// Delete successfully settled requests
+				c.deleteRequests(outcome.SettledRequests)
+				c.logger.Infof("User %s: deleted %d settled requests", 
+					outcome.User.Hex(), len(outcome.SettledRequests))
+			}
+			
+		case SettlementNoSigner:
+			// Permanent failure - delete all requests for this user
+			// For permanent failures, we should delete all user's requests (not just settled ones)
+			userReqs, err := c.getUserRequestsForAddress(outcome.User.Hex())
+			if err != nil {
+				c.logger.Infof("Error getting requests for permanent failure user %s: %v", outcome.User.Hex(), err)
+			} else if userReqs != nil {
+				c.deleteRequests(userReqs.Requests)
+				c.logger.Infof("User %s: deleted %d requests due to permanent failure", 
+					outcome.User.Hex(), len(userReqs.Requests))
+			}
+			
+		default:
+			// Temporary failure - already handled by skipUntil logic
+			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
+		}
+	}
+}
+
+// Helper functions (simplified and consolidated)
+
+func (c *Ctrl) groupRequestsByUser(reqs []model.Request) map[string]*UserRequests {
+	userRequestsMap := make(map[string]*UserRequests)
+	
+	for _, req := range reqs {
+		fee, err := util.ConvertToBigInt(req.Fee)
+		if err != nil {
+			c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
+			continue
+		}
+
+		reqCopy := req
+		if userReqs, exists := userRequestsMap[req.UserAddress]; exists {
+			userReqs.Requests = append(userReqs.Requests, &reqCopy)
+			userReqs.TotalFee = new(big.Int).Add(userReqs.TotalFee, fee)
+		} else {
+			userRequestsMap[req.UserAddress] = &UserRequests{
+				Requests: []*model.Request{&reqCopy},
+				TotalFee: fee,
+			}
+		}
+	}
+	
+	return userRequestsMap
+}
+
+func (c *Ctrl) createUserSettlement(userAddr string, userReqs *UserRequests) (contract.TEESettlementData, error) {
+	requestsHash := c.hashUserRequests(userReqs.Requests)
+	nonce := big.NewInt(time.Now().Unix())
+	nonce.Mul(nonce, big.NewInt(10000000))
+
+	settlementData := contract.TEESettlementData{
+		User:         common.HexToAddress(userAddr),
+		Provider:     common.HexToAddress(c.contract.ProviderAddress),
+		TotalFee:     userReqs.TotalFee,
+		RequestsHash: requestsHash,
+		Nonce:        nonce,
+	}
+
+	// Sign with TEE service
+	messageHash := crypto.Keccak256(
+		requestsHash[:],
+		common.LeftPadBytes(nonce.Bytes(), 32),
+		settlementData.Provider.Bytes(),
+		settlementData.User.Bytes(),
+		common.LeftPadBytes(userReqs.TotalFee.Bytes(), 32),
+	)
+
+	signature, err := c.teeService.Sign(messageHash)
+	if err != nil {
+		return settlementData, errors.Wrap(err, "TEE signing failed")
+	}
+
+	settlementData.Signature = signature
+	return settlementData, nil
+}
+
+func (c *Ctrl) getRequestsWithinBudget(requests []*model.Request, budget *big.Int) ([]*model.Request, *big.Int) {
+	var result []*model.Request
+	remaining := new(big.Int).Set(budget)
+	actualTotalFee := big.NewInt(0)
+	
+	for _, req := range requests {
+		fee, err := util.ConvertToBigInt(req.Fee)
+		if err != nil {
+			continue
+		}
+		
+		if remaining.Cmp(fee) >= 0 {
+			result = append(result, req)
+			remaining.Sub(remaining, fee)
+			actualTotalFee.Add(actualTotalFee, fee)
+		} else {
+			break
+		}
+	}
+	
+	return result, actualTotalFee
+}
+
+func (c *Ctrl) getUnsettledRequests(allRequests, settledRequests []*model.Request) []*model.Request {
+	settledMap := make(map[string]bool)
+	for _, req := range settledRequests {
+		settledMap[req.RequestHash] = true
+	}
+	
+	var unsettled []*model.Request
+	for _, req := range allRequests {
+		if !settledMap[req.RequestHash] {
+			unsettled = append(unsettled, req)
+		}
+	}
+	
+	return unsettled
+}
+
+func (c *Ctrl) getRequestHashes(requests []*model.Request) []string {
+	hashes := make([]string, len(requests))
+	for i, req := range requests {
+		hashes[i] = req.RequestHash
+	}
+	return hashes
+}
+
+func (c *Ctrl) deleteRequests(requests []*model.Request) {
+	if len(requests) == 0 {
+		return
+	}
+	
+	requestHashes := c.getRequestHashes(requests)
+	err := c.db.DeleteRequestsByHashes(requestHashes)
+	if err != nil {
+		c.logger.Infof("Error deleting requests: %v", err)
+	}
+}
+
+func (c *Ctrl) executeBatches(ctx context.Context, settlements []contract.TEESettlementData) (map[common.Address]SettlementStatus, error) {
+	failures := make(map[common.Address]SettlementStatus)
+	
+	// Process in batches
+	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
+		end := i + constant.TEESettlementBatchSize
+		if end > len(settlements) {
+			end = len(settlements)
+		}
+		
+		batch := settlements[i:end]
+		c.logger.Infof("Executing settlement batch %d-%d", i+1, end)
+		
+		failedUsers, err := c.contract.SettleFeesWithTEE(ctx, batch)
+		if err != nil {
+			return failures, errors.Wrapf(err, "settlement batch %d-%d failed", i, end-1)
+		}
+		
+		for _, user := range failedUsers {
+			failures[user] = SettlementPartial
+		}
+	}
+	
+	return failures, nil
+}
+
+// getUserRequestsForAddress gets all unprocessed requests for a specific user
+func (c *Ctrl) getUserRequestsForAddress(userAddress string) (*UserRequests, error) {
+	// Query database for all unprocessed requests for this user
+	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
+		Processed:         false,
+		IncludeSkipped:    true, // Include skipped requests for permanent failures
+		Sort:              model.PtrOf("created_at ASC"),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "list requests for user")
+	}
+
+	// Filter for this specific user and calculate total fee
+	var userRequests []*model.Request
+	totalFee := big.NewInt(0)
+	
+	for _, req := range reqs {
+		if req.UserAddress == userAddress {
+			reqCopy := req
+			userRequests = append(userRequests, &reqCopy)
+			
+			fee, err := util.ConvertToBigInt(req.Fee)
+			if err != nil {
+				c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
+				continue
+			}
+			totalFee.Add(totalFee, fee)
+		}
+	}
+
+	if len(userRequests) == 0 {
+		return nil, nil
+	}
+
+	return &UserRequests{
+		Requests: userRequests,
+		TotalFee: totalFee,
+	}, nil
+}
+
+// Other required methods (from original file)
+
+func (c *Ctrl) hashUserRequests(requests []*model.Request) [32]byte {
+	var requestData []byte
+	for _, req := range requests {
+		requestData = append(requestData, []byte(req.RequestHash)...)
+		requestData = append(requestData, []byte(req.UserAddress)...)
+		requestData = append(requestData, []byte(req.Fee)...)
+		requestData = append(requestData, []byte(req.InputFee)...)
+		requestData = append(requestData, []byte(req.OutputFee)...)
+	}
+	return crypto.Keccak256Hash(requestData)
+}
+
+func (c *Ctrl) isPermanentFailure(status SettlementStatus) bool {
+	return status == SettlementNoSigner
+}
+
+func (c *Ctrl) markRequestsWithSkipUntil(requestHashes []string, skipDuration time.Duration) error {
+	if len(requestHashes) == 0 {
+		return nil
+	}
+	
+	skipUntil := time.Now().Add(skipDuration)
+	err := c.db.UpdateRequestsSkipUntil(requestHashes, &skipUntil)
+	if err != nil {
+		return errors.Wrap(err, "update requests skipUntil")
+	}
+	
+	c.logger.Infof("Marked %d requests to skip until %v", len(requestHashes), skipUntil)
+	return nil
 }
