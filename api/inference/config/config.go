@@ -46,7 +46,7 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zk"`
-	ChatCacheExpiration time.Duration         `yaml:"chatCacheExpiration"`
+	ChatCacheExpiration time.Duration        `yaml:"chatCacheExpiration"`
 	NvGPU               bool                 `yaml:"nvGPU"`
 	Logger              *config.LoggerConfig `yaml:"logger"`
 }
@@ -73,12 +73,11 @@ func loadConfig(config *Config) error {
 	return yaml.UnmarshalStrict(data, config)
 }
 
-
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
 			AllowOrigins:    []string{"*"},
-			ContractAddress: "0x192ff84e5E3Ef3A6D29F508a56bF9beb344471f3",
+			ContractAddress: "0x4f850eb2abc036096999882b54e92ecd63aec13d",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
