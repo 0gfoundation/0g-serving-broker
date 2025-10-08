@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"log"
 	"os"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -13,7 +13,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/0glabs/0g-serving-broker/inference/config"
+	cfg "github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
@@ -32,7 +32,11 @@ import (
 //	@in				header
 
 func Main() {
-	config := config.GetConfig()
+	config := cfg.GetConfig()
+	logger, err := log.GetLogger(config.Logger)
+	if err != nil {
+		panic(err)
+	}
 
 	db, err := database.NewDB(config)
 	if err != nil {
@@ -42,7 +46,7 @@ func Main() {
 		panic(err)
 	}
 
-	contract, err := providercontract.NewProviderContract(config)
+	contract, err := providercontract.NewProviderContract(config, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -81,23 +85,23 @@ func Main() {
 		}
 
 		if err := teeService.SyncGPUPayload(ctx, teeClientType == tee.Mock); err != nil {
-			log.Printf("err %v", err)
+			logger.Errorf("error syncing GPU payload: %v", err)
 		}
 	}
 
-	ctrl := ctrl.New(db, contract, config, svcCache, teeService)
+	ctrl := ctrl.New(db, contract, config, svcCache, teeService, logger)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
 	}
 	settleFeesErr := ctrl.SettleFeesWithTEE(ctx)
 	if settleFeesErr != nil {
-		log.Printf("error settling fees: %v", settleFeesErr)
+		logger.Errorf("error settling fees: %v", settleFeesErr)
 	}
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
 	}
-	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)
 	}

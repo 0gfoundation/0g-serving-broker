@@ -1,6 +1,8 @@
 package log
 
 import (
+	"os"
+	"path/filepath"
 	"time"
 
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
@@ -87,6 +89,13 @@ func GetLogger(cfg *config.LoggerConfig) (Logger, error) {
 }
 
 func newLfsHook(logPath string, maxRemainCnt uint, formatter log.Formatter) (log.Hook, error) {
+	// Create directory if it doesn't exist
+	if dir := filepath.Dir(logPath); dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, err
+		}
+	}
+	
 	writer, err := rotatelogs.New(
 		logPath+".%Y%m%d%H",
 		rotatelogs.WithLinkName(logPath),

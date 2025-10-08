@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log"
 	"os"
 	"sync"
 	"time"
@@ -47,8 +46,9 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zk"`
-	ChatCacheExpiration time.Duration `yaml:"chatCacheExpiration"`
-	NvGPU               bool          `yaml:"nvGPU"`
+	ChatCacheExpiration time.Duration        `yaml:"chatCacheExpiration"`
+	NvGPU               bool                 `yaml:"nvGPU"`
+	Logger              *config.LoggerConfig `yaml:"logger"`
 }
 
 var (
@@ -77,7 +77,7 @@ func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
 			AllowOrigins:    []string{"*"},
-			ContractAddress: "0x192ff84e5E3Ef3A6D29F508a56bF9beb344471f3",
+			ContractAddress: "0x4f850eb2abc036096999882b54e92ecd63aec13d",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
@@ -115,10 +115,16 @@ func GetConfig() *Config {
 			},
 			ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
+			Logger: &config.LoggerConfig{
+				Format:        "text",
+				Level:         "info",
+				Path:          "./logs/inference.log",
+				RotationCount: 7,
+			},
 		}
 
 		if err := loadConfig(instance); err != nil {
-			log.Fatalf("Error loading configuration: %v", err)
+			panic(err)
 		}
 
 		for _, networkConf := range instance.Networks {
