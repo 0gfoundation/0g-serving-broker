@@ -89,7 +89,9 @@ type DeploymentConfig struct {
 	UseGPU        bool
 	UseTest       bool
 	UseMonitoring bool
+	UseNginx      bool
 	ConfigFile    string
+	ConfigPath    string // Full path for mounting in docker-compose
 	Ports         PortConfig
 	ProjectName   string // Docker Compose project name for isolation
 }
@@ -133,6 +135,7 @@ const dockerComposeTemplate = `services:
     networks:
       - default
 
+{{- if .UseNginx}}
   # Nginx load balancer
   nginx:
     image: nginx:1.27.0
@@ -193,9 +196,15 @@ const dockerComposeTemplate = `services:
       retries: 3
       start_period: 10s
 
-  # Main broker starts after nginx is ready
+{{- end}}
+
+  # Main broker service
   0g-serving-provider-broker:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest
+{{- if not .UseNginx}}
+    ports:
+      - "{{.Ports.Nginx80}}:3080"
+{{- end}}
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -203,7 +212,7 @@ const dockerComposeTemplate = `services:
       - NETWORK=hardhat
 {{- end}}
     volumes:
-      - ./{{.ConfigFile}}:/etc/config.yaml
+      - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/broker:/var/log/inference
 {{- end}}
@@ -236,8 +245,10 @@ const dockerComposeTemplate = `services:
       hardhat-node-with-contract:
         condition: service_healthy
 {{- end}}
+{{- if .UseNginx}}
       nginx:
         condition: service_healthy
+{{- end}}
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
@@ -248,7 +259,7 @@ const dockerComposeTemplate = `services:
       - NETWORK=hardhat
 {{- end}}
     volumes:
-      - ./{{.ConfigFile}}:/etc/config.yaml
+      - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/event:/var/log/inference
 {{- end}}
@@ -268,8 +279,10 @@ const dockerComposeTemplate = `services:
     depends_on:
       0g-serving-provider-broker:
         condition: service_healthy
+{{- if .UseNginx}}
       nginx:
         condition: service_healthy
+{{- end}}
 
 {{- if .UseMonitoring}}
   prometheus:
@@ -370,7 +383,9 @@ type TemplateData struct {
 	UseGPU        bool
 	UseTest       bool
 	UseMonitoring bool
+	UseNginx      bool
 	ConfigFile    string
+	ConfigPath    string
 	Ports         PortConfig
 	ProjectName   string
 	EnableFileLog bool
@@ -443,7 +458,7 @@ func main() {
 
 	// Step 1: Load and configure YAML config
 	fmt.Println("\n📋 Step 1: Configuration File Setup")
-	configFile, yamlConfig, err := generateYAMLConfig(originalDir)
+	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -457,6 +472,7 @@ func main() {
 		os.Exit(1)
 	}
 	deployConfig.ConfigFile = configFile
+	deployConfig.ConfigPath = configPath
 
 	// Step 3: Generate deployment files
 	fmt.Println("\n🔧 Step 3: Generating deployment configuration...")
@@ -524,13 +540,13 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string) (string, *Config, error) {
+func generateYAMLConfig(originalDir string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
 	baseConfigPath := findBaseConfig(originalDir)
 	if baseConfigPath == "" {
-		return "", nil, fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
+		return "", "", nil, fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
 	}
 
 	// Ask for existing config file
@@ -557,9 +573,20 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 		configName = "config.local.yml"
 	}
 
-	// Ensure .yml extension
-	if !strings.HasSuffix(configName, ".yml") && !strings.HasSuffix(configName, ".yaml") {
-		configName += ".yml"
+	// Use the filename as provided by user (no automatic extension)
+
+	// Ask for mount path in docker-compose
+	fmt.Print("📁 Enter the mount path for the configuration file in docker-compose [default: ./]: ")
+	mountPath, _ := reader.ReadString('\n')
+	mountPath = strings.TrimSpace(mountPath)
+
+	if mountPath == "" {
+		mountPath = "./"
+	}
+
+	// Ensure mountPath ends with /
+	if !strings.HasSuffix(mountPath, "/") {
+		mountPath += "/"
 	}
 
 	outputPath := configName
@@ -567,12 +594,12 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 	// Load and merge configs
 	config, err := loadAndMergeConfigs(baseConfigPath, userConfigPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to load configs: %v", err)
+		return "", "", nil, fmt.Errorf("failed to load configs: %v", err)
 	}
 
 	// Check and prompt for required fields
 	if err := checkAndPromptRequiredFields(config); err != nil {
-		return "", nil, fmt.Errorf("error checking required fields: %v", err)
+		return "", "", nil, fmt.Errorf("error checking required fields: %v", err)
 	}
 
 	// Add logger configuration for Docker deployment
@@ -593,11 +620,12 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 
 	// Save final configuration
 	if err := saveConfig(config, outputPath); err != nil {
-		return "", nil, fmt.Errorf("error saving config: %v", err)
+		return "", "", nil, fmt.Errorf("error saving config: %v", err)
 	}
 
 	fmt.Printf("✅ Configuration saved to: %s\n", outputPath)
-	return filepath.Base(outputPath), config, nil
+	fullMountPath := mountPath + filepath.Base(outputPath)
+	return filepath.Base(outputPath), fullMountPath, config, nil
 }
 
 func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
@@ -630,6 +658,16 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 	config.UseTest = strings.ToLower(strings.TrimSpace(response)) == "y"
 	if config.UseTest {
 		fmt.Println("   ✓ Test environment services will be included")
+	}
+
+	// Ask about nginx proxy
+	fmt.Print("\n🌐 Do you want to use Nginx as a proxy? [y/N]: ")
+	response, _ = reader.ReadString('\n')
+	config.UseNginx = strings.ToLower(strings.TrimSpace(response)) == "y"
+	if config.UseNginx {
+		fmt.Println("   ✓ Nginx proxy will be configured")
+	} else {
+		fmt.Println("   ✓ Direct broker access will be configured")
 	}
 
 	// Ask about monitoring services
@@ -679,8 +717,27 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		config.Ports.MySQL = response
 	}
 
-	// Set Nginx HTTP port from service.servingUrl (no user input needed)
-	config.Ports.Nginx80 = servingPort
+	// Configure HTTP port based on whether nginx is used
+	if config.UseNginx {
+		// Set Nginx HTTP port from service.servingUrl (no user input needed)
+		config.Ports.Nginx80 = servingPort
+		fmt.Printf("\n🌐 Nginx Proxy\n")
+		fmt.Printf("   Nginx will proxy requests on port %s\n", servingPort)
+	} else {
+		// Ask user for broker direct access port
+		fmt.Printf("\n🚀 Direct Broker Access\n")
+		fmt.Printf("   Enter host port for direct broker access [default: 80]: ")
+		response, _ = reader.ReadString('\n')
+		response = strings.TrimSpace(response)
+		if response == "" {
+			config.Ports.Nginx80 = "80"
+		} else {
+			if err := validatePort(response); err != nil {
+				return fmt.Errorf("invalid broker port: %v", err)
+			}
+			config.Ports.Nginx80 = response
+		}
+	}
 
 	// Hardhat port (if test environment)
 	if config.UseTest {
@@ -736,7 +793,11 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 	// Summary
 	fmt.Printf("\n✅ Port configuration completed:\n")
 	fmt.Printf("   MySQL: %s\n", config.Ports.MySQL)
-	fmt.Printf("   HTTP (Main API): %s\n", config.Ports.Nginx80)
+	if config.UseNginx {
+		fmt.Printf("   HTTP (Nginx Proxy): %s\n", config.Ports.Nginx80)
+	} else {
+		fmt.Printf("   HTTP (Direct Broker): %s\n", config.Ports.Nginx80)
+	}
 	if config.UseTest {
 		fmt.Printf("   Hardhat: %s\n", config.Ports.Hardhat)
 	}
@@ -791,7 +852,9 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		UseGPU:        config.UseGPU,
 		UseTest:       config.UseTest,
 		UseMonitoring: config.UseMonitoring,
+		UseNginx:      config.UseNginx,
 		ConfigFile:    config.ConfigFile,
+		ConfigPath:    config.ConfigPath,
 		Ports:         config.Ports,
 		ProjectName:   config.ProjectName,
 		EnableFileLog: true, // Always enable file logging
@@ -863,6 +926,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	}
 	fmt.Printf("  • GPU Support: %t\n", config.UseGPU)
 	fmt.Printf("  • Test Environment: %t\n", config.UseTest)
+	fmt.Printf("  • Nginx Proxy: %t\n", config.UseNginx)
 	fmt.Printf("  • Monitoring: %t\n", config.UseMonitoring)
 	fmt.Printf("  • Config File: %s\n", config.ConfigFile)
 
@@ -877,7 +941,11 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • Single file mount: Only %s needs to be mounted\n", config.ConfigFile)
 	fmt.Printf("  • Environment variables: Static configs via env vars\n")
 	fmt.Printf("  • Auto database init: No manual SQL scripts needed\n")
-	fmt.Printf("  • Embedded nginx config: No separate nginx.conf file\n")
+	if config.UseNginx {
+		fmt.Printf("  • Embedded nginx config: No separate nginx.conf file\n")
+	} else {
+		fmt.Printf("  • Direct broker access: No nginx proxy needed\n")
+	}
 
 	fmt.Printf("\n🚀 To start the services, run:\n")
 	if config.ProjectName != "" {
