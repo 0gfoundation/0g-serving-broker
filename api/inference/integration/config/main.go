@@ -89,51 +89,14 @@ type DeploymentConfig struct {
 	UseGPU        bool
 	UseTest       bool
 	UseMonitoring bool
+	UseNginx      bool
 	ConfigFile    string
+	ConfigPath    string // Full path for mounting in docker-compose
 	Ports         PortConfig
 	ProjectName   string // Docker Compose project name for isolation
 }
 
-// Templates for nginx.conf
-const nginxTemplate = `events { }
-
-http {
-    server {
-        listen 80;
-        
-        # Use Docker's DNS resolver with valid parameter for caching
-        resolver 127.0.0.11 valid=30s;
-        
-        # Use variables to enable dynamic resolution
-        set $broker_backend 0g-serving-provider-broker:3080;
-
-        location /v1/proxy {
-            proxy_pass http://$broker_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location /v1/quote {
-            proxy_pass http://$broker_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location / {
-            allow 127.0.0.1;
-            allow 172.16.0.0/12;
-            deny all;
-            proxy_pass http://$broker_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location /stub_status {
-            stub_status on;
-        }
-    }
-}
-`
+// nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
 
 // Docker compose template
 const dockerComposeTemplate = `services:
@@ -157,10 +120,12 @@ const dockerComposeTemplate = `services:
       - "{{.Ports.MySQL}}:3306"
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: 123456
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=provider
+      - MYSQL_USER=provider
+      - MYSQL_PASSWORD=provider
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "mysql -uroot -p123456 -e 'USE provider'"]
       interval: 15s
@@ -170,14 +135,58 @@ const dockerComposeTemplate = `services:
     networks:
       - default
 
+{{- if .UseNginx}}
   # Nginx load balancer
   nginx:
     image: nginx:1.27.0
     ports:
       - "{{.Ports.Nginx80}}:80"
     restart: unless-stopped
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
+    environment:
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+      - BROKER_BACKEND=0g-serving-provider-broker:3080
+      - NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
+    command: |
+      sh -c '
+      mkdir -p /etc/nginx/templates
+      cat > /etc/nginx/templates/nginx.conf.template << EOF
+      events { }
+      
+      http {
+          server {
+              listen 80;
+              resolver 127.0.0.11 valid=30s;
+              set $$broker_backend ${BROKER_BACKEND};
+      
+              location /v1/proxy {
+                  proxy_pass http://$$broker_backend;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+      
+              location /v1/quote {
+                  proxy_pass http://$$broker_backend;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+      
+              location / {
+                  allow 127.0.0.1;
+                  allow 172.16.0.0/12;
+                  deny all;
+                  proxy_pass http://$$broker_backend;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+      
+              location /stub_status {
+                  stub_status on;
+              }
+          }
+      }
+      EOF
+      /docker-entrypoint.sh nginx -g "daemon off;"
+      '
     networks:
       - default
     healthcheck:
@@ -187,9 +196,15 @@ const dockerComposeTemplate = `services:
       retries: 3
       start_period: 10s
 
-  # Main broker starts after nginx is ready
+{{- end}}
+
+  # Main broker service
   0g-serving-provider-broker:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest
+{{- if not .UseNginx}}
+    ports:
+      - "{{.Ports.Nginx80}}:3080"
+{{- end}}
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
@@ -197,7 +212,7 @@ const dockerComposeTemplate = `services:
       - NETWORK=hardhat
 {{- end}}
     volumes:
-      - ./{{.ConfigFile}}:/etc/config.yaml
+      - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/broker:/var/log/inference
 {{- end}}
@@ -230,8 +245,10 @@ const dockerComposeTemplate = `services:
       hardhat-node-with-contract:
         condition: service_healthy
 {{- end}}
+{{- if .UseNginx}}
       nginx:
         condition: service_healthy
+{{- end}}
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
@@ -242,7 +259,7 @@ const dockerComposeTemplate = `services:
       - NETWORK=hardhat
 {{- end}}
     volumes:
-      - ./{{.ConfigFile}}:/etc/config.yaml
+      - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/event:/var/log/inference
 {{- end}}
@@ -262,15 +279,41 @@ const dockerComposeTemplate = `services:
     depends_on:
       0g-serving-provider-broker:
         condition: service_healthy
+{{- if .UseNginx}}
       nginx:
         condition: service_healthy
+{{- end}}
 
 {{- if .UseMonitoring}}
+  # Init container for Prometheus config
+  prometheus-init:
+    image: alpine:3.18
+    environment:
+      - PROMETHEUS_CONFIG=${PROMETHEUS_CONFIG:-}
+    volumes:
+      - prometheus-config:/tmp
+    command: |
+      sh -c 'if [ -n "$$PROMETHEUS_CONFIG" ]; then
+        echo "$$PROMETHEUS_CONFIG" | base64 -d > /tmp/prometheus.yml
+      else
+        cat > /tmp/prometheus.yml << "EOF"
+      global:
+        scrape_interval: 15s
+      scrape_configs:
+        - job_name: "0g-serving"
+          static_configs:
+            - targets: ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
+        - job_name: "node-exporter"
+          static_configs:
+            - targets: ["prometheus-node-exporter:9100"]
+      EOF
+      fi'
+
   prometheus:
     image: prom/prometheus:v2.45.2
     restart: unless-stopped
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-config:/etc/prometheus
     ports:
       - "{{.Ports.Prometheus}}:9090"
     networks:
@@ -281,6 +324,9 @@ const dockerComposeTemplate = `services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    depends_on:
+      prometheus-init:
+        condition: service_completed_successfully
 
   grafana:
     image: grafana/grafana-oss:11.4.0
@@ -334,6 +380,9 @@ const dockerComposeTemplate = `services:
 {{- end}}
 volumes:
   mysql-data:
+{{- if .UseMonitoring}}
+  prometheus-config:
+{{- end}}
 
 networks:
   default:
@@ -345,7 +394,9 @@ type TemplateData struct {
 	UseGPU        bool
 	UseTest       bool
 	UseMonitoring bool
+	UseNginx      bool
 	ConfigFile    string
+	ConfigPath    string
 	Ports         PortConfig
 	ProjectName   string
 	EnableFileLog bool
@@ -418,7 +469,7 @@ func main() {
 
 	// Step 1: Load and configure YAML config
 	fmt.Println("\n📋 Step 1: Configuration File Setup")
-	configFile, yamlConfig, err := generateYAMLConfig(originalDir)
+	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -432,6 +483,7 @@ func main() {
 		os.Exit(1)
 	}
 	deployConfig.ConfigFile = configFile
+	deployConfig.ConfigPath = configPath
 
 	// Step 3: Generate deployment files
 	fmt.Println("\n🔧 Step 3: Generating deployment configuration...")
@@ -499,13 +551,13 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string) (string, *Config, error) {
+func generateYAMLConfig(originalDir string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
 	baseConfigPath := findBaseConfig(originalDir)
 	if baseConfigPath == "" {
-		return "", nil, fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
+		return "", "", nil, fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
 	}
 
 	// Ask for existing config file
@@ -532,9 +584,20 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 		configName = "config.local.yml"
 	}
 
-	// Ensure .yml extension
-	if !strings.HasSuffix(configName, ".yml") && !strings.HasSuffix(configName, ".yaml") {
-		configName += ".yml"
+	// Use the filename as provided by user (no automatic extension)
+
+	// Ask for mount path in docker-compose
+	fmt.Print("📁 Enter the mount path for the configuration file in docker-compose [default: ./]: ")
+	mountPath, _ := reader.ReadString('\n')
+	mountPath = strings.TrimSpace(mountPath)
+
+	if mountPath == "" {
+		mountPath = "./"
+	}
+
+	// Ensure mountPath ends with /
+	if !strings.HasSuffix(mountPath, "/") {
+		mountPath += "/"
 	}
 
 	outputPath := configName
@@ -542,12 +605,12 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 	// Load and merge configs
 	config, err := loadAndMergeConfigs(baseConfigPath, userConfigPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to load configs: %v", err)
+		return "", "", nil, fmt.Errorf("failed to load configs: %v", err)
 	}
 
 	// Check and prompt for required fields
 	if err := checkAndPromptRequiredFields(config); err != nil {
-		return "", nil, fmt.Errorf("error checking required fields: %v", err)
+		return "", "", nil, fmt.Errorf("error checking required fields: %v", err)
 	}
 
 	// Add logger configuration for Docker deployment
@@ -568,11 +631,12 @@ func generateYAMLConfig(originalDir string) (string, *Config, error) {
 
 	// Save final configuration
 	if err := saveConfig(config, outputPath); err != nil {
-		return "", nil, fmt.Errorf("error saving config: %v", err)
+		return "", "", nil, fmt.Errorf("error saving config: %v", err)
 	}
 
 	fmt.Printf("✅ Configuration saved to: %s\n", outputPath)
-	return filepath.Base(outputPath), config, nil
+	fullMountPath := mountPath + filepath.Base(outputPath)
+	return filepath.Base(outputPath), fullMountPath, config, nil
 }
 
 func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
@@ -605,6 +669,16 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 	config.UseTest = strings.ToLower(strings.TrimSpace(response)) == "y"
 	if config.UseTest {
 		fmt.Println("   ✓ Test environment services will be included")
+	}
+
+	// Ask about nginx proxy
+	fmt.Print("\n🌐 Do you want to use Nginx as a proxy? [y/N]: ")
+	response, _ = reader.ReadString('\n')
+	config.UseNginx = strings.ToLower(strings.TrimSpace(response)) == "y"
+	if config.UseNginx {
+		fmt.Println("   ✓ Nginx proxy will be configured")
+	} else {
+		fmt.Println("   ✓ Direct broker access will be configured")
 	}
 
 	// Ask about monitoring services
@@ -654,8 +728,27 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		config.Ports.MySQL = response
 	}
 
-	// Set Nginx HTTP port from service.servingUrl (no user input needed)
-	config.Ports.Nginx80 = servingPort
+	// Configure HTTP port based on whether nginx is used
+	if config.UseNginx {
+		// Set Nginx HTTP port from service.servingUrl (no user input needed)
+		config.Ports.Nginx80 = servingPort
+		fmt.Printf("\n🌐 Nginx Proxy\n")
+		fmt.Printf("   Nginx will proxy requests on port %s\n", servingPort)
+	} else {
+		// Ask user for broker direct access port
+		fmt.Printf("\n🚀 Direct Broker Access\n")
+		fmt.Printf("   Enter host port for direct broker access [default: 80]: ")
+		response, _ = reader.ReadString('\n')
+		response = strings.TrimSpace(response)
+		if response == "" {
+			config.Ports.Nginx80 = "80"
+		} else {
+			if err := validatePort(response); err != nil {
+				return fmt.Errorf("invalid broker port: %v", err)
+			}
+			config.Ports.Nginx80 = response
+		}
+	}
 
 	// Hardhat port (if test environment)
 	if config.UseTest {
@@ -711,7 +804,11 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 	// Summary
 	fmt.Printf("\n✅ Port configuration completed:\n")
 	fmt.Printf("   MySQL: %s\n", config.Ports.MySQL)
-	fmt.Printf("   HTTP (Main API): %s\n", config.Ports.Nginx80)
+	if config.UseNginx {
+		fmt.Printf("   HTTP (Nginx Proxy): %s\n", config.Ports.Nginx80)
+	} else {
+		fmt.Printf("   HTTP (Direct Broker): %s\n", config.Ports.Nginx80)
+	}
 	if config.UseTest {
 		fmt.Printf("   Hardhat: %s\n", config.Ports.Hardhat)
 	}
@@ -766,41 +863,22 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		UseGPU:        config.UseGPU,
 		UseTest:       config.UseTest,
 		UseMonitoring: config.UseMonitoring,
+		UseNginx:      config.UseNginx,
 		ConfigFile:    config.ConfigFile,
+		ConfigPath:    config.ConfigPath,
 		Ports:         config.Ports,
 		ProjectName:   config.ProjectName,
 		EnableFileLog: true, // Always enable file logging
 	}
 
-	// Generate nginx.conf
-	if err := generateNginxConfig(templateData); err != nil {
-		return fmt.Errorf("failed to generate nginx config: %v", err)
-	}
-
-	// Generate docker-compose.yml
+	// Generate docker-compose.yml only
 	if err := generateDockerCompose(templateData); err != nil {
 		return fmt.Errorf("failed to generate docker compose: %v", err)
 	}
 
-	// Create logs directories for file logging
-	if err := os.MkdirAll("logs/broker", 0755); err != nil {
-		return fmt.Errorf("failed to create logs/broker directory: %v", err)
-	}
-	if err := os.MkdirAll("logs/event", 0755); err != nil {
-		return fmt.Errorf("failed to create logs/event directory: %v", err)
-	}
+	// Logs directories will be created automatically by Docker Compose
 
-	// Generate prometheus.yml if monitoring is enabled
-	if config.UseMonitoring {
-		if err := generatePrometheusConfig(); err != nil {
-			return fmt.Errorf("failed to generate prometheus config: %v", err)
-		}
-	}
-
-	// Generate init.sql for MySQL initialization
-	if err := generateInitSQL(); err != nil {
-		return fmt.Errorf("failed to generate init.sql: %v", err)
-	}
+	// No additional files needed - all configurations are embedded
 
 	// Generate .env file if project name is specified
 	if config.ProjectName != "" {
@@ -812,20 +890,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 	return nil
 }
 
-func generateNginxConfig(data TemplateData) error {
-	tmpl, err := template.New("nginx").Parse(nginxTemplate)
-	if err != nil {
-		return err
-	}
-
-	file, err := os.Create("nginx.conf")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	return tmpl.Execute(file, data)
-}
+// generateNginxConfig is no longer needed as nginx config is now embedded in docker-compose.yml
 
 func generateDockerCompose(data TemplateData) error {
 	tmpl, err := template.New("dockercompose").Parse(dockerComposeTemplate)
@@ -842,53 +907,11 @@ func generateDockerCompose(data TemplateData) error {
 	return tmpl.Execute(file, data)
 }
 
-func generatePrometheusConfig() error {
-	prometheusConfig := `global:
-  scrape_interval: 15s
+// generatePrometheusConfig is no longer needed as prometheus config is now handled via environment variables
 
-scrape_configs:
-  - job_name: "prometheus-go"
-    static_configs:
-      - targets:
-          ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
-          # node-exporter
-      - targets: ["prometheus-node-exporter:9100"]
-`
+// generateInitSQL is no longer needed as database initialization is handled by MySQL environment variables and broker migration
 
-	// Create prometheus directory if it doesn't exist
-	if err := os.MkdirAll("prometheus", 0755); err != nil {
-		return fmt.Errorf("failed to create prometheus directory: %v", err)
-	}
-
-	file, err := os.Create("prometheus/prometheus.yml")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = file.WriteString(prometheusConfig)
-	return err
-}
-
-func generateInitSQL() error {
-	initSQLContent := `CREATE DATABASE IF NOT EXISTS provider CHARACTER SET utf8mb4;
-
-CREATE USER IF NOT EXISTS 'provider'@'%' IDENTIFIED BY 'provider';
-
-GRANT ALL PRIVILEGES ON provider.* TO 'provider'@'%';
-
-FLUSH PRIVILEGES;
-`
-
-	file, err := os.Create("init.sql")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = file.WriteString(initSQLContent)
-	return err
-}
+// generateEnvExample is no longer needed as configurations are embedded in docker-compose.yml
 
 func generateEnvFile(projectName string) error {
 	envContent := fmt.Sprintf("# Docker Compose project name for resource isolation\nCOMPOSE_PROJECT_NAME=%s\n", projectName)
@@ -914,20 +937,25 @@ func printSuccessSummary(config *DeploymentConfig) {
 	}
 	fmt.Printf("  • GPU Support: %t\n", config.UseGPU)
 	fmt.Printf("  • Test Environment: %t\n", config.UseTest)
+	fmt.Printf("  • Nginx Proxy: %t\n", config.UseNginx)
 	fmt.Printf("  • Monitoring: %t\n", config.UseMonitoring)
 	fmt.Printf("  • Config File: %s\n", config.ConfigFile)
 
 	fmt.Printf("\n📁 Generated Files:\n")
-	fmt.Printf("  • nginx.conf\n")
-	fmt.Printf("  • docker-compose.yml\n")
-	fmt.Printf("  • %s\n", config.ConfigFile)
-	fmt.Printf("  • init.sql\n")
-	fmt.Printf("  • logs/ (directory for persistent logs)\n")
+	fmt.Printf("  • docker-compose.yml (with embedded configurations)\n")
+	fmt.Printf("  • %s (main configuration file)\n", config.ConfigFile)
 	if config.ProjectName != "" {
 		fmt.Printf("  • .env (with project name)\n")
 	}
-	if config.UseMonitoring {
-		fmt.Printf("  • prometheus/prometheus.yml\n")
+
+	fmt.Printf("\n🔧 Deployment Benefits:\n")
+	fmt.Printf("  • Single file mount: Only %s needs to be mounted\n", config.ConfigFile)
+	fmt.Printf("  • Environment variables: Static configs via env vars\n")
+	fmt.Printf("  • Auto database init: No manual SQL scripts needed\n")
+	if config.UseNginx {
+		fmt.Printf("  • Embedded nginx config: No separate nginx.conf file\n")
+	} else {
+		fmt.Printf("  • Direct broker access: No nginx proxy needed\n")
 	}
 
 	fmt.Printf("\n🚀 To start the services, run:\n")
@@ -952,11 +980,16 @@ func printSuccessSummary(config *DeploymentConfig) {
 	}
 
 	fmt.Printf("\n⚙️ Management Commands:\n")
+	fmt.Printf("  • Copy and edit: cp .env.example .env\n")
+	fmt.Printf("  • Start services: docker compose up -d\n")
 	fmt.Printf("  • View logs: docker compose logs -f\n")
 	fmt.Printf("  • Stop services: docker compose down\n")
 	fmt.Printf("  • Health check: docker ps\n")
 
-	fmt.Printf("\n💡 All services should be healthy in ~60 seconds after starting\n")
+	fmt.Printf("\n💡 Custom Prometheus config:\n")
+	fmt.Printf("   cat your-prometheus.yml | base64 -w 0\n")
+	fmt.Printf("   export PROMETHEUS_CONFIG=<base64-output>\n")
+	fmt.Printf("\n🚀 All services should be healthy in ~60 seconds after starting\n")
 }
 
 // Helper functions (reuse from config-merger)
@@ -982,7 +1015,7 @@ func loadAndMergeConfigs(baseConfigPath, userConfigPath string) (*Config, error)
 	}
 
 	// If user config is provided, merge it
-	if userConfigPath != "" && userConfigPath != "" {
+	if userConfigPath != "" {
 		if _, err := os.Stat(userConfigPath); err == nil {
 			fmt.Printf("🔄 Merging configuration from: %s\n", userConfigPath)
 			userConfig, err := loadConfigFromFile(userConfigPath)
@@ -1010,7 +1043,37 @@ func loadConfigFromFile(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Ensure price fields are properly typed as numbers
+	normalizePriceFields(&config)
+
 	return &config, nil
+}
+
+// normalizePriceFields ensures price fields are stored as int64 instead of string
+func normalizePriceFields(config *Config) {
+	// Convert InputPrice
+	if config.Service.InputPrice != nil {
+		switch v := config.Service.InputPrice.(type) {
+		case float64:
+			config.Service.InputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				config.Service.InputPrice = num
+			}
+		}
+	}
+	
+	// Convert OutputPrice
+	if config.Service.OutputPrice != nil {
+		switch v := config.Service.OutputPrice.(type) {
+		case float64:
+			config.Service.OutputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				config.Service.OutputPrice = num
+			}
+		}
+	}
 }
 
 func mergeConfigs(base, user *Config) {
@@ -1053,10 +1116,34 @@ func mergeConfigs(base, user *Config) {
 		base.Service.TargetURL = user.Service.TargetURL
 	}
 	if user.Service.InputPrice != nil {
-		base.Service.InputPrice = user.Service.InputPrice
+		// Convert to int64 if it's a float64 or string
+		switch v := user.Service.InputPrice.(type) {
+		case float64:
+			base.Service.InputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				base.Service.InputPrice = num
+			} else {
+				base.Service.InputPrice = v
+			}
+		default:
+			base.Service.InputPrice = user.Service.InputPrice
+		}
 	}
 	if user.Service.OutputPrice != nil {
-		base.Service.OutputPrice = user.Service.OutputPrice
+		// Convert to int64 if it's a float64 or string
+		switch v := user.Service.OutputPrice.(type) {
+		case float64:
+			base.Service.OutputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				base.Service.OutputPrice = num
+			} else {
+				base.Service.OutputPrice = v
+			}
+		default:
+			base.Service.OutputPrice = user.Service.OutputPrice
+		}
 	}
 	if user.Service.Type != "" {
 		base.Service.Type = user.Service.Type
@@ -1228,9 +1315,17 @@ func setFieldValue(config *Config, path, value string) error {
 	case "service.targetUrl":
 		config.Service.TargetURL = value
 	case "service.inputPrice":
-		config.Service.InputPrice = value
+		if num, err := strconv.ParseInt(value, 10, 64); err == nil {
+			config.Service.InputPrice = num
+		} else {
+			config.Service.InputPrice = value // Keep as string if not a valid number
+		}
 	case "service.outputPrice":
-		config.Service.OutputPrice = value
+		if num, err := strconv.ParseInt(value, 10, 64); err == nil {
+			config.Service.OutputPrice = num
+		} else {
+			config.Service.OutputPrice = value // Keep as string if not a valid number
+		}
 	case "service.model":
 		config.Service.ModelType = value
 	case "networks.ethereum0g.privateKeys[0]":
