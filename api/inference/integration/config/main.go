@@ -94,46 +94,7 @@ type DeploymentConfig struct {
 	ProjectName   string // Docker Compose project name for isolation
 }
 
-// Templates for nginx.conf
-const nginxTemplate = `events { }
-
-http {
-    server {
-        listen 80;
-        
-        # Use Docker's DNS resolver with valid parameter for caching
-        resolver 127.0.0.11 valid=30s;
-        
-        # Use variables to enable dynamic resolution
-        set $broker_backend 0g-serving-provider-broker:3080;
-
-        location /v1/proxy {
-            proxy_pass http://$broker_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location /v1/quote {
-            proxy_pass http://$broker_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location / {
-            allow 127.0.0.1;
-            allow 172.16.0.0/12;
-            deny all;
-            proxy_pass http://$broker_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-
-        location /stub_status {
-            stub_status on;
-        }
-    }
-}
-`
+// nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
 
 // Docker compose template
 const dockerComposeTemplate = `services:
@@ -157,12 +118,14 @@ const dockerComposeTemplate = `services:
       - "{{.Ports.MySQL}}:3306"
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: 123456
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-123456}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-provider}
+      - MYSQL_USER=${MYSQL_USER:-provider}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-provider}
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "mysql -uroot -p123456 -e 'USE provider'"]
+      test: ["CMD-SHELL", "mysql -uroot -p${MYSQL_ROOT_PASSWORD:-123456} -e 'USE ${MYSQL_DATABASE:-provider}'"]
       interval: 15s
       timeout: 5s
       retries: 15
@@ -176,8 +139,51 @@ const dockerComposeTemplate = `services:
     ports:
       - "{{.Ports.Nginx80}}:80"
     restart: unless-stopped
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
+    environment:
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+      - BROKER_BACKEND=${BROKER_BACKEND:-0g-serving-provider-broker:3080}
+      - NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
+    command: |
+      sh -c '
+      mkdir -p /etc/nginx/templates
+      cat > /etc/nginx/templates/nginx.conf.template << EOF
+      events { }
+      
+      http {
+          server {
+              listen 80;
+              resolver 127.0.0.11 valid=30s;
+              set $$broker_backend ${BROKER_BACKEND};
+      
+              location /v1/proxy {
+                  proxy_pass http://$$broker_backend;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+      
+              location /v1/quote {
+                  proxy_pass http://$$broker_backend;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+      
+              location / {
+                  allow 127.0.0.1;
+                  allow 172.16.0.0/12;
+                  deny all;
+                  proxy_pass http://$$broker_backend;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+      
+              location /stub_status {
+                  stub_status on;
+              }
+          }
+      }
+      EOF
+      /docker-entrypoint.sh nginx -g "daemon off;"
+      '
     networks:
       - default
     healthcheck:
@@ -269,8 +275,27 @@ const dockerComposeTemplate = `services:
   prometheus:
     image: prom/prometheus:v2.45.2
     restart: unless-stopped
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    environment:
+      - PROMETHEUS_CONFIG=${PROMETHEUS_CONFIG}
+    command: |
+      sh -c '
+      if [ -n "$$PROMETHEUS_CONFIG" ]; then
+        echo "$$PROMETHEUS_CONFIG" | base64 -d > /tmp/prometheus.yml
+      else
+        cat > /tmp/prometheus.yml << EOF
+      global:
+        scrape_interval: 15s
+      scrape_configs:
+        - job_name: "0g-serving"
+          static_configs:
+            - targets: ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
+        - job_name: "node-exporter"
+          static_configs:
+            - targets: ["prometheus-node-exporter:9100"]
+      EOF
+      fi
+      prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus
+      '
     ports:
       - "{{.Ports.Prometheus}}:9090"
     networks:
@@ -772,12 +797,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		EnableFileLog: true, // Always enable file logging
 	}
 
-	// Generate nginx.conf
-	if err := generateNginxConfig(templateData); err != nil {
-		return fmt.Errorf("failed to generate nginx config: %v", err)
-	}
-
-	// Generate docker-compose.yml
+	// Generate docker-compose.yml only
 	if err := generateDockerCompose(templateData); err != nil {
 		return fmt.Errorf("failed to generate docker compose: %v", err)
 	}
@@ -790,16 +810,9 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		return fmt.Errorf("failed to create logs/event directory: %v", err)
 	}
 
-	// Generate prometheus.yml if monitoring is enabled
-	if config.UseMonitoring {
-		if err := generatePrometheusConfig(); err != nil {
-			return fmt.Errorf("failed to generate prometheus config: %v", err)
-		}
-	}
-
-	// Generate init.sql for MySQL initialization
-	if err := generateInitSQL(); err != nil {
-		return fmt.Errorf("failed to generate init.sql: %v", err)
+	// Generate .env.example file
+	if err := generateEnvExample(config); err != nil {
+		return fmt.Errorf("failed to generate .env.example: %v", err)
 	}
 
 	// Generate .env file if project name is specified
@@ -812,20 +825,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 	return nil
 }
 
-func generateNginxConfig(data TemplateData) error {
-	tmpl, err := template.New("nginx").Parse(nginxTemplate)
-	if err != nil {
-		return err
-	}
-
-	file, err := os.Create("nginx.conf")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	return tmpl.Execute(file, data)
-}
+// generateNginxConfig is no longer needed as nginx config is now embedded in docker-compose.yml
 
 func generateDockerCompose(data TemplateData) error {
 	tmpl, err := template.New("dockercompose").Parse(dockerComposeTemplate)
@@ -842,51 +842,60 @@ func generateDockerCompose(data TemplateData) error {
 	return tmpl.Execute(file, data)
 }
 
-func generatePrometheusConfig() error {
-	prometheusConfig := `global:
-  scrape_interval: 15s
+// generatePrometheusConfig is no longer needed as prometheus config is now handled via environment variables
 
-scrape_configs:
-  - job_name: "prometheus-go"
-    static_configs:
-      - targets:
-          ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
-          # node-exporter
-      - targets: ["prometheus-node-exporter:9100"]
+// generateInitSQL is no longer needed as database initialization is handled by MySQL environment variables and broker migration
+
+func generateEnvExample(config *DeploymentConfig) error {
+	envExampleContent := `# ==============================================
+# 0G Serving Broker Environment Variables
+# ==============================================
+# Copy this file to .env and modify the values as needed
+
+# MySQL Database Configuration
+# These values are used by the mysql container to create the database and user
+MYSQL_ROOT_PASSWORD=123456
+MYSQL_DATABASE=provider
+MYSQL_USER=provider
+MYSQL_PASSWORD=provider
+
+# Nginx Configuration
+# Backend service that nginx will proxy to
+BROKER_BACKEND=0g-serving-provider-broker:3080
+
+# Prometheus Configuration (Optional)
+# If you want to customize prometheus configuration, encode your prometheus.yml to base64:
+# cat your-prometheus.yml | base64 -w 0
+# Then set the result to PROMETHEUS_CONFIG
+# Leave empty to use the default configuration
+PROMETHEUS_CONFIG=
+
+# Default prometheus config (for reference):
+# global:
+#   scrape_interval: 15s
+# scrape_configs:
+#   - job_name: "0g-serving"
+#     static_configs:
+#       - targets: ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
+#   - job_name: "node-exporter"
+#     static_configs:
+#       - targets: ["prometheus-node-exporter:9100"]
+
+# Grafana Configuration
+GF_SECURITY_ADMIN_PASSWORD=admin
 `
 
-	// Create prometheus directory if it doesn't exist
-	if err := os.MkdirAll("prometheus", 0755); err != nil {
-		return fmt.Errorf("failed to create prometheus directory: %v", err)
+	if config.ProjectName != "" {
+		envExampleContent += fmt.Sprintf("\n# Docker Compose Project Name\nCOMPOSE_PROJECT_NAME=%s\n", config.ProjectName)
 	}
 
-	file, err := os.Create("prometheus/prometheus.yml")
+	file, err := os.Create(".env.example")
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	_, err = file.WriteString(prometheusConfig)
-	return err
-}
-
-func generateInitSQL() error {
-	initSQLContent := `CREATE DATABASE IF NOT EXISTS provider CHARACTER SET utf8mb4;
-
-CREATE USER IF NOT EXISTS 'provider'@'%' IDENTIFIED BY 'provider';
-
-GRANT ALL PRIVILEGES ON provider.* TO 'provider'@'%';
-
-FLUSH PRIVILEGES;
-`
-
-	file, err := os.Create("init.sql")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = file.WriteString(initSQLContent)
+	_, err = file.WriteString(envExampleContent)
 	return err
 }
 
@@ -918,17 +927,19 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • Config File: %s\n", config.ConfigFile)
 
 	fmt.Printf("\n📁 Generated Files:\n")
-	fmt.Printf("  • nginx.conf\n")
-	fmt.Printf("  • docker-compose.yml\n")
-	fmt.Printf("  • %s\n", config.ConfigFile)
-	fmt.Printf("  • init.sql\n")
+	fmt.Printf("  • docker-compose.yml (with embedded configurations)\n")
+	fmt.Printf("  • %s (main configuration file)\n", config.ConfigFile)
+	fmt.Printf("  • .env.example (environment variables reference)\n")
 	fmt.Printf("  • logs/ (directory for persistent logs)\n")
 	if config.ProjectName != "" {
 		fmt.Printf("  • .env (with project name)\n")
 	}
-	if config.UseMonitoring {
-		fmt.Printf("  • prometheus/prometheus.yml\n")
-	}
+
+	fmt.Printf("\n🔧 Deployment Benefits:\n")
+	fmt.Printf("  • Single file mount: Only %s needs to be mounted\n", config.ConfigFile)
+	fmt.Printf("  • Environment variables: Static configs via env vars\n")
+	fmt.Printf("  • Auto database init: No manual SQL scripts needed\n")
+	fmt.Printf("  • Embedded nginx config: No separate nginx.conf file\n")
 
 	fmt.Printf("\n🚀 To start the services, run:\n")
 	if config.ProjectName != "" {
@@ -952,11 +963,15 @@ func printSuccessSummary(config *DeploymentConfig) {
 	}
 
 	fmt.Printf("\n⚙️ Management Commands:\n")
+	fmt.Printf("  • Copy and edit: cp .env.example .env\n")
+	fmt.Printf("  • Start services: docker compose up -d\n")
 	fmt.Printf("  • View logs: docker compose logs -f\n")
 	fmt.Printf("  • Stop services: docker compose down\n")
 	fmt.Printf("  • Health check: docker ps\n")
 
-	fmt.Printf("\n💡 All services should be healthy in ~60 seconds after starting\n")
+	fmt.Printf("\n💡 Custom Prometheus config: echo 'your-config' | base64 -w 0\n")
+	fmt.Printf("   Then set PROMETHEUS_CONFIG=<base64-output> in .env\n")
+	fmt.Printf("\n🚀 All services should be healthy in ~60 seconds after starting\n")
 }
 
 // Helper functions (reuse from config-merger)
@@ -982,7 +997,7 @@ func loadAndMergeConfigs(baseConfigPath, userConfigPath string) (*Config, error)
 	}
 
 	// If user config is provided, merge it
-	if userConfigPath != "" && userConfigPath != "" {
+	if userConfigPath != "" {
 		if _, err := os.Stat(userConfigPath); err == nil {
 			fmt.Printf("🔄 Merging configuration from: %s\n", userConfigPath)
 			userConfig, err := loadConfigFromFile(userConfigPath)
