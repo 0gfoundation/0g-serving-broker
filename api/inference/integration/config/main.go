@@ -118,14 +118,14 @@ const dockerComposeTemplate = `services:
       - "{{.Ports.MySQL}}:3306"
     restart: unless-stopped
     environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-123456}
-      - MYSQL_DATABASE=${MYSQL_DATABASE:-provider}
-      - MYSQL_USER=${MYSQL_USER:-provider}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-provider}
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=provider
+      - MYSQL_USER=provider
+      - MYSQL_PASSWORD=provider
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysql -uroot -p${MYSQL_ROOT_PASSWORD:-123456} -e 'USE ${MYSQL_DATABASE:-provider}'"]
+      test: ["CMD-SHELL", "mysql -uroot -p123456 -e 'USE provider'"]
       interval: 15s
       timeout: 5s
       retries: 15
@@ -141,7 +141,7 @@ const dockerComposeTemplate = `services:
     restart: unless-stopped
     environment:
       - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
-      - BROKER_BACKEND=${BROKER_BACKEND:-0g-serving-provider-broker:3080}
+      - BROKER_BACKEND=0g-serving-provider-broker:3080
       - NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template
     command: |
       sh -c '
@@ -279,8 +279,8 @@ const dockerComposeTemplate = `services:
       - PROMETHEUS_CONFIG=${PROMETHEUS_CONFIG}
     command: |
       sh -c '
-      if [ -n "$$PROMETHEUS_CONFIG" ]; then
-        echo "$$PROMETHEUS_CONFIG" | base64 -d > /tmp/prometheus.yml
+      if [ -n "$PROMETHEUS_CONFIG" ]; then
+        echo "$PROMETHEUS_CONFIG" | base64 -d > /tmp/prometheus.yml
       else
         cat > /tmp/prometheus.yml << EOF
       global:
@@ -802,18 +802,9 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		return fmt.Errorf("failed to generate docker compose: %v", err)
 	}
 
-	// Create logs directories for file logging
-	if err := os.MkdirAll("logs/broker", 0755); err != nil {
-		return fmt.Errorf("failed to create logs/broker directory: %v", err)
-	}
-	if err := os.MkdirAll("logs/event", 0755); err != nil {
-		return fmt.Errorf("failed to create logs/event directory: %v", err)
-	}
+	// Logs directories will be created automatically by Docker Compose
 
-	// Generate .env.example file
-	if err := generateEnvExample(config); err != nil {
-		return fmt.Errorf("failed to generate .env.example: %v", err)
-	}
+	// No additional files needed - all configurations are embedded
 
 	// Generate .env file if project name is specified
 	if config.ProjectName != "" {
@@ -846,58 +837,7 @@ func generateDockerCompose(data TemplateData) error {
 
 // generateInitSQL is no longer needed as database initialization is handled by MySQL environment variables and broker migration
 
-func generateEnvExample(config *DeploymentConfig) error {
-	envExampleContent := `# ==============================================
-# 0G Serving Broker Environment Variables
-# ==============================================
-# Copy this file to .env and modify the values as needed
-
-# MySQL Database Configuration
-# These values are used by the mysql container to create the database and user
-MYSQL_ROOT_PASSWORD=123456
-MYSQL_DATABASE=provider
-MYSQL_USER=provider
-MYSQL_PASSWORD=provider
-
-# Nginx Configuration
-# Backend service that nginx will proxy to
-BROKER_BACKEND=0g-serving-provider-broker:3080
-
-# Prometheus Configuration (Optional)
-# If you want to customize prometheus configuration, encode your prometheus.yml to base64:
-# cat your-prometheus.yml | base64 -w 0
-# Then set the result to PROMETHEUS_CONFIG
-# Leave empty to use the default configuration
-PROMETHEUS_CONFIG=
-
-# Default prometheus config (for reference):
-# global:
-#   scrape_interval: 15s
-# scrape_configs:
-#   - job_name: "0g-serving"
-#     static_configs:
-#       - targets: ["0g-serving-provider-broker:3080", "0g-serving-provider-event:3081"]
-#   - job_name: "node-exporter"
-#     static_configs:
-#       - targets: ["prometheus-node-exporter:9100"]
-
-# Grafana Configuration
-GF_SECURITY_ADMIN_PASSWORD=admin
-`
-
-	if config.ProjectName != "" {
-		envExampleContent += fmt.Sprintf("\n# Docker Compose Project Name\nCOMPOSE_PROJECT_NAME=%s\n", config.ProjectName)
-	}
-
-	file, err := os.Create(".env.example")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = file.WriteString(envExampleContent)
-	return err
-}
+// generateEnvExample is no longer needed as configurations are embedded in docker-compose.yml
 
 func generateEnvFile(projectName string) error {
 	envContent := fmt.Sprintf("# Docker Compose project name for resource isolation\nCOMPOSE_PROJECT_NAME=%s\n", projectName)
@@ -929,8 +869,6 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("\n📁 Generated Files:\n")
 	fmt.Printf("  • docker-compose.yml (with embedded configurations)\n")
 	fmt.Printf("  • %s (main configuration file)\n", config.ConfigFile)
-	fmt.Printf("  • .env.example (environment variables reference)\n")
-	fmt.Printf("  • logs/ (directory for persistent logs)\n")
 	if config.ProjectName != "" {
 		fmt.Printf("  • .env (with project name)\n")
 	}
@@ -969,8 +907,9 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • Stop services: docker compose down\n")
 	fmt.Printf("  • Health check: docker ps\n")
 
-	fmt.Printf("\n💡 Custom Prometheus config: echo 'your-config' | base64 -w 0\n")
-	fmt.Printf("   Then set PROMETHEUS_CONFIG=<base64-output> in .env\n")
+	fmt.Printf("\n💡 Custom Prometheus config:\n")
+	fmt.Printf("   cat your-prometheus.yml | base64 -w 0\n")
+	fmt.Printf("   export PROMETHEUS_CONFIG=<base64-output>\n")
 	fmt.Printf("\n🚀 All services should be healthy in ~60 seconds after starting\n")
 }
 
