@@ -285,17 +285,18 @@ const dockerComposeTemplate = `services:
 {{- end}}
 
 {{- if .UseMonitoring}}
-  prometheus:
-    image: prom/prometheus:v2.45.2
-    restart: unless-stopped
+  # Init container for Prometheus config
+  prometheus-init:
+    image: alpine:3.18
     environment:
-      - PROMETHEUS_CONFIG=${PROMETHEUS_CONFIG}
+      - PROMETHEUS_CONFIG=${PROMETHEUS_CONFIG:-}
+    volumes:
+      - prometheus-config:/tmp
     command: |
-      sh -c '
-      if [ -n "$PROMETHEUS_CONFIG" ]; then
-        echo "$PROMETHEUS_CONFIG" | base64 -d > /tmp/prometheus.yml
+      sh -c 'if [ -n "$$PROMETHEUS_CONFIG" ]; then
+        echo "$$PROMETHEUS_CONFIG" | base64 -d > /tmp/prometheus.yml
       else
-        cat > /tmp/prometheus.yml << EOF
+        cat > /tmp/prometheus.yml << "EOF"
       global:
         scrape_interval: 15s
       scrape_configs:
@@ -306,9 +307,13 @@ const dockerComposeTemplate = `services:
           static_configs:
             - targets: ["prometheus-node-exporter:9100"]
       EOF
-      fi
-      prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus
-      '
+      fi'
+
+  prometheus:
+    image: prom/prometheus:v2.45.2
+    restart: unless-stopped
+    volumes:
+      - prometheus-config:/etc/prometheus
     ports:
       - "{{.Ports.Prometheus}}:9090"
     networks:
@@ -319,6 +324,9 @@ const dockerComposeTemplate = `services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    depends_on:
+      prometheus-init:
+        condition: service_completed_successfully
 
   grafana:
     image: grafana/grafana-oss:11.4.0
@@ -372,6 +380,9 @@ const dockerComposeTemplate = `services:
 {{- end}}
 volumes:
   mysql-data:
+{{- if .UseMonitoring}}
+  prometheus-config:
+{{- end}}
 
 networks:
   default:
@@ -1032,7 +1043,37 @@ func loadConfigFromFile(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Ensure price fields are properly typed as numbers
+	normalizePriceFields(&config)
+
 	return &config, nil
+}
+
+// normalizePriceFields ensures price fields are stored as int64 instead of string
+func normalizePriceFields(config *Config) {
+	// Convert InputPrice
+	if config.Service.InputPrice != nil {
+		switch v := config.Service.InputPrice.(type) {
+		case float64:
+			config.Service.InputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				config.Service.InputPrice = num
+			}
+		}
+	}
+	
+	// Convert OutputPrice
+	if config.Service.OutputPrice != nil {
+		switch v := config.Service.OutputPrice.(type) {
+		case float64:
+			config.Service.OutputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				config.Service.OutputPrice = num
+			}
+		}
+	}
 }
 
 func mergeConfigs(base, user *Config) {
@@ -1075,10 +1116,34 @@ func mergeConfigs(base, user *Config) {
 		base.Service.TargetURL = user.Service.TargetURL
 	}
 	if user.Service.InputPrice != nil {
-		base.Service.InputPrice = user.Service.InputPrice
+		// Convert to int64 if it's a float64 or string
+		switch v := user.Service.InputPrice.(type) {
+		case float64:
+			base.Service.InputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				base.Service.InputPrice = num
+			} else {
+				base.Service.InputPrice = v
+			}
+		default:
+			base.Service.InputPrice = user.Service.InputPrice
+		}
 	}
 	if user.Service.OutputPrice != nil {
-		base.Service.OutputPrice = user.Service.OutputPrice
+		// Convert to int64 if it's a float64 or string
+		switch v := user.Service.OutputPrice.(type) {
+		case float64:
+			base.Service.OutputPrice = int64(v)
+		case string:
+			if num, err := strconv.ParseInt(v, 10, 64); err == nil {
+				base.Service.OutputPrice = num
+			} else {
+				base.Service.OutputPrice = v
+			}
+		default:
+			base.Service.OutputPrice = user.Service.OutputPrice
+		}
 	}
 	if user.Service.Type != "" {
 		base.Service.Type = user.Service.Type
@@ -1250,9 +1315,17 @@ func setFieldValue(config *Config, path, value string) error {
 	case "service.targetUrl":
 		config.Service.TargetURL = value
 	case "service.inputPrice":
-		config.Service.InputPrice = value
+		if num, err := strconv.ParseInt(value, 10, 64); err == nil {
+			config.Service.InputPrice = num
+		} else {
+			config.Service.InputPrice = value // Keep as string if not a valid number
+		}
 	case "service.outputPrice":
-		config.Service.OutputPrice = value
+		if num, err := strconv.ParseInt(value, 10, 64); err == nil {
+			config.Service.OutputPrice = num
+		} else {
+			config.Service.OutputPrice = value // Keep as string if not a valid number
+		}
 	case "service.model":
 		config.Service.ModelType = value
 	case "networks.ethereum0g.privateKeys[0]":
