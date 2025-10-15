@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
@@ -112,13 +114,50 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 
 		if buildImage {
 			logger.Debugf("build image %s", imageName)
+			
+			// Check if transformer files exist in the embedded location
+			embeddedPath := "/fine-tuning/execution/transformer"
+			
+			// Prepare bridge directory for Docker daemon access
+			if _, err := os.Stat(embeddedPath); err == nil {
+				logger.Infof("Found embedded transformer files at %s", embeddedPath)
+				
+				// Clean bridge directory contents but don't remove the directory itself (it may be mounted)
+				bridgeDir := constant.FineTuningDockerfilePath
+				if entries, err := os.ReadDir(bridgeDir); err == nil {
+					for _, entry := range entries {
+						entryPath := filepath.Join(bridgeDir, entry.Name())
+						if err := os.RemoveAll(entryPath); err != nil {
+							logger.Warnf("failed to remove %s: %v", entryPath, err)
+						}
+					}
+				}
+				
+				// Ensure bridge directory exists
+				if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+					logger.Errorf("failed to create bridge directory: %v", err)
+					return
+				}
+				
+				// Copy transformer files to bridge directory
+				logger.Infof("Copying transformer files to bridge directory: %s", bridgeDir)
+				if err := copyDirectory(embeddedPath, bridgeDir); err != nil {
+					logger.Errorf("failed to copy transformer files: %v", err)
+					return
+				}
+				logger.Infof("Transformer files copied successfully to bridge directory")
+			} else {
+				logger.Warnf("Embedded transformer files not found at %s, checking bridge directory", embeddedPath)
+			}
+			
+			// Build image using the bridge directory (constant.FineTuningDockerfilePath now points to /tmp/transformer-bridge)
+			logger.Infof("Building image from: %s", constant.FineTuningDockerfilePath)
 			err := image.ImageBuild(ctx, cli, constant.FineTuningDockerfilePath, imageName, logger)
 			if err != nil {
 				logger.Errorf("failed to build image: %v", err)
 				return
 			}
-
-			logger.Debugf("docker image %s built successfully!", imageName)
+			logger.Infof("Docker image %s built successfully!", imageName)
 		}
 
 		imageChan <- true
@@ -248,5 +287,76 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 
 	<-stop
 	logger.Info("shutting down server...")
+	return nil
+}
+
+// copyDirectory recursively copies a directory from src to dst
+func copyDirectory(src, dst string) error {
+	// Get file info of source
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	// Create destination directory
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	// Read source directory
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	// Copy each entry
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			// Recursively copy subdirectory
+			if err := copyDirectory(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// Copy file
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// copyFile copies a single file from src to dst
+func copyFile(src, dst string) error {
+	// Open source file
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	// Get source file info
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	// Create destination file
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	// Copy contents
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

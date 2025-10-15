@@ -2,11 +2,14 @@ services:
   mysql:
     image: mysql:8.0
     container_name: 0g-fine-tune-broker-db
+    ports:
+      - "33060:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: 123456
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=fineTune
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: always
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
       interval: 10s
@@ -17,22 +20,31 @@ services:
   0g-fine-tune-broker:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest
     privileged: true
+    restart: always
     container_name: 0g-fine-tune-broker
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TOKEN=PHALA@2025
     ports:
       - "#PORT#:3080"
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./config.local.yaml:/etc/config.yaml
+      - /dstack/user_config:/etc/config.yaml
       - /tmp:/tmp
-      - ./transformer:/fine-tuning/execution/transformer
+      - /tmp/0g-transformer-bridge:/opt/transformer-bridge
       - ./models:/fine-tuning/execution/models
     command: 0g-fine-tuning-server
     networks:
       - localhost
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    runtime: nvidia
     depends_on:
       mysql:
         condition: service_healthy
