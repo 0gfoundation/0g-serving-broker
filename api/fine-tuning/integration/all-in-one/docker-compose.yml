@@ -17,10 +17,11 @@ services:
     ports:
       - "33060:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: 123456
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=fineTune
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: always
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
       interval: 10s
@@ -31,6 +32,7 @@ services:
   0g-fine-tune-broker:
     image: ghcr.io/0gfoundation/0g-serving-broker:dev-amd64
     privileged: true
+    restart: always
     container_name: 0g-fine-tune-broker
     ports:
       - "3080:3080"
@@ -39,14 +41,18 @@ services:
       - CONFIG_FILE=/etc/config.yaml
       - NETWORK=hardhat
     volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.local.yaml:/etc/config.yaml
       - /tmp:/tmp
-      - ../../../fine-tuning/execution/transformer:/fine-tuning/execution/transformer
+      - /tmp/0g-transformer-bridge:/opt/transformer-bridge
     command: 0g-fine-tuning-server
     networks:
       - localhost
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
     depends_on:
       mysql:
         condition: service_healthy

@@ -20,5 +20,9 @@ var (
 		}}
 )
 
-const FineTuningDockerfilePath = "./fine-tuning/execution/transformer"
+const FineTuningDockerfilePath = "/opt/transformer-bridge"
+
+// TODO customer model should upload by user, since:
+// 1. tee deployment not allow to mount volume
+// 2. user may want to use different model
 const ModelUsagePath = "./fine-tuning/execution/models"
