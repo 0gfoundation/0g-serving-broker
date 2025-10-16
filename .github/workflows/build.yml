@@ -59,22 +59,38 @@ jobs:
             make release VERSION='${{ github.ref_name }}'
           "
 
-    - name: Tag and push image to registry
+    - name: Push built image to registry
       id: push
       run: |
-        cd ${{ github.workspace }}/api
+        # The buildpack created the image in local Docker daemon
+        # Now we need to push it to GitHub Container Registry
         
-        # Push the built OCI image to registry
-        if [ -d "build/oci" ]; then
-          # Copy OCI image directly to registry
-          skopeo copy --dest-tls-verify=false \
-            oci:build/oci:${{ github.ref_name }}-amd64 \
-            docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+        # Tag the local image with registry URL
+        LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${{ github.ref_name }}"
+        REGISTRY_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
+        
+        # Check if image exists locally
+        if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
+          echo "Found local image: $LOCAL_IMAGE"
+          
+          # Tag for registry
+          docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE"
+          
+          # Push to registry
+          docker push "$REGISTRY_IMAGE"
           
           # Get the pushed image digest
-          DIGEST=$(skopeo inspect docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} | jq -r '.Digest')
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REGISTRY_IMAGE" | cut -d'@' -f2)
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
-          echo "image_url=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "image_url=${REGISTRY_IMAGE}" >> $GITHUB_OUTPUT
+          
+          echo "Successfully pushed: $REGISTRY_IMAGE"
+          echo "Image digest: $DIGEST"
+        else
+          echo "Local image not found: $LOCAL_IMAGE"
+          echo "Available images:"
+          docker images | grep -E "(0g-serving-broker|ghcr.io)" || echo "No matching images found"
+          exit 1
         fi
 
     - name: Sign container image with cosign
