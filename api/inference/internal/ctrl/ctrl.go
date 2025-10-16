@@ -26,6 +26,9 @@ type Ctrl struct {
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
+	
+	// Session validation cache
+	sessionCache *cache.Cache
 }
 
 func New(
@@ -45,6 +48,8 @@ func New(
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
 		logger:               logger,
+		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes
+		sessionCache:         cache.New(5*time.Minute, 10*time.Minute),
 	}
 
 	return p
