@@ -63,10 +63,10 @@ jobs:
       id: push
       run: |
         # The buildpack created the image in local Docker daemon
-        # Now we need to push it to GitHub Container Registry
+        # Makefile creates image with -amd64 suffix
         
-        # Tag the local image with registry URL
-        LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${{ github.ref_name }}"
+        # The actual local image created by Makefile
+        LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${{ github.ref_name }}-amd64"
         REGISTRY_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
         
         # Check if image exists locally
