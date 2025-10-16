@@ -1,0 +1,109 @@
+name: Build and Sign Container Images
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BUILDPACK_IMAGE: ghcr.io/0gfoundation/compute-network-buildpack:20250619
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.PAT_TOKEN }}
+
+    - name: Set up Git configuration
+      run: |
+        git config --global --add safe.directory ${{ github.workspace }}
+        git config --global --add safe.directory ${{ github.workspace }}/api/token-counter
+        git config --global --add safe.directory ${{ github.workspace }}/api/libs/0g-serving-contract
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.PAT_TOKEN }}
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+
+    - name: Build with buildpack container
+      run: |
+        # Use the same build process as local development
+        docker run --rm \
+          -v "${{ github.workspace }}:/workspace" \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -w /workspace/api \
+          ${{ env.BUILDPACK_IMAGE }} \
+          bash -c "
+            git config --global --add safe.directory /workspace && \
+            git config --global --add safe.directory /workspace/api/token-counter && \
+            git config --global --add safe.directory /workspace/api/libs/0g-serving-contract && \
+            make release VERSION='${{ github.ref_name }}'
+          "
+
+    - name: Tag and push image to registry
+      id: push
+      run: |
+        cd ${{ github.workspace }}/api
+        
+        # Push the built OCI image to registry
+        if [ -d "build/oci" ]; then
+          # Copy OCI image directly to registry
+          skopeo copy --dest-tls-verify=false \
+            oci:build/oci:${{ github.ref_name }}-amd64 \
+            docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          
+          # Get the pushed image digest
+          DIGEST=$(skopeo inspect docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} | jq -r '.Digest')
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "image_url=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Sign container image with cosign
+      run: |
+        # Sign the image with cosign - this creates a record in Sigstore transparency log
+        cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+    - name: Generate SLSA provenance attestation
+      uses: actions/attest-build-provenance@v1
+      with:
+        subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        subject-digest: ${{ steps.push.outputs.digest }}
+        push-to-registry: true
+
+    - name: Verify signature
+      run: |
+        # Verify the signature we just created
+        cosign verify \
+          --certificate-identity-regexp="https://github.com/${{ github.repository }}/.*" \
+          --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+    - name: Output build summary
+      run: |
+        echo "## Built Image" >> $GITHUB_STEP_SUMMARY
+        echo "**Image:** \`${{ steps.push.outputs.image_url }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Signed with Sigstore cosign**" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **SLSA Build Provenance attached**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🔍 **Verify on Sigstore:** [View Build Provenance](https://search.sigstore.dev/?hash=${{ steps.push.outputs.digest }})" >> $GITHUB_STEP_SUMMARY
