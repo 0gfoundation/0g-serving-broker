@@ -9,18 +9,22 @@ var (
 
 	// Keep this as to remove duplicate headers from incoming request
 	RequestMetaDataDuplicate = map[string]struct{}{
-		"Address":      {},
-		"Fee":          {},
-		"Input-Fee":    {},
-		"Nonce":        {},
-		"Request-Hash": {},
-		"Signature":    {},
-		"VLLM-Proxy":   {},
+		"Address":           {},
+		"Fee":               {},
+		"Input-Fee":         {},
+		"Nonce":             {},
+		"Request-Hash":      {},
+		"Signature":         {},
+		"VLLM-Proxy":        {},
+		"Session-Token":     {},
+		"Session-Signature": {},
 	}
 
 	RequestMetaData = map[string]struct{}{
-		"Address":      {},
-		"VLLM-Proxy":   {},
+		"Address":           {},
+		"VLLM-Proxy":        {},
+		"Session-Token":     {},
+		"Session-Signature": {},
 	}
 
 	// Should align with the topUpTriggerThreshold in the client sdk
