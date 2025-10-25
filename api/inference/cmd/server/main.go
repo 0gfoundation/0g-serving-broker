@@ -7,7 +7,6 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
@@ -75,18 +74,8 @@ func Main() {
 	}
 
 	ctx := context.Background()
-	if err := teeService.SyncQuote(ctx); err != nil {
+	if err := teeService.SyncQuote(ctx, config.NvGPU); err != nil {
 		panic(err)
-	}
-
-	if config.NvGPU {
-		if err := util.CheckPythonEnv(util.NvTrustPackages, nil); err != nil {
-			panic(err)
-		}
-
-		if err := teeService.SyncGPUPayload(ctx, teeClientType == tee.Mock); err != nil {
-			logger.Errorf("error syncing GPU payload: %v", err)
-		}
 	}
 
 	ctrl := ctrl.New(db, contract, config, svcCache, teeService, logger)

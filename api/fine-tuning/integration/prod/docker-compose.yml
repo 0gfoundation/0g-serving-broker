@@ -30,7 +30,7 @@ services:
     ports:
       - "#PORT#:3080"
     volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/docker.sock:/var/run/docker.sock
       - /dstack/user_config:/etc/config.yaml
       - /tmp:/tmp

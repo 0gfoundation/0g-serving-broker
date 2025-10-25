@@ -21,11 +21,8 @@ type GPUEvidence struct {
 	Arch        string `json:"arch"`
 }
 
-func GpuPayload(publicKey string, noGpu bool, logger log.Logger) (*NvidiaPayload, error) {
+func GpuPayload(publicKey string, logger log.Logger) (*NvidiaPayload, error) {
 	args := []string{"common/tee/payload.py", "--public_key", publicKey}
-	if noGpu {
-		args = append(args, "--no_gpu_mode")
-	}
 
 	output, err := util.RunCommand("python3", args, logger)
 	if err != nil {

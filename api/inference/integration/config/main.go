@@ -217,7 +217,7 @@ const dockerComposeTemplate = `services:
       - ./logs/broker:/var/log/inference
 {{- end}}
 {{- if not .UseTest}}
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
 {{- end}}
     command: 0g-inference-server
     networks:
@@ -264,7 +264,7 @@ const dockerComposeTemplate = `services:
       - ./logs/event:/var/log/inference
 {{- end}}
 {{- if not .UseTest}}
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
 {{- end}}
     command: 0g-inference-event
     networks:
@@ -689,7 +689,6 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 		fmt.Println("   ✓ Monitoring services will be included")
 	}
 
-
 	// Configure ports based on selected services
 	if err := promptPortConfiguration(config, yamlConfig); err != nil {
 		return nil, fmt.Errorf("failed to configure ports: %v", err)
@@ -1062,7 +1061,7 @@ func normalizePriceFields(config *Config) {
 			}
 		}
 	}
-	
+
 	// Convert OutputPrice
 	if config.Service.OutputPrice != nil {
 		switch v := config.Service.OutputPrice.(type) {
