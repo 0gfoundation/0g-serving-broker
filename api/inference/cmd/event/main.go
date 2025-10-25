@@ -76,10 +76,6 @@ func Main() {
 
 	ctx := controller.SetupSignalHandler()
 
-	if err := teeService.SyncQuote(ctx); err != nil {
-		panic(err)
-	}
-
 	ctrl := ctrl.New(db, contract, conf, nil, teeService, logger)
 
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)

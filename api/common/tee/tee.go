@@ -6,8 +6,6 @@ import (
 	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -15,11 +13,6 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 )
-
-type TdxQuoteResponse struct {
-	Quote    string `json:"quote"`
-	EventLog string `json:"provider_signer"`
-}
 
 type ClientType int
 
@@ -30,7 +23,7 @@ const (
 )
 
 type TappdClient interface {
-	TdxQuote(ctx context.Context, jsonData []byte) (*TdxQuoteResponse, error)
+	TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error)
 	DeriveKey(ctx context.Context, path string) (string, error)
 }
 
@@ -40,13 +33,6 @@ type TeeService struct {
 	ProviderSigner *ecdsa.PrivateKey
 	Address        common.Address
 	Quote          string
-
-	Payload *NvidiaPayload
-}
-
-type QuoteResponse struct {
-	Quote          string `json:"quote"`
-	ProviderSigner string `json:"provider_signer"`
 }
 
 func NewTeeService(clientType ClientType) (*TeeService, error) {
@@ -56,7 +42,7 @@ func NewTeeService(clientType ClientType) (*TeeService, error) {
 }
 
 // SyncQuote synchronizes the quote and provider signer.
-func (s *TeeService) SyncQuote(ctx context.Context) error {
+func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	var client TappdClient
 	switch s.clientType {
 	case Mock:
@@ -76,41 +62,15 @@ func (s *TeeService) SyncQuote(ctx context.Context) error {
 	s.ProviderSigner = signer
 	s.Address = crypto.PubkeyToAddress(signer.PublicKey)
 
-	quote, err := s.getQuote(ctx, client, s.Address.Hex())
+	quoteStr, err := client.TdxQuote(ctx, s.Address.Hex(), nvQuote)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "tdx quote")
 	}
 
-	s.Quote = quote
+	s.Quote = quoteStr
 	return nil
 }
 
-func (s *TeeService) SyncGPUPayload(ctx context.Context, noGpu bool) error {
-	nvidiaPayload, err := GpuPayload(hex.EncodeToString(crypto.Keccak256(crypto.FromECDSAPub(&s.ProviderSigner.PublicKey))), noGpu, nil)
-	if err != nil {
-		return err
-	}
-
-	s.Payload = nvidiaPayload
-	return nil
-}
-
-func (s *TeeService) getQuote(ctx context.Context, client TappdClient, reportData string) (string, error) {
-	request := map[string]interface{}{
-		"report_data": reportData,
-	}
-
-	jsonData, err := json.Marshal(request)
-	if err != nil {
-		return "", errors.Wrap(err, "encoding json")
-	}
-
-	quote, err := client.TdxQuote(ctx, jsonData)
-	if err != nil {
-		return "", errors.Wrap(err, "tdx quote")
-	}
-	return quote.Quote, nil
-}
 
 func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ecdsa.PrivateKey, error) {
 	key, err := client.DeriveKey(ctx, "/")
@@ -126,15 +86,20 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 			return nil, errors.Wrap(err, "converting hex to ECDSA key")
 		}
 	case Phala:
-		block, _ := pem.Decode([]byte(key))
-		if block == nil || block.Type != "PRIVATE KEY" {
-			return nil, errors.New("failed to decode PEM block containing the key")
-		}
-
-		privateKeyBytes := sha256.Sum256(block.Bytes)
-		privateKey, err = crypto.ToECDSA(privateKeyBytes[:])
+		privateKey, err = crypto.HexToECDSA(key)
 		if err != nil {
-			return nil, errors.Wrap(err, "converting to ECDSA private key")
+			// Try as raw bytes hash
+			keyBytes := []byte(key)
+			if len(keyBytes) == 32 {
+				privateKey, err = crypto.ToECDSA(keyBytes)
+			} else {
+				// Hash the key to get 32 bytes
+				privateKeyBytes := sha256.Sum256(keyBytes)
+				privateKey, err = crypto.ToECDSA(privateKeyBytes[:])
+			}
+			if err != nil {
+				return nil, errors.Wrap(err, "converting to ECDSA private key")
+			}
 		}
 	case GCP:
 		dBytes, err := hex.DecodeString(key)
@@ -152,39 +117,26 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 	return privateKey, nil
 }
 
-func (s *TeeService) GetQuote() (string, error) {
-	jsonData, err := json.Marshal(QuoteResponse{
-		Quote:          s.Quote,
-		ProviderSigner: s.Address.Hex(),
-	})
-
-	if err != nil {
-		return "", err
-	}
-
-	return string(jsonData), nil
-}
-
 // Sign signs the given message hash with the TEE provider signer
 // This matches the signature format expected by Ethereum contracts
 func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
 	if s.ProviderSigner == nil {
 		return nil, errors.New("provider signer not initialized")
 	}
-	
+
 	// Add Ethereum Signed Message prefix (matching the contract expectation)
 	ethPrefix := []byte("\x19Ethereum Signed Message:\n32")
 	prefixedHash := crypto.Keccak256(ethPrefix, messageHash)
-	
+
 	signature, err := crypto.Sign(prefixedHash, s.ProviderSigner)
 	if err != nil {
 		return nil, errors.Wrap(err, "signing message")
 	}
-	
+
 	// Adjust v value to match Ethereum standards (27/28 instead of 0/1)
 	if signature[64] == 0 || signature[64] == 1 {
 		signature[64] += 27
 	}
-	
+
 	return signature, nil
 }
