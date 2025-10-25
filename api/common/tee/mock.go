@@ -2,16 +2,30 @@ package tee
 
 import (
 	"context"
+	"encoding/json"
 )
 
 // MockTappdClient is a mock implementation of TappdClient for testing.
 type MockTappdClient struct{}
 
-func (c *MockTappdClient) TdxQuote(ctx context.Context, jsonData []byte) (*TdxQuoteResponse, error) {
-	return &TdxQuoteResponse{
-		Quote:    "mock",
-		EventLog: "",
-	}, nil
+func (c *MockTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
+	mockResp := map[string]interface{}{
+		"signing_address": "mock_signing_address",
+		"intel_quote":     "mock_intel_quote",
+		"nvidia_payload":  "mock_nvidia_payload",
+		"event_log":       []interface{}{},
+		"info": map[string]interface{}{
+			"app_id":   "mock_app_id",
+			"tcb_info": `{"mock": "tcb_info"}`,
+		},
+	}
+
+	jsonData, err := json.Marshal(mockResp)
+	if err != nil {
+		return "", err
+	}
+
+	return string(jsonData), nil
 }
 
 func (c *MockTappdClient) DeriveKey(ctx context.Context, path string) (string, error) {

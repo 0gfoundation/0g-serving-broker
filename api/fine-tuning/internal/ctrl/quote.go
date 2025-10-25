@@ -7,7 +7,7 @@ import (
 )
 
 func (c *Ctrl) GetQuote(ctx context.Context) (string, error) {
-	return c.teeService.GetQuote()
+	return c.teeService.Quote, nil
 }
 
 func (c *Ctrl) getProviderSignerAddress(ctx context.Context) common.Address {

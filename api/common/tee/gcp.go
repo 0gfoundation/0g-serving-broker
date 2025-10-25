@@ -16,28 +16,34 @@ import (
 
 type GcpTappdClient struct{}
 
-func (c *GcpTappdClient) TdxQuote(ctx context.Context, jsonData []byte) (*TdxQuoteResponse, error) {
+func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
 	quoteProvider, err := client.GetQuoteProvider()
 	if err != nil {
-		return nil, errors.Wrapf(err, "Failed to get quote provider: %v")
+		return "", errors.Wrap(err, "Failed to get quote provider")
 	}
 
 	quote, err := client.GetQuote(quoteProvider, [64]byte{})
 	if err != nil {
-		return nil, errors.Wrapf(err, "Failed to get quote: %v")
+		return "", errors.Wrap(err, "Failed to get quote")
 	}
 	quoteV4, ok := quote.(*pb.QuoteV4)
 	if !ok {
-		return nil, errors.Wrap(err, "Failed to assert quote to *client.QuoteV4")
+		return "", errors.Wrap(err, "Failed to assert quote to *client.QuoteV4")
 	}
-	quoteJSON, err := json.MarshalIndent(quoteV4, "", "  ")
+
+	// Create GCP response structure
+	gcpResp := map[string]interface{}{
+		"quote":     quoteV4,
+		"event_log": "gcp_event_log", // TODO: Extract from actual GCP data
+		"vm_config": "gcp_vm_config", // TODO: Extract from actual GCP data
+	}
+
+	jsonData, err := json.Marshal(gcpResp)
 	if err != nil {
-		return nil, errors.Wrapf(err, "Failed to marshal quote to JSON: %v")
+		return "", errors.Wrap(err, "Failed to marshal GCP response to JSON")
 	}
-	return &TdxQuoteResponse{
-		Quote:    string(quoteJSON),
-		EventLog: "",
-	}, nil
+
+	return string(jsonData), nil
 }
 
 func (c *GcpTappdClient) DeriveKey(ctx context.Context, path string) (string, error) {

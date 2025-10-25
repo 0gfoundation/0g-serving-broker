@@ -237,7 +237,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 
 func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
 	logger.Info("syncing TEE quote")
-	if err := services.teeService.SyncQuote(ctx); err != nil {
+	if err := services.teeService.SyncQuote(ctx, true); err != nil {
 		return err
 	}
 
