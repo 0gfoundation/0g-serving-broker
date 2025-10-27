@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 
 	"google.golang.org/grpc"
@@ -19,18 +20,28 @@ import (
 type AliCloudClient struct{}
 
 func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
-	const (
-		defaultPort      = "50051"
-		appIDPlaceholder = "test-broker-app" // TODO: Replace with actual APP_ID
-	)
-
-	// Get host from environment variable
-	host := os.Getenv("TAPP_SERVICE_HOST")
-	if host == "" {
-		return "", errors.New("TAPP_SERVICE_HOST environment variable is required for AliCloud TEE mode")
+	// Get TAPP service URL from environment variable
+	tappServiceURL := os.Getenv("TAPP_SERVICE_URL")
+	if tappServiceURL == "" {
+		return "", errors.New("TAPP_SERVICE_URL environment variable is required for AliCloud TEE mode")
 	}
 
-	target := fmt.Sprintf("%s:%s", host, defaultPort)
+	// Get APP ID from environment variable
+	appID := os.Getenv("TAPP_APP_ID")
+	if appID == "" {
+		return "", errors.New("TAPP_APP_ID environment variable is required for AliCloud TEE mode")
+	}
+
+	// Parse the URL to extract host and port
+	u, err := url.Parse(tappServiceURL)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to parse TAPP_SERVICE_URL")
+	}
+
+	target := u.Host
+	if target == "" {
+		return "", errors.New("invalid TAPP_SERVICE_URL: missing host")
+	}
 
 	// According to get_evidence.sh, signer should be 32-byte data
 	// reportData is typically an Ethereum address (0x + 40 hex chars = 20 bytes)
@@ -75,7 +86,7 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 
 	// Prepare the request - signer should be the bytes (proto will handle base64 encoding)
 	req := &pb.GetEvidenceRequest{
-		AppId:  appIDPlaceholder,
+		AppId:  appID,
 		Signer: signerBytes, // This matches the proto bytes field
 	}
 

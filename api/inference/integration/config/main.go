@@ -103,7 +103,8 @@ type DeploymentConfig struct {
 	ConfigPath      string // Full path for mounting in docker-compose
 	Ports           PortConfig
 	ProjectName     string // Docker Compose project name for isolation
-	TappServiceHost string // TAPP service host for AliCloud mode
+	TappServiceURL string // TAPP service URL for AliCloud mode
+	TappAppID      string // TAPP application ID for AliCloud mode
 }
 
 // nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
@@ -224,7 +225,8 @@ const dockerComposeTemplate = `services:
       - NETWORK=phala
 {{- else if eq .TeeNode "alicloud"}}
       - NETWORK=alicloud
-      - TAPP_SERVICE_HOST={{.TappServiceHost}}
+      - TAPP_SERVICE_URL={{.TappServiceURL}}
+      - TAPP_APP_ID={{.TappAppID}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
@@ -276,7 +278,8 @@ const dockerComposeTemplate = `services:
       - NETWORK=phala
 {{- else if eq .TeeNode "alicloud"}}
       - NETWORK=alicloud
-      - TAPP_SERVICE_HOST={{.TappServiceHost}}
+      - TAPP_SERVICE_URL={{.TappServiceURL}}
+      - TAPP_APP_ID={{.TappAppID}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
@@ -420,7 +423,8 @@ type TemplateData struct {
 	Ports           PortConfig
 	ProjectName     string
 	EnableFileLog   bool
-	TappServiceHost string
+	TappServiceURL string
+	TappAppID      string
 }
 
 var requiredFields = []RequiredField{
@@ -701,16 +705,33 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 		config.TeeNode = TeeNodeAliCloud
 		fmt.Println("   ✓ Alibaba Cloud selected")
 		
-		// Ask for TAPP service host for AliCloud
-		fmt.Print("\n🔗 Enter TAPP service host for AliCloud [default: host.docker.internal]: ")
-		response, _ = reader.ReadString('\n')
-		tappHost := strings.TrimSpace(response)
-		if tappHost == "" {
-			config.TappServiceHost = "host.docker.internal"
-		} else {
-			config.TappServiceHost = tappHost
+		// Ask for TAPP service URL for AliCloud (required)
+		for {
+			fmt.Print("\n🔗 Enter TAPP service URL for AliCloud (e.g., https://172.16.1.100:50051): ")
+			response, _ = reader.ReadString('\n')
+			tappURL := strings.TrimSpace(response)
+			if tappURL == "" {
+				fmt.Printf("❌ TAPP service URL is required for AliCloud mode!\n")
+				continue
+			}
+			config.TappServiceURL = tappURL
+			fmt.Printf("   ✓ TAPP service URL set to: %s\n", config.TappServiceURL)
+			break
 		}
-		fmt.Printf("   ✓ TAPP service host set to: %s\n", config.TappServiceHost)
+
+		// Ask for TAPP application ID for AliCloud (required)
+		for {
+			fmt.Print("\n🆔 Enter TAPP application ID for AliCloud: ")
+			response, _ = reader.ReadString('\n')
+			tappAppID := strings.TrimSpace(response)
+			if tappAppID == "" {
+				fmt.Printf("❌ TAPP application ID is required for AliCloud mode!\n")
+				continue
+			}
+			config.TappAppID = tappAppID
+			fmt.Printf("   ✓ TAPP application ID set to: %s\n", config.TappAppID)
+			break
+		}
 	default:
 		config.TeeNode = TeeNodeLocalHardhat
 		fmt.Println("   ✓ Local Hardhat selected (test environment)")
@@ -779,19 +800,10 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		fmt.Printf("\n🌐 Nginx Proxy\n")
 		fmt.Printf("   Nginx will proxy requests on port %s\n", servingPort)
 	} else {
-		// Ask user for broker direct access port
+		// Use servingUrl port for direct broker access (no user input needed)
+		config.Ports.Nginx80 = servingPort
 		fmt.Printf("\n🚀 Direct Broker Access\n")
-		fmt.Printf("   Enter host port for direct broker access [default: 80]: ")
-		response, _ = reader.ReadString('\n')
-		response = strings.TrimSpace(response)
-		if response == "" {
-			config.Ports.Nginx80 = "80"
-		} else {
-			if err := validatePort(response); err != nil {
-				return fmt.Errorf("invalid broker port: %v", err)
-			}
-			config.Ports.Nginx80 = response
-		}
+		fmt.Printf("   Direct broker access will use port %s\n", servingPort)
 	}
 
 	// Hardhat port (if hardhat TEE node)
@@ -913,7 +925,8 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		Ports:           config.Ports,
 		ProjectName:     config.ProjectName,
 		EnableFileLog:   true, // Always enable file logging
-		TappServiceHost: config.TappServiceHost,
+		TappServiceURL: config.TappServiceURL,
+		TappAppID:      config.TappAppID,
 	}
 
 	// Generate docker-compose.yml only
