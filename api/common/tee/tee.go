@@ -3,15 +3,13 @@ package tee
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha256"
-	"encoding/hex"
-	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/tee/alicloud"
 )
 
 type ClientType int
@@ -20,6 +18,7 @@ const (
 	Mock ClientType = iota
 	Phala
 	GCP
+	AliCloud
 )
 
 type TappdClient interface {
@@ -51,6 +50,8 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 		client = &PhalaTappdClient{}
 	case GCP:
 		client = &GcpTappdClient{}
+	case AliCloud:
+		client = &alicloud.AliCloudClient{}
 	default:
 		return errors.New("unsupported client type")
 	}
@@ -101,15 +102,11 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 				return nil, errors.Wrap(err, "converting to ECDSA private key")
 			}
 		}
-	case GCP:
-		dBytes, err := hex.DecodeString(key)
+	case GCP, AliCloud:
+		privateKey, err = crypto.HexToECDSA(key)
 		if err != nil {
-			return nil, errors.Wrap(err, "decode hex D for GCP ECDSA key")
+			return nil, errors.Wrap(err, "converting hex to ECDSA key")
 		}
-		privateKey = new(ecdsa.PrivateKey)
-		privateKey.PublicKey.Curve = elliptic.P256()
-		privateKey.D = new(big.Int).SetBytes(dBytes)
-		privateKey.PublicKey.X, privateKey.PublicKey.Y = privateKey.PublicKey.Curve.ScalarBaseMult(dBytes)
 	default:
 		return nil, errors.New("unsupported key type")
 	}

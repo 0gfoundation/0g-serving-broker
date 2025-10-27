@@ -84,23 +84,34 @@ type PortConfig struct {
 	Grafana    string
 }
 
+// TEE Node options
+type TeeNode string
+
+const (
+	TeeNodeLocalHardhat TeeNode = "hardhat"
+	TeeNodePhala        TeeNode = "phala"
+	TeeNodeAliCloud     TeeNode = "alicloud"
+)
+
 // Deployment configuration
 type DeploymentConfig struct {
-	UseGPU        bool
-	UseTest       bool
-	UseMonitoring bool
-	UseNginx      bool
-	ConfigFile    string
-	ConfigPath    string // Full path for mounting in docker-compose
-	Ports         PortConfig
-	ProjectName   string // Docker Compose project name for isolation
+	UseGPU          bool
+	TeeNode         TeeNode // TEE node selection (replaces UseTest)
+	UseMonitoring   bool
+	UseNginx        bool
+	ConfigFile      string
+	ConfigPath      string // Full path for mounting in docker-compose
+	Ports           PortConfig
+	ProjectName     string // Docker Compose project name for isolation
+	TappServiceURL string // TAPP service URL for AliCloud mode
+	TappAppID      string // TAPP application ID for AliCloud mode
 }
 
 // nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
 
 // Docker compose template
 const dockerComposeTemplate = `services:
-{{- if .UseTest}}
+{{- if eq .TeeNode "hardhat"}}
   hardhat-node-with-contract:
     image: raven20241/hardhat-compute-network-contract:dev
     ports:
@@ -208,15 +219,21 @@ const dockerComposeTemplate = `services:
     environment:
       - PORT=3080
       - CONFIG_FILE=/etc/config.yaml
-{{- if .UseTest}}
+{{- if eq .TeeNode "hardhat"}}
       - NETWORK=hardhat
+{{- else if eq .TeeNode "phala"}}
+      - NETWORK=phala
+{{- else if eq .TeeNode "alicloud"}}
+      - NETWORK=alicloud
+      - TAPP_SERVICE_URL={{.TappServiceURL}}
+      - TAPP_APP_ID={{.TappAppID}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/broker:/var/log/inference
 {{- end}}
-{{- if not .UseTest}}
+{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
       - /var/run/dstack.sock:/var/run/dstack.sock
 {{- end}}
     command: 0g-inference-server
@@ -241,7 +258,7 @@ const dockerComposeTemplate = `services:
     depends_on:
       mysql:
         condition: service_healthy
-{{- if .UseTest}}
+{{- if eq .TeeNode "hardhat"}}
       hardhat-node-with-contract:
         condition: service_healthy
 {{- end}}
@@ -255,15 +272,21 @@ const dockerComposeTemplate = `services:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest
     environment:
       - CONFIG_FILE=/etc/config.yaml
-{{- if .UseTest}}
+{{- if eq .TeeNode "hardhat"}}
       - NETWORK=hardhat
+{{- else if eq .TeeNode "phala"}}
+      - NETWORK=phala
+{{- else if eq .TeeNode "alicloud"}}
+      - NETWORK=alicloud
+      - TAPP_SERVICE_URL={{.TappServiceURL}}
+      - TAPP_APP_ID={{.TappAppID}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/event:/var/log/inference
 {{- end}}
-{{- if not .UseTest}}
+{{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
       - /var/run/dstack.sock:/var/run/dstack.sock
 {{- end}}
     command: 0g-inference-event
@@ -391,15 +414,17 @@ networks:
 `
 
 type TemplateData struct {
-	UseGPU        bool
-	UseTest       bool
-	UseMonitoring bool
-	UseNginx      bool
-	ConfigFile    string
-	ConfigPath    string
-	Ports         PortConfig
-	ProjectName   string
-	EnableFileLog bool
+	UseGPU          bool
+	TeeNode         TeeNode
+	UseMonitoring   bool
+	UseNginx        bool
+	ConfigFile      string
+	ConfigPath      string
+	Ports           PortConfig
+	ProjectName     string
+	EnableFileLog   bool
+	TappServiceURL string
+	TappAppID      string
 }
 
 var requiredFields = []RequiredField{
@@ -663,12 +688,53 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 		fmt.Println("   ✓ GPU support will be enabled")
 	}
 
-	// Ask about test environment
-	fmt.Print("\n🧪 Is this a test environment (include hardhat services)? [y/N]: ")
+	// Ask about TEE node type
+	fmt.Print("\n🔒 Select TEE node type:\n")
+	fmt.Print("   1. Local Hardhat (for testing)\n")
+	fmt.Print("   2. Phala Network\n")
+	fmt.Print("   3. Alibaba Cloud\n")
+	fmt.Print("Enter your choice [1-3] (default: 1): ")
 	response, _ = reader.ReadString('\n')
-	config.UseTest = strings.ToLower(strings.TrimSpace(response)) == "y"
-	if config.UseTest {
-		fmt.Println("   ✓ Test environment services will be included")
+	choice := strings.TrimSpace(response)
+	
+	switch choice {
+	case "2":
+		config.TeeNode = TeeNodePhala
+		fmt.Println("   ✓ Phala Network selected")
+	case "3":
+		config.TeeNode = TeeNodeAliCloud
+		fmt.Println("   ✓ Alibaba Cloud selected")
+		
+		// Ask for TAPP service URL for AliCloud (required)
+		for {
+			fmt.Print("\n🔗 Enter TAPP service URL for AliCloud (e.g., https://172.16.1.100:50051): ")
+			response, _ = reader.ReadString('\n')
+			tappURL := strings.TrimSpace(response)
+			if tappURL == "" {
+				fmt.Printf("❌ TAPP service URL is required for AliCloud mode!\n")
+				continue
+			}
+			config.TappServiceURL = tappURL
+			fmt.Printf("   ✓ TAPP service URL set to: %s\n", config.TappServiceURL)
+			break
+		}
+
+		// Ask for TAPP application ID for AliCloud (required)
+		for {
+			fmt.Print("\n🆔 Enter TAPP application ID for AliCloud: ")
+			response, _ = reader.ReadString('\n')
+			tappAppID := strings.TrimSpace(response)
+			if tappAppID == "" {
+				fmt.Printf("❌ TAPP application ID is required for AliCloud mode!\n")
+				continue
+			}
+			config.TappAppID = tappAppID
+			fmt.Printf("   ✓ TAPP application ID set to: %s\n", config.TappAppID)
+			break
+		}
+	default:
+		config.TeeNode = TeeNodeLocalHardhat
+		fmt.Println("   ✓ Local Hardhat selected (test environment)")
 	}
 
 	// Ask about nginx proxy
@@ -734,23 +800,14 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		fmt.Printf("\n🌐 Nginx Proxy\n")
 		fmt.Printf("   Nginx will proxy requests on port %s\n", servingPort)
 	} else {
-		// Ask user for broker direct access port
+		// Use servingUrl port for direct broker access (no user input needed)
+		config.Ports.Nginx80 = servingPort
 		fmt.Printf("\n🚀 Direct Broker Access\n")
-		fmt.Printf("   Enter host port for direct broker access [default: 80]: ")
-		response, _ = reader.ReadString('\n')
-		response = strings.TrimSpace(response)
-		if response == "" {
-			config.Ports.Nginx80 = "80"
-		} else {
-			if err := validatePort(response); err != nil {
-				return fmt.Errorf("invalid broker port: %v", err)
-			}
-			config.Ports.Nginx80 = response
-		}
+		fmt.Printf("   Direct broker access will use port %s\n", servingPort)
 	}
 
-	// Hardhat port (if test environment)
-	if config.UseTest {
+	// Hardhat port (if hardhat TEE node)
+	if config.TeeNode == TeeNodeLocalHardhat {
 		fmt.Printf("\n🧪 Hardhat Test Node")
 		defaultPort = "8545"
 		fmt.Printf("\n   Enter host port for Hardhat node [default: %s]: ", defaultPort)
@@ -808,7 +865,7 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 	} else {
 		fmt.Printf("   HTTP (Direct Broker): %s\n", config.Ports.Nginx80)
 	}
-	if config.UseTest {
+	if config.TeeNode == TeeNodeLocalHardhat {
 		fmt.Printf("   Hardhat: %s\n", config.Ports.Hardhat)
 	}
 	if config.UseMonitoring {
@@ -859,15 +916,17 @@ func validatePort(port string) error {
 
 func generateDeploymentFiles(config *DeploymentConfig) error {
 	templateData := TemplateData{
-		UseGPU:        config.UseGPU,
-		UseTest:       config.UseTest,
-		UseMonitoring: config.UseMonitoring,
-		UseNginx:      config.UseNginx,
-		ConfigFile:    config.ConfigFile,
-		ConfigPath:    config.ConfigPath,
-		Ports:         config.Ports,
-		ProjectName:   config.ProjectName,
-		EnableFileLog: true, // Always enable file logging
+		UseGPU:          config.UseGPU,
+		TeeNode:         config.TeeNode,
+		UseMonitoring:   config.UseMonitoring,
+		UseNginx:        config.UseNginx,
+		ConfigFile:      config.ConfigFile,
+		ConfigPath:      config.ConfigPath,
+		Ports:           config.Ports,
+		ProjectName:     config.ProjectName,
+		EnableFileLog:   true, // Always enable file logging
+		TappServiceURL: config.TappServiceURL,
+		TappAppID:      config.TappAppID,
 	}
 
 	// Generate docker-compose.yml only
@@ -935,7 +994,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 		fmt.Printf("  • Project Name: %s\n", config.ProjectName)
 	}
 	fmt.Printf("  • GPU Support: %t\n", config.UseGPU)
-	fmt.Printf("  • Test Environment: %t\n", config.UseTest)
+	fmt.Printf("  • TEE Node: %s\n", config.TeeNode)
 	fmt.Printf("  • Nginx Proxy: %t\n", config.UseNginx)
 	fmt.Printf("  • Monitoring: %t\n", config.UseMonitoring)
 	fmt.Printf("  • Config File: %s\n", config.ConfigFile)
@@ -969,7 +1028,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • Main API: http://localhost:%s\n", config.Ports.Nginx80)
 	fmt.Printf("  • MySQL Database: localhost:%s\n", config.Ports.MySQL)
 
-	if config.UseTest {
+	if config.TeeNode == TeeNodeLocalHardhat {
 		fmt.Printf("  • Hardhat Node: http://localhost:%s\n", config.Ports.Hardhat)
 	}
 
