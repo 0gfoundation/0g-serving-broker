@@ -64,6 +64,10 @@ func Main() {
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
 		teeClientType = tee.Mock
+	case "gcp":
+		teeClientType = tee.GCP
+	case "alicloud":
+		teeClientType = tee.AliCloud		
 	default:
 		teeClientType = tee.Phala
 	}
