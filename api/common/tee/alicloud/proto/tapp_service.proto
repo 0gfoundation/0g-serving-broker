@@ -1,0 +1,178 @@
+syntax = "proto3";
+
+package tapp_service;
+
+option go_package = "github.com/0glabs/0g-serving-broker/common/tee/alicloud/proto";
+
+// Service definition
+service TappService {
+  // Start an application using Docker Compose content
+  rpc StartApp(StartAppRequest) returns (StartAppResponse);
+
+  // Get attestation evidence for external verifiers
+  rpc GetEvidence(GetEvidenceRequest) returns (GetEvidenceResponse);
+
+  // Get application-bound key from KBS based on app ID
+  rpc GetAppKey(GetAppKeyRequest) returns (GetAppKeyResponse);
+
+  // Get application secret key (private key) - local access only
+  rpc GetAppSecretKey(GetAppSecretKeyRequest)
+      returns (GetAppSecretKeyResponse);
+
+  // Get service status and health information
+  rpc GetServiceStatus(GetServiceStatusRequest)
+      returns (GetServiceStatusResponse);
+
+  // Get service logs with filtering options
+  rpc GetServiceLogs(GetServiceLogsRequest) returns (GetServiceLogsResponse);
+}
+
+enum LogLevel {
+  DEBUG = 0;
+  INFO = 1;
+  WARNING = 2;
+  ERROR = 3;
+}
+
+enum ServiceHealthStatus {
+  HEALTHY = 0;
+  UNHEALTHY = 1;
+  UNKNOWN = 2;
+}
+
+enum EvidenceFormat {
+  RAW_QUOTE = 0;           // Raw TDX quote
+  JSON_EVIDENCE = 1;       // JSON formatted evidence with metadata
+  COMPOSITE_EVIDENCE = 2;  // Evidence with additional device attestations
+}
+
+// Start App Messages
+message MountFile {
+  string source_path = 1;  // Source path in compose file, e.g., ./nginx.conf
+  bytes content = 2;       // File content (base64 encoded)
+  string mode = 3;         // File permissions, e.g., "0644"
+}
+
+message StartAppRequest {
+  string compose_content = 1;
+  string app_id = 2;  // Application identifier for key binding
+  repeated MountFile mount_files =
+      3;  // Files to mount (mapped by source_path from compose volumes)
+}
+
+message StartAppResponse {
+  bool success = 1;
+  string message = 2;
+  string app_id = 4;    // Application identifier
+  int64 timestamp = 5;  // Timestamp of the start request
+}
+
+// Get Evidence Messages
+message GetEvidenceRequest {
+  string app_id = 1;
+  bytes signer = 2;  // Public key (32 bytes) to be included in report data
+}
+
+message GetEvidenceResponse {
+  bool success = 1;
+  string message = 2;
+  bytes evidence = 3;
+  // Metadata
+  string tee_type = 4;  // TEE type (e.g., "TDX", "SNP", "SGX")
+  int64 timestamp = 5;  // Evidence generation timestamp
+}
+
+// Get App Key Messages (replaces GetPubkey)
+message GetAppKeyRequest {
+  string app_id = 1;            // Application identifier
+  string key_type = 2;          // Key type: "ethereum", "rsa", "ec"
+  bytes additional_data = 3;    // Additional binding data
+  string kbs_resource_uri = 4;  // KBS resource URI for key material
+}
+
+message GetAppKeyResponse {
+  bool success = 1;
+  string message = 2;
+
+  // Key material (format depends on key_type)
+  bytes public_key = 3;  // Public key bytes
+  // Ethereum-specific fields (when key_type="ethereum")
+  bytes eth_address = 4;  // 20-byte Ethereum address
+  // Key provenance
+  string key_source = 5;  // Source: "kbs", "in-memory"
+}
+
+// Get App Secret Key Messages (local access only)
+message GetAppSecretKeyRequest {
+  string app_id = 1;  // Application identifier
+}
+
+message GetAppSecretKeyResponse {
+  bool success = 1;
+  string message = 2;
+
+  // Secret key material (SENSITIVE - only for local access)
+  bytes private_key = 3;   // Private key bytes (32 bytes for Ethereum)
+  bytes public_key = 4;    // Public key bytes (for verification)
+  bytes eth_address = 5;   // Ethereum address (if applicable)
+}
+
+// Service Status Messages
+message GetServiceStatusRequest {
+  string service_name = 1;  // Optional: specific service name to check
+}
+
+message ServiceInfo {
+  string name = 1;
+  ServiceHealthStatus status = 2;
+  string status_message = 3;
+  int64 uptime_seconds = 4;
+  int64 memory_usage_mb = 5;
+  double cpu_usage_percent = 6;
+  int32 pid = 7;
+  string version = 8;
+
+  // Attestation-related status
+  bool attestation_available = 9;
+  string tee_type = 10;
+  bool kbs_connected = 11;
+}
+
+message GetServiceStatusResponse {
+  bool success = 1;
+  string message = 2;
+  repeated ServiceInfo services = 3;
+  int64 timestamp = 4;
+
+  // Overall system status
+  bool system_healthy = 5;
+  string system_version = 6;
+}
+
+// Service Logs Messages
+message GetServiceLogsRequest {
+  string service_name =
+      1;             // Service name to get logs from (default: tapp-server)
+  int32 lines = 2;   // Number of lines to retrieve (default: 100)
+  string since = 3;  // Time filter: "1h", "30m", "2024-01-01 10:00:00"
+  string until = 4;  // Time filter: "1h", "30m", "2024-01-01 10:00:00"
+  LogLevel min_level = 5;   // Minimum log level to include
+  string grep_pattern = 6;  // Pattern to filter log messages
+  bool json_format = 7;     // Return logs in JSON format
+}
+
+message LogEntry {
+  string timestamp = 1;              // Human-readable timestamp
+  LogLevel level = 2;                // Log level
+  string message = 3;                // Log message content
+  string service_name = 4;           // Service that generated the log
+  map<string, string> metadata = 5;  // Additional metadata
+}
+
+message GetServiceLogsResponse {
+  bool success = 1;
+  string message = 2;
+  repeated LogEntry logs = 3;
+  int32 total_lines = 4;
+  bool truncated = 5;  // Whether results were truncated
+}
