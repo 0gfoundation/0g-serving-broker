@@ -96,6 +96,8 @@ const (
 // Deployment configuration
 type DeploymentConfig struct {
 	UseGPU          bool
+	DeployLLM       bool   // Whether to deploy LLM service container
+	LLMModel        string // LLM model to deploy (e.g., "Qwen/Qwen2.5-7B")
 	TeeNode         TeeNode // TEE node selection (replaces UseTest)
 	UseMonitoring   bool
 	UseNginx        bool
@@ -111,6 +113,35 @@ type DeploymentConfig struct {
 
 // Docker compose template
 const dockerComposeTemplate = `services:
+{{- if .DeployLLM}}
+  vllm:
+    image: vllm/vllm-openai:v0.6.3.post1
+    container_name: vllm
+    shm_size: "10.24gb"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    command: >
+      --model {{.LLMModel}}
+      --served-model-name {{.LLMModel}}
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+{{- end}}
 {{- if eq .TeeNode "hardhat"}}
   hardhat-node-with-contract:
     image: raven20241/hardhat-compute-network-contract:dev
@@ -245,6 +276,11 @@ const dockerComposeTemplate = `services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
 {{- if .UseGPU}}
     deploy:
       resources:
@@ -258,6 +294,10 @@ const dockerComposeTemplate = `services:
     depends_on:
       mysql:
         condition: service_healthy
+{{- if .DeployLLM}}
+      vllm:
+        condition: service_healthy
+{{- end}}
 {{- if eq .TeeNode "hardhat"}}
       hardhat-node-with-contract:
         condition: service_healthy
@@ -298,6 +338,11 @@ const dockerComposeTemplate = `services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
     restart: unless-stopped
     depends_on:
       0g-serving-provider-broker:
@@ -415,6 +460,8 @@ networks:
 
 type TemplateData struct {
 	UseGPU          bool
+	DeployLLM       bool
+	LLMModel        string
 	TeeNode         TeeNode
 	UseMonitoring   bool
 	UseNginx        bool
@@ -450,7 +497,7 @@ var requiredFields = []RequiredField{
 	},
 	{
 		Path:        "service.model",
-		Description: "Model name, which needs to be consistent with the model field name when sending requests to the LLM (e.g., meta-llama/llama-3.3-70b-instruct)",
+		Description: "Model name, which needs to be consistent with the model field name when sending requests to the LLM (e.g., Qwen/Qwen2.5-7B)",
 		Validator:   isNotEmpty,
 	},
 	{
@@ -492,9 +539,34 @@ func main() {
 		fmt.Printf("✅ Working in directory: %s\n", outputDir)
 	}
 
+	// Step 0.5: Ask about LLM deployment early
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("\n🤖 Do you want to deploy an LLM service container in the same environment? [y/N]: ")
+	response, _ := reader.ReadString('\n')
+	deployLLM := strings.ToLower(strings.TrimSpace(response)) == "y"
+	
+	var llmModel string
+	if deployLLM {
+		fmt.Println("   ✓ LLM service container will be deployed")
+		fmt.Println("   ℹ️  The targetUrl will be automatically configured as http://vllm:8000/v1")
+		
+		// Model name is required for LLM deployment
+		for {
+			fmt.Print("📝 Enter the model name to deploy (e.g., Qwen/Qwen2.5-7B): ")
+			modelInput, _ := reader.ReadString('\n')
+			llmModel = strings.TrimSpace(modelInput)
+			if llmModel == "" {
+				fmt.Println("   ❌ Model name is required for LLM deployment!")
+				continue
+			}
+			break
+		}
+		fmt.Printf("   ✓ Model set to: %s\n", llmModel)
+	}
+
 	// Step 1: Load and configure YAML config
 	fmt.Println("\n📋 Step 1: Configuration File Setup")
-	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir)
+	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir, deployLLM)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -502,13 +574,15 @@ func main() {
 
 	// Step 2: Environment setup
 	fmt.Println("\n🌍 Step 2: Environment Configuration")
-	deployConfig, err := promptEnvironmentConfig(yamlConfig)
+	deployConfig, err := promptEnvironmentConfig(yamlConfig, deployLLM)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error configuring environment: %v\n", err)
 		os.Exit(1)
 	}
 	deployConfig.ConfigFile = configFile
 	deployConfig.ConfigPath = configPath
+	deployConfig.DeployLLM = deployLLM
+	deployConfig.LLMModel = llmModel
 
 	// Step 3: Generate deployment files
 	fmt.Println("\n🔧 Step 3: Generating deployment configuration...")
@@ -576,7 +650,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -634,24 +708,22 @@ func generateYAMLConfig(originalDir string) (string, string, *Config, error) {
 	}
 
 	// Check and prompt for required fields
-	if err := checkAndPromptRequiredFields(config); err != nil {
+	if err := checkAndPromptRequiredFields(config, deployLLM); err != nil {
 		return "", "", nil, fmt.Errorf("error checking required fields: %v", err)
 	}
 
 	// Add logger configuration for Docker deployment
-	// Set default logger configuration if not already set
-	if config.Logger.Path == "" {
-		config.Logger = struct {
-			Format        string `yaml:"format,omitempty"`
-			Level         string `yaml:"level,omitempty"`
-			Path          string `yaml:"path,omitempty"`
-			RotationCount int    `yaml:"rotationCount,omitempty"`
-		}{
-			Format:        "text",
-			Level:         "info",
-			Path:          "/var/log/inference/inference.log",
-			RotationCount: 7,
-		}
+	// Always set logger configuration for consistency
+	config.Logger = struct {
+		Format        string `yaml:"format,omitempty"`
+		Level         string `yaml:"level,omitempty"`
+		Path          string `yaml:"path,omitempty"`
+		RotationCount int    `yaml:"rotationCount,omitempty"`
+	}{
+		Format:        "text",
+		Level:         "info",
+		Path:          "/var/log/inference/inference.log",
+		RotationCount: 7,
 	}
 
 	// Save final configuration
@@ -664,7 +736,7 @@ func generateYAMLConfig(originalDir string) (string, string, *Config, error) {
 	return filepath.Base(outputPath), fullMountPath, config, nil
 }
 
-func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
+func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool) (*DeploymentConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	config := &DeploymentConfig{}
 
@@ -680,12 +752,17 @@ func promptEnvironmentConfig(yamlConfig *Config) (*DeploymentConfig, error) {
 		fmt.Println("   ℹ️  Use 'docker compose up -d' to start services")
 	}
 
-	// Ask about TEE GPU environment
-	fmt.Print("\n🖥️  Are you running in a TEE GPU environment? [y/N]: ")
-	response, _ = reader.ReadString('\n')
-	config.UseGPU = strings.ToLower(strings.TrimSpace(response)) == "y"
-	if config.UseGPU {
-		fmt.Println("   ✓ GPU support will be enabled")
+	// Ask about GPU environment only if not deploying LLM (LLM requires GPU)
+	if deployLLM {
+		config.UseGPU = true
+		fmt.Println("\n🖥️  GPU support automatically enabled (required for LLM deployment)")
+	} else {
+		fmt.Print("\n🖥️  Do you have GPU available for inference? [y/N]: ")
+		response, _ = reader.ReadString('\n')
+		config.UseGPU = strings.ToLower(strings.TrimSpace(response)) == "y"
+		if config.UseGPU {
+			fmt.Println("   ✓ GPU support will be enabled for containers")
+		}
 	}
 
 	// Ask about TEE node type
@@ -917,6 +994,8 @@ func validatePort(port string) error {
 func generateDeploymentFiles(config *DeploymentConfig) error {
 	templateData := TemplateData{
 		UseGPU:          config.UseGPU,
+		DeployLLM:       config.DeployLLM,
+		LLMModel:        config.LLMModel,
 		TeeNode:         config.TeeNode,
 		UseMonitoring:   config.UseMonitoring,
 		UseNginx:        config.UseNginx,
@@ -994,6 +1073,11 @@ func printSuccessSummary(config *DeploymentConfig) {
 		fmt.Printf("  • Project Name: %s\n", config.ProjectName)
 	}
 	fmt.Printf("  • GPU Support: %t\n", config.UseGPU)
+	if config.DeployLLM {
+		fmt.Printf("  • LLM Deployment: Yes (Model: %s)\n", config.LLMModel)
+	} else {
+		fmt.Printf("  • LLM Deployment: No (using external service)\n")
+	}
 	fmt.Printf("  • TEE Node: %s\n", config.TeeNode)
 	fmt.Printf("  • Nginx Proxy: %t\n", config.UseNginx)
 	fmt.Printf("  • Monitoring: %t\n", config.UseMonitoring)
@@ -1027,6 +1111,10 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("\n🌐 After starting, services will be available at:\n")
 	fmt.Printf("  • Main API: http://localhost:%s\n", config.Ports.Nginx80)
 	fmt.Printf("  • MySQL Database: localhost:%s\n", config.Ports.MySQL)
+	
+	if config.DeployLLM {
+		fmt.Printf("  • vLLM Service: http://localhost:8000 (internal)\n")
+	}
 
 	if config.TeeNode == TeeNodeLocalHardhat {
 		fmt.Printf("  • Hardhat Node: http://localhost:%s\n", config.Ports.Hardhat)
@@ -1047,6 +1135,18 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("\n💡 Custom Prometheus config:\n")
 	fmt.Printf("   cat your-prometheus.yml | base64 -w 0\n")
 	fmt.Printf("   export PROMETHEUS_CONFIG=<base64-output>\n")
+	
+	if config.DeployLLM {
+		fmt.Printf("\n⚠️  Important Notes for LLM Deployment:\n")
+		fmt.Printf("  • The vLLM configuration in docker-compose.yml is a sample template\n")
+		fmt.Printf("  • Please modify the vLLM service configuration based on your actual requirements:\n")
+		fmt.Printf("    - Model: Currently set to %s\n", config.LLMModel)
+		fmt.Printf("    - Image version: vllm/vllm-openai:v0.6.3.post1\n")
+		fmt.Printf("    - Memory settings, GPU allocation, etc.\n")
+		fmt.Printf("  • The targetUrl is automatically mapped to: http://vllm:8000/v1\n")
+		fmt.Printf("    (Container name: vllm, Port: 8000)\n")
+	}
+	
 	fmt.Printf("\n🚀 All services should be healthy in ~60 seconds after starting\n")
 }
 
@@ -1243,9 +1343,17 @@ func mergeConfigs(base, user *Config) {
 	base.NvGPU = user.NvGPU
 }
 
-func checkAndPromptRequiredFields(config *Config) error {
+func checkAndPromptRequiredFields(config *Config, deployLLM bool) error {
 	reader := bufio.NewReader(os.Stdin)
 	hasChanges := false
+
+	// If deployLLM is true, automatically set targetUrl
+	if deployLLM {
+		config.Service.TargetURL = "http://vllm:8000/v1"
+		hasChanges = true
+		fmt.Printf("✅ Target URL automatically set to: http://vllm:8000/v1\n")
+		fmt.Printf("   ℹ️  This maps to the vLLM container (name: vllm, port: 8000)\n")
+	}
 
 	// Process fields in a specific order to ensure consistency
 	orderedFields := []string{
@@ -1267,6 +1375,12 @@ func checkAndPromptRequiredFields(config *Config) error {
 		if !exists {
 			continue
 		}
+		
+		// Skip targetUrl if deployLLM is true
+		if deployLLM && fieldPath == "service.targetUrl" {
+			continue
+		}
+		
 		currentValue := getFieldValue(config, field.Path)
 
 		// Check if field needs input
