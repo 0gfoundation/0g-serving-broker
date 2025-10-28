@@ -144,7 +144,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.OutputCount = 0 // Will be updated when response is processed
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
-
+	
+	p.logger.Debugf("request saved: %v", req)
 	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {
 		p.handleBrokerError(ctx, err, "validate request")
 		return
@@ -159,6 +160,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
+	p.logger.Debugf("request sent to target llm server %v", httpReq)
 
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, p.ctrl.Service.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
