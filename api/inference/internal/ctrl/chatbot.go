@@ -217,9 +217,11 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 			if isStreamDone(line) {
 				// For stream responses, usage info comes before [DONE]
 				if usage != nil {
-					return c.finalizeResponseWithUsage(ctx, usage, outputPrice, reqModel.RequestHash, c.Service.InputPrice)
+					c.finalizeResponseWithUsage(ctx, usage, outputPrice, reqModel.RequestHash, c.Service.InputPrice)
+					break
 				}
-				return c.finalizeResponse(ctx, output, outputPrice, reqModel.RequestHash)
+				c.finalizeResponse(ctx, output, outputPrice, reqModel.RequestHash)
+				break
 			}
 
 			// Skip empty lines
@@ -242,6 +244,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	}
 
 	if !reqModel.VLLMProxy {
+		c.logger.Debug("reqModel.VLLMProxy is false, signing chat response")
 		if err := c.signChat(reqBody, data, respChunk); err != nil {
 			return err
 		}
@@ -303,13 +306,13 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	for _, choice := range chunk.Choices {
 		*output += choice.Message.Content
 	}
-	
+
 	// For non-stream responses, usage info is in the same response
 	if chunk.Usage != nil {
 		*usage = chunk.Usage
 		return c.updateAccountWithUsage(ctx, chunk.Usage, outputPrice, requestHash, c.Service.InputPrice)
 	}
-	
+
 	// Fallback to old logic if no usage info
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
@@ -354,23 +357,23 @@ func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPri
 	if err != nil {
 		return errors.Wrap(err, "Error calculating input fee from actual tokens")
 	}
-	
+
 	outputFee, err := util.Multiply(outputPrice, int64(usage.CompletionTokens))
 	if err != nil {
 		return errors.Wrap(err, "Error calculating output fee from actual tokens")
 	}
-	
+
 	totalFee, err := util.Add(inputFee, outputFee)
 	if err != nil {
 		return errors.Wrap(err, "Error calculating total fee")
 	}
-	
+
 	// Update the request with accurate token counts and fees
-	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(), 
+	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(),
 		int64(usage.PromptTokens), int64(usage.CompletionTokens)); err != nil {
 		return errors.Wrap(err, "Error updating request with accurate tokens")
 	}
-	
+
 	return nil
 }
 
