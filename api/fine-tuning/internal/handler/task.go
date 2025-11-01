@@ -43,14 +43,9 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 // @Description Cancels a task before it starts running. Requires task ID, user address, and a valid signature.
 // @Tags Task
 // @Router /user/{userAddress}/task/:taskID/cancel [post]
-//
-//	@Param		userAddress	path	string	true	"user address"
-//	@Param		taskID		path	string	true	"task ID"
-//	@Param cancelTaskRequest body struct {
-//	    ID          uuid.UUID `json:"id"`
-//	    Signature   string    `json:"signature"`
-//	} true "Task cancellation request body"
-//
+// @Param userAddress path string true "user address"
+// @Param taskID path string true "task ID"
+// @Param body body object true "Task cancellation request body" example({"signature":"string"})
 // @Success 200 {string} string "task <task_id> cancelled"
 func (h *Handler) CancelTask(ctx *gin.Context) {
 	h.logger.Debug("request cancel task")
