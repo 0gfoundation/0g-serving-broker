@@ -15,6 +15,63 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/model": {
+            "get": {
+                "description": "This endpoint allows you to list models provided by this broker",
+                "tags": [
+                    "model"
+                ],
+                "operationId": "listModel",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "$ref": "#/definitions/config.CustomizedModel"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/model/desc/{name}": {
+            "get": {
+                "description": "This endpoint allows you to get detail usage of a model",
+                "tags": [
+                    "model"
+                ],
+                "operationId": "getModelDesc",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "file"
+                        }
+                    }
+                }
+            }
+        },
+        "/model/{name}": {
+            "get": {
+                "description": "This endpoint allows you to get a model",
+                "tags": [
+                    "model"
+                ],
+                "operationId": "getModel",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/config.CustomizedModel"
+                        }
+                    }
+                }
+            }
+        },
         "/quote": {
             "get": {
                 "description": "This endpoint allows you to get a quote",
@@ -25,6 +82,23 @@ const docTemplate = `{
                 "responses": {
                     "200": {
                         "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/task/pending": {
+            "get": {
+                "description": "Returns the number of training tasks that are currently in the pending queue.",
+                "tags": [
+                    "Task"
+                ],
+                "summary": "Get pending training task count",
+                "responses": {
+                    "200": {
+                        "description": "5",
                         "schema": {
                             "type": "string"
                         }
@@ -51,6 +125,12 @@ const docTemplate = `{
                         "type": "string",
                         "description": "latest tasks",
                         "name": "latest",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "sort order, e.g., asc or desc, default is desc",
+                        "name": "order",
                         "in": "query"
                     }
                 ],
@@ -93,6 +173,48 @@ const docTemplate = `{
                 "responses": {
                     "204": {
                         "description": "No Content - success without response body"
+                    }
+                }
+            }
+        },
+        "/user/{userAddress}/task/:taskID/cancel": {
+            "post": {
+                "description": "Cancels a task before it starts running. Requires task ID, user address, and a valid signature.",
+                "tags": [
+                    "Task"
+                ],
+                "summary": "Cancel a task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "user address",
+                        "name": "userAddress",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "task ID",
+                        "name": "taskID",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Task cancellation request body",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "task \u003ctask_id\u003e cancelled",
+                        "schema": {
+                            "type": "string"
+                        }
                     }
                 }
             }
@@ -168,6 +290,57 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "config.CustomizedModel": {
+            "type": "object",
+            "properties": {
+                "dataType": {
+                    "$ref": "#/definitions/config.TrainingDataType"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "hash": {
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "tokenizer": {
+                    "type": "string"
+                },
+                "trainingScript": {
+                    "type": "string"
+                },
+                "usageFile": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.TrainingDataType": {
+            "type": "integer",
+            "enum": [
+                0,
+                1
+            ],
+            "x-enum-varnames": [
+                "Text",
+                "Image"
+            ]
+        },
+        "db.ModelType": {
+            "type": "integer",
+            "enum": [
+                0,
+                1
+            ],
+            "x-enum-varnames": [
+                "PreDefinedModel",
+                "CustomizedModel"
+            ]
+        },
         "schema.Task": {
             "type": "object",
             "required": [
@@ -191,12 +364,18 @@ const docTemplate = `{
                     "type": "integer",
                     "readOnly": true
                 },
+                "deliverTime": {
+                    "type": "integer"
+                },
                 "fee": {
                     "type": "string"
                 },
                 "id": {
                     "type": "string",
                     "readOnly": true
+                },
+                "modelType": {
+                    "$ref": "#/definitions/db.ModelType"
                 },
                 "nonce": {
                     "type": "string"
@@ -220,6 +399,9 @@ const docTemplate = `{
                 },
                 "userAddress": {
                     "type": "string"
+                },
+                "wait": {
+                    "type": "boolean"
                 }
             }
         }

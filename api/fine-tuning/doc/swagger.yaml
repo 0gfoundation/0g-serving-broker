@@ -1,5 +1,40 @@
 basePath: /v1
 definitions:
+  config.CustomizedModel:
+    properties:
+      dataType:
+        $ref: '#/definitions/config.TrainingDataType'
+      description:
+        type: string
+      hash:
+        type: string
+      image:
+        type: string
+      name:
+        type: string
+      tokenizer:
+        type: string
+      trainingScript:
+        type: string
+      usageFile:
+        type: string
+    type: object
+  config.TrainingDataType:
+    enum:
+    - 0
+    - 1
+    type: integer
+    x-enum-varnames:
+    - Text
+    - Image
+  db.ModelType:
+    enum:
+    - 0
+    - 1
+    type: integer
+    x-enum-varnames:
+    - PreDefinedModel
+    - CustomizedModel
   schema.Task:
     properties:
       createdAt:
@@ -10,11 +45,15 @@ definitions:
       deliverIndex:
         readOnly: true
         type: integer
+      deliverTime:
+        type: integer
       fee:
         type: string
       id:
         readOnly: true
         type: string
+      modelType:
+        $ref: '#/definitions/db.ModelType'
       nonce:
         type: string
       preTrainedModelHash:
@@ -31,6 +70,8 @@ definitions:
         type: string
       userAddress:
         type: string
+      wait:
+        type: boolean
     required:
     - datasetHash
     - fee
@@ -48,6 +89,43 @@ info:
   title: 0G Compute Network Fine-tuning Provider API
   version: 0.1.0
 paths:
+  /model:
+    get:
+      description: This endpoint allows you to list models provided by this broker
+      operationId: listModel
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              items:
+                $ref: '#/definitions/config.CustomizedModel'
+              type: array
+            type: array
+      tags:
+      - model
+  /model/{name}:
+    get:
+      description: This endpoint allows you to get a model
+      operationId: getModel
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/config.CustomizedModel'
+      tags:
+      - model
+  /model/desc/{name}:
+    get:
+      description: This endpoint allows you to get detail usage of a model
+      operationId: getModelDesc
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: file
+      tags:
+      - model
   /quote:
     get:
       description: This endpoint allows you to get a quote
@@ -59,6 +137,18 @@ paths:
             type: string
       tags:
       - quote
+  /task/pending:
+    get:
+      description: Returns the number of training tasks that are currently in the
+        pending queue.
+      responses:
+        "200":
+          description: "5"
+          schema:
+            type: string
+      summary: Get pending training task count
+      tags:
+      - Task
   /user/{userAddress}/task:
     get:
       description: This endpoint allows you to list tasks by user address
@@ -72,6 +162,10 @@ paths:
       - description: latest tasks
         in: query
         name: latest
+        type: string
+      - description: sort order, e.g., asc or desc, default is desc
+        in: query
+        name: order
         type: string
       responses:
         "200":
@@ -102,6 +196,35 @@ paths:
           description: No Content - success without response body
       tags:
       - task
+  /user/{userAddress}/task/:taskID/cancel:
+    post:
+      description: Cancels a task before it starts running. Requires task ID, user
+        address, and a valid signature.
+      parameters:
+      - description: user address
+        in: path
+        name: userAddress
+        required: true
+        type: string
+      - description: task ID
+        in: path
+        name: taskID
+        required: true
+        type: string
+      - description: Task cancellation request body
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      responses:
+        "200":
+          description: task <task_id> cancelled
+          schema:
+            type: string
+      summary: Cancel a task
+      tags:
+      - Task
   /user/{userAddress}/task/{taskID}:
     get:
       description: This endpoint allows you to get a task by ID
