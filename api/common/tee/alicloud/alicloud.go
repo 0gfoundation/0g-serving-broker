@@ -26,12 +26,6 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 		return "", errors.New("TAPP_SERVICE_URL environment variable is required for AliCloud TEE mode")
 	}
 
-	// Get APP ID from environment variable
-	appID := os.Getenv("TAPP_APP_ID")
-	if appID == "" {
-		return "", errors.New("TAPP_APP_ID environment variable is required for AliCloud TEE mode")
-	}
-
 	// Parse the URL to extract host and port
 	u, err := url.Parse(tappServiceURL)
 	if err != nil {
@@ -67,7 +61,7 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 
 	// Convert to hex string (64 characters), similar to SIGNER_HEX in get_evidence.sh
 	signerHex := hex.EncodeToString(paddedReportData)
-	
+
 	// Convert hex back to bytes, then to the format expected by proto (should be bytes)
 	signerBytes, err := hex.DecodeString(signerHex)
 	if err != nil {
@@ -86,8 +80,7 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 
 	// Prepare the request - signer should be the bytes (proto will handle base64 encoding)
 	req := &pb.GetEvidenceRequest{
-		AppId:  appID,
-		Signer: signerBytes, // This matches the proto bytes field
+		ReportData: signerBytes, // This matches the proto bytes field
 	}
 
 	// Call the GetEvidence RPC
