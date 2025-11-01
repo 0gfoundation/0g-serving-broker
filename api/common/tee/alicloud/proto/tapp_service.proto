@@ -6,8 +6,15 @@ option go_package = "github.com/0glabs/0g-serving-broker/common/tee/alicloud/pro
 
 // Service definition
 service TappService {
-  // Start an application using Docker Compose content
+  // Start an application using Docker Compose content (async - returns task ID)
   rpc StartApp(StartAppRequest) returns (StartAppResponse);
+
+  // Get task status for async operations
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+
+  // List all deployed applications' measurement information
+  rpc ListAppMeasurements(ListAppMeasurementsRequest)
+      returns (ListAppMeasurementsResponse);
 
   // Get attestation evidence for external verifiers
   rpc GetEvidence(GetEvidenceRequest) returns (GetEvidenceResponse);
@@ -16,8 +23,7 @@ service TappService {
   rpc GetAppKey(GetAppKeyRequest) returns (GetAppKeyResponse);
 
   // Get application secret key (private key) - local access only
-  rpc GetAppSecretKey(GetAppSecretKeyRequest)
-      returns (GetAppSecretKeyResponse);
+  rpc GetAppSecretKey(GetAppSecretKeyRequest) returns (GetAppSecretKeyResponse);
 
   // Get service status and health information
   rpc GetServiceStatus(GetServiceStatusRequest)
@@ -40,6 +46,14 @@ enum ServiceHealthStatus {
   UNKNOWN = 2;
 }
 
+// Task status for async operations
+enum TaskStatus {
+  PENDING = 0;     // Task is queued but not started
+  RUNNING = 1;     // Task is currently running
+  COMPLETED = 2;   // Task completed successfully
+  FAILED = 3;      // Task failed with error
+}
+
 enum EvidenceFormat {
   RAW_QUOTE = 0;           // Raw TDX quote
   JSON_EVIDENCE = 1;       // JSON formatted evidence with metadata
@@ -58,19 +72,65 @@ message StartAppRequest {
   string app_id = 2;  // Application identifier for key binding
   repeated MountFile mount_files =
       3;  // Files to mount (mapped by source_path from compose volumes)
+  bytes deployer = 4;  // 32 bytes deployer public key
 }
 
 message StartAppResponse {
   bool success = 1;
   string message = 2;
-  string app_id = 4;    // Application identifier
-  int64 timestamp = 5;  // Timestamp of the start request
+  string task_id = 3;   // Async task identifier for tracking progress
+  int64 timestamp = 4;  // Timestamp of the start request
+}
+
+// Task Status Messages
+message GetTaskStatusRequest {
+  string task_id = 1;  // Task identifier to query
+}
+
+message TaskResult {
+  string app_id = 1;    // Application identifier (on success)
+  bytes deployer = 2;   // 32 bytes deployer public key (on success)
+  string error = 3;     // Error message (on failure)
+}
+
+message GetTaskStatusResponse {
+  bool success = 1;
+  string message = 2;
+  string task_id = 3;
+  TaskStatus status = 4;  // Current task status
+  TaskResult result = 5;  // Task result (only available when completed/failed)
+  int64 created_at = 6;   // Task creation timestamp
+  int64 updated_at = 7;   // Last update timestamp
+}
+
+// List App Measurements Messages
+message ListAppMeasurementsRequest {
+  // Optional filters (empty means list all)
+  string deployer_filter = 1;  // Filter by deployer (hex string)
+}
+
+message AppMeasurementInfo {
+  string app_id = 1;        // Application identifier (original, without suffix)
+  string compose_hash = 2;  // Hash of compose file content
+  string volumes_hash = 3;  // Hash of mounted volumes
+  string deployer = 4;      // Deployer public key (hex)
+  int64 timestamp = 5;      // Measurement timestamp
+}
+
+message ListAppMeasurementsResponse {
+  bool success = 1;
+  string message = 2;
+  repeated AppMeasurementInfo measurements = 3;
+  int32 total_count = 4;       // Total number of measurements
+  string hash_algorithm = 5;   // Hash algorithm used globally (e.g., "sha256")
 }
 
 // Get Evidence Messages
 message GetEvidenceRequest {
-  string app_id = 1;
-  bytes signer = 2;  // Public key (32 bytes) to be included in report data
+  bytes report_data =
+      1;  // Custom report data (up to 64 bytes) to be included in the quote
+          // Can be nonce, hash of business data, or any custom data
+          // If empty, will use zero-filled 64 bytes
 }
 
 message GetEvidenceResponse {
@@ -104,7 +164,11 @@ message GetAppKeyResponse {
 
 // Get App Secret Key Messages (local access only)
 message GetAppSecretKeyRequest {
-  string app_id = 1;  // Application identifier
+  string app_id = 1;      // Application identifier
+  string nonce = 2;       // Random nonce (prevents replay attacks)
+  int64 timestamp = 3;    // Request timestamp (unix timestamp in seconds)
+  bytes signature = 4;    // Deployer's signature over (app_id || nonce || timestamp)
+                          // Must be signed by the app's deployer
 }
 
 message GetAppSecretKeyResponse {
@@ -112,9 +176,9 @@ message GetAppSecretKeyResponse {
   string message = 2;
 
   // Secret key material (SENSITIVE - only for local access)
-  bytes private_key = 3;   // Private key bytes (32 bytes for Ethereum)
-  bytes public_key = 4;    // Public key bytes (for verification)
-  bytes eth_address = 5;   // Ethereum address (if applicable)
+  bytes private_key = 3;  // Private key bytes (32 bytes for Ethereum)
+  bytes public_key = 4;   // Public key bytes (for verification)
+  bytes eth_address = 5;  // Ethereum address (if applicable)
 }
 
 // Service Status Messages

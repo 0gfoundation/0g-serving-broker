@@ -106,7 +106,6 @@ type DeploymentConfig struct {
 	Ports           PortConfig
 	ProjectName     string // Docker Compose project name for isolation
 	TappServiceURL string // TAPP service URL for AliCloud mode
-	TappAppID      string // TAPP application ID for AliCloud mode
 }
 
 // nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
@@ -257,7 +256,6 @@ const dockerComposeTemplate = `services:
 {{- else if eq .TeeNode "alicloud"}}
       - NETWORK=alicloud
       - TAPP_SERVICE_URL={{.TappServiceURL}}
-      - TAPP_APP_ID={{.TappAppID}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
@@ -319,7 +317,6 @@ const dockerComposeTemplate = `services:
 {{- else if eq .TeeNode "alicloud"}}
       - NETWORK=alicloud
       - TAPP_SERVICE_URL={{.TappServiceURL}}
-      - TAPP_APP_ID={{.TappAppID}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
@@ -471,7 +468,6 @@ type TemplateData struct {
 	ProjectName     string
 	EnableFileLog   bool
 	TappServiceURL string
-	TappAppID      string
 }
 
 var requiredFields = []RequiredField{
@@ -796,19 +792,6 @@ func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool) (*DeploymentCon
 			break
 		}
 
-		// Ask for TAPP application ID for AliCloud (required)
-		for {
-			fmt.Print("\n🆔 Enter TAPP application ID for AliCloud: ")
-			response, _ = reader.ReadString('\n')
-			tappAppID := strings.TrimSpace(response)
-			if tappAppID == "" {
-				fmt.Printf("❌ TAPP application ID is required for AliCloud mode!\n")
-				continue
-			}
-			config.TappAppID = tappAppID
-			fmt.Printf("   ✓ TAPP application ID set to: %s\n", config.TappAppID)
-			break
-		}
 	default:
 		config.TeeNode = TeeNodeLocalHardhat
 		fmt.Println("   ✓ Local Hardhat selected (test environment)")
@@ -1005,7 +988,6 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		ProjectName:     config.ProjectName,
 		EnableFileLog:   true, // Always enable file logging
 		TappServiceURL: config.TappServiceURL,
-		TappAppID:      config.TappAppID,
 	}
 
 	// Generate docker-compose.yml only

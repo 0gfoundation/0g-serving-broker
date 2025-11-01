@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v3.20.3
-// source: proto/tapp_service.proto
+// source: api/common/tee/alicloud/proto/tapp_service.proto
 
 package proto
 
@@ -19,12 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TappService_StartApp_FullMethodName         = "/tapp_service.TappService/StartApp"
-	TappService_GetEvidence_FullMethodName      = "/tapp_service.TappService/GetEvidence"
-	TappService_GetAppKey_FullMethodName        = "/tapp_service.TappService/GetAppKey"
-	TappService_GetAppSecretKey_FullMethodName  = "/tapp_service.TappService/GetAppSecretKey"
-	TappService_GetServiceStatus_FullMethodName = "/tapp_service.TappService/GetServiceStatus"
-	TappService_GetServiceLogs_FullMethodName   = "/tapp_service.TappService/GetServiceLogs"
+	TappService_StartApp_FullMethodName            = "/tapp_service.TappService/StartApp"
+	TappService_GetTaskStatus_FullMethodName       = "/tapp_service.TappService/GetTaskStatus"
+	TappService_ListAppMeasurements_FullMethodName = "/tapp_service.TappService/ListAppMeasurements"
+	TappService_GetEvidence_FullMethodName         = "/tapp_service.TappService/GetEvidence"
+	TappService_GetAppKey_FullMethodName           = "/tapp_service.TappService/GetAppKey"
+	TappService_GetAppSecretKey_FullMethodName     = "/tapp_service.TappService/GetAppSecretKey"
+	TappService_GetServiceStatus_FullMethodName    = "/tapp_service.TappService/GetServiceStatus"
+	TappService_GetServiceLogs_FullMethodName      = "/tapp_service.TappService/GetServiceLogs"
 )
 
 // TappServiceClient is the client API for TappService service.
@@ -33,8 +35,12 @@ const (
 //
 // Service definition
 type TappServiceClient interface {
-	// Start an application using Docker Compose content
+	// Start an application using Docker Compose content (async - returns task ID)
 	StartApp(ctx context.Context, in *StartAppRequest, opts ...grpc.CallOption) (*StartAppResponse, error)
+	// Get task status for async operations
+	GetTaskStatus(ctx context.Context, in *GetTaskStatusRequest, opts ...grpc.CallOption) (*GetTaskStatusResponse, error)
+	// List all deployed applications' measurement information
+	ListAppMeasurements(ctx context.Context, in *ListAppMeasurementsRequest, opts ...grpc.CallOption) (*ListAppMeasurementsResponse, error)
 	// Get attestation evidence for external verifiers
 	GetEvidence(ctx context.Context, in *GetEvidenceRequest, opts ...grpc.CallOption) (*GetEvidenceResponse, error)
 	// Get application-bound key from KBS based on app ID
@@ -59,6 +65,26 @@ func (c *tappServiceClient) StartApp(ctx context.Context, in *StartAppRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartAppResponse)
 	err := c.cc.Invoke(ctx, TappService_StartApp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *tappServiceClient) GetTaskStatus(ctx context.Context, in *GetTaskStatusRequest, opts ...grpc.CallOption) (*GetTaskStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTaskStatusResponse)
+	err := c.cc.Invoke(ctx, TappService_GetTaskStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *tappServiceClient) ListAppMeasurements(ctx context.Context, in *ListAppMeasurementsRequest, opts ...grpc.CallOption) (*ListAppMeasurementsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAppMeasurementsResponse)
+	err := c.cc.Invoke(ctx, TappService_ListAppMeasurements_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -121,8 +147,12 @@ func (c *tappServiceClient) GetServiceLogs(ctx context.Context, in *GetServiceLo
 //
 // Service definition
 type TappServiceServer interface {
-	// Start an application using Docker Compose content
+	// Start an application using Docker Compose content (async - returns task ID)
 	StartApp(context.Context, *StartAppRequest) (*StartAppResponse, error)
+	// Get task status for async operations
+	GetTaskStatus(context.Context, *GetTaskStatusRequest) (*GetTaskStatusResponse, error)
+	// List all deployed applications' measurement information
+	ListAppMeasurements(context.Context, *ListAppMeasurementsRequest) (*ListAppMeasurementsResponse, error)
 	// Get attestation evidence for external verifiers
 	GetEvidence(context.Context, *GetEvidenceRequest) (*GetEvidenceResponse, error)
 	// Get application-bound key from KBS based on app ID
@@ -145,6 +175,12 @@ type UnimplementedTappServiceServer struct{}
 
 func (UnimplementedTappServiceServer) StartApp(context.Context, *StartAppRequest) (*StartAppResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartApp not implemented")
+}
+func (UnimplementedTappServiceServer) GetTaskStatus(context.Context, *GetTaskStatusRequest) (*GetTaskStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTaskStatus not implemented")
+}
+func (UnimplementedTappServiceServer) ListAppMeasurements(context.Context, *ListAppMeasurementsRequest) (*ListAppMeasurementsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAppMeasurements not implemented")
 }
 func (UnimplementedTappServiceServer) GetEvidence(context.Context, *GetEvidenceRequest) (*GetEvidenceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetEvidence not implemented")
@@ -196,6 +232,42 @@ func _TappService_StartApp_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(TappServiceServer).StartApp(ctx, req.(*StartAppRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TappService_GetTaskStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTaskStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TappServiceServer).GetTaskStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TappService_GetTaskStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TappServiceServer).GetTaskStatus(ctx, req.(*GetTaskStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TappService_ListAppMeasurements_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAppMeasurementsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TappServiceServer).ListAppMeasurements(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TappService_ListAppMeasurements_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TappServiceServer).ListAppMeasurements(ctx, req.(*ListAppMeasurementsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -302,6 +374,14 @@ var TappService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _TappService_StartApp_Handler,
 		},
 		{
+			MethodName: "GetTaskStatus",
+			Handler:    _TappService_GetTaskStatus_Handler,
+		},
+		{
+			MethodName: "ListAppMeasurements",
+			Handler:    _TappService_ListAppMeasurements_Handler,
+		},
+		{
 			MethodName: "GetEvidence",
 			Handler:    _TappService_GetEvidence_Handler,
 		},
@@ -323,5 +403,5 @@ var TappService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/tapp_service.proto",
+	Metadata: "api/common/tee/alicloud/proto/tapp_service.proto",
 }
