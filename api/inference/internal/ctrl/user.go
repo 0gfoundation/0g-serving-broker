@@ -34,7 +34,6 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 		User:                 userAddress,
 		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
-		Signer:               []string{contractAccount.Signer[0].String(), contractAccount.Signer[1].String()},
 	}
 
 	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
@@ -99,7 +98,6 @@ func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) 
 	new := model.User{
 		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
-		Signer:               []string{account.Signer[0].String(), account.Signer[1].String()},
 	}
 	return errors.Wrap(c.db.UpdateUserAccount(userAddress.String(), new), "update account in db")
 }
@@ -123,6 +121,5 @@ func parse(account contract.Account) model.User {
 		User:                 account.User.String(),
 		LockBalance:          model.PtrOf(lockBalance.String()),
 		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
-		Signer:               []string{account.Signer[0].String(), account.Signer[1].String()},
 	}
 }

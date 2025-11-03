@@ -2,6 +2,7 @@ package tee
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 )
 
@@ -9,8 +10,9 @@ import (
 type MockTappdClient struct{}
 
 func (c *MockTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
+	encodedReportData := base64.StdEncoding.EncodeToString([]byte(reportData))
 	mockResp := map[string]interface{}{
-		"signing_address": "mock_signing_address",
+		"report_data": encodedReportData,
 		"intel_quote":     "mock_intel_quote",
 		"nvidia_payload":  "mock_nvidia_payload",
 		"event_log":       []interface{}{},
