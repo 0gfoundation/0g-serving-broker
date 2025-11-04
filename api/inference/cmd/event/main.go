@@ -16,6 +16,7 @@ import (
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/event"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func Main() {
@@ -34,7 +35,7 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	contract, err := providercontract.NewProviderContract(conf, logger)
+	contract, err := providercontract.NewProviderContract(conf, common.Address{}, logger)
 	if err != nil {
 		panic(err)
 	}

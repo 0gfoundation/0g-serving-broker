@@ -15,14 +15,12 @@ var (
 		"Nonce":             {},
 		"Request-Hash":      {},
 		"Signature":         {},
-		"VLLM-Proxy":        {},
 		"Session-Token":     {},
 		"Session-Signature": {},
 	}
 
 	RequestMetaData = map[string]struct{}{
 		"Address":           {},
-		"VLLM-Proxy":        {},
 		"Session-Token":     {},
 		"Session-Signature": {},
 	}
