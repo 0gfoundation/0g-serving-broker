@@ -2,6 +2,7 @@ package handler
 
 import (
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -9,14 +10,16 @@ import (
 )
 
 type Handler struct {
-	ctrl  *ctrl.Ctrl
-	proxy *proxy.Proxy
+	ctrl        *ctrl.Ctrl
+	proxy       *proxy.Proxy
+	rateLimiter *RateLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	h := &Handler{
-		ctrl:  ctrl,
-		proxy: proxy,
+		ctrl:        ctrl,
+		proxy:       proxy,
+		rateLimiter: NewRateLimiter(rate.Limit(10), 20),
 	}
 	return h
 }
@@ -42,27 +45,29 @@ func corsMiddleware() gin.HandlerFunc {
 func (h *Handler) Register(r *gin.Engine) {
 	group := r.Group("/v1")
 
-	// service
-	group.GET("/service", corsMiddleware(), h.GetService)
+	// TODO: ONLY provider owner can call these endpoints
+	// // service
+	// group.GET("/service", corsMiddleware(), h.GetService)
 
-	// settle
-	group.POST("/settle", corsMiddleware(), h.SettleFees)
+	// // settle
+	// group.POST("/settle", corsMiddleware(), h.SettleFees)
 
-	// account
-	group.GET("/user", corsMiddleware(), h.ListUserAccount)
-	group.GET("/user/:user", corsMiddleware(), h.GetUserAccount)
-	group.POST("sync-account", corsMiddleware(), h.SyncUserAccounts)
+	// // account
+	// group.GET("/user", corsMiddleware(), h.ListUserAccount)
+	// group.GET("/user/:user", corsMiddleware(), h.GetUserAccount)
+	// group.POST("sync-account", corsMiddleware(), h.SyncUserAccounts)
 
 	// request
-	group.GET("/request", corsMiddleware(), h.ListRequest)
+	// group.GET("/request", corsMiddleware(), h.ListRequest)
 
-	group.GET("/quote", corsMiddleware(), h.GetQuote)
+	group.GET("/quote", corsMiddleware(), RateLimitMiddleware(h.rateLimiter), h.GetQuote)
 
-	//nvidia TEE verification
-	group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)
-	group.OPTIONS("/quote/verify/gpu", corsMiddleware(), func(c *gin.Context) {
-		c.Status(204)
-	})
+	// TODO: should be verified by client
+	// //nvidia TEE verification
+	// group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)
+	// group.OPTIONS("/quote/verify/gpu", corsMiddleware(), func(c *gin.Context) {
+	// 	c.Status(204)
+	// })
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

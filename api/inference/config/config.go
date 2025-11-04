@@ -18,6 +18,8 @@ type Service struct {
 	ModelType        string            `yaml:"model"`
 	Verifiability    string            `yaml:"verifiability"`
 	AdditionalSecret map[string]string `yaml:"additionalSecret"`
+	TargetTeeAddress string            `yaml:"targetTeeAddress"`
+	TargetSeparated  bool              `yaml:"targetSeparated"`
 }
 
 type Config struct {
