@@ -21,6 +21,11 @@ const (
 	AliCloud
 )
 
+const (
+	VerifierCryptoPilot = "cryptopilot"
+	VerifierDStack      = "dstack"
+)
+
 type TappdClient interface {
 	TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error)
 	DeriveKey(ctx context.Context, path string) (string, error)

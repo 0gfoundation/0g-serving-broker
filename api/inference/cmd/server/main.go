@@ -45,12 +45,6 @@ func Main() {
 		panic(err)
 	}
 
-	contract, err := providercontract.NewProviderContract(config, logger)
-	if err != nil {
-		panic(err)
-	}
-	defer contract.Close()
-
 	engine := gin.New()
 
 	if config.Monitor.Enable {
@@ -67,7 +61,7 @@ func Main() {
 	case "gcp":
 		teeClientType = tee.GCP
 	case "alicloud":
-		teeClientType = tee.AliCloud		
+		teeClientType = tee.AliCloud
 	default:
 		teeClientType = tee.Phala
 	}
@@ -81,6 +75,12 @@ func Main() {
 	if err := teeService.SyncQuote(ctx, config.NvGPU); err != nil {
 		panic(err)
 	}
+
+	contract, err := providercontract.NewProviderContract(config, teeService.Address, logger)
+	if err != nil {
+		panic(err)
+	}
+	defer contract.Close()
 
 	ctrl := ctrl.New(db, contract, config, svcCache, teeService, logger)
 

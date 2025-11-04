@@ -3,7 +3,6 @@ package ctrl
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -52,7 +51,7 @@ func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
 
 	for k := range constant.RequestMetaData {
 		values := headerMap.Values(k)
-		if len(values) == 0 && k != "VLLM-Proxy" {
+		if len(values) == 0 {
 			return req, errors.Wrapf(errors.New("missing Header"), "%s", k)
 		}
 		value := values[0]
@@ -161,15 +160,6 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	if err := c.ValidateSession(ctx); err != nil {
 		return errors.Wrap(err, "session validation failed")
 	}
-	
-	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(req.UserAddress))
-	if err != nil {
-		return errors.Wrap(err, "get account from contract")
-	}
-
-	if c.teeService.Address != contractAccount.TeeSignerAddress {
-		return errors.New("user not acknowledge the provider")
-	}
 
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
 	if err != nil {
@@ -258,12 +248,6 @@ func updateRequestField(req *model.Request, key, value string) error {
 	switch key {
 	case "Address":
 		req.UserAddress = value
-	case "VLLM-Proxy":
-		v, err := strconv.ParseBool(value)
-		if err != nil {
-			v = false
-		}
-		req.VLLMProxy = v
 	case "Session-Token", "Session-Signature":
 		// These headers are used for validation only, not stored in the request
 		// They are processed in ValidateSession method

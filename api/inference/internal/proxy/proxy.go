@@ -172,11 +172,10 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 		return false
 	}
 
-	vllmProxy := ctx.GetHeader("VLLM-Proxy")
 	relativePath := strings.ToLower(ctx.Param("any"))
 	chatID := strings.TrimPrefix(relativePath, "/signature/")
 
-	if strings.ToLower(vllmProxy) != "true" {
+	if !p.ctrl.Service.TargetSeparated {
 		sig, err := p.ctrl.GetChatSignature(chatID)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
