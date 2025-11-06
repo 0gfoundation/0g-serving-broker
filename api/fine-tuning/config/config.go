@@ -170,7 +170,7 @@ func loadConfig(config *Config) error {
 func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
-			ContractAddress: "0x677AB02CA1DAffEf7521858d3264E4574BEf7aA7",
+			ContractAddress: "0x434cAbDedef8eBB760e7e583E419BFD5537A8B8a",
 			Database: struct {
 				FineTune string `yaml:"fineTune"`
 			}{
