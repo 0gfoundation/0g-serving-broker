@@ -5,7 +5,7 @@ allowOrigins:
   - "*"
 
 # Smart contract address for the serving broker
-contractAddress: "0x4f850eb2abc036096999882b54e92ecd63aec13d"
+contractAddress: "0xD18A6308793bDE62c3664729e3Fd0F7CFd2565Da"
 
 # Database configuration
 database:

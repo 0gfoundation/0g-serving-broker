@@ -23,6 +23,7 @@ type QuoteResponseWithNvidia struct {
 	EventLog      string      `json:"event_log"`
 	ReportData    []byte      `json:"report_data"`
 	VmConfig      string      `json:"vm_config"`
+	TcbInfo       string      `json:"tcb_info,omitempty"`
 	NvidiaPayload interface{} `json:"nvidia_payload,omitempty"`
 }
 
@@ -83,9 +84,35 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData string, nvQu
 		EventLog   string `json:"event_log"`
 		ReportData string `json:"report_data"`
 		VmConfig   string `json:"vm_config"`
+		TcbInfo    string `json:"tcb_info"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", errors.Wrap(err, "failed to unmarshal response")
+	}
+
+	// Make /Info request to get tcb_info
+	infoReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/Info", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create info request")
+	}
+
+	infoReq.Header.Set("Content-Type", "application/json")
+	infoResp, err := httpClient.Do(infoReq)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send info request")
+	}
+	defer infoResp.Body.Close()
+
+	if infoResp.StatusCode == http.StatusOK {
+		infoBody, err := io.ReadAll(infoResp.Body)
+		if err == nil {
+			var infoResponse struct {
+				TcbInfo string `json:"tcb_info"`
+			}
+			if err := json.Unmarshal(infoBody, &infoResponse); err == nil {
+				response.TcbInfo = infoResponse.TcbInfo
+			}
+		}
 	}
 	reportDataRespBytes, err := hex.DecodeString(response.ReportData)
 	if err != nil {
@@ -95,6 +122,7 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData string, nvQu
 		Quote:      response.Quote,
 		EventLog:   response.EventLog,
 		VmConfig:   response.VmConfig,
+		TcbInfo:    response.TcbInfo,
 		ReportData: reportDataRespBytes,
 	}
 

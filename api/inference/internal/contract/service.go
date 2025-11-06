@@ -31,6 +31,7 @@ func buildAdditionalInfo(service config.Service) (string, error) {
 
 	// Create AdditionalInfo JSON string
 	additionalInfo := map[string]interface{}{
+		"VerifierURL":      service.VerifierURL,
 		"TEEVerifier":      teeVerifier,
 		"TargetSeparated":  service.TargetSeparated,
 		"TargetTeeAddress": "",

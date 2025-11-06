@@ -18,6 +18,7 @@ type Service struct {
 	ModelType        string            `yaml:"model"`
 	Verifiability    string            `yaml:"verifiability"`
 	AdditionalSecret map[string]string `yaml:"additionalSecret"`
+	VerifierURL      string            `yaml:"verifierUrl"`
 	TargetTeeAddress string            `yaml:"targetTeeAddress"`
 	TargetSeparated  bool              `yaml:"targetSeparated"`
 }
@@ -79,7 +80,7 @@ func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
 			AllowOrigins:    []string{"*"},
-			ContractAddress: "0x4f850eb2abc036096999882b54e92ecd63aec13d",
+			ContractAddress: "0xD18A6308793bDE62c3664729e3Fd0F7CFd2565Da",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{
