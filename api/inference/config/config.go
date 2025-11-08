@@ -80,7 +80,7 @@ func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
 			AllowOrigins:    []string{"*"},
-			ContractAddress: "0xD18A6308793bDE62c3664729e3Fd0F7CFd2565Da",
+			ContractAddress: "0x0754221A9f2C11D820F827170249c3cc5cC3DC74",
 			Database: struct {
 				Provider string `yaml:"provider"`
 			}{

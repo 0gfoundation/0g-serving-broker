@@ -8,11 +8,13 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/google/uuid"
+	"golang.org/x/time/rate"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -28,6 +30,7 @@ type Proxy struct {
 	serviceTarget     string
 	serviceType       string
 	serviceGroup      *gin.RouterGroup
+	rateLimiter       *middleware.RateLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, logger log.Logger) *Proxy {
@@ -41,6 +44,8 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		ctrl:         ctrl,
 		logger:       logger,
 		serviceGroup: engine.Group(constant.ServicePrefix),
+		// Configure rate limiter: 30 requests per second with burst of 50
+		rateLimiter:  middleware.NewRateLimiter(rate.Limit(30), 50),
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -48,6 +53,9 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowHeaders: []string{"*"},
 	}))
+
+	// Apply rate limiting middleware
+	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
 
 	if enableMonitor {
 		p.serviceGroup.Use(monitor.TrackMetrics())

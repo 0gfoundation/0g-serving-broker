@@ -21,6 +21,10 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 	if err := c.contract.SyncService(ctx, c.Service); err != nil {
 		return errors.Wrap(err, "sync services")
 	}
+	
+	// Clear service cache when service is synced/updated
+	c.serviceCache.Delete("current_service")
+	
 	return nil
 }
 
@@ -30,11 +34,12 @@ func parseService(svc contract.Service) model.Service {
 			CreatedAt: model.PtrOf(time.Unix(svc.UpdatedAt.Int64(), 0)),
 			UpdatedAt: model.PtrOf(time.Unix(svc.UpdatedAt.Int64(), 0)),
 		},
-		Type:          svc.ServiceType,
-		URL:           svc.Url,
-		ModelType:     svc.Model,
-		InputPrice:    svc.InputPrice.String(),
-		OutputPrice:   svc.OutputPrice.String(),
-		Verifiability: svc.Verifiability,
+		Type:                  svc.ServiceType,
+		URL:                   svc.Url,
+		ModelType:             svc.Model,
+		InputPrice:            svc.InputPrice.String(),
+		OutputPrice:           svc.OutputPrice.String(),
+		Verifiability:         svc.Verifiability,
+		TeeSignerAcknowledged: svc.TeeSignerAcknowledged,
 	}
 }

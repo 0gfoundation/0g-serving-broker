@@ -5,6 +5,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 )
@@ -12,14 +13,14 @@ import (
 type Handler struct {
 	ctrl        *ctrl.Ctrl
 	proxy       *proxy.Proxy
-	rateLimiter *RateLimiter
+	rateLimiter *middleware.RateLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
 		proxy:       proxy,
-		rateLimiter: NewRateLimiter(rate.Limit(10), 20),
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
 	}
 	return h
 }
@@ -60,7 +61,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	// request
 	// group.GET("/request", corsMiddleware(), h.ListRequest)
 
-	group.GET("/quote", corsMiddleware(), RateLimitMiddleware(h.rateLimiter), h.GetQuote)
+	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
 
 	// TODO: should be verified by client
 	// //nvidia TEE verification

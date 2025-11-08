@@ -29,6 +29,10 @@ type Ctrl struct {
 	
 	// Session validation cache
 	sessionCache *cache.Cache
+	
+	// Contract data caches to avoid frequent contract calls
+	contractAccountCache *cache.Cache  // Cache for user account data from contract
+	serviceCache         *cache.Cache  // Cache for service data from contract
 }
 
 func New(
@@ -50,6 +54,9 @@ func New(
 		logger:               logger,
 		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes
 		sessionCache:         cache.New(5*time.Minute, 10*time.Minute),
+		// Initialize contract data caches with appropriate expiration times
+		contractAccountCache: cache.New(2*time.Minute, 5*time.Minute),  // Cache user accounts for 2 minutes
+		serviceCache:         cache.New(5*time.Minute, 10*time.Minute), // Cache service data for 5 minutes
 	}
 
 	return p
