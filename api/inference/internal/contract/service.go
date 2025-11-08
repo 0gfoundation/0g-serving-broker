@@ -132,27 +132,16 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 		Context: ctx,
 	}
 
-	list, err := c.Contract.GetAllServices(callOpts)
+	service, err := c.Contract.GetService(callOpts, common.HexToAddress(c.ProviderAddress))
 	if err != nil {
-		c.logger.Errorf("[GetService] Failed to get all services list - error=%v", err)
+		c.logger.Errorf("[GetService] Failed to get service - error=%v", err)
 		return nil, err
 	}
 
-	c.logger.Infof("[GetService] Retrieved %d services from contract", len(list))
+	c.logger.Infof("[GetService] Retrieved service from contract - url=%s, model=%s, type=%s",
+		service.Url, service.Model, service.ServiceType)
 
-	for i := range list {
-		c.logger.Infof("[GetService] Service #%d - provider=%s, url=%s, model=%s",
-			i, list[i].Provider.String(), list[i].Url, list[i].Model)
-
-		if list[i].Provider.String() == c.ProviderAddress {
-			c.logger.Infof("[GetService] Found matching service - url=%s, model=%s, type=%s",
-				list[i].Url, list[i].Model, list[i].ServiceType)
-			return &list[i], nil
-		}
-	}
-
-	c.logger.Warnf("[GetService] Service not found for provider %s", c.ProviderAddress)
-	return nil, ErrServiceNotFound
+	return &service, nil
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {

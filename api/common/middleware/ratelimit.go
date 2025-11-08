@@ -1,4 +1,4 @@
-package handler
+package middleware
 
 import (
 	"net/http"
@@ -80,5 +80,37 @@ func RateLimitMiddleware(limiter *RateLimiter) gin.HandlerFunc {
 }
 
 func getClientIP(c *gin.Context) string {
-	return strings.Split(c.Request.RemoteAddr, ":")[0]
+	// Try to get the real IP from common headers first (only when behind proxy)
+	// Note: These headers are typically set by reverse proxies, not clients
+	if xForwardedFor := c.Request.Header.Get("X-Forwarded-For"); xForwardedFor != "" {
+		// X-Forwarded-For may contain multiple IPs, get the first one (original client)
+		ips := strings.Split(xForwardedFor, ",")
+		if len(ips) > 0 {
+			ip := strings.TrimSpace(ips[0])
+			// Basic validation to ensure it's not empty and looks like an IP
+			if ip != "" && !strings.Contains(ip, " ") {
+				return ip
+			}
+		}
+	}
+	
+	if xRealIP := c.Request.Header.Get("X-Real-IP"); xRealIP != "" {
+		// Validate the IP is not empty
+		if strings.TrimSpace(xRealIP) != "" {
+			return strings.TrimSpace(xRealIP)
+		}
+	}
+	
+	// Gin's ClientIP method provides built-in logic for IP detection
+	// This handles RemoteAddr and validates the result
+	if clientIP := c.ClientIP(); clientIP != "" {
+		return clientIP
+	}
+	
+	// Final fallback to RemoteAddr (should rarely be needed)
+	remoteAddr := c.Request.RemoteAddr
+	if idx := strings.LastIndex(remoteAddr, ":"); idx != -1 {
+		return remoteAddr[:idx]
+	}
+	return remoteAddr
 }
