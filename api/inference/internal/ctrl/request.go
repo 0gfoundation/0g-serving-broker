@@ -15,6 +15,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -30,7 +31,7 @@ type SessionToken struct {
 // SessionValidationCache stores validated sessions to avoid repeated signature verification
 // Since the cache key contains all validation data, we only need to store minimal info
 type SessionValidationCache struct {
-	ValidatedAt int64  // Timestamp when validation occurred
+	ValidatedAt int64 // Timestamp when validation occurred
 }
 
 func (c *Ctrl) CreateRequest(req model.Request) error {
@@ -70,37 +71,37 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 	address := ctx.GetHeader("Address")
 	tokenStr := ctx.GetHeader("Session-Token")
 	signature := ctx.GetHeader("Session-Signature")
-	
+
 	// Check if all required headers are present
 	if address == "" || tokenStr == "" || signature == "" {
 		return errors.New("missing session authentication headers, please make sure your client includes Address, Session-Token, and Session-Signature headers")
 	}
-	
+
 	// Parse session token
 	var token SessionToken
 	if err := json.Unmarshal([]byte(tokenStr), &token); err != nil {
 		return errors.Wrap(err, "invalid session token format")
 	}
-	
+
 	// Validate address matches
 	if !strings.EqualFold(token.Address, address) {
 		return errors.New("address mismatch in session token")
 	}
-	
+
 	// Validate provider matches this provider
 	if !strings.EqualFold(token.Provider, c.contract.ProviderAddress) {
 		return errors.New("session token is for different provider")
 	}
-	
+
 	// Check token expiration (convert milliseconds to seconds)
 	if time.Now().Unix() > token.ExpiresAt/1000 {
 		return errors.New("session token expired")
 	}
-	
+
 	// Create hash values for secure caching
 	tokenHashValue := crypto.Keccak256Hash([]byte(tokenStr)).Hex()
 	signatureHashValue := crypto.Keccak256Hash([]byte(signature)).Hex()
-	
+
 	// Check session cache to avoid repeated signature verification
 	// Use a more secure cache key that includes token and signature hashes
 	cacheKey := fmt.Sprintf("%s:%s:%s:%s", address, token.Nonce, tokenHashValue, signatureHashValue)
@@ -109,46 +110,46 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 		// If found, it means this exact combination was already validated
 		return nil
 	}
-	
+
 	// Verify signature following the same pattern as verifySignature in setup.go
 	messageHash := crypto.Keccak256Hash([]byte(tokenStr))
-	
+
 	// Create Ethereum personal message hash (matches the client signMessage behavior)
 	// Following the same pattern as getHash in setup.go
 	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), messageHash.Bytes())
-	
+
 	// Decode signature from hex
 	sigBytes, err := hexutil.Decode(signature)
 	if err != nil {
 		return errors.Wrap(err, "invalid signature format")
 	}
-	
+
 	// Ethereum signatures are 65 bytes: R (32) + S (32) + V (1)
 	if len(sigBytes) != 65 {
 		return errors.New("invalid signature length")
 	}
-	
+
 	// Adjust V value for Ethereum signature recovery (same as verifySignature)
 	v1 := sigBytes[64] - 27
 	pubKey, err := crypto.SigToPub(prefixedMsg.Bytes(), append(sigBytes[:64], v1))
 	if err != nil {
 		return errors.Wrap(err, "failed to recover public key from signature")
 	}
-	
+
 	// Get address from public key
 	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-	
+
 	// Verify recovered address matches claimed address (same as verifySignature)
 	if !strings.EqualFold(recoveredAddr.Hex(), address) {
 		return errors.New("signature verification failed: address mismatch")
 	}
-	
+
 	// Cache the validated session
 	// Cache will expire based on the cache configuration (5 minutes)
 	c.sessionCache.Set(cacheKey, SessionValidationCache{
 		ValidatedAt: time.Now().Unix(),
 	}, cache.DefaultExpiration)
-	
+
 	// Session is valid
 	return nil
 }
@@ -159,6 +160,66 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	// First validate the session token
 	if err := c.ValidateSession(ctx); err != nil {
 		return errors.Wrap(err, "session validation failed")
+	}
+
+	// Try to get contract account from cache first
+	userAddress := common.HexToAddress(req.UserAddress)
+	accountCacheKey := userAddress.Hex()
+	
+	var contractAccount *contract.Account
+	if cachedAccount, found := c.contractAccountCache.Get(accountCacheKey); found {
+		// Use cached account data
+		if acc, ok := cachedAccount.(*contract.Account); ok {
+			contractAccount = acc
+		}
+	}
+	
+	// If not in cache or invalid, fetch from contract
+	if contractAccount == nil {
+		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
+		if err != nil {
+			return errors.Wrap(err, "get account from contract")
+		}
+		contractAccount = &fetchedAccount
+		
+		// Cache the account data
+		c.contractAccountCache.Set(accountCacheKey, contractAccount, cache.DefaultExpiration)
+	}
+
+	if contractAccount.Acknowledged == false {
+		return errors.New("user not acknowledge the provider, please use acknowledgeProviderSigner function in sdk first, it will take effect in 2 minutes")
+	}
+
+	// Try to get service from cache first
+	serviceCacheKey := "current_service"
+	var service model.Service
+	
+	if cachedService, found := c.serviceCache.Get(serviceCacheKey); found {
+		// Use cached service data
+		if svc, ok := cachedService.(model.Service); ok {
+			service = svc
+		} else {
+			// Cache data is invalid, fetch from contract
+			service, err := c.GetService(ctx)
+			if err != nil {
+				return errors.Wrap(err, "get service from context")
+			}
+			// Update cache with fresh data
+			c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
+		}
+	} else {
+		// Not in cache, fetch from contract
+		var err error
+		service, err = c.GetService(ctx)
+		if err != nil {
+			return errors.Wrap(err, "get service from context")
+		}
+		// Cache the service data
+		c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
+	}
+
+	if service.TeeSignerAcknowledged == false {
+		return errors.New("service not acknowledge the tee signer")
 	}
 
 	account, err := c.GetOrCreateAccount(ctx, req.UserAddress)
@@ -173,7 +234,6 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	}
 	return nil
 }
-
 
 func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee string) error {
 	if account.LockBalance == nil {
@@ -218,13 +278,13 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	if err != nil {
 		return err
 	}
-	
+
 	// Recalculate unsettled fee after sync using optimized method
 	unsettledFeeNew, err := c.db.CalculateUnsettledFee(account.User, c.Service.InputPrice, c.Service.OutputPrice)
 	if err != nil {
 		return errors.Wrap(err, "recalculate unsettled fee")
 	}
-	
+
 	totalWithInputNew, err := util.Add(fee, unsettledFeeNew.String())
 	if err != nil {
 		return err
