@@ -55,6 +55,7 @@ func (d *Service) Bind(ctx *gin.Context) error {
 	d.Verifiability = r.Verifiability
 	d.InputPrice = r.InputPrice
 	d.OutputPrice = r.OutputPrice
+	d.TeeSignerAcknowledged = r.TeeSignerAcknowledged
 
 	return nil
 }

@@ -297,6 +297,7 @@ const docTemplate = `{
                 "model",
                 "name",
                 "outputPrice",
+                "teeSignerAcknowledged",
                 "type",
                 "url",
                 "verifiability"
@@ -317,6 +318,9 @@ const docTemplate = `{
                 },
                 "outputPrice": {
                     "type": "string"
+                },
+                "teeSignerAcknowledged": {
+                    "type": "boolean"
                 },
                 "type": {
                     "type": "string"
