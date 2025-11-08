@@ -291,6 +291,7 @@
                 "model",
                 "name",
                 "outputPrice",
+                "teeSignerAcknowledged",
                 "type",
                 "url",
                 "verifiability"
@@ -311,6 +312,9 @@
                 },
                 "outputPrice": {
                     "type": "string"
+                },
+                "teeSignerAcknowledged": {
+                    "type": "boolean"
                 },
                 "type": {
                     "type": "string"
