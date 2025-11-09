@@ -52,6 +52,12 @@ type Config struct {
 	ChatCacheExpiration time.Duration        `yaml:"chatCacheExpiration"`
 	NvGPU               bool                 `yaml:"nvGPU"`
 	Logger              *config.LoggerConfig `yaml:"logger"`
+	LogPaths            LogPathsConfig       `yaml:"logPaths"`
+}
+
+type LogPathsConfig struct {
+	BrokerLogDir string `yaml:"brokerLogDir"`
+	EventLogDir  string `yaml:"eventLogDir"`
 }
 
 var (
@@ -123,6 +129,10 @@ func GetConfig() *Config {
 				Level:         "info",
 				Path:          "./logs/inference.log",
 				RotationCount: 7,
+			},
+			LogPaths: LogPathsConfig{
+				BrokerLogDir: "/var/log/inference",
+				EventLogDir:  "/var/log/event",
 			},
 		}
 
