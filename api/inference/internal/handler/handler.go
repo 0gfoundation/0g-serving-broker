@@ -63,6 +63,10 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
 
+	// Provider-only endpoints for log management
+	group.GET("/logs", corsMiddleware(), h.ListLogs)                           // List all log files
+	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile)    // Download specific log file
+
 	// TODO: should be verified by client
 	// //nvidia TEE verification
 	// group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)
@@ -78,3 +82,4 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 	}
 	errors.Response(ctx, errors.Wrap(err, info))
 }
+

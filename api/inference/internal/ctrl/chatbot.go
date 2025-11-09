@@ -243,8 +243,8 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	}
 
-	if !reqModel.VLLMProxy {
-		c.logger.Debug("reqModel.VLLMProxy is false, signing chat response")
+	if !c.Service.TargetSeparated {
+		c.logger.Debug("LLM server in the same network, signing chat response")
 		if err := c.signChat(reqBody, data, respChunk); err != nil {
 			return err
 		}
