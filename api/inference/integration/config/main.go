@@ -23,6 +23,9 @@ type Service struct {
 	Type             string                 `yaml:"type,omitempty"`
 	ModelType        string                 `yaml:"model,omitempty"`
 	Verifiability    string                 `yaml:"verifiability,omitempty"`
+	TargetTeeAddress string                 `yaml:"targetTeeAddress,omitempty"`
+	TargetSeparated  bool                   `yaml:"targetSeparated"`
+	VerifierUrl      string                 `yaml:"verifierUrl,omitempty"`
 	AdditionalSecret map[string]interface{} `yaml:"additionalSecret,omitempty"`
 }
 
@@ -241,7 +244,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    image: ghcr.io/0gfoundation/0g-serving-broker:v1.0.0
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -307,7 +310,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    image: ghcr.io/0gfoundation/0g-serving-broker:v1.0.0
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if eq .TeeNode "hardhat"}}
@@ -535,16 +538,53 @@ func main() {
 		fmt.Printf("✅ Working in directory: %s\n", outputDir)
 	}
 
-	// Step 0.5: Ask about LLM deployment early
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("\n🤖 Do you want to deploy an LLM service container in the same environment? [y/N]: ")
+
+	// Step 0.3: Ask about TEE node type early
+	var teeNodeType TeeNode
+	var verifierUrl string
+	fmt.Print("\n🔒 Select TEE node type:\n")
+	fmt.Print("   1. Local Hardhat (for testing)\n")
+	fmt.Print("   2. Phala Network\n")
+	fmt.Print("   3. Alibaba Cloud\n")
+	fmt.Print("Enter your choice [1-3] (default: 1): ")
 	response, _ := reader.ReadString('\n')
+	choice := strings.TrimSpace(response)
+	
+	switch choice {
+	case "2":
+		teeNodeType = TeeNodePhala
+		verifierUrl = "https://github.com/Dstack-TEE/dstack/releases/tag/verifier-v0.5.4"
+		fmt.Println("   ✓ Phala Network selected")
+		fmt.Printf("   ✓ VerifierUrl set to: %s\n", verifierUrl)
+	case "3":
+		teeNodeType = TeeNodeAliCloud
+		verifierUrl = ""
+		fmt.Println("   ✓ Alibaba Cloud selected")
+	default:
+		teeNodeType = TeeNodeLocalHardhat
+		verifierUrl = ""
+		fmt.Println("   ✓ Local Hardhat selected (test environment)")
+	}
+
+	// Step 0.5: Ask about LLM deployment
+	var targetTeeAddress string
+	var targetSeparated bool
+	var additionalHeaders map[string]string
+	
+	fmt.Print("\n🤖 Do you want to deploy an LLM service container in the same environment? [y/N]: ")
+	response, _ = reader.ReadString('\n')
 	deployLLM := strings.ToLower(strings.TrimSpace(response)) == "y"
 	
 	var llmModel string
 	if deployLLM {
 		fmt.Println("   ✓ LLM service container will be deployed")
 		fmt.Println("   ℹ️  The targetUrl will be automatically configured as http://vllm:8000/v1")
+		
+		// Set fields for same environment deployment
+		targetTeeAddress = ""
+		targetSeparated = false
+		// additionalSecret will not be set
 		
 		// Model name is required for LLM deployment
 		for {
@@ -558,11 +598,68 @@ func main() {
 			break
 		}
 		fmt.Printf("   ✓ Model set to: %s\n", llmModel)
+	} else {
+		// User chose not to deploy LLM in same environment
+		fmt.Println("\n⚠️  Please note: The separate LLM service should also be deployed in a TEE environment")
+		fmt.Printf("   and should use the same TEE node type (%s)\n", teeNodeType)
+		fmt.Println("   and use a private key within the TEE to sign the response.")
+		
+		// Ask for LLM server's signing public key address
+		for {
+			fmt.Print("\n🔑 Enter the LLM server's signing public key address: ")
+			addressInput, _ := reader.ReadString('\n')
+			targetTeeAddress = strings.TrimSpace(addressInput)
+			if targetTeeAddress == "" {
+				fmt.Println("   ❌ Address is required!")
+				continue
+			}
+			break
+		}
+		targetSeparated = true
+		fmt.Printf("   ✓ Target TEE address set to: %s\n", targetTeeAddress)
+		
+		// Ask about additional headers
+		fmt.Print("\n🔐 Does the separate LLM server require additional request headers for authentication? [y/N]: ")
+		response, _ = reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(response)) == "y" {
+			fmt.Println("   Enter headers in format 'Key: Value' (one per line)")
+			fmt.Println("   Example: Authorization: sk-xxxx")
+			fmt.Println("   Press Enter twice to finish:")
+			
+			additionalHeaders = make(map[string]string)
+			for {
+				fmt.Print("> ")
+				headerInput, _ := reader.ReadString('\n')
+				headerInput = strings.TrimSpace(headerInput)
+				
+				if headerInput == "" {
+					break // Empty line means done
+				}
+				
+				// Parse header
+				parts := strings.SplitN(headerInput, ":", 2)
+				if len(parts) != 2 {
+					fmt.Println("   ❌ Invalid format. Use 'Key: Value'")
+					continue
+				}
+				
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				additionalHeaders[key] = value
+				fmt.Printf("   ✓ Added header: %s\n", key)
+			}
+			
+			if len(additionalHeaders) > 0 {
+				fmt.Printf("   ✓ %d headers configured\n", len(additionalHeaders))
+			}
+		} else {
+			fmt.Println("   ✓ No additional headers required")
+		}
 	}
 
 	// Step 1: Load and configure YAML config
 	fmt.Println("\n📋 Step 1: Configuration File Setup")
-	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir, deployLLM)
+	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -570,7 +667,7 @@ func main() {
 
 	// Step 2: Environment setup
 	fmt.Println("\n🌍 Step 2: Environment Configuration")
-	deployConfig, err := promptEnvironmentConfig(yamlConfig, deployLLM)
+	deployConfig, err := promptEnvironmentConfig(yamlConfig, deployLLM, teeNodeType)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error configuring environment: %v\n", err)
 		os.Exit(1)
@@ -579,6 +676,7 @@ func main() {
 	deployConfig.ConfigPath = configPath
 	deployConfig.DeployLLM = deployLLM
 	deployConfig.LLMModel = llmModel
+	deployConfig.TeeNode = teeNodeType
 
 	// Step 3: Generate deployment files
 	fmt.Println("\n🔧 Step 3: Generating deployment configuration...")
@@ -646,7 +744,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -703,6 +801,21 @@ func generateYAMLConfig(originalDir string, deployLLM bool) (string, string, *Co
 		return "", "", nil, fmt.Errorf("failed to load configs: %v", err)
 	}
 
+	// Set the new TEE-related fields
+	config.Service.TargetTeeAddress = targetTeeAddress
+	config.Service.TargetSeparated = targetSeparated
+	config.Service.VerifierUrl = verifierUrl
+	
+	// Set additionalSecret if headers were provided
+	if len(additionalHeaders) > 0 {
+		if config.Service.AdditionalSecret == nil {
+			config.Service.AdditionalSecret = make(map[string]interface{})
+		}
+		for k, v := range additionalHeaders {
+			config.Service.AdditionalSecret[k] = v
+		}
+	}
+	
 	// Check and prompt for required fields
 	if err := checkAndPromptRequiredFields(config, deployLLM); err != nil {
 		return "", "", nil, fmt.Errorf("error checking required fields: %v", err)
@@ -732,9 +845,10 @@ func generateYAMLConfig(originalDir string, deployLLM bool) (string, string, *Co
 	return filepath.Base(outputPath), fullMountPath, config, nil
 }
 
-func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool) (*DeploymentConfig, error) {
+func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool, teeNodeType TeeNode) (*DeploymentConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	config := &DeploymentConfig{}
+	config.TeeNode = teeNodeType // Set the TEE node type from earlier selection
 
 	// Ask for Docker Compose project name
 	fmt.Print("\n🏷️  Enter a Docker Compose project name for this deployment (leave empty for default): ")
@@ -761,23 +875,8 @@ func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool) (*DeploymentCon
 		}
 	}
 
-	// Ask about TEE node type
-	fmt.Print("\n🔒 Select TEE node type:\n")
-	fmt.Print("   1. Local Hardhat (for testing)\n")
-	fmt.Print("   2. Phala Network\n")
-	fmt.Print("   3. Alibaba Cloud\n")
-	fmt.Print("Enter your choice [1-3] (default: 1): ")
-	response, _ = reader.ReadString('\n')
-	choice := strings.TrimSpace(response)
-	
-	switch choice {
-	case "2":
-		config.TeeNode = TeeNodePhala
-		fmt.Println("   ✓ Phala Network selected")
-	case "3":
-		config.TeeNode = TeeNodeAliCloud
-		fmt.Println("   ✓ Alibaba Cloud selected")
-		
+	// If AliCloud was selected earlier, ask for TAPP service URL
+	if config.TeeNode == TeeNodeAliCloud {
 		// Ask for TAPP service URL for AliCloud (required)
 		for {
 			fmt.Print("\n🔗 Enter TAPP service URL for AliCloud (e.g., https://172.16.1.100:50051): ")
@@ -791,10 +890,6 @@ func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool) (*DeploymentCon
 			fmt.Printf("   ✓ TAPP service URL set to: %s\n", config.TappServiceURL)
 			break
 		}
-
-	default:
-		config.TeeNode = TeeNodeLocalHardhat
-		fmt.Println("   ✓ Local Hardhat selected (test environment)")
 	}
 
 	// Ask about nginx proxy
@@ -1293,6 +1388,13 @@ func mergeConfigs(base, user *Config) {
 	}
 	if user.Service.Verifiability != "" {
 		base.Service.Verifiability = user.Service.Verifiability
+	}
+	if user.Service.TargetTeeAddress != "" {
+		base.Service.TargetTeeAddress = user.Service.TargetTeeAddress
+	}
+	base.Service.TargetSeparated = user.Service.TargetSeparated
+	if user.Service.VerifierUrl != "" {
+		base.Service.VerifierUrl = user.Service.VerifierUrl
 	}
 	if user.Service.AdditionalSecret != nil {
 		if base.Service.AdditionalSecret == nil {
