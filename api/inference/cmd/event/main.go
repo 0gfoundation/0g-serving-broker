@@ -66,16 +66,22 @@ func Main() {
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
 		teeClientType = tee.Mock
+	case "gcp":
+		teeClientType = tee.GCP
+	case "alicloud":
+		teeClientType = tee.AliCloud
 	default:
 		teeClientType = tee.Phala
 	}
-
 	teeService, err := tee.NewTeeService(teeClientType)
 	if err != nil {
 		panic(err)
 	}
 
 	ctx := controller.SetupSignalHandler()
+	if err := teeService.SyncQuote(ctx, false); err != nil {
+		panic(err)
+	}
 
 	ctrl := ctrl.New(db, contract, conf, nil, teeService, logger)
 

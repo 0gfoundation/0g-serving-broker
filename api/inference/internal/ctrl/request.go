@@ -20,12 +20,13 @@ import (
 )
 
 // SessionToken represents the structure of a session token
+// Used for both user sessions and provider authentication
 type SessionToken struct {
-	Address   string `json:"address"`
-	Provider  string `json:"provider"`
-	Timestamp int64  `json:"timestamp"`
-	ExpiresAt int64  `json:"expiresAt"`
-	Nonce     string `json:"nonce"`
+	Address   string `json:"address"`   // User/Provider address
+	Provider  string `json:"provider"`  // Target provider address
+	Timestamp int64  `json:"timestamp"` // Token creation timestamp
+	ExpiresAt int64  `json:"expiresAt"` // Token expiration timestamp
+	Nonce     string `json:"nonce"`     // Random nonce to prevent replay attacks
 }
 
 // SessionValidationCache stores validated sessions to avoid repeated signature verification
@@ -153,6 +154,95 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 	// Session is valid
 	return nil
 }
+
+// ValidateProviderAuth validates that the request is from the provider itself
+func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
+	// Get headers (exactly the same as ValidateSession for consistency)
+	address := ctx.GetHeader("Address")
+	tokenStr := ctx.GetHeader("Session-Token")
+	signature := ctx.GetHeader("Session-Signature")
+
+	// Check if all required headers are present
+	if address == "" || tokenStr == "" || signature == "" {
+		return errors.New("missing provider authentication headers, please make sure your client includes Address, Session-Token, and Session-Signature headers")
+	}
+
+	// Parse provider token (reuse SessionToken structure)
+	var token SessionToken
+	if err := json.Unmarshal([]byte(tokenStr), &token); err != nil {
+		return errors.Wrap(err, "invalid provider token format")
+	}
+
+	// Validate address matches token address
+	if !strings.EqualFold(token.Address, address) {
+		return errors.New("address mismatch in provider token")
+	}
+
+	// Validate that both address and provider field match this provider's address
+	if !strings.EqualFold(token.Address, c.contract.ProviderAddress) {
+		return errors.New("unauthorized: not the provider")
+	}
+
+	if !strings.EqualFold(token.Provider, c.contract.ProviderAddress) {
+		return errors.New("provider field mismatch")
+	}
+
+	// Check token expiration (convert milliseconds to seconds)
+	if time.Now().Unix() > token.ExpiresAt/1000 {
+		return errors.New("provider token expired")
+	}
+
+	// Create hash values for secure caching
+	tokenHashValue := crypto.Keccak256Hash([]byte(tokenStr)).Hex()
+	signatureHashValue := crypto.Keccak256Hash([]byte(signature)).Hex()
+
+	// Check session cache to avoid repeated signature verification
+	cacheKey := fmt.Sprintf("provider:%s:%s:%s:%s", address, token.Nonce, tokenHashValue, signatureHashValue)
+	if _, found := c.sessionCache.Get(cacheKey); found {
+		return nil
+	}
+
+	// Verify signature following the same pattern as ValidateSession
+	messageHash := crypto.Keccak256Hash([]byte(tokenStr))
+
+	// Create Ethereum personal message hash
+	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), messageHash.Bytes())
+
+	// Decode signature from hex
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return errors.Wrap(err, "invalid signature format")
+	}
+
+	// Ethereum signatures are 65 bytes: R (32) + S (32) + V (1)
+	if len(sigBytes) != 65 {
+		return errors.New("invalid signature length")
+	}
+
+	// Adjust V value for Ethereum signature recovery
+	v1 := sigBytes[64] - 27
+	pubKey, err := crypto.SigToPub(prefixedMsg.Bytes(), append(sigBytes[:64], v1))
+	if err != nil {
+		return errors.Wrap(err, "failed to recover public key from signature")
+	}
+
+	// Get address from public key
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+
+	// Verify recovered address matches claimed address
+	if !strings.EqualFold(recoveredAddr.Hex(), address) {
+		return errors.New("signature verification failed: address mismatch")
+	}
+
+	// Cache the validated provider authentication
+	c.sessionCache.Set(cacheKey, SessionValidationCache{
+		ValidatedAt: time.Now().Unix(),
+	}, cache.DefaultExpiration)
+
+	// Provider authentication successful
+	return nil
+}
+
 
 // ValidateRequestWithEstimatedFee validates the request using an estimated fee
 // This is used before the actual token count is known from the LLM

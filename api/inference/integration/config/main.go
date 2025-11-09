@@ -69,6 +69,10 @@ type Config struct {
 		Path          string `yaml:"path,omitempty"`
 		RotationCount int    `yaml:"rotationCount,omitempty"`
 	} `yaml:"logger,omitempty"`
+	LogPaths            struct {
+		BrokerLogDir string `yaml:"brokerLogDir,omitempty"`
+		EventLogDir  string `yaml:"eventLogDir,omitempty"`
+	} `yaml:"logPaths,omitempty"`
 }
 
 // Required fields definition
@@ -264,6 +268,7 @@ const dockerComposeTemplate = `services:
       - {{.ConfigPath}}:/etc/config.yaml
 {{- if .EnableFileLog}}
       - ./logs/broker:/var/log/inference
+      - ./logs/event:/var/log/event
 {{- end}}
 {{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
       - /var/run/dstack.sock:/var/run/dstack.sock
@@ -833,6 +838,15 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		Level:         "info",
 		Path:          "/var/log/inference/inference.log",
 		RotationCount: 7,
+	}
+
+	// Add log paths configuration for multiple components
+	config.LogPaths = struct {
+		BrokerLogDir string `yaml:"brokerLogDir,omitempty"`
+		EventLogDir  string `yaml:"eventLogDir,omitempty"`
+	}{
+		BrokerLogDir: "/var/log/inference",
+		EventLogDir:  "/var/log/event",
 	}
 
 	// Save final configuration
