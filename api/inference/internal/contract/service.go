@@ -149,11 +149,6 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 
 	old, err := c.GetService(ctx)
-	if err != nil && err.Error() != "service not found" {
-		c.logger.Errorf("[SyncService] Failed to get existing service - error=%v", err)
-		return err
-	}
-
 	if err != nil && err.Error() == "service not found" {
 		c.logger.Info("[SyncService] No existing service found in contract")
 	} else if old != nil {

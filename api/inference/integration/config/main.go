@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -108,8 +107,8 @@ type DeploymentConfig struct {
 	TeeNode         TeeNode // TEE node selection (replaces UseTest)
 	UseMonitoring   bool
 	UseNginx        bool
-	ConfigFile      string
-	ConfigPath      string // Full path for mounting in docker-compose
+	ConfigFile      string // Local config file name
+	ConfigPath      string // Source path in TEE node (e.g., /dstack/user_config.yml)
 	Ports           PortConfig
 	ProjectName     string // Docker Compose project name for isolation
 	TappServiceURL string // TAPP service URL for AliCloud mode
@@ -545,6 +544,24 @@ func main() {
 
 	reader := bufio.NewReader(os.Stdin)
 
+	// Step 0.1: Ask about network type early
+	var networkType string
+	fmt.Print("\n🌐 Select network type:\n")
+	fmt.Print("   1. Mainnet (production)\n")
+	fmt.Print("   2. Testnet (development)\n")
+	fmt.Print("Enter your choice [1-2] (default: 2): ")
+	response, _ := reader.ReadString('\n')
+	choice := strings.TrimSpace(response)
+	
+	switch choice {
+	case "1":
+		networkType = "mainnet"
+		fmt.Println("   ✓ Mainnet selected")
+	default:
+		networkType = "testnet"
+		fmt.Println("   ✓ Testnet selected")
+	}
+
 	// Step 0.3: Ask about TEE node type early
 	var teeNodeType TeeNode
 	var verifierUrl string
@@ -553,10 +570,10 @@ func main() {
 	fmt.Print("   2. Phala Network\n")
 	fmt.Print("   3. Alibaba Cloud\n")
 	fmt.Print("Enter your choice [1-3] (default: 1): ")
-	response, _ := reader.ReadString('\n')
-	choice := strings.TrimSpace(response)
+	teeResponse, _ := reader.ReadString('\n')
+	teeChoice := strings.TrimSpace(teeResponse)
 	
-	switch choice {
+	switch teeChoice {
 	case "2":
 		teeNodeType = TeeNodePhala
 		verifierUrl = "https://github.com/Dstack-TEE/dstack/releases/tag/verifier-v0.5.4"
@@ -662,17 +679,27 @@ func main() {
 		}
 	}
 
-	// Step 1: Load and configure YAML config
-	fmt.Println("\n📋 Step 1: Configuration File Setup")
-	configFile, configPath, yamlConfig, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders)
+	// Step 1: Ask about monitoring services early (before config generation)
+	fmt.Println("\n🌍 Step 1: Environment Configuration")
+	monitoringReader := bufio.NewReader(os.Stdin)
+	fmt.Print("\n📊 Do you want to add monitoring services (Prometheus/Grafana)? [y/N]: ")
+	monitoringResponse, _ := monitoringReader.ReadString('\n')
+	useMonitoring := strings.ToLower(strings.TrimSpace(monitoringResponse)) == "y"
+	if useMonitoring {
+		fmt.Println("   ✓ Monitoring services will be included")
+	}
+
+	// Step 2: Load and configure YAML config (with monitoring setting)
+	fmt.Println("\n📋 Step 2: Configuration File Setup")
+	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Step 2: Environment setup
-	fmt.Println("\n🌍 Step 2: Environment Configuration")
-	deployConfig, err := promptEnvironmentConfig(yamlConfig, deployLLM, teeNodeType)
+	// Step 3: Complete environment setup
+	fmt.Println("\n🌍 Step 3: Additional Environment Configuration")
+	deployConfig, err := promptEnvironmentConfig(deployLLM, teeNodeType, useMonitoring)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error configuring environment: %v\n", err)
 		os.Exit(1)
@@ -682,15 +709,16 @@ func main() {
 	deployConfig.DeployLLM = deployLLM
 	deployConfig.LLMModel = llmModel
 	deployConfig.TeeNode = teeNodeType
+	deployConfig.UseMonitoring = useMonitoring
 
-	// Step 3: Generate deployment files
-	fmt.Println("\n🔧 Step 3: Generating deployment configuration...")
+	// Step 4: Generate deployment files
+	fmt.Println("\n🔧 Step 4: Generating deployment configuration...")
 	if err := generateDeploymentFiles(deployConfig); err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating deployment files: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Step 4: Success summary
+	// Step 5: Success summary
 	printSuccessSummary(deployConfig)
 }
 
@@ -749,13 +777,13 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
-	baseConfigPath := findBaseConfig(originalDir)
+	baseConfigPath := findBaseConfig(originalDir, networkType)
 	if baseConfigPath == "" {
-		return "", "", nil, fmt.Errorf("base config file (config.yml) not found in %s", originalDir)
+		return "", "", nil, fmt.Errorf("base config file (config.%s.yml) not found in %s", networkType, originalDir)
 	}
 
 	// Ask for existing config file
@@ -784,19 +812,17 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 
 	// Use the filename as provided by user (no automatic extension)
 
-	// Ask for mount path in docker-compose
-	fmt.Print("📁 Enter the mount path for the configuration file in docker-compose [default: ./]: ")
-	mountPath, _ := reader.ReadString('\n')
-	mountPath = strings.TrimSpace(mountPath)
+	// Ask for source path in TEE node (where the config file exists in TEE node)
+	fmt.Print("📁 Enter the source path of configuration file in TEE node [default: ./config.yml]: ")
+	fmt.Print("\n   (e.g., ./config.yml, /dstack/user_config): ")
+	teeSourcePath, _ := reader.ReadString('\n')
+	teeSourcePath = strings.TrimSpace(teeSourcePath)
 
-	if mountPath == "" {
-		mountPath = "./"
+	if teeSourcePath == "" {
+		teeSourcePath = "./config.yml"
 	}
 
-	// Ensure mountPath ends with /
-	if !strings.HasSuffix(mountPath, "/") {
-		mountPath += "/"
-	}
+	// Use exactly what the user provides, no automatic extension
 
 	outputPath := configName
 
@@ -824,6 +850,11 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	// Check and prompt for required fields
 	if err := checkAndPromptRequiredFields(config, deployLLM); err != nil {
 		return "", "", nil, fmt.Errorf("error checking required fields: %v", err)
+	}
+
+	// Set monitoring configuration if enabled
+	if useMonitoring {
+		config.Monitor.Enable = true
 	}
 
 	// Add logger configuration for Docker deployment
@@ -855,14 +886,16 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	}
 
 	fmt.Printf("✅ Configuration saved to: %s\n", outputPath)
-	fullMountPath := mountPath + filepath.Base(outputPath)
-	return filepath.Base(outputPath), fullMountPath, config, nil
+	fmt.Printf("   ℹ️  Will be mounted as: %s:/etc/config.yaml in docker-compose\n", teeSourcePath)
+	// Return the local file name and the TEE source path
+	return filepath.Base(outputPath), teeSourcePath, config, nil
 }
 
-func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool, teeNodeType TeeNode) (*DeploymentConfig, error) {
+func promptEnvironmentConfig(deployLLM bool, teeNodeType TeeNode, useMonitoring bool) (*DeploymentConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	config := &DeploymentConfig{}
 	config.TeeNode = teeNodeType // Set the TEE node type from earlier selection
+	config.UseMonitoring = useMonitoring // Set monitoring from earlier selection
 
 	// Ask for Docker Compose project name
 	fmt.Print("\n🏷️  Enter a Docker Compose project name for this deployment (leave empty for default): ")
@@ -916,33 +949,16 @@ func promptEnvironmentConfig(yamlConfig *Config, deployLLM bool, teeNodeType Tee
 		fmt.Println("   ✓ Direct broker access will be configured")
 	}
 
-	// Ask about monitoring services
-	fmt.Print("\n📊 Do you want to add monitoring services (Prometheus/Grafana)? [y/N]: ")
-	response, _ = reader.ReadString('\n')
-	config.UseMonitoring = strings.ToLower(strings.TrimSpace(response)) == "y"
-	if config.UseMonitoring {
-		fmt.Println("   ✓ Monitoring services will be included")
-	}
-
 	// Configure ports based on selected services
-	if err := promptPortConfiguration(config, yamlConfig); err != nil {
+	if err := promptPortConfiguration(config); err != nil {
 		return nil, fmt.Errorf("failed to configure ports: %v", err)
 	}
 
 	return config, nil
 }
 
-func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error {
+func promptPortConfiguration(config *DeploymentConfig) error {
 	reader := bufio.NewReader(os.Stdin)
-
-	// Extract the servingUrl port from the passed config
-	servingPort := "3080" // fallback default
-
-	if yamlConfig != nil {
-		if port := extractPortFromURL(yamlConfig.Service.ServingURL); port != "" {
-			servingPort = port
-		}
-	}
 
 	fmt.Println("\n🔌 Port Configuration")
 	fmt.Println("Configure the host ports for each service:")
@@ -962,17 +978,25 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 		config.Ports.MySQL = response
 	}
 
-	// Configure HTTP port based on whether nginx is used
-	if config.UseNginx {
-		// Set Nginx HTTP port from service.servingUrl (no user input needed)
-		config.Ports.Nginx80 = servingPort
-		fmt.Printf("\n🌐 Nginx Proxy\n")
-		fmt.Printf("   Nginx will proxy requests on port %s\n", servingPort)
+	// Configure HTTP port - ask user for port configuration
+	fmt.Printf("\n🌐 HTTP Service")
+	defaultHTTPPort := "80"
+	fmt.Printf("\n   Enter host port for HTTP service [default: %s]: ", defaultHTTPPort)
+	response, _ = reader.ReadString('\n')
+	response = strings.TrimSpace(response)
+	if response == "" {
+		config.Ports.Nginx80 = defaultHTTPPort
 	} else {
-		// Use servingUrl port for direct broker access (no user input needed)
-		config.Ports.Nginx80 = servingPort
-		fmt.Printf("\n🚀 Direct Broker Access\n")
-		fmt.Printf("   Direct broker access will use port %s\n", servingPort)
+		if err := validatePort(response); err != nil {
+			return fmt.Errorf("invalid HTTP port: %v", err)
+		}
+		config.Ports.Nginx80 = response
+	}
+
+	if config.UseNginx {
+		fmt.Printf("   ✓ Nginx will proxy requests on port %s\n", config.Ports.Nginx80)
+	} else {
+		fmt.Printf("   ✓ Direct broker access will use port %s\n", config.Ports.Nginx80)
 	}
 
 	// Hardhat port (if hardhat TEE node)
@@ -1045,32 +1069,6 @@ func promptPortConfiguration(config *DeploymentConfig, yamlConfig *Config) error
 	return nil
 }
 
-func extractPortFromURL(urlStr string) string {
-	if urlStr == "" {
-		return ""
-	}
-
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return ""
-	}
-
-	// Get port from URL
-	port := parsedURL.Port()
-	if port != "" {
-		return port
-	}
-
-	// If no explicit port, use default based on scheme
-	switch parsedURL.Scheme {
-	case "http":
-		return "80"
-	case "https":
-		return "443"
-	default:
-		return ""
-	}
-}
 
 func validatePort(port string) error {
 	portNum, err := strconv.Atoi(port)
@@ -1182,7 +1180,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	}
 
 	fmt.Printf("\n🔧 Deployment Benefits:\n")
-	fmt.Printf("  • Single file mount: Only %s needs to be mounted\n", config.ConfigFile)
+	fmt.Printf("  • Config mount: %s → /etc/config.yaml (in container)\n", config.ConfigPath)
 	fmt.Printf("  • Environment variables: Static configs via env vars\n")
 	fmt.Printf("  • Auto database init: No manual SQL scripts needed\n")
 	if config.UseNginx {
@@ -1242,14 +1240,18 @@ func printSuccessSummary(config *DeploymentConfig) {
 }
 
 // Helper functions (reuse from config-merger)
-func findBaseConfig(originalDir string) string {
+func findBaseConfig(originalDir string, networkType string) string {
 	possiblePaths := []string{
+		filepath.Join(originalDir, fmt.Sprintf("config.%s.yml", networkType)),
+		fmt.Sprintf("config.%s.yml", networkType), // Also check current directory as fallback
+		// Fallback to generic config.yml if network-specific not found
 		filepath.Join(originalDir, "config.yml"),
-		"config.yml", // Also check current directory as fallback
+		"config.yml",
 	}
 
 	for _, path := range possiblePaths {
 		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("✅ Using base config: %s\n", path)
 			return path
 		}
 	}
