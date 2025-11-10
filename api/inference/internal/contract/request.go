@@ -26,6 +26,7 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 	}
 	
 	// Wait for transaction receipt
+	c.logger.Infof("Settlement transaction submitted with hash: %s", tx.Hash().Hex())
 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
 		return nil, errors.Wrap(err, "wait for receipt")
