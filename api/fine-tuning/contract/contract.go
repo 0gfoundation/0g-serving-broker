@@ -54,7 +54,7 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 		return nil, err
 	}
 
-	ethereumClient, err := client.NewEthereumClient(networkConfig, gasPrice)
+	ethereumClient, err := client.NewEthereumClient(networkConfig, gasPrice, logger)
 	if err != nil {
 		return nil, err
 	}

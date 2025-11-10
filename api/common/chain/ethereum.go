@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/rs/zerolog/log"
 )
 
 // EthereumClient wraps the client and the BlockChain network to interact with an EVM based Blockchain
@@ -18,10 +18,11 @@ type EthereumClient struct {
 	Client   *ethclient.Client
 	Network  BlockchainNetwork
 	GasPrice string
+	logger   log.Logger
 }
 
 // NewEthereumClient returns an instantiated instance of the Ethereum client that has connected to the server
-func NewEthereumClient(network BlockchainNetwork, gasPrice string) (*EthereumClient, error) {
+func NewEthereumClient(network BlockchainNetwork, gasPrice string, logger log.Logger) (*EthereumClient, error) {
 	cl, err := ethclient.Dial(network.URL())
 	if err != nil {
 		return nil, err
@@ -31,6 +32,7 @@ func NewEthereumClient(network BlockchainNetwork, gasPrice string) (*EthereumCli
 		Client:   cl,
 		Network:  network,
 		GasPrice: gasPrice,
+		logger:   logger,
 	}, nil
 }
 
@@ -47,18 +49,18 @@ func (e *EthereumClient) TransactionCallMessage(
 	if err != nil {
 		return nil, err
 	}
-	log.Info().Str("Suggested Gas Price", gasPrice.String())
+	e.logger.Infof("Suggested Gas Price: %s", gasPrice.String())
 	if e.GasPrice != "" {
 		GasPriceConfig, ok := new(big.Int).SetString(e.GasPrice, 10)
 		if !ok {
 			return nil, fmt.Errorf("invalid gas price: %s", e.GasPrice)
 		}
-		log.Info().Str("Config Gas Price", GasPriceConfig.String())
+		e.logger.Infof("Config Gas Price: %s", GasPriceConfig.String())
 		if gasPrice != nil && GasPriceConfig.Cmp(gasPrice) == 1 {
 			gasPrice = GasPriceConfig
 		}
 	}
-	log.Info().Str("Final Gas Price", gasPrice.String())
+	e.logger.Infof("Final Gas Price: %s", gasPrice.String())
 	msg := ethereum.CallMsg{
 		From:     common.HexToAddress(from.Address()),
 		To:       &to,
@@ -67,7 +69,7 @@ func (e *EthereumClient) TransactionCallMessage(
 		Data:     data,
 	}
 	msg.Gas = e.Network.Config().TransactionLimit + e.Network.Config().GasEstimationBuffer
-	log.Debug().Uint64("Gas Limit", e.Network.Config().TransactionLimit).Uint64("Limit + Buffer", msg.Gas)
+	e.logger.Debugf("Gas Limit: %d, Limit + Buffer: %d", e.Network.Config().TransactionLimit, msg.Gas)
 	return &msg, nil
 }
 
@@ -86,6 +88,10 @@ func (e *EthereumClient) TransactionOpts(
 	if err != nil {
 		return nil, err
 	}
+
+	// Log nonce information for debugging
+	e.logger.Infof("Preparing transaction - Address: %s, Nonce: %d", from.Address(), nonce)
+
 	privateKey, err := crypto.HexToECDSA(from.PrivateKey())
 	if err != nil {
 		return nil, fmt.Errorf("invalid private key: %v", err)

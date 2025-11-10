@@ -14,6 +14,7 @@ import (
 
 	client "github.com/0glabs/0g-serving-broker/common/chain"
 	"github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
@@ -40,7 +41,7 @@ type RetryOption struct {
 	MaxGasPrice      *big.Int
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice, maxGasPrice string) (*ServingContract, error) {
+func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice, maxGasPrice string, logger log.Logger) (*ServingContract, error) {
 	var networkConfig client.BlockchainNetwork
 	var err error
 	if network == "hardhat" {
@@ -52,7 +53,7 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 		return nil, err
 	}
 
-	ethereumClient, err := client.NewEthereumClient(networkConfig, gasPrice)
+	ethereumClient, err := client.NewEthereumClient(networkConfig, gasPrice, logger)
 	if err != nil {
 		return nil, err
 	}
