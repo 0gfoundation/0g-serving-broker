@@ -77,7 +77,7 @@ networks:
       - <privateKey>
 
     # Maximum number of transactions to process in parallel
-    transactionLimit: 1000000
+    transactionLimit: 2000000
 
     # Buffer for gas estimation
     gasEstimationBuffer: 10000
