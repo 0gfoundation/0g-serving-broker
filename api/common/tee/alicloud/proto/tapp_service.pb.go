@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.10
 // 	protoc        v3.20.3
-// source: api/common/tee/alicloud/proto/tapp_service.proto
+// source: proto/tapp_service.proto
 
 package proto
 
@@ -57,11 +57,11 @@ func (x LogLevel) String() string {
 }
 
 func (LogLevel) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[0].Descriptor()
+	return file_proto_tapp_service_proto_enumTypes[0].Descriptor()
 }
 
 func (LogLevel) Type() protoreflect.EnumType {
-	return &file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[0]
+	return &file_proto_tapp_service_proto_enumTypes[0]
 }
 
 func (x LogLevel) Number() protoreflect.EnumNumber {
@@ -70,7 +70,7 @@ func (x LogLevel) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LogLevel.Descriptor instead.
 func (LogLevel) EnumDescriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{0}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{0}
 }
 
 type ServiceHealthStatus int32
@@ -106,11 +106,11 @@ func (x ServiceHealthStatus) String() string {
 }
 
 func (ServiceHealthStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[1].Descriptor()
+	return file_proto_tapp_service_proto_enumTypes[1].Descriptor()
 }
 
 func (ServiceHealthStatus) Type() protoreflect.EnumType {
-	return &file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[1]
+	return &file_proto_tapp_service_proto_enumTypes[1]
 }
 
 func (x ServiceHealthStatus) Number() protoreflect.EnumNumber {
@@ -119,7 +119,7 @@ func (x ServiceHealthStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ServiceHealthStatus.Descriptor instead.
 func (ServiceHealthStatus) EnumDescriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{1}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{1}
 }
 
 // Task status for async operations
@@ -159,11 +159,11 @@ func (x TaskStatus) String() string {
 }
 
 func (TaskStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[2].Descriptor()
+	return file_proto_tapp_service_proto_enumTypes[2].Descriptor()
 }
 
 func (TaskStatus) Type() protoreflect.EnumType {
-	return &file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[2]
+	return &file_proto_tapp_service_proto_enumTypes[2]
 }
 
 func (x TaskStatus) Number() protoreflect.EnumNumber {
@@ -172,7 +172,7 @@ func (x TaskStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TaskStatus.Descriptor instead.
 func (TaskStatus) EnumDescriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{2}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{2}
 }
 
 type EvidenceFormat int32
@@ -208,11 +208,11 @@ func (x EvidenceFormat) String() string {
 }
 
 func (EvidenceFormat) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[3].Descriptor()
+	return file_proto_tapp_service_proto_enumTypes[3].Descriptor()
 }
 
 func (EvidenceFormat) Type() protoreflect.EnumType {
-	return &file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes[3]
+	return &file_proto_tapp_service_proto_enumTypes[3]
 }
 
 func (x EvidenceFormat) Number() protoreflect.EnumNumber {
@@ -221,7 +221,7 @@ func (x EvidenceFormat) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EvidenceFormat.Descriptor instead.
 func (EvidenceFormat) EnumDescriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{3}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{3}
 }
 
 // Start App Messages
@@ -236,7 +236,7 @@ type MountFile struct {
 
 func (x *MountFile) Reset() {
 	*x = MountFile{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[0]
+	mi := &file_proto_tapp_service_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -248,7 +248,7 @@ func (x *MountFile) String() string {
 func (*MountFile) ProtoMessage() {}
 
 func (x *MountFile) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[0]
+	mi := &file_proto_tapp_service_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -261,7 +261,7 @@ func (x *MountFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MountFile.ProtoReflect.Descriptor instead.
 func (*MountFile) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{0}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *MountFile) GetSourcePath() string {
@@ -297,7 +297,7 @@ type StartAppRequest struct {
 
 func (x *StartAppRequest) Reset() {
 	*x = StartAppRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[1]
+	mi := &file_proto_tapp_service_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -309,7 +309,7 @@ func (x *StartAppRequest) String() string {
 func (*StartAppRequest) ProtoMessage() {}
 
 func (x *StartAppRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[1]
+	mi := &file_proto_tapp_service_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -322,7 +322,7 @@ func (x *StartAppRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartAppRequest.ProtoReflect.Descriptor instead.
 func (*StartAppRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{1}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *StartAppRequest) GetComposeContent() string {
@@ -365,7 +365,7 @@ type StartAppResponse struct {
 
 func (x *StartAppResponse) Reset() {
 	*x = StartAppResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[2]
+	mi := &file_proto_tapp_service_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -377,7 +377,7 @@ func (x *StartAppResponse) String() string {
 func (*StartAppResponse) ProtoMessage() {}
 
 func (x *StartAppResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[2]
+	mi := &file_proto_tapp_service_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -390,7 +390,7 @@ func (x *StartAppResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartAppResponse.ProtoReflect.Descriptor instead.
 func (*StartAppResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{2}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *StartAppResponse) GetSuccess() bool {
@@ -431,7 +431,7 @@ type GetTaskStatusRequest struct {
 
 func (x *GetTaskStatusRequest) Reset() {
 	*x = GetTaskStatusRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[3]
+	mi := &file_proto_tapp_service_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -443,7 +443,7 @@ func (x *GetTaskStatusRequest) String() string {
 func (*GetTaskStatusRequest) ProtoMessage() {}
 
 func (x *GetTaskStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[3]
+	mi := &file_proto_tapp_service_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -456,7 +456,7 @@ func (x *GetTaskStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTaskStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetTaskStatusRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{3}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetTaskStatusRequest) GetTaskId() string {
@@ -477,7 +477,7 @@ type TaskResult struct {
 
 func (x *TaskResult) Reset() {
 	*x = TaskResult{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[4]
+	mi := &file_proto_tapp_service_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -489,7 +489,7 @@ func (x *TaskResult) String() string {
 func (*TaskResult) ProtoMessage() {}
 
 func (x *TaskResult) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[4]
+	mi := &file_proto_tapp_service_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -502,7 +502,7 @@ func (x *TaskResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskResult.ProtoReflect.Descriptor instead.
 func (*TaskResult) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{4}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *TaskResult) GetAppId() string {
@@ -541,7 +541,7 @@ type GetTaskStatusResponse struct {
 
 func (x *GetTaskStatusResponse) Reset() {
 	*x = GetTaskStatusResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[5]
+	mi := &file_proto_tapp_service_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -553,7 +553,7 @@ func (x *GetTaskStatusResponse) String() string {
 func (*GetTaskStatusResponse) ProtoMessage() {}
 
 func (x *GetTaskStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[5]
+	mi := &file_proto_tapp_service_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -566,7 +566,7 @@ func (x *GetTaskStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTaskStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetTaskStatusResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{5}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetTaskStatusResponse) GetSuccess() bool {
@@ -629,7 +629,7 @@ type ListAppMeasurementsRequest struct {
 
 func (x *ListAppMeasurementsRequest) Reset() {
 	*x = ListAppMeasurementsRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[6]
+	mi := &file_proto_tapp_service_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +641,7 @@ func (x *ListAppMeasurementsRequest) String() string {
 func (*ListAppMeasurementsRequest) ProtoMessage() {}
 
 func (x *ListAppMeasurementsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[6]
+	mi := &file_proto_tapp_service_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +654,7 @@ func (x *ListAppMeasurementsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAppMeasurementsRequest.ProtoReflect.Descriptor instead.
 func (*ListAppMeasurementsRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{6}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ListAppMeasurementsRequest) GetDeployerFilter() string {
@@ -677,7 +677,7 @@ type AppMeasurementInfo struct {
 
 func (x *AppMeasurementInfo) Reset() {
 	*x = AppMeasurementInfo{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[7]
+	mi := &file_proto_tapp_service_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -689,7 +689,7 @@ func (x *AppMeasurementInfo) String() string {
 func (*AppMeasurementInfo) ProtoMessage() {}
 
 func (x *AppMeasurementInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[7]
+	mi := &file_proto_tapp_service_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -702,7 +702,7 @@ func (x *AppMeasurementInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppMeasurementInfo.ProtoReflect.Descriptor instead.
 func (*AppMeasurementInfo) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{7}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *AppMeasurementInfo) GetAppId() string {
@@ -753,7 +753,7 @@ type ListAppMeasurementsResponse struct {
 
 func (x *ListAppMeasurementsResponse) Reset() {
 	*x = ListAppMeasurementsResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[8]
+	mi := &file_proto_tapp_service_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -765,7 +765,7 @@ func (x *ListAppMeasurementsResponse) String() string {
 func (*ListAppMeasurementsResponse) ProtoMessage() {}
 
 func (x *ListAppMeasurementsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[8]
+	mi := &file_proto_tapp_service_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -778,7 +778,7 @@ func (x *ListAppMeasurementsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAppMeasurementsResponse.ProtoReflect.Descriptor instead.
 func (*ListAppMeasurementsResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{8}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListAppMeasurementsResponse) GetSuccess() bool {
@@ -826,7 +826,7 @@ type GetEvidenceRequest struct {
 
 func (x *GetEvidenceRequest) Reset() {
 	*x = GetEvidenceRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[9]
+	mi := &file_proto_tapp_service_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -838,7 +838,7 @@ func (x *GetEvidenceRequest) String() string {
 func (*GetEvidenceRequest) ProtoMessage() {}
 
 func (x *GetEvidenceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[9]
+	mi := &file_proto_tapp_service_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -851,7 +851,7 @@ func (x *GetEvidenceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEvidenceRequest.ProtoReflect.Descriptor instead.
 func (*GetEvidenceRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{9}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetEvidenceRequest) GetReportData() []byte {
@@ -875,7 +875,7 @@ type GetEvidenceResponse struct {
 
 func (x *GetEvidenceResponse) Reset() {
 	*x = GetEvidenceResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[10]
+	mi := &file_proto_tapp_service_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -887,7 +887,7 @@ func (x *GetEvidenceResponse) String() string {
 func (*GetEvidenceResponse) ProtoMessage() {}
 
 func (x *GetEvidenceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[10]
+	mi := &file_proto_tapp_service_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -900,7 +900,7 @@ func (x *GetEvidenceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEvidenceResponse.ProtoReflect.Descriptor instead.
 func (*GetEvidenceResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{10}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetEvidenceResponse) GetSuccess() bool {
@@ -951,7 +951,7 @@ type GetAppKeyRequest struct {
 
 func (x *GetAppKeyRequest) Reset() {
 	*x = GetAppKeyRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[11]
+	mi := &file_proto_tapp_service_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -963,7 +963,7 @@ func (x *GetAppKeyRequest) String() string {
 func (*GetAppKeyRequest) ProtoMessage() {}
 
 func (x *GetAppKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[11]
+	mi := &file_proto_tapp_service_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -976,7 +976,7 @@ func (x *GetAppKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAppKeyRequest.ProtoReflect.Descriptor instead.
 func (*GetAppKeyRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{11}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetAppKeyRequest) GetAppId() string {
@@ -1023,7 +1023,7 @@ type GetAppKeyResponse struct {
 
 func (x *GetAppKeyResponse) Reset() {
 	*x = GetAppKeyResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[12]
+	mi := &file_proto_tapp_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1035,7 +1035,7 @@ func (x *GetAppKeyResponse) String() string {
 func (*GetAppKeyResponse) ProtoMessage() {}
 
 func (x *GetAppKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[12]
+	mi := &file_proto_tapp_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1048,7 +1048,7 @@ func (x *GetAppKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAppKeyResponse.ProtoReflect.Descriptor instead.
 func (*GetAppKeyResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{12}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetAppKeyResponse) GetSuccess() bool {
@@ -1092,14 +1092,14 @@ type GetAppSecretKeyRequest struct {
 	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"` // Application identifier
 	Nonce         string                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`              // Random nonce (prevents replay attacks)
 	Timestamp     int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`     // Request timestamp (unix timestamp in seconds)
-	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`      // Deployer's signature over (app_id || nonce || timestamp)
+	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`      // Deployer's signature over (app_id || nonce ||
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetAppSecretKeyRequest) Reset() {
 	*x = GetAppSecretKeyRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[13]
+	mi := &file_proto_tapp_service_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1111,7 +1111,7 @@ func (x *GetAppSecretKeyRequest) String() string {
 func (*GetAppSecretKeyRequest) ProtoMessage() {}
 
 func (x *GetAppSecretKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[13]
+	mi := &file_proto_tapp_service_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1124,7 +1124,7 @@ func (x *GetAppSecretKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAppSecretKeyRequest.ProtoReflect.Descriptor instead.
 func (*GetAppSecretKeyRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{13}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetAppSecretKeyRequest) GetAppId() string {
@@ -1169,7 +1169,7 @@ type GetAppSecretKeyResponse struct {
 
 func (x *GetAppSecretKeyResponse) Reset() {
 	*x = GetAppSecretKeyResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[14]
+	mi := &file_proto_tapp_service_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1181,7 +1181,7 @@ func (x *GetAppSecretKeyResponse) String() string {
 func (*GetAppSecretKeyResponse) ProtoMessage() {}
 
 func (x *GetAppSecretKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[14]
+	mi := &file_proto_tapp_service_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1194,7 +1194,7 @@ func (x *GetAppSecretKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAppSecretKeyResponse.ProtoReflect.Descriptor instead.
 func (*GetAppSecretKeyResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{14}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetAppSecretKeyResponse) GetSuccess() bool {
@@ -1232,6 +1232,126 @@ func (x *GetAppSecretKeyResponse) GetEthAddress() []byte {
 	return nil
 }
 
+type GetAppInfoRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAppInfoRequest) Reset() {
+	*x = GetAppInfoRequest{}
+	mi := &file_proto_tapp_service_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAppInfoRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAppInfoRequest) ProtoMessage() {}
+
+func (x *GetAppInfoRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_tapp_service_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAppInfoRequest.ProtoReflect.Descriptor instead.
+func (*GetAppInfoRequest) Descriptor() ([]byte, []int) {
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GetAppInfoRequest) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+type GetAppInfoResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Success        bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message        string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	AppId          string                 `protobuf:"bytes,3,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	ComposeContent string                 `protobuf:"bytes,5,opt,name=compose_content,json=composeContent,proto3" json:"compose_content,omitempty"`
+	VolumesContent string                 `protobuf:"bytes,6,opt,name=volumes_content,json=volumesContent,proto3" json:"volumes_content,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GetAppInfoResponse) Reset() {
+	*x = GetAppInfoResponse{}
+	mi := &file_proto_tapp_service_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAppInfoResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAppInfoResponse) ProtoMessage() {}
+
+func (x *GetAppInfoResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_tapp_service_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAppInfoResponse.ProtoReflect.Descriptor instead.
+func (*GetAppInfoResponse) Descriptor() ([]byte, []int) {
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetAppInfoResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *GetAppInfoResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *GetAppInfoResponse) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *GetAppInfoResponse) GetComposeContent() string {
+	if x != nil {
+		return x.ComposeContent
+	}
+	return ""
+}
+
+func (x *GetAppInfoResponse) GetVolumesContent() string {
+	if x != nil {
+		return x.VolumesContent
+	}
+	return ""
+}
+
 // Service Status Messages
 type GetServiceStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1242,7 +1362,7 @@ type GetServiceStatusRequest struct {
 
 func (x *GetServiceStatusRequest) Reset() {
 	*x = GetServiceStatusRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[15]
+	mi := &file_proto_tapp_service_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1254,7 +1374,7 @@ func (x *GetServiceStatusRequest) String() string {
 func (*GetServiceStatusRequest) ProtoMessage() {}
 
 func (x *GetServiceStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[15]
+	mi := &file_proto_tapp_service_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1267,7 +1387,7 @@ func (x *GetServiceStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetServiceStatusRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{15}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GetServiceStatusRequest) GetServiceName() string {
@@ -1297,7 +1417,7 @@ type ServiceInfo struct {
 
 func (x *ServiceInfo) Reset() {
 	*x = ServiceInfo{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[16]
+	mi := &file_proto_tapp_service_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1309,7 +1429,7 @@ func (x *ServiceInfo) String() string {
 func (*ServiceInfo) ProtoMessage() {}
 
 func (x *ServiceInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[16]
+	mi := &file_proto_tapp_service_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1322,7 +1442,7 @@ func (x *ServiceInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceInfo.ProtoReflect.Descriptor instead.
 func (*ServiceInfo) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{16}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ServiceInfo) GetName() string {
@@ -1417,7 +1537,7 @@ type GetServiceStatusResponse struct {
 
 func (x *GetServiceStatusResponse) Reset() {
 	*x = GetServiceStatusResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[17]
+	mi := &file_proto_tapp_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1429,7 +1549,7 @@ func (x *GetServiceStatusResponse) String() string {
 func (*GetServiceStatusResponse) ProtoMessage() {}
 
 func (x *GetServiceStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[17]
+	mi := &file_proto_tapp_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1442,7 +1562,7 @@ func (x *GetServiceStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetServiceStatusResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{17}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GetServiceStatusResponse) GetSuccess() bool {
@@ -1503,7 +1623,7 @@ type GetServiceLogsRequest struct {
 
 func (x *GetServiceLogsRequest) Reset() {
 	*x = GetServiceLogsRequest{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[18]
+	mi := &file_proto_tapp_service_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1515,7 +1635,7 @@ func (x *GetServiceLogsRequest) String() string {
 func (*GetServiceLogsRequest) ProtoMessage() {}
 
 func (x *GetServiceLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[18]
+	mi := &file_proto_tapp_service_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1528,7 +1648,7 @@ func (x *GetServiceLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceLogsRequest.ProtoReflect.Descriptor instead.
 func (*GetServiceLogsRequest) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{18}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *GetServiceLogsRequest) GetServiceName() string {
@@ -1593,7 +1713,7 @@ type LogEntry struct {
 
 func (x *LogEntry) Reset() {
 	*x = LogEntry{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[19]
+	mi := &file_proto_tapp_service_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1605,7 +1725,7 @@ func (x *LogEntry) String() string {
 func (*LogEntry) ProtoMessage() {}
 
 func (x *LogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[19]
+	mi := &file_proto_tapp_service_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1618,7 +1738,7 @@ func (x *LogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
 func (*LogEntry) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{19}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *LogEntry) GetTimestamp() string {
@@ -1669,7 +1789,7 @@ type GetServiceLogsResponse struct {
 
 func (x *GetServiceLogsResponse) Reset() {
 	*x = GetServiceLogsResponse{}
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[20]
+	mi := &file_proto_tapp_service_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1681,7 +1801,7 @@ func (x *GetServiceLogsResponse) String() string {
 func (*GetServiceLogsResponse) ProtoMessage() {}
 
 func (x *GetServiceLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes[20]
+	mi := &file_proto_tapp_service_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1694,7 +1814,7 @@ func (x *GetServiceLogsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceLogsResponse.ProtoReflect.Descriptor instead.
 func (*GetServiceLogsResponse) Descriptor() ([]byte, []int) {
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP(), []int{20}
+	return file_proto_tapp_service_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *GetServiceLogsResponse) GetSuccess() bool {
@@ -1732,11 +1852,11 @@ func (x *GetServiceLogsResponse) GetTruncated() bool {
 	return false
 }
 
-var File_api_common_tee_alicloud_proto_tapp_service_proto protoreflect.FileDescriptor
+var File_proto_tapp_service_proto protoreflect.FileDescriptor
 
-const file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc = "" +
+const file_proto_tapp_service_proto_rawDesc = "" +
 	"\n" +
-	"0api/common/tee/alicloud/proto/tapp_service.proto\x12\ftapp_service\"Z\n" +
+	"\x18proto/tapp_service.proto\x12\ftapp_service\"Z\n" +
 	"\tMountFile\x12\x1f\n" +
 	"\vsource_path\x18\x01 \x01(\tR\n" +
 	"sourcePath\x12\x18\n" +
@@ -1821,7 +1941,15 @@ const file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc = "" +
 	"\n" +
 	"public_key\x18\x04 \x01(\fR\tpublicKey\x12\x1f\n" +
 	"\veth_address\x18\x05 \x01(\fR\n" +
-	"ethAddress\"<\n" +
+	"ethAddress\"*\n" +
+	"\x11GetAppInfoRequest\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\"\xb1\x01\n" +
+	"\x12GetAppInfoResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12\x15\n" +
+	"\x06app_id\x18\x03 \x01(\tR\x05appId\x12'\n" +
+	"\x0fcompose_content\x18\x05 \x01(\tR\x0ecomposeContent\x12'\n" +
+	"\x0fvolumes_content\x18\x06 \x01(\tR\x0evolumesContent\"<\n" +
 	"\x17GetServiceStatusRequest\x12!\n" +
 	"\fservice_name\x18\x01 \x01(\tR\vserviceName\"\x9f\x03\n" +
 	"\vServiceInfo\x12\x12\n" +
@@ -1888,32 +2016,34 @@ const file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc = "" +
 	"\x0eEvidenceFormat\x12\r\n" +
 	"\tRAW_QUOTE\x10\x00\x12\x11\n" +
 	"\rJSON_EVIDENCE\x10\x01\x12\x16\n" +
-	"\x12COMPOSITE_EVIDENCE\x10\x022\xe0\x05\n" +
+	"\x12COMPOSITE_EVIDENCE\x10\x022\xb1\x06\n" +
 	"\vTappService\x12I\n" +
 	"\bStartApp\x12\x1d.tapp_service.StartAppRequest\x1a\x1e.tapp_service.StartAppResponse\x12X\n" +
 	"\rGetTaskStatus\x12\".tapp_service.GetTaskStatusRequest\x1a#.tapp_service.GetTaskStatusResponse\x12j\n" +
 	"\x13ListAppMeasurements\x12(.tapp_service.ListAppMeasurementsRequest\x1a).tapp_service.ListAppMeasurementsResponse\x12R\n" +
 	"\vGetEvidence\x12 .tapp_service.GetEvidenceRequest\x1a!.tapp_service.GetEvidenceResponse\x12L\n" +
 	"\tGetAppKey\x12\x1e.tapp_service.GetAppKeyRequest\x1a\x1f.tapp_service.GetAppKeyResponse\x12^\n" +
-	"\x0fGetAppSecretKey\x12$.tapp_service.GetAppSecretKeyRequest\x1a%.tapp_service.GetAppSecretKeyResponse\x12a\n" +
+	"\x0fGetAppSecretKey\x12$.tapp_service.GetAppSecretKeyRequest\x1a%.tapp_service.GetAppSecretKeyResponse\x12O\n" +
+	"\n" +
+	"GetAppInfo\x12\x1f.tapp_service.GetAppInfoRequest\x1a .tapp_service.GetAppInfoResponse\x12a\n" +
 	"\x10GetServiceStatus\x12%.tapp_service.GetServiceStatusRequest\x1a&.tapp_service.GetServiceStatusResponse\x12[\n" +
 	"\x0eGetServiceLogs\x12#.tapp_service.GetServiceLogsRequest\x1a$.tapp_service.GetServiceLogsResponseB?Z=github.com/0glabs/0g-serving-broker/common/tee/alicloud/protob\x06proto3"
 
 var (
-	file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescOnce sync.Once
-	file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescData []byte
+	file_proto_tapp_service_proto_rawDescOnce sync.Once
+	file_proto_tapp_service_proto_rawDescData []byte
 )
 
-func file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescGZIP() []byte {
-	file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescOnce.Do(func() {
-		file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc), len(file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc)))
+func file_proto_tapp_service_proto_rawDescGZIP() []byte {
+	file_proto_tapp_service_proto_rawDescOnce.Do(func() {
+		file_proto_tapp_service_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_tapp_service_proto_rawDesc), len(file_proto_tapp_service_proto_rawDesc)))
 	})
-	return file_api_common_tee_alicloud_proto_tapp_service_proto_rawDescData
+	return file_proto_tapp_service_proto_rawDescData
 }
 
-var file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
-var file_api_common_tee_alicloud_proto_tapp_service_proto_goTypes = []any{
+var file_proto_tapp_service_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_proto_tapp_service_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_proto_tapp_service_proto_goTypes = []any{
 	(LogLevel)(0),                       // 0: tapp_service.LogLevel
 	(ServiceHealthStatus)(0),            // 1: tapp_service.ServiceHealthStatus
 	(TaskStatus)(0),                     // 2: tapp_service.TaskStatus
@@ -1933,69 +2063,73 @@ var file_api_common_tee_alicloud_proto_tapp_service_proto_goTypes = []any{
 	(*GetAppKeyResponse)(nil),           // 16: tapp_service.GetAppKeyResponse
 	(*GetAppSecretKeyRequest)(nil),      // 17: tapp_service.GetAppSecretKeyRequest
 	(*GetAppSecretKeyResponse)(nil),     // 18: tapp_service.GetAppSecretKeyResponse
-	(*GetServiceStatusRequest)(nil),     // 19: tapp_service.GetServiceStatusRequest
-	(*ServiceInfo)(nil),                 // 20: tapp_service.ServiceInfo
-	(*GetServiceStatusResponse)(nil),    // 21: tapp_service.GetServiceStatusResponse
-	(*GetServiceLogsRequest)(nil),       // 22: tapp_service.GetServiceLogsRequest
-	(*LogEntry)(nil),                    // 23: tapp_service.LogEntry
-	(*GetServiceLogsResponse)(nil),      // 24: tapp_service.GetServiceLogsResponse
-	nil,                                 // 25: tapp_service.LogEntry.MetadataEntry
+	(*GetAppInfoRequest)(nil),           // 19: tapp_service.GetAppInfoRequest
+	(*GetAppInfoResponse)(nil),          // 20: tapp_service.GetAppInfoResponse
+	(*GetServiceStatusRequest)(nil),     // 21: tapp_service.GetServiceStatusRequest
+	(*ServiceInfo)(nil),                 // 22: tapp_service.ServiceInfo
+	(*GetServiceStatusResponse)(nil),    // 23: tapp_service.GetServiceStatusResponse
+	(*GetServiceLogsRequest)(nil),       // 24: tapp_service.GetServiceLogsRequest
+	(*LogEntry)(nil),                    // 25: tapp_service.LogEntry
+	(*GetServiceLogsResponse)(nil),      // 26: tapp_service.GetServiceLogsResponse
+	nil,                                 // 27: tapp_service.LogEntry.MetadataEntry
 }
-var file_api_common_tee_alicloud_proto_tapp_service_proto_depIdxs = []int32{
+var file_proto_tapp_service_proto_depIdxs = []int32{
 	4,  // 0: tapp_service.StartAppRequest.mount_files:type_name -> tapp_service.MountFile
 	2,  // 1: tapp_service.GetTaskStatusResponse.status:type_name -> tapp_service.TaskStatus
 	8,  // 2: tapp_service.GetTaskStatusResponse.result:type_name -> tapp_service.TaskResult
 	11, // 3: tapp_service.ListAppMeasurementsResponse.measurements:type_name -> tapp_service.AppMeasurementInfo
 	1,  // 4: tapp_service.ServiceInfo.status:type_name -> tapp_service.ServiceHealthStatus
-	20, // 5: tapp_service.GetServiceStatusResponse.services:type_name -> tapp_service.ServiceInfo
+	22, // 5: tapp_service.GetServiceStatusResponse.services:type_name -> tapp_service.ServiceInfo
 	0,  // 6: tapp_service.GetServiceLogsRequest.min_level:type_name -> tapp_service.LogLevel
 	0,  // 7: tapp_service.LogEntry.level:type_name -> tapp_service.LogLevel
-	25, // 8: tapp_service.LogEntry.metadata:type_name -> tapp_service.LogEntry.MetadataEntry
-	23, // 9: tapp_service.GetServiceLogsResponse.logs:type_name -> tapp_service.LogEntry
+	27, // 8: tapp_service.LogEntry.metadata:type_name -> tapp_service.LogEntry.MetadataEntry
+	25, // 9: tapp_service.GetServiceLogsResponse.logs:type_name -> tapp_service.LogEntry
 	5,  // 10: tapp_service.TappService.StartApp:input_type -> tapp_service.StartAppRequest
 	7,  // 11: tapp_service.TappService.GetTaskStatus:input_type -> tapp_service.GetTaskStatusRequest
 	10, // 12: tapp_service.TappService.ListAppMeasurements:input_type -> tapp_service.ListAppMeasurementsRequest
 	13, // 13: tapp_service.TappService.GetEvidence:input_type -> tapp_service.GetEvidenceRequest
 	15, // 14: tapp_service.TappService.GetAppKey:input_type -> tapp_service.GetAppKeyRequest
 	17, // 15: tapp_service.TappService.GetAppSecretKey:input_type -> tapp_service.GetAppSecretKeyRequest
-	19, // 16: tapp_service.TappService.GetServiceStatus:input_type -> tapp_service.GetServiceStatusRequest
-	22, // 17: tapp_service.TappService.GetServiceLogs:input_type -> tapp_service.GetServiceLogsRequest
-	6,  // 18: tapp_service.TappService.StartApp:output_type -> tapp_service.StartAppResponse
-	9,  // 19: tapp_service.TappService.GetTaskStatus:output_type -> tapp_service.GetTaskStatusResponse
-	12, // 20: tapp_service.TappService.ListAppMeasurements:output_type -> tapp_service.ListAppMeasurementsResponse
-	14, // 21: tapp_service.TappService.GetEvidence:output_type -> tapp_service.GetEvidenceResponse
-	16, // 22: tapp_service.TappService.GetAppKey:output_type -> tapp_service.GetAppKeyResponse
-	18, // 23: tapp_service.TappService.GetAppSecretKey:output_type -> tapp_service.GetAppSecretKeyResponse
-	21, // 24: tapp_service.TappService.GetServiceStatus:output_type -> tapp_service.GetServiceStatusResponse
-	24, // 25: tapp_service.TappService.GetServiceLogs:output_type -> tapp_service.GetServiceLogsResponse
-	18, // [18:26] is the sub-list for method output_type
-	10, // [10:18] is the sub-list for method input_type
+	19, // 16: tapp_service.TappService.GetAppInfo:input_type -> tapp_service.GetAppInfoRequest
+	21, // 17: tapp_service.TappService.GetServiceStatus:input_type -> tapp_service.GetServiceStatusRequest
+	24, // 18: tapp_service.TappService.GetServiceLogs:input_type -> tapp_service.GetServiceLogsRequest
+	6,  // 19: tapp_service.TappService.StartApp:output_type -> tapp_service.StartAppResponse
+	9,  // 20: tapp_service.TappService.GetTaskStatus:output_type -> tapp_service.GetTaskStatusResponse
+	12, // 21: tapp_service.TappService.ListAppMeasurements:output_type -> tapp_service.ListAppMeasurementsResponse
+	14, // 22: tapp_service.TappService.GetEvidence:output_type -> tapp_service.GetEvidenceResponse
+	16, // 23: tapp_service.TappService.GetAppKey:output_type -> tapp_service.GetAppKeyResponse
+	18, // 24: tapp_service.TappService.GetAppSecretKey:output_type -> tapp_service.GetAppSecretKeyResponse
+	20, // 25: tapp_service.TappService.GetAppInfo:output_type -> tapp_service.GetAppInfoResponse
+	23, // 26: tapp_service.TappService.GetServiceStatus:output_type -> tapp_service.GetServiceStatusResponse
+	26, // 27: tapp_service.TappService.GetServiceLogs:output_type -> tapp_service.GetServiceLogsResponse
+	19, // [19:28] is the sub-list for method output_type
+	10, // [10:19] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
 	10, // [10:10] is the sub-list for extension extendee
 	0,  // [0:10] is the sub-list for field type_name
 }
 
-func init() { file_api_common_tee_alicloud_proto_tapp_service_proto_init() }
-func file_api_common_tee_alicloud_proto_tapp_service_proto_init() {
-	if File_api_common_tee_alicloud_proto_tapp_service_proto != nil {
+func init() { file_proto_tapp_service_proto_init() }
+func file_proto_tapp_service_proto_init() {
+	if File_proto_tapp_service_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc), len(file_api_common_tee_alicloud_proto_tapp_service_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_tapp_service_proto_rawDesc), len(file_proto_tapp_service_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   22,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_api_common_tee_alicloud_proto_tapp_service_proto_goTypes,
-		DependencyIndexes: file_api_common_tee_alicloud_proto_tapp_service_proto_depIdxs,
-		EnumInfos:         file_api_common_tee_alicloud_proto_tapp_service_proto_enumTypes,
-		MessageInfos:      file_api_common_tee_alicloud_proto_tapp_service_proto_msgTypes,
+		GoTypes:           file_proto_tapp_service_proto_goTypes,
+		DependencyIndexes: file_proto_tapp_service_proto_depIdxs,
+		EnumInfos:         file_proto_tapp_service_proto_enumTypes,
+		MessageInfos:      file_proto_tapp_service_proto_msgTypes,
 	}.Build()
-	File_api_common_tee_alicloud_proto_tapp_service_proto = out.File
-	file_api_common_tee_alicloud_proto_tapp_service_proto_goTypes = nil
-	file_api_common_tee_alicloud_proto_tapp_service_proto_depIdxs = nil
+	File_proto_tapp_service_proto = out.File
+	file_proto_tapp_service_proto_goTypes = nil
+	file_proto_tapp_service_proto_depIdxs = nil
 }

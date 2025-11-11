@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v3.20.3
-// source: api/common/tee/alicloud/proto/tapp_service.proto
+// source: proto/tapp_service.proto
 
 package proto
 
@@ -25,6 +25,7 @@ const (
 	TappService_GetEvidence_FullMethodName         = "/tapp_service.TappService/GetEvidence"
 	TappService_GetAppKey_FullMethodName           = "/tapp_service.TappService/GetAppKey"
 	TappService_GetAppSecretKey_FullMethodName     = "/tapp_service.TappService/GetAppSecretKey"
+	TappService_GetAppInfo_FullMethodName          = "/tapp_service.TappService/GetAppInfo"
 	TappService_GetServiceStatus_FullMethodName    = "/tapp_service.TappService/GetServiceStatus"
 	TappService_GetServiceLogs_FullMethodName      = "/tapp_service.TappService/GetServiceLogs"
 )
@@ -47,6 +48,8 @@ type TappServiceClient interface {
 	GetAppKey(ctx context.Context, in *GetAppKeyRequest, opts ...grpc.CallOption) (*GetAppKeyResponse, error)
 	// Get application secret key (private key) - local access only
 	GetAppSecretKey(ctx context.Context, in *GetAppSecretKeyRequest, opts ...grpc.CallOption) (*GetAppSecretKeyResponse, error)
+	// Get application information
+	GetAppInfo(ctx context.Context, in *GetAppInfoRequest, opts ...grpc.CallOption) (*GetAppInfoResponse, error)
 	// Get service status and health information
 	GetServiceStatus(ctx context.Context, in *GetServiceStatusRequest, opts ...grpc.CallOption) (*GetServiceStatusResponse, error)
 	// Get service logs with filtering options
@@ -121,6 +124,16 @@ func (c *tappServiceClient) GetAppSecretKey(ctx context.Context, in *GetAppSecre
 	return out, nil
 }
 
+func (c *tappServiceClient) GetAppInfo(ctx context.Context, in *GetAppInfoRequest, opts ...grpc.CallOption) (*GetAppInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAppInfoResponse)
+	err := c.cc.Invoke(ctx, TappService_GetAppInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *tappServiceClient) GetServiceStatus(ctx context.Context, in *GetServiceStatusRequest, opts ...grpc.CallOption) (*GetServiceStatusResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetServiceStatusResponse)
@@ -159,6 +172,8 @@ type TappServiceServer interface {
 	GetAppKey(context.Context, *GetAppKeyRequest) (*GetAppKeyResponse, error)
 	// Get application secret key (private key) - local access only
 	GetAppSecretKey(context.Context, *GetAppSecretKeyRequest) (*GetAppSecretKeyResponse, error)
+	// Get application information
+	GetAppInfo(context.Context, *GetAppInfoRequest) (*GetAppInfoResponse, error)
 	// Get service status and health information
 	GetServiceStatus(context.Context, *GetServiceStatusRequest) (*GetServiceStatusResponse, error)
 	// Get service logs with filtering options
@@ -190,6 +205,9 @@ func (UnimplementedTappServiceServer) GetAppKey(context.Context, *GetAppKeyReque
 }
 func (UnimplementedTappServiceServer) GetAppSecretKey(context.Context, *GetAppSecretKeyRequest) (*GetAppSecretKeyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetAppSecretKey not implemented")
+}
+func (UnimplementedTappServiceServer) GetAppInfo(context.Context, *GetAppInfoRequest) (*GetAppInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAppInfo not implemented")
 }
 func (UnimplementedTappServiceServer) GetServiceStatus(context.Context, *GetServiceStatusRequest) (*GetServiceStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetServiceStatus not implemented")
@@ -326,6 +344,24 @@ func _TappService_GetAppSecretKey_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TappService_GetAppInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAppInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TappServiceServer).GetAppInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TappService_GetAppInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TappServiceServer).GetAppInfo(ctx, req.(*GetAppInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TappService_GetServiceStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetServiceStatusRequest)
 	if err := dec(in); err != nil {
@@ -394,6 +430,10 @@ var TappService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _TappService_GetAppSecretKey_Handler,
 		},
 		{
+			MethodName: "GetAppInfo",
+			Handler:    _TappService_GetAppInfo_Handler,
+		},
+		{
 			MethodName: "GetServiceStatus",
 			Handler:    _TappService_GetServiceStatus_Handler,
 		},
@@ -403,5 +443,5 @@ var TappService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "api/common/tee/alicloud/proto/tapp_service.proto",
+	Metadata: "proto/tapp_service.proto",
 }
