@@ -22,8 +22,8 @@ import (
 // @Param       Session-Signature header string true "Signature of the session token"
 // @Param       component          query  string false "Component name (broker/event), default: both"
 // @Success     200 {object} map[string]interface{} "List of log files"
-// @Failure     401 {object} errors.Error "Unauthorized"
-// @Failure     500 {object} errors.Error "Internal server error"
+// @Failure     401 {object} map[string]string "Unauthorized"
+// @Failure     500 {object} map[string]string "Internal server error"
 // @Router      /logs [get]
 func (h *Handler) ListLogs(ctx *gin.Context) {
 	// Validate provider authentication
@@ -122,10 +122,10 @@ func (h *Handler) getComponentLogs(component string) []map[string]interface{} {
 // @Param       component          path   string true "Component name (broker/event)"
 // @Param       filename           path   string true "Log file name"
 // @Success     200 {file} binary "Log file content"
-// @Failure     400 {object} errors.Error "Invalid component or filename"
-// @Failure     401 {object} errors.Error "Unauthorized"
-// @Failure     404 {object} errors.Error "Log file not found"
-// @Failure     500 {object} errors.Error "Internal server error"
+// @Failure     400 {object} map[string]string "Invalid component or filename"
+// @Failure     401 {object} map[string]string "Unauthorized"
+// @Failure     404 {object} map[string]string "Log file not found"
+// @Failure     500 {object} map[string]string "Internal server error"
 // @Router      /logs/{component}/{filename} [get]
 func (h *Handler) GetLogFile(ctx *gin.Context) {
 	// Validate provider authentication

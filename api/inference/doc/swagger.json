@@ -9,6 +9,167 @@
     "host": "localhost:3080",
     "basePath": "/v1",
     "paths": {
+        "/logs": {
+            "get": {
+                "description": "Provider can list all available log files using signature authentication",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "logs"
+                ],
+                "summary": "List available log files",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider's address",
+                        "name": "Address",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "JSON session token with address, provider, timestamp, expiresAt, nonce",
+                        "name": "Session-Token",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Signature of the session token",
+                        "name": "Session-Signature",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Component name (broker/event), default: both",
+                        "name": "component",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "List of log files",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/logs/{component}/{filename}": {
+            "get": {
+                "description": "Provider can download a specific log file using signature authentication",
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "logs"
+                ],
+                "summary": "Download a specific log file",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider's address",
+                        "name": "Address",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "JSON session token with address, provider, timestamp, expiresAt, nonce",
+                        "name": "Session-Token",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Signature of the session token",
+                        "name": "Session-Signature",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Component name (broker/event)",
+                        "name": "component",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Log file name",
+                        "name": "filename",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Log file content",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid component or filename",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Log file not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/quote": {
             "get": {
                 "description": "This endpoint allows you to get a quote",

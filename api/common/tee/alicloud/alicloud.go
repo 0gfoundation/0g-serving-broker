@@ -1,3 +1,5 @@
+//go:generate protoc --go_out=../../../ --go-grpc_out=../../../ --go_opt=module=github.com/0glabs/0g-serving-broker --go-grpc_opt=module=github.com/0glabs/0g-serving-broker proto/tapp_service.proto
+
 package alicloud
 
 import (
