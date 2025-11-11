@@ -149,6 +149,117 @@ info:
   title: 0G Serving Provider Broker API
   version: 0.1.0
 paths:
+  /logs:
+    get:
+      description: Provider can list all available log files using signature authentication
+      parameters:
+      - description: Provider's address
+        in: header
+        name: Address
+        required: true
+        type: string
+      - description: JSON session token with address, provider, timestamp, expiresAt,
+          nonce
+        in: header
+        name: Session-Token
+        required: true
+        type: string
+      - description: Signature of the session token
+        in: header
+        name: Session-Signature
+        required: true
+        type: string
+      - description: 'Component name (broker/event), default: both'
+        in: query
+        name: component
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of log files
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List available log files
+      tags:
+      - logs
+  /logs/{component}/{filename}:
+    get:
+      description: Provider can download a specific log file using signature authentication
+      parameters:
+      - description: Provider's address
+        in: header
+        name: Address
+        required: true
+        type: string
+      - description: JSON session token with address, provider, timestamp, expiresAt,
+          nonce
+        in: header
+        name: Session-Token
+        required: true
+        type: string
+      - description: Signature of the session token
+        in: header
+        name: Session-Signature
+        required: true
+        type: string
+      - description: Component name (broker/event)
+        in: path
+        name: component
+        required: true
+        type: string
+      - description: Log file name
+        in: path
+        name: filename
+        required: true
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: Log file content
+          schema:
+            type: file
+        "400":
+          description: Invalid component or filename
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Log file not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Download a specific log file
+      tags:
+      - logs
   /quote:
     get:
       description: This endpoint allows you to get a quote

@@ -25,6 +25,9 @@ service TappService {
   // Get application secret key (private key) - local access only
   rpc GetAppSecretKey(GetAppSecretKeyRequest) returns (GetAppSecretKeyResponse);
 
+  // Get application information
+  rpc GetAppInfo(GetAppInfoRequest) returns (GetAppInfoResponse);
+
   // Get service status and health information
   rpc GetServiceStatus(GetServiceStatusRequest)
       returns (GetServiceStatusResponse);
@@ -48,10 +51,10 @@ enum ServiceHealthStatus {
 
 // Task status for async operations
 enum TaskStatus {
-  PENDING = 0;     // Task is queued but not started
-  RUNNING = 1;     // Task is currently running
-  COMPLETED = 2;   // Task completed successfully
-  FAILED = 3;      // Task failed with error
+  PENDING = 0;    // Task is queued but not started
+  RUNNING = 1;    // Task is currently running
+  COMPLETED = 2;  // Task completed successfully
+  FAILED = 3;     // Task failed with error
 }
 
 enum EvidenceFormat {
@@ -88,9 +91,9 @@ message GetTaskStatusRequest {
 }
 
 message TaskResult {
-  string app_id = 1;    // Application identifier (on success)
-  bytes deployer = 2;   // 32 bytes deployer public key (on success)
-  string error = 3;     // Error message (on failure)
+  string app_id = 1;   // Application identifier (on success)
+  bytes deployer = 2;  // 32 bytes deployer public key (on success)
+  string error = 3;    // Error message (on failure)
 }
 
 message GetTaskStatusResponse {
@@ -121,8 +124,8 @@ message ListAppMeasurementsResponse {
   bool success = 1;
   string message = 2;
   repeated AppMeasurementInfo measurements = 3;
-  int32 total_count = 4;       // Total number of measurements
-  string hash_algorithm = 5;   // Hash algorithm used globally (e.g., "sha256")
+  int32 total_count = 4;      // Total number of measurements
+  string hash_algorithm = 5;  // Hash algorithm used globally (e.g., "sha256")
 }
 
 // Get Evidence Messages
@@ -164,11 +167,11 @@ message GetAppKeyResponse {
 
 // Get App Secret Key Messages (local access only)
 message GetAppSecretKeyRequest {
-  string app_id = 1;      // Application identifier
-  string nonce = 2;       // Random nonce (prevents replay attacks)
-  int64 timestamp = 3;    // Request timestamp (unix timestamp in seconds)
-  bytes signature = 4;    // Deployer's signature over (app_id || nonce || timestamp)
-                          // Must be signed by the app's deployer
+  string app_id = 1;    // Application identifier
+  string nonce = 2;     // Random nonce (prevents replay attacks)
+  int64 timestamp = 3;  // Request timestamp (unix timestamp in seconds)
+  bytes signature = 4;  // Deployer's signature over (app_id || nonce ||
+                        // timestamp) Must be signed by the app's deployer
 }
 
 message GetAppSecretKeyResponse {
@@ -179,6 +182,19 @@ message GetAppSecretKeyResponse {
   bytes private_key = 3;  // Private key bytes (32 bytes for Ethereum)
   bytes public_key = 4;   // Public key bytes (for verification)
   bytes eth_address = 5;  // Ethereum address (if applicable)
+}
+
+message GetAppInfoRequest {
+  string app_id = 1;
+}
+
+message GetAppInfoResponse {
+  bool success = 1;
+  string message = 2;
+
+  string app_id = 3;
+  string compose_content = 5;
+  string volumes_content = 6;
 }
 
 // Service Status Messages
