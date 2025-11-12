@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/Dstack-TEE/dstack/sdk/go/dstack"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 type PhalaTappdClient struct{}
@@ -131,7 +132,7 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData string, nvQu
 			panic(err)
 		}
 
-		nvidiaPayload, err := GpuPayload(reportData, nil)
+		nvidiaPayload, err := GpuPayload(hex.EncodeToString(crypto.Keccak256(reportDataBytes)), nil)
 		if err != nil {
 			return "", errors.Wrap(err, "failed to get NVIDIA payload")
 		}

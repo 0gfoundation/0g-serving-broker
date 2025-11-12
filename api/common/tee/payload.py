@@ -21,7 +21,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     gpu_evidence_list = cc_admin.collect_gpu_evidence_remote(
-        args.public_key, args.no_gpu_mode
+        args.public_key, args.no_gpu_mode, False
     )
     data = {
         "nonce": args.public_key,
