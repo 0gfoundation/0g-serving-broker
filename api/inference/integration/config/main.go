@@ -101,17 +101,18 @@ const (
 
 // Deployment configuration
 type DeploymentConfig struct {
-	UseGPU          bool
-	DeployLLM       bool   // Whether to deploy LLM service container
-	LLMModel        string // LLM model to deploy (e.g., "Qwen/Qwen2.5-7B")
-	TeeNode         TeeNode // TEE node selection (replaces UseTest)
-	UseMonitoring   bool
-	UseNginx        bool
-	ConfigFile      string // Local config file name
-	ConfigPath      string // Source path in TEE node (e.g., /dstack/user_config.yml)
-	Ports           PortConfig
-	ProjectName     string // Docker Compose project name for isolation
+	UseGPU         bool
+	DeployLLM      bool    // Whether to deploy LLM service container
+	LLMModel       string  // LLM model to deploy (e.g., "Qwen/Qwen2.5-7B")
+	TeeNode        TeeNode // TEE node selection (replaces UseTest)
+	UseMonitoring  bool
+	UseNginx       bool
+	ConfigFile     string // Local config file name
+	ConfigPath     string // Source path in TEE node (e.g., /dstack/user_config.yml)
+	Ports          PortConfig
+	ProjectName    string // Docker Compose project name for isolation
 	TappServiceURL string // TAPP service URL for AliCloud mode
+	TappAppID      string // TAPP AppID for AliCloud mode
 }
 
 // nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
@@ -119,6 +120,28 @@ type DeploymentConfig struct {
 // Docker compose template
 const dockerComposeTemplate = `services:
 {{- if .DeployLLM}}
+{{- if and (eq .TeeNode "alicloud") .DeployLLM }}
+  vllm:
+    image: egs-registry.cn-hangzhou.cr.aliyuncs.com/egs/vllm:0.8.5-pytorch2.6-cu124-20250429
+    container_name: vllm
+    shm_size: "10.24gb"
+    volumes:
+      - /data/models:/root/.cache/huggingface
+    command: >
+      python3 -m vllm.entrypoints.openai.api_server
+      --model {{.LLMModel}}
+      --served-model-name {{.LLMModel}}
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_ENDPOINT=https://hf-mirror.com
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+{{- else }}
   vllm:
     image: vllm/vllm-openai:v0.6.3.post1
     container_name: vllm
@@ -145,6 +168,7 @@ const dockerComposeTemplate = `services:
       timeout: 10s
       retries: 5
       start_period: 120s
+{{- end}}
 
 {{- end}}
 {{- if eq .TeeNode "hardhat"}}
@@ -262,6 +286,9 @@ const dockerComposeTemplate = `services:
 {{- else if eq .TeeNode "alicloud"}}
       - NETWORK=alicloud
       - TAPP_SERVICE_URL={{.TappServiceURL}}
+{{- if .TappAppID }}
+      - TAPP_APP_ID={{.TappAppID}}
+{{- end}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
@@ -463,18 +490,19 @@ networks:
 `
 
 type TemplateData struct {
-	UseGPU          bool
-	DeployLLM       bool
-	LLMModel        string
-	TeeNode         TeeNode
-	UseMonitoring   bool
-	UseNginx        bool
-	ConfigFile      string
-	ConfigPath      string
-	Ports           PortConfig
-	ProjectName     string
-	EnableFileLog   bool
+	UseGPU         bool
+	DeployLLM      bool
+	LLMModel       string
+	TeeNode        TeeNode
+	UseMonitoring  bool
+	UseNginx       bool
+	ConfigFile     string
+	ConfigPath     string
+	Ports          PortConfig
+	ProjectName    string
+	EnableFileLog  bool
 	TappServiceURL string
+	TappAppID      string
 }
 
 var requiredFields = []RequiredField{
@@ -552,7 +580,7 @@ func main() {
 	fmt.Print("Enter your choice [1-2] (default: 2): ")
 	response, _ := reader.ReadString('\n')
 	choice := strings.TrimSpace(response)
-	
+
 	switch choice {
 	case "1":
 		networkType = "mainnet"
@@ -572,7 +600,7 @@ func main() {
 	fmt.Print("Enter your choice [1-3] (default: 1): ")
 	teeResponse, _ := reader.ReadString('\n')
 	teeChoice := strings.TrimSpace(teeResponse)
-	
+
 	switch teeChoice {
 	case "2":
 		teeNodeType = TeeNodePhala
@@ -593,21 +621,21 @@ func main() {
 	var targetTeeAddress string
 	var targetSeparated bool
 	var additionalHeaders map[string]string
-	
+
 	fmt.Print("\n🤖 Do you want to deploy an LLM service container in the same environment? [y/N]: ")
 	response, _ = reader.ReadString('\n')
 	deployLLM := strings.ToLower(strings.TrimSpace(response)) == "y"
-	
+
 	var llmModel string
 	if deployLLM {
 		fmt.Println("   ✓ LLM service container will be deployed")
 		fmt.Println("   ℹ️  The targetUrl will be automatically configured as http://vllm:8000/v1")
-		
+
 		// Set fields for same environment deployment
 		targetTeeAddress = ""
 		targetSeparated = false
 		// additionalSecret will not be set
-		
+
 		// Model name is required for LLM deployment
 		for {
 			fmt.Print("📝 Enter the model name to deploy (e.g., Qwen/Qwen2.5-7B): ")
@@ -625,7 +653,7 @@ func main() {
 		fmt.Println("\n⚠️  Please note: The separate LLM service should also be deployed in a TEE environment")
 		fmt.Printf("   and should use the same TEE node type (%s)\n", teeNodeType)
 		fmt.Println("   and use a private key within the TEE to sign the response.")
-		
+
 		// Ask for LLM server's signing public key address
 		for {
 			fmt.Print("\n🔑 Enter the LLM server's signing public key address: ")
@@ -639,7 +667,7 @@ func main() {
 		}
 		targetSeparated = true
 		fmt.Printf("   ✓ Target TEE address set to: %s\n", targetTeeAddress)
-		
+
 		// Ask about additional headers
 		fmt.Print("\n🔐 Does the separate LLM server require additional request headers for authentication? [y/N]: ")
 		response, _ = reader.ReadString('\n')
@@ -647,30 +675,30 @@ func main() {
 			fmt.Println("   Enter headers in format 'Key: Value' (one per line)")
 			fmt.Println("   Example: Authorization: sk-xxxx")
 			fmt.Println("   Press Enter twice to finish:")
-			
+
 			additionalHeaders = make(map[string]string)
 			for {
 				fmt.Print("> ")
 				headerInput, _ := reader.ReadString('\n')
 				headerInput = strings.TrimSpace(headerInput)
-				
+
 				if headerInput == "" {
 					break // Empty line means done
 				}
-				
+
 				// Parse header
 				parts := strings.SplitN(headerInput, ":", 2)
 				if len(parts) != 2 {
 					fmt.Println("   ❌ Invalid format. Use 'Key: Value'")
 					continue
 				}
-				
+
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 				additionalHeaders[key] = value
 				fmt.Printf("   ✓ Added header: %s\n", key)
 			}
-			
+
 			if len(additionalHeaders) > 0 {
 				fmt.Printf("   ✓ %d headers configured\n", len(additionalHeaders))
 			}
@@ -836,7 +864,7 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	config.Service.TargetTeeAddress = targetTeeAddress
 	config.Service.TargetSeparated = targetSeparated
 	config.Service.VerifierUrl = verifierUrl
-	
+
 	// Set additionalSecret if headers were provided
 	if len(additionalHeaders) > 0 {
 		if config.Service.AdditionalSecret == nil {
@@ -846,7 +874,7 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 			config.Service.AdditionalSecret[k] = v
 		}
 	}
-	
+
 	// Check and prompt for required fields
 	if err := checkAndPromptRequiredFields(config, deployLLM); err != nil {
 		return "", "", nil, fmt.Errorf("error checking required fields: %v", err)
@@ -894,7 +922,7 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 func promptEnvironmentConfig(deployLLM bool, teeNodeType TeeNode, useMonitoring bool) (*DeploymentConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	config := &DeploymentConfig{}
-	config.TeeNode = teeNodeType // Set the TEE node type from earlier selection
+	config.TeeNode = teeNodeType         // Set the TEE node type from earlier selection
 	config.UseMonitoring = useMonitoring // Set monitoring from earlier selection
 
 	// Ask for Docker Compose project name
@@ -935,6 +963,19 @@ func promptEnvironmentConfig(deployLLM bool, teeNodeType TeeNode, useMonitoring 
 			}
 			config.TappServiceURL = tappURL
 			fmt.Printf("   ✓ TAPP service URL set to: %s\n", config.TappServiceURL)
+			break
+		}
+		// Ask for TAPP AppID for AliCloud (required)
+		for {
+			fmt.Print("🆔 Enter TAPP AppID for AliCloud: ")
+			appidResp, _ := reader.ReadString('\n')
+			appid := strings.TrimSpace(appidResp)
+			if appid == "" {
+				fmt.Printf("❌ TAPP AppID is required for AliCloud mode!\n")
+				continue
+			}
+			config.TappAppID = appid
+			fmt.Printf("   ✓ TAPP AppID set to: %s\n", config.TappAppID)
 			break
 		}
 	}
@@ -1069,7 +1110,6 @@ func promptPortConfiguration(config *DeploymentConfig) error {
 	return nil
 }
 
-
 func validatePort(port string) error {
 	portNum, err := strconv.Atoi(port)
 	if err != nil {
@@ -1083,18 +1123,19 @@ func validatePort(port string) error {
 
 func generateDeploymentFiles(config *DeploymentConfig) error {
 	templateData := TemplateData{
-		UseGPU:          config.UseGPU,
-		DeployLLM:       config.DeployLLM,
-		LLMModel:        config.LLMModel,
-		TeeNode:         config.TeeNode,
-		UseMonitoring:   config.UseMonitoring,
-		UseNginx:        config.UseNginx,
-		ConfigFile:      config.ConfigFile,
-		ConfigPath:      config.ConfigPath,
-		Ports:           config.Ports,
-		ProjectName:     config.ProjectName,
-		EnableFileLog:   true, // Always enable file logging
+		UseGPU:         config.UseGPU,
+		DeployLLM:      config.DeployLLM,
+		LLMModel:       config.LLMModel,
+		TeeNode:        config.TeeNode,
+		UseMonitoring:  config.UseMonitoring,
+		UseNginx:       config.UseNginx,
+		ConfigFile:     config.ConfigFile,
+		ConfigPath:     config.ConfigPath,
+		Ports:          config.Ports,
+		ProjectName:    config.ProjectName,
+		EnableFileLog:  true, // Always enable file logging
 		TappServiceURL: config.TappServiceURL,
+		TappAppID:      config.TappAppID,
 	}
 
 	// Generate docker-compose.yml only
@@ -1117,7 +1158,6 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 }
 
 // generateNginxConfig is no longer needed as nginx config is now embedded in docker-compose.yml
-
 func generateDockerCompose(data TemplateData) error {
 	tmpl, err := template.New("dockercompose").Parse(dockerComposeTemplate)
 	if err != nil {
@@ -1200,7 +1240,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("\n🌐 After starting, services will be available at:\n")
 	fmt.Printf("  • Main API: http://localhost:%s\n", config.Ports.Nginx80)
 	fmt.Printf("  • MySQL Database: localhost:%s\n", config.Ports.MySQL)
-	
+
 	if config.DeployLLM {
 		fmt.Printf("  • vLLM Service: http://localhost:8000 (internal)\n")
 	}
@@ -1224,7 +1264,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("\n💡 Custom Prometheus config:\n")
 	fmt.Printf("   cat your-prometheus.yml | base64 -w 0\n")
 	fmt.Printf("   export PROMETHEUS_CONFIG=<base64-output>\n")
-	
+
 	if config.DeployLLM {
 		fmt.Printf("\n⚠️  Important Notes for LLM Deployment:\n")
 		fmt.Printf("  • The vLLM configuration in docker-compose.yml is a sample template\n")
@@ -1235,7 +1275,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 		fmt.Printf("  • The targetUrl is automatically mapped to: http://vllm:8000/v1\n")
 		fmt.Printf("    (Container name: vllm, Port: 8000)\n")
 	}
-	
+
 	fmt.Printf("\n🚀 All services should be healthy in ~60 seconds after starting\n")
 }
 
@@ -1475,12 +1515,12 @@ func checkAndPromptRequiredFields(config *Config, deployLLM bool) error {
 		if !exists {
 			continue
 		}
-		
+
 		// Skip targetUrl if deployLLM is true
 		if deployLLM && fieldPath == "service.targetUrl" {
 			continue
 		}
-		
+
 		currentValue := getFieldValue(config, field.Path)
 
 		// Check if field needs input
