@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -95,9 +96,40 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 		return "", errors.New(fmt.Sprintf("failed to get evidence: %s", resp.Message))
 	}
 
-	// Return the proto response directly - it contains all necessary information
-	// The String() method provides a consistent, parseable format
-	return resp.String(), nil
+	appId := os.Getenv("TAPP_APP_ID")
+	if appId == "" {
+		return "", errors.New("TAPP_APP_ID environment variable is required for AliCloud TEE mode")
+	}
+	// Call the GetAppInfo RPC
+	appInfoReq := &pb.GetAppInfoRequest{
+		AppId: appId, // Use the appId from the environment variable
+	}
+
+	appInfoResp, err := client.GetAppInfo(ctx, appInfoReq)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to call GetAppInfo")
+	}
+
+	if !appInfoResp.Success {
+		return "", errors.New(fmt.Sprintf("failed to get app info: %s", appInfoResp.Message))
+	}
+
+	// Create a combined JSON response with ComposeContent and Evidence
+	combinedResponse := struct {
+		ComposeContent string `json:"compose_content"`
+		Evidence       []byte `json:"evidence"`
+	}{
+		ComposeContent: appInfoResp.ComposeContent,
+		Evidence:       resp.Evidence,
+	}
+
+	// Convert to JSON string
+	jsonBytes, err := json.Marshal(combinedResponse)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to marshal combined response to JSON")
+	}
+
+	return string(jsonBytes), nil
 }
 
 func (c *AliCloudClient) DeriveKey(ctx context.Context, path string) (string, error) {
