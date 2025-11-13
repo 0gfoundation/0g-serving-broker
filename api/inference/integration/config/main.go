@@ -351,6 +351,9 @@ const dockerComposeTemplate = `services:
 {{- else if eq .TeeNode "alicloud"}}
       - NETWORK=alicloud
       - TAPP_SERVICE_URL={{.TappServiceURL}}
+{{- if .TappAppID }}
+      - TAPP_APP_ID={{.TappAppID}}
+{{- end}}
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
