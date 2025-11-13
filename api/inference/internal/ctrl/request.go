@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -47,56 +48,40 @@ func (c *Ctrl) ListRequest(q model.RequestListOptions) ([]model.Request, int, er
 	return list, fee, nil
 }
 
-func (c *Ctrl) GetFromHTTPRequest(ctx *gin.Context) (model.Request, error) {
-	var req model.Request
-	headerMap := ctx.Request.Header
-
-	for k := range constant.RequestMetaData {
-		values := headerMap.Values(k)
-		if len(values) == 0 {
-			return req, errors.Wrapf(errors.New("missing Header"), "%s", k)
-		}
-		value := values[0]
-
-		if err := updateRequestField(&req, k, value); err != nil {
-			return req, err
-		}
-	}
-
-	return req, nil
-}
-
 // ValidateSession validates the session token and signature
-func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
-	// Get headers
-	address := ctx.GetHeader("Address")
-	tokenStr := ctx.GetHeader("Session-Token")
-	signature := ctx.GetHeader("Session-Signature")
-
-	// Check if all required headers are present
-	if address == "" || tokenStr == "" || signature == "" {
-		return errors.New("missing session authentication headers, please make sure your client includes Address, Session-Token, and Session-Signature headers")
+func (c *Ctrl) ValidateSession(ctx *gin.Context) (string, error) {
+	authHeader := ctx.GetHeader("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer app-sk-") {
+		return "", errors.New("missing or invalid Authorization header, must be Bearer app-sk-<base64(rawMessage:signature)>")
 	}
 
-	// Parse session token
+	enc := strings.TrimPrefix(authHeader, "Bearer app-sk-")
+	decodedBytes, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return "", errors.Wrap(err, "invalid base64 in Authorization header")
+	}
+	decoded := string(decodedBytes)
+	parts := strings.SplitN(decoded, "|", 2)
+	if len(parts) != 2 {
+		return "", errors.New("invalid Authorization payload, expect base64(rawMessage:signature)")
+	}
+	tokenStr := parts[0]
+	signature := parts[1]
+
 	var token SessionToken
 	if err := json.Unmarshal([]byte(tokenStr), &token); err != nil {
-		return errors.Wrap(err, "invalid session token format")
+		return "", errors.Wrap(err, "invalid session token format in Authorization")
 	}
-
-	// Validate address matches
-	if !strings.EqualFold(token.Address, address) {
-		return errors.New("address mismatch in session token")
-	}
+	address := token.Address
 
 	// Validate provider matches this provider
 	if !strings.EqualFold(token.Provider, c.contract.ProviderAddress) {
-		return errors.New("session token is for different provider")
+		return "", errors.New("session token is for different provider")
 	}
 
 	// Check token expiration (convert milliseconds to seconds)
 	if time.Now().Unix() > token.ExpiresAt/1000 {
-		return errors.New("session token expired")
+		return "", errors.New("session token expired")
 	}
 
 	// Create hash values for secure caching
@@ -109,7 +94,7 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 	if _, found := c.sessionCache.Get(cacheKey); found {
 		// Cache key already contains all verification data (address, nonce, token hash, signature hash)
 		// If found, it means this exact combination was already validated
-		return nil
+		return address, nil
 	}
 
 	// Verify signature following the same pattern as verifySignature in setup.go
@@ -122,19 +107,19 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 	// Decode signature from hex
 	sigBytes, err := hexutil.Decode(signature)
 	if err != nil {
-		return errors.Wrap(err, "invalid signature format")
+		return "", errors.Wrap(err, "invalid signature format")
 	}
 
 	// Ethereum signatures are 65 bytes: R (32) + S (32) + V (1)
 	if len(sigBytes) != 65 {
-		return errors.New("invalid signature length")
+		return "", errors.New("invalid signature length")
 	}
 
 	// Adjust V value for Ethereum signature recovery (same as verifySignature)
 	v1 := sigBytes[64] - 27
 	pubKey, err := crypto.SigToPub(prefixedMsg.Bytes(), append(sigBytes[:64], v1))
 	if err != nil {
-		return errors.Wrap(err, "failed to recover public key from signature")
+		return "", errors.Wrap(err, "failed to recover public key from signature")
 	}
 
 	// Get address from public key
@@ -142,7 +127,7 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 
 	// Verify recovered address matches claimed address (same as verifySignature)
 	if !strings.EqualFold(recoveredAddr.Hex(), address) {
-		return errors.New("signature verification failed: address mismatch")
+		return "", errors.New("signature verification failed: address mismatch")
 	}
 
 	// Cache the validated session
@@ -152,7 +137,7 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) error {
 	}, cache.DefaultExpiration)
 
 	// Session is valid
-	return nil
+	return address, nil
 }
 
 // ValidateProviderAuth validates that the request is from the provider itself
@@ -243,19 +228,13 @@ func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
 	return nil
 }
 
-
 // ValidateRequestWithEstimatedFee validates the request using an estimated fee
 // This is used before the actual token count is known from the LLM
 func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Request, estimatedFee string) error {
-	// First validate the session token
-	if err := c.ValidateSession(ctx); err != nil {
-		return errors.Wrap(err, "session validation failed")
-	}
-
 	// Try to get contract account from cache first
 	userAddress := common.HexToAddress(req.UserAddress)
 	accountCacheKey := userAddress.Hex()
-	
+
 	var contractAccount *contract.Account
 	if cachedAccount, found := c.contractAccountCache.Get(accountCacheKey); found {
 		// Use cached account data
@@ -263,7 +242,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 			contractAccount = acc
 		}
 	}
-	
+
 	// If not in cache or invalid, fetch from contract
 	if contractAccount == nil {
 		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
@@ -271,7 +250,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 			return errors.Wrap(err, "get account from contract")
 		}
 		contractAccount = &fetchedAccount
-		
+
 		// Cache the account data
 		c.contractAccountCache.Set(accountCacheKey, contractAccount, cache.DefaultExpiration)
 	}
@@ -283,7 +262,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	// Try to get service from cache first
 	serviceCacheKey := "current_service"
 	var service model.Service
-	
+
 	if cachedService, found := c.serviceCache.Get(serviceCacheKey); found {
 		// Use cached service data
 		if svc, ok := cachedService.(model.Service); ok {
@@ -394,16 +373,4 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	return fmt.Errorf("insufficient balance, total fee of %s (including response reservation) exceeds the available balance of %s", totalNew.String(), *newAccount.LockBalance)
 }
 
-func updateRequestField(req *model.Request, key, value string) error {
-	switch key {
-	case "Address":
-		req.UserAddress = value
-	case "Session-Token", "Session-Signature":
-		// These headers are used for validation only, not stored in the request
-		// They are processed in ValidateSession method
-		return nil
-	default:
-		return errors.Wrapf(errors.New("unexpected Header"), "%s", key)
-	}
-	return nil
-}
+ 

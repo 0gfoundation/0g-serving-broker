@@ -89,6 +89,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	switch svcType {
 	case "chatbot":
 		return c.handleChatbotResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "text-to-image":
+		return c.handleTextToImageResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
 		c.handleBrokerError(ctx, err, "prepare request extractor")

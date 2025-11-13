@@ -15,6 +15,8 @@ import (
 	"compress/flate"
 	"compress/gzip"
 
+	"github.com/google/uuid"
+
 	"github.com/andybalholm/brotli"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -130,6 +132,9 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	chatKey := uuid.NewString()
+	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+
 	var rawBody bytes.Buffer
 	reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
 
@@ -139,7 +144,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		return err
 	}
 
-	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes()); err != nil {
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes(), chatKey); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
@@ -149,6 +154,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
+
+	chatKey := uuid.NewString()
+	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 
 	var rawBody bytes.Buffer
 
@@ -187,14 +195,14 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	}
 
 	// Fully read and then start decoding and processing
-	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk); err != nil {
+	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, chatKey); err != nil {
 		c.handleBrokerError(ctx, err, "decode and process")
 		return err
 	}
 
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, chatKey string) error {
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -245,7 +253,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
-		if err := c.signChat(reqBody, data, respChunk); err != nil {
+		if err := c.signChatWithKey(reqBody, data, chatKey); err != nil {
 			return err
 		}
 	}
@@ -253,7 +261,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	return nil
 }
 
-func (c *Ctrl) signChat(reqBody, respData, respChunk []byte) error {
+func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 	hashAndEncode := func(b []byte) string {
 		h := sha256.Sum256(b)
 		return hex.EncodeToString(h[:])
@@ -262,13 +270,7 @@ func (c *Ctrl) signChat(reqBody, respData, respChunk []byte) error {
 	requestSha256 := hashAndEncode(reqBody)
 	responseSha256 := hashAndEncode(respData)
 
-	var chatResp CompletionChunk
-	err := json.Unmarshal(respChunk, &chatResp)
-	if err != nil {
-		return errors.Wrap(err, "Chat id could not be extracted from the response")
-	}
-	chatID := chatResp.ID
-
+	c.logger.Debugf("requestSha256: %s, responseSha256: %s, signer address %s", requestSha256, responseSha256, c.teeService.Address.Hex())
 	text := fmt.Sprintf("%s:%s", requestSha256, responseSha256)
 	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
 	if err != nil {
@@ -286,7 +288,7 @@ func (c *Ctrl) signChat(reqBody, respData, respChunk []byte) error {
 		SigningAlgo:         ECDSA.String(),
 	}
 
-	key := c.chatCacheKey(chatID)
+	key := c.chatCacheKey(chatKey)
 	c.logger.Debugf("key: %v, chat signature: %v", key, chatSignature)
 	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
 	return nil

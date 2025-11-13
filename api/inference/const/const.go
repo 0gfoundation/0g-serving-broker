@@ -4,7 +4,8 @@ var (
 	ServicePrefix = "/v1/proxy"
 
 	TargetRoute = map[string]struct{}{
-		"/chat/completions": {},
+		"/chat/completions":   {},
+		"/images/generations": {},
 	}
 
 	// Keep this as to remove duplicate headers from incoming request
@@ -17,12 +18,7 @@ var (
 		"Signature":         {},
 		"Session-Token":     {},
 		"Session-Signature": {},
-	}
-
-	RequestMetaData = map[string]struct{}{
-		"Address":           {},
-		"Session-Token":     {},
-		"Session-Signature": {},
+		"Authorization":     {},
 	}
 
 	// Should align with the topUpTriggerThreshold in the client sdk
