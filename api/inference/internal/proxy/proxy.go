@@ -52,6 +52,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		AllowOrigins: p.allowOrigins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowHeaders: []string{"*"},
+		ExposeHeaders: []string{"ZG-Res-Key", "Provider", "content-encoding"},
 	}))
 
 	// Apply rate limiting middleware
