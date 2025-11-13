@@ -195,17 +195,17 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	relativePath := strings.ToLower(ctx.Param("any"))
 	chatID := strings.TrimPrefix(relativePath, "/signature/")
 
-	// if !p.ctrl.Service.TargetSeparated {
-	sig, err := p.ctrl.GetChatSignature(chatID)
-	if err != nil {
-		p.handleBrokerError(ctx, err, "prepare HTTP request")
+	if !p.ctrl.Service.TargetSeparated {
+		sig, err := p.ctrl.GetChatSignature(chatID)
+		if err != nil {
+			p.handleBrokerError(ctx, err, "prepare HTTP request")
+			return true
+		}
+
+		ctx.JSON(http.StatusOK, sig)
 		return true
 	}
-
-	ctx.JSON(http.StatusOK, sig)
-	return true
-	// }
-
+	return false
 }
 
 func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {

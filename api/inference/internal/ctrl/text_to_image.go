@@ -54,10 +54,10 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		return err
 	}
 
-	// if !c.Service.TargetSeparated {
-	c.logger.Debug("LLM server in the same network, signing text-to-image response")
-	_ = c.signChatWithKey(reqBody, body, chatKey)
-	// }
+	if !c.Service.TargetSeparated {
+		c.logger.Debug("LLM server in the same network, signing text-to-image response")
+		_ = c.signChatWithKey(reqBody, body, chatKey)
+	}
 
 	// Get imageNum from request for billing
 	imageNum := reqModel.OutputCount // previously stored imageNum count
