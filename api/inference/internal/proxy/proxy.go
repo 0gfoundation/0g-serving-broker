@@ -45,7 +45,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		logger:       logger,
 		serviceGroup: engine.Group(constant.ServicePrefix),
 		// Configure rate limiter: 30 requests per second with burst of 50
-		rateLimiter:  middleware.NewRateLimiter(rate.Limit(30), 50),
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(30), 50),
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -66,7 +66,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 func (p *Proxy) Start() error {
 	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot":
+	case "zgStorage", "chatbot", "text-to-image":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	default:
 		return errors.New("invalid service type")
@@ -123,10 +123,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, 0, false)
 		return
 	}
-	req, err := p.ctrl.GetFromHTTPRequest(ctx)
+
+	userAddress, err := p.ctrl.ValidateSession(ctx)
 	if err != nil {
-		p.handleBrokerError(ctx, err, "get model.request from HTTP request")
+		p.handleBrokerError(ctx, err, "validate session")
 		return
+	}
+
+	req := model.Request{
+		UserAddress: userAddress,
 	}
 
 	var expectedInputFee string
@@ -139,6 +144,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			p.handleBrokerError(ctx, err, "get input fee and count")
 			return
 		}
+	case "text-to-image":
+		_, imageNum, err := p.ctrl.GetTextToImageInputFeeAndImageNum(reqBody)
+		if err != nil {
+			p.handleBrokerError(ctx, err, "get text-to-image steps")
+			return
+		}
+		// Store steps for later billing calculation
+		req.OutputCount = imageNum
+		expectedInputFee = "0"
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
@@ -146,13 +160,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	// Use estimated values for validation only
 	// Actual values will be set when LLM response is received
-	req.InputFee = "0"  // Will be set with actual value from LLM response
-	req.Fee = "0"       // Will be set with actual value from LLM response
-	req.InputCount = 0  // Will be set with actual token count from LLM
-	req.OutputCount = 0 // Will be updated when response is processed
+	req.InputFee = "0" // Will be set with actual value from LLM response
+	req.Fee = "0"      // Will be set with actual value from LLM response
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
-	
+
 	p.logger.Debugf("request saved: %v", req)
 	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {
 		p.handleBrokerError(ctx, err, "validate request")
@@ -183,18 +195,17 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	relativePath := strings.ToLower(ctx.Param("any"))
 	chatID := strings.TrimPrefix(relativePath, "/signature/")
 
-	if !p.ctrl.Service.TargetSeparated {
-		sig, err := p.ctrl.GetChatSignature(chatID)
-		if err != nil {
-			p.handleBrokerError(ctx, err, "prepare HTTP request")
-			return true
-		}
-
-		ctx.JSON(http.StatusOK, sig)
+	// if !p.ctrl.Service.TargetSeparated {
+	sig, err := p.ctrl.GetChatSignature(chatID)
+	if err != nil {
+		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return true
 	}
 
-	return false
+	ctx.JSON(http.StatusOK, sig)
+	return true
+	// }
+
 }
 
 func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {
