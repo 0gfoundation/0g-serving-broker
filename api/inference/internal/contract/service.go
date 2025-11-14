@@ -172,7 +172,6 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 		return err
 	}
 
-	c.logger.Debugf("old tee address: %s, new tee address: %s", old.TeeSignerAddress.Hex(), c.TeeSignerAddress.Hex())
 	if old != nil && identicalService(*old, new, c.TeeSignerAddress, newAdditionalInfo) {
 		c.logger.Info("[SyncService] Service is identical, no update needed")
 		return nil
