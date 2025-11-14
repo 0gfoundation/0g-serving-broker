@@ -133,7 +133,11 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+
+	if !c.Service.TargetSeparated {
+		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header")
+		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	}
 
 	var rawBody bytes.Buffer
 	reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
@@ -156,7 +160,11 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+
+	if !c.Service.TargetSeparated {
+		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header for streaming response")
+		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	}
 
 	var rawBody bytes.Buffer
 
