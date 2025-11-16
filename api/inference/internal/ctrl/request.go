@@ -370,7 +370,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return nil
 	}
 	ctx.Set("ignoreError", true)
-	return fmt.Errorf("insufficient balance, total fee of %s (including response reservation) exceeds the available balance of %s", totalNew.String(), *newAccount.LockBalance)
+	return fmt.Errorf("insufficient balance, total fee of %s neuron (including response reservation) exceeds the available balance of %s neuron", totalNew.String(), *newAccount.LockBalance)
 }
 
  
