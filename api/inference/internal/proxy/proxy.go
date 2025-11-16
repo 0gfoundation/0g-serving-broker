@@ -44,8 +44,8 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		ctrl:         ctrl,
 		logger:       logger,
 		serviceGroup: engine.Group(constant.ServicePrefix),
-		// Configure rate limiter: 30 requests per second with burst of 50
-		rateLimiter: middleware.NewRateLimiter(rate.Limit(30), 50),
+		// Configure rate limiter: 20 requests per second with burst of 30
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(20), 30),
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -57,6 +57,9 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
+	
+	// Apply request size limit middleware (32MB)
+	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
 	if enableMonitor {
 		p.serviceGroup.Use(monitor.TrackMetrics())
@@ -106,6 +109,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
+		// Check if the error is due to request body size limit
+		if err.Error() == "http: request body too large" {
+			// Mark this as an expected client error, not a server error
+			ctx.Set("ignoreError", true)
+			ctx.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error": "Request body size exceeds the maximum allowed size of 32MB",
+			})
+			ctx.Abort()
+			return
+		}
 		p.handleBrokerError(ctx, err, "read request body")
 		return
 	}
