@@ -49,9 +49,9 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
-		AllowOrigins: p.allowOrigins,
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders: []string{"*"},
+		AllowOrigins:  p.allowOrigins,
+		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders:  []string{"*"},
 		ExposeHeaders: []string{"ZG-Res-Key", "Provider", "content-encoding"},
 	}))
 
@@ -67,7 +67,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 func (p *Proxy) Start() error {
 	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot", "text-to-image":
+	case "zgStorage", "chatbot", "text-to-image", "speech-to-text":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	default:
 		return errors.New("invalid service type")
@@ -137,7 +137,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	var expectedInputFee string
 	switch svcType {
-	case "zgStorage":
+	case "zgStorage", "speech-to-text":
 		expectedInputFee = "0"
 	case "chatbot":
 		expectedInputFee, _, err = p.ctrl.GetChatbotInputFeeAndCount(reqBody)
@@ -181,7 +181,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
-	p.logger.Debugf("request sent to target llm server %v", httpReq)
 
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, p.ctrl.Service.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)

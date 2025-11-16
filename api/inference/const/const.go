@@ -6,6 +6,7 @@ var (
 	TargetRoute = map[string]struct{}{
 		"/chat/completions":   {},
 		"/images/generations": {},
+		"/audio/transcriptions": {},
 	}
 
 	// Keep this as to remove duplicate headers from incoming request
