@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee/alicloud"
 )
 
@@ -33,15 +34,17 @@ type TappdClient interface {
 
 type TeeService struct {
 	clientType ClientType
+	logger     log.Logger
 
 	ProviderSigner *ecdsa.PrivateKey
 	Address        common.Address
 	Quote          string
 }
 
-func NewTeeService(clientType ClientType) (*TeeService, error) {
+func NewTeeService(clientType ClientType, logger log.Logger) (*TeeService, error) {
 	return &TeeService{
 		clientType: clientType,
+		logger:     logger,
 	}, nil
 }
 
@@ -76,7 +79,6 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.Quote = quoteStr
 	return nil
 }
-
 
 func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ecdsa.PrivateKey, error) {
 	key, err := client.DeriveKey(ctx, "/")
@@ -125,6 +127,8 @@ func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
 	if s.ProviderSigner == nil {
 		return nil, errors.New("provider signer not initialized")
 	}
+
+	s.logger.Infof("provider address: %s", crypto.PubkeyToAddress(s.ProviderSigner.PublicKey))
 
 	// Add Ethereum Signed Message prefix (matching the contract expectation)
 	ethPrefix := []byte("\x19Ethereum Signed Message:\n32")

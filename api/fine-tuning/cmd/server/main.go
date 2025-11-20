@@ -114,14 +114,14 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 
 		if buildImage {
 			logger.Debugf("build image %s", imageName)
-			
+
 			// Check if transformer files exist in the embedded location
 			embeddedPath := "/fine-tuning/execution/transformer"
-			
+
 			// Prepare bridge directory for Docker daemon access
 			if _, err := os.Stat(embeddedPath); err == nil {
 				logger.Infof("Found embedded transformer files at %s", embeddedPath)
-				
+
 				// Clean bridge directory contents but don't remove the directory itself (it may be mounted)
 				bridgeDir := constant.FineTuningDockerfilePath
 				if entries, err := os.ReadDir(bridgeDir); err == nil {
@@ -132,13 +132,13 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 						}
 					}
 				}
-				
+
 				// Ensure bridge directory exists
 				if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 					logger.Errorf("failed to create bridge directory: %v", err)
 					return
 				}
-				
+
 				// Copy transformer files to bridge directory
 				logger.Infof("Copying transformer files to bridge directory: %s", bridgeDir)
 				if err := copyDirectory(embeddedPath, bridgeDir); err != nil {
@@ -149,7 +149,7 @@ func buildImageIfNeeded(ctx context.Context, config *config.Config, logger log.L
 			} else {
 				logger.Warnf("Embedded transformer files not found at %s, checking bridge directory", embeddedPath)
 			}
-			
+
 			// Build image using the bridge directory (constant.FineTuningDockerfilePath now points to /tmp/transformer-bridge)
 			logger.Infof("Building image from: %s", constant.FineTuningDockerfilePath)
 			err := image.ImageBuild(ctx, cli, constant.FineTuningDockerfilePath, imageName, logger)
@@ -195,7 +195,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		teeClientType = tee.Phala
 	}
 
-	teeService, err := tee.NewTeeService(teeClientType)
+	teeService, err := tee.NewTeeService(teeClientType, logger)
 	if err != nil {
 		return nil, err
 	}
