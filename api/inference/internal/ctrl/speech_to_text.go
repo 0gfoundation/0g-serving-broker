@@ -91,7 +91,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	if err != nil {
 		c.logger.Warnf("Failed to decompress speech-to-text response: %v", err)
 		// Fallback to estimated billing if decompression fails
-		return c.updateSpeechToTextFallback(reqModel)
+		return c.updateSpeechToTextFallback(reqModel, string(decompressedBody))
 	}
 
 	// Debug: log response content
@@ -110,7 +110,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
 		c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
 		// Fallback to estimated billing if parsing fails
-		return c.updateSpeechToTextFallback(reqModel)
+		return c.updateSpeechToTextFallback(reqModel, string(decompressedBody))
 	}
 
 	// Sign response if needed
@@ -125,7 +125,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	}
 
 	// Fallback if no usage data
-	return c.updateSpeechToTextFallback(reqModel)
+	return c.updateSpeechToTextFallback(reqModel, string(decompressedBody))
 }
 
 // handleStreamingSpeechToText handles streaming speech-to-text response
@@ -201,7 +201,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	}
 
 	// Fallback if no usage data
-	return c.updateSpeechToTextFallback(reqModel)
+	return c.updateSpeechToTextFallback(reqModel, rawBody.String())
 }
 
 // updateSpeechToTextWithUsage updates the request with accurate token counts from the API response
@@ -231,12 +231,31 @@ func (c *Ctrl) updateSpeechToTextWithUsage(_ context.Context, usage *SpeechToTex
 	return nil
 }
 
-// updateSpeechToTextFallback is used when no usage data is available
-func (c *Ctrl) updateSpeechToTextFallback(reqModel model.Request) error {
-	// Use a default output token count for transcription
-	// Estimate based on average transcription output
-	estimatedOutputTokens := int64(100) // default estimation
-	
+/*
+updateSpeechToTextFallback is used when no usage data is available.
+If text is provided, billing is based on the number of words in the text.
+Otherwise, falls back to a default estimation.
+*/
+func (c *Ctrl) updateSpeechToTextFallback(reqModel model.Request, text string) error {
+	var estimatedOutputTokens int64 = 100 // default estimation
+
+	if len(text) > 0 {
+		// Count words: split by whitespace
+		wordCount := int64(0)
+		inWord := false
+		for _, r := range text {
+			if r == ' ' || r == '\n' || r == '\t' || r == '\r' {
+				inWord = false
+			} else if !inWord {
+				inWord = true
+				wordCount++
+			}
+		}
+		if wordCount > 0 {
+			estimatedOutputTokens = wordCount * 2 // assume 2 tokens per word
+		}
+	}
+
 	outputFee, err := util.Multiply(c.Service.OutputPrice, estimatedOutputTokens)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee")
