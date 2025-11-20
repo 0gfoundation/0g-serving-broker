@@ -76,6 +76,8 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		c.logger.Errorf("[AddOrUpdateService] Failed to build additional info - error=%v", err)
 		return err
 	}
+	c.logger.Infof("[AddOrUpdateService] Additional info JSON: %s", additionalInfoJSON)
+	c.logger.Infof("[AddOrUpdateService] Tee signer address: %s", teeSignerAddress.Hex())
 
 	tx, err := c.Contract.Transact(ctx,
 		nil,

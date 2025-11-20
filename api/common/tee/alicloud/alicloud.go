@@ -133,12 +133,18 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 }
 
 func (c *AliCloudClient) DeriveKey(ctx context.Context, path string) (string, error) {
-	// Similar to GCP implementation, generate a random ECDSA private key
+	keyFilePath := "/data/tee_key"
+	if data, err := os.ReadFile(keyFilePath); err == nil && len(data) > 0 {
+		return string(data), nil
+	}
+
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to generate ECDSA private key")
 	}
-
 	dHex := hex.EncodeToString(privateKey.D.Bytes())
+
+	_ = os.WriteFile(keyFilePath, []byte(dHex), 0600)
+
 	return dHex, nil
 }
