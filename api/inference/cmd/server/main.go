@@ -66,7 +66,7 @@ func Main() {
 		teeClientType = tee.Phala
 	}
 
-	teeService, err := tee.NewTeeService(teeClientType)
+	teeService, err := tee.NewTeeService(teeClientType, logger)
 	if err != nil {
 		panic(err)
 	}

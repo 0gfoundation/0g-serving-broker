@@ -292,6 +292,9 @@ const dockerComposeTemplate = `services:
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
+{{- if eq .TeeNode "alicloud"}}
+      - tee-key-data:/data
+{{- end}}
 {{- if .EnableFileLog}}
       - ./logs/broker:/var/log/inference
       - ./logs/event:/var/log/event
@@ -357,6 +360,9 @@ const dockerComposeTemplate = `services:
 {{- end}}
     volumes:
       - {{.ConfigPath}}:/etc/config.yaml
+{{- if eq .TeeNode "alicloud"}}
+      - tee-key-data:/data
+{{- end}}
 {{- if .EnableFileLog}}
       - ./logs/event:/var/log/inference
 {{- end}}
@@ -484,6 +490,9 @@ volumes:
   mysql-data:
 {{- if .UseMonitoring}}
   prometheus-config:
+{{- end}}
+{{- if eq .TeeNode "alicloud"}}
+  tee-key-data:
 {{- end}}
 
 networks:
