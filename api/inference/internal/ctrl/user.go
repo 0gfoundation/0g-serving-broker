@@ -121,6 +121,38 @@ func (c *Ctrl) SyncUserAccounts(ctx context.Context) error {
 	return errors.Wrap(c.db.BatchUpdateUserAccount(accounts), "batch update account in db")
 }
 
+// SyncUserAccountsByAddresses syncs only the specified user accounts from the contract to the database.
+// This is more efficient than SyncUserAccounts when only a subset of accounts need to be synced.
+func (c *Ctrl) SyncUserAccountsByAddresses(ctx context.Context, userAddresses []string) error {
+	if len(userAddresses) == 0 {
+		return nil
+	}
+
+	// Fetch accounts from contract in parallel
+	accounts := make([]model.User, 0, len(userAddresses))
+	for _, addr := range userAddresses {
+		// Clear cache for this account
+		c.contractAccountCache.Delete(addr)
+
+		account, err := c.contract.GetUserAccount(ctx, common.HexToAddress(addr))
+		if err != nil {
+			// Log error but continue with other accounts
+			c.logger.Infof("Warning: failed to get account %s from contract: %v", addr, err)
+			continue
+		}
+		accounts = append(accounts, parse(account))
+	}
+
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return errors.Wrap(c.db.BatchUpdateUserAccountsByAddresses(accounts), "batch update accounts in db")
+}
+
 func parse(account contract.Account) model.User {
 	lockBalance := big.NewInt(0)
 	lockBalance.Sub(account.Balance, account.PendingRefund)
