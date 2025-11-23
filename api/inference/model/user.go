@@ -24,5 +24,5 @@ type UserList struct {
 type UserListOptions struct {
 	LowBalanceRisk         *time.Time
 	MinUnsettledFee        *int64
-	SettleTriggerThreshold *int64
+	SettleTriggerThreshold *string // Use string to handle large values exceeding int64 max
 }

@@ -6,7 +6,6 @@ import (
 
 	"github.com/pkg/errors"
 
-	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -24,19 +23,9 @@ func (d *DB) CreateUserAccounts(accounts []model.User) error {
 	return ret.Error
 }
 
-func (d *DB) ListUserAccount(opt *model.UserListOptions) ([]model.User, error) {
-	tx := d.db.Model(model.User{})
-
-	if opt != nil {
-		if opt.LowBalanceRisk != nil && opt.SettleTriggerThreshold != nil {
-			tx = tx.Where("((lock_balance - unsettled_fee) < ? OR last_balance_check_time < ?)", constant.SettleTriggerThreshold, *opt.LowBalanceRisk)
-		}
-		if opt.MinUnsettledFee != nil {
-			tx = tx.Where("unsettled_fee > ?", *opt.MinUnsettledFee)
-		}
-	}
+func (d *DB) ListUserAccount() ([]model.User, error) {
 	list := []model.User{}
-	ret := tx.Find(&list)
+	ret := d.db.Model(model.User{}).Find(&list)
 	return list, ret.Error
 }
 
@@ -65,7 +54,7 @@ func (d *DB) UpdateUserAccount(userAddress string, new model.User) error {
 }
 
 func (d *DB) BatchUpdateUserAccount(news []model.User) error {
-	olds, err := d.ListUserAccount(nil)
+	olds, err := d.ListUserAccount()
 	if err != nil {
 		return err
 	}
@@ -103,23 +92,27 @@ func (d *DB) BatchUpdateUserAccount(news []model.User) error {
 	return d.DeleteUserAccounts(toRemove)
 }
 
-func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, outputPrice int64) ([]model.User, error) {
+func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions) ([]model.User, error) {
 	if opt == nil {
 		opt = &model.UserListOptions{}
 	}
 
 	// Build the optimized query with JOIN and aggregation
+	// Note: Use DECIMAL(65,0) for all fee-related calculations to avoid BIGINT overflow
+	// since lock_balance and fee values can exceed SIGNED BIGINT max (9.22e18)
+	// Use r.fee directly instead of calculating from input_count * inputPrice + output_count * outputPrice
+	// Keep calculated_unsettled_fee as DECIMAL for proper numeric comparison in HAVING clause
 	query := `
-		SELECT 
+		SELECT
 			u.user,
 			u.lock_balance,
 			u.last_balance_check_time,
-			COALESCE(SUM(r.input_count * ? + r.output_count * ?), 0) as calculated_unsettled_fee
+			COALESCE(SUM(CAST(r.fee AS DECIMAL(65,0))), 0) as calculated_unsettled_fee
 		FROM user u
 		LEFT JOIN request r ON u.user = r.user_address AND r.processed = false
 		WHERE (u.skip_until IS NULL OR u.skip_until <= ?)
 	`
-	args := []interface{}{inputPrice, outputPrice, time.Now()}
+	args := []interface{}{time.Now()}
 
 	// Group by user fields
 	query += " GROUP BY u.user, u.lock_balance, u.last_balance_check_time"
@@ -133,14 +126,16 @@ func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, 
 	}
 
 	// Preserve original OR logic: (balance_condition OR time_condition)
+	// Note: Use DECIMAL(65,0) to avoid BIGINT overflow when comparing large balance values
+	// calculated_unsettled_fee is already DECIMAL(65,0) from the SELECT clause
 	if opt.LowBalanceRisk != nil && opt.SettleTriggerThreshold != nil {
 		havingClauses = append(havingClauses,
-			"((CAST(u.lock_balance AS SIGNED) - calculated_unsettled_fee) < ? OR u.last_balance_check_time < ?)")
+			"((CAST(u.lock_balance AS DECIMAL(65,0)) - calculated_unsettled_fee) < ? OR u.last_balance_check_time < ?)")
 		args = append(args, *opt.SettleTriggerThreshold, *opt.LowBalanceRisk)
 	} else if opt.SettleTriggerThreshold != nil {
 		// Only check balance condition if no time filter - match original logic
 		havingClauses = append(havingClauses,
-			"(CAST(u.lock_balance AS SIGNED) - calculated_unsettled_fee) < ?")
+			"(CAST(u.lock_balance AS DECIMAL(65,0)) - calculated_unsettled_fee) < ?")
 		args = append(args, *opt.SettleTriggerThreshold)
 	} else if opt.LowBalanceRisk != nil {
 		// Only check time condition if no threshold
@@ -156,11 +151,12 @@ func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions, inputPrice, 
 	}
 
 	// Execute the query
+	// Note: CalculatedUnsettledFee is string to handle values exceeding int64 max
 	type QueryResult struct {
 		User                   string
 		LockBalance            *string
 		LastBalanceCheckTime   *time.Time
-		CalculatedUnsettledFee int64
+		CalculatedUnsettledFee string
 	}
 
 	var results []QueryResult

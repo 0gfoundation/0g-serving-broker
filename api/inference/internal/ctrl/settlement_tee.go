@@ -78,14 +78,18 @@ type SettlementBatch struct {
 }
 
 func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
-	settleTriggerThreshold := (c.Service.InputPrice + c.Service.OutputPrice) * constant.SettleTriggerThreshold
+	// Use big.Int to avoid int64 overflow when calculating threshold
+	// (InputPrice + OutputPrice) * SettleTriggerThreshold can exceed int64 max
+	priceSum := big.NewInt(c.Service.InputPrice + c.Service.OutputPrice)
+	threshold := big.NewInt(constant.SettleTriggerThreshold)
+	settleTriggerThreshold := new(big.Int).Mul(priceSum, threshold).String()
 
 	// Use the optimized method that calculates unsettled fees with a single query
 	accounts, err := c.db.ListUsersWithUnsettledFees(&model.UserListOptions{
 		LowBalanceRisk:         model.PtrOf(time.Now().Add(-c.contract.LockTime + c.autoSettleBufferTime)),
 		MinUnsettledFee:        model.PtrOf(int64(0)),
 		SettleTriggerThreshold: &settleTriggerThreshold,
-	}, c.Service.InputPrice, c.Service.OutputPrice)
+	})
 	if err != nil {
 		return errors.Wrap(err, "list accounts that need to be settled in db")
 	}
@@ -103,7 +107,7 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 		MinUnsettledFee:        model.PtrOf(int64(0)),
 		LowBalanceRisk:         model.PtrOf(time.Now()),
 		SettleTriggerThreshold: &settleTriggerThreshold,
-	}, c.Service.InputPrice, c.Service.OutputPrice)
+	})
 	if err != nil {
 		return errors.Wrap(err, "list accounts that need to be settled in db after sync")
 	}
