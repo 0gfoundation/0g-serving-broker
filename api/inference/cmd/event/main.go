@@ -90,6 +90,30 @@ func Main() {
 		panic(err)
 	}
 
+	// Add revenue transfer processor if configured
+	if conf.RevenueTransfer.Interval > 0 && conf.RevenueTransfer.TargetAddress != "" {
+		revenueTransferProcessor, err := event.NewRevenueTransferProcessor(
+			contract,
+			conf.RevenueTransfer.TargetAddress,
+			conf.RevenueTransfer.ReserveAmount,
+			conf.RevenueTransfer.Interval,
+			logger,
+		)
+		if err != nil {
+			panic(err)
+		}
+		if revenueTransferProcessor != nil {
+			logger.Infof("Starting revenue transfer processor: target=%s, interval=%ds, reserve=%s",
+				conf.RevenueTransfer.TargetAddress,
+				conf.RevenueTransfer.Interval,
+				conf.RevenueTransfer.ReserveAmount,
+			)
+			if err := mgr.Add(revenueTransferProcessor); err != nil {
+				panic(err)
+			}
+		}
+	}
+
 	if err := mgr.Start(ctx); err != nil {
 		panic(err)
 	}
