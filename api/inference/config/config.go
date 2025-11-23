@@ -39,6 +39,11 @@ type Config struct {
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
 	} `yaml:"interval"`
+	RevenueTransfer struct {
+		TargetAddress string `yaml:"targetAddress"` // Target address to transfer revenue to
+		ReserveAmount string `yaml:"reserveAmount"` // Amount of 0G to reserve for gas (default: 10000000000000000000 = 10 0G)
+		Interval      int    `yaml:"interval"`      // Interval in seconds for revenue transfer (0 to disable)
+	} `yaml:"revenueTransfer"`
 	Service  Service         `yaml:"service"`
 	Networks config.Networks `mapstructure:"networks" yaml:"networks"`
 	Monitor  struct {
@@ -107,6 +112,15 @@ func GetConfig() *Config {
 				AutoSettleBufferTime:     60,
 				ForceSettlementProcessor: 600,
 				SettlementProcessor:      300,
+			},
+			RevenueTransfer: struct {
+				TargetAddress string `yaml:"targetAddress"`
+				ReserveAmount string `yaml:"reserveAmount"`
+				Interval      int    `yaml:"interval"`
+			}{
+				TargetAddress: "",
+				ReserveAmount: "10000000000000000000",
+				Interval:      3600,
 			},
 			Monitor: struct {
 				Enable       bool   `yaml:"enable"`
