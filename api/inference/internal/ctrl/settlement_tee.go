@@ -97,8 +97,14 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 		return nil
 	}
 
-	// Verify the available balance in the contract
-	if err := c.SyncUserAccounts(ctx); err != nil {
+	// Extract user addresses that need to be synced
+	userAddresses := make([]string, len(accounts))
+	for i, acc := range accounts {
+		userAddresses[i] = acc.User
+	}
+
+	// Verify the available balance in the contract - only sync accounts that need settlement
+	if err := c.SyncUserAccountsByAddresses(ctx, userAddresses); err != nil {
 		return errors.Wrap(err, "synchronize accounts from the contract to the database")
 	}
 
@@ -234,7 +240,7 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 			adjustedSettlement, settledRequests := c.adjustForPartialSettlement(settlement, userReqs, result.UnsettledAmount)
 			
 			// Set user-level skip_until since user will have insufficient balance after this settlement
-			userSkipUntil := time.Now().Add(1 * time.Hour)
+			userSkipUntil := time.Now().Add(constant.SkipUntilDuration)
 			if err := c.db.UpdateUserSkipUntil(settlement.User.Hex(), &userSkipUntil); err != nil {
 				c.logger.Infof("Error setting skip_until for user %s: %v", settlement.User.Hex(), err)
 			} else {
@@ -249,7 +255,7 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 			
 			// Mark unsettled requests with skipUntil for forceSettlement
 			unsettledRequests := c.getUnsettledRequests(userReqs.Requests, settledRequests)
-			c.markRequestsWithSkipUntil(c.getRequestHashes(unsettledRequests), 1*time.Hour)
+			c.markRequestsWithSkipUntil(c.getRequestHashes(unsettledRequests), constant.SkipUntilDuration)
 			
 		default:
 			// Failed settlement - no adjustment needed
