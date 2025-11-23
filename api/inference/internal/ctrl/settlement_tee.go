@@ -132,7 +132,7 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 	}
 
 	// Main settlement loop with limited iterations
-	const maxSettlementRounds = 10
+	const maxSettlementRounds = 1
 	for round := 1; round <= maxSettlementRounds; round++ {
 		c.logger.Infof("Settlement round %d/%d", round, maxSettlementRounds)
 		
