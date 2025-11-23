@@ -49,11 +49,16 @@ type Config struct {
 	} `yaml:"event,omitempty"`
 	GasPrice    interface{} `yaml:"gasPrice,omitempty"`
 	MaxGasPrice interface{} `yaml:"maxGasPrice,omitempty"`
-	Interval    struct {
+	Interval struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime,omitempty"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor,omitempty"`
 		SettlementProcessor      int `yaml:"settlementProcessor,omitempty"`
 	} `yaml:"interval,omitempty"`
+	RevenueTransfer struct {
+		TargetAddress string `yaml:"targetAddress,omitempty"`
+		ReserveAmount string `yaml:"reserveAmount,omitempty"`
+		Interval      int    `yaml:"interval,omitempty"`
+	} `yaml:"revenueTransfer,omitempty"`
 	Service  Service  `yaml:"service,omitempty"`
 	Networks Networks `yaml:"networks,omitempty"`
 	Monitor  struct {
@@ -729,9 +734,68 @@ func main() {
 		fmt.Println("   ✓ Monitoring services will be included")
 	}
 
+	// Ask about revenue transfer configuration
+	var revenueTransferConfig struct {
+		TargetAddress string
+		ReserveAmount string
+		Interval      int
+	}
+	fmt.Print("\n💰 Do you want to configure automatic revenue transfer to another address? [y/N]: ")
+	revenueResponse, _ := reader.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(revenueResponse)) == "y" {
+		fmt.Println("   ℹ️  Revenue transfer will periodically transfer earnings to a specified address")
+		fmt.Println("   ℹ️  A reserve amount will be kept for gas fees")
+
+		// Ask for target address
+		for {
+			fmt.Print("\n🏦 Enter the target address to receive revenue transfers: ")
+			addressInput, _ := reader.ReadString('\n')
+			revenueTransferConfig.TargetAddress = strings.TrimSpace(addressInput)
+			if revenueTransferConfig.TargetAddress == "" {
+				fmt.Println("   ❌ Target address is required!")
+				continue
+			}
+			if !strings.HasPrefix(revenueTransferConfig.TargetAddress, "0x") {
+				fmt.Println("   ❌ Invalid address format. Address should start with 0x")
+				continue
+			}
+			break
+		}
+		fmt.Printf("   ✓ Target address set to: %s\n", revenueTransferConfig.TargetAddress)
+
+		// Ask for reserve amount
+		fmt.Print("\n💎 Enter the reserve amount in neuron to keep for gas (default: 10000000000000000000 = 10 0G): ")
+		reserveInput, _ := reader.ReadString('\n')
+		reserveInput = strings.TrimSpace(reserveInput)
+		if reserveInput == "" {
+			revenueTransferConfig.ReserveAmount = "10000000000000000000"
+		} else {
+			revenueTransferConfig.ReserveAmount = reserveInput
+		}
+		fmt.Printf("   ✓ Reserve amount set to: %s neuron\n", revenueTransferConfig.ReserveAmount)
+
+		// Ask for transfer interval
+		fmt.Print("\n⏱️  Enter the transfer interval in seconds (default: 3600 = 1 hour): ")
+		intervalInput, _ := reader.ReadString('\n')
+		intervalInput = strings.TrimSpace(intervalInput)
+		if intervalInput == "" {
+			revenueTransferConfig.Interval = 3600
+		} else {
+			if interval, err := strconv.Atoi(intervalInput); err == nil {
+				revenueTransferConfig.Interval = interval
+			} else {
+				revenueTransferConfig.Interval = 3600
+				fmt.Println("   ⚠️  Invalid interval, using default: 3600 seconds")
+			}
+		}
+		fmt.Printf("   ✓ Transfer interval set to: %d seconds\n", revenueTransferConfig.Interval)
+	} else {
+		fmt.Println("   ✓ Revenue transfer disabled")
+	}
+
 	// Step 2: Load and configure YAML config (with monitoring setting)
 	fmt.Println("\n📋 Step 2: Configuration File Setup")
-	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType)
+	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -817,7 +881,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -895,6 +959,13 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	// Set monitoring configuration if enabled
 	if useMonitoring {
 		config.Monitor.Enable = true
+	}
+
+	// Set revenue transfer configuration if provided
+	if revenueTargetAddress != "" {
+		config.RevenueTransfer.TargetAddress = revenueTargetAddress
+		config.RevenueTransfer.ReserveAmount = revenueReserveAmount
+		config.RevenueTransfer.Interval = revenueInterval
 	}
 
 	// Add logger configuration for Docker deployment
@@ -1409,6 +1480,17 @@ func mergeConfigs(base, user *Config) {
 	}
 	if user.Interval.SettlementProcessor != 0 {
 		base.Interval.SettlementProcessor = user.Interval.SettlementProcessor
+	}
+
+	// Merge revenue transfer
+	if user.RevenueTransfer.TargetAddress != "" {
+		base.RevenueTransfer.TargetAddress = user.RevenueTransfer.TargetAddress
+	}
+	if user.RevenueTransfer.ReserveAmount != "" {
+		base.RevenueTransfer.ReserveAmount = user.RevenueTransfer.ReserveAmount
+	}
+	if user.RevenueTransfer.Interval != 0 {
+		base.RevenueTransfer.Interval = user.RevenueTransfer.Interval
 	}
 
 	// Merge service
