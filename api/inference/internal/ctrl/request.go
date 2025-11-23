@@ -40,12 +40,12 @@ func (c *Ctrl) CreateRequest(req model.Request) error {
 	return errors.Wrap(c.db.CreateRequest(req), "create request in db")
 }
 
-func (c *Ctrl) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
+func (c *Ctrl) ListRequest(q model.RequestListOptions) ([]model.Request, string, error) {
 	list, fee, err := c.db.ListRequest(q)
 	if err != nil {
-		return nil, 0, errors.Wrap(err, "list service from db")
+		return nil, "0", errors.Wrap(err, "list service from db")
 	}
-	return list, fee, nil
+	return list, fee.String(), nil
 }
 
 // ValidateSession validates the session token and signature
@@ -316,7 +316,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	}
 
 	// Use optimized calculation for unsettled fee using database aggregation
-	unsettledFee, err := c.db.CalculateUnsettledFee(account.User, c.Service.InputPrice, c.Service.OutputPrice)
+	unsettledFee, err := c.db.CalculateUnsettledFee(account.User)
 	if err != nil {
 		return errors.Wrap(err, "calculate unsettled fee")
 	}
@@ -349,7 +349,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 	}
 
 	// Recalculate unsettled fee after sync using optimized method
-	unsettledFeeNew, err := c.db.CalculateUnsettledFee(account.User, c.Service.InputPrice, c.Service.OutputPrice)
+	unsettledFeeNew, err := c.db.CalculateUnsettledFee(account.User)
 	if err != nil {
 		return errors.Wrap(err, "recalculate unsettled fee")
 	}

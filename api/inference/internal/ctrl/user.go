@@ -22,10 +22,10 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 	if err == nil {
 		return dbAccount, nil
 	}
-	
+
 	// Clear cache when creating new account to ensure fresh data
 	c.contractAccountCache.Delete(userAddress)
-	
+
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
 		return model.User{}, errors.Wrap(err, "get account from contract")
@@ -43,23 +43,20 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 	return dbAccount, errors.Wrap(c.db.CreateUserAccounts([]model.User{dbAccount}), "create account in db")
 }
 
-func (c *Ctrl) GetUserAccount(ctx context.Context, userAddress common.Address) (model.User, error) {
-	account, err := c.contract.GetUserAccount(ctx, userAddress)
-	if err != nil {
-		return model.User{}, errors.Wrap(err, "get account from contract")
-	}
-	rets, err := c.backfillUserAccount([]contract.Account{account})
-	return rets[0], err
-}
+// func (c *Ctrl) GetUserAccount(ctx context.Context, userAddress common.Address) (model.User, error) {
+// 	account, err := c.contract.GetUserAccount(ctx, userAddress)
+// 	if err != nil {
+// 		return model.User{}, errors.Wrap(err, "get account from contract")
+// 	}
+// 	rets, err := c.backfillUserAccount([]contract.Account{account})
+// 	return rets[0], err
+// }
 
-func (c *Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User, error) {
+func (c *Ctrl) ListUserAccount(ctx context.Context) ([]model.User, error) {
 	accounts, err := c.contract.ListUserAccount(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "list account from contract")
 	}
-	if mergeDB {
-		return c.backfillUserAccount(accounts)
-	}
 	list := make([]model.User, len(accounts))
 	for i, account := range accounts {
 		list[i] = parse(account)
@@ -67,24 +64,24 @@ func (c *Ctrl) ListUserAccount(ctx context.Context, mergeDB bool) ([]model.User,
 	return list, nil
 }
 
-func (c *Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, error) {
-	list := make([]model.User, len(accounts))
-	dbAccounts, err := c.db.ListUserAccount(nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "list account from db")
-	}
-	accountMap := make(map[string]model.User, len(dbAccounts))
-	for i, account := range dbAccounts {
-		accountMap[account.User] = dbAccounts[i]
-	}
-	for i, account := range accounts {
-		list[i] = parse(account)
-		if v, ok := accountMap[account.User.String()]; ok {
-			list[i].LastBalanceCheckTime = v.LastBalanceCheckTime
-		}
-	}
-	return list, nil
-}
+// func (c *Ctrl) backfillUserAccount(accounts []contract.Account) ([]model.User, error) {
+// 	list := make([]model.User, len(accounts))
+// 	dbAccounts, err := c.db.ListUserAccount()
+// 	if err != nil {
+// 		return nil, errors.Wrap(err, "list account from db")
+// 	}
+// 	accountMap := make(map[string]model.User, len(dbAccounts))
+// 	for i, account := range dbAccounts {
+// 		accountMap[account.User] = dbAccounts[i]
+// 	}
+// 	for i, account := range accounts {
+// 		list[i] = parse(account)
+// 		if v, ok := accountMap[account.User.String()]; ok {
+// 			list[i].LastBalanceCheckTime = v.LastBalanceCheckTime
+// 		}
+// 	}
+// 	return list, nil
+// }
 
 func (c *Ctrl) UpdateUserAccount(userAddress string, new model.User) error {
 	return errors.Wrap(c.db.UpdateUserAccount(userAddress, new), "create account in db")
@@ -93,7 +90,7 @@ func (c *Ctrl) UpdateUserAccount(userAddress string, new model.User) error {
 func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) error {
 	// Clear cache when syncing account to ensure fresh data
 	c.contractAccountCache.Delete(userAddress.Hex())
-	
+
 	account, err := c.contract.GetUserAccount(ctx, userAddress)
 	if err != nil {
 		return err
@@ -110,17 +107,17 @@ func (c *Ctrl) SyncUserAccount(ctx context.Context, userAddress common.Address) 
 }
 
 func (c *Ctrl) SyncUserAccounts(ctx context.Context) error {
-	accounts, err := c.ListUserAccount(ctx, false)
+	accounts, err := c.ListUserAccount(ctx)
 	if err != nil {
 		return err
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	// Clear all user account cache when batch syncing
 	c.contractAccountCache.Flush()
-	
+
 	return errors.Wrap(c.db.BatchUpdateUserAccount(accounts), "batch update account in db")
 }
 
