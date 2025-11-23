@@ -177,6 +177,57 @@ func (d *DB) ListUsersWithUnsettledFees(opt *model.UserListOptions) ([]model.Use
 	return users, nil
 }
 
+// BatchUpdateUserAccountsByAddresses updates only the specified user accounts in the database.
+// Unlike BatchUpdateUserAccount, this method only updates/creates the accounts provided,
+// without deleting accounts that are not in the list.
+func (d *DB) BatchUpdateUserAccountsByAddresses(accounts []model.User) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	// Get addresses to check which ones exist
+	addresses := make([]string, len(accounts))
+	for i, acc := range accounts {
+		addresses[i] = strings.ToLower(acc.User)
+	}
+
+	// Find existing accounts
+	var existing []model.User
+	if err := d.db.Where("LOWER(user) IN ?", addresses).Find(&existing).Error; err != nil {
+		return errors.Wrap(err, "find existing accounts")
+	}
+
+	existingMap := make(map[string]bool, len(existing))
+	for _, acc := range existing {
+		existingMap[strings.ToLower(acc.User)] = true
+	}
+
+	// Separate into accounts to add and accounts to update
+	var toAdd []model.User
+	var toUpdate []model.User
+	for _, acc := range accounts {
+		if existingMap[strings.ToLower(acc.User)] {
+			toUpdate = append(toUpdate, acc)
+		} else {
+			toAdd = append(toAdd, acc)
+		}
+	}
+
+	// Create new accounts
+	if err := d.CreateUserAccounts(toAdd); err != nil {
+		return err
+	}
+
+	// Update existing accounts - use batch update for better performance
+	for _, acc := range toUpdate {
+		if ret := d.db.Where("LOWER(user) = ?", strings.ToLower(acc.User)).Updates(acc); ret.Error != nil {
+			return ret.Error
+		}
+	}
+
+	return nil
+}
+
 // UpdateUserSkipUntil updates the skip_until field for a specific user
 func (d *DB) UpdateUserSkipUntil(userAddress string, skipUntil *time.Time) error {
 	return d.db.Model(&model.User{}).

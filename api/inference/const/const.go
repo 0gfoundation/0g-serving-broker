@@ -1,11 +1,13 @@
 package constant
 
+import "time"
+
 var (
 	ServicePrefix = "/v1/proxy"
 
 	TargetRoute = map[string]struct{}{
-		"/chat/completions":   {},
-		"/images/generations": {},
+		"/chat/completions":     {},
+		"/images/generations":   {},
 		"/audio/transcriptions": {},
 	}
 
@@ -30,4 +32,6 @@ var (
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50
+
+	SkipUntilDuration = 8 * time.Hour
 )
