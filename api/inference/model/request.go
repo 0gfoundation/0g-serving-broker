@@ -25,7 +25,7 @@ type Request struct {
 type RequestList struct {
 	Metadata ListMeta  `json:"metadata"`
 	Items    []Request `json:"items"`
-	Fee      int       `json:"fee"`
+	Fee      string    `json:"fee"` // Use string to handle large values exceeding int64 max
 }
 
 type RequestListOptions struct {

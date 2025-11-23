@@ -15,9 +15,9 @@ func (d *DB) GetRequest(requestHash string) (model.Request, error) {
 	return req, ret.Error
 }
 
-func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, error) {
+func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, *big.Int, error) {
 	list := []model.Request{}
-	var totalFee sql.NullInt64
+	var totalFeeStr sql.NullString
 
 	err := d.db.Transaction(func(tx *gorm.DB) error {
 		ret := tx.Model(model.Request{}).
@@ -42,19 +42,18 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, int, erro
 			return err
 		}
 
-		if err := ret.Select("SUM(CAST(fee AS SIGNED))").Scan(&totalFee).Error; err != nil {
+		// Note: Use DECIMAL(65,0) to avoid BIGINT overflow when summing large fee values
+		if err := ret.Select("CAST(SUM(CAST(fee AS DECIMAL(65,0))) AS CHAR)").Scan(&totalFeeStr).Error; err != nil {
 			return err
 		}
 		return nil
 	})
 
-	var totalFeeInt int
-	if totalFee.Valid {
-		totalFeeInt = int(totalFee.Int64)
-	} else {
-		totalFeeInt = 0
+	totalFee := big.NewInt(0)
+	if totalFeeStr.Valid && totalFeeStr.String != "" {
+		totalFee.SetString(totalFeeStr.String, 10)
 	}
-	return list, totalFeeInt, err
+	return list, totalFee, err
 }
 
 func (d *DB) UpdateRequest(latestReqCreateAt *time.Time) error {
@@ -152,32 +151,22 @@ func (d *DB) PruneRequest(pruneThreshold time.Duration) error {
 
 // CalculateUnsettledFee calculates unsettled fee using SUM aggregation for optimal performance
 // Uses database aggregation instead of application-level calculation
-func (d *DB) CalculateUnsettledFee(userAddress string, inputPrice, outputPrice int64) (*big.Int, error) {
-	type AggregateResult struct {
-		TotalInputCount  int64
-		TotalOutputCount int64
-	}
-	
-	var result AggregateResult
+// Note: Use DECIMAL(65,0) to avoid BIGINT overflow when summing large fee values
+func (d *DB) CalculateUnsettledFee(userAddress string) (*big.Int, error) {
+	var totalFeeStr sql.NullString
 	err := d.db.Model(&model.Request{}).
-		Select("COALESCE(SUM(input_count), 0) as total_input_count, COALESCE(SUM(output_count), 0) as total_output_count").
+		Select("CAST(COALESCE(SUM(CAST(fee AS DECIMAL(65,0))), 0) AS CHAR)").
 		Where("user_address = ? AND processed = ?", userAddress, false).
-		Scan(&result).Error
-	
+		Scan(&totalFeeStr).Error
+
 	if err != nil {
 		return nil, err
 	}
-	
-	// Calculate total fee: (inputCount * inputPrice) + (outputCount * outputPrice)
-	inputFee := big.NewInt(result.TotalInputCount)
-	inputFee.Mul(inputFee, big.NewInt(inputPrice))
-	
-	outputFee := big.NewInt(result.TotalOutputCount)
-	outputFee.Mul(outputFee, big.NewInt(outputPrice))
-	
+
 	totalFee := big.NewInt(0)
-	totalFee.Add(inputFee, outputFee)
-	
+	if totalFeeStr.Valid && totalFeeStr.String != "" {
+		totalFee.SetString(totalFeeStr.String, 10)
+	}
 	return totalFee, nil
 }
 
