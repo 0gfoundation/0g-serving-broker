@@ -8,8 +8,8 @@ networks:
     chainID: 16602
     privateKeys:
       - <Private_Key>
-    transactionLimit: 1000000
-    gasEstimationBuffer: 10000
+    transactionLimit: 5000000
+    gasEstimationBuffer: 100000
 service:
   servingUrl: <Serving URL>
   targetUrl: <Target URL>
