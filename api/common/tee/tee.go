@@ -128,8 +128,6 @@ func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
 		return nil, errors.New("provider signer not initialized")
 	}
 
-	s.logger.Infof("provider address: %s", crypto.PubkeyToAddress(s.ProviderSigner.PublicKey))
-
 	// Add Ethereum Signed Message prefix (matching the contract expectation)
 	ethPrefix := []byte("\x19Ethereum Signed Message:\n32")
 	prefixedHash := crypto.Keccak256(ethPrefix, messageHash)
