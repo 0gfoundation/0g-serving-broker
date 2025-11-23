@@ -12,6 +12,12 @@ var (
 	RequestCount    *prometheus.CounterVec
 	ErrorCount      *prometheus.CounterVec
 	RequestDuration *prometheus.HistogramVec
+
+	// UniqueUsersTotal tracks the number of unique users per day
+	UniqueUsersTotal prometheus.Gauge
+
+	// uniqueUsersChan is a buffered channel for async user recording (non-blocking)
+	uniqueUsersChan chan string
 )
 
 func PrometheusInit(serverName string) {
@@ -47,9 +53,44 @@ func PrometheusInit(serverName string) {
 		[]string{"path"},
 	)
 
+	UniqueUsersTotal = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name:        "broker_unique_users_total",
+			Help:        "Number of unique users for the current day (resets daily at UTC midnight).",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+	)
+
 	prometheus.MustRegister(RequestCount)
 	prometheus.MustRegister(ErrorCount)
 	prometheus.MustRegister(RequestDuration)
+	prometheus.MustRegister(UniqueUsersTotal)
+
+	// Initialize buffered channel and start background processor
+	uniqueUsersChan = make(chan string, 10000)
+	go processUniqueUsers()
+}
+
+// processUniqueUsers runs in background and processes user addresses without blocking requests
+func processUniqueUsers() {
+	uniqueUsers := make(map[string]struct{})
+	lastResetDay := time.Now().UTC().YearDay()
+
+	for userAddress := range uniqueUsersChan {
+		// Check if we need to reset (new day)
+		currentDay := time.Now().UTC().YearDay()
+		if currentDay != lastResetDay {
+			uniqueUsers = make(map[string]struct{})
+			lastResetDay = currentDay
+			UniqueUsersTotal.Set(0)
+		}
+
+		// Add user if not already present
+		if _, exists := uniqueUsers[userAddress]; !exists {
+			uniqueUsers[userAddress] = struct{}{}
+			UniqueUsersTotal.Set(float64(len(uniqueUsers)))
+		}
+	}
 }
 
 // TrackMetrics is a Gin middleware that tracks request metrics.
@@ -72,5 +113,20 @@ func TrackMetrics() gin.HandlerFunc {
 		if !ignoreError && status >= 400 {
 			ErrorCount.WithLabelValues(path, http.StatusText(status)).Inc()
 		}
+	}
+}
+
+// RecordUniqueUser records a unique user for the current day (non-blocking).
+// It sends the user address to a buffered channel for async processing.
+func RecordUniqueUser(userAddress string) {
+	if userAddress == "" || uniqueUsersChan == nil {
+		return
+	}
+
+	// Non-blocking send: if channel is full, skip this record
+	select {
+	case uniqueUsersChan <- userAddress:
+	default:
+		// Channel full, skip to avoid blocking request
 	}
 }
