@@ -417,10 +417,10 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			if len(outcome.SettledRequests) > 0 {
 				// Delete successfully settled requests
 				c.deleteRequests(outcome.SettledRequests)
-				c.logger.Infof("User %s: deleted %d settled requests", 
+				c.logger.Infof("User %s: deleted %d settled requests",
 					outcome.User.Hex(), len(outcome.SettledRequests))
 			}
-			
+
 		case SettlementNoSigner:
 			// Permanent failure - delete all requests for this user
 			// For permanent failures, we should delete all user's requests (not just settled ones)
@@ -429,10 +429,10 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 				c.logger.Infof("Error getting requests for permanent failure user %s: %v", outcome.User.Hex(), err)
 			} else if userReqs != nil {
 				c.deleteRequests(userReqs.Requests)
-				c.logger.Infof("User %s: deleted %d requests due to permanent failure", 
+				c.logger.Infof("User %s: deleted %d requests due to permanent failure",
 					outcome.User.Hex(), len(userReqs.Requests))
 			}
-			
+
 		default:
 			// Temporary failure - already handled by skipUntil logic
 			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())

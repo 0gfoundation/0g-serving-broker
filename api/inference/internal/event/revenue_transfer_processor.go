@@ -9,6 +9,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 type RevenueTransferProcessor struct {
@@ -87,4 +88,7 @@ func (r *RevenueTransferProcessor) handleTransfer(ctx context.Context) {
 	}
 
 	r.logger.Infof("Revenue transfer successful, tx hash: %s", txHash.Hex())
+
+	// Record revenue transfer for monitoring
+	monitor.RecordRevenueTransfer(transferAmount)
 }

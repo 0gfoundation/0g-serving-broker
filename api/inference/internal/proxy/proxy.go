@@ -147,6 +147,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
+	// Record unique user for DAU tracking
+	monitor.RecordUniqueUser(userAddress)
+
 	req := model.Request{
 		UserAddress: userAddress,
 	}
