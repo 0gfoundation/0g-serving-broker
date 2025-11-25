@@ -78,9 +78,10 @@ type SettlementBatch struct {
 }
 
 func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
-	// Use big.Int to avoid int64 overflow when calculating threshold
-	// (InputPrice + OutputPrice) * SettleTriggerThreshold can exceed int64 max
-	priceSum := big.NewInt(c.Service.InputPrice + c.Service.OutputPrice)
+	priceSum, err := util.Add(c.Service.InputPrice, c.Service.OutputPrice)
+	if err != nil {
+		return errors.Wrap(err, "calculate price sum")
+	}
 	threshold := big.NewInt(constant.SettleTriggerThreshold)
 	settleTriggerThreshold := new(big.Int).Mul(priceSum, threshold).String()
 

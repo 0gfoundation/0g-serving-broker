@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -309,10 +310,22 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("nil lockBalance in account")
 	}
 
+	var responseFeeReservation *big.Int
+	var err error
 	// Calculate response fee reservation
-	responseFeeReservation, err := util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactor)
-	if err != nil {
-		return errors.Wrap(err, "calculate response fee reservation")
+	switch c.Service.Type {
+	case "zgStorage", "chatbot", "speech-to-text":
+		responseFeeReservation, err = util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactor)
+		if err != nil {
+			return errors.Wrap(err, "calculate response fee reservation")
+		}
+	case "text-to-image":
+		responseFeeReservation, err = util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactorForImage)
+		if err != nil {
+			return errors.Wrap(err, "calculate response fee reservation for image")
+		}
+	default:
+		return errors.New("unknown service type for balance adequacy validation")
 	}
 
 	// Use optimized calculation for unsettled fee using database aggregation
@@ -370,7 +383,18 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return nil
 	}
 	ctx.Set("ignoreError", true)
-	return fmt.Errorf("insufficient balance, total fee of %s neuron (including response reservation) exceeds the available balance of %s neuron", totalNew.String(), *newAccount.LockBalance)
-}
 
- 
+	// Convert neuron to 0G for display (1 0G = 10^18 neuron)
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+	totalNewBig := new(big.Int)
+	totalNewBig.SetString(totalNew.String(), 10)
+	totalInZG := new(big.Float).Quo(new(big.Float).SetInt(totalNewBig), new(big.Float).SetInt(divisor))
+
+	balanceBig := new(big.Int)
+	balanceBig.SetString(*newAccount.LockBalance, 10)
+	balanceInZG := new(big.Float).Quo(new(big.Float).SetInt(balanceBig), new(big.Float).SetInt(divisor))
+
+	return fmt.Errorf("insufficient balance: this service requires at least %s 0G in your account, but your current locked balance is only %s 0G (locked balance = total balance - pending retrieval amount). You can check your sub-account details with: 0g-compute-cli get-sub-account --provider %s --service inference",
+		totalInZG.Text('f', 6), balanceInZG.Text('f', 6), c.contract.ProviderAddress)
+}

@@ -44,8 +44,8 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		ctrl:         ctrl,
 		logger:       logger,
 		serviceGroup: engine.Group(constant.ServicePrefix),
-		// Configure rate limiter: 20 requests per second with burst of 30
-		rateLimiter: middleware.NewRateLimiter(rate.Limit(20), 30),
+		// Configure rate limiter: 15 requests per second with burst of 20
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(15), 20),
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -57,7 +57,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
-	
+
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
@@ -137,7 +137,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
-		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, 0, false)
+		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
 		return
 	}
 
@@ -156,14 +156,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	var expectedInputFee string
 	switch svcType {
-	case "zgStorage", "speech-to-text":
+	case "zgStorage", "chatbot", "speech-to-text":
 		expectedInputFee = "0"
-	case "chatbot":
-		expectedInputFee, _, err = p.ctrl.GetChatbotInputFeeAndCount(reqBody)
-		if err != nil {
-			p.handleBrokerError(ctx, err, "get input fee and count")
-			return
-		}
 	case "text-to-image":
 		_, imageNum, err := p.ctrl.GetTextToImageInputFeeAndImageNum(reqBody)
 		if err != nil {

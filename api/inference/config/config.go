@@ -12,8 +12,8 @@ import (
 type Service struct {
 	ServingURL       string            `yaml:"servingUrl"`
 	TargetURL        string            `yaml:"targetUrl"`
-	InputPrice       int64             `yaml:"inputPrice"`
-	OutputPrice      int64             `yaml:"outputPrice"`
+	InputPrice       string            `yaml:"inputPrice"`
+	OutputPrice      string            `yaml:"outputPrice"`
 	Type             string            `yaml:"type"`
 	ModelType        string            `yaml:"model"`
 	Verifiability    string            `yaml:"verifiability"`
