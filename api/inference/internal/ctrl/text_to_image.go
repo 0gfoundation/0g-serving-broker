@@ -35,7 +35,7 @@ func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64,
 }
 
 // handleTextToImageResponse handles image generation response
-func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
+func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()

@@ -116,7 +116,7 @@ func getInputCount(reqBody []byte) (int64, error) {
 	return int64(len(messagesBytes)), nil
 }
 
-func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
+func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	isStream, err := isStream(reqBody)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "check if stream")
@@ -129,7 +129,7 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 	}
 }
 
-func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
+func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
@@ -156,7 +156,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	return nil
 }
 
-func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice int64, reqBody []byte, reqModel model.Request) error {
+func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
@@ -210,7 +210,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice int64, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, chatKey string) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, chatKey string) error {
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -306,7 +306,7 @@ func (*Ctrl) chatCacheKey(chatID string) string {
 	return fmt.Sprintf("%s:%s", ChatPrefix, chatID)
 }
 
-func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice int64, output *string, requestHash string, usage **Usage) error {
+func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage) error {
 	line := bytes.TrimPrefix(decodedBody, []byte("data: "))
 	var chunk CompletionChunk
 	if err := json.Unmarshal(line, &chunk); err != nil {
@@ -341,7 +341,7 @@ func (c *Ctrl) processLine(line []byte) (string, error) {
 	return outputChunk, nil
 }
 
-func (c *Ctrl) finalizeResponse(ctx context.Context, output string, outputPrice int64, requestHash string) error {
+func (c *Ctrl) finalizeResponse(ctx context.Context, output string, outputPrice string, requestHash string) error {
 	return c.updateAccountWithOutput(ctx, output, outputPrice, requestHash)
 }
 
@@ -356,12 +356,12 @@ func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
 }
 
 // finalizeResponseWithUsage updates the account with accurate token counts from LLM
-func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice int64, requestHash string, inputPrice int64) error {
+func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
 	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice)
 }
 
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response
-func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPrice int64, requestHash string, inputPrice int64) error {
+func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
 	// Calculate actual fees based on LLM-provided token counts
 	inputFee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
 	if err != nil {
@@ -390,7 +390,7 @@ func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPri
 // updateAccountWithOutput is the FALLBACK method when LLM doesn't provide usage information
 // It estimates tokens by counting space-separated words (inaccurate but better than nothing)
 // This should only be used when the LLM response doesn't include usage data
-func (c *Ctrl) updateAccountWithOutput(_ context.Context, output string, outputPrice int64, requestHash string) error {
+func (c *Ctrl) updateAccountWithOutput(_ context.Context, output string, outputPrice string, requestHash string) error {
 	// WARNING: This is a rough estimation based on word count, not actual tokens
 	outputCount := int64(len(strings.Fields(output)))
 	lastResponseFee, err := util.Multiply(outputPrice, outputCount)

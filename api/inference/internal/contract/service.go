@@ -54,17 +54,17 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	c.logger.Infof("[AddOrUpdateService] Starting to add or update service - provider=%s, type=%s, url=%s, model=%s, verifiability=%s",
 		c.ProviderAddress, service.Type, service.ServingURL, service.ModelType, service.Verifiability)
 
-	c.logger.Infof("[AddOrUpdateService] Price information - inputPrice=%d, outputPrice=%d",
+	c.logger.Infof("[AddOrUpdateService] Price information - inputPrice=%s, outputPrice=%s",
 		service.InputPrice, service.OutputPrice)
 
 	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
 	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to convert input price - inputPrice=%d, error=%v", service.InputPrice, err)
+		c.logger.Errorf("[AddOrUpdateService] Failed to convert input price - inputPrice=%s, error=%v", service.InputPrice, err)
 		return errors.Wrap(err, "convert input price")
 	}
 	outputPrice, err := util.ConvertToBigInt(service.OutputPrice)
 	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to convert output price - outputPrice=%d, error=%v", service.OutputPrice, err)
+		c.logger.Errorf("[AddOrUpdateService] Failed to convert output price - outputPrice=%s, error=%v", service.OutputPrice, err)
 		return errors.Wrap(err, "convert input price")
 	}
 
@@ -147,7 +147,7 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {
-	c.logger.Infof("[SyncService] Starting to sync service - provider=%s, newURL=%s, newModel=%s, newType=%s, inputPrice=%d, outputPrice=%d",
+	c.logger.Infof("[SyncService] Starting to sync service - provider=%s, newURL=%s, newModel=%s, newType=%s, inputPrice=%s, outputPrice=%s",
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 
 	old, err := c.GetService(ctx)
@@ -196,10 +196,10 @@ func identicalService(old contract.Service, new config.Service, teeSignerAddress
 	if old.Verifiability != new.Verifiability {
 		return false
 	}
-	if old.InputPrice.Int64() != new.InputPrice {
+	if old.InputPrice.String() != new.InputPrice {
 		return false
 	}
-	if old.OutputPrice.Int64() != new.OutputPrice {
+	if old.OutputPrice.String() != new.OutputPrice {
 		return false
 	}
 	if old.ServiceType != new.Type {

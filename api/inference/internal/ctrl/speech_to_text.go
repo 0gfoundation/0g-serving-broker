@@ -49,7 +49,7 @@ type SpeechToTextStreamChunk struct {
 }
 
 // handleSpeechToTextResponse handles speech-to-text transcription response
-func (c *Ctrl) handleSpeechToTextResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ int64, reqBody []byte, reqModel model.Request) error {
+func (c *Ctrl) handleSpeechToTextResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ string, reqBody []byte, reqModel model.Request) error {
 	// Check if request is for streaming by parsing the request body
 	isStream := c.isSpeechToTextStream(reqBody)
 	
