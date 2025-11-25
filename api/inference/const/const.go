@@ -27,8 +27,11 @@ var (
 	// Should align with the topUpTriggerThreshold in the client sdk
 	SettleTriggerThreshold = int64(1000000)
 
-	// Response fee reservation factor for balance adequacy validation
+	// Response fee reservation factor for balance adequacy validation:  chatbot, speech-to-text,
 	ResponseFeeReservationFactor = int64(1000000)
+
+	// Response fee reservation factor for balance adequacy validation: text-to-image
+	ResponseFeeReservationFactorForImage = int64(100)
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50
