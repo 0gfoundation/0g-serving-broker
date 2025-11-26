@@ -80,41 +80,6 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-// GetChatbotInputFeeAndCount returns both the input fee and count for efficient request creation
-// Note: This returns an ESTIMATE based on message byte size for validation purposes
-// The actual token count will be obtained from the LLM response
-func (c *Ctrl) GetChatbotInputFeeAndCount(reqBody []byte) (string, int64, error) {
-	inputCount, err := getInputCount(reqBody)
-	if err != nil {
-		return "", 0, errors.Wrap(err, "get input count")
-	}
-
-	expectedInputFee, err := util.Multiply(inputCount, c.Service.InputPrice)
-	if err != nil {
-		return "", 0, errors.Wrap(err, "calculate input fee")
-	}
-	return expectedInputFee.String(), inputCount, nil
-}
-
-// getInputCount provides an estimation of input tokens based on message byte size
-// This is used ONLY for initial balance validation before the request is sent to LLM
-// The actual token count from LLM response will replace this estimate
-func getInputCount(reqBody []byte) (int64, error) {
-	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(reqBody, &bodyMap); err != nil {
-		return 0, fmt.Errorf("failed to unmarshal reqBody: %w", err)
-	}
-	messages, ok := bodyMap["messages"]
-	if !ok {
-		return 0, fmt.Errorf("messages field not found in reqBody")
-	}
-	messagesBytes, err := json.Marshal(messages)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal messages: %w", err)
-	}
-	// Estimation based on message byte length for validation only
-	return int64(len(messagesBytes)), nil
-}
 
 func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	isStream, err := isStream(reqBody)
@@ -233,7 +198,12 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 			if isStreamDone(line) {
 				// For stream responses, usage info comes before [DONE]
 				if usage != nil {
-					c.finalizeResponseWithUsage(ctx, usage, outputPrice, reqModel.RequestHash, c.Service.InputPrice)
+					// Get service price from cache/contract instead of config
+					service, err := c.GetCachedService(ctx)
+					if err != nil {
+						return errors.Wrap(err, "get cached service for stream response billing")
+					}
+					c.finalizeResponseWithUsage(ctx, usage, service.OutputPrice, reqModel.RequestHash, service.InputPrice)
 					break
 				}
 				c.finalizeResponse(ctx, output, outputPrice, reqModel.RequestHash)
@@ -320,7 +290,12 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	// For non-stream responses, usage info is in the same response
 	if chunk.Usage != nil {
 		*usage = chunk.Usage
-		return c.updateAccountWithUsage(ctx, chunk.Usage, outputPrice, requestHash, c.Service.InputPrice)
+		// Get service price from cache/contract instead of config
+		service, err := c.GetCachedService(ctx)
+		if err != nil {
+			return errors.Wrap(err, "get cached service for single response billing")
+		}
+		return c.updateAccountWithUsage(ctx, chunk.Usage, service.OutputPrice, requestHash, service.InputPrice)
 	}
 
 	// Fallback to old logic if no usage info

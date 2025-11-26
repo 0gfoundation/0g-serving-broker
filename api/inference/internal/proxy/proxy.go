@@ -143,6 +143,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	userAddress, err := p.ctrl.ValidateSession(ctx)
 	if err != nil {
+		// Session validation errors are user-caused (invalid token, expired session, etc.)
+		ctx.Set("ignoreError", true)
 		p.handleBrokerError(ctx, err, "validate session")
 		return
 	}
@@ -161,6 +163,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	case "text-to-image":
 		_, imageNum, err := p.ctrl.GetTextToImageInputFeeAndImageNum(reqBody)
 		if err != nil {
+			// Invalid request body is a user-caused error
+			ctx.Set("ignoreError", true)
 			p.handleBrokerError(ctx, err, "get text-to-image steps")
 			return
 		}
@@ -195,7 +199,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, p.ctrl.Service.OutputPrice, true); err != nil {
+	// Get service price from cache/contract instead of config
+	service, err := p.ctrl.GetCachedService(ctx)
+	if err != nil {
+		p.handleBrokerError(ctx, err, "get cached service for request processing")
+		return
+	}
+
+	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, service.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
 	}
 }

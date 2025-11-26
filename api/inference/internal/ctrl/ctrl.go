@@ -26,13 +26,16 @@ type Ctrl struct {
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
-	
+
 	// Session validation cache
 	sessionCache *cache.Cache
-	
+
 	// Contract data caches to avoid frequent contract calls
 	contractAccountCache *cache.Cache  // Cache for user account data from contract
 	serviceCache         *cache.Cache  // Cache for service data from contract
+
+	// Service sync flag to ensure SyncService is only called once
+	serviceSynced bool
 
 	// Log configuration
 	logPath      string

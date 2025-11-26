@@ -257,6 +257,8 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	}
 
 	if contractAccount.Acknowledged == false {
+		// User-caused error: user hasn't acknowledged the provider
+		ctx.Set("ignoreError", true)
 		return errors.New("user not acknowledge the provider, please use acknowledgeProviderSigner function in sdk first, it will take effect in 2 minutes")
 	}
 
@@ -310,17 +312,22 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("nil lockBalance in account")
 	}
 
+	// Get service price from cache/contract instead of config
+	service, err := c.GetCachedService(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get cached service for balance validation")
+	}
+
 	var responseFeeReservation *big.Int
-	var err error
 	// Calculate response fee reservation
 	switch c.Service.Type {
 	case "zgStorage", "chatbot", "speech-to-text":
-		responseFeeReservation, err = util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactor)
+		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactor)
 		if err != nil {
 			return errors.Wrap(err, "calculate response fee reservation")
 		}
 	case "text-to-image":
-		responseFeeReservation, err = util.Multiply(c.Service.OutputPrice, constant.ResponseFeeReservationFactorForImage)
+		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactorForImage)
 		if err != nil {
 			return errors.Wrap(err, "calculate response fee reservation for image")
 		}
