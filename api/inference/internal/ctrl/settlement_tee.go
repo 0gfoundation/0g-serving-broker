@@ -78,7 +78,13 @@ type SettlementBatch struct {
 }
 
 func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
-	priceSum, err := util.Add(c.Service.InputPrice, c.Service.OutputPrice)
+	// Get service price from cache/contract instead of config
+	service, err := c.GetCachedService(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get cached service for settlement")
+	}
+
+	priceSum, err := util.Add(service.InputPrice, service.OutputPrice)
 	if err != nil {
 		return errors.Wrap(err, "calculate price sum")
 	}
