@@ -276,7 +276,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker:v1.0.0
+    image: ghcr.io/0gfoundation/0g-serving-broker:v0.3.0
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -349,7 +349,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker:v1.0.0
+    image: ghcr.io/0gfoundation/0g-serving-broker:v0.3.0
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if eq .TeeNode "hardhat"}}
