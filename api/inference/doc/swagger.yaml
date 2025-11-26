@@ -57,7 +57,8 @@ definitions:
   model.RequestList:
     properties:
       fee:
-        type: integer
+        description: Use string to handle large values exceeding int64 max
+        type: string
       items:
         items:
           $ref: '#/definitions/model.Request'
@@ -104,38 +105,6 @@ definitions:
       items:
         items:
           $ref: '#/definitions/model.Service'
-        type: array
-      metadata:
-        $ref: '#/definitions/model.ListMeta'
-    type: object
-  model.User:
-    properties:
-      createdAt:
-        readOnly: true
-        type: string
-      lastBalanceCheckTime:
-        type: string
-      lockBalance:
-        type: string
-      signer:
-        items:
-          type: string
-        type: array
-      skipUntil:
-        type: string
-      updatedAt:
-        readOnly: true
-        type: string
-      user:
-        type: string
-    required:
-    - user
-    type: object
-  model.UserList:
-    properties:
-      items:
-        items:
-          $ref: '#/definitions/model.User'
         type: array
       metadata:
         $ref: '#/definitions/model.ListMeta'
@@ -334,35 +303,6 @@ paths:
       responses:
         "202":
           description: Accepted
-      tags:
-      - user
-  /user:
-    get:
-      description: This endpoint allows you to list all users who have created accounts
-        for your service
-      operationId: listUserAccount
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/model.UserList'
-      tags:
-      - user
-  /user/{user}:
-    get:
-      description: This endpoint allows you to get account by user address
-      operationId: getUserAccount
-      parameters:
-      - description: User address
-        in: path
-        name: user
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/model.User'
       tags:
       - user
   /user/{user}/sync:

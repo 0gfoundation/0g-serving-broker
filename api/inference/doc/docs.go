@@ -290,49 +290,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/user": {
-            "get": {
-                "description": "This endpoint allows you to list all users who have created accounts for your service",
-                "tags": [
-                    "user"
-                ],
-                "operationId": "listUserAccount",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/model.UserList"
-                        }
-                    }
-                }
-            }
-        },
-        "/user/{user}": {
-            "get": {
-                "description": "This endpoint allows you to get account by user address",
-                "tags": [
-                    "user"
-                ],
-                "operationId": "getUserAccount",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "User address",
-                        "name": "user",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/model.User"
-                        }
-                    }
-                }
-            }
-        },
         "/user/{user}/sync": {
             "post": {
                 "description": "This endpoint allows you to synchronize information of single account from the contract",
@@ -438,7 +395,8 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "fee": {
-                    "type": "integer"
+                    "description": "Use string to handle large values exceeding int64 max",
+                    "type": "string"
                 },
                 "items": {
                     "type": "array",
@@ -505,54 +463,6 @@ const docTemplate = `{
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/model.Service"
-                    }
-                },
-                "metadata": {
-                    "$ref": "#/definitions/model.ListMeta"
-                }
-            }
-        },
-        "model.User": {
-            "type": "object",
-            "required": [
-                "user"
-            ],
-            "properties": {
-                "createdAt": {
-                    "type": "string",
-                    "readOnly": true
-                },
-                "lastBalanceCheckTime": {
-                    "type": "string"
-                },
-                "lockBalance": {
-                    "type": "string"
-                },
-                "signer": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "skipUntil": {
-                    "type": "string"
-                },
-                "updatedAt": {
-                    "type": "string",
-                    "readOnly": true
-                },
-                "user": {
-                    "type": "string"
-                }
-            }
-        },
-        "model.UserList": {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/model.User"
                     }
                 },
                 "metadata": {
