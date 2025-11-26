@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -17,6 +18,9 @@ import (
 )
 
 var ErrServiceNotFound = errors.New("service not found")
+
+// DefaultProviderStake is the default stake amount for first-time service registration (10 0G)
+var DefaultProviderStake = new(big.Int).Mul(big.NewInt(10), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
 func buildAdditionalInfo(service config.Service) (string, error) {
@@ -50,12 +54,16 @@ func buildAdditionalInfo(service config.Service) (string, error) {
 	return string(additionalInfoJSON), nil
 }
 
-func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, teeSignerAddress common.Address) error {
+func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, teeSignerAddress common.Address, stakeValue *big.Int) error {
 	c.logger.Infof("[AddOrUpdateService] Starting to add or update service - provider=%s, type=%s, url=%s, model=%s, verifiability=%s",
 		c.ProviderAddress, service.Type, service.ServingURL, service.ModelType, service.Verifiability)
 
 	c.logger.Infof("[AddOrUpdateService] Price information - inputPrice=%s, outputPrice=%s",
 		service.InputPrice, service.OutputPrice)
+
+	if stakeValue != nil {
+		c.logger.Infof("[AddOrUpdateService] First-time registration with stake - stakeValue=%s", stakeValue.String())
+	}
 
 	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
 	if err != nil {
@@ -79,8 +87,9 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	c.logger.Infof("[AddOrUpdateService] Additional info JSON: %s", additionalInfoJSON)
 	c.logger.Infof("[AddOrUpdateService] Tee signer address: %s", teeSignerAddress.Hex())
 
-	tx, err := c.Contract.Transact(ctx,
+	tx, err := c.Contract.TransactWithValue(ctx,
 		nil,
+		stakeValue,
 		"addOrUpdateService",
 		contract.ServiceParams{
 			ServiceType:   service.Type,
@@ -179,8 +188,23 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 		return nil
 	}
 
+	// Determine stake value for first-time registration
+	var stakeValue *big.Int
+	if old == nil {
+		// First-time registration: need to stake
+		stakeValue = DefaultProviderStake
+		if new.ProviderStake != "" {
+			stakeValue, err = util.ConvertToBigInt(new.ProviderStake)
+			if err != nil {
+				c.logger.Errorf("[SyncService] Failed to convert provider stake - stake=%s, error=%v", new.ProviderStake, err)
+				return errors.Wrap(err, "convert provider stake")
+			}
+		}
+		c.logger.Infof("[SyncService] First-time registration, stake amount: %s", stakeValue.String())
+	}
+
 	c.logger.Info("[SyncService] Preparing to add or update service to contract")
-	if err := c.AddOrUpdateService(ctx, new, c.TeeSignerAddress); err != nil {
+	if err := c.AddOrUpdateService(ctx, new, c.TeeSignerAddress, stakeValue); err != nil {
 		c.logger.Errorf("[SyncService] Failed to add or update service - error=%v", err)
 		return errors.Wrap(err, "add or update service in contract")
 	}
