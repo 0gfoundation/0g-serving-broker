@@ -14,15 +14,22 @@ import (
 )
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
-	req, err := http.NewRequest(ctx.Request.Method, targetURL, io.NopCloser(bytes.NewBuffer(reqBody)))
+	var body io.Reader
+	if len(reqBody) > 0 {
+		body = bytes.NewBuffer(reqBody)
+	}
+	req, err := http.NewRequest(ctx.Request.Method, targetURL, body)
 	if err != nil {
 		return nil, err
+	}
+	// Set Content-Length explicitly to avoid chunked transfer encoding
+	if len(reqBody) > 0 {
+		req.ContentLength = int64(len(reqBody))
 	}
 
 	for k, v := range ctx.Request.Header {
 		if _, ok := constant.RequestMetaDataDuplicate[k]; !ok {
 			req.Header.Set(k, v[0])
-			continue
 		}
 	}
 
@@ -40,12 +47,16 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	client := &http.Client{}
 
 	// back up body for other usage
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		c.handleBrokerError(ctx, err, "failed to read request body")
-		return err
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		if err != nil {
+			c.handleBrokerError(ctx, err, "failed to read request body")
+			return err
+		}
+		req.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
-	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	resp, err := client.Do(req)
 	if err != nil {
