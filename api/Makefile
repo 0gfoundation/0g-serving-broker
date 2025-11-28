@@ -69,7 +69,8 @@ generate-inference-router-api:
 package-inference:
 	@mkdir -p /tmp/inference-broker && \
 	cp ./inference/integration/README.md /tmp/inference-broker/ && \
-	cp ./inference/integration/config/config.yml /tmp/inference-broker/ && \
+	cp ./inference/integration/config/config.mainnet.yml /tmp/inference-broker/ && \
+	cp ./inference/integration/config/config.testnet.yml /tmp/inference-broker/ && \
 	cp ./inference/integration/config/config /tmp/inference-broker/ && \
 	tar -czf /tmp/inference-broker.tar.gz -C /tmp inference-broker && \
 	rm -rf /tmp/inference-broker && \
