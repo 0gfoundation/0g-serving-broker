@@ -21,14 +21,26 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
+// EphemeralTokenId is the special token ID reserved for ephemeral tokens.
+// Ephemeral tokens (tokenId=255) are not checked against the revoked bitmap,
+// only generation check applies. This allows unlimited ephemeral tokens without
+// consuming the 0-254 tokenId quota.
+const EphemeralTokenId = 255
+
+// EphemeralTokenMaxDuration is the maximum allowed duration for ephemeral tokens (24 hours in milliseconds).
+// Ephemeral tokens must have an expiration time and cannot exceed this duration.
+const EphemeralTokenMaxDuration = 24 * 60 * 60 * 1000 // 24 hours in milliseconds
+
 // SessionToken represents the structure of a session token
 // Used for both user sessions and provider authentication
 type SessionToken struct {
-	Address   string `json:"address"`   // User/Provider address
-	Provider  string `json:"provider"`  // Target provider address
-	Timestamp int64  `json:"timestamp"` // Token creation timestamp
-	ExpiresAt int64  `json:"expiresAt"` // Token expiration timestamp
-	Nonce     string `json:"nonce"`     // Random nonce to prevent replay attacks
+	Address    string `json:"address"`    // User/Provider address
+	Provider   string `json:"provider"`   // Target provider address
+	Timestamp  int64  `json:"timestamp"`  // Token creation timestamp
+	ExpiresAt  int64  `json:"expiresAt"`  // Token expiration timestamp (0 = never expires)
+	Nonce      string `json:"nonce"`      // Random nonce to prevent replay attacks
+	Generation uint64 `json:"generation"` // Token generation for batch revocation
+	TokenId    uint8  `json:"tokenId"`    // Token ID: 0-254 for persistent tokens, 255 for ephemeral
 }
 
 // SessionValidationCache stores validated sessions to avoid repeated signature verification
@@ -80,9 +92,28 @@ func (c *Ctrl) ValidateSession(ctx *gin.Context) (string, error) {
 		return "", errors.New("session token is for different provider")
 	}
 
+	// Validate ephemeral token constraints
+	if token.TokenId == EphemeralTokenId {
+		// Ephemeral tokens MUST have an expiration time
+		if token.ExpiresAt == 0 {
+			return "", errors.New("ephemeral token must have an expiration time")
+		}
+		// Ephemeral tokens cannot exceed 24 hours duration
+		tokenDuration := token.ExpiresAt - token.Timestamp
+		if tokenDuration > EphemeralTokenMaxDuration {
+			return "", errors.New("ephemeral token duration cannot exceed 24 hours")
+		}
+	}
+
 	// Check token expiration (convert milliseconds to seconds)
-	if time.Now().Unix() > token.ExpiresAt/1000 {
+	// ExpiresAt == 0 means never expires (only allowed for persistent tokens)
+	if token.ExpiresAt > 0 && time.Now().Unix() > token.ExpiresAt/1000 {
 		return "", errors.New("session token expired")
+	}
+
+	// Validate generation and revocation status from contract
+	if err := c.validateTokenRevocation(ctx, token); err != nil {
+		return "", err
 	}
 
 	// Create hash values for secure caching
@@ -404,4 +435,68 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 
 	return fmt.Errorf("insufficient balance: this service requires at least %s 0G in your account, but your current locked balance is only %s 0G (locked balance = total balance - pending retrieval amount). You can check your sub-account details with: 0g-compute-cli get-sub-account --provider %s --service inference",
 		totalInZG.Text('f', 6), balanceInZG.Text('f', 6), c.contract.ProviderAddress)
+}
+
+// validateTokenRevocation checks if the session token has been revoked
+// by comparing generation and checking the revoked bitmap from the contract.
+//
+// For ephemeral tokens (tokenId=255), only generation check is performed.
+// For persistent tokens (tokenId=0-254), both generation and bitmap are checked.
+func (c *Ctrl) validateTokenRevocation(ctx *gin.Context, token SessionToken) error {
+	// Get account from contract cache
+	userAddress := common.HexToAddress(token.Address)
+	accountCacheKey := userAddress.Hex()
+
+	var contractAccount *contract.Account
+	if cachedAccount, found := c.contractAccountCache.Get(accountCacheKey); found {
+		if acc, ok := cachedAccount.(*contract.Account); ok {
+			contractAccount = acc
+		}
+	}
+
+	// If not in cache, fetch from contract
+	if contractAccount == nil {
+		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
+		if err != nil {
+			// If account doesn't exist, generation and bitmap are 0, which is valid
+			// for a new token with generation=0
+			return nil
+		}
+		contractAccount = &fetchedAccount
+		c.contractAccountCache.Set(accountCacheKey, contractAccount, cache.DefaultExpiration)
+	}
+
+	// Check generation (batch revocation) - applies to ALL token types
+	contractGeneration := uint64(0)
+	if contractAccount.Generation != nil {
+		contractGeneration = contractAccount.Generation.Uint64()
+	}
+
+	if token.Generation < contractGeneration {
+		// Token's generation is older than current, it has been batch revoked
+		return errors.New("session token has been revoked (generation expired)")
+	}
+	if token.Generation > contractGeneration {
+		// Token's generation is from the future, invalid
+		return errors.New("invalid session token (future generation)")
+	}
+
+	// Ephemeral tokens (tokenId=255) skip bitmap check
+	// They can only be revoked via revokeAllTokens() which increments generation
+	if token.TokenId == EphemeralTokenId {
+		return nil
+	}
+
+	// Check bitmap (precise revocation) - only for persistent tokens (tokenId=0-254)
+	// token.Generation == contractGeneration
+	if contractAccount.RevokedBitmap != nil {
+		// Check if the bit at position tokenId is set
+		bitmap := contractAccount.RevokedBitmap
+		tokenIdBit := new(big.Int).Lsh(big.NewInt(1), uint(token.TokenId))
+		if new(big.Int).And(bitmap, tokenIdBit).Cmp(big.NewInt(0)) != 0 {
+			return errors.New("session token has been revoked")
+		}
+	}
+
+	return nil
 }

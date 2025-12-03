@@ -21,7 +21,7 @@ type Service struct {
 	VerifierURL      string            `yaml:"verifierUrl"`
 	TargetTeeAddress string            `yaml:"targetTeeAddress"`
 	TargetSeparated  bool              `yaml:"targetSeparated"`
-	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 10000000000000000000 = 10 0G)
+	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 }
 
 type Config struct {

@@ -19,8 +19,8 @@ import (
 
 var ErrServiceNotFound = errors.New("service not found")
 
-// DefaultProviderStake is the default stake amount for first-time service registration (10 0G)
-var DefaultProviderStake = new(big.Int).Mul(big.NewInt(10), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+// DefaultProviderStake is the default stake amount for first-time service registration (100 0G)
+var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
 func buildAdditionalInfo(service config.Service) (string, error) {
