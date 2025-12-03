@@ -10,9 +10,10 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/gin-gonic/gin"
 )
 
-func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (model.User, error) {
+func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.User, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	dbAccount, err := c.db.GetUserAccount(userAddress)
@@ -28,6 +29,8 @@ func (c *Ctrl) GetOrCreateAccount(ctx context.Context, userAddress string) (mode
 
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
+		// User-caused error: user account not found in contract
+		ctx.Set("ignoreError", true)
 		return model.User{}, errors.Wrap(err, "get account from contract")
 	}
 
