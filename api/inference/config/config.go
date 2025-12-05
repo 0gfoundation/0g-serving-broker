@@ -59,11 +59,41 @@ type Config struct {
 	NvGPU               bool                 `yaml:"nvGPU"`
 	Logger              *config.LoggerConfig `yaml:"logger"`
 	LogPaths            LogPathsConfig       `yaml:"logPaths"`
+	Controller          ControllerConfig     `yaml:"controller"`
 }
 
 type LogPathsConfig struct {
 	BrokerLogDir string `yaml:"brokerLogDir"`
 	EventLogDir  string `yaml:"eventLogDir"`
+}
+
+// ControllerConfig Controller service configuration
+type ControllerConfig struct {
+	Enable         bool                 `yaml:"enable"`         // Enable controller service
+	Port           int                  `yaml:"port"`           // HTTP service port, default 3090
+	AdminAddresses []string             `yaml:"adminAddresses"` // Authorized admin wallet addresses
+	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
+	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
+	Containers     ContainersConfig     `yaml:"containers"`     // Managed containers config
+	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
+	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
+}
+
+// DockerConfig Docker connection configuration
+type DockerConfig struct {
+	Host       string `yaml:"host"`       // Docker socket path, default unix:///var/run/docker.sock
+	APIVersion string `yaml:"apiVersion"` // Docker API version, default 1.41
+}
+
+// ContainersConfig managed containers configuration
+type ContainersConfig struct {
+	Broker ContainerConfig `yaml:"broker"`
+	Event  ContainerConfig `yaml:"event"`
+}
+
+// ContainerConfig single container configuration
+type ContainerConfig struct {
+	Name string `yaml:"name"` // Container name (or partial name for matching)
 }
 
 var (
@@ -76,6 +106,9 @@ func loadConfig(config *Config) error {
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
 		configPath = envPath
 	}
+
+	// Always set ConfigFile so Controller knows the path
+	config.Controller.ConfigFile = configPath
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -148,6 +181,30 @@ func GetConfig() *Config {
 			LogPaths: LogPathsConfig{
 				BrokerLogDir: "/var/log/inference",
 				EventLogDir:  "/var/log/event",
+			},
+			Controller: ControllerConfig{
+				Enable:         false,
+				Port:           3090,
+				AdminAddresses: []string{},
+				AllowedIPs:     []string{},
+				Docker: DockerConfig{
+					Host:       "unix:///var/run/docker.sock",
+					APIVersion: "1.41",
+				},
+				Containers: ContainersConfig{
+					Broker: ContainerConfig{
+						Name: "0g-serving-provider-broker",
+					},
+					Event: ContainerConfig{
+						Name: "0g-serving-provider-event",
+					},
+				},
+				Logger: &config.LoggerConfig{
+					Format:        "text",
+					Level:         "info",
+					Path:          "./logs/controller.log",
+					RotationCount: 7,
+				},
 			},
 		}
 
