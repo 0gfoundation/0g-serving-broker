@@ -101,6 +101,33 @@ services:
         condition: service_healthy
       nginx:
         condition: service_healthy
+
+  # Controller service for managing broker and event containers
+  0g-controller:
+    image: ghcr.io/0gfoundation/0g-serving-broker:dev1
+    ports:
+      - "3090:3090"
+    environment:
+      - PORT=3090
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=hardhat
+    volumes:
+      - ./config.local.yml:/etc/config.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: 0g-controller
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      0g-serving-provider-broker:
+        condition: service_healthy
+
 volumes:
   mysql-data:
 
