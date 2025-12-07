@@ -243,13 +243,14 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	}
 
 	// Step 1: Pull the latest image
-	imageID, err := c.dockerClient.PullImage(ctx, c.config.Image)
+	imageInfo, err := c.dockerClient.PullImage(ctx, c.config.Image)
 	if err != nil {
 		result.Success = false
 		result.Error = "failed to pull image: " + err.Error()
 		return result, err
 	}
-	result.ImageID = imageID
+	result.ImageID = imageInfo.ImageID
+	result.Digest = imageInfo.Digest
 
 	// Step 2: Stop containers in reverse dependency order (event -> broker)
 	// First stop event
