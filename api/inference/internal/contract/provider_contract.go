@@ -6,11 +6,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	dockerimage "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
@@ -22,6 +24,10 @@ type ProviderContract struct {
 	LockTime         time.Duration
 	TeeSignerAddress common.Address
 	logger           log.Logger
+
+	// Docker client for image info (optional)
+	dockerClient *client.Client
+	imageName    string
 }
 
 func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, logger log.Logger) (*ProviderContract, error) {
@@ -40,17 +46,57 @@ func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, l
 	if err != nil {
 		return nil, err
 	}
-	return &ProviderContract{
+
+	pc := &ProviderContract{
 		Contract:         contract,
 		ProviderAddress:  wallets.Default().Address(),
 		LockTime:         time.Duration(lockTime.Int64()) * time.Second,
 		TeeSignerAddress: teeSignerAddress,
 		logger:           logger,
-	}, nil
+	}
+
+	// Initialize Docker client if controller is enabled and Docker is configured
+	if conf.Controller.Enable && conf.Controller.Docker.Host != "" {
+		opts := []client.Opt{
+			client.WithHost(conf.Controller.Docker.Host),
+			client.WithAPIVersionNegotiation(),
+		}
+		if conf.Controller.Docker.APIVersion != "" {
+			opts = append(opts, client.WithVersion(conf.Controller.Docker.APIVersion))
+		}
+		dockerCli, err := client.NewClientWithOpts(opts...)
+		if err != nil {
+			logger.Warnf("Failed to create Docker client: %v", err)
+		} else {
+			pc.dockerClient = dockerCli
+			pc.imageName = conf.Controller.Image
+		}
+	}
+
+	return pc, nil
 }
 
 func (u *ProviderContract) Close() {
 	u.Contract.Close()
+	if u.dockerClient != nil {
+		u.dockerClient.Close()
+	}
+}
+
+// GetImageDigest returns the digest of the configured image
+// Returns empty string if Docker is not configured or on error
+func (u *ProviderContract) GetImageDigest(ctx context.Context) string {
+	if u.dockerClient == nil || u.imageName == "" {
+		return ""
+	}
+
+	info, err := dockerimage.GetImageInfo(ctx, u.dockerClient, u.imageName)
+	if err != nil {
+		u.logger.Warnf("Failed to get image info for %s: %v", u.imageName, err)
+		return ""
+	}
+
+	return info.Digest
 }
 
 // GetBalance returns the native token balance of the provider address

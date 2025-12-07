@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/docker/docker/api/types"
@@ -13,6 +15,44 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
 )
+
+// ImageInfo represents information about a Docker image
+type ImageInfo struct {
+	Image   string    `json:"image"`
+	ImageID string    `json:"imageId"`
+	Digest  string    `json:"digest"` // Image digest (e.g., sha256:abc123...)
+	Created time.Time `json:"created"`
+	Size    int64     `json:"size"`
+}
+
+// GetImageInfo returns information about a Docker image including its digest
+func GetImageInfo(ctx context.Context, cli *client.Client, imageName string) (*ImageInfo, error) {
+	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect image %s: %v", imageName, err)
+	}
+
+	created, _ := time.Parse(time.RFC3339Nano, inspect.Created)
+
+	// Get digest from RepoDigests (format: "image@sha256:...")
+	var digest string
+	if len(inspect.RepoDigests) > 0 {
+		// RepoDigests format: ["ghcr.io/0gfoundation/0g-serving-broker@sha256:abc123..."]
+		// Extract the digest part after @
+		repoDigest := inspect.RepoDigests[0]
+		if idx := strings.Index(repoDigest, "@"); idx != -1 {
+			digest = repoDigest[idx+1:]
+		}
+	}
+
+	return &ImageInfo{
+		Image:   imageName,
+		ImageID: inspect.ID,
+		Digest:  digest,
+		Created: created,
+		Size:    inspect.Size,
+	}, nil
+}
 
 func ImageExists(ctx context.Context, cli *client.Client, imageName string) (bool, error) {
 	images, err := cli.ImageList(ctx, image.ListOptions{})
