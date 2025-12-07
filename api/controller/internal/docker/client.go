@@ -229,6 +229,7 @@ func (e *ContainerNotFoundError) Error() string {
 type ImageInfo struct {
 	Image   string    `json:"image"`
 	ImageID string    `json:"imageId"`
+	Digest  string    `json:"digest"` // Image digest (e.g., sha256:abc123...)
 	Created time.Time `json:"created"`
 	Size    int64     `json:"size"`
 }
@@ -247,24 +248,23 @@ type ImageUpdateResult struct {
 	Success           bool                    `json:"success"`
 	Image             string                  `json:"image"`
 	ImageID           string                  `json:"imageId"`
+	Digest            string                  `json:"digest"` // Image digest (e.g., sha256:abc123...)
 	UpdatedContainers []ContainerUpdateResult `json:"updatedContainers"`
 	Error             string                  `json:"error,omitempty"`
 }
 
-// PullImage pulls an image from the registry
-func (c *Client) PullImage(ctx context.Context, imageName string) (string, error) {
+// PullImage pulls an image from the registry and returns the image info
+func (c *Client) PullImage(ctx context.Context, imageName string) (*ImageInfo, error) {
 	reader, err := c.cli.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer reader.Close()
 
 	// Read all output to ensure the pull completes
-	// Parse the output to get the final digest
 	decoder := json.NewDecoder(reader)
-	var lastStatus string
 	for {
-		var event map[string]interface{}
+		var event map[string]any
 		if err := decoder.Decode(&event); err != nil {
 			if err == io.EOF {
 				break
@@ -272,19 +272,10 @@ func (c *Client) PullImage(ctx context.Context, imageName string) (string, error
 			// Ignore JSON decode errors, just continue
 			continue
 		}
-		if status, ok := event["status"].(string); ok {
-			lastStatus = status
-		}
-	}
-	_ = lastStatus // We don't need lastStatus but it shows the pull completed
-
-	// Get the image ID after pull
-	inspect, _, err := c.cli.ImageInspectWithRaw(ctx, imageName)
-	if err != nil {
-		return "", err
 	}
 
-	return inspect.ID, nil
+	// Get the image info after pull
+	return c.GetImageInfo(ctx, imageName)
 }
 
 // GetImageInfo returns information about an image
@@ -296,9 +287,21 @@ func (c *Client) GetImageInfo(ctx context.Context, imageName string) (*ImageInfo
 
 	created, _ := time.Parse(time.RFC3339Nano, inspect.Created)
 
+	// Get digest from RepoDigests (format: "image@sha256:...")
+	var digest string
+	if len(inspect.RepoDigests) > 0 {
+		// RepoDigests format: ["ghcr.io/0gfoundation/0g-serving-broker@sha256:abc123..."]
+		// Extract the digest part after @
+		repoDigest := inspect.RepoDigests[0]
+		if idx := strings.Index(repoDigest, "@"); idx != -1 {
+			digest = repoDigest[idx+1:]
+		}
+	}
+
 	return &ImageInfo{
 		Image:   imageName,
 		ImageID: inspect.ID,
+		Digest:  digest,
 		Created: created,
 		Size:    inspect.Size,
 	}, nil
