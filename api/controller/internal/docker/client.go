@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 
+	dockerimage "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -280,30 +281,17 @@ func (c *Client) PullImage(ctx context.Context, imageName string) (*ImageInfo, e
 
 // GetImageInfo returns information about an image
 func (c *Client) GetImageInfo(ctx context.Context, imageName string) (*ImageInfo, error) {
-	inspect, _, err := c.cli.ImageInspectWithRaw(ctx, imageName)
+	info, err := dockerimage.GetImageInfo(ctx, c.cli, imageName)
 	if err != nil {
 		return nil, err
 	}
 
-	created, _ := time.Parse(time.RFC3339Nano, inspect.Created)
-
-	// Get digest from RepoDigests (format: "image@sha256:...")
-	var digest string
-	if len(inspect.RepoDigests) > 0 {
-		// RepoDigests format: ["ghcr.io/0gfoundation/0g-serving-broker@sha256:abc123..."]
-		// Extract the digest part after @
-		repoDigest := inspect.RepoDigests[0]
-		if idx := strings.Index(repoDigest, "@"); idx != -1 {
-			digest = repoDigest[idx+1:]
-		}
-	}
-
 	return &ImageInfo{
-		Image:   imageName,
-		ImageID: inspect.ID,
-		Digest:  digest,
-		Created: created,
-		Size:    inspect.Size,
+		Image:   info.Image,
+		ImageID: info.ImageID,
+		Digest:  info.Digest,
+		Created: info.Created,
+		Size:    info.Size,
 	}, nil
 }
 
