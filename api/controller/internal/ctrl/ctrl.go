@@ -2,21 +2,33 @@ package ctrl
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 	"gopkg.in/yaml.v3"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
 
 // Ctrl is the controller for managing containers and configs
 type Ctrl struct {
-	config       config.ControllerConfig
+	config     config.ControllerConfig
+	fullConfig *config.Config // Full config for accessing Service configuration
 	dockerClient *docker.Client
+
+	// Contract for syncing services
+	servingContract *contract.ServingContract
+	providerAddress string
+	logger          log.Logger
 
 	// Dynamic whitelists (protected by mutex)
 	mu             sync.RWMutex
@@ -25,7 +37,9 @@ type Ctrl struct {
 }
 
 // NewCtrl creates a new controller
-func NewCtrl(cfg config.ControllerConfig) (*Ctrl, error) {
+func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
+	cfg := fullConfig.Controller
+
 	dockerClient, err := docker.NewClient(cfg)
 	if err != nil {
 		return nil, err
@@ -43,16 +57,53 @@ func NewCtrl(cfg config.ControllerConfig) (*Ctrl, error) {
 		allowedIPs[ip] = true
 	}
 
-	return &Ctrl{
+	ctrl := &Ctrl{
 		config:         cfg,
+		fullConfig:     fullConfig,
 		dockerClient:   dockerClient,
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
-	}, nil
+		logger:         logger,
+	}
+
+	// Initialize ServingContract for deleting services (required)
+	if fullConfig.ContractAddress == "" {
+		return nil, fmt.Errorf("contract address is required for controller")
+	}
+	if len(fullConfig.Networks) == 0 {
+		return nil, fmt.Errorf("networks configuration is required for controller")
+	}
+
+	servingContract, err := contract.NewServingContract(
+		common.HexToAddress(fullConfig.ContractAddress),
+		&fullConfig.Networks,
+		os.Getenv("NETWORK"),
+		fullConfig.GasPrice,
+		fullConfig.MaxGasPrice,
+		logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize ServingContract for controller: %w", err)
+	}
+
+	wallets, err := servingContract.Client.Network.Wallets()
+	if err != nil {
+		servingContract.Close()
+		return nil, fmt.Errorf("failed to get wallets for controller: %w", err)
+	}
+
+	ctrl.servingContract = servingContract
+	ctrl.providerAddress = wallets.Default().Address()
+	logger.Infof("ServingContract initialized for controller. Provider address: %s", ctrl.providerAddress)
+
+	return ctrl, nil
 }
 
 // Close closes the controller resources
 func (c *Ctrl) Close() error {
+	if c.servingContract != nil {
+		c.servingContract.Close()
+	}
 	return c.dockerClient.Close()
 }
 
@@ -235,6 +286,114 @@ func (c *Ctrl) GetImageInfo(ctx context.Context) (*docker.ImageInfo, error) {
 	return c.dockerClient.GetImageInfo(ctx, c.config.Image)
 }
 
+// GetService gets the current service from the contract
+func (c *Ctrl) GetService(ctx context.Context) (*contract.Service, error) {
+	callOpts := &bind.CallOpts{Context: ctx}
+	providerAddr := common.HexToAddress(c.providerAddress)
+
+	service, err := c.servingContract.GetService(callOpts, providerAddr)
+	if err != nil {
+		// Check if the error indicates service not found
+		if strings.Contains(err.Error(), "ServiceNotExist") ||
+			strings.Contains(err.Error(), "service not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &service, nil
+}
+
+// updateAdditionalInfoImageFields updates only ImageName and ImageDigest in additionalInfo JSON
+func updateAdditionalInfoImageFields(oldAdditionalInfo, imageName, imageDigest string) (string, error) {
+	// Parse existing additionalInfo
+	var info map[string]interface{}
+	if oldAdditionalInfo != "" {
+		if err := json.Unmarshal([]byte(oldAdditionalInfo), &info); err != nil {
+			return "", fmt.Errorf("failed to parse old additionalInfo: %w", err)
+		}
+	} else {
+		info = make(map[string]interface{})
+	}
+
+	// Only update image-related fields
+	info["ImageName"] = imageName
+	info["ImageDigest"] = imageDigest
+
+	newAdditionalInfo, err := json.Marshal(info)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal additionalInfo: %w", err)
+	}
+
+	return string(newAdditionalInfo), nil
+}
+
+// SyncService syncs the service in the contract with the new image digest
+// Only updates ImageName and ImageDigest, all other fields remain unchanged
+func (c *Ctrl) SyncService(ctx context.Context, imageName, imageDigest string) error {
+	c.logger.Infof("[SyncService] Starting to sync service - provider=%s", c.providerAddress)
+
+	// Get existing service from contract
+	old, err := c.GetService(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get existing service: %w", err)
+	}
+
+	if old == nil {
+		c.logger.Info("[SyncService] No existing service found in contract, nothing to update")
+		return nil
+	}
+
+	c.logger.Infof("[SyncService] Found existing service - url=%s, model=%s, type=%s",
+		old.Url, old.Model, old.ServiceType)
+
+	// Update only image fields in additionalInfo
+	newAdditionalInfo, err := updateAdditionalInfoImageFields(old.AdditionalInfo, imageName, imageDigest)
+	if err != nil {
+		return fmt.Errorf("failed to update additionalInfo: %w", err)
+	}
+
+	// Check if additionalInfo changed
+	if old.AdditionalInfo == newAdditionalInfo {
+		c.logger.Info("[SyncService] Image info unchanged, no update needed")
+		return nil
+	}
+
+	c.logger.Infof("[SyncService] Updating service with new image info - ImageName=%s, ImageDigest=%s",
+		imageName, imageDigest)
+
+	// Call addOrUpdateService with all old values except additionalInfo
+	tx, err := c.servingContract.TransactWithValue(ctx,
+		nil,
+		nil, // No stake needed for update
+		"addOrUpdateService",
+		contract.ServiceParams{
+			ServiceType:      old.ServiceType,
+			Url:              old.Url,
+			Model:            old.Model,
+			Verifiability:    old.Verifiability,
+			InputPrice:       old.InputPrice,
+			OutputPrice:      old.OutputPrice,
+			AdditionalInfo:   newAdditionalInfo,
+			TeeSignerAddress: old.TeeSignerAddress,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to send transaction: %w", err)
+	}
+
+	c.logger.Infof("[SyncService] Transaction sent - txHash=%s", tx.Hash().String())
+
+	receipt, err := c.servingContract.WaitForReceipt(ctx, tx.Hash())
+	if err != nil {
+		return fmt.Errorf("failed to wait for receipt: %w", err)
+	}
+
+	c.logger.Infof("[SyncService] Service sync successful - txHash=%s, blockNumber=%d, gasUsed=%d",
+		tx.Hash().String(), receipt.BlockNumber.Uint64(), receipt.GasUsed)
+
+	return nil
+}
+
 // UpdateImages pulls the latest image and recreates broker and event containers
 func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, error) {
 	result := &docker.ImageUpdateResult{
@@ -243,6 +402,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	}
 
 	// Step 1: Pull the latest image
+	c.logger.Info("[UpdateImages] Pulling latest image...")
 	imageInfo, err := c.dockerClient.PullImage(ctx, c.config.Image)
 	if err != nil {
 		result.Success = false
@@ -251,9 +411,18 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	}
 	result.ImageID = imageInfo.ImageID
 	result.Digest = imageInfo.Digest
+	c.logger.Infof("[UpdateImages] Image pulled - ID=%s, Digest=%s", imageInfo.ImageID, imageInfo.Digest)
 
-	// Step 2: Stop containers in reverse dependency order (event -> broker)
-	// First stop event
+	// Step 2: Sync service in the contract with new image digest
+	c.logger.Info("[UpdateImages] Syncing service with new image digest...")
+	if err := c.SyncService(ctx, c.config.Image, imageInfo.Digest); err != nil {
+		result.Success = false
+		result.Error = "failed to sync service: " + err.Error()
+		return result, err
+	}
+
+	// Step 3: Stop containers in reverse dependency order (event -> broker)
+	c.logger.Info("[UpdateImages] Stopping containers...")
 	eventConfig := c.dockerClient.GetContainerConfig("event")
 	if eventConfig != nil {
 		if err := c.dockerClient.StopContainer(ctx, eventConfig.Name); err != nil {
@@ -278,7 +447,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 		}
 	}
 
-	// Step 3: Recreate containers in dependency order (broker -> event)
+	// Step 4: Recreate containers in dependency order (broker -> event)
 	// First recreate broker
 	if brokerConfig != nil {
 		brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerConfig.Name, c.config.Image)
