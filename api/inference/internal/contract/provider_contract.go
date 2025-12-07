@@ -83,20 +83,20 @@ func (u *ProviderContract) Close() {
 	}
 }
 
-// GetImageDigest returns the digest of the configured image
-// Returns empty string if Docker is not configured or on error
-func (u *ProviderContract) GetImageDigest(ctx context.Context) string {
+// GetImageInfo returns the name and digest of the configured image
+// Returns empty strings if Docker is not configured or on error
+func (u *ProviderContract) GetImageInfo(ctx context.Context) (imageName, imageDigest string) {
 	if u.dockerClient == nil || u.imageName == "" {
-		return ""
+		return "", ""
 	}
 
 	info, err := dockerimage.GetImageInfo(ctx, u.dockerClient, u.imageName)
 	if err != nil {
 		u.logger.Warnf("Failed to get image info for %s: %v", u.imageName, err)
-		return ""
+		return u.imageName, ""
 	}
 
-	return info.Digest
+	return u.imageName, info.Digest
 }
 
 // GetBalance returns the native token balance of the provider address
