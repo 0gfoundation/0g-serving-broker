@@ -23,7 +23,7 @@ var ErrServiceNotFound = errors.New("service not found")
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
-func buildAdditionalInfo(service config.Service, imageDigest string) (string, error) {
+func buildAdditionalInfo(service config.Service, imageName, imageDigest string) (string, error) {
 	// Determine TEE verifier based on NETWORK environment variable
 	var teeVerifier string
 	switch os.Getenv("NETWORK") {
@@ -39,6 +39,7 @@ func buildAdditionalInfo(service config.Service, imageDigest string) (string, er
 		"TEEVerifier":      teeVerifier,
 		"TargetSeparated":  service.TargetSeparated,
 		"TargetTeeAddress": "",
+		"ImageName":        imageName,
 		"ImageDigest":      imageDigest,
 	}
 
@@ -172,11 +173,11 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 		return c.DeleteService(ctx)
 	}
 
-	// Get image digest if Docker is configured
-	imageDigest := c.GetImageDigest(ctx)
+	// Get image info if Docker is configured
+	imageName, imageDigest := c.GetImageInfo(ctx)
 
 	// Build additionalInfo for comparison
-	newAdditionalInfo, err := buildAdditionalInfo(new, imageDigest)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest)
 	if err != nil {
 		c.logger.Errorf("[SyncService] Failed to build additional info - error=%v", err)
 		return err
