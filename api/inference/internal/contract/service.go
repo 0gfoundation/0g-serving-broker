@@ -23,7 +23,7 @@ var ErrServiceNotFound = errors.New("service not found")
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
-func buildAdditionalInfo(service config.Service) (string, error) {
+func buildAdditionalInfo(service config.Service, imageDigest string) (string, error) {
 	// Determine TEE verifier based on NETWORK environment variable
 	var teeVerifier string
 	switch os.Getenv("NETWORK") {
@@ -39,6 +39,7 @@ func buildAdditionalInfo(service config.Service) (string, error) {
 		"TEEVerifier":      teeVerifier,
 		"TargetSeparated":  service.TargetSeparated,
 		"TargetTeeAddress": "",
+		"ImageDigest":      imageDigest,
 	}
 
 	// Set TargetTeeAddress if TargetSeparated is true
@@ -54,38 +55,33 @@ func buildAdditionalInfo(service config.Service) (string, error) {
 	return string(additionalInfoJSON), nil
 }
 
-func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, teeSignerAddress common.Address, stakeValue *big.Int) error {
-	c.logger.Infof("[AddOrUpdateService] Starting to add or update service - provider=%s, type=%s, url=%s, model=%s, verifiability=%s",
+func (c *ProviderContract) addOrUpdateService(ctx context.Context, service config.Service, teeSignerAddress common.Address, stakeValue *big.Int, additionalInfoJSON string) error {
+	c.logger.Infof("[addOrUpdateService] Starting to add or update service - provider=%s, type=%s, url=%s, model=%s, verifiability=%s",
 		c.ProviderAddress, service.Type, service.ServingURL, service.ModelType, service.Verifiability)
 
-	c.logger.Infof("[AddOrUpdateService] Price information - inputPrice=%s, outputPrice=%s",
+	c.logger.Infof("[addOrUpdateService] Price information - inputPrice=%s, outputPrice=%s",
 		service.InputPrice, service.OutputPrice)
 
 	if stakeValue != nil {
-		c.logger.Infof("[AddOrUpdateService] First-time registration with stake - stakeValue=%s", stakeValue.String())
+		c.logger.Infof("[addOrUpdateService] First-time registration with stake - stakeValue=%s", stakeValue.String())
 	}
 
 	inputPrice, err := util.ConvertToBigInt(service.InputPrice)
 	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to convert input price - inputPrice=%s, error=%v", service.InputPrice, err)
+		c.logger.Errorf("[addOrUpdateService] Failed to convert input price - inputPrice=%s, error=%v", service.InputPrice, err)
 		return errors.Wrap(err, "convert input price")
 	}
 	outputPrice, err := util.ConvertToBigInt(service.OutputPrice)
 	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to convert output price - outputPrice=%s, error=%v", service.OutputPrice, err)
+		c.logger.Errorf("[addOrUpdateService] Failed to convert output price - outputPrice=%s, error=%v", service.OutputPrice, err)
 		return errors.Wrap(err, "convert input price")
 	}
 
-	c.logger.Infof("[AddOrUpdateService] Preparing to send transaction to contract - inputPriceWei=%s, outputPriceWei=%s",
+	c.logger.Infof("[addOrUpdateService] Preparing to send transaction to contract - inputPriceWei=%s, outputPriceWei=%s",
 		inputPrice.String(), outputPrice.String())
 
-	additionalInfoJSON, err := buildAdditionalInfo(service)
-	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to build additional info - error=%v", err)
-		return err
-	}
-	c.logger.Infof("[AddOrUpdateService] Additional info JSON: %s", additionalInfoJSON)
-	c.logger.Infof("[AddOrUpdateService] Tee signer address: %s", teeSignerAddress.Hex())
+	c.logger.Infof("[addOrUpdateService] Additional info JSON: %s", additionalInfoJSON)
+	c.logger.Infof("[addOrUpdateService] Tee signer address: %s", teeSignerAddress.Hex())
 
 	tx, err := c.Contract.TransactWithValue(ctx,
 		nil,
@@ -105,20 +101,20 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 	)
 
 	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to send transaction - error=%v", err)
+		c.logger.Errorf("[addOrUpdateService] Failed to send transaction - error=%v", err)
 		return err
 	}
 
-	c.logger.Infof("[AddOrUpdateService] Transaction sent - txHash=%s", tx.Hash().String())
+	c.logger.Infof("[addOrUpdateService] Transaction sent - txHash=%s", tx.Hash().String())
 	fmt.Printf("tx hash: %s\n", tx.Hash().String())
 
 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
-		c.logger.Errorf("[AddOrUpdateService] Failed to wait for transaction receipt - txHash=%s, error=%v", tx.Hash().String(), err)
+		c.logger.Errorf("[addOrUpdateService] Failed to wait for transaction receipt - txHash=%s, error=%v", tx.Hash().String(), err)
 		return errors.Wrapf(err, "wait for receipt of tx %s", tx.Hash().String())
 	}
 
-	c.logger.Infof("[AddOrUpdateService] Transaction successful - txHash=%s, blockNumber=%d, gasUsed=%d",
+	c.logger.Infof("[addOrUpdateService] Transaction successful - txHash=%s, blockNumber=%d, gasUsed=%d",
 		tx.Hash().String(), receipt.BlockNumber.Uint64(), receipt.GasUsed)
 
 	return nil
@@ -176,8 +172,11 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 		return c.DeleteService(ctx)
 	}
 
+	// Get image digest if Docker is configured
+	imageDigest := c.GetImageDigest(ctx)
+
 	// Build additionalInfo for comparison
-	newAdditionalInfo, err := buildAdditionalInfo(new)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageDigest)
 	if err != nil {
 		c.logger.Errorf("[SyncService] Failed to build additional info - error=%v", err)
 		return err
@@ -204,7 +203,7 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 	}
 
 	c.logger.Info("[SyncService] Preparing to add or update service to contract")
-	if err := c.AddOrUpdateService(ctx, new, c.TeeSignerAddress, stakeValue); err != nil {
+	if err := c.addOrUpdateService(ctx, new, c.TeeSignerAddress, stakeValue, newAdditionalInfo); err != nil {
 		c.logger.Errorf("[SyncService] Failed to add or update service - error=%v", err)
 		return errors.Wrap(err, "add or update service in contract")
 	}
