@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -227,4 +228,94 @@ type InvalidConfigError struct {
 
 func (e *InvalidConfigError) Error() string {
 	return "invalid config format: " + e.Err.Error()
+}
+
+// GetImageInfo returns information about the current image
+func (c *Ctrl) GetImageInfo(ctx context.Context) (*docker.ImageInfo, error) {
+	return c.dockerClient.GetImageInfo(ctx, c.config.Image)
+}
+
+// UpdateImages pulls the latest image and recreates broker and event containers
+func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, error) {
+	result := &docker.ImageUpdateResult{
+		Image:             c.config.Image,
+		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
+	}
+
+	// Step 1: Pull the latest image
+	imageID, err := c.dockerClient.PullImage(ctx, c.config.Image)
+	if err != nil {
+		result.Success = false
+		result.Error = "failed to pull image: " + err.Error()
+		return result, err
+	}
+	result.ImageID = imageID
+
+	// Step 2: Stop containers in reverse dependency order (event -> broker)
+	// First stop event
+	eventConfig := c.dockerClient.GetContainerConfig("event")
+	if eventConfig != nil {
+		if err := c.dockerClient.StopContainer(ctx, eventConfig.Name); err != nil {
+			// Log error but continue - container might not exist
+			if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+				result.Success = false
+				result.Error = "failed to stop event container: " + err.Error()
+				return result, err
+			}
+		}
+	}
+
+	// Then stop broker
+	brokerConfig := c.dockerClient.GetContainerConfig("broker")
+	if brokerConfig != nil {
+		if err := c.dockerClient.StopContainer(ctx, brokerConfig.Name); err != nil {
+			if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+				result.Success = false
+				result.Error = "failed to stop broker container: " + err.Error()
+				return result, err
+			}
+		}
+	}
+
+	// Step 3: Recreate containers in dependency order (broker -> event)
+	// First recreate broker
+	if brokerConfig != nil {
+		brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerConfig.Name, c.config.Image)
+		if brokerResult != nil {
+			result.UpdatedContainers = append(result.UpdatedContainers, *brokerResult)
+		}
+		if err != nil {
+			result.Success = false
+			result.Error = "failed to recreate broker container: " + err.Error()
+			return result, err
+		}
+
+		// Wait for broker to become healthy before starting event
+		if err := c.dockerClient.WaitForHealthy(ctx, brokerConfig.Name, 2*time.Minute); err != nil {
+			result.Success = false
+			result.Error = "broker container failed to become healthy: " + err.Error()
+			return result, err
+		}
+	}
+
+	// Then recreate event
+	if eventConfig != nil {
+		eventResult, err := c.dockerClient.RecreateContainer(ctx, eventConfig.Name, c.config.Image)
+		if eventResult != nil {
+			result.UpdatedContainers = append(result.UpdatedContainers, *eventResult)
+		}
+		if err != nil {
+			result.Success = false
+			result.Error = "failed to recreate event container: " + err.Error()
+			return result, err
+		}
+	}
+
+	result.Success = true
+	return result, nil
+}
+
+// GetConfiguredImage returns the configured image name
+func (c *Ctrl) GetConfiguredImage() string {
+	return c.config.Image
 }

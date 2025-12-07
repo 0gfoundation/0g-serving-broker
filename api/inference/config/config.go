@@ -73,6 +73,7 @@ type ControllerConfig struct {
 	Port           int                  `yaml:"port"`           // HTTP service port, default 3090
 	AdminAddresses []string             `yaml:"adminAddresses"` // Authorized admin wallet addresses
 	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
+	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
 	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
 	Containers     ContainersConfig     `yaml:"containers"`     // Managed containers config
 	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
@@ -187,6 +188,7 @@ func GetConfig() *Config {
 				Port:           3090,
 				AdminAddresses: []string{},
 				AllowedIPs:     []string{},
+				Image:          "ghcr.io/0gfoundation/0g-serving-broker:latest",
 				Docker: DockerConfig{
 					Host:       "unix:///var/run/docker.sock",
 					APIVersion: "1.41",
