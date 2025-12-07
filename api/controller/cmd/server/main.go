@@ -49,8 +49,8 @@ func Main() {
 		logger.Warn("No admin addresses configured. Controller API will reject all requests.")
 	}
 
-	// Create controller
-	controller, err := ctrl.NewCtrl(cfg.Controller)
+	// Create controller with full config for contract access
+	controller, err := ctrl.NewCtrl(cfg, logger)
 	if err != nil {
 		logger.Fatalf("Failed to create controller: %v", err)
 	}
