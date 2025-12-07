@@ -49,6 +49,13 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 		admin.POST("/ips", h.AddAllowedIP)
 		admin.DELETE("/ips/:ip", h.RemoveAllowedIP)
 	}
+
+	// Image management
+	images := v1.Group("/images")
+	{
+		images.GET("/info", h.GetImageInfo)
+		images.POST("/update", h.UpdateImages)
+	}
 }
 
 // ListContainers returns the status of all managed containers
@@ -271,4 +278,31 @@ func (h *Handler) RemoveAllowedIP(ctx *gin.Context) {
 
 	h.ctrl.RemoveAllowedIP(ip)
 	ctx.JSON(http.StatusOK, gin.H{"message": "IP removed from whitelist"})
+}
+
+// GetImageInfo returns information about the current image
+func (h *Handler) GetImageInfo(ctx *gin.Context) {
+	info, err := h.ctrl.GetImageInfo(ctx)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, info)
+}
+
+// UpdateImages pulls the latest image and updates containers
+func (h *Handler) UpdateImages(ctx *gin.Context) {
+	result, err := h.ctrl.UpdateImages(ctx)
+	if err != nil {
+		// Return the result even on error, as it contains partial progress info
+		if result != nil {
+			ctx.JSON(http.StatusInternalServerError, result)
+		} else {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	ctx.JSON(http.StatusOK, result)
 }
