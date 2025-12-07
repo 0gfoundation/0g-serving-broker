@@ -282,7 +282,7 @@ func (h *Handler) RemoveAllowedIP(ctx *gin.Context) {
 
 // GetImageInfo returns information about the current image
 func (h *Handler) GetImageInfo(ctx *gin.Context) {
-	info, err := h.ctrl.GetImageInfo(ctx)
+		info, err := h.ctrl.GetImageInfo(ctx)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
