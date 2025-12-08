@@ -38,6 +38,12 @@ type NetworkConfig struct {
 
 type Networks map[string]*NetworkConfig
 
+type ControllerConfig struct {
+	Enable         bool     `yaml:"enable,omitempty"`
+	AdminAddresses []string `yaml:"adminAddresses,omitempty"`
+	Image          string   `yaml:"image,omitempty"`
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins,omitempty"`
 	ContractAddress string   `yaml:"contractAddress,omitempty"`
@@ -49,7 +55,7 @@ type Config struct {
 	} `yaml:"event,omitempty"`
 	GasPrice    interface{} `yaml:"gasPrice,omitempty"`
 	MaxGasPrice interface{} `yaml:"maxGasPrice,omitempty"`
-	Interval struct {
+	Interval    struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime,omitempty"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor,omitempty"`
 		SettlementProcessor      int `yaml:"settlementProcessor,omitempty"`
@@ -73,10 +79,11 @@ type Config struct {
 		Path          string `yaml:"path,omitempty"`
 		RotationCount int    `yaml:"rotationCount,omitempty"`
 	} `yaml:"logger,omitempty"`
-	LogPaths            struct {
+	LogPaths struct {
 		BrokerLogDir string `yaml:"brokerLogDir,omitempty"`
 		EventLogDir  string `yaml:"eventLogDir,omitempty"`
 	} `yaml:"logPaths,omitempty"`
+	Controller ControllerConfig `yaml:"controller,omitempty"`
 }
 
 // Required fields definition
@@ -118,6 +125,10 @@ type DeploymentConfig struct {
 	ProjectName    string // Docker Compose project name for isolation
 	TappServiceURL string // TAPP service URL for AliCloud mode
 	TappAppID      string // TAPP AppID for AliCloud mode
+	// Controller configuration
+	UseController      bool   // Whether to deploy controller service
+	ControllerPort     string // Host port for controller (if exposed)
+	ControllerExposePort bool // Whether to expose controller port
 }
 
 // nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
@@ -276,7 +287,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker:v0.3.0
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -306,6 +317,7 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- if and (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - /var/run/docker.sock:/var/run/docker.sock
 {{- end}}
     command: 0g-inference-server
     networks:
@@ -349,7 +361,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker:v0.3.0
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if eq .TeeNode "hardhat"}}
@@ -397,6 +409,34 @@ const dockerComposeTemplate = `services:
         condition: service_healthy
 {{- end}}
 
+{{- if .UseController}}
+  0g-controller:
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+{{- if .ControllerExposePort}}
+    ports:
+      - "{{.ControllerPort}}:3090"
+{{- end}}
+    environment:
+      - PORT=3090
+      - CONFIG_FILE=/etc/config.yaml
+    volumes:
+      - {{.ConfigPath}}:/etc/config.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: 0g-controller
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      0g-serving-provider-broker:
+        condition: service_healthy
+
+{{- end}}
 {{- if .UseMonitoring}}
   # Init container for Prometheus config
   prometheus-init:
@@ -507,19 +547,22 @@ networks:
 `
 
 type TemplateData struct {
-	UseGPU         bool
-	DeployLLM      bool
-	LLMModel       string
-	TeeNode        TeeNode
-	UseMonitoring  bool
-	UseNginx       bool
-	ConfigFile     string
-	ConfigPath     string
-	Ports          PortConfig
-	ProjectName    string
-	EnableFileLog  bool
-	TappServiceURL string
-	TappAppID      string
+	UseGPU               bool
+	DeployLLM            bool
+	LLMModel             string
+	TeeNode              TeeNode
+	UseMonitoring        bool
+	UseNginx             bool
+	ConfigFile           string
+	ConfigPath           string
+	Ports                PortConfig
+	ProjectName          string
+	EnableFileLog        bool
+	TappServiceURL       string
+	TappAppID            string
+	UseController        bool
+	ControllerPort       string
+	ControllerExposePort bool
 }
 
 var requiredFields = []RequiredField{
@@ -793,9 +836,65 @@ func main() {
 		fmt.Println("   ✓ Revenue transfer disabled")
 	}
 
+	// Ask about controller configuration
+	var controllerConfig struct {
+		Enable       bool
+		ExposePort   bool
+		HostPort     string
+		AdminAddress string
+	}
+	fmt.Print("\n🎮 Do you want to deploy the controller service? [y/N]: ")
+	controllerResponse, _ := reader.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(controllerResponse)) == "y" {
+		controllerConfig.Enable = true
+		fmt.Println("   ✓ Controller service will be deployed")
+
+		// Ask about port exposure
+		fmt.Print("\n🔌 Do you want to expose the controller port to the host? [y/N]: ")
+		portResponse, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(portResponse)) == "y" {
+			controllerConfig.ExposePort = true
+			fmt.Print("   Enter the host port for controller [default: 3090]: ")
+			portInput, _ := reader.ReadString('\n')
+			portInput = strings.TrimSpace(portInput)
+			if portInput == "" {
+				controllerConfig.HostPort = "3090"
+			} else {
+				if err := validatePort(portInput); err != nil {
+					fmt.Printf("   ⚠️  Invalid port, using default: 3090\n")
+					controllerConfig.HostPort = "3090"
+				} else {
+					controllerConfig.HostPort = portInput
+				}
+			}
+			fmt.Printf("   ✓ Controller will be exposed on port %s\n", controllerConfig.HostPort)
+		} else {
+			fmt.Println("   ✓ Controller port will not be exposed")
+		}
+
+		// Ask for admin address
+		for {
+			fmt.Print("\n👤 Enter the controller admin address (e.g., 0x...): ")
+			addressInput, _ := reader.ReadString('\n')
+			controllerConfig.AdminAddress = strings.TrimSpace(addressInput)
+			if controllerConfig.AdminAddress == "" {
+				fmt.Println("   ❌ Admin address is required for controller!")
+				continue
+			}
+			if !strings.HasPrefix(controllerConfig.AdminAddress, "0x") {
+				fmt.Println("   ❌ Invalid address format. Address should start with 0x")
+				continue
+			}
+			break
+		}
+		fmt.Printf("   ✓ Admin address set to: %s\n", controllerConfig.AdminAddress)
+	} else {
+		fmt.Println("   ✓ Controller service will not be deployed")
+	}
+
 	// Step 2: Load and configure YAML config (with monitoring setting)
 	fmt.Println("\n📋 Step 2: Configuration File Setup")
-	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval)
+	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -814,6 +913,9 @@ func main() {
 	deployConfig.LLMModel = llmModel
 	deployConfig.TeeNode = teeNodeType
 	deployConfig.UseMonitoring = useMonitoring
+	deployConfig.UseController = controllerConfig.Enable
+	deployConfig.ControllerExposePort = controllerConfig.ExposePort
+	deployConfig.ControllerPort = controllerConfig.HostPort
 
 	// Step 4: Generate deployment files
 	fmt.Println("\n🔧 Step 4: Generating deployment configuration...")
@@ -881,7 +983,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int, controllerEnable bool, controllerAdminAddress string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -989,6 +1091,15 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	}{
 		BrokerLogDir: "/var/log/inference",
 		EventLogDir:  "/var/log/event",
+	}
+
+	// Set controller configuration if enabled
+	if controllerEnable {
+		config.Controller = ControllerConfig{
+			Enable:         true,
+			AdminAddresses: []string{controllerAdminAddress},
+			Image:          "ghcr.io/0gfoundation/0g-serving-broker:latest",
+		}
 	}
 
 	// Save final configuration
@@ -1206,19 +1317,22 @@ func validatePort(port string) error {
 
 func generateDeploymentFiles(config *DeploymentConfig) error {
 	templateData := TemplateData{
-		UseGPU:         config.UseGPU,
-		DeployLLM:      config.DeployLLM,
-		LLMModel:       config.LLMModel,
-		TeeNode:        config.TeeNode,
-		UseMonitoring:  config.UseMonitoring,
-		UseNginx:       config.UseNginx,
-		ConfigFile:     config.ConfigFile,
-		ConfigPath:     config.ConfigPath,
-		Ports:          config.Ports,
-		ProjectName:    config.ProjectName,
-		EnableFileLog:  true, // Always enable file logging
-		TappServiceURL: config.TappServiceURL,
-		TappAppID:      config.TappAppID,
+		UseGPU:               config.UseGPU,
+		DeployLLM:            config.DeployLLM,
+		LLMModel:             config.LLMModel,
+		TeeNode:              config.TeeNode,
+		UseMonitoring:        config.UseMonitoring,
+		UseNginx:             config.UseNginx,
+		ConfigFile:           config.ConfigFile,
+		ConfigPath:           config.ConfigPath,
+		Ports:                config.Ports,
+		ProjectName:          config.ProjectName,
+		EnableFileLog:        true, // Always enable file logging
+		TappServiceURL:       config.TappServiceURL,
+		TappAppID:            config.TappAppID,
+		UseController:        config.UseController,
+		ControllerPort:       config.ControllerPort,
+		ControllerExposePort: config.ControllerExposePort,
 	}
 
 	// Generate docker-compose.yml only
@@ -1293,6 +1407,7 @@ func printSuccessSummary(config *DeploymentConfig) {
 	fmt.Printf("  • TEE Node: %s\n", config.TeeNode)
 	fmt.Printf("  • Nginx Proxy: %t\n", config.UseNginx)
 	fmt.Printf("  • Monitoring: %t\n", config.UseMonitoring)
+	fmt.Printf("  • Controller: %t\n", config.UseController)
 	fmt.Printf("  • Config File: %s\n", config.ConfigFile)
 
 	fmt.Printf("\n📁 Generated Files:\n")
@@ -1330,6 +1445,14 @@ func printSuccessSummary(config *DeploymentConfig) {
 
 	if config.TeeNode == TeeNodeLocalHardhat {
 		fmt.Printf("  • Hardhat Node: http://localhost:%s\n", config.Ports.Hardhat)
+	}
+
+	if config.UseController {
+		if config.ControllerExposePort {
+			fmt.Printf("  • Controller: http://localhost:%s\n", config.ControllerPort)
+		} else {
+			fmt.Printf("  • Controller: http://0g-controller:3090 (internal)\n")
+		}
 	}
 
 	if config.UseMonitoring {
