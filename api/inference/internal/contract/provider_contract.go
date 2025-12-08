@@ -2,10 +2,13 @@ package providercontract
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -83,20 +86,65 @@ func (u *ProviderContract) Close() {
 	}
 }
 
-// GetImageInfo returns the name and digest of the configured image
-// Returns empty strings if Docker is not configured or on error
+// GetImageInfo returns the name and digest of the actual running container image.
+// It verifies that the running container's image matches the configured image.
+// Returns empty strings if Docker is not configured or on error.
 func (u *ProviderContract) GetImageInfo(ctx context.Context) (imageName, imageDigest string) {
 	if u.dockerClient == nil || u.imageName == "" {
 		return "", ""
 	}
 
-	info, err := dockerimage.GetImageInfo(ctx, u.dockerClient, u.imageName)
+	// Get the current container ID from hostname (Docker sets hostname to container ID by default)
+	hostname, err := os.Hostname()
 	if err != nil {
-		u.logger.Warnf("Failed to get image info for %s: %v", u.imageName, err)
+		u.logger.Warnf("Failed to get hostname: %v", err)
 		return u.imageName, ""
 	}
 
-	return u.imageName, info.Digest
+	// Find the current container by matching hostname (container ID prefix)
+	actualImageID, err := u.getContainerImageID(ctx, hostname)
+	if err != nil {
+		u.logger.Warnf("Failed to get container image ID: %v", err)
+		return u.imageName, ""
+	}
+
+	// Get info about the configured image
+	configuredImageInfo, err := dockerimage.GetImageInfo(ctx, u.dockerClient, u.imageName)
+	if err != nil {
+		u.logger.Warnf("Failed to get configured image info for %s: %v", u.imageName, err)
+		return u.imageName, ""
+	}
+
+	// Verify that the actual running image matches the configured image
+	// Compare by Image ID (sha256:...)
+	if actualImageID != configuredImageInfo.ImageID {
+		u.logger.Errorf("Image mismatch detected! Configured image %s (ID=%s) does not match actual running image (ID=%s)",
+			u.imageName, configuredImageInfo.ImageID, actualImageID)
+		// Return empty digest to indicate mismatch - this will trigger a contract update
+		// with empty digest, signaling to users that something is wrong
+		return u.imageName, ""
+	}
+
+	u.logger.Infof("Image verification passed: configured=%s, imageID=%s, digest=%s",
+		u.imageName, configuredImageInfo.ImageID, configuredImageInfo.Digest)
+	return u.imageName, configuredImageInfo.Digest
+}
+
+// getContainerImageID finds a container by hostname prefix and returns its image ID
+func (u *ProviderContract) getContainerImageID(ctx context.Context, hostnamePrefix string) (string, error) {
+	containers, err := u.dockerClient.ContainerList(ctx, container.ListOptions{All: false})
+	if err != nil {
+		return "", fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	for _, c := range containers {
+		// Container ID starts with the hostname (first 12 chars)
+		if strings.HasPrefix(c.ID, hostnamePrefix) {
+			return c.ImageID, nil
+		}
+	}
+
+	return "", fmt.Errorf("container with hostname prefix %s not found", hostnamePrefix)
 }
 
 // GetBalance returns the native token balance of the provider address
