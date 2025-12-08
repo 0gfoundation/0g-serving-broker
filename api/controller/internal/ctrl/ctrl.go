@@ -395,6 +395,11 @@ func (c *Ctrl) SyncService(ctx context.Context, imageName, imageDigest string) e
 }
 
 // UpdateImages pulls the latest image and recreates broker and event containers
+// The order of operations ensures contract is only updated after containers are successfully recreated:
+// 1. Pull image
+// 2. Stop containers (event -> broker)
+// 3. Recreate containers (broker -> event)
+// 4. Sync service to contract (only after containers are running with new image)
 func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, error) {
 	result := &docker.ImageUpdateResult{
 		Image:             c.config.Image,
@@ -413,15 +418,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	result.Digest = imageInfo.Digest
 	c.logger.Infof("[UpdateImages] Image pulled - ID=%s, Digest=%s", imageInfo.ImageID, imageInfo.Digest)
 
-	// Step 2: Sync service in the contract with new image digest
-	c.logger.Info("[UpdateImages] Syncing service with new image digest...")
-	if err := c.SyncService(ctx, c.config.Image, imageInfo.Digest); err != nil {
-		result.Success = false
-		result.Error = "failed to sync service: " + err.Error()
-		return result, err
-	}
-
-	// Step 3: Stop containers in reverse dependency order (event -> broker)
+	// Step 2: Stop containers in reverse dependency order (event -> broker)
 	c.logger.Info("[UpdateImages] Stopping containers...")
 	eventConfig := c.dockerClient.GetContainerConfig("event")
 	if eventConfig != nil {
@@ -447,7 +444,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 		}
 	}
 
-	// Step 4: Recreate containers in dependency order (broker -> event)
+	// Step 3: Recreate containers in dependency order (broker -> event)
 	// First recreate broker
 	if brokerConfig != nil {
 		brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerConfig.Name, c.config.Image)
@@ -479,6 +476,16 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 			result.Error = "failed to recreate event container: " + err.Error()
 			return result, err
 		}
+	}
+
+	// Step 4: Sync service in the contract with new image digest
+	// This is done AFTER containers are successfully recreated to ensure
+	// the contract always reflects the actual running state
+	c.logger.Info("[UpdateImages] Syncing service with new image digest...")
+	if err := c.SyncService(ctx, c.config.Image, imageInfo.Digest); err != nil {
+		result.Success = false
+		result.Error = "failed to sync service: " + err.Error()
+		return result, err
 	}
 
 	result.Success = true
