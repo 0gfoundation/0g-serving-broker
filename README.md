@@ -75,23 +75,6 @@ For TEE-verified services, you need to set up a TEE node:
 - **Option 1:** Follow the [Dstack Getting Started Guide](https://github.com/Dstack-TEE/dstack?tab=readme-ov-file#-getting-started)
 - **Option 2:** Follow the [0G-TAPP README](https://github.com/0gfoundation/0g-tapp/blob/main/README.md)
 
-## Troubleshooting
-
-**Broker fails to start:**
-- Verify Docker Compose is installed correctly
-- Check port availability
-- Ensure config.local.yaml syntax is valid
-- Review logs: `docker compose logs`
-
-**Service not accessible:**
-- Confirm firewall allows incoming connections
-- Verify public IP/domain is correct
-- Test local service connectivity
-
-**Settlement issues:**
-- Check wallet has sufficient gas
-- Verify network connectivity
-- Monitor settlement logs in broker output
 
 ## Documentation
 
