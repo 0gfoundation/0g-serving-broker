@@ -71,6 +71,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		}
 		ctx.Writer.Header()[k] = v
 	}
+	c.addNoCacheHeaders(ctx)
 
 	if resp.StatusCode != http.StatusOK {
 		ctx.Writer.WriteHeader(resp.StatusCode)
@@ -139,6 +140,11 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 	}
 
 	return nil
+}
+
+func (c *Ctrl) addNoCacheHeaders(ctx *gin.Context) {
+	// Disable Nginx proxy buffering to allow real-time streaming output
+	ctx.Writer.Header().Set("X-Accel-Buffering", "no")
 }
 
 func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
