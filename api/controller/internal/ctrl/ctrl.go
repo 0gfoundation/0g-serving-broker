@@ -463,6 +463,17 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 			result.Error = "broker container failed to become healthy: " + err.Error()
 			return result, err
 		}
+
+		// Reload ingress container if configured (to re-resolve broker's new IP)
+		if c.config.IngressContainer != "" {
+			c.logger.Infof("[UpdateImages] Reloading ingress container: %s", c.config.IngressContainer)
+			if err := c.dockerClient.ReloadNginx(ctx, c.config.IngressContainer); err != nil {
+				// Log warning but don't fail - ingress might not exist in this deployment
+				c.logger.Warnf("[UpdateImages] Failed to reload ingress container %s: %v", c.config.IngressContainer, err)
+			} else {
+				c.logger.Info("[UpdateImages] Ingress container reloaded successfully")
+			}
+		}
 	}
 
 	// Then recreate event
