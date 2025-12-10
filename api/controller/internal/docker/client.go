@@ -432,4 +432,27 @@ func (c *Client) GetImage() string {
 	return c.config.Image
 }
 
+// ReloadNginx sends a reload signal to nginx in the specified container
+// This is useful when upstream containers are recreated and nginx needs to re-resolve DNS
+func (c *Client) ReloadNginx(ctx context.Context, containerName string) error {
+	containerID, err := c.getContainerID(ctx, containerName)
+	if err != nil {
+		return err
+	}
+
+	// Execute nginx -s reload to gracefully reload configuration and re-resolve DNS
+	execConfig := container.ExecOptions{
+		Cmd:          []string{"nginx", "-s", "reload"},
+		AttachStderr: true,
+		AttachStdout: true,
+	}
+
+	execResp, err := c.cli.ContainerExecCreate(ctx, containerID, execConfig)
+	if err != nil {
+		return err
+	}
+
+	return c.cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{})
+}
+
 var _ = container.Summary{}
