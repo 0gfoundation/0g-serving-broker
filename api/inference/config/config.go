@@ -69,15 +69,16 @@ type LogPathsConfig struct {
 
 // ControllerConfig Controller service configuration
 type ControllerConfig struct {
-	Enable         bool                 `yaml:"enable"`         // Enable controller service
-	Port           int                  `yaml:"port"`           // HTTP service port, default 3090
-	AdminAddresses []string             `yaml:"adminAddresses"` // Authorized admin wallet addresses
-	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
-	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
-	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
-	Containers     ContainersConfig     `yaml:"containers"`     // Managed containers config
-	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
-	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
+	Enable           bool                 `yaml:"enable"`           // Enable controller service
+	Port             int                  `yaml:"port"`             // HTTP service port, default 3090
+	AdminAddresses   []string             `yaml:"adminAddresses"`   // Authorized admin wallet addresses
+	AllowedIPs       []string             `yaml:"allowedIPs"`       // IP whitelist, empty means allow all
+	Image            string               `yaml:"image"`            // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
+	IngressContainer string               `yaml:"ingressContainer"` // Optional: nginx ingress container name to reload after broker update
+	Docker           DockerConfig         `yaml:"docker"`           // Docker connection config
+	Containers       ContainersConfig     `yaml:"containers"`       // Managed containers config
+	Logger           *config.LoggerConfig `yaml:"logger"`           // Logger config
+	ConfigFile       string               `yaml:"-"`                // Resolved config file path (set at runtime, not from yaml)
 }
 
 // DockerConfig Docker connection configuration
