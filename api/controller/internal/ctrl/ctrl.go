@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -174,60 +175,99 @@ func (c *Ctrl) RemoveAllowedIP(ip string) {
 	delete(c.allowedIPs, ip)
 }
 
+// getContainerName returns the container name for a given alias
+func (c *Ctrl) getContainerName(alias string) string {
+	switch alias {
+	case "broker":
+		return c.config.Containers.Broker
+	case "event":
+		return c.config.Containers.Event
+	case "ingress":
+		return c.config.Containers.Ingress
+	case "prometheus-init":
+		return c.config.Containers.PrometheusInit
+	case "prometheus":
+		return c.config.Containers.Prometheus
+	default:
+		return ""
+	}
+}
+
+// GetAllManagedContainerAliases returns all managed container aliases
+func (c *Ctrl) GetAllManagedContainerAliases() []string {
+	return []string{"broker", "event", "ingress", "prometheus-init", "prometheus"}
+}
+
 // GetContainerStatus gets the status of a specific container
 func (c *Ctrl) GetContainerStatus(ctx context.Context, alias string) (*docker.ContainerStatus, error) {
-	containerConfig := c.dockerClient.GetContainerConfig(alias)
-	if containerConfig == nil {
+	containerName := c.getContainerName(alias)
+	if containerName == "" {
 		return nil, &InvalidContainerError{Alias: alias}
 	}
 
-	return c.dockerClient.GetContainerStatus(ctx, containerConfig.Name)
+	return c.dockerClient.GetContainerStatus(ctx, containerName)
 }
 
 // GetAllContainersStatus gets the status of all managed containers
 func (c *Ctrl) GetAllContainersStatus(ctx context.Context) ([]docker.ContainerStatus, error) {
-	return c.dockerClient.GetAllContainersStatus(ctx)
+	var statuses []docker.ContainerStatus
+
+	// Get all container aliases
+	aliases := c.GetAllManagedContainerAliases()
+
+	for _, alias := range aliases {
+		containerName := c.getContainerName(alias)
+		if containerName == "" {
+			continue
+		}
+
+		status, err := c.dockerClient.GetContainerStatus(ctx, containerName)
+		if err != nil {
+			// Log error but continue to get other containers
+			c.logger.Warnf("Failed to get status for container %s: %v", alias, err)
+			continue
+		}
+		if status != nil {
+			statuses = append(statuses, *status)
+		}
+	}
+
+	return statuses, nil
 }
 
-// StartContainer starts a container by alias (broker/event)
+// StartContainer starts a container by alias
 func (c *Ctrl) StartContainer(ctx context.Context, alias string) error {
-	containerConfig := c.dockerClient.GetContainerConfig(alias)
-	if containerConfig == nil {
+	containerName := c.getContainerName(alias)
+	if containerName == "" {
 		return &InvalidContainerError{Alias: alias}
 	}
 
-	return c.dockerClient.StartContainer(ctx, containerConfig.Name)
+	return c.dockerClient.StartContainer(ctx, containerName)
 }
 
 // StopContainer stops a container by alias
 func (c *Ctrl) StopContainer(ctx context.Context, alias string) error {
-	containerConfig := c.dockerClient.GetContainerConfig(alias)
-	if containerConfig == nil {
+	containerName := c.getContainerName(alias)
+	if containerName == "" {
 		return &InvalidContainerError{Alias: alias}
 	}
 
-	return c.dockerClient.StopContainer(ctx, containerConfig.Name)
+	return c.dockerClient.StopContainer(ctx, containerName)
 }
 
 // RestartContainer restarts a container by alias
 func (c *Ctrl) RestartContainer(ctx context.Context, alias string) error {
-	containerConfig := c.dockerClient.GetContainerConfig(alias)
-	if containerConfig == nil {
+	containerName := c.getContainerName(alias)
+	if containerName == "" {
 		return &InvalidContainerError{Alias: alias}
 	}
 
-	return c.dockerClient.RestartContainer(ctx, containerConfig.Name)
+	return c.dockerClient.RestartContainer(ctx, containerName)
 }
 
-// GetContainerConfig reads the shared config file and returns its content
-// The alias is just for validation (broker/event)
-func (c *Ctrl) GetContainerConfig(alias string) (string, error) {
-	// Validate alias
-	if alias != "broker" && alias != "event" {
-		return "", &InvalidContainerError{Alias: alias}
-	}
-
-	// All containers share the same config file
+// GetCoreConfig reads the shared config file and returns its content
+// The core config is shared by broker and event containers
+func (c *Ctrl) GetCoreConfig() (string, error) {
 	data, err := os.ReadFile(c.config.ConfigFile)
 	if err != nil {
 		return "", err
@@ -236,31 +276,28 @@ func (c *Ctrl) GetContainerConfig(alias string) (string, error) {
 	return string(data), nil
 }
 
-// UpdateContainerConfig updates the shared config file
-// The alias is just for validation (broker/event)
+// ApplyCoreConfig updates the shared config file and restarts both broker and event containers
 // configContent is raw YAML string to avoid parsing issues with hex addresses
-func (c *Ctrl) UpdateContainerConfig(alias string, configContent string) error {
-	// Validate alias
-	if alias != "broker" && alias != "event" {
-		return &InvalidContainerError{Alias: alias}
-	}
-
+func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error {
 	// Validate YAML format (but don't use parsed result to preserve original content)
 	var tmp interface{}
 	if err := yaml.Unmarshal([]byte(configContent), &tmp); err != nil {
 		return &InvalidConfigError{Err: err}
 	}
 
-	return os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644)
-}
-
-// ApplyContainerConfig updates config and restarts the container
-func (c *Ctrl) ApplyContainerConfig(ctx context.Context, alias string, configContent string) error {
-	if err := c.UpdateContainerConfig(alias, configContent); err != nil {
+	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
 		return err
 	}
 
-	return c.RestartContainer(ctx, alias)
+	// Restart both broker and event since they share the config
+	if err := c.RestartContainer(ctx, "broker"); err != nil {
+		return fmt.Errorf("failed to restart broker: %w", err)
+	}
+	if err := c.RestartContainer(ctx, "event"); err != nil {
+		return fmt.Errorf("failed to restart event: %w", err)
+	}
+
+	return nil
 }
 
 // InvalidContainerError is returned when an invalid container alias is provided
@@ -269,7 +306,17 @@ type InvalidContainerError struct {
 }
 
 func (e *InvalidContainerError) Error() string {
-	return "invalid container alias: " + e.Alias + ", must be 'broker' or 'event'"
+	return "invalid container alias: " + e.Alias
+}
+
+// ForbiddenEnvKeyError is returned when trying to modify an env key not in the whitelist
+type ForbiddenEnvKeyError struct {
+	Key     string
+	Allowed []string
+}
+
+func (e *ForbiddenEnvKeyError) Error() string {
+	return fmt.Sprintf("environment variable '%s' is not allowed, allowed keys: %v", e.Key, e.Allowed)
 }
 
 // InvalidConfigError is returned when the config content is not valid YAML
@@ -406,6 +453,10 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
 	}
 
+	brokerName := c.config.Containers.Broker
+	eventName := c.config.Containers.Event
+	ingressName := c.config.Containers.Ingress
+
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
 	imageInfo, err := c.dockerClient.PullImage(ctx, c.config.Image)
@@ -420,73 +471,63 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 
 	// Step 2: Stop containers in reverse dependency order (event -> broker)
 	c.logger.Info("[UpdateImages] Stopping containers...")
-	eventConfig := c.dockerClient.GetContainerConfig("event")
-	if eventConfig != nil {
-		if err := c.dockerClient.StopContainer(ctx, eventConfig.Name); err != nil {
-			// Log error but continue - container might not exist
-			if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-				result.Success = false
-				result.Error = "failed to stop event container: " + err.Error()
-				return result, err
-			}
+	if err := c.dockerClient.StopContainer(ctx, eventName); err != nil {
+		// Log error but continue - container might not exist
+		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+			result.Success = false
+			result.Error = "failed to stop event container: " + err.Error()
+			return result, err
 		}
 	}
 
 	// Then stop broker
-	brokerConfig := c.dockerClient.GetContainerConfig("broker")
-	if brokerConfig != nil {
-		if err := c.dockerClient.StopContainer(ctx, brokerConfig.Name); err != nil {
-			if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-				result.Success = false
-				result.Error = "failed to stop broker container: " + err.Error()
-				return result, err
-			}
+	if err := c.dockerClient.StopContainer(ctx, brokerName); err != nil {
+		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+			result.Success = false
+			result.Error = "failed to stop broker container: " + err.Error()
+			return result, err
 		}
 	}
 
 	// Step 3: Recreate containers in dependency order (broker -> event)
 	// First recreate broker
-	if brokerConfig != nil {
-		brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerConfig.Name, c.config.Image)
-		if brokerResult != nil {
-			result.UpdatedContainers = append(result.UpdatedContainers, *brokerResult)
-		}
-		if err != nil {
-			result.Success = false
-			result.Error = "failed to recreate broker container: " + err.Error()
-			return result, err
-		}
+	brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerName, c.config.Image)
+	if brokerResult != nil {
+		result.UpdatedContainers = append(result.UpdatedContainers, *brokerResult)
+	}
+	if err != nil {
+		result.Success = false
+		result.Error = "failed to recreate broker container: " + err.Error()
+		return result, err
+	}
 
-		// Wait for broker to become healthy before starting event
-		if err := c.dockerClient.WaitForHealthy(ctx, brokerConfig.Name, 2*time.Minute); err != nil {
-			result.Success = false
-			result.Error = "broker container failed to become healthy: " + err.Error()
-			return result, err
-		}
+	// Wait for broker to become healthy before starting event
+	if err := c.dockerClient.WaitForHealthy(ctx, brokerName, 2*time.Minute); err != nil {
+		result.Success = false
+		result.Error = "broker container failed to become healthy: " + err.Error()
+		return result, err
+	}
 
-		// Reload ingress container if configured (to re-resolve broker's new IP)
-		if c.config.IngressContainer != "" {
-			c.logger.Infof("[UpdateImages] Reloading ingress container: %s", c.config.IngressContainer)
-			if err := c.dockerClient.ReloadNginx(ctx, c.config.IngressContainer); err != nil {
-				// Log warning but don't fail - ingress might not exist in this deployment
-				c.logger.Warnf("[UpdateImages] Failed to reload ingress container %s: %v", c.config.IngressContainer, err)
-			} else {
-				c.logger.Info("[UpdateImages] Ingress container reloaded successfully")
-			}
+	// Reload ingress container (to re-resolve broker's new IP)
+	if ingressName != "" {
+		c.logger.Infof("[UpdateImages] Reloading ingress container: %s", ingressName)
+		if err := c.dockerClient.ReloadNginx(ctx, ingressName); err != nil {
+			// Log warning but don't fail - ingress might not exist in this deployment
+			c.logger.Warnf("[UpdateImages] Failed to reload ingress container %s: %v", ingressName, err)
+		} else {
+			c.logger.Info("[UpdateImages] Ingress container reloaded successfully")
 		}
 	}
 
 	// Then recreate event
-	if eventConfig != nil {
-		eventResult, err := c.dockerClient.RecreateContainer(ctx, eventConfig.Name, c.config.Image)
-		if eventResult != nil {
-			result.UpdatedContainers = append(result.UpdatedContainers, *eventResult)
-		}
-		if err != nil {
-			result.Success = false
-			result.Error = "failed to recreate event container: " + err.Error()
-			return result, err
-		}
+	eventResult, err := c.dockerClient.RecreateContainer(ctx, eventName, c.config.Image)
+	if eventResult != nil {
+		result.UpdatedContainers = append(result.UpdatedContainers, *eventResult)
+	}
+	if err != nil {
+		result.Success = false
+		result.Error = "failed to recreate event container: " + err.Error()
+		return result, err
 	}
 
 	// Step 4: Sync service in the contract with new image digest
@@ -506,4 +547,88 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 // GetConfiguredImage returns the configured image name
 func (c *Ctrl) GetConfiguredImage() string {
 	return c.config.Image
+}
+
+// UpdatePrometheusConfig updates the Prometheus configuration
+// It reruns the prometheus-init container with the new config and restarts prometheus
+func (c *Ctrl) UpdatePrometheusConfig(ctx context.Context, base64Config string) error {
+	// 1. Validate base64 format
+	if _, err := base64.StdEncoding.DecodeString(base64Config); err != nil {
+		return &InvalidConfigError{Err: fmt.Errorf("invalid base64 encoding: %w", err)}
+	}
+
+	initContainer := c.config.Containers.PrometheusInit
+	promContainer := c.config.Containers.Prometheus
+
+	c.logger.Infof("[UpdatePrometheusConfig] Rerunning %s with new config", initContainer)
+
+	// 2. Rerun prometheus-init container with new PROMETHEUS_CONFIG env
+	err := c.dockerClient.RerunContainerWithEnv(ctx, initContainer, map[string]string{
+		"PROMETHEUS_CONFIG": base64Config,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to rerun prometheus-init: %w", err)
+	}
+
+	// 3. Restart prometheus container to load new config
+	c.logger.Infof("[UpdatePrometheusConfig] Restarting %s", promContainer)
+	if err := c.dockerClient.RestartContainer(ctx, promContainer); err != nil {
+		return fmt.Errorf("failed to restart prometheus: %w", err)
+	}
+
+	c.logger.Info("[UpdatePrometheusConfig] Prometheus config updated successfully")
+	return nil
+}
+
+// UpdateIngressConfig updates the ingress container environment variables
+// Validates env keys against the IngressAllowedEnvKeys whitelist
+func (c *Ctrl) UpdateIngressConfig(ctx context.Context, envUpdates map[string]string) error {
+	// Validate env keys against whitelist
+	for key := range envUpdates {
+		allowed := false
+		for _, allowedKey := range config.IngressAllowedEnvKeys {
+			if key == allowedKey {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return &ForbiddenEnvKeyError{Key: key, Allowed: config.IngressAllowedEnvKeys}
+		}
+	}
+
+	ingressName := c.config.Containers.Ingress
+	c.logger.Infof("[UpdateIngressConfig] Updating ingress container %s with env keys: %v", ingressName, mapKeys(envUpdates))
+
+	if err := c.dockerClient.UpdateContainerEnv(ctx, ingressName, envUpdates); err != nil {
+		return fmt.Errorf("failed to update ingress container: %w", err)
+	}
+
+	c.logger.Info("[UpdateIngressConfig] Ingress config updated successfully")
+	return nil
+}
+
+// GetIngressEnv returns the current environment variables of the ingress container
+func (c *Ctrl) GetIngressEnv(ctx context.Context) (map[string]string, error) {
+	ingressName := c.config.Containers.Ingress
+	return c.dockerClient.GetContainerEnv(ctx, ingressName, config.IngressAllowedEnvKeys)
+}
+
+// GetPrometheusConfig returns the current Prometheus configuration (base64 encoded)
+func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
+	initContainer := c.config.Containers.PrometheusInit
+	env, err := c.dockerClient.GetContainerEnv(ctx, initContainer, []string{"PROMETHEUS_CONFIG"})
+	if err != nil {
+		return "", err
+	}
+	return env["PROMETHEUS_CONFIG"], nil
+}
+
+// mapKeys returns the keys of a map as a slice
+func mapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
