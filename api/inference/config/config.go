@@ -69,16 +69,15 @@ type LogPathsConfig struct {
 
 // ControllerConfig Controller service configuration
 type ControllerConfig struct {
-	Enable           bool                 `yaml:"enable"`           // Enable controller service
-	Port             int                  `yaml:"port"`             // HTTP service port, default 3090
-	AdminAddresses   []string             `yaml:"adminAddresses"`   // Authorized admin wallet addresses
-	AllowedIPs       []string             `yaml:"allowedIPs"`       // IP whitelist, empty means allow all
-	Image            string               `yaml:"image"`            // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
-	IngressContainer string               `yaml:"ingressContainer"` // Optional: nginx ingress container name to reload after broker update
-	Docker           DockerConfig         `yaml:"docker"`           // Docker connection config
-	Containers       ContainersConfig     `yaml:"containers"`       // Managed containers config
-	Logger           *config.LoggerConfig `yaml:"logger"`           // Logger config
-	ConfigFile       string               `yaml:"-"`                // Resolved config file path (set at runtime, not from yaml)
+	Enable         bool                 `yaml:"enable"`         // Enable controller service
+	Port           int                  `yaml:"port"`           // HTTP service port, default 3090
+	AdminAddresses []string             `yaml:"adminAddresses"` // Authorized admin wallet addresses
+	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
+	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
+	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
+	Containers     ContainersConfig     `yaml:"containers"`     // All managed containers
+	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
+	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
 }
 
 // DockerConfig Docker connection configuration
@@ -87,15 +86,24 @@ type DockerConfig struct {
 	APIVersion string `yaml:"apiVersion"` // Docker API version, default 1.41
 }
 
-// ContainersConfig managed containers configuration
+// ContainersConfig all managed containers configuration
 type ContainersConfig struct {
-	Broker ContainerConfig `yaml:"broker"`
-	Event  ContainerConfig `yaml:"event"`
+	Broker         string `yaml:"broker"`         // Broker container name, default "0g-serving-provider-broker"
+	Event          string `yaml:"event"`          // Event container name, default "0g-serving-provider-event"
+	Ingress        string `yaml:"ingress"`        // Ingress container name, default "broker-ingress"
+	PrometheusInit string `yaml:"prometheusInit"` // Prometheus init container name, default "prometheus-init"
+	Prometheus     string `yaml:"prometheus"`     // Prometheus container name, default "prometheus"
 }
 
-// ContainerConfig single container configuration
-type ContainerConfig struct {
-	Name string `yaml:"name"` // Container name (or partial name for matching)
+// IngressAllowedEnvKeys whitelist of environment variables that can be modified for ingress
+var IngressAllowedEnvKeys = []string{
+	"CLOUDFLARE_API_TOKEN",
+	"DOMAIN",
+	"TARGET_ENDPOINT",
+	"CERTBOT_EMAIL",
+	"GATEWAY_DOMAIN",
+	"SET_CAA",
+	"PORT",
 }
 
 var (
@@ -195,12 +203,11 @@ func GetConfig() *Config {
 					APIVersion: "1.41",
 				},
 				Containers: ContainersConfig{
-					Broker: ContainerConfig{
-						Name: "0g-serving-provider-broker",
-					},
-					Event: ContainerConfig{
-						Name: "0g-serving-provider-event",
-					},
+					Broker:         "0g-serving-provider-broker",
+					Event:          "0g-serving-provider-event",
+					Ingress:        "broker-ingress",
+					PrometheusInit: "prometheus-init",
+					Prometheus:     "prometheus",
 				},
 				Logger: &config.LoggerConfig{
 					Format:        "text",

@@ -91,7 +91,7 @@ services:
     networks:
       - default
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "0g-inference-event"]
+      test: ["CMD-SHELL", "grep -q '0g-inference-event' /proc/1/cmdline"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -119,7 +119,7 @@ services:
     networks:
       - default
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3090/health"]
+      test: ["CMD-SHELL", "grep -q '0g-controller' /proc/1/cmdline"]
       interval: 30s
       timeout: 5s
       retries: 3
