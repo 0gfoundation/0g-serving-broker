@@ -390,7 +390,7 @@ const dockerComposeTemplate = `services:
     networks:
       - default
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "0g-inference-event"]
+      test: ["CMD-SHELL", "grep -q '0g-inference-event' /proc/1/cmdline"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -426,7 +426,7 @@ const dockerComposeTemplate = `services:
     networks:
       - default
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3090/health"]
+      test: ["CMD-SHELL", "grep -q '0g-controller' /proc/1/cmdline"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -518,12 +518,6 @@ const dockerComposeTemplate = `services:
     networks:
       - default
     privileged: true
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:9100/metrics || curl -f http://localhost:9100/metrics"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
     depends_on:
       prometheus:
         condition: service_healthy
