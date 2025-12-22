@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -61,64 +62,91 @@ func (c *Client) Close() error {
 
 // GetContainerStatus gets the status of a container by name
 // The containerName can be a partial match (e.g., "broker" matches "project-0g-serving-provider-broker-1")
+// Matching priority: exact match > substring match (prefer shortest container name to avoid ambiguity)
 func (c *Client) GetContainerStatus(ctx context.Context, containerName string) (*ContainerStatus, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return nil, err
 	}
 
-	for _, cont := range containers {
+	var bestMatch struct {
+		cont *container.Summary
+		name string
+	}
+
+	for i := range containers {
+		cont := &containers[i]
 		for _, name := range cont.Names {
-			// Container names have a leading slash, remove it for matching
 			cleanName := strings.TrimPrefix(name, "/")
-			// Match if name equals containerName or contains it (for docker-compose naming)
-			if cleanName == containerName || strings.Contains(cleanName, containerName) {
-				// Get detailed inspection
-				inspect, err := c.cli.ContainerInspect(ctx, cont.ID)
-				if err != nil {
-					return nil, err
-				}
 
-				health := "none"
-				if inspect.State.Health != nil {
-					health = inspect.State.Health.Status
-				}
+			// Exact match has highest priority
+			if cleanName == containerName {
+				return c.inspectContainerStatus(ctx, cont.ID, cleanName)
+			}
 
-				return &ContainerStatus{
-					Name:      cleanName, // Return actual container name
-					ID:        cont.ID[:12],
-					State:     inspect.State.Status,
-					Health:    health,
-					StartedAt: inspect.State.StartedAt,
-					Image:     cont.Image,
-				}, nil
+			// Substring match - prefer shortest container name to avoid matching more specific variants
+			if strings.Contains(cleanName, containerName) {
+				if bestMatch.cont == nil || len(cleanName) < len(bestMatch.name) {
+					bestMatch.cont = cont
+					bestMatch.name = cleanName
+				}
 			}
 		}
 	}
 
+	if bestMatch.cont != nil {
+		return c.inspectContainerStatus(ctx, bestMatch.cont.ID, bestMatch.name)
+	}
+
 	return nil, nil
+}
+
+// inspectContainerStatus gets detailed status for a container
+func (c *Client) inspectContainerStatus(ctx context.Context, containerID, containerName string) (*ContainerStatus, error) {
+	inspect, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, err
+	}
+
+	health := "none"
+	if inspect.State.Health != nil {
+		health = inspect.State.Health.Status
+	}
+
+	return &ContainerStatus{
+		Name:      containerName,
+		ID:        containerID[:12],
+		State:     inspect.State.Status,
+		Health:    health,
+		StartedAt: inspect.State.StartedAt,
+		Image:     inspect.Config.Image,
+	}, nil
 }
 
 // GetAllContainersStatus gets status of all managed containers
 func (c *Client) GetAllContainersStatus(ctx context.Context) ([]ContainerStatus, error) {
 	var statuses []ContainerStatus
 
-	// Get broker status
-	brokerStatus, err := c.GetContainerStatus(ctx, c.config.Containers.Broker.Name)
-	if err != nil {
-		return nil, err
-	}
-	if brokerStatus != nil {
-		statuses = append(statuses, *brokerStatus)
+	// Get all managed container names
+	containerNames := []string{
+		c.config.Containers.Broker,
+		c.config.Containers.Event,
+		c.config.Containers.Ingress,
+		c.config.Containers.PrometheusInit,
+		c.config.Containers.Prometheus,
 	}
 
-	// Get event status
-	eventStatus, err := c.GetContainerStatus(ctx, c.config.Containers.Event.Name)
-	if err != nil {
-		return nil, err
-	}
-	if eventStatus != nil {
-		statuses = append(statuses, *eventStatus)
+	for _, name := range containerNames {
+		if name == "" {
+			continue
+		}
+		status, err := c.GetContainerStatus(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if status != nil {
+			statuses = append(statuses, *status)
+		}
 	}
 
 	return statuses, nil
@@ -185,36 +213,73 @@ func (c *Client) GetContainerLogs(ctx context.Context, containerName string, tai
 
 // getContainerID gets container ID by name
 // The containerName can be a partial match (e.g., "broker" matches "project-0g-serving-provider-broker-1")
+// Matching priority: exact match > substring match (prefer shortest container name to avoid ambiguity)
 func (c *Client) getContainerID(ctx context.Context, containerName string) (string, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return "", err
 	}
 
+	var bestMatch struct {
+		id   string
+		name string
+	}
+
 	for _, cont := range containers {
 		for _, name := range cont.Names {
-			// Container names have a leading slash, remove it for matching
 			cleanName := strings.TrimPrefix(name, "/")
-			// Match if name equals containerName or contains it (for docker-compose naming)
-			if cleanName == containerName || strings.Contains(cleanName, containerName) {
+
+			// Exact match has highest priority
+			if cleanName == containerName {
 				return cont.ID, nil
 			}
+
+			// Substring match - prefer shortest container name to avoid matching more specific variants
+			// e.g., searching "prometheus" should match "project-prometheus-1" not "project-prometheus-init-1"
+			if strings.Contains(cleanName, containerName) {
+				if bestMatch.id == "" || len(cleanName) < len(bestMatch.name) {
+					bestMatch.id = cont.ID
+					bestMatch.name = cleanName
+				}
+			}
 		}
+	}
+
+	if bestMatch.id != "" {
+		return bestMatch.id, nil
 	}
 
 	return "", &ContainerNotFoundError{Name: containerName}
 }
 
-// GetContainerConfig gets the container config for a given container alias
-func (c *Client) GetContainerConfig(alias string) *config.ContainerConfig {
-	switch alias {
-	case "broker":
-		return &c.config.Containers.Broker
-	case "event":
-		return &c.config.Containers.Event
-	default:
-		return nil
+// GetContainerEnv gets environment variables from a container, filtered by allowed keys
+func (c *Client) GetContainerEnv(ctx context.Context, containerName string, allowedKeys []string) (map[string]string, error) {
+	containerID, err := c.getContainerID(ctx, containerName)
+	if err != nil {
+		return nil, err
 	}
+
+	inspect, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build allowed keys set for fast lookup
+	allowedSet := make(map[string]bool)
+	for _, key := range allowedKeys {
+		allowedSet[key] = true
+	}
+
+	// Extract env vars, filtering by allowed keys
+	result := make(map[string]string)
+	for _, env := range inspect.Config.Env {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 && allowedSet[parts[0]] {
+			result[parts[0]] = parts[1]
+		}
+	}
+
+	return result, nil
 }
 
 // ContainerNotFoundError is returned when a container is not found
@@ -456,3 +521,145 @@ func (c *Client) ReloadNginx(ctx context.Context, containerName string) error {
 }
 
 var _ = container.Summary{}
+
+// RecreateContainerWithEnv recreates a container with updated environment variables
+// - For init containers (waitForExit=true): waits for container to exit and checks exit code
+// - For service containers (waitForExit=false): starts container and returns immediately
+func (c *Client) RecreateContainerWithEnv(ctx context.Context, containerName string, envUpdates map[string]string, waitForExit bool) error {
+	// 1. Get container ID
+	containerID, err := c.getContainerID(ctx, containerName)
+	if err != nil {
+		return err
+	}
+
+	// 2. Inspect the container to get its full configuration
+	inspect, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return err
+	}
+
+	// Get the actual container name (without leading slash)
+	actualName := strings.TrimPrefix(inspect.Name, "/")
+
+	// 3. Stop the container
+	timeout := 30
+	if waitForExit {
+		timeout = 10 // shorter timeout for init containers
+	}
+	stopErr := c.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+	if stopErr != nil && !waitForExit {
+		// For service containers, stop error is fatal
+		return stopErr
+	}
+	// For init containers, ignore stop error (might already be stopped)
+
+	// 4. Remove the old container
+	if err := c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
+		return err
+	}
+
+	// 5. Merge environment variables (new values override old ones)
+	newEnv := mergeEnv(inspect.Config.Env, envUpdates)
+
+	// 6. Create new container config with updated environment
+	newConfig := &container.Config{
+		Image:        inspect.Config.Image,
+		Cmd:          inspect.Config.Cmd,
+		Env:          newEnv,
+		Entrypoint:   inspect.Config.Entrypoint,
+		WorkingDir:   inspect.Config.WorkingDir,
+		Labels:       inspect.Config.Labels,
+		ExposedPorts: inspect.Config.ExposedPorts,
+		Healthcheck:  inspect.Config.Healthcheck,
+	}
+
+	// Host config
+	hostConfig := inspect.HostConfig
+
+	// Network config - preserve network settings
+	networkingConfig := &network.NetworkingConfig{
+		EndpointsConfig: make(map[string]*network.EndpointSettings),
+	}
+	for netName, netSettings := range inspect.NetworkSettings.Networks {
+		networkingConfig.EndpointsConfig[netName] = &network.EndpointSettings{
+			Aliases:   netSettings.Aliases,
+			NetworkID: netSettings.NetworkID,
+		}
+	}
+
+	// 7. Create new container
+	createResp, err := c.cli.ContainerCreate(ctx, newConfig, hostConfig, networkingConfig, nil, actualName)
+	if err != nil {
+		return err
+	}
+
+	// 8. Start the new container
+	if err := c.cli.ContainerStart(ctx, createResp.ID, container.StartOptions{}); err != nil {
+		return err
+	}
+
+	// 9. For init containers, wait for exit and check exit code
+	if waitForExit {
+		statusCh, errCh := c.cli.ContainerWait(ctx, createResp.ID, container.WaitConditionNotRunning)
+		select {
+		case err := <-errCh:
+			if err != nil {
+				return err
+			}
+		case status := <-statusCh:
+			if status.StatusCode != 0 {
+				return &InitContainerFailedError{Name: containerName, ExitCode: int(status.StatusCode)}
+			}
+		}
+	}
+
+	return nil
+}
+
+// RerunContainerWithEnv reruns an init container with updated environment variables
+// Wrapper for RecreateContainerWithEnv with waitForExit=true
+func (c *Client) RerunContainerWithEnv(ctx context.Context, containerName string, envUpdates map[string]string) error {
+	return c.RecreateContainerWithEnv(ctx, containerName, envUpdates, true)
+}
+
+// UpdateContainerEnv updates environment variables and restarts a service container
+// Wrapper for RecreateContainerWithEnv with waitForExit=false
+func (c *Client) UpdateContainerEnv(ctx context.Context, containerName string, envUpdates map[string]string) error {
+	return c.RecreateContainerWithEnv(ctx, containerName, envUpdates, false)
+}
+
+// mergeEnv merges environment variables, new values override old ones
+func mergeEnv(oldEnv []string, updates map[string]string) []string {
+	envMap := make(map[string]string)
+
+	// Parse old env into map
+	for _, e := range oldEnv {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+
+	// Apply updates
+	for k, v := range updates {
+		envMap[k] = v
+	}
+
+	// Convert back to slice
+	result := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		result = append(result, k+"="+v)
+	}
+
+	return result
+}
+
+// InitContainerFailedError is returned when an init container exits with non-zero code
+type InitContainerFailedError struct {
+	Name     string
+	ExitCode int
+}
+
+func (e *InitContainerFailedError) Error() string {
+	return fmt.Sprintf("init container %s failed with exit code %d", e.Name, e.ExitCode)
+}

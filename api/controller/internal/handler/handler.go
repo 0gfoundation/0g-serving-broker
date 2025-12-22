@@ -30,12 +30,21 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 		containers.POST("/:name/restart", h.RestartContainer)
 	}
 
-	// Config management
-	configs := v1.Group("/configs")
+	// Config management - organized by function
+	config := v1.Group("/config")
 	{
-		configs.GET("/:name", h.GetConfig)
-		configs.PUT("/:name", h.UpdateConfig)
-		configs.POST("/:name/apply", h.ApplyConfig)
+		// Core config (shared by broker and event) - YAML file
+		// PUT updates config AND restarts broker+event
+		config.GET("/core", h.GetCoreConfig)
+		config.PUT("/core", h.UpdateCoreConfig)
+
+		// Ingress config - environment variables
+		config.GET("/ingress", h.GetIngressConfig)
+		config.PUT("/ingress", h.UpdateIngressConfig)
+
+		// Prometheus config - base64 encoded YAML
+		config.GET("/prometheus", h.GetPrometheusConfig)
+		config.PUT("/prometheus", h.UpdatePrometheusConfig)
 	}
 
 	// Admin whitelist management
@@ -139,16 +148,10 @@ func (h *Handler) RestartContainer(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "container restarted"})
 }
 
-// GetConfig returns the config of a container
-func (h *Handler) GetConfig(ctx *gin.Context) {
-	name := ctx.Param("name")
-
-	content, err := h.ctrl.GetContainerConfig(name)
+// GetCoreConfig returns the core config (shared by broker and event)
+func (h *Handler) GetCoreConfig(ctx *gin.Context) {
+	content, err := h.ctrl.GetCoreConfig()
 	if err != nil {
-		if _, ok := err.(*ctrl.InvalidContainerError); ok {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -162,21 +165,15 @@ type UpdateConfigRequest struct {
 	Config string `json:"config" binding:"required"`
 }
 
-// UpdateConfig updates the config of a container
-func (h *Handler) UpdateConfig(ctx *gin.Context) {
-	name := ctx.Param("name")
-
+// UpdateCoreConfig updates the core config and restarts broker+event containers
+func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 	var req UpdateConfigRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
-	if err := h.ctrl.UpdateContainerConfig(name, req.Config); err != nil {
-		if _, ok := err.(*ctrl.InvalidContainerError); ok {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
+	if err := h.ctrl.ApplyCoreConfig(ctx, req.Config); err != nil {
 		if _, ok := err.(*ctrl.InvalidConfigError); ok {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -185,33 +182,7 @@ func (h *Handler) UpdateConfig(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{"message": "config updated"})
-}
-
-// ApplyConfig updates the config and restarts the container
-func (h *Handler) ApplyConfig(ctx *gin.Context) {
-	name := ctx.Param("name")
-
-	var req UpdateConfigRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-
-	if err := h.ctrl.ApplyContainerConfig(ctx, name, req.Config); err != nil {
-		if _, ok := err.(*ctrl.InvalidContainerError); ok {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		if _, ok := err.(*ctrl.InvalidConfigError); ok {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{"message": "config applied and container restarted"})
+	ctx.JSON(http.StatusOK, gin.H{"message": "config updated and containers restarted"})
 }
 
 // ListAdminWallets returns all admin wallet addresses
@@ -305,4 +276,76 @@ func (h *Handler) UpdateImages(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, result)
+}
+
+// GetIngressConfig returns the current ingress environment variables
+func (h *Handler) GetIngressConfig(ctx *gin.Context) {
+	env, err := h.ctrl.GetIngressEnv(ctx)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"env": env})
+}
+
+// UpdateIngressConfigRequest is the request body for updating ingress configuration
+type UpdateIngressConfigRequest struct {
+	Env map[string]string `json:"env" binding:"required"`
+}
+
+// UpdateIngressConfig updates the ingress configuration
+func (h *Handler) UpdateIngressConfig(ctx *gin.Context) {
+	var req UpdateIngressConfigRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "env field is required"})
+		return
+	}
+
+	if err := h.ctrl.UpdateIngressConfig(ctx, req.Env); err != nil {
+		if _, ok := err.(*ctrl.ForbiddenEnvKeyError); ok {
+			ctx.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "ingress config updated"})
+}
+
+// GetPrometheusConfig returns the current Prometheus configuration
+func (h *Handler) GetPrometheusConfig(ctx *gin.Context) {
+	config, err := h.ctrl.GetPrometheusConfig(ctx)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"config": config})
+}
+
+// UpdatePrometheusConfigRequest is the request body for updating Prometheus config
+type UpdatePrometheusConfigRequest struct {
+	Config string `json:"config" binding:"required"` // base64 encoded prometheus.yml
+}
+
+// UpdatePrometheusConfig updates the Prometheus configuration
+func (h *Handler) UpdatePrometheusConfig(ctx *gin.Context) {
+	var req UpdatePrometheusConfigRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "config field is required"})
+		return
+	}
+
+	if err := h.ctrl.UpdatePrometheusConfig(ctx, req.Config); err != nil {
+		if _, ok := err.(*ctrl.InvalidConfigError); ok {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "prometheus config updated and applied"})
 }
