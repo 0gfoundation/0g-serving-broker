@@ -74,6 +74,10 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	c.addNoCacheHeaders(ctx)
 
 	if resp.StatusCode != http.StatusOK {
+		// Ignore 4xx errors in monitoring as they are client errors
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			ctx.Set("ignoreError", true)
+		}
 		ctx.Writer.WriteHeader(resp.StatusCode)
 		c.handleServiceError(ctx, resp.Body)
 		return err
