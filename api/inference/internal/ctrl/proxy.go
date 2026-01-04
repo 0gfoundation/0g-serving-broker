@@ -3,8 +3,10 @@ package ctrl
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -44,7 +46,22 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 }
 
 func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, outputPrice string, charing bool) error {
-	client := &http.Client{}
+	// Configure HTTP client with timeouts to prevent resource leaks
+	client := &http.Client{
+		Timeout: 180 * time.Second, // 3 minutes total timeout (slightly longer than expected 2-min response)
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second, // Connection timeout
+				KeepAlive: 30 * time.Second, // Keep-alive for connection reuse
+			}).DialContext,
+			MaxIdleConns:          100,              // Total idle connections across all hosts
+			MaxIdleConnsPerHost:   20,               // Idle connections per host
+			IdleConnTimeout:       90 * time.Second, // How long idle connections stay alive
+			TLSHandshakeTimeout:   10 * time.Second, // TLS handshake timeout
+			ResponseHeaderTimeout: 30 * time.Second, // Timeout waiting for response headers
+			ExpectContinueTimeout: 1 * time.Second,  // Timeout for 100-continue
+		},
+	}
 
 	// back up body for other usage
 	var body []byte
@@ -109,6 +126,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleTextToImageResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "speech-to-text":
 		return c.handleSpeechToTextResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "image-editing":
+		return c.handleImageEditingResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
 		c.handleBrokerError(ctx, err, "prepare request extractor")
