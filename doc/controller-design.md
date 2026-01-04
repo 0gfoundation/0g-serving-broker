@@ -160,13 +160,13 @@ Therefore, restart order should be:
                   │                │  Error    │
                   │                └───────────┘
                   ▼
-         ┌─────────────┐
+         ┌──────────────┐
          │ Step 2:      │
          │ Sync service │
          │ to contract  │
          │ (update      │
          │ image info)  │
-         └─────────────┘
+         └──────────────┘
                   │
                   ▼
          ┌─────────────┐

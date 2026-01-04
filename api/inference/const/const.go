@@ -7,6 +7,7 @@ var (
 
 	TargetRoute = map[string]struct{}{
 		"/chat/completions":     {},
+		"/images/edits": {},
 		"/images/generations":   {},
 		"/audio/transcriptions": {},
 	}
