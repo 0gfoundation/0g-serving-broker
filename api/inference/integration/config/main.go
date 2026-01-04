@@ -126,9 +126,9 @@ type DeploymentConfig struct {
 	TappServiceURL string // TAPP service URL for AliCloud mode
 	TappAppID      string // TAPP AppID for AliCloud mode
 	// Controller configuration
-	UseController      bool   // Whether to deploy controller service
-	ControllerPort     string // Host port for controller (if exposed)
-	ControllerExposePort bool // Whether to expose controller port
+	UseController        bool   // Whether to deploy controller service
+	ControllerPort       string // Host port for controller (if exposed)
+	ControllerExposePort bool   // Whether to expose controller port
 }
 
 // nginxTemplate is no longer needed as nginx config is embedded in docker-compose.yml
@@ -411,7 +411,7 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:c7c6221f2a69954271cb32858736e8e15cd9541979bd091c30fc56b3fca203e9
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:df8eea08abaa603446b51f0807e13f9ecb26203ded0f8c66f87764e2156e3d9f
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
