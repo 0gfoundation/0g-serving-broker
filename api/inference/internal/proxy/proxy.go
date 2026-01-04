@@ -25,12 +25,13 @@ type Proxy struct {
 	ctrl   *ctrl.Ctrl
 	logger log.Logger
 
-	allowOrigins      []string
-	serviceRoutesLock sync.RWMutex
-	serviceTarget     string
-	serviceType       string
-	serviceGroup      *gin.RouterGroup
-	rateLimiter       *middleware.RateLimiter
+	allowOrigins        []string
+	serviceRoutesLock   sync.RWMutex
+	serviceTarget       string
+	serviceType         string
+	serviceGroup        *gin.RouterGroup
+	rateLimiter         *middleware.RateLimiter
+	concurrencyLimiter  *middleware.ConcurrencyLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, logger log.Logger) *Proxy {
@@ -46,6 +47,9 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		serviceGroup: engine.Group(constant.ServicePrefix),
 		// Configure rate limiter: 15 requests per second with burst of 20
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(15), 20),
+		// Configure concurrency limiter: max 50 concurrent requests
+		// For 2-minute requests: 50 concurrent × 2min = manageable load
+		concurrencyLimiter: middleware.NewConcurrencyLimiter(50),
 	}
 
 	p.serviceGroup.Use(cors.New(cors.Config{
@@ -57,6 +61,13 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
+
+	// Apply concurrency limiting middleware only for long-running services
+	// text-to-image: 10-30s, image-editing: 1-2min
+	// chatbot and speech-to-text are fast enough and don't need this limit
+	if ctrl.Service.Type == "text-to-image" || ctrl.Service.Type == "image-editing" {
+		p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
+	}
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
@@ -70,7 +81,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 func (p *Proxy) Start() error {
 	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot", "text-to-image", "speech-to-text":
+	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	default:
 		return errors.New("invalid service type")
@@ -171,6 +182,17 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Store steps for later billing calculation
 		req.OutputCount = imageNum
 		expectedInputFee = "0"
+	case "image-editing":
+		inputFee, imageNum, err := p.ctrl.GetImageEditingInputFeeAndImageNum(reqBody)
+		if err != nil {
+			// Invalid request body is a user-caused error
+			ctx.Set("ignoreError", true)
+			p.handleBrokerError(ctx, err, "get image-editing parameters")
+			return
+		}
+		// Store image count for later billing calculation
+		req.OutputCount = imageNum
+		expectedInputFee = inputFee // Can be 0 or based on input image size
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return
