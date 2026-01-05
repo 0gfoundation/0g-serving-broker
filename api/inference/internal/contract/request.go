@@ -22,14 +22,18 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 	// Execute the actual transaction
 	tx, err := c.Contract.Transact(ctx, nil, "settleFeesWithTEE", settlements)
 	if err != nil {
-		return nil, errors.Wrap(err, "call settleFeesWithTEE")
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[SettleFeesWithTEE] Contract error calling settleFeesWithTEE: %v", wrappedErr)
+		return nil, errors.Wrap(wrappedErr, "call settleFeesWithTEE")
 	}
-	
+
 	// Wait for transaction receipt
 	c.logger.Infof("Settlement transaction submitted with hash: %s", tx.Hash().Hex())
 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
-		return nil, errors.Wrap(err, "wait for receipt")
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[SettleFeesWithTEE] Contract error waiting for receipt: %v", wrappedErr)
+		return nil, errors.Wrap(wrappedErr, "wait for receipt")
 	}
 	
 	// Parse TEESettlementResult events from logs to determine failed users

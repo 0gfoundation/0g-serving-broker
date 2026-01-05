@@ -13,7 +13,20 @@ func (c *ProviderContract) GetUserAccount(ctx context.Context, user common.Addre
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
-	return c.Contract.GetAccount(callOpts, user, common.HexToAddress(c.ProviderAddress))
+	account, err := c.Contract.GetAccount(callOpts, user, common.HexToAddress(c.ProviderAddress))
+
+	if err != nil {
+		// Wrap error to extract details from rpc.jsonError Data field
+		wrappedErr := WrapContractError(err)
+
+		// Log the parsed error
+		c.logger.Errorf("[GetUserAccount] Contract error - user=%s, provider=%s: %v",
+			user.Hex(), c.ProviderAddress, wrappedErr)
+
+		return account, wrappedErr
+	}
+
+	return account, nil
 }
 
 func (c *ProviderContract) ListUserAccount(ctx context.Context) ([]contract.Account, error) {
@@ -31,11 +44,14 @@ func (c *ProviderContract) ListUserAccount(ctx context.Context) ([]contract.Acco
 	for {
 		result, err := c.Contract.GetAccountsByProvider(callOpts, common.HexToAddress(c.ProviderAddress), offset, limit)
 		if err != nil {
-			return nil, err
+			wrappedErr := WrapContractError(err)
+			c.logger.Errorf("[ListUserAccount] Contract error - provider=%s, offset=%s, limit=%s: %v",
+				c.ProviderAddress, offset.String(), limit.String(), wrappedErr)
+			return nil, wrappedErr
 		}
-		
+
 		allAccounts = append(allAccounts, result.Accounts...)
-		
+
 		if offset.Add(offset, limit).Cmp(result.Total) >= 0 {
 			break
 		}
