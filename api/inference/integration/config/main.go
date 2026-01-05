@@ -411,7 +411,7 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:df8eea08abaa603446b51f0807e13f9ecb26203ded0f8c66f87764e2156e3d9f
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:25ffd3c777773cc0688e23c44eb5ae4df8b0e0bf2c759ece1f95f09b62d580cd
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
