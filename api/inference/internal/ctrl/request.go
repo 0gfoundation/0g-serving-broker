@@ -279,7 +279,8 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	if contractAccount == nil {
 		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
 		if err != nil {
-			return errors.Wrap(err, "get account from contract")
+			ctx.Set("ignoreError", true)
+			return errors.Wrap(err, "get account from contract, account not exist")
 		}
 		contractAccount = &fetchedAccount
 
