@@ -102,8 +102,9 @@ func (c *ProviderContract) addOrUpdateService(ctx context.Context, service confi
 	)
 
 	if err != nil {
-		c.logger.Errorf("[addOrUpdateService] Failed to send transaction - error=%v", err)
-		return err
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[addOrUpdateService] Failed to send transaction - error=%v", wrappedErr)
+		return wrappedErr
 	}
 
 	c.logger.Infof("[addOrUpdateService] Transaction sent - txHash=%s", tx.Hash().String())
@@ -111,8 +112,9 @@ func (c *ProviderContract) addOrUpdateService(ctx context.Context, service confi
 
 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
-		c.logger.Errorf("[addOrUpdateService] Failed to wait for transaction receipt - txHash=%s, error=%v", tx.Hash().String(), err)
-		return errors.Wrapf(err, "wait for receipt of tx %s", tx.Hash().String())
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[addOrUpdateService] Failed to wait for transaction receipt - txHash=%s, error=%v", tx.Hash().String(), wrappedErr)
+		return errors.Wrapf(wrappedErr, "wait for receipt of tx %s", tx.Hash().String())
 	}
 
 	c.logger.Infof("[addOrUpdateService] Transaction successful - txHash=%s, blockNumber=%d, gasUsed=%d",
@@ -127,10 +129,17 @@ func (c *ProviderContract) DeleteService(ctx context.Context) error {
 		"removeService",
 	)
 	if err != nil {
-		return err
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[DeleteService] Failed to send transaction - error=%v", wrappedErr)
+		return wrappedErr
 	}
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
-	return err
+	if err != nil {
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[DeleteService] Failed to wait for receipt - txHash=%s, error=%v", tx.Hash().String(), wrappedErr)
+		return wrappedErr
+	}
+	return nil
 }
 
 func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, error) {
@@ -142,8 +151,10 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 
 	service, err := c.Contract.GetService(callOpts, common.HexToAddress(c.ProviderAddress))
 	if err != nil {
-		c.logger.Errorf("[GetService] Failed to get service - error=%v", err)
-		return nil, err
+		// Wrap error to extract details from rpc.jsonError Data field
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[GetService] Contract error - provider=%s: %v", c.ProviderAddress, wrappedErr)
+		return nil, wrappedErr
 	}
 
 	c.logger.Infof("[GetService] Retrieved service from contract - url=%s, model=%s, type=%s",
