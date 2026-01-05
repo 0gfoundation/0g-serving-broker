@@ -13,11 +13,11 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
-	"github.com/0glabs/0g-storage-client/common"
-	"github.com/0glabs/0g-storage-client/common/blockchain"
-	"github.com/0glabs/0g-storage-client/core"
-	"github.com/0glabs/0g-storage-client/indexer"
-	"github.com/0glabs/0g-storage-client/transfer"
+	"github.com/0gfoundation/0g-storage-client/common"
+	"github.com/0gfoundation/0g-storage-client/common/blockchain"
+	"github.com/0gfoundation/0g-storage-client/core"
+	"github.com/0gfoundation/0g-storage-client/indexer"
+	"github.com/0gfoundation/0g-storage-client/transfer"
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/openweb3/web3go"
@@ -162,7 +162,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
-	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method)
+	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method, false)
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
 		return nil, err
