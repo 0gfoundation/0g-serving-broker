@@ -194,6 +194,51 @@ func (d *DB) DeleteRequestsByHashes(requestHashes []string) error {
 	if len(requestHashes) == 0 {
 		return nil
 	}
-	
+
 	return d.db.Where("request_hash IN ?", requestHashes).Delete(&model.Request{}).Error
+}
+
+// UpdateRequestWithTaskInfo stores async task information
+func (d *DB) UpdateRequestWithTaskInfo(requestHash, taskID, taskStatus string, taskExpiry time.Time, providerURL string) error {
+	return d.db.
+		Where(&model.Request{RequestHash: requestHash}).
+		Updates(&model.Request{
+			TaskID:      &taskID,
+			TaskStatus:  &taskStatus,
+			TaskExpiry:  &taskExpiry,
+			ProviderURL: &providerURL,
+		}).Error
+}
+
+// GetRequestByTaskID retrieves request by task_id
+func (d *DB) GetRequestByTaskID(taskID string) (model.Request, error) {
+	var req model.Request
+	err := d.db.Where("task_id = ?", taskID).First(&req).Error
+	return req, err
+}
+
+// UpdateTaskFeesAndStatus updates fees and marks task as completed
+func (d *DB) UpdateTaskFeesAndStatus(requestHash, outputFee, totalFee, status string) error {
+	return d.db.
+		Where(&model.Request{RequestHash: requestHash}).
+		Updates(&model.Request{
+			OutputFee:  outputFee,
+			Fee:        totalFee,
+			TaskStatus: &status,
+		}).Error
+}
+
+// UpdateTaskStatus updates only the task status
+func (d *DB) UpdateTaskStatus(requestHash, status string) error {
+	return d.db.
+		Where(&model.Request{RequestHash: requestHash}).
+		Update("task_status", status).Error
+}
+
+// CleanupExpiredTasks deletes expired async tasks (run periodically)
+func (d *DB) CleanupExpiredTasks() error {
+	now := time.Now()
+	return d.db.
+		Where("task_expiry IS NOT NULL AND task_expiry <= ?", now).
+		Delete(&model.Request{}).Error
 }

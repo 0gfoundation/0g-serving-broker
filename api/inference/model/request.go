@@ -20,6 +20,11 @@ type Request struct {
 	OutputCount  int64      `gorm:"type:bigint;not null;default:0" json:"outputCount"`
 	// Skip this request in settlement until this time
 	SkipUntil    *time.Time `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
+	// Async task fields (nullable for backward compatibility)
+	TaskID       *string    `gorm:"type:varchar(255);index" json:"taskId,omitempty"`
+	TaskStatus   *string    `gorm:"type:varchar(50)" json:"taskStatus,omitempty"`
+	TaskExpiry   *time.Time `gorm:"type:datetime;index" json:"taskExpiry,omitempty"`
+	ProviderURL  *string    `gorm:"type:varchar(512)" json:"providerUrl,omitempty"`
 }
 
 type RequestList struct {

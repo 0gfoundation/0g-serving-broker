@@ -138,6 +138,18 @@ func (d *DB) Migrate() error {
 				return nil
 			},
 		},
+		{
+			ID: "add-async-fields-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					TaskID      *string    `gorm:"type:varchar(255);index"`
+					TaskStatus  *string    `gorm:"type:varchar(50)"`
+					TaskExpiry  *time.Time `gorm:"type:datetime;index"`
+					ProviderURL *string    `gorm:"type:varchar(512)"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
