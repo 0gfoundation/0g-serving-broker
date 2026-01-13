@@ -1,9 +1,7 @@
 package services
 
 import (
-	"bytes"
 	"context"
-	"crypto/ecdsa"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
+	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
@@ -229,26 +228,32 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		}
 	}
 
-	settlementHash, err := getSettlementMessageHash(modelRootHash, task.Fee, task.Nonce, common.HexToAddress(task.UserAddress), crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey), retrievedSecret)
-	if err != nil {
-		return errors.Wrapf(err, "getting settlement message hash")
-	}
+	providerSigner := crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey)
+	userAddress := common.HexToAddress(task.UserAddress)
 
-	sig, err := getSignature(settlementHash, s.teeService.ProviderSigner)
-	if err != nil {
-		return errors.Wrapf(err, "getting signature")
-	}
-
+	// Create EIP-712 signature
 	input := contract.VerifierInput{
 		Id:              task.ID.String(),
 		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,
-		ProviderSigner:  crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey),
-		Signature:       sig,
+		ProviderSigner:  providerSigner,
 		TaskFee:         fee,
-		User:            common.HexToAddress(task.UserAddress),
+		User:            userAddress,
 	}
+
+	digest, err := s.createEIP712Digest(ctx, input)
+	if err != nil {
+		return errors.Wrap(err, "create EIP-712 digest failed")
+	}
+
+	// Use SignEIP712 for EIP-712 typed data (not Sign which is for personal_sign)
+	sig, err := s.teeService.SignEIP712(digest)
+	if err != nil {
+		return errors.Wrap(err, "TEE signing failed")
+	}
+
+	input.Signature = sig
 
 	if err := s.contract.SettleFees(ctx, input); err != nil {
 		return err
@@ -266,43 +271,56 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 	return nil
 }
 
-func getSettlementMessageHash(modelRootHash []byte, taskFee string, nonce string, user, providerSigner common.Address, encryptedSecret []byte) (common.Hash, error) {
-	fee, err := util.ConvertToBigInt(taskFee)
+// domainSeparator calculates the EIP-712 domain separator for fine-tuning
+// Must match the domain separator calculation in FineTuningVerifier.sol
+func (s *Settlement) domainSeparator(ctx context.Context) (common.Hash, error) {
+	chainID, err := s.contract.Contract.Client.Client.ChainID(ctx)
 	if err != nil {
-		return [32]byte{}, errors.Wrap(err, "task fee")
+		return common.Hash{}, errors.Wrap(err, "get chain ID")
 	}
 
-	inputNonce, err := util.ConvertToBigInt(nonce)
-	if err != nil {
-		return [32]byte{}, errors.Wrap(err, "nonce")
-	}
+	// Calculate domain separator: keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(name), keccak256(version), chainId, verifyingContract))
+	domainSep := crypto.Keccak256Hash(
+		constant.DomainTypehash.Bytes(),
+		crypto.Keccak256([]byte(constant.DomainName)),
+		crypto.Keccak256([]byte(constant.DomainVersion)),
+		common.LeftPadBytes(chainID.Bytes(), 32),
+		common.LeftPadBytes(common.HexToAddress(s.contract.ContractAddress).Bytes(), 32),
+	)
 
-	buf := new(bytes.Buffer)
-	buf.Write(encryptedSecret)
-	buf.Write(modelRootHash)
-	buf.Write(common.LeftPadBytes(inputNonce.Bytes(), 32))
-	buf.Write(providerSigner.Bytes())
-	buf.Write(common.LeftPadBytes(fee.Bytes(), 32))
-	buf.Write(user.Bytes())
-
-	msg := crypto.Keccak256Hash(buf.Bytes())
-	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), msg.Bytes())
-
-	return prefixedMsg, nil
+	return domainSep, nil
 }
 
-func getSignature(settlementHash common.Hash, key *ecdsa.PrivateKey) ([]byte, error) {
-	sig, err := crypto.Sign(settlementHash.Bytes(), key)
+// createEIP712Digest creates the EIP-712 digest for a verifier input
+// Returns: Keccak256(\x19\x01 || domainSeparator || structHash)
+// Must match the signature verification logic in FineTuningVerifier.sol
+func (s *Settlement) createEIP712Digest(ctx context.Context, input contract.VerifierInput) ([]byte, error) {
+	// Calculate domain separator
+	domainSep, err := s.domainSeparator(ctx)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "calculate domain separator")
 	}
 
-	// https://github.com/ethereum/go-ethereum/issues/19751#issuecomment-504900739
-	if sig[64] == 0 || sig[64] == 1 {
-		sig[64] += 27
-	}
+	// Calculate struct hash: keccak256(abi.encode(MESSAGE_TYPEHASH, keccak256(id), keccak256(encryptedSecret), keccak256(modelRootHash), nonce, providerSigner, taskFee, user))
+	structHash := crypto.Keccak256Hash(
+		constant.MessageTypehash.Bytes(),
+		crypto.Keccak256([]byte(input.Id)),
+		crypto.Keccak256(input.EncryptedSecret),
+		crypto.Keccak256(input.ModelRootHash),
+		common.LeftPadBytes(input.Nonce.Bytes(), 32),
+		common.LeftPadBytes(input.ProviderSigner.Bytes(), 32),
+		common.LeftPadBytes(input.TaskFee.Bytes(), 32),
+		common.LeftPadBytes(input.User.Bytes(), 32),
+	)
 
-	return sig, nil
+	// Calculate EIP-712 digest: keccak256("\x19\x01" || domainSeparator || structHash)
+	digest := crypto.Keccak256(
+		[]byte("\x19\x01"),
+		domainSep.Bytes(),
+		structHash.Bytes(),
+	)
+
+	return digest, nil
 }
 
 func (s *Settlement) startDiskCleanupRoutine(ctx context.Context) {

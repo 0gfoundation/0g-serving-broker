@@ -12,6 +12,7 @@ import (
 type ProviderContract struct {
 	Contract        *contract.ServingContract
 	ProviderAddress string
+	ContractAddress string
 	logger          log.Logger
 }
 
@@ -27,6 +28,7 @@ func NewProviderContract(conf *config.Config, logger log.Logger) (*ProviderContr
 	return &ProviderContract{
 		Contract:        contract,
 		ProviderAddress: wallets.Default().Address(),
+		ContractAddress: conf.ContractAddress,
 		logger:          logger,
 	}, nil
 }
