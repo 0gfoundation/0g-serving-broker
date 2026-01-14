@@ -1,0 +1,3 @@
+# Python dependencies for token-counter
+transformers>=4.57.0
+datasets>=4.4.0
