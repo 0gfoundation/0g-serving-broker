@@ -42,14 +42,10 @@ type RetryOption struct {
 	MaxGasPrice      *big.Int
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Networks, network string, gasPrice, maxGasPrice string, logger log.Logger) (*ServingContract, error) {
+func NewServingContract(servingAddress common.Address, conf *config.Networks, gasPrice, maxGasPrice string, logger log.Logger) (*ServingContract, error) {
 	var networkConfig client.BlockchainNetwork
 	var err error
-	if network == "hardhat" {
-		networkConfig, err = client.NewHardhatNetwork(conf)
-	} else {
-		networkConfig, err = client.New0gNetwork(conf)
-	}
+	networkConfig, err = client.New0gNetwork(conf)
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +79,10 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ne
 }
 
 func (s *ServingContract) Transact(ctx context.Context, retryOpts *RetryOption, method string, params ...interface{}) (*types.Transaction, error) {
+	return s.TransactWithValue(ctx, retryOpts, nil, method, params...)
+}
+
+func (s *ServingContract) TransactWithValue(ctx context.Context, retryOpts *RetryOption, value *big.Int, method string, params ...interface{}) (*types.Transaction, error) {
 	// Set timeout and max non-gas retries from retryOpts if provided.
 	if retryOpts == nil {
 		retryOpts = &RetryOption{
@@ -93,7 +93,7 @@ func (s *ServingContract) Transact(ctx context.Context, retryOpts *RetryOption, 
 		}
 	}
 
-	opts, err := s.CreateTransactOpts()
+	opts, err := s.Contract.CreateTransactOptsWithValue(value)
 	if err != nil {
 		return nil, err
 	}
@@ -149,11 +149,15 @@ type Contract struct {
 }
 
 func (c *Contract) CreateTransactOpts() (*bind.TransactOpts, error) {
+	return c.CreateTransactOptsWithValue(nil)
+}
+
+func (c *Contract) CreateTransactOptsWithValue(value *big.Int) (*bind.TransactOpts, error) {
 	wallets, err := c.Client.Network.Wallets()
 	if err != nil {
 		return nil, err
 	}
-	opt, err := c.Client.TransactionOpts(wallets.Default(), c.address, nil, nil)
+	opt, err := c.Client.TransactionOpts(wallets.Default(), c.address, value, nil)
 	if err != nil {
 		return nil, err
 	}

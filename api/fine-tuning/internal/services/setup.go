@@ -214,8 +214,20 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 	if account.Nonce.Cmp(nonce) >= 0 {
 		return fmt.Errorf("invalid nonce: expected %v, got %v", account.Nonce, nonce)
 	}
-	if account.ProviderSigner != crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey) {
-		return errors.New("user not acknowledged yet")
+
+	// Verify that the service's TEE signer has been acknowledged by the owner
+	service, err := s.contract.GetService(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get service from contract")
+	}
+
+	if !service.TeeSignerAcknowledged {
+		return errors.New("service TEE signer has not been acknowledged by the 0G team")
+	}
+
+	// Verify that the user has acknowledged the provider's TEE signer
+	if !account.Acknowledged {
+		return errors.New("user has not acknowledged the provider's TEE signer yet")
 	}
 
 	messageHash := s.getHash(fee, task.DatasetHash, userAddress, nonce)

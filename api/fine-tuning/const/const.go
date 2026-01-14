@@ -36,8 +36,8 @@ var (
 	// DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
 	DomainTypehash = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
 
-	// MESSAGE_TYPEHASH = keccak256("VerifierMessage(string id,bytes encryptedSecret,bytes modelRootHash,uint256 nonce,address providerSigner,uint256 taskFee,address user)")
-	MessageTypehash = crypto.Keccak256Hash([]byte("VerifierMessage(string id,bytes encryptedSecret,bytes modelRootHash,uint256 nonce,address providerSigner,uint256 taskFee,address user)"))
+	// MESSAGE_TYPEHASH = keccak256("VerifierMessage(string id,bytes encryptedSecret,bytes modelRootHash,uint256 nonce,uint256 taskFee,address user)")
+	MessageTypehash = crypto.Keccak256Hash([]byte("VerifierMessage(string id,bytes encryptedSecret,bytes modelRootHash,uint256 nonce,uint256 taskFee,address user)"))
 
 	// Domain constants (must match FineTuningVerifier.sol)
 	DomainName    = "0G Fine-Tuning Serving"

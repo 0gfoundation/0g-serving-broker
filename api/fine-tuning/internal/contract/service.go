@@ -3,6 +3,7 @@ package providercontract
 import (
 	"context"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -11,6 +12,11 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
+)
+
+var (
+	// DefaultProviderStake is the default stake amount for first-time service registration (100 0G)
+	DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 )
 
 func (c *ProviderContract) GetLockTime(ctx context.Context) (int64, error) {
@@ -32,12 +38,22 @@ func (c *ProviderContract) OccupyService(ctx context.Context, service config.Ser
 	}
 
 	if srv.Occupied != occupied {
-		return c.AddOrUpdateService(ctx, service, occupied)
+		return c.addOrUpdateServiceWithOld(ctx, service, occupied, srv)
 	}
 	return nil
 }
 
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
+	// Get existing service if any
+	old, err := c.GetService(ctx)
+	if err != nil && err.Error() != "service not found" {
+		return errors.Wrap(err, "get service from contract")
+	}
+
+	return c.addOrUpdateServiceWithOld(ctx, service, occupied, old)
+}
+
+func (c *ProviderContract) addOrUpdateServiceWithOld(ctx context.Context, service config.Service, occupied bool, old *contract.Service) error {
 	c.logger.Debugf("update service %s to occupied: %v", service.ServingUrl, occupied)
 	cpuCount, err := util.ConvertToBigInt(service.Quota.CpuCount)
 	if err != nil {
@@ -67,16 +83,25 @@ func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service confi
 		GpuCount:    gpuCount,
 	}
 
-	tx, err := c.Contract.Transact(ctx,
+	// Determine if we need to stake based on whether service exists
+	var stakeValue *big.Int
+	if old == nil {
+		// First-time registration: need to stake
+		stakeValue = DefaultProviderStake
+		c.logger.Infof("First-time service registration, staking %s", stakeValue.String())
+	}
+	// If old exists, it's an update, stakeValue remains nil (no additional stake)
+
+	tx, err := c.Contract.TransactWithValue(ctx,
 		nil,
+		stakeValue,
 		"addOrUpdateService",
 		service.ServingUrl,
 		quota,
 		pricePerToken,
-		// TODO: replace by real provider signer address
-		common.HexToAddress("0x111111"),
 		occupied,
 		service.GetCustomizedModelName(),
+		c.TeeSignerAddress,
 	)
 	if err != nil {
 		return err
@@ -126,11 +151,12 @@ func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service)
 		}
 	}
 
-	if old != nil && identicalService(*old, new) {
+	if old != nil && identicalService(*old, new, c.TeeSignerAddress) {
 		return nil
 	}
 
-	if err := c.AddOrUpdateService(ctx, new, false); err != nil {
+	// Pass the old service to avoid redundant GetService call
+	if err := c.addOrUpdateServiceWithOld(ctx, new, false, old); err != nil {
 		return errors.Wrap(err, "add or update service in contract")
 	}
 
@@ -149,7 +175,7 @@ func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Addre
 	return err
 }
 
-func identicalService(old contract.Service, new config.Service) bool {
+func identicalService(old contract.Service, new config.Service, teeSignerAddress common.Address) bool {
 	if old.Url != new.ServingUrl {
 		return false
 	}
@@ -183,6 +209,11 @@ func identicalService(old contract.Service, new config.Service) bool {
 		if old.Models[i] != modelsNames[i] {
 			return false
 		}
+	}
+
+	// Check if TEE signer address has changed
+	if old.TeeSignerAddress != teeSignerAddress {
+		return false
 	}
 
 	return true

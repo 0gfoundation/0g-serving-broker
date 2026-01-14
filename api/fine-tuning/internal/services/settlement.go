@@ -228,7 +228,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		}
 	}
 
-	providerSigner := crypto.PubkeyToAddress(s.teeService.ProviderSigner.PublicKey)
 	userAddress := common.HexToAddress(task.UserAddress)
 
 	// Create EIP-712 signature
@@ -237,7 +236,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 		EncryptedSecret: retrievedSecret,
 		ModelRootHash:   modelRootHash,
 		Nonce:           nonce,
-		ProviderSigner:  providerSigner,
 		TaskFee:         fee,
 		User:            userAddress,
 	}
@@ -301,14 +299,13 @@ func (s *Settlement) createEIP712Digest(ctx context.Context, input contract.Veri
 		return nil, errors.Wrap(err, "calculate domain separator")
 	}
 
-	// Calculate struct hash: keccak256(abi.encode(MESSAGE_TYPEHASH, keccak256(id), keccak256(encryptedSecret), keccak256(modelRootHash), nonce, providerSigner, taskFee, user))
+	// Calculate struct hash: keccak256(abi.encode(MESSAGE_TYPEHASH, keccak256(id), keccak256(encryptedSecret), keccak256(modelRootHash), nonce, taskFee, user))
 	structHash := crypto.Keccak256Hash(
 		constant.MessageTypehash.Bytes(),
 		crypto.Keccak256([]byte(input.Id)),
 		crypto.Keccak256(input.EncryptedSecret),
 		crypto.Keccak256(input.ModelRootHash),
 		common.LeftPadBytes(input.Nonce.Bytes(), 32),
-		common.LeftPadBytes(input.ProviderSigner.Bytes(), 32),
 		common.LeftPadBytes(input.TaskFee.Bytes(), 32),
 		common.LeftPadBytes(input.User.Bytes(), 32),
 	)

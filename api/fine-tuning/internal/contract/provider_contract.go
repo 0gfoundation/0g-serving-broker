@@ -1,8 +1,6 @@
 package providercontract
 
 import (
-	"os"
-
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
@@ -10,14 +8,15 @@ import (
 )
 
 type ProviderContract struct {
-	Contract        *contract.ServingContract
-	ProviderAddress string
-	ContractAddress string
-	logger          log.Logger
+	Contract         *contract.ServingContract
+	ProviderAddress  string
+	ContractAddress  string
+	TeeSignerAddress common.Address
+	logger           log.Logger
 }
 
-func NewProviderContract(conf *config.Config, logger log.Logger) (*ProviderContract, error) {
-	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, os.Getenv("NETWORK"), conf.GasPrice, conf.MaxGasPrice, logger)
+func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, logger log.Logger) (*ProviderContract, error) {
+	contract, err := contract.NewServingContract(common.HexToAddress(conf.ContractAddress), &conf.Networks, conf.GasPrice, conf.MaxGasPrice, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -26,10 +25,11 @@ func NewProviderContract(conf *config.Config, logger log.Logger) (*ProviderContr
 		return nil, err
 	}
 	return &ProviderContract{
-		Contract:        contract,
-		ProviderAddress: wallets.Default().Address(),
-		ContractAddress: conf.ContractAddress,
-		logger:          logger,
+		Contract:         contract,
+		ProviderAddress:  wallets.Default().Address(),
+		ContractAddress:  conf.ContractAddress,
+		TeeSignerAddress: teeSignerAddress,
+		logger:           logger,
 	}, nil
 }
 

@@ -180,11 +180,6 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		return nil, err
 	}
 
-	contract, err := providercontract.NewProviderContract(cfg, logger)
-	if err != nil {
-		return nil, err
-	}
-
 	var teeClientType tee.ClientType
 	switch os.Getenv("NETWORK") {
 	case "hardhat":
@@ -196,6 +191,11 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 	}
 
 	teeService, err := tee.NewTeeService(teeClientType, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	contract, err := providercontract.NewProviderContract(cfg, teeService.Address, logger)
 	if err != nil {
 		return nil, err
 	}
