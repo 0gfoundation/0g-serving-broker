@@ -92,6 +92,22 @@ func (c *ProviderContract) addOrUpdateServiceWithOld(ctx context.Context, servic
 	}
 	// If old exists, it's an update, stakeValue remains nil (no additional stake)
 
+	c.logger.Infof("[addOrUpdateService] Starting to add or update service - TeeSignerAddress=%s, type=%v, url=%s, pricePerToken=%s, occupied=%s",
+		c.TeeSignerAddress, quota, service.ServingUrl, pricePerToken,occupied)
+
+	// Pre-validate the transaction to get detailed error before sending
+	if err := c.Contract.PreValidateCall(ctx, "addOrUpdateService",
+		service.ServingUrl,
+		quota,
+		pricePerToken,
+		occupied,
+		service.GetCustomizedModelName(),
+		c.TeeSignerAddress,
+	); err != nil {
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "validate addOrUpdateService")
+	}
+
 	tx, err := c.Contract.TransactWithValue(ctx,
 		nil,
 		stakeValue,
@@ -104,20 +120,36 @@ func (c *ProviderContract) addOrUpdateServiceWithOld(ctx context.Context, servic
 		c.TeeSignerAddress,
 	)
 	if err != nil {
-		return err
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "call addOrUpdateService")
 	}
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	if err != nil {
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "wait for receipt")
+	}
 
-	return err
+	return nil
 }
 
 func (c *ProviderContract) DeleteService(ctx context.Context) error {
+	// Pre-validate the transaction to get detailed error before sending
+	if err := c.Contract.PreValidateCall(ctx, "removeService"); err != nil {
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "validate removeService")
+	}
+
 	tx, err := c.Contract.Transact(ctx, nil, "removeService")
 	if err != nil {
-		return err
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "call removeService")
 	}
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
-	return err
+	if err != nil {
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "wait for receipt")
+	}
+	return nil
 }
 
 func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, error) {
@@ -164,15 +196,25 @@ func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service)
 }
 
 func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Address, id string, modelRootHash []byte) error {
-	tx, err := c.Contract.Transact(ctx, nil, "addDeliverable", user, id, modelRootHash)
+	// Pre-validate the transaction to get detailed error before sending
+	if err := c.Contract.PreValidateCall(ctx, "addDeliverable", user, id, modelRootHash); err != nil {
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "validate addDeliverable")
+	}
 
+	tx, err := c.Contract.Transact(ctx, nil, "addDeliverable", user, id, modelRootHash)
 	if err != nil {
-		return err
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "call addDeliverable")
 	}
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
+	if err != nil {
+		wrappedErr := WrapContractError(err)
+		return errors.Wrap(wrappedErr, "wait for receipt")
+	}
 
 	// todo return deliver index?
-	return err
+	return nil
 }
 
 func identicalService(old contract.Service, new config.Service, teeSignerAddress common.Address) bool {

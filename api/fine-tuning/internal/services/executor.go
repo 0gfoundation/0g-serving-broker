@@ -181,7 +181,7 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 
 	runtime := ""
 	deviceRequests := make([]container.DeviceRequest, 0)
-	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH || os.Getenv("NETWORK") == "hardhat" {
 		runtime = ""
 	} else {
 		if _, ok := info.Runtimes["nvidia"]; ok {

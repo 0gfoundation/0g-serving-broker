@@ -9,6 +9,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	ethereum "github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
@@ -55,10 +56,17 @@ func NewServingContract(servingAddress common.Address, conf *config.Networks, ga
 		return nil, err
 	}
 
+	// Parse the ABI for pre-validation
+	parsedABI, err := abi.JSON(strings.NewReader(FineTuningServingABI))
+	if err != nil {
+		return nil, errors.Wrap(err, "parse contract ABI")
+	}
+
 	contract := &Contract{
-		Client:  *ethereumClient,
-		address: servingAddress,
-		logger:  logger,
+		Client:      *ethereumClient,
+		address:     servingAddress,
+		logger:      logger,
+		contractABI: &parsedABI,
 	}
 
 	serving, err := NewFineTuningServing(servingAddress, ethereumClient.Client)
@@ -143,9 +151,11 @@ func (s *ServingContract) TransactWithValue(ctx context.Context, retryOpts *Retr
 }
 
 type Contract struct {
-	Client  client.EthereumClient
-	address common.Address
-	logger  log.Logger
+	Client         client.EthereumClient
+	address        common.Address
+	logger         log.Logger
+	contractABI    *abi.ABI
+	contractBinder *bind.BoundContract
 }
 
 func (c *Contract) CreateTransactOpts() (*bind.TransactOpts, error) {
@@ -171,6 +181,59 @@ func (c *Contract) GetGasPrice(ctx context.Context) (*big.Int, error) {
 	}
 
 	return gasPrice, nil
+}
+
+// PreValidateCall simulates a contract call to check for errors before sending a transaction.
+// This is a generic method that can be used for any contract method to:
+// - Get detailed error messages before wasting gas
+// - Provide immediate feedback without waiting for transaction confirmation
+// - Save gas by avoiding transactions that would fail
+//
+// Parameters:
+//   - ctx: context for the call
+//   - method: the contract method name (e.g., "settleFees")
+//   - params: the method parameters
+//
+// Returns:
+//   - error if the call would revert, containing the detailed revert reason
+func (c *Contract) PreValidateCall(ctx context.Context, method string, params ...interface{}) error {
+	if c.contractABI == nil {
+		return errors.New("contract ABI not initialized")
+	}
+
+	// Pack the function call data
+	data, err := c.contractABI.Pack(method, params...)
+	if err != nil {
+		return errors.Wrapf(err, "pack %s call", method)
+	}
+
+	// Get the caller address
+	wallets, err := c.Client.Network.Wallets()
+	if err != nil {
+		return errors.Wrap(err, "get wallets")
+	}
+	wallet, err := wallets.Wallet(0)
+	if err != nil {
+		return errors.Wrap(err, "get wallet")
+	}
+
+	// Convert addresses
+	fromAddr := common.HexToAddress(wallet.Address())
+
+	// Simulate the call
+	msg := ethereum.CallMsg{
+		From: fromAddr,
+		To:   &c.address,
+		Data: data,
+	}
+
+	// This will return an error if the call would revert
+	_, err = c.Client.Client.CallContract(ctx, msg, nil)
+	if err != nil {
+		return errors.Wrapf(err, "pre-validate %s", method)
+	}
+
+	return nil
 }
 
 func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts ...RetryOption) (receipt *types.Receipt, err error) {
@@ -199,11 +262,60 @@ func (c *Contract) WaitForReceipt(ctx context.Context, txHash common.Hash, opts 
 	case types.ReceiptStatusSuccessful:
 		return receipt, nil
 	case types.ReceiptStatusFailed:
+		// Try to get detailed error by replaying the transaction
+		// This is a fallback for cases where:
+		// 1. PreValidateCall was skipped
+		// 2. State changed between validation and execution
+		c.logger.Warnf("Transaction failed: %s", txHash.Hex())
+		if revertErr := c.getRevertReason(ctx, txHash, receipt); revertErr != nil {
+			return receipt, revertErr
+		}
 		return receipt, errors.New("Transaction execution failed")
 
 	default:
 		return receipt, errors.Errorf("Unknown receipt status %d", receipt.Status)
 	}
+}
+
+// getRevertReason replays a failed transaction to extract the revert reason
+// This is a fallback mechanism when detailed errors are needed but PreValidateCall wasn't used
+func (c *Contract) getRevertReason(ctx context.Context, txHash common.Hash, receipt *types.Receipt) error {
+	tx, _, err := c.Client.Client.TransactionByHash(ctx, txHash)
+	if err != nil {
+		c.logger.Warnf("Failed to get transaction for revert reason: %v", err)
+		return nil
+	}
+
+	chainID, err := c.Client.Client.ChainID(ctx)
+	if err != nil {
+		c.logger.Warnf("Failed to get chain ID for revert reason: %v", err)
+		return nil
+	}
+
+	signer := types.LatestSignerForChainID(chainID)
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		c.logger.Warnf("Failed to get sender for revert reason: %v", err)
+		return nil
+	}
+
+	msg := ethereum.CallMsg{
+		From:     from,
+		To:       tx.To(),
+		Gas:      tx.Gas(),
+		GasPrice: tx.GasPrice(),
+		Value:    tx.Value(),
+		Data:     tx.Data(),
+	}
+
+	// Replay at the block before execution
+	_, err = c.Client.Client.CallContract(ctx, msg, receipt.BlockNumber)
+	if err != nil {
+		// This error contains the revert reason
+		return err
+	}
+
+	return nil
 }
 
 func (c *Contract) GetBalance(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error) {

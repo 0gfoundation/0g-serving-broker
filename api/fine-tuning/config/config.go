@@ -143,6 +143,9 @@ type UploadArgs struct {
 	Routines         int  `yaml:"routines"`
 
 	FragmentSize int64 `yaml:"fragmentSize"`
+	FullTrusted  bool  `yaml:"fullTrusted"`
+	FastMode     bool  `yaml:"fastMode"`
+	Step         int64 `yaml:"step"`
 }
 
 var (
