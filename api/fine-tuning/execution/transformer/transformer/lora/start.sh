@@ -1,0 +1,1 @@
+docker run --rm --gpus all --shm-size=16g -v /data:/data -w /data qwen-lora-fast:latest bash /data/run-test-fast.sh

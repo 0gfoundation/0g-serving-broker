@@ -1,0 +1,28 @@
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
+
+# 更新 pip
+RUN pip install --upgrade pip setuptools wheel
+
+RUN pip install --no-cache-dir \
+    transformers==4.46.0 \
+    datasets==2.14.0 \
+    accelerate==0.28.0 \
+    peft==0.7.0 \
+    bitsandbytes==0.41.0 \
+    sentencepiece \
+    protobuf \
+    safetensors
+
+# 安装 modelscope（用于下载模型）
+RUN pip install --no-cache-dir modelscope
+
+# 设置工作目录
+WORKDIR /data
+
+# 默认命令
+CMD ["/bin/bash"]
