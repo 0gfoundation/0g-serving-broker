@@ -197,6 +197,22 @@ func (c *Contract) GetGasPrice(ctx context.Context) (*big.Int, error) {
 // Returns:
 //   - error if the call would revert, containing the detailed revert reason
 func (c *Contract) PreValidateCall(ctx context.Context, method string, params ...interface{}) error {
+	return c.PreValidateCallWithValue(ctx, nil, method, params...)
+}
+
+// PreValidateCallWithValue simulates a contract call with a value (for payable functions)
+// to check for errors before sending a transaction.
+// This is used for methods that require sending ETH/tokens along with the call.
+//
+// Parameters:
+//   - ctx: context for the call
+//   - value: the amount of ETH/tokens to send (can be nil for 0)
+//   - method: the contract method name (e.g., "addOrUpdateService")
+//   - params: the method parameters
+//
+// Returns:
+//   - error if the call would revert, containing the detailed revert reason
+func (c *Contract) PreValidateCallWithValue(ctx context.Context, value *big.Int, method string, params ...interface{}) error {
 	if c.contractABI == nil {
 		return errors.New("contract ABI not initialized")
 	}
@@ -222,9 +238,10 @@ func (c *Contract) PreValidateCall(ctx context.Context, method string, params ..
 
 	// Simulate the call
 	msg := ethereum.CallMsg{
-		From: fromAddr,
-		To:   &c.address,
-		Data: data,
+		From:  fromAddr,
+		To:    &c.address,
+		Data:  data,
+		Value: value,
 	}
 
 	// This will return an error if the call would revert

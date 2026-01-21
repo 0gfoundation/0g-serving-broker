@@ -96,7 +96,8 @@ func (c *ProviderContract) addOrUpdateServiceWithOld(ctx context.Context, servic
 		c.TeeSignerAddress, quota, service.ServingUrl, pricePerToken,occupied)
 
 	// Pre-validate the transaction to get detailed error before sending
-	if err := c.Contract.PreValidateCall(ctx, "addOrUpdateService",
+	// Use PreValidateCallWithValue to include the stake value in validation
+	if err := c.Contract.PreValidateCallWithValue(ctx, stakeValue, "addOrUpdateService",
 		service.ServingUrl,
 		quota,
 		pricePerToken,
