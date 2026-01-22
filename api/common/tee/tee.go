@@ -144,3 +144,28 @@ func (s *TeeService) Sign(messageHash []byte) ([]byte, error) {
 
 	return signature, nil
 }
+
+// SignEIP712 signs an EIP-712 typed data digest with the TEE provider signer
+// The digest parameter should be a 32-byte hash computed via:
+// Keccak256(\x19\x01 || domainSeparator || structHash)
+// This is used for EIP-712 typed data signatures (e.g., TEE settlements)
+func (s *TeeService) SignEIP712(digest []byte) ([]byte, error) {
+	if s.ProviderSigner == nil {
+		return nil, errors.New("provider signer not initialized")
+	}
+
+	// The digest is already the final 32-byte hash from EIP-712
+	// Sign it directly without adding any additional prefixes
+	// (unlike Sign() which adds "\x19Ethereum Signed Message:\n32" for personal_sign)
+	signature, err := crypto.Sign(digest, s.ProviderSigner)
+	if err != nil {
+		return nil, errors.Wrap(err, "signing EIP-712 digest")
+	}
+
+	// Adjust v value to match Ethereum standards (27/28 instead of 0/1)
+	if signature[64] == 0 || signature[64] == 1 {
+		signature[64] += 27
+	}
+
+	return signature, nil
+}

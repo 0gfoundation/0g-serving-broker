@@ -15,3 +15,17 @@ meili_data_v1.7
 **.local.*
 node_modules/
 .claude
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/

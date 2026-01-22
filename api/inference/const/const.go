@@ -1,6 +1,10 @@
 package constant
 
-import "time"
+import (
+	"time"
+
+	"github.com/ethereum/go-ethereum/crypto"
+)
 
 var (
 	ServicePrefix = "/v1/proxy"
@@ -38,4 +42,15 @@ var (
 	TEESettlementBatchSize = 50
 
 	SkipUntilDuration = 8 * time.Hour
+
+	// EIP-712 constants matching the contract
+	// DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+	DomainTypehash = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
+
+	// SETTLEMENT_TYPEHASH = keccak256("TEESettlement(bytes32 requestsHash,uint256 nonce,address provider,address user,uint256 totalFee)")
+	SettlementTypehash = crypto.Keccak256Hash([]byte("TEESettlement(bytes32 requestsHash,uint256 nonce,address provider,address user,uint256 totalFee)"))
+
+	// Domain constants
+	DomainName    = "0G Inference Serving"
+	DomainVersion = "1"
 )

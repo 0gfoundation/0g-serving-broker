@@ -487,16 +487,14 @@ func (c *Ctrl) createUserSettlement(userAddr string, userReqs *UserRequests) (co
 		Nonce:        nonce,
 	}
 
-	// Sign with TEE service
-	messageHash := crypto.Keccak256(
-		requestsHash[:],
-		common.LeftPadBytes(nonce.Bytes(), 32),
-		settlementData.Provider.Bytes(),
-		settlementData.User.Bytes(),
-		common.LeftPadBytes(userReqs.TotalFee.Bytes(), 32),
-	)
+	// Create EIP-712 signature
+	digest, err := c.createEIP712Digest(settlementData)
+	if err != nil {
+		return settlementData, errors.Wrap(err, "create EIP-712 digest failed")
+	}
 
-	signature, err := c.teeService.Sign(messageHash)
+	// Use SignEIP712 for EIP-712 typed data (not Sign which is for personal_sign)
+	signature, err := c.teeService.SignEIP712(digest)
 	if err != nil {
 		return settlementData, errors.Wrap(err, "TEE signing failed")
 	}
@@ -652,13 +650,61 @@ func (c *Ctrl) markRequestsWithSkipUntil(requestHashes []string, skipDuration ti
 	if len(requestHashes) == 0 {
 		return nil
 	}
-	
+
 	skipUntil := time.Now().Add(skipDuration)
 	err := c.db.UpdateRequestsSkipUntil(requestHashes, &skipUntil)
 	if err != nil {
 		return errors.Wrap(err, "update requests skipUntil")
 	}
-	
+
 	c.logger.Infof("Marked %d requests to skip until %v", len(requestHashes), skipUntil)
 	return nil
+}
+
+// domainSeparator calculates the EIP-712 domain separator
+func (c *Ctrl) domainSeparator() (common.Hash, error) {
+	chainID, err := c.contract.Contract.Client.Client.ChainID(context.Background())
+	if err != nil {
+		return common.Hash{}, errors.Wrap(err, "get chain ID")
+	}
+
+	// Calculate domain separator: keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(name), keccak256(version), chainId, verifyingContract))
+	domainSep := crypto.Keccak256Hash(
+		constant.DomainTypehash.Bytes(),
+		crypto.Keccak256([]byte(constant.DomainName)),
+		crypto.Keccak256([]byte(constant.DomainVersion)),
+		common.LeftPadBytes(chainID.Bytes(), 32),
+		common.LeftPadBytes(common.HexToAddress(c.contract.ContractAddress).Bytes(), 32),
+	)
+
+	return domainSep, nil
+}
+
+// createEIP712Digest creates the EIP-712 digest for a settlement
+// Returns: Keccak256(\x19\x01 || domainSeparator || structHash)
+func (c *Ctrl) createEIP712Digest(settlement contract.TEESettlementData) ([]byte, error) {
+	// Calculate domain separator
+	domainSep, err := c.domainSeparator()
+	if err != nil {
+		return nil, errors.Wrap(err, "calculate domain separator")
+	}
+
+	// Calculate struct hash: keccak256(abi.encode(SETTLEMENT_TYPEHASH, requestsHash, nonce, provider, user, totalFee))
+	structHash := crypto.Keccak256Hash(
+		constant.SettlementTypehash.Bytes(),
+		settlement.RequestsHash[:],
+		common.LeftPadBytes(settlement.Nonce.Bytes(), 32),
+		common.LeftPadBytes(settlement.Provider.Bytes(), 32),
+		common.LeftPadBytes(settlement.User.Bytes(), 32),
+		common.LeftPadBytes(settlement.TotalFee.Bytes(), 32),
+	)
+
+	// Calculate EIP-712 digest: keccak256("\x19\x01" || domainSeparator || structHash)
+	digest := crypto.Keccak256(
+		[]byte("\x19\x01"),
+		domainSep.Bytes(),
+		structHash.Bytes(),
+	)
+
+	return digest, nil
 }
