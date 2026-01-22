@@ -118,6 +118,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if targetRoute != "/" {
 		targetURL += targetRoute
 	}
+
+	// Extract path without query parameters for route matching
+	targetPath := targetRoute
+	if idx := strings.Index(targetPath, "?"); idx != -1 {
+		targetPath = targetPath[:idx]
+	}
+
 	p.logger.Debugf("Proxy debug: method=%s, url=%s, Content-Length=%s, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header)
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
@@ -138,12 +145,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	p.logger.Debugf("Proxy debug: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody), ctx.Request.Header)
 
 	// handle endpoints not need to be charged
-	if _, ok := constant.TargetRoute[targetRoute]; !ok {
-		if p.handleSignatureRoute(ctx, targetRoute) {
+	if _, ok := constant.TargetRoute[targetPath]; !ok {
+		if p.handleSignatureRoute(ctx, targetPath) {
 			return
 		}
 
-		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
+		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
@@ -215,7 +222,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
+	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 	if err != nil {
 		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return
