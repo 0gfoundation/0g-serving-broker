@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -55,20 +54,8 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 }
 
 func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, outputPrice string, charing bool) error {
-	// Configure HTTP client with timeouts to prevent resource leaks
-	// Timeout considerations:
-	// - Chatbot streaming: can be slow, needs longer timeout (5 minutes)
-	// - Text-to-image: 10-30 seconds typical
-	// - Image-editing: 1-2 minutes typical
-	// - Speech-to-text: usually fast, < 30 seconds
-	timeout := 6 * time.Minute
-	if svcType == "speech-to-text" {
-		timeout = 3 * time.Minute
-	}
-	client := &http.Client{
-		Timeout: timeout,
-	}
-
+	// Use shared HTTP client for connection reuse
+	// The shared client is initialized with appropriate timeout and connection pool settings
 	// back up body for other usage
 	var body []byte
 	if req.Body != nil {
@@ -81,7 +68,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		req.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
 
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		// Skip error logging for telemetry endpoints to reduce noise
 		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {

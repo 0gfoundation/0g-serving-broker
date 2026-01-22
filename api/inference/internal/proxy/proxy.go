@@ -52,12 +52,38 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		concurrencyLimiter: middleware.NewConcurrencyLimiter(50),
 	}
 
-	p.serviceGroup.Use(cors.New(cors.Config{
-		AllowOrigins:  p.allowOrigins,
-		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders:  []string{"*"},
-		ExposeHeaders: []string{"ZG-Res-Key", "Provider", "content-encoding"},
-	}))
+	// Configure CORS middleware
+	// IMPORTANT: This must handle OPTIONS preflight requests before they reach the proxy handler
+	corsConfig := cors.Config{
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders: []string{
+			"Content-Type",
+			"Authorization",
+			"X-Requested-With",
+			"Accept",
+			"Origin",
+		},
+		ExposeHeaders: []string{
+			"ZG-Res-Key",
+			"Provider",
+			"Content-Type",
+			"Content-Encoding",
+		},
+		AllowCredentials: true, // Required for Authorization headers
+		MaxAge:           12 * 3600,
+	}
+
+	// Handle origin configuration
+	if len(p.allowOrigins) == 1 && p.allowOrigins[0] == "*" {
+		// Wildcard with credentials requires using AllowOriginFunc
+		corsConfig.AllowOriginFunc = func(origin string) bool {
+			return true
+		}
+	} else {
+		corsConfig.AllowOrigins = p.allowOrigins
+	}
+
+	p.serviceGroup.Use(cors.New(corsConfig))
 
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
