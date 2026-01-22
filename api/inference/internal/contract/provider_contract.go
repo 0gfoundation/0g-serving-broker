@@ -24,6 +24,7 @@ import (
 type ProviderContract struct {
 	Contract         *contract.ServingContract
 	ProviderAddress  string
+	ContractAddress  string
 	LockTime         time.Duration
 	TeeSignerAddress common.Address
 	logger           log.Logger
@@ -53,6 +54,7 @@ func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, l
 	pc := &ProviderContract{
 		Contract:         contract,
 		ProviderAddress:  wallets.Default().Address(),
+		ContractAddress:  conf.ContractAddress,
 		LockTime:         time.Duration(lockTime.Int64()) * time.Second,
 		TeeSignerAddress: teeSignerAddress,
 		logger:           logger,
