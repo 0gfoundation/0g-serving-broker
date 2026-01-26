@@ -52,12 +52,38 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		concurrencyLimiter: middleware.NewConcurrencyLimiter(50),
 	}
 
-	p.serviceGroup.Use(cors.New(cors.Config{
-		AllowOrigins:  p.allowOrigins,
-		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders:  []string{"*"},
-		ExposeHeaders: []string{"ZG-Res-Key", "Provider", "content-encoding"},
-	}))
+	// Configure CORS middleware
+	// IMPORTANT: This must handle OPTIONS preflight requests before they reach the proxy handler
+	corsConfig := cors.Config{
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders: []string{
+			"Content-Type",
+			"Authorization",
+			"X-Requested-With",
+			"Accept",
+			"Origin",
+		},
+		ExposeHeaders: []string{
+			"ZG-Res-Key",
+			"Provider",
+			"Content-Type",
+			"Content-Encoding",
+		},
+		AllowCredentials: true, // Required for Authorization headers
+		MaxAge:           12 * 3600,
+	}
+
+	// Handle origin configuration
+	if len(p.allowOrigins) == 1 && p.allowOrigins[0] == "*" {
+		// Wildcard with credentials requires using AllowOriginFunc
+		corsConfig.AllowOriginFunc = func(origin string) bool {
+			return true
+		}
+	} else {
+		corsConfig.AllowOrigins = p.allowOrigins
+	}
+
+	p.serviceGroup.Use(cors.New(corsConfig))
 
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
@@ -118,6 +144,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if targetRoute != "/" {
 		targetURL += targetRoute
 	}
+
+	// Extract path without query parameters for route matching
+	targetPath := targetRoute
+	if idx := strings.Index(targetPath, "?"); idx != -1 {
+		targetPath = targetPath[:idx]
+	}
+
 	p.logger.Debugf("Proxy debug: method=%s, url=%s, Content-Length=%s, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header)
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
@@ -138,12 +171,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	p.logger.Debugf("Proxy debug: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody), ctx.Request.Header)
 
 	// handle endpoints not need to be charged
-	if _, ok := constant.TargetRoute[targetRoute]; !ok {
-		if p.handleSignatureRoute(ctx, targetRoute) {
+	if _, ok := constant.TargetRoute[targetPath]; !ok {
+		if p.handleSignatureRoute(ctx, targetPath) {
 			return
 		}
 
-		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
+		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
@@ -215,7 +248,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody)
+	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 	if err != nil {
 		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return

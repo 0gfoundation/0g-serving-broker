@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"net/http"
 	"sync"
 	"time"
 
@@ -36,6 +37,9 @@ type Ctrl struct {
 
 	// Service sync flag to ensure SyncService is only called once
 	serviceSynced bool
+
+	// Shared HTTP client for backend requests to enable connection reuse
+	httpClient *http.Client
 
 	// Log configuration
 	logPath      string
@@ -84,6 +88,24 @@ func New(
 		logPath:              logPath,
 		brokerLogDir:         brokerLogDir,
 		eventLogDir:          eventLogDir,
+		// Initialize shared HTTP client with connection pooling
+		// Optimized for single backend container with many concurrent users
+		httpClient: &http.Client{
+			Timeout: 6 * time.Minute, // Default timeout for all requests
+			Transport: &http.Transport{
+				// Since we have a single backend container, MaxIdleConnsPerHost is the key parameter
+				MaxIdleConns:          100,               // Total idle connections (across all hosts)
+				MaxIdleConnsPerHost:   100,               // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       0,                 // 0 = unlimited active connections per host
+				IdleConnTimeout:       90 * time.Second,  // How long idle connections stay open
+				TLSHandshakeTimeout:   10 * time.Second,  // TLS handshake timeout
+				ResponseHeaderTimeout: 30 * time.Second,  // Time to wait for response headers
+				ExpectContinueTimeout: 1 * time.Second,   // Time to wait for 100-continue response
+				DisableKeepAlives:     false,             // Enable connection reuse (critical)
+				DisableCompression:    false,             // Allow gzip compression
+				ForceAttemptHTTP2:     false,             // Use HTTP/1.1 for stability
+			},
+		},
 	}
 
 	return p

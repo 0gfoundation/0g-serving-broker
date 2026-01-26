@@ -10,8 +10,10 @@ var (
 	ServicePrefix = "/v1/proxy"
 
 	TargetRoute = map[string]struct{}{
+		"/messages":             {}, // LiteLLM/Claude API format
+		"/v1/messages":          {}, // For Claude Code client compatibility
 		"/chat/completions":     {},
-		"/images/edits": {},
+		"/images/edits":         {},
 		"/images/generations":   {},
 		"/audio/transcriptions": {},
 	}
