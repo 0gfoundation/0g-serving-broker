@@ -147,11 +147,21 @@ func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string
 	if err != nil {
 		return errors.Wrap(err, "get account in contract")
 	}
-
-	c.logger.Infof("contract providerSigner: %s, local provider address: %s", account.ProviderSigner.String(), c.getProviderSignerAddress(ctx).String())
-	if account.ProviderSigner != c.getProviderSignerAddress(ctx) {
-		return errors.New("provider signer should be acknowledged before creating a task")
+	// Verify that the service's TEE signer has been acknowledged by the owner
+	service, err := c.contract.GetService(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get service from contract")
 	}
+
+	if !service.TeeSignerAcknowledged {
+		return errors.New("service TEE signer has not been acknowledged by 0G team")
+	}
+
+	// Verify that the user has acknowledged the provider's TEE signer
+	if !account.Acknowledged {
+		return errors.New("user has not acknowledged the provider's TEE signer. User must acknowledge before creating a task")
+	}
+
 	return nil
 }
 

@@ -1,5 +1,9 @@
 package constant
 
+import (
+	"github.com/ethereum/go-ethereum/crypto"
+)
+
 var (
 	MOCK_MODEL_ROOT_HASH = "0xcb42b5ca9e998c82dd239ef2d20d22a4ae16b3dc0ce0a855c93b52c7c2bab6dc"
 
@@ -26,3 +30,16 @@ const FineTuningDockerfilePath = "/opt/transformer-bridge"
 // 1. tee deployment not allow to mount volume
 // 2. user may want to use different model
 const ModelUsagePath = "./fine-tuning/execution/models"
+
+// EIP-712 constants matching the contract (FineTuningVerifier.sol)
+var (
+	// DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+	DomainTypehash = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
+
+	// MESSAGE_TYPEHASH = keccak256("VerifierMessage(string id,bytes encryptedSecret,bytes modelRootHash,uint256 nonce,uint256 taskFee,address user)")
+	MessageTypehash = crypto.Keccak256Hash([]byte("VerifierMessage(string id,bytes encryptedSecret,bytes modelRootHash,uint256 nonce,uint256 taskFee,address user)"))
+
+	// Domain constants (must match FineTuningVerifier.sol)
+	DomainName    = "0G Fine-Tuning Serving"
+	DomainVersion = "1"
+)
