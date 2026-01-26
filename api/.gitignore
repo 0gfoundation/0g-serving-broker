@@ -16,3 +16,5 @@ meili_data_v1.7
 
 *.pem
 *.key
+# Python virtual environment
+.venv/

@@ -180,15 +180,8 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 		return nil, err
 	}
 
-	contract, err := providercontract.NewProviderContract(cfg, logger)
-	if err != nil {
-		return nil, err
-	}
-
 	var teeClientType tee.ClientType
 	switch os.Getenv("NETWORK") {
-	case "hardhat":
-		teeClientType = tee.Mock
 	case "gcp":
 		teeClientType = tee.GCP
 	default:
@@ -196,6 +189,17 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 	}
 
 	teeService, err := tee.NewTeeService(teeClientType, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sync TEE quote to initialize Address before creating contract
+	logger.Info("syncing TEE quote during service initialization")
+	if err := teeService.SyncQuote(ctx, os.Getenv("NETWORK") != "hardhat"); err != nil {
+		return nil, err
+	}
+
+	contract, err := providercontract.NewProviderContract(cfg, teeService.Address, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -236,11 +240,6 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 }
 
 func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
-	logger.Info("syncing TEE quote")
-	if err := services.teeService.SyncQuote(ctx, true); err != nil {
-		return err
-	}
-
 	if err := services.db.MarkInProgressTasksAsFailed(); err != nil {
 		return err
 	}

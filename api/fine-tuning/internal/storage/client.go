@@ -66,7 +66,6 @@ func New(config *config.Config, logger log.Logger) (*Client, error) {
 		}
 		blockchain.CustomGasPrice = gasPrice
 	}
-	defer w3client.Close()
 
 	indexerStandardClient, err := indexer.NewClient(config.StorageClientConfig.IndexerStandard, indexer.IndexerClientOption{
 		ProviderOption: config.ProviderOption,
@@ -145,7 +144,9 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		SkipTx:           c.storageUploadUrgs.SkipTx,
 		MaxGasPrice:      c.MaxGasPrice,
 		NRetries:         c.NRetries,
+		Step:             c.storageUploadUrgs.Step,
 		Method:           c.Method,
+		FullTrusted:      c.storageUploadUrgs.FullTrusted,
 	}
 
 	file, err := core.Open(fileName)
@@ -162,21 +163,37 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
-	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method, false)
+	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method, opt.FullTrusted)
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
 		return nil, err
 	}
-	defer indexerClient.Close()
 
 	uploader.WithRoutines(c.storageUploadUrgs.Routines)
 
 	_, roots, err := uploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
+
+	// Retry with full trusted nodes if initial upload fails and FullTrusted was false
+	if err != nil && !opt.FullTrusted {
+		c.logger.Warnf("Upload with non-full-trusted nodes failed, retrying with full trusted nodes: %v", err)
+		opt.FullTrusted = true
+
+		fullUploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method, true)
+		if err != nil {
+			c.logger.Errorf("Error creating full trusted uploader: %v\n", err)
+			return nil, err
+		}
+
+		fullUploader.WithRoutines(c.storageUploadUrgs.Routines)
+		_, roots, err = fullUploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
+	}
+
 	if err != nil {
 		err = errors.Wrapf(err, "Error uploading file: %v", fileName)
 		c.logger.Errorf("%v", err)
 		return nil, err
 	}
+
 	if len(roots) == 1 {
 		c.logger.Infof("file uploaded in 1 fragment, root = %v", roots[0].String())
 	} else {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -180,7 +181,7 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 
 	runtime := ""
 	deviceRequests := make([]container.DeviceRequest, 0)
-	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH || os.Getenv("NETWORK") == "hardhat" {
 		runtime = ""
 	} else {
 		if _, ok := info.Runtimes["nvidia"]; ok {
@@ -235,7 +236,7 @@ func (c *Executor) getContainerImage(task *db.Task) (string, string, bool, error
 	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
 	needPull := !c.config.Images.BuildImage
 
-	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH {
+	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH || os.Getenv("NETWORK") == "hardhat" {
 		image = c.config.Images.ExecutionMockImageName
 	} else {
 		switch task.ModelType {

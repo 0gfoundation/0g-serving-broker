@@ -70,6 +70,7 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	}
 	s.ProviderSigner = signer
 	s.Address = crypto.PubkeyToAddress(signer.PublicKey)
+	s.logger.Debugf("teeAddress: %s", s.Address)
 
 	quoteStr, err := client.TdxQuote(ctx, s.Address.Hex(), nvQuote)
 	if err != nil {
@@ -109,6 +110,7 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 				return nil, errors.Wrap(err, "converting to ECDSA private key")
 			}
 		}
+		s.logger.Debugf("privateKey: %v", privateKey.PublicKey)
 	case GCP, AliCloud:
 		privateKey, err = crypto.HexToECDSA(key)
 		if err != nil {

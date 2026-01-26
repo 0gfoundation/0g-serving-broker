@@ -38,11 +38,11 @@ type AccountDetails struct {
 	PendingRefund      *big.Int
 	Refunds            []Refund
 	AdditionalInfo     string
-	ProviderSigner     common.Address
 	Deliverables       []Deliverable
 	ValidRefundsLength *big.Int
 	DeliverablesHead   *big.Int
 	DeliverablesCount  *big.Int
+	Acknowledged       bool
 }
 
 // AccountSummary is an auto generated low-level Go binding around an user-defined struct.
@@ -53,9 +53,9 @@ type AccountSummary struct {
 	Balance            *big.Int
 	PendingRefund      *big.Int
 	AdditionalInfo     string
-	ProviderSigner     common.Address
 	ValidRefundsLength *big.Int
 	DeliverablesCount  *big.Int
+	Acknowledged       bool
 }
 
 // Deliverable is an auto generated low-level Go binding around an user-defined struct.
@@ -86,13 +86,14 @@ type Refund struct {
 
 // Service is an auto generated low-level Go binding around an user-defined struct.
 type Service struct {
-	Provider       common.Address
-	Url            string
-	Quota          Quota
-	PricePerToken  *big.Int
-	ProviderSigner common.Address
-	Occupied       bool
-	Models         []string
+	Provider              common.Address
+	Url                   string
+	Quota                 Quota
+	PricePerToken         *big.Int
+	Occupied              bool
+	Models                []string
+	TeeSignerAddress      common.Address
+	TeeSignerAcknowledged bool
 }
 
 // VerifierInput is an auto generated low-level Go binding around an user-defined struct.
@@ -101,7 +102,6 @@ type VerifierInput struct {
 	EncryptedSecret []byte
 	ModelRootHash   []byte
 	Nonce           *big.Int
-	ProviderSigner  common.Address
 	Signature       []byte
 	TaskFee         *big.Int
 	User            common.Address
@@ -109,7 +109,7 @@ type VerifierInput struct {
 
 // FineTuningServingMetaData contains all meta data concerning the FineTuningServing contract.
 var FineTuningServingMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountNotExists\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"AdditionalInfoTooLong\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidVerifierInput\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"TooManyRefunds\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"name\":\"BalanceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":false,\"internalType\":\"uint8\",\"name\":\"version\",\"type\":\"uint8\"}],\"name\":\"Initialized\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"previousOwner\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"OwnershipTransferred\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"name\":\"RefundRequested\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"}],\"name\":\"ServiceRemoved\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"indexed\":false,\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"}],\"name\":\"ServiceUpdated\",\"type\":\"event\"},{\"inputs\":[],\"name\":\"MAX_LOCKTIME\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"MIN_LOCKTIME\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"accountExists\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"acknowledgeDeliverable\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"}],\"name\":\"acknowledgeProviderSigner\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"name\":\"addAccount\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"}],\"name\":\"addDeliverable\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"},{\"internalType\":\"string[]\",\"name\":\"models\",\"type\":\"string[]\"}],\"name\":\"addOrUpdateService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"deleteAccount\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"cancelRetrievingAmount\",\"type\":\"uint256\"}],\"name\":\"depositFund\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getAccount\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"},{\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"internalType\":\"structDeliverable[]\",\"name\":\"deliverables\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesHead\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"}],\"internalType\":\"structAccountDetails\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByProvider\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByUser\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAllAccounts\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllServices\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"},{\"internalType\":\"string[]\",\"name\":\"models\",\"type\":\"string[]\"}],\"internalType\":\"structService[]\",\"name\":\"services\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address[]\",\"name\":\"users\",\"type\":\"address[]\"}],\"name\":\"getBatchAccountsByUsers\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"getDeliverable\",\"outputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"},{\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"internalType\":\"structDeliverable\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getDeliverables\",\"outputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"},{\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"internalType\":\"structDeliverable[]\",\"name\":\"\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getPendingRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getService\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"},{\"internalType\":\"string[]\",\"name\":\"models\",\"type\":\"string[]\"}],\"internalType\":\"structService\",\"name\":\"service\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"_ledgerAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"_penaltyPercentage\",\"type\":\"uint256\"}],\"name\":\"initialize\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"initialized\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"ledgerAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"lockTime\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"penaltyPercentage\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"processRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"totalAmount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"removeService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"renounceOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"requestRefundAll\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"providerSigner\",\"type\":\"address\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"},{\"internalType\":\"uint256\",\"name\":\"taskFee\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"}],\"internalType\":\"structVerifierInput\",\"name\":\"verifierInput\",\"type\":\"tuple\"}],\"name\":\"settleFees\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes4\",\"name\":\"interfaceId\",\"type\":\"bytes4\"}],\"name\":\"supportsInterface\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"transferOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"}],\"name\":\"updateLockTime\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_penaltyPercentage\",\"type\":\"uint256\"}],\"name\":\"updatePenaltyPercentage\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"stateMutability\":\"payable\",\"type\":\"receive\"}]",
+	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"AccountNotExists\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"AdditionalInfoTooLong\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"CannotAddStakeWhenUpdating\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"}],\"name\":\"CannotRevokeWithNonZeroBalance\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"DeliverableAlreadyExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"length\",\"type\":\"uint256\"}],\"name\":\"DeliverableIdInvalidLength\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"length\",\"type\":\"uint256\"}],\"name\":\"DeliverableIdTooLong\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"DeliverableNotExists\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"DeliverableNotExists\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"DirectDepositsDisabled\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"ETHTransferFailed\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"provided\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"required\",\"type\":\"uint256\"}],\"name\":\"InsufficientStake\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"InvalidLedgerAddress\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"InvalidVerifierInput\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"LimitTooLarge\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"lockTime\",\"type\":\"uint256\"}],\"name\":\"LockTimeOutOfRange\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"percentage\",\"type\":\"uint256\"}],\"name\":\"PenaltyPercentageTooHigh\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"PreviousDeliverableNotAcknowledged\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"SecretShouldBeEmpty\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"SecretShouldNotBeEmpty\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"ServiceNotExist\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"TooManyRefunds\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"TransferToLedgerFailed\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"refundedAmount\",\"type\":\"uint256\"}],\"name\":\"AccountDeleted\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"name\":\"BalanceUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":false,\"internalType\":\"uint8\",\"name\":\"version\",\"type\":\"uint8\"}],\"name\":\"Initialized\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"oldLockTime\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"newLockTime\",\"type\":\"uint256\"}],\"name\":\"LockTimeUpdated\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"previousOwner\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"OwnershipTransferred\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"ProviderStakeReturned\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"ProviderStaked\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"name\":\"ProviderTEESignerAcknowledged\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"timestamp\",\"type\":\"uint256\"}],\"name\":\"RefundRequested\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"}],\"name\":\"ServiceRemoved\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"indexed\":false,\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"}],\"name\":\"ServiceUpdated\",\"type\":\"event\"},{\"inputs\":[],\"name\":\"MAX_LOCKTIME\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"MIN_LOCKTIME\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"MIN_PROVIDER_STAKE\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"accountExists\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"acknowledgeDeliverable\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"name\":\"acknowledgeTEESigner\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"acknowledgeTEESignerByOwner\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"}],\"name\":\"addAccount\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"}],\"name\":\"addDeliverable\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"},{\"internalType\":\"string[]\",\"name\":\"models\",\"type\":\"string[]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"}],\"name\":\"addOrUpdateService\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"deleteAccount\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"cancelRetrievingAmount\",\"type\":\"uint256\"}],\"name\":\"depositFund\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getAccount\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"index\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"createdAt\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"processed\",\"type\":\"bool\"}],\"internalType\":\"structRefund[]\",\"name\":\"refunds\",\"type\":\"tuple[]\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"},{\"internalType\":\"uint248\",\"name\":\"timestamp\",\"type\":\"uint248\"}],\"internalType\":\"structDeliverable[]\",\"name\":\"deliverables\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesHead\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"internalType\":\"structAccountDetails\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByProvider\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAccountsByUser\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"offset\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"limit\",\"type\":\"uint256\"}],\"name\":\"getAllAccounts\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"},{\"internalType\":\"uint256\",\"name\":\"total\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getAllServices\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"},{\"internalType\":\"string[]\",\"name\":\"models\",\"type\":\"string[]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"teeSignerAcknowledged\",\"type\":\"bool\"}],\"internalType\":\"structService[]\",\"name\":\"services\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address[]\",\"name\":\"users\",\"type\":\"address[]\"}],\"name\":\"getBatchAccountsByUsers\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"additionalInfo\",\"type\":\"string\"},{\"internalType\":\"uint256\",\"name\":\"validRefundsLength\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"deliverablesCount\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"}],\"internalType\":\"structAccountSummary[]\",\"name\":\"accounts\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"}],\"name\":\"getDeliverable\",\"outputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"},{\"internalType\":\"uint248\",\"name\":\"timestamp\",\"type\":\"uint248\"}],\"internalType\":\"structDeliverable\",\"name\":\"\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getDeliverables\",\"outputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bool\",\"name\":\"acknowledged\",\"type\":\"bool\"},{\"internalType\":\"uint248\",\"name\":\"timestamp\",\"type\":\"uint248\"}],\"internalType\":\"structDeliverable[]\",\"name\":\"\",\"type\":\"tuple[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getPendingRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"getService\",\"outputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"},{\"internalType\":\"string\",\"name\":\"url\",\"type\":\"string\"},{\"components\":[{\"internalType\":\"uint256\",\"name\":\"cpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeMemory\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"gpuCount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"nodeStorage\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"gpuType\",\"type\":\"string\"}],\"internalType\":\"structQuota\",\"name\":\"quota\",\"type\":\"tuple\"},{\"internalType\":\"uint256\",\"name\":\"pricePerToken\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"occupied\",\"type\":\"bool\"},{\"internalType\":\"string[]\",\"name\":\"models\",\"type\":\"string[]\"},{\"internalType\":\"address\",\"name\":\"teeSignerAddress\",\"type\":\"address\"},{\"internalType\":\"bool\",\"name\":\"teeSignerAcknowledged\",\"type\":\"bool\"}],\"internalType\":\"structService\",\"name\":\"service\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"_ledgerAddress\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"_penaltyPercentage\",\"type\":\"uint256\"}],\"name\":\"initialize\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"initialized\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"ledgerAddress\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"lockTime\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"penaltyPercentage\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"processRefund\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"totalAmount\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"balance\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"pendingRefund\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"removeService\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"renounceOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"requestRefundAll\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"provider\",\"type\":\"address\"}],\"name\":\"revokeTEESignerAcknowledgement\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"string\",\"name\":\"id\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"encryptedSecret\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"modelRootHash\",\"type\":\"bytes\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"},{\"internalType\":\"uint256\",\"name\":\"taskFee\",\"type\":\"uint256\"},{\"internalType\":\"address\",\"name\":\"user\",\"type\":\"address\"}],\"internalType\":\"structVerifierInput\",\"name\":\"verifierInput\",\"type\":\"tuple\"}],\"name\":\"settleFees\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes4\",\"name\":\"interfaceId\",\"type\":\"bytes4\"}],\"name\":\"supportsInterface\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"newOwner\",\"type\":\"address\"}],\"name\":\"transferOwnership\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_locktime\",\"type\":\"uint256\"}],\"name\":\"updateLockTime\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"_penaltyPercentage\",\"type\":\"uint256\"}],\"name\":\"updatePenaltyPercentage\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"stateMutability\":\"payable\",\"type\":\"receive\"}]",
 }
 
 // FineTuningServingABI is the input ABI used to generate the binding from.
@@ -320,6 +320,37 @@ func (_FineTuningServing *FineTuningServingCallerSession) MINLOCKTIME() (*big.In
 	return _FineTuningServing.Contract.MINLOCKTIME(&_FineTuningServing.CallOpts)
 }
 
+// MINPROVIDERSTAKE is a free data retrieval call binding the contract method 0x650190e7.
+//
+// Solidity: function MIN_PROVIDER_STAKE() view returns(uint256)
+func (_FineTuningServing *FineTuningServingCaller) MINPROVIDERSTAKE(opts *bind.CallOpts) (*big.Int, error) {
+	var out []interface{}
+	err := _FineTuningServing.contract.Call(opts, &out, "MIN_PROVIDER_STAKE")
+
+	if err != nil {
+		return *new(*big.Int), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new(*big.Int)).(**big.Int)
+
+	return out0, err
+
+}
+
+// MINPROVIDERSTAKE is a free data retrieval call binding the contract method 0x650190e7.
+//
+// Solidity: function MIN_PROVIDER_STAKE() view returns(uint256)
+func (_FineTuningServing *FineTuningServingSession) MINPROVIDERSTAKE() (*big.Int, error) {
+	return _FineTuningServing.Contract.MINPROVIDERSTAKE(&_FineTuningServing.CallOpts)
+}
+
+// MINPROVIDERSTAKE is a free data retrieval call binding the contract method 0x650190e7.
+//
+// Solidity: function MIN_PROVIDER_STAKE() view returns(uint256)
+func (_FineTuningServing *FineTuningServingCallerSession) MINPROVIDERSTAKE() (*big.Int, error) {
+	return _FineTuningServing.Contract.MINPROVIDERSTAKE(&_FineTuningServing.CallOpts)
+}
+
 // AccountExists is a free data retrieval call binding the contract method 0x147500e3.
 //
 // Solidity: function accountExists(address user, address provider) view returns(bool)
@@ -353,7 +384,7 @@ func (_FineTuningServing *FineTuningServingCallerSession) AccountExists(user com
 
 // GetAccount is a free data retrieval call binding the contract method 0xfd590847.
 //
-// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,(uint256,uint256,uint256,bool)[],string,address,(string,bytes,bytes,bool,uint256)[],uint256,uint256,uint256))
+// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,(uint256,uint256,uint256,bool)[],string,(string,bytes,bytes,bool,uint248)[],uint256,uint256,uint256,bool))
 func (_FineTuningServing *FineTuningServingCaller) GetAccount(opts *bind.CallOpts, user common.Address, provider common.Address) (AccountDetails, error) {
 	var out []interface{}
 	err := _FineTuningServing.contract.Call(opts, &out, "getAccount", user, provider)
@@ -370,21 +401,21 @@ func (_FineTuningServing *FineTuningServingCaller) GetAccount(opts *bind.CallOpt
 
 // GetAccount is a free data retrieval call binding the contract method 0xfd590847.
 //
-// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,(uint256,uint256,uint256,bool)[],string,address,(string,bytes,bytes,bool,uint256)[],uint256,uint256,uint256))
+// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,(uint256,uint256,uint256,bool)[],string,(string,bytes,bytes,bool,uint248)[],uint256,uint256,uint256,bool))
 func (_FineTuningServing *FineTuningServingSession) GetAccount(user common.Address, provider common.Address) (AccountDetails, error) {
 	return _FineTuningServing.Contract.GetAccount(&_FineTuningServing.CallOpts, user, provider)
 }
 
 // GetAccount is a free data retrieval call binding the contract method 0xfd590847.
 //
-// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,(uint256,uint256,uint256,bool)[],string,address,(string,bytes,bytes,bool,uint256)[],uint256,uint256,uint256))
+// Solidity: function getAccount(address user, address provider) view returns((address,address,uint256,uint256,uint256,(uint256,uint256,uint256,bool)[],string,(string,bytes,bytes,bool,uint248)[],uint256,uint256,uint256,bool))
 func (_FineTuningServing *FineTuningServingCallerSession) GetAccount(user common.Address, provider common.Address) (AccountDetails, error) {
 	return _FineTuningServing.Contract.GetAccount(&_FineTuningServing.CallOpts, user, provider)
 }
 
 // GetAccountsByProvider is a free data retrieval call binding the contract method 0x1d73b9f5.
 //
-// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingCaller) GetAccountsByProvider(opts *bind.CallOpts, provider common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -409,7 +440,7 @@ func (_FineTuningServing *FineTuningServingCaller) GetAccountsByProvider(opts *b
 
 // GetAccountsByProvider is a free data retrieval call binding the contract method 0x1d73b9f5.
 //
-// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingSession) GetAccountsByProvider(provider common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -419,7 +450,7 @@ func (_FineTuningServing *FineTuningServingSession) GetAccountsByProvider(provid
 
 // GetAccountsByProvider is a free data retrieval call binding the contract method 0x1d73b9f5.
 //
-// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAccountsByProvider(address provider, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingCallerSession) GetAccountsByProvider(provider common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -429,7 +460,7 @@ func (_FineTuningServing *FineTuningServingCallerSession) GetAccountsByProvider(
 
 // GetAccountsByUser is a free data retrieval call binding the contract method 0x4fe63f4d.
 //
-// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingCaller) GetAccountsByUser(opts *bind.CallOpts, user common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -454,7 +485,7 @@ func (_FineTuningServing *FineTuningServingCaller) GetAccountsByUser(opts *bind.
 
 // GetAccountsByUser is a free data retrieval call binding the contract method 0x4fe63f4d.
 //
-// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingSession) GetAccountsByUser(user common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -464,7 +495,7 @@ func (_FineTuningServing *FineTuningServingSession) GetAccountsByUser(user commo
 
 // GetAccountsByUser is a free data retrieval call binding the contract method 0x4fe63f4d.
 //
-// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAccountsByUser(address user, uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingCallerSession) GetAccountsByUser(user common.Address, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -474,7 +505,7 @@ func (_FineTuningServing *FineTuningServingCallerSession) GetAccountsByUser(user
 
 // GetAllAccounts is a free data retrieval call binding the contract method 0x5bd7ace2.
 //
-// Solidity: function getAllAccounts(uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAllAccounts(uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingCaller) GetAllAccounts(opts *bind.CallOpts, offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -499,7 +530,7 @@ func (_FineTuningServing *FineTuningServingCaller) GetAllAccounts(opts *bind.Cal
 
 // GetAllAccounts is a free data retrieval call binding the contract method 0x5bd7ace2.
 //
-// Solidity: function getAllAccounts(uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAllAccounts(uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingSession) GetAllAccounts(offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -509,7 +540,7 @@ func (_FineTuningServing *FineTuningServingSession) GetAllAccounts(offset *big.I
 
 // GetAllAccounts is a free data retrieval call binding the contract method 0x5bd7ace2.
 //
-// Solidity: function getAllAccounts(uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts, uint256 total)
+// Solidity: function getAllAccounts(uint256 offset, uint256 limit) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts, uint256 total)
 func (_FineTuningServing *FineTuningServingCallerSession) GetAllAccounts(offset *big.Int, limit *big.Int) (struct {
 	Accounts []AccountSummary
 	Total    *big.Int
@@ -519,7 +550,7 @@ func (_FineTuningServing *FineTuningServingCallerSession) GetAllAccounts(offset 
 
 // GetAllServices is a free data retrieval call binding the contract method 0x21fe0f30.
 //
-// Solidity: function getAllServices() view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,address,bool,string[])[] services)
+// Solidity: function getAllServices() view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,bool,string[],address,bool)[] services)
 func (_FineTuningServing *FineTuningServingCaller) GetAllServices(opts *bind.CallOpts) ([]Service, error) {
 	var out []interface{}
 	err := _FineTuningServing.contract.Call(opts, &out, "getAllServices")
@@ -536,21 +567,21 @@ func (_FineTuningServing *FineTuningServingCaller) GetAllServices(opts *bind.Cal
 
 // GetAllServices is a free data retrieval call binding the contract method 0x21fe0f30.
 //
-// Solidity: function getAllServices() view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,address,bool,string[])[] services)
+// Solidity: function getAllServices() view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,bool,string[],address,bool)[] services)
 func (_FineTuningServing *FineTuningServingSession) GetAllServices() ([]Service, error) {
 	return _FineTuningServing.Contract.GetAllServices(&_FineTuningServing.CallOpts)
 }
 
 // GetAllServices is a free data retrieval call binding the contract method 0x21fe0f30.
 //
-// Solidity: function getAllServices() view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,address,bool,string[])[] services)
+// Solidity: function getAllServices() view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,bool,string[],address,bool)[] services)
 func (_FineTuningServing *FineTuningServingCallerSession) GetAllServices() ([]Service, error) {
 	return _FineTuningServing.Contract.GetAllServices(&_FineTuningServing.CallOpts)
 }
 
 // GetBatchAccountsByUsers is a free data retrieval call binding the contract method 0xba16a750.
 //
-// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts)
+// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts)
 func (_FineTuningServing *FineTuningServingCaller) GetBatchAccountsByUsers(opts *bind.CallOpts, users []common.Address) ([]AccountSummary, error) {
 	var out []interface{}
 	err := _FineTuningServing.contract.Call(opts, &out, "getBatchAccountsByUsers", users)
@@ -567,21 +598,21 @@ func (_FineTuningServing *FineTuningServingCaller) GetBatchAccountsByUsers(opts 
 
 // GetBatchAccountsByUsers is a free data retrieval call binding the contract method 0xba16a750.
 //
-// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts)
+// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts)
 func (_FineTuningServing *FineTuningServingSession) GetBatchAccountsByUsers(users []common.Address) ([]AccountSummary, error) {
 	return _FineTuningServing.Contract.GetBatchAccountsByUsers(&_FineTuningServing.CallOpts, users)
 }
 
 // GetBatchAccountsByUsers is a free data retrieval call binding the contract method 0xba16a750.
 //
-// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,string,address,uint256,uint256)[] accounts)
+// Solidity: function getBatchAccountsByUsers(address[] users) view returns((address,address,uint256,uint256,uint256,string,uint256,uint256,bool)[] accounts)
 func (_FineTuningServing *FineTuningServingCallerSession) GetBatchAccountsByUsers(users []common.Address) ([]AccountSummary, error) {
 	return _FineTuningServing.Contract.GetBatchAccountsByUsers(&_FineTuningServing.CallOpts, users)
 }
 
 // GetDeliverable is a free data retrieval call binding the contract method 0xa134f9e1.
 //
-// Solidity: function getDeliverable(address user, address provider, string id) view returns((string,bytes,bytes,bool,uint256))
+// Solidity: function getDeliverable(address user, address provider, string id) view returns((string,bytes,bytes,bool,uint248))
 func (_FineTuningServing *FineTuningServingCaller) GetDeliverable(opts *bind.CallOpts, user common.Address, provider common.Address, id string) (Deliverable, error) {
 	var out []interface{}
 	err := _FineTuningServing.contract.Call(opts, &out, "getDeliverable", user, provider, id)
@@ -598,21 +629,21 @@ func (_FineTuningServing *FineTuningServingCaller) GetDeliverable(opts *bind.Cal
 
 // GetDeliverable is a free data retrieval call binding the contract method 0xa134f9e1.
 //
-// Solidity: function getDeliverable(address user, address provider, string id) view returns((string,bytes,bytes,bool,uint256))
+// Solidity: function getDeliverable(address user, address provider, string id) view returns((string,bytes,bytes,bool,uint248))
 func (_FineTuningServing *FineTuningServingSession) GetDeliverable(user common.Address, provider common.Address, id string) (Deliverable, error) {
 	return _FineTuningServing.Contract.GetDeliverable(&_FineTuningServing.CallOpts, user, provider, id)
 }
 
 // GetDeliverable is a free data retrieval call binding the contract method 0xa134f9e1.
 //
-// Solidity: function getDeliverable(address user, address provider, string id) view returns((string,bytes,bytes,bool,uint256))
+// Solidity: function getDeliverable(address user, address provider, string id) view returns((string,bytes,bytes,bool,uint248))
 func (_FineTuningServing *FineTuningServingCallerSession) GetDeliverable(user common.Address, provider common.Address, id string) (Deliverable, error) {
 	return _FineTuningServing.Contract.GetDeliverable(&_FineTuningServing.CallOpts, user, provider, id)
 }
 
 // GetDeliverables is a free data retrieval call binding the contract method 0x9622e934.
 //
-// Solidity: function getDeliverables(address user, address provider) view returns((string,bytes,bytes,bool,uint256)[])
+// Solidity: function getDeliverables(address user, address provider) view returns((string,bytes,bytes,bool,uint248)[])
 func (_FineTuningServing *FineTuningServingCaller) GetDeliverables(opts *bind.CallOpts, user common.Address, provider common.Address) ([]Deliverable, error) {
 	var out []interface{}
 	err := _FineTuningServing.contract.Call(opts, &out, "getDeliverables", user, provider)
@@ -629,14 +660,14 @@ func (_FineTuningServing *FineTuningServingCaller) GetDeliverables(opts *bind.Ca
 
 // GetDeliverables is a free data retrieval call binding the contract method 0x9622e934.
 //
-// Solidity: function getDeliverables(address user, address provider) view returns((string,bytes,bytes,bool,uint256)[])
+// Solidity: function getDeliverables(address user, address provider) view returns((string,bytes,bytes,bool,uint248)[])
 func (_FineTuningServing *FineTuningServingSession) GetDeliverables(user common.Address, provider common.Address) ([]Deliverable, error) {
 	return _FineTuningServing.Contract.GetDeliverables(&_FineTuningServing.CallOpts, user, provider)
 }
 
 // GetDeliverables is a free data retrieval call binding the contract method 0x9622e934.
 //
-// Solidity: function getDeliverables(address user, address provider) view returns((string,bytes,bytes,bool,uint256)[])
+// Solidity: function getDeliverables(address user, address provider) view returns((string,bytes,bytes,bool,uint248)[])
 func (_FineTuningServing *FineTuningServingCallerSession) GetDeliverables(user common.Address, provider common.Address) ([]Deliverable, error) {
 	return _FineTuningServing.Contract.GetDeliverables(&_FineTuningServing.CallOpts, user, provider)
 }
@@ -674,7 +705,7 @@ func (_FineTuningServing *FineTuningServingCallerSession) GetPendingRefund(user 
 
 // GetService is a free data retrieval call binding the contract method 0x15a52302.
 //
-// Solidity: function getService(address provider) view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,address,bool,string[]) service)
+// Solidity: function getService(address provider) view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,bool,string[],address,bool) service)
 func (_FineTuningServing *FineTuningServingCaller) GetService(opts *bind.CallOpts, provider common.Address) (Service, error) {
 	var out []interface{}
 	err := _FineTuningServing.contract.Call(opts, &out, "getService", provider)
@@ -691,14 +722,14 @@ func (_FineTuningServing *FineTuningServingCaller) GetService(opts *bind.CallOpt
 
 // GetService is a free data retrieval call binding the contract method 0x15a52302.
 //
-// Solidity: function getService(address provider) view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,address,bool,string[]) service)
+// Solidity: function getService(address provider) view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,bool,string[],address,bool) service)
 func (_FineTuningServing *FineTuningServingSession) GetService(provider common.Address) (Service, error) {
 	return _FineTuningServing.Contract.GetService(&_FineTuningServing.CallOpts, provider)
 }
 
 // GetService is a free data retrieval call binding the contract method 0x15a52302.
 //
-// Solidity: function getService(address provider) view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,address,bool,string[]) service)
+// Solidity: function getService(address provider) view returns((address,string,(uint256,uint256,uint256,uint256,string),uint256,bool,string[],address,bool) service)
 func (_FineTuningServing *FineTuningServingCallerSession) GetService(provider common.Address) (Service, error) {
 	return _FineTuningServing.Contract.GetService(&_FineTuningServing.CallOpts, provider)
 }
@@ -910,25 +941,46 @@ func (_FineTuningServing *FineTuningServingTransactorSession) AcknowledgeDeliver
 	return _FineTuningServing.Contract.AcknowledgeDeliverable(&_FineTuningServing.TransactOpts, provider, id)
 }
 
-// AcknowledgeProviderSigner is a paid mutator transaction binding the contract method 0xf2c6741a.
+// AcknowledgeTEESigner is a paid mutator transaction binding the contract method 0x7ff6fc1c.
 //
-// Solidity: function acknowledgeProviderSigner(address provider, address providerSigner) returns()
-func (_FineTuningServing *FineTuningServingTransactor) AcknowledgeProviderSigner(opts *bind.TransactOpts, provider common.Address, providerSigner common.Address) (*types.Transaction, error) {
-	return _FineTuningServing.contract.Transact(opts, "acknowledgeProviderSigner", provider, providerSigner)
+// Solidity: function acknowledgeTEESigner(address provider, bool acknowledged) returns()
+func (_FineTuningServing *FineTuningServingTransactor) AcknowledgeTEESigner(opts *bind.TransactOpts, provider common.Address, acknowledged bool) (*types.Transaction, error) {
+	return _FineTuningServing.contract.Transact(opts, "acknowledgeTEESigner", provider, acknowledged)
 }
 
-// AcknowledgeProviderSigner is a paid mutator transaction binding the contract method 0xf2c6741a.
+// AcknowledgeTEESigner is a paid mutator transaction binding the contract method 0x7ff6fc1c.
 //
-// Solidity: function acknowledgeProviderSigner(address provider, address providerSigner) returns()
-func (_FineTuningServing *FineTuningServingSession) AcknowledgeProviderSigner(provider common.Address, providerSigner common.Address) (*types.Transaction, error) {
-	return _FineTuningServing.Contract.AcknowledgeProviderSigner(&_FineTuningServing.TransactOpts, provider, providerSigner)
+// Solidity: function acknowledgeTEESigner(address provider, bool acknowledged) returns()
+func (_FineTuningServing *FineTuningServingSession) AcknowledgeTEESigner(provider common.Address, acknowledged bool) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.AcknowledgeTEESigner(&_FineTuningServing.TransactOpts, provider, acknowledged)
 }
 
-// AcknowledgeProviderSigner is a paid mutator transaction binding the contract method 0xf2c6741a.
+// AcknowledgeTEESigner is a paid mutator transaction binding the contract method 0x7ff6fc1c.
 //
-// Solidity: function acknowledgeProviderSigner(address provider, address providerSigner) returns()
-func (_FineTuningServing *FineTuningServingTransactorSession) AcknowledgeProviderSigner(provider common.Address, providerSigner common.Address) (*types.Transaction, error) {
-	return _FineTuningServing.Contract.AcknowledgeProviderSigner(&_FineTuningServing.TransactOpts, provider, providerSigner)
+// Solidity: function acknowledgeTEESigner(address provider, bool acknowledged) returns()
+func (_FineTuningServing *FineTuningServingTransactorSession) AcknowledgeTEESigner(provider common.Address, acknowledged bool) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.AcknowledgeTEESigner(&_FineTuningServing.TransactOpts, provider, acknowledged)
+}
+
+// AcknowledgeTEESignerByOwner is a paid mutator transaction binding the contract method 0xb2394d09.
+//
+// Solidity: function acknowledgeTEESignerByOwner(address provider) returns()
+func (_FineTuningServing *FineTuningServingTransactor) AcknowledgeTEESignerByOwner(opts *bind.TransactOpts, provider common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.contract.Transact(opts, "acknowledgeTEESignerByOwner", provider)
+}
+
+// AcknowledgeTEESignerByOwner is a paid mutator transaction binding the contract method 0xb2394d09.
+//
+// Solidity: function acknowledgeTEESignerByOwner(address provider) returns()
+func (_FineTuningServing *FineTuningServingSession) AcknowledgeTEESignerByOwner(provider common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.AcknowledgeTEESignerByOwner(&_FineTuningServing.TransactOpts, provider)
+}
+
+// AcknowledgeTEESignerByOwner is a paid mutator transaction binding the contract method 0xb2394d09.
+//
+// Solidity: function acknowledgeTEESignerByOwner(address provider) returns()
+func (_FineTuningServing *FineTuningServingTransactorSession) AcknowledgeTEESignerByOwner(provider common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.AcknowledgeTEESignerByOwner(&_FineTuningServing.TransactOpts, provider)
 }
 
 // AddAccount is a paid mutator transaction binding the contract method 0xe50688f9.
@@ -973,25 +1025,25 @@ func (_FineTuningServing *FineTuningServingTransactorSession) AddDeliverable(use
 	return _FineTuningServing.Contract.AddDeliverable(&_FineTuningServing.TransactOpts, user, id, modelRootHash)
 }
 
-// AddOrUpdateService is a paid mutator transaction binding the contract method 0x389f68ee.
+// AddOrUpdateService is a paid mutator transaction binding the contract method 0x43d96bb3.
 //
-// Solidity: function addOrUpdateService(string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address providerSigner, bool occupied, string[] models) returns()
-func (_FineTuningServing *FineTuningServingTransactor) AddOrUpdateService(opts *bind.TransactOpts, url string, quota Quota, pricePerToken *big.Int, providerSigner common.Address, occupied bool, models []string) (*types.Transaction, error) {
-	return _FineTuningServing.contract.Transact(opts, "addOrUpdateService", url, quota, pricePerToken, providerSigner, occupied, models)
+// Solidity: function addOrUpdateService(string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, bool occupied, string[] models, address teeSignerAddress) payable returns()
+func (_FineTuningServing *FineTuningServingTransactor) AddOrUpdateService(opts *bind.TransactOpts, url string, quota Quota, pricePerToken *big.Int, occupied bool, models []string, teeSignerAddress common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.contract.Transact(opts, "addOrUpdateService", url, quota, pricePerToken, occupied, models, teeSignerAddress)
 }
 
-// AddOrUpdateService is a paid mutator transaction binding the contract method 0x389f68ee.
+// AddOrUpdateService is a paid mutator transaction binding the contract method 0x43d96bb3.
 //
-// Solidity: function addOrUpdateService(string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address providerSigner, bool occupied, string[] models) returns()
-func (_FineTuningServing *FineTuningServingSession) AddOrUpdateService(url string, quota Quota, pricePerToken *big.Int, providerSigner common.Address, occupied bool, models []string) (*types.Transaction, error) {
-	return _FineTuningServing.Contract.AddOrUpdateService(&_FineTuningServing.TransactOpts, url, quota, pricePerToken, providerSigner, occupied, models)
+// Solidity: function addOrUpdateService(string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, bool occupied, string[] models, address teeSignerAddress) payable returns()
+func (_FineTuningServing *FineTuningServingSession) AddOrUpdateService(url string, quota Quota, pricePerToken *big.Int, occupied bool, models []string, teeSignerAddress common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.AddOrUpdateService(&_FineTuningServing.TransactOpts, url, quota, pricePerToken, occupied, models, teeSignerAddress)
 }
 
-// AddOrUpdateService is a paid mutator transaction binding the contract method 0x389f68ee.
+// AddOrUpdateService is a paid mutator transaction binding the contract method 0x43d96bb3.
 //
-// Solidity: function addOrUpdateService(string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address providerSigner, bool occupied, string[] models) returns()
-func (_FineTuningServing *FineTuningServingTransactorSession) AddOrUpdateService(url string, quota Quota, pricePerToken *big.Int, providerSigner common.Address, occupied bool, models []string) (*types.Transaction, error) {
-	return _FineTuningServing.Contract.AddOrUpdateService(&_FineTuningServing.TransactOpts, url, quota, pricePerToken, providerSigner, occupied, models)
+// Solidity: function addOrUpdateService(string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, bool occupied, string[] models, address teeSignerAddress) payable returns()
+func (_FineTuningServing *FineTuningServingTransactorSession) AddOrUpdateService(url string, quota Quota, pricePerToken *big.Int, occupied bool, models []string, teeSignerAddress common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.AddOrUpdateService(&_FineTuningServing.TransactOpts, url, quota, pricePerToken, occupied, models, teeSignerAddress)
 }
 
 // DeleteAccount is a paid mutator transaction binding the contract method 0x97216725.
@@ -1141,23 +1193,44 @@ func (_FineTuningServing *FineTuningServingTransactorSession) RequestRefundAll(u
 	return _FineTuningServing.Contract.RequestRefundAll(&_FineTuningServing.TransactOpts, user, provider)
 }
 
-// SettleFees is a paid mutator transaction binding the contract method 0x95e21362.
+// RevokeTEESignerAcknowledgement is a paid mutator transaction binding the contract method 0xddf96abd.
 //
-// Solidity: function settleFees((string,bytes,bytes,uint256,address,bytes,uint256,address) verifierInput) returns()
+// Solidity: function revokeTEESignerAcknowledgement(address provider) returns()
+func (_FineTuningServing *FineTuningServingTransactor) RevokeTEESignerAcknowledgement(opts *bind.TransactOpts, provider common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.contract.Transact(opts, "revokeTEESignerAcknowledgement", provider)
+}
+
+// RevokeTEESignerAcknowledgement is a paid mutator transaction binding the contract method 0xddf96abd.
+//
+// Solidity: function revokeTEESignerAcknowledgement(address provider) returns()
+func (_FineTuningServing *FineTuningServingSession) RevokeTEESignerAcknowledgement(provider common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.RevokeTEESignerAcknowledgement(&_FineTuningServing.TransactOpts, provider)
+}
+
+// RevokeTEESignerAcknowledgement is a paid mutator transaction binding the contract method 0xddf96abd.
+//
+// Solidity: function revokeTEESignerAcknowledgement(address provider) returns()
+func (_FineTuningServing *FineTuningServingTransactorSession) RevokeTEESignerAcknowledgement(provider common.Address) (*types.Transaction, error) {
+	return _FineTuningServing.Contract.RevokeTEESignerAcknowledgement(&_FineTuningServing.TransactOpts, provider)
+}
+
+// SettleFees is a paid mutator transaction binding the contract method 0x3d60456a.
+//
+// Solidity: function settleFees((string,bytes,bytes,uint256,bytes,uint256,address) verifierInput) returns()
 func (_FineTuningServing *FineTuningServingTransactor) SettleFees(opts *bind.TransactOpts, verifierInput VerifierInput) (*types.Transaction, error) {
 	return _FineTuningServing.contract.Transact(opts, "settleFees", verifierInput)
 }
 
-// SettleFees is a paid mutator transaction binding the contract method 0x95e21362.
+// SettleFees is a paid mutator transaction binding the contract method 0x3d60456a.
 //
-// Solidity: function settleFees((string,bytes,bytes,uint256,address,bytes,uint256,address) verifierInput) returns()
+// Solidity: function settleFees((string,bytes,bytes,uint256,bytes,uint256,address) verifierInput) returns()
 func (_FineTuningServing *FineTuningServingSession) SettleFees(verifierInput VerifierInput) (*types.Transaction, error) {
 	return _FineTuningServing.Contract.SettleFees(&_FineTuningServing.TransactOpts, verifierInput)
 }
 
-// SettleFees is a paid mutator transaction binding the contract method 0x95e21362.
+// SettleFees is a paid mutator transaction binding the contract method 0x3d60456a.
 //
-// Solidity: function settleFees((string,bytes,bytes,uint256,address,bytes,uint256,address) verifierInput) returns()
+// Solidity: function settleFees((string,bytes,bytes,uint256,bytes,uint256,address) verifierInput) returns()
 func (_FineTuningServing *FineTuningServingTransactorSession) SettleFees(verifierInput VerifierInput) (*types.Transaction, error) {
 	return _FineTuningServing.Contract.SettleFees(&_FineTuningServing.TransactOpts, verifierInput)
 }
@@ -1244,6 +1317,160 @@ func (_FineTuningServing *FineTuningServingSession) Receive() (*types.Transactio
 // Solidity: receive() payable returns()
 func (_FineTuningServing *FineTuningServingTransactorSession) Receive() (*types.Transaction, error) {
 	return _FineTuningServing.Contract.Receive(&_FineTuningServing.TransactOpts)
+}
+
+// FineTuningServingAccountDeletedIterator is returned from FilterAccountDeleted and is used to iterate over the raw logs and unpacked data for AccountDeleted events raised by the FineTuningServing contract.
+type FineTuningServingAccountDeletedIterator struct {
+	Event *FineTuningServingAccountDeleted // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *FineTuningServingAccountDeletedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(FineTuningServingAccountDeleted)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(FineTuningServingAccountDeleted)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *FineTuningServingAccountDeletedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *FineTuningServingAccountDeletedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// FineTuningServingAccountDeleted represents a AccountDeleted event raised by the FineTuningServing contract.
+type FineTuningServingAccountDeleted struct {
+	User           common.Address
+	Provider       common.Address
+	RefundedAmount *big.Int
+	Raw            types.Log // Blockchain specific contextual infos
+}
+
+// FilterAccountDeleted is a free log retrieval operation binding the contract event 0x342d961f860d5b1c27877a790eff2b213c020d1955a4903d6a9bf3ed590b7cd7.
+//
+// Solidity: event AccountDeleted(address indexed user, address indexed provider, uint256 refundedAmount)
+func (_FineTuningServing *FineTuningServingFilterer) FilterAccountDeleted(opts *bind.FilterOpts, user []common.Address, provider []common.Address) (*FineTuningServingAccountDeletedIterator, error) {
+
+	var userRule []interface{}
+	for _, userItem := range user {
+		userRule = append(userRule, userItem)
+	}
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.FilterLogs(opts, "AccountDeleted", userRule, providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return &FineTuningServingAccountDeletedIterator{contract: _FineTuningServing.contract, event: "AccountDeleted", logs: logs, sub: sub}, nil
+}
+
+// WatchAccountDeleted is a free log subscription operation binding the contract event 0x342d961f860d5b1c27877a790eff2b213c020d1955a4903d6a9bf3ed590b7cd7.
+//
+// Solidity: event AccountDeleted(address indexed user, address indexed provider, uint256 refundedAmount)
+func (_FineTuningServing *FineTuningServingFilterer) WatchAccountDeleted(opts *bind.WatchOpts, sink chan<- *FineTuningServingAccountDeleted, user []common.Address, provider []common.Address) (event.Subscription, error) {
+
+	var userRule []interface{}
+	for _, userItem := range user {
+		userRule = append(userRule, userItem)
+	}
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.WatchLogs(opts, "AccountDeleted", userRule, providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(FineTuningServingAccountDeleted)
+				if err := _FineTuningServing.contract.UnpackLog(event, "AccountDeleted", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseAccountDeleted is a log parse operation binding the contract event 0x342d961f860d5b1c27877a790eff2b213c020d1955a4903d6a9bf3ed590b7cd7.
+//
+// Solidity: event AccountDeleted(address indexed user, address indexed provider, uint256 refundedAmount)
+func (_FineTuningServing *FineTuningServingFilterer) ParseAccountDeleted(log types.Log) (*FineTuningServingAccountDeleted, error) {
+	event := new(FineTuningServingAccountDeleted)
+	if err := _FineTuningServing.contract.UnpackLog(event, "AccountDeleted", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
 }
 
 // FineTuningServingBalanceUpdatedIterator is returned from FilterBalanceUpdated and is used to iterate over the raw logs and unpacked data for BalanceUpdated events raised by the FineTuningServing contract.
@@ -1535,6 +1762,141 @@ func (_FineTuningServing *FineTuningServingFilterer) ParseInitialized(log types.
 	return event, nil
 }
 
+// FineTuningServingLockTimeUpdatedIterator is returned from FilterLockTimeUpdated and is used to iterate over the raw logs and unpacked data for LockTimeUpdated events raised by the FineTuningServing contract.
+type FineTuningServingLockTimeUpdatedIterator struct {
+	Event *FineTuningServingLockTimeUpdated // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *FineTuningServingLockTimeUpdatedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(FineTuningServingLockTimeUpdated)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(FineTuningServingLockTimeUpdated)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *FineTuningServingLockTimeUpdatedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *FineTuningServingLockTimeUpdatedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// FineTuningServingLockTimeUpdated represents a LockTimeUpdated event raised by the FineTuningServing contract.
+type FineTuningServingLockTimeUpdated struct {
+	OldLockTime *big.Int
+	NewLockTime *big.Int
+	Raw         types.Log // Blockchain specific contextual infos
+}
+
+// FilterLockTimeUpdated is a free log retrieval operation binding the contract event 0x5707a70527b6cbb892bfe5d8739a8f0643d3212d9b1139bc31c742e731c65270.
+//
+// Solidity: event LockTimeUpdated(uint256 oldLockTime, uint256 newLockTime)
+func (_FineTuningServing *FineTuningServingFilterer) FilterLockTimeUpdated(opts *bind.FilterOpts) (*FineTuningServingLockTimeUpdatedIterator, error) {
+
+	logs, sub, err := _FineTuningServing.contract.FilterLogs(opts, "LockTimeUpdated")
+	if err != nil {
+		return nil, err
+	}
+	return &FineTuningServingLockTimeUpdatedIterator{contract: _FineTuningServing.contract, event: "LockTimeUpdated", logs: logs, sub: sub}, nil
+}
+
+// WatchLockTimeUpdated is a free log subscription operation binding the contract event 0x5707a70527b6cbb892bfe5d8739a8f0643d3212d9b1139bc31c742e731c65270.
+//
+// Solidity: event LockTimeUpdated(uint256 oldLockTime, uint256 newLockTime)
+func (_FineTuningServing *FineTuningServingFilterer) WatchLockTimeUpdated(opts *bind.WatchOpts, sink chan<- *FineTuningServingLockTimeUpdated) (event.Subscription, error) {
+
+	logs, sub, err := _FineTuningServing.contract.WatchLogs(opts, "LockTimeUpdated")
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(FineTuningServingLockTimeUpdated)
+				if err := _FineTuningServing.contract.UnpackLog(event, "LockTimeUpdated", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseLockTimeUpdated is a log parse operation binding the contract event 0x5707a70527b6cbb892bfe5d8739a8f0643d3212d9b1139bc31c742e731c65270.
+//
+// Solidity: event LockTimeUpdated(uint256 oldLockTime, uint256 newLockTime)
+func (_FineTuningServing *FineTuningServingFilterer) ParseLockTimeUpdated(log types.Log) (*FineTuningServingLockTimeUpdated, error) {
+	event := new(FineTuningServingLockTimeUpdated)
+	if err := _FineTuningServing.contract.UnpackLog(event, "LockTimeUpdated", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
 // FineTuningServingOwnershipTransferredIterator is returned from FilterOwnershipTransferred and is used to iterate over the raw logs and unpacked data for OwnershipTransferred events raised by the FineTuningServing contract.
 type FineTuningServingOwnershipTransferredIterator struct {
 	Event *FineTuningServingOwnershipTransferred // Event containing the contract specifics and raw log
@@ -1682,6 +2044,450 @@ func (_FineTuningServing *FineTuningServingFilterer) WatchOwnershipTransferred(o
 func (_FineTuningServing *FineTuningServingFilterer) ParseOwnershipTransferred(log types.Log) (*FineTuningServingOwnershipTransferred, error) {
 	event := new(FineTuningServingOwnershipTransferred)
 	if err := _FineTuningServing.contract.UnpackLog(event, "OwnershipTransferred", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
+// FineTuningServingProviderStakeReturnedIterator is returned from FilterProviderStakeReturned and is used to iterate over the raw logs and unpacked data for ProviderStakeReturned events raised by the FineTuningServing contract.
+type FineTuningServingProviderStakeReturnedIterator struct {
+	Event *FineTuningServingProviderStakeReturned // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *FineTuningServingProviderStakeReturnedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(FineTuningServingProviderStakeReturned)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(FineTuningServingProviderStakeReturned)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *FineTuningServingProviderStakeReturnedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *FineTuningServingProviderStakeReturnedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// FineTuningServingProviderStakeReturned represents a ProviderStakeReturned event raised by the FineTuningServing contract.
+type FineTuningServingProviderStakeReturned struct {
+	Provider common.Address
+	Amount   *big.Int
+	Raw      types.Log // Blockchain specific contextual infos
+}
+
+// FilterProviderStakeReturned is a free log retrieval operation binding the contract event 0x17f7db034d4b59fadec3e44a684cb4396ca10fd036c4e4f718bf06e993715882.
+//
+// Solidity: event ProviderStakeReturned(address indexed provider, uint256 amount)
+func (_FineTuningServing *FineTuningServingFilterer) FilterProviderStakeReturned(opts *bind.FilterOpts, provider []common.Address) (*FineTuningServingProviderStakeReturnedIterator, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.FilterLogs(opts, "ProviderStakeReturned", providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return &FineTuningServingProviderStakeReturnedIterator{contract: _FineTuningServing.contract, event: "ProviderStakeReturned", logs: logs, sub: sub}, nil
+}
+
+// WatchProviderStakeReturned is a free log subscription operation binding the contract event 0x17f7db034d4b59fadec3e44a684cb4396ca10fd036c4e4f718bf06e993715882.
+//
+// Solidity: event ProviderStakeReturned(address indexed provider, uint256 amount)
+func (_FineTuningServing *FineTuningServingFilterer) WatchProviderStakeReturned(opts *bind.WatchOpts, sink chan<- *FineTuningServingProviderStakeReturned, provider []common.Address) (event.Subscription, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.WatchLogs(opts, "ProviderStakeReturned", providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(FineTuningServingProviderStakeReturned)
+				if err := _FineTuningServing.contract.UnpackLog(event, "ProviderStakeReturned", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseProviderStakeReturned is a log parse operation binding the contract event 0x17f7db034d4b59fadec3e44a684cb4396ca10fd036c4e4f718bf06e993715882.
+//
+// Solidity: event ProviderStakeReturned(address indexed provider, uint256 amount)
+func (_FineTuningServing *FineTuningServingFilterer) ParseProviderStakeReturned(log types.Log) (*FineTuningServingProviderStakeReturned, error) {
+	event := new(FineTuningServingProviderStakeReturned)
+	if err := _FineTuningServing.contract.UnpackLog(event, "ProviderStakeReturned", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
+// FineTuningServingProviderStakedIterator is returned from FilterProviderStaked and is used to iterate over the raw logs and unpacked data for ProviderStaked events raised by the FineTuningServing contract.
+type FineTuningServingProviderStakedIterator struct {
+	Event *FineTuningServingProviderStaked // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *FineTuningServingProviderStakedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(FineTuningServingProviderStaked)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(FineTuningServingProviderStaked)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *FineTuningServingProviderStakedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *FineTuningServingProviderStakedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// FineTuningServingProviderStaked represents a ProviderStaked event raised by the FineTuningServing contract.
+type FineTuningServingProviderStaked struct {
+	Provider common.Address
+	Amount   *big.Int
+	Raw      types.Log // Blockchain specific contextual infos
+}
+
+// FilterProviderStaked is a free log retrieval operation binding the contract event 0xcd6dbb0e62eeb71e114bae8b2e2547921dd19209bebf32b595be3e7d247dbbb4.
+//
+// Solidity: event ProviderStaked(address indexed provider, uint256 amount)
+func (_FineTuningServing *FineTuningServingFilterer) FilterProviderStaked(opts *bind.FilterOpts, provider []common.Address) (*FineTuningServingProviderStakedIterator, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.FilterLogs(opts, "ProviderStaked", providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return &FineTuningServingProviderStakedIterator{contract: _FineTuningServing.contract, event: "ProviderStaked", logs: logs, sub: sub}, nil
+}
+
+// WatchProviderStaked is a free log subscription operation binding the contract event 0xcd6dbb0e62eeb71e114bae8b2e2547921dd19209bebf32b595be3e7d247dbbb4.
+//
+// Solidity: event ProviderStaked(address indexed provider, uint256 amount)
+func (_FineTuningServing *FineTuningServingFilterer) WatchProviderStaked(opts *bind.WatchOpts, sink chan<- *FineTuningServingProviderStaked, provider []common.Address) (event.Subscription, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.WatchLogs(opts, "ProviderStaked", providerRule)
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(FineTuningServingProviderStaked)
+				if err := _FineTuningServing.contract.UnpackLog(event, "ProviderStaked", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseProviderStaked is a log parse operation binding the contract event 0xcd6dbb0e62eeb71e114bae8b2e2547921dd19209bebf32b595be3e7d247dbbb4.
+//
+// Solidity: event ProviderStaked(address indexed provider, uint256 amount)
+func (_FineTuningServing *FineTuningServingFilterer) ParseProviderStaked(log types.Log) (*FineTuningServingProviderStaked, error) {
+	event := new(FineTuningServingProviderStaked)
+	if err := _FineTuningServing.contract.UnpackLog(event, "ProviderStaked", log); err != nil {
+		return nil, err
+	}
+	event.Raw = log
+	return event, nil
+}
+
+// FineTuningServingProviderTEESignerAcknowledgedIterator is returned from FilterProviderTEESignerAcknowledged and is used to iterate over the raw logs and unpacked data for ProviderTEESignerAcknowledged events raised by the FineTuningServing contract.
+type FineTuningServingProviderTEESignerAcknowledgedIterator struct {
+	Event *FineTuningServingProviderTEESignerAcknowledged // Event containing the contract specifics and raw log
+
+	contract *bind.BoundContract // Generic contract to use for unpacking event data
+	event    string              // Event name to use for unpacking event data
+
+	logs chan types.Log        // Log channel receiving the found contract events
+	sub  ethereum.Subscription // Subscription for errors, completion and termination
+	done bool                  // Whether the subscription completed delivering logs
+	fail error                 // Occurred error to stop iteration
+}
+
+// Next advances the iterator to the subsequent event, returning whether there
+// are any more events found. In case of a retrieval or parsing error, false is
+// returned and Error() can be queried for the exact failure.
+func (it *FineTuningServingProviderTEESignerAcknowledgedIterator) Next() bool {
+	// If the iterator failed, stop iterating
+	if it.fail != nil {
+		return false
+	}
+	// If the iterator completed, deliver directly whatever's available
+	if it.done {
+		select {
+		case log := <-it.logs:
+			it.Event = new(FineTuningServingProviderTEESignerAcknowledged)
+			if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+				it.fail = err
+				return false
+			}
+			it.Event.Raw = log
+			return true
+
+		default:
+			return false
+		}
+	}
+	// Iterator still in progress, wait for either a data or an error event
+	select {
+	case log := <-it.logs:
+		it.Event = new(FineTuningServingProviderTEESignerAcknowledged)
+		if err := it.contract.UnpackLog(it.Event, it.event, log); err != nil {
+			it.fail = err
+			return false
+		}
+		it.Event.Raw = log
+		return true
+
+	case err := <-it.sub.Err():
+		it.done = true
+		it.fail = err
+		return it.Next()
+	}
+}
+
+// Error returns any retrieval or parsing error occurred during filtering.
+func (it *FineTuningServingProviderTEESignerAcknowledgedIterator) Error() error {
+	return it.fail
+}
+
+// Close terminates the iteration process, releasing any pending underlying
+// resources.
+func (it *FineTuningServingProviderTEESignerAcknowledgedIterator) Close() error {
+	it.sub.Unsubscribe()
+	return nil
+}
+
+// FineTuningServingProviderTEESignerAcknowledged represents a ProviderTEESignerAcknowledged event raised by the FineTuningServing contract.
+type FineTuningServingProviderTEESignerAcknowledged struct {
+	Provider         common.Address
+	TeeSignerAddress common.Address
+	Acknowledged     bool
+	Raw              types.Log // Blockchain specific contextual infos
+}
+
+// FilterProviderTEESignerAcknowledged is a free log retrieval operation binding the contract event 0x4909107c46469d21135443e891c6ecae55b5baa31b338d50f391935308b08f89.
+//
+// Solidity: event ProviderTEESignerAcknowledged(address indexed provider, address indexed teeSignerAddress, bool acknowledged)
+func (_FineTuningServing *FineTuningServingFilterer) FilterProviderTEESignerAcknowledged(opts *bind.FilterOpts, provider []common.Address, teeSignerAddress []common.Address) (*FineTuningServingProviderTEESignerAcknowledgedIterator, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+	var teeSignerAddressRule []interface{}
+	for _, teeSignerAddressItem := range teeSignerAddress {
+		teeSignerAddressRule = append(teeSignerAddressRule, teeSignerAddressItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.FilterLogs(opts, "ProviderTEESignerAcknowledged", providerRule, teeSignerAddressRule)
+	if err != nil {
+		return nil, err
+	}
+	return &FineTuningServingProviderTEESignerAcknowledgedIterator{contract: _FineTuningServing.contract, event: "ProviderTEESignerAcknowledged", logs: logs, sub: sub}, nil
+}
+
+// WatchProviderTEESignerAcknowledged is a free log subscription operation binding the contract event 0x4909107c46469d21135443e891c6ecae55b5baa31b338d50f391935308b08f89.
+//
+// Solidity: event ProviderTEESignerAcknowledged(address indexed provider, address indexed teeSignerAddress, bool acknowledged)
+func (_FineTuningServing *FineTuningServingFilterer) WatchProviderTEESignerAcknowledged(opts *bind.WatchOpts, sink chan<- *FineTuningServingProviderTEESignerAcknowledged, provider []common.Address, teeSignerAddress []common.Address) (event.Subscription, error) {
+
+	var providerRule []interface{}
+	for _, providerItem := range provider {
+		providerRule = append(providerRule, providerItem)
+	}
+	var teeSignerAddressRule []interface{}
+	for _, teeSignerAddressItem := range teeSignerAddress {
+		teeSignerAddressRule = append(teeSignerAddressRule, teeSignerAddressItem)
+	}
+
+	logs, sub, err := _FineTuningServing.contract.WatchLogs(opts, "ProviderTEESignerAcknowledged", providerRule, teeSignerAddressRule)
+	if err != nil {
+		return nil, err
+	}
+	return event.NewSubscription(func(quit <-chan struct{}) error {
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case log := <-logs:
+				// New log arrived, parse the event and forward to the user
+				event := new(FineTuningServingProviderTEESignerAcknowledged)
+				if err := _FineTuningServing.contract.UnpackLog(event, "ProviderTEESignerAcknowledged", log); err != nil {
+					return err
+				}
+				event.Raw = log
+
+				select {
+				case sink <- event:
+				case err := <-sub.Err():
+					return err
+				case <-quit:
+					return nil
+				}
+			case err := <-sub.Err():
+				return err
+			case <-quit:
+				return nil
+			}
+		}
+	}), nil
+}
+
+// ParseProviderTEESignerAcknowledged is a log parse operation binding the contract event 0x4909107c46469d21135443e891c6ecae55b5baa31b338d50f391935308b08f89.
+//
+// Solidity: event ProviderTEESignerAcknowledged(address indexed provider, address indexed teeSignerAddress, bool acknowledged)
+func (_FineTuningServing *FineTuningServingFilterer) ParseProviderTEESignerAcknowledged(log types.Log) (*FineTuningServingProviderTEESignerAcknowledged, error) {
+	event := new(FineTuningServingProviderTEESignerAcknowledged)
+	if err := _FineTuningServing.contract.UnpackLog(event, "ProviderTEESignerAcknowledged", log); err != nil {
 		return nil, err
 	}
 	event.Raw = log
@@ -2064,18 +2870,18 @@ func (it *FineTuningServingServiceUpdatedIterator) Close() error {
 
 // FineTuningServingServiceUpdated represents a ServiceUpdated event raised by the FineTuningServing contract.
 type FineTuningServingServiceUpdated struct {
-	User           common.Address
-	Url            string
-	Quota          Quota
-	PricePerToken  *big.Int
-	ProviderSigner common.Address
-	Occupied       bool
-	Raw            types.Log // Blockchain specific contextual infos
+	User             common.Address
+	Url              string
+	Quota            Quota
+	PricePerToken    *big.Int
+	TeeSignerAddress common.Address
+	Occupied         bool
+	Raw              types.Log // Blockchain specific contextual infos
 }
 
 // FilterServiceUpdated is a free log retrieval operation binding the contract event 0x9657518f02d23efc8a15c042c006a06464dd791f65394ff87310a287c6949462.
 //
-// Solidity: event ServiceUpdated(address indexed user, string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address providerSigner, bool occupied)
+// Solidity: event ServiceUpdated(address indexed user, string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address teeSignerAddress, bool occupied)
 func (_FineTuningServing *FineTuningServingFilterer) FilterServiceUpdated(opts *bind.FilterOpts, user []common.Address) (*FineTuningServingServiceUpdatedIterator, error) {
 
 	var userRule []interface{}
@@ -2092,7 +2898,7 @@ func (_FineTuningServing *FineTuningServingFilterer) FilterServiceUpdated(opts *
 
 // WatchServiceUpdated is a free log subscription operation binding the contract event 0x9657518f02d23efc8a15c042c006a06464dd791f65394ff87310a287c6949462.
 //
-// Solidity: event ServiceUpdated(address indexed user, string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address providerSigner, bool occupied)
+// Solidity: event ServiceUpdated(address indexed user, string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address teeSignerAddress, bool occupied)
 func (_FineTuningServing *FineTuningServingFilterer) WatchServiceUpdated(opts *bind.WatchOpts, sink chan<- *FineTuningServingServiceUpdated, user []common.Address) (event.Subscription, error) {
 
 	var userRule []interface{}
@@ -2134,7 +2940,7 @@ func (_FineTuningServing *FineTuningServingFilterer) WatchServiceUpdated(opts *b
 
 // ParseServiceUpdated is a log parse operation binding the contract event 0x9657518f02d23efc8a15c042c006a06464dd791f65394ff87310a287c6949462.
 //
-// Solidity: event ServiceUpdated(address indexed user, string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address providerSigner, bool occupied)
+// Solidity: event ServiceUpdated(address indexed user, string url, (uint256,uint256,uint256,uint256,string) quota, uint256 pricePerToken, address teeSignerAddress, bool occupied)
 func (_FineTuningServing *FineTuningServingFilterer) ParseServiceUpdated(log types.Log) (*FineTuningServingServiceUpdated, error) {
 	event := new(FineTuningServingServiceUpdated)
 	if err := _FineTuningServing.contract.UnpackLog(event, "ServiceUpdated", log); err != nil {
