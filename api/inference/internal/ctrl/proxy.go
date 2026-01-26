@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -13,7 +14,16 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
-func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte) (*http.Request, error) {
+func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte, svcType string) (*http.Request, error) {
+	// For chatbot requests, ensure stream_options is set for stream requests
+	if svcType == "chatbot" {
+		modifiedBody, err := c.EnsureStreamOptions(reqBody)
+		if err != nil {
+			return nil, errors.Wrap(err, "ensure stream options")
+		}
+		reqBody = modifiedBody
+	}
+
 	var body io.Reader
 	if len(reqBody) > 0 {
 		body = bytes.NewBuffer(reqBody)
@@ -44,9 +54,8 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 }
 
 func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, outputPrice string, charing bool) error {
-	// Configure HTTP client with timeouts to prevent resource leaks
-	client := &http.Client{}
-
+	// Use shared HTTP client for connection reuse
+	// The shared client is initialized with appropriate timeout and connection pool settings
 	// back up body for other usage
 	var body []byte
 	if req.Body != nil {
@@ -59,8 +68,12 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		req.Body = io.NopCloser(bytes.NewBuffer(body))
 	}
 
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// Skip error logging for telemetry endpoints to reduce noise
+		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
+			ctx.Set("ignoreError", true)
+		}
 		c.handleBrokerError(ctx, err, "call proxied service")
 		return err
 	}
@@ -75,6 +88,10 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	c.addNoCacheHeaders(ctx)
 
 	if resp.StatusCode != http.StatusOK {
+		// 4xx errors are client errors, should be ignored in error tracking
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			ctx.Set("ignoreError", true)
+		}
 		ctx.Writer.WriteHeader(resp.StatusCode)
 		c.handleServiceError(ctx, resp.Body)
 		return err
@@ -175,7 +192,16 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 }
 
 func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
-	c.logger.Errorf("Proxy broker error: %v, context: %s", err, context)
+	// Defensive check: if err is nil, return early to prevent panic
+	if err == nil {
+		c.logger.Warnf("handleBrokerError called with nil error, context: %s", context)
+		return
+	}
+
+	// Skip logging if ignoreError flag is set
+	if ignoreError, exists := ctx.Get("ignoreError"); !exists || !ignoreError.(bool) {
+		c.logger.Errorf("Proxy broker error in ctrl: %v, context: %s", err, context)
+	}
 	info := "Provider proxy: handle proxied service response"
 	if context != "" {
 		info += (", " + context)
@@ -184,17 +210,74 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 }
 
 func (c *Ctrl) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
-	
+
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		c.logger.Errorf("Failed to read service error response body: %v", err)
 		return
 	}
-	
+
 	// Log the actual service error content for debugging
-	c.logger.Errorf("Service returned error response: %s", string(respBody))
-	
+	// Skip logging for telemetry endpoints to reduce noise
+	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
+		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", string(respBody), ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
+	}
+
 	if _, err := ctx.Writer.Write(respBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
 	}
+}
+
+// EnsureStreamOptions ensures that stream requests include stream_options with include_usage: true
+// This is required for some LLM services to return usage information in streaming responses
+func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
+	var bodyMap map[string]interface{}
+
+	err := json.Unmarshal(body, &bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to parse JSON body")
+	}
+
+	// Check if this is a stream request
+	stream, hasStream := bodyMap["stream"]
+	if !hasStream {
+		return body, nil
+	}
+
+	streamBool, ok := stream.(bool)
+	if !ok || !streamBool {
+		return body, nil
+	}
+
+	// Check if stream_options already exists
+	streamOptions, hasStreamOptions := bodyMap["stream_options"]
+	if hasStreamOptions {
+		// Check if include_usage is already set
+		if opts, ok := streamOptions.(map[string]interface{}); ok {
+			if _, hasIncludeUsage := opts["include_usage"]; hasIncludeUsage {
+				// Already configured, return original body
+				return body, nil
+			}
+			// stream_options exists but include_usage is not set, add it
+			opts["include_usage"] = true
+		} else {
+			// stream_options exists but is not a map, replace it
+			bodyMap["stream_options"] = map[string]interface{}{
+				"include_usage": true,
+			}
+		}
+	} else {
+		// stream_options doesn't exist, add it
+		bodyMap["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	}
+
+	// Marshal back to JSON
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to marshal modified JSON body")
+	}
+
+	return modifiedBody, nil
 }
