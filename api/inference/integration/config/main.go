@@ -287,7 +287,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:1b9824067db3f32410aaaa7d000afbf0542331b00ea8729e8162cd48c5ec9feb
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -361,7 +361,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:1b9824067db3f32410aaaa7d000afbf0542331b00ea8729e8162cd48c5ec9feb
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if eq .TeeNode "hardhat"}}
@@ -411,7 +411,7 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:25ffd3c777773cc0688e23c44eb5ae4df8b0e0bf2c759ece1f95f09b62d580cd
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:1b9824067db3f32410aaaa7d000afbf0542331b00ea8729e8162cd48c5ec9feb
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
@@ -1092,7 +1092,7 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		config.Controller = ControllerConfig{
 			Enable:         true,
 			AdminAddresses: []string{controllerAdminAddress},
-			Image:          "ghcr.io/0gfoundation/0g-serving-broker:latest",
+			Image:          "ghcr.io/0gfoundation/0g-serving-broker@sha256:1b9824067db3f32410aaaa7d000afbf0542331b00ea8729e8162cd48c5ec9feb",
 		}
 	}
 
