@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -22,6 +23,20 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			return nil, errors.Wrap(err, "ensure stream options")
 		}
 		reqBody = modifiedBody
+	}
+
+	// For text-to-image requests, ensure wait=true query parameter is set
+	if svcType == "text-to-image" {
+		parsedURL, err := url.Parse(targetURL)
+		if err != nil {
+			return nil, errors.Wrap(err, "parse target URL")
+		}
+
+		// Force wait=true query parameter, overriding any existing value
+		queryParams := parsedURL.Query()
+		queryParams.Set("wait", "true")
+		parsedURL.RawQuery = queryParams.Encode()
+		targetURL = parsedURL.String()
 	}
 
 	var body io.Reader
