@@ -16,6 +16,8 @@ var (
 		"0x2084fdd904c9a3317dde98147d4e7778a40e076b5b0eb469f7a8f27ae5b13e7f": "/app/finetune.py",
 		"0xcb42b5ca9e998c82dd239ef2d20d22a4ae16b3dc0ce0a855c93b52c7c2bab6dc": "/app/finetune.py",
 		"0x02ed6d3889bebad9e2cd4008066478654c0886b12ad25ea7cf7d31df3441182e": "/app/CocktailSGD/finetune-cocktail.py",
+		// Qwen2.5-0.5B-Instruct (turbo)
+		"0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "/app/train_lora.py",
 	}
 
 	ENV_MAP = map[string][]string{
