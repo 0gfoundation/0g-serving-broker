@@ -142,32 +142,18 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 
 // prepareModel prepares the pre-trained model, either from local path or 0G Storage
 func (s *Setup) prepareModel(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
+	// First check modelLocalPaths config (works for any model including predefined)
+	if s.config.Service.ModelLocalPaths != nil {
+		if localPath, ok := s.config.Service.ModelLocalPaths[task.PreTrainedModelHash]; ok && localPath != "" {
+			return s.useLocalModel(localPath, paths)
+		}
+	}
+
 	// Check if this is a customized model with local path
 	if task.ModelType == db.CustomizedModel {
 		customizedModel, ok := s.customizedModels[common.HexToHash(task.PreTrainedModelHash)]
 		if ok && customizedModel.LocalPath != "" {
-			// Use local model path - create symlink instead of downloading
-			s.logger.Infof("Using local model from: %s", customizedModel.LocalPath)
-
-			// Verify local path exists
-			if _, err := os.Stat(customizedModel.LocalPath); os.IsNotExist(err) {
-				return fmt.Errorf("local model path does not exist: %s", customizedModel.LocalPath)
-			}
-
-			// Remove existing model folder if exists
-			if err := os.RemoveAll(paths.PretrainedModel); err != nil {
-				s.logger.Errorf("Error removing existing model folder: %v\n", err)
-				return err
-			}
-
-			// Create symlink to local model
-			if err := os.Symlink(customizedModel.LocalPath, paths.PretrainedModel); err != nil {
-				s.logger.Errorf("Error creating symlink to local model: %v\n", err)
-				return err
-			}
-
-			s.logger.Infof("Created symlink from %s to %s", customizedModel.LocalPath, paths.PretrainedModel)
-			return nil
+			return s.useLocalModel(customizedModel.LocalPath, paths)
 		}
 	}
 
@@ -189,6 +175,31 @@ func (s *Setup) prepareModel(ctx context.Context, task *db.Task, paths *utils.Ta
 		}
 	}
 
+	return nil
+}
+
+// useLocalModel creates a symlink to a local model path instead of downloading
+func (s *Setup) useLocalModel(localPath string, paths *utils.TaskPaths) error {
+	s.logger.Infof("Using local model from: %s", localPath)
+
+	// Verify local path exists
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		return fmt.Errorf("local model path does not exist: %s", localPath)
+	}
+
+	// Remove existing model folder if exists
+	if err := os.RemoveAll(paths.PretrainedModel); err != nil {
+		s.logger.Errorf("Error removing existing model folder: %v\n", err)
+		return err
+	}
+
+	// Create symlink to local model
+	if err := os.Symlink(localPath, paths.PretrainedModel); err != nil {
+		s.logger.Errorf("Error creating symlink to local model: %v\n", err)
+		return err
+	}
+
+	s.logger.Infof("Created symlink from %s to %s", localPath, paths.PretrainedModel)
 	return nil
 }
 
