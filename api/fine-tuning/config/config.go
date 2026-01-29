@@ -28,6 +28,9 @@ type Service struct {
 	} `yaml:"quota"`
 	PricePerToken    int64             `yaml:"pricePerToken"`
 	CustomizedModels []CustomizedModel `yaml:"customizedModels"`
+	// ModelLocalPaths maps model hash to local file path for any model (including predefined models)
+	// When set, the broker will use the local model instead of downloading from 0G Storage
+	ModelLocalPaths map[string]string `yaml:"modelLocalPaths"`
 }
 
 func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
