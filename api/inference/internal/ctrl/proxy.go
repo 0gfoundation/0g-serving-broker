@@ -89,6 +89,11 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
 			ctx.Set("ignoreError", true)
 		}
+		// Skip error logging for context canceled errors (client-side cancellations)
+		// These are normal when users close browser, refresh page, or lose connection
+		if strings.Contains(err.Error(), "context canceled") {
+			ctx.Set("ignoreError", true)
+		}
 		c.handleBrokerError(ctx, err, "call proxied service")
 		return err
 	}
