@@ -89,6 +89,7 @@ type CustomizedModel struct {
 	Description    string           `yaml:"description" json:"description"`
 	Tokenizer      string           `yaml:"tokenizer" json:"tokenizer"`
 	UsageFile      string           `yaml:"usageFile" json:"usageFile"`
+	LocalPath      string           `yaml:"localPath" json:"localPath"` // Local path to pre-downloaded model, skip 0G Storage download if set
 }
 
 type Images struct {
