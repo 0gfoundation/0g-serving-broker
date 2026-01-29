@@ -15,6 +15,25 @@ service:
     storage: 10
     gpuType: "H200"
     gpuCount: 1
+  # Customized models with optional local path support
+  # If localPath is set, the broker will use the local model instead of downloading from 0G Storage
+  customizedModels:
+    - name: "Qwen2.5-0.5B-Instruct"
+      hash: "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7"
+      image: "0glab/qwen-lora:latest"
+      dataType: "text"
+      trainingScript: "/app/train_lora.py"
+      description: "Qwen2.5-0.5B LoRA fine-tuning"
+      tokenizer: "Qwen/Qwen2.5-0.5B-Instruct"
+      # localPath: "/path/to/local/model"  # Optional: skip 0G Storage download if model is pre-downloaded
+    - name: "Qwen2.5-32B-Instruct"
+      hash: "0x..."  # Replace with actual hash
+      image: "0glab/qwen-lora:latest"
+      dataType: "text"
+      trainingScript: "/app/train_lora.py"
+      description: "Qwen2.5-32B LoRA fine-tuning"
+      tokenizer: "Qwen/Qwen2.5-32B-Instruct"
+      localPath: "/dstack/persistent/models/Qwen2.5-32B-Instruct"  # Use pre-downloaded model
 storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
   indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"
