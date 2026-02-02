@@ -1,8 +1,10 @@
 package ctrl
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -194,4 +196,103 @@ func (c *Ctrl) validateModelType(task *schema.Task) error {
 
 func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
 	return c.db.PendingTrainingTaskCount()
+}
+
+// GetLoRAModel returns the path to the LoRA model zip file for a completed task
+func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
+	task, err := c.db.GetTask(id)
+	if err != nil {
+		return "", errors.Wrap(err, "get task from db")
+	}
+
+	// Verify user owns this task
+	if task.UserAddress != userAddress {
+		return "", errors.New("unauthorized: task does not belong to this user")
+	}
+
+	// Check if task is trained (at least)
+	progress := task.Progress
+	if progress != db.ProgressStateTrained.String() &&
+		progress != db.ProgressStateDelivering.String() &&
+		progress != db.ProgressStateDelivered.String() &&
+		progress != db.ProgressStateUserAcknowledged.String() &&
+		progress != db.ProgressStateFinished.String() {
+		return "", errors.New("task is not trained yet")
+	}
+
+	// Build paths
+	paths := utils.NewTaskPaths(filepath.Join(os.TempDir(), id.String()))
+
+	// Create zip of LoRA output if not exists
+	loraZipPath := filepath.Join(os.TempDir(), id.String(), "lora_output.zip")
+	if _, err := os.Stat(loraZipPath); os.IsNotExist(err) {
+		// Zip the output directory
+		if _, err := os.Stat(paths.Output); os.IsNotExist(err) {
+			return "", errors.New("LoRA output not found")
+		}
+
+		// Create zip file
+		if err := zipDirectory(paths.Output, loraZipPath); err != nil {
+			return "", errors.Wrap(err, "failed to create LoRA zip")
+		}
+	}
+
+	return loraZipPath, nil
+}
+
+// zipDirectory creates a zip file from a directory
+func zipDirectory(sourceDir, destZip string) error {
+	zipFile, err := os.Create(destZip)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	archive := zip.NewWriter(zipFile)
+	defer archive.Close()
+
+	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Get relative path
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Skip the root directory
+		if relPath == "." {
+			return nil
+		}
+
+		// Create header
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+		header.Method = zip.Deflate
+
+		if info.IsDir() {
+			header.Name += "/"
+			_, err = archive.CreateHeader(header)
+			return err
+		}
+
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		return err
+	})
 }
