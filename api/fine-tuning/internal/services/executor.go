@@ -212,14 +212,53 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 		memory = info.MemTotal
 	}
 
-	hostConfig := &container.HostConfig{
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeBind,
-				Source: paths.BasePath,
-				Target: utils.ContainerBasePath,
-			},
+	mounts := []mount.Mount{
+		{
+			Type:   mount.TypeBind,
+			Source: paths.BasePath,
+			Target: utils.ContainerBasePath,
 		},
+	}
+
+	// Check if model path is a symlink (e.g., for local model paths)
+	// If so, resolve the symlink and add an additional mount for the actual model directory
+	if linkTarget, err := os.Readlink(paths.PretrainedModel); err == nil {
+		c.logger.Infof("Model path is symlink, adding mount for actual path: %s -> %s", paths.PretrainedModel, linkTarget)
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   linkTarget,
+			Target:   paths.ContainerPretrainedModel,
+			ReadOnly: true,
+		})
+	}
+
+	// Check if dataset path is a symlink (e.g., for local dataset paths)
+	// If so, resolve the symlink and add an additional mount for the actual dataset directory
+	if linkTarget, err := os.Readlink(paths.Dataset); err == nil {
+		c.logger.Infof("Dataset path is symlink, adding mount for actual path: %s -> %s", paths.Dataset, linkTarget)
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   linkTarget,
+			Target:   paths.ContainerDataset,
+			ReadOnly: true,
+		})
+	}
+
+	// Check if fixed training script exists and mount it
+	// This fixes the file:// prefix issue with fsspec in newer datasets library versions
+	fixedScriptPath := "/tmp/train_lora_fixed.py"
+	if _, err := os.Stat(fixedScriptPath); err == nil {
+		c.logger.Infof("Using fixed training script from: %s", fixedScriptPath)
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   fixedScriptPath,
+			Target:   "/app/train_lora.py",
+			ReadOnly: true,
+		})
+	}
+
+	hostConfig := &container.HostConfig{
+		Mounts:  mounts,
 		Runtime: runtime,
 		Resources: container.Resources{
 			Memory:         memory,
