@@ -28,14 +28,15 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - TOKEN=PHALA@2025
     ports:
-      - "#PORT#:3080"
+      - "80:3080"
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/docker.sock:/var/run/docker.sock
-      - /dstack/user_config:/etc/config.yaml
+      - ./config.yaml:/etc/config.yaml
       - /tmp:/tmp
       - /tmp/0g-transformer-bridge:/opt/transformer-bridge
       - ./models:/fine-tuning/execution/models
+      - /dstack/persistent:/dstack/persistent
     command: 0g-fine-tuning-server
     networks:
       - localhost
@@ -44,7 +45,6 @@ services:
       options:
         max-size: "100m"
         max-file: "5"
-    runtime: nvidia
     depends_on:
       mysql:
         condition: service_healthy
