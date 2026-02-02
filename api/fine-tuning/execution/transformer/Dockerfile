@@ -19,9 +19,12 @@ RUN git clone https://github.com/0glabs/CocktailSGD.git
 RUN mkdir /app/mnt
 COPY transformer/finetune-img.py /app/finetune-img.py
 COPY transformer/finetune.py /app/finetune.py
+COPY transformer/train_lora.py /app/train_lora.py
 
 # Install additional Python libraries 
-RUN pip install transformers==4.38.0 datasets evaluate accelerate==0.28.0 toml sentencepiece netifaces zstandard
+# Added peft and bitsandbytes for LoRA training
+RUN pip install transformers==4.52.4 datasets evaluate accelerate==0.28.0 toml sentencepiece netifaces zstandard \
+    peft bitsandbytes scipy
 
 # Set default command
 CMD ["bash"]
