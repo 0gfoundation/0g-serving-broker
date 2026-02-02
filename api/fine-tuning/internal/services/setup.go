@@ -140,12 +140,20 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 	return nil
 }
 
-// prepareModel prepares the pre-trained model, either from local path or 0G Storage
+// prepareModel prepares the pre-trained model, either from local path, HuggingFace, or 0G Storage
 func (s *Setup) prepareModel(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
 	// First check modelLocalPaths config (works for any model including predefined)
 	if s.config.Service.ModelLocalPaths != nil {
 		if localPath, ok := s.config.Service.ModelLocalPaths[task.PreTrainedModelHash]; ok && localPath != "" {
-			return s.useLocalModel(localPath, paths)
+			err := s.useLocalModel(localPath, paths)
+			if err == nil {
+				return nil
+			}
+			s.logger.Warnf("Failed to use local model: %v, trying HuggingFace fallback", err)
+			// Try HuggingFace fallback
+			if hfErr := s.tryHuggingFaceFallback(task.PreTrainedModelHash, paths); hfErr == nil {
+				return nil
+			}
 		}
 	}
 
@@ -153,7 +161,15 @@ func (s *Setup) prepareModel(ctx context.Context, task *db.Task, paths *utils.Ta
 	if task.ModelType == db.CustomizedModel {
 		customizedModel, ok := s.customizedModels[common.HexToHash(task.PreTrainedModelHash)]
 		if ok && customizedModel.LocalPath != "" {
-			return s.useLocalModel(customizedModel.LocalPath, paths)
+			err := s.useLocalModel(customizedModel.LocalPath, paths)
+			if err == nil {
+				return nil
+			}
+			s.logger.Warnf("Failed to use local model: %v, trying HuggingFace fallback", err)
+			// Try HuggingFace fallback
+			if hfErr := s.tryHuggingFaceFallback(task.PreTrainedModelHash, paths); hfErr == nil {
+				return nil
+			}
 		}
 	}
 
@@ -200,6 +216,44 @@ func (s *Setup) useLocalModel(localPath string, paths *utils.TaskPaths) error {
 	}
 
 	s.logger.Infof("Created symlink from %s to %s", localPath, paths.PretrainedModel)
+	return nil
+}
+
+// tryHuggingFaceFallback attempts to download model from HuggingFace if configured
+func (s *Setup) tryHuggingFaceFallback(modelHash string, paths *utils.TaskPaths) error {
+	if s.config.Service.ModelHuggingFaceFallback == nil {
+		return fmt.Errorf("no HuggingFace fallback configured")
+	}
+
+	hfRepo, ok := s.config.Service.ModelHuggingFaceFallback[modelHash]
+	if !ok || hfRepo == "" {
+		return fmt.Errorf("no HuggingFace repo configured for model hash: %s", modelHash)
+	}
+
+	s.logger.Infof("Downloading model from HuggingFace: %s", hfRepo)
+
+	// Remove existing model folder if exists
+	if err := os.RemoveAll(paths.PretrainedModel); err != nil {
+		s.logger.Errorf("Error removing existing model folder: %v\n", err)
+		return err
+	}
+
+	// Create the model directory
+	if err := os.MkdirAll(paths.PretrainedModel, os.ModePerm); err != nil {
+		s.logger.Errorf("Error creating model folder: %v\n", err)
+		return err
+	}
+
+	// Use huggingface-cli to download the model
+	// Command: huggingface-cli download <repo> --local-dir <path>
+	args := []string{"download", hfRepo, "--local-dir", paths.PretrainedModel}
+	output, err := util.RunCommand("huggingface-cli", args, s.logger)
+	if err != nil {
+		s.logger.Errorf("Error downloading from HuggingFace: %v, output: %s\n", err, output)
+		return fmt.Errorf("failed to download from HuggingFace: %v", err)
+	}
+
+	s.logger.Infof("Successfully downloaded model from HuggingFace: %s to %s", hfRepo, paths.PretrainedModel)
 	return nil
 }
 

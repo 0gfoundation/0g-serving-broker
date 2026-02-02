@@ -1,0 +1,43 @@
+contractAddress: 0x4e4158DF35CfdC0ac63264D3E112F5B8E9a5c569
+database:
+  fineTune: root:123456@tcp(mysql:3306)/fineTune?parseTime=true
+networks:
+  ethereum0g:
+    url: "https://evmrpc-testnet.0g.ai"
+    chainID: 16602
+    privateKeys:
+      - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+    transactionLimit: 10000000
+    gasEstimationBuffer: 100000
+images:
+  executionImageName: "qwen-lora:v3"
+  executionMockImageName: "qwen-lora:v3"
+service:
+  servingUrl: "https://d4872603ae17c78f5d3a35318da14daedacf28a8-80.dstack-pha-use2.phala.network"
+  pricePerToken: 1
+  quota:
+    cpuCount: 8
+    memory: 187
+    storage: 900
+    gpuType: "H200"
+    gpuCount: 1
+  customizedModels:
+    - name: "Qwen2.5-0.5B-Instruct"
+      hash: "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7"
+      image: "qwen-lora:v3"
+      dataType: "text"
+      trainingScript: "/app/train_lora.py"
+      description: "Qwen2.5-0.5B LoRA fine-tuning"
+      tokenizer: "Qwen/Qwen2.5-0.5B-Instruct"
+      localPath: "/dstack/persistent/models/Qwen2.5-0.5B-Instruct"
+storageClient:
+  indexerStandard: "https://indexer-storage-testnet-turbo.0g.ai"
+  indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"
+  uploadArgs:
+    finalityRequired: false
+    tags: "0x"
+    expectedReplica: 1
+    skipTx: false
+    fragmentSize: 4294967296
+logger:
+  level: "debug"
