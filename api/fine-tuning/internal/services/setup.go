@@ -224,38 +224,31 @@ func (s *Setup) useLocalModel(localPath string, paths *utils.TaskPaths) error {
 	return nil
 }
 
-// useLocalDataset copies or symlinks a local dataset path instead of downloading
+// useLocalDataset creates a symlink to a local dataset path instead of downloading
 func (s *Setup) useLocalDataset(localPath string, paths *utils.TaskPaths) error {
 	// Verify local path exists
-	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+	info, err := os.Stat(localPath)
+	if os.IsNotExist(err) {
 		return fmt.Errorf("local dataset path does not exist: %s", localPath)
 	}
 
-	// Remove existing dataset folder if exists
+	// Remove existing dataset file/folder if exists
 	if err := os.RemoveAll(paths.Dataset); err != nil {
-		s.logger.Errorf("Error removing existing dataset folder: %v\n", err)
+		s.logger.Errorf("Error removing existing dataset: %v\n", err)
 		return err
 	}
 
-	// Create parent directory if needed
-	if err := os.MkdirAll(paths.Dataset, os.ModePerm); err != nil {
-		s.logger.Errorf("Error creating dataset folder: %v\n", err)
+	// Create symlink to local dataset (works for both files and directories)
+	if err := os.Symlink(localPath, paths.Dataset); err != nil {
+		s.logger.Errorf("Error creating symlink to local dataset: %v\n", err)
 		return err
 	}
 
-	// Copy the dataset file to the expected location
-	input, err := os.ReadFile(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to read local dataset: %v", err)
+	if info.IsDir() {
+		s.logger.Infof("Created symlink to local dataset directory from %s to %s", localPath, paths.Dataset)
+	} else {
+		s.logger.Infof("Created symlink to local dataset file from %s to %s", localPath, paths.Dataset)
 	}
-
-	// Write to dataset folder with expected filename
-	datasetFile := paths.Dataset + "/dataset.jsonl"
-	if err := os.WriteFile(datasetFile, input, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to write dataset: %v", err)
-	}
-
-	s.logger.Infof("Copied local dataset from %s to %s", localPath, datasetFile)
 	return nil
 }
 
