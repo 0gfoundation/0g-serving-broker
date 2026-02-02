@@ -60,7 +60,7 @@ func (s *Setup) useLocalModel(localPath string, paths *utils.TaskPaths) error {
 
 ### Step 2: 配置 Broker
 
-在 `config.yaml` 中添加 `modelLocalPaths` 配置：
+在 `config.yaml` 中添加 `modelLocalPaths` 和 `modelHuggingFaceFallback` 配置：
 
 ```yaml
 service:
@@ -72,9 +72,18 @@ service:
     storage: 900
     gpuType: "H200"
     gpuCount: 1
+  # Local model paths - used first
   modelLocalPaths:
     "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "/dstack/persistent/models/Qwen2.5-0.5B-Instruct"
+  # HuggingFace fallback - used if local path fails
+  modelHuggingFaceFallback:
+    "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "Qwen/Qwen2.5-0.5B-Instruct"
 ```
+
+**模型加载优先级**：
+1. 本地路径 (`modelLocalPaths`) - 最高优先级
+2. HuggingFace 下载 (`modelHuggingFaceFallback`) - 本地路径失败时的备用方案
+3. 0G Storage 下载 - 默认方案
 
 ### Step 3: 部署 Broker 容器
 
