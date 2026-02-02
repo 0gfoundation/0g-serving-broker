@@ -34,6 +34,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/user/:userAddress/task/:taskID", h.GetTask)
 
 	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
+	group.GET("/user/:userAddress/task/:taskID/lora", h.DownloadLoRA)
 	group.GET("/task/pending", h.GetPendingTrainingTaskCount)
 
 	group.GET("/quote", middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)

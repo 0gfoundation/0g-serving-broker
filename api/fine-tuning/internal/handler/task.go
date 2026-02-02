@@ -180,3 +180,38 @@ func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 
 	ctx.String(http.StatusOK, strconv.Itoa(int(counter)))
 }
+
+// DownloadLoRA godoc
+// @Summary Download LoRA model from TEE
+// @Description Download the trained LoRA adapter directly from TEE. This is a fallback when 0G Storage download fails.
+// @Tags Task
+// @Produce application/zip
+// @Router /user/{userAddress}/task/{taskID}/lora [get]
+// @Param userAddress path string true "user address"
+// @Param taskID path string true "task ID"
+// @Success 200 {file} file "lora_model.zip"
+func (h *Handler) DownloadLoRA(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	id, err := uuid.Parse(ctx.Param("taskID"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
+
+	filePath, err := h.ctrl.GetLoRAModel(&id, userAddress)
+	if err != nil {
+		handleBrokerError(ctx, err, "get LoRA model")
+		return
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "LoRA model not found. Task may not be trained yet."})
+		return
+	}
+
+	ctx.Header("Content-Description", "File Transfer")
+	ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=lora_model_%s.zip", id.String()))
+	ctx.Header("Content-Type", "application/zip")
+	ctx.File(filePath)
+}
