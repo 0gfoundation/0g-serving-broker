@@ -105,27 +105,29 @@ func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
 }
 
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-	// Check if dataset has a local path configured (skip 0G Storage download)
+	var localErr error
+
+	// Step 1: Try local dataset path if configured
 	if s.config.Service.DatasetLocalPaths != nil {
 		if localPath, ok := s.config.Service.DatasetLocalPaths[task.DatasetHash]; ok && localPath != "" {
-			if err := s.useLocalDataset(localPath, paths); err == nil {
+			localErr = s.useLocalDataset(localPath, paths)
+			if localErr == nil {
 				s.logger.Infof("Using local dataset from: %s", localPath)
-			} else {
-				s.logger.Warnf("Failed to use local dataset: %v, falling back to 0G Storage", err)
-				if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
-					return err
-				}
+				goto prepareModel
 			}
-		} else {
-			if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
-				return err
-			}
-		}
-	} else {
-		if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
-			return err
+			s.logger.Warnf("Failed to use local dataset: %v, falling back to 0G Storage", localErr)
 		}
 	}
+
+	// Step 2: Fall back to 0G Storage
+	if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
+		if localErr != nil {
+			s.logger.Errorf("Local dataset error: %v", localErr)
+		}
+		return fmt.Errorf("dataset sources failed - local: %v, 0G Storage: %v", localErr, err)
+	}
+
+prepareModel:
 
 	// Check if model has a local path configured (skip 0G Storage download)
 	if err := s.prepareModel(ctx, task, paths); err != nil {
@@ -145,45 +147,63 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 	return nil
 }
 
-// prepareModel prepares the pre-trained model, either from local path, HuggingFace, or 0G Storage
+// prepareModel prepares the pre-trained model with fallback chain:
+// 1. Local path (symlink) - fastest, no download needed
+// 2. HuggingFace download - downloads to task directory
+// 3. 0G Storage download - last resort
 func (s *Setup) prepareModel(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-	// First check modelLocalPaths config (works for any model including predefined)
+	var localPathErr, hfErr error
+
+	// Step 1: Try local path from modelLocalPaths config
 	if s.config.Service.ModelLocalPaths != nil {
 		if localPath, ok := s.config.Service.ModelLocalPaths[task.PreTrainedModelHash]; ok && localPath != "" {
-			err := s.useLocalModel(localPath, paths)
-			if err == nil {
+			localPathErr = s.useLocalModel(localPath, paths)
+			if localPathErr == nil {
 				return nil
 			}
-			s.logger.Warnf("Failed to use local model: %v, trying HuggingFace fallback", err)
-			// Try HuggingFace fallback
-			if hfErr := s.tryHuggingFaceFallback(task.PreTrainedModelHash, paths); hfErr == nil {
-				return nil
-			}
+			s.logger.Warnf("Failed to use local model from modelLocalPaths: %v", localPathErr)
 		}
 	}
 
-	// Check if this is a customized model with local path
+	// Step 1b: Try local path from customized model config
 	if task.ModelType == db.CustomizedModel {
 		customizedModel, ok := s.customizedModels[common.HexToHash(task.PreTrainedModelHash)]
 		if ok && customizedModel.LocalPath != "" {
-			err := s.useLocalModel(customizedModel.LocalPath, paths)
-			if err == nil {
+			localPathErr = s.useLocalModel(customizedModel.LocalPath, paths)
+			if localPathErr == nil {
 				return nil
 			}
-			s.logger.Warnf("Failed to use local model: %v, trying HuggingFace fallback", err)
-			// Try HuggingFace fallback
-			if hfErr := s.tryHuggingFaceFallback(task.PreTrainedModelHash, paths); hfErr == nil {
-				return nil
-			}
+			s.logger.Warnf("Failed to use local model from customized config: %v", localPathErr)
 		}
 	}
 
-	// Fall back to downloading from 0G Storage
+	// Step 2: Try HuggingFace fallback (downloads to task directory, no symlink needed)
+	if s.config.Service.ModelHuggingFaceFallback != nil {
+		if _, ok := s.config.Service.ModelHuggingFaceFallback[task.PreTrainedModelHash]; ok {
+			s.logger.Infof("Attempting HuggingFace fallback for model: %s", task.PreTrainedModelHash)
+			hfErr = s.tryHuggingFaceFallback(task.PreTrainedModelHash, paths)
+			if hfErr == nil {
+				return nil
+			}
+			s.logger.Warnf("Failed to download from HuggingFace: %v", hfErr)
+		}
+	}
+
+	// Step 3: Fall back to downloading from 0G Storage
+	s.logger.Infof("Attempting 0G Storage download for model: %s", task.PreTrainedModelHash)
 	modelTopLevelDir, err := s.storage.DownloadFromStorage(ctx, task.PreTrainedModelHash, paths.PretrainedModel, constant.IS_TURBO)
 	if err != nil {
-		s.logger.Errorf("Error creating pre-trained model folder: %v\n", err)
-		return err
+		// Log all errors for debugging
+		if localPathErr != nil {
+			s.logger.Errorf("Local path error: %v", localPathErr)
+		}
+		if hfErr != nil {
+			s.logger.Errorf("HuggingFace error: %v", hfErr)
+		}
+		s.logger.Errorf("0G Storage error: %v", err)
+		return fmt.Errorf("all model sources failed - local: %v, HuggingFace: %v, 0G Storage: %v", localPathErr, hfErr, err)
 	}
+
 	if modelTopLevelDir != paths.PretrainedModel {
 		if err := os.RemoveAll(paths.PretrainedModel); err != nil {
 			s.logger.Errorf("Error removing existing model folder: %v\n", err)
