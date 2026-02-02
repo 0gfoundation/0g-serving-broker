@@ -18,6 +18,8 @@ var (
 		"0x02ed6d3889bebad9e2cd4008066478654c0886b12ad25ea7cf7d31df3441182e": "/app/CocktailSGD/finetune-cocktail.py",
 		// Qwen2.5-0.5B-Instruct (turbo)
 		"0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "/app/train_lora.py",
+		// Qwen3-32B (turbo)
+		"0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "/app/train_lora.py",
 	}
 
 	ENV_MAP = map[string][]string{

@@ -74,10 +74,16 @@ service:
     gpuCount: 1
   # Local model paths - used first
   modelLocalPaths:
+    # Qwen2.5-0.5B-Instruct
     "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "/dstack/persistent/models/Qwen2.5-0.5B-Instruct"
+    # Qwen3-32B
+    "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "/dstack/persistent/models/Qwen3-32B"
   # HuggingFace fallback - used if local path fails
   modelHuggingFaceFallback:
+    # Qwen2.5-0.5B-Instruct
     "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "Qwen/Qwen2.5-0.5B-Instruct"
+    # Qwen3-32B
+    "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "Qwen/Qwen3-32B"
 ```
 
 **模型加载优先级**：
