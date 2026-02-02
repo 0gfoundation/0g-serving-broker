@@ -78,6 +78,29 @@ func (s *Finalizer) GetTaskTimeout(ctx context.Context) (time.Duration, error) {
 }
 
 func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
+	// Check if storage upload should be skipped
+	// When skipped, users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
+	if f.config.Service.SkipStorageUpload {
+		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true), task %s will be marked as finished", task.ID)
+
+		// Update task with minimal info - no encryption needed since we're not uploading
+		if err := f.db.UpdateTask(task.ID,
+			db.Task{
+				OutputRootHash:  "", // No root hash since not uploaded
+				Secret:          "", // No secret since not encrypted
+				EncryptedSecret: "",
+				DeliverIndex:    0,
+				DeliverTime:     time.Now().Unix(),
+			}); err != nil {
+			f.logger.Errorf("Failed to update task: %v", err)
+			return err
+		}
+
+		f.logger.Infof("Task %s finished without storage upload. LoRA available at /v1/user/%s/task/%s/lora", task.ID, task.UserAddress, task.ID)
+		return nil
+	}
+
+	// Normal flow: encrypt and upload to 0G Storage
 	settlementMetadata, err := f.encryptAndUploadModel(ctx, paths.Output, task)
 	if err != nil {
 		return err

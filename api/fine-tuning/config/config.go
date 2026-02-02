@@ -38,6 +38,10 @@ type Service struct {
 	// When set, the broker will use the local dataset instead of downloading from 0G Storage
 	// Useful for testing or pre-cached datasets
 	DatasetLocalPaths map[string]string `yaml:"datasetLocalPaths"`
+	// SkipStorageUpload when true, skips uploading trained model to 0G Storage
+	// Users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
+	// Useful for testing or when 0G Storage is not available
+	SkipStorageUpload bool `yaml:"skipStorageUpload"`
 }
 
 func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
