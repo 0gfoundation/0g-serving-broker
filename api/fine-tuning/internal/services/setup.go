@@ -105,19 +105,24 @@ func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
 }
 
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-	datasetTopLevelDir, err := s.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO)
-	if err != nil {
-		s.logger.Errorf("Error creating dataset folder: %v\n", err)
-		return err
-	}
-	if datasetTopLevelDir != paths.Dataset {
-		if err := os.RemoveAll(paths.Dataset); err != nil {
-			s.logger.Errorf("Error removing existing dataset folder: %v\n", err)
-			return err
+	// Check if dataset has a local path configured (skip 0G Storage download)
+	if s.config.Service.DatasetLocalPaths != nil {
+		if localPath, ok := s.config.Service.DatasetLocalPaths[task.DatasetHash]; ok && localPath != "" {
+			if err := s.useLocalDataset(localPath, paths); err == nil {
+				s.logger.Infof("Using local dataset from: %s", localPath)
+			} else {
+				s.logger.Warnf("Failed to use local dataset: %v, falling back to 0G Storage", err)
+				if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
+					return err
+				}
+			}
+		} else {
+			if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
+				return err
+			}
 		}
-
-		if err := os.Rename(datasetTopLevelDir, paths.Dataset); err != nil {
-			s.logger.Errorf("Error moving dataset folder: %v\n", err)
+	} else {
+		if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
 			return err
 		}
 	}
@@ -216,6 +221,62 @@ func (s *Setup) useLocalModel(localPath string, paths *utils.TaskPaths) error {
 	}
 
 	s.logger.Infof("Created symlink from %s to %s", localPath, paths.PretrainedModel)
+	return nil
+}
+
+// useLocalDataset copies or symlinks a local dataset path instead of downloading
+func (s *Setup) useLocalDataset(localPath string, paths *utils.TaskPaths) error {
+	// Verify local path exists
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		return fmt.Errorf("local dataset path does not exist: %s", localPath)
+	}
+
+	// Remove existing dataset folder if exists
+	if err := os.RemoveAll(paths.Dataset); err != nil {
+		s.logger.Errorf("Error removing existing dataset folder: %v\n", err)
+		return err
+	}
+
+	// Create parent directory if needed
+	if err := os.MkdirAll(paths.Dataset, os.ModePerm); err != nil {
+		s.logger.Errorf("Error creating dataset folder: %v\n", err)
+		return err
+	}
+
+	// Copy the dataset file to the expected location
+	input, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to read local dataset: %v", err)
+	}
+
+	// Write to dataset folder with expected filename
+	datasetFile := paths.Dataset + "/dataset.jsonl"
+	if err := os.WriteFile(datasetFile, input, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to write dataset: %v", err)
+	}
+
+	s.logger.Infof("Copied local dataset from %s to %s", localPath, datasetFile)
+	return nil
+}
+
+// downloadDatasetFromStorage downloads dataset from 0G Storage
+func (s *Setup) downloadDatasetFromStorage(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
+	datasetTopLevelDir, err := s.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO)
+	if err != nil {
+		s.logger.Errorf("Error downloading dataset: %v\n", err)
+		return errors.Wrap(err, fmt.Sprintf("Error downloading data with root: %s", task.DatasetHash))
+	}
+	if datasetTopLevelDir != paths.Dataset {
+		if err := os.RemoveAll(paths.Dataset); err != nil {
+			s.logger.Errorf("Error removing existing dataset folder: %v\n", err)
+			return err
+		}
+
+		if err := os.Rename(datasetTopLevelDir, paths.Dataset); err != nil {
+			s.logger.Errorf("Error moving dataset folder: %v\n", err)
+			return err
+		}
+	}
 	return nil
 }
 

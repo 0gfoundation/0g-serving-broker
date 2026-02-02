@@ -34,6 +34,10 @@ type Service struct {
 	// ModelHuggingFaceFallback maps model hash to HuggingFace repo name
 	// Used as fallback when local model path doesn't exist
 	ModelHuggingFaceFallback map[string]string `yaml:"modelHuggingFaceFallback"`
+	// DatasetLocalPaths maps dataset hash to local file path
+	// When set, the broker will use the local dataset instead of downloading from 0G Storage
+	// Useful for testing or pre-cached datasets
+	DatasetLocalPaths map[string]string `yaml:"datasetLocalPaths"`
 }
 
 func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
