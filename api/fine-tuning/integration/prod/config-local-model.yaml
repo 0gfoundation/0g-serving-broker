@@ -6,14 +6,14 @@ networks:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16602
     privateKeys:
-      - 5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+      - "${PRIVATE_KEY}"  # Set via environment variable
     transactionLimit: 10000000
     gasEstimationBuffer: 100000
 images:
   executionImageName: "qwen-lora:v3"
   executionMockImageName: "qwen-lora:v3"
 service:
-  servingUrl: "https://d4872603ae17c78f5d3a35318da14daedacf28a8-80.dstack-pha-use2.phala.network"
+  servingUrl: "${SERVING_URL}"  # Your broker's public URL
   pricePerToken: 1
   quota:
     cpuCount: 8
