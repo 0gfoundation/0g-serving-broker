@@ -3,11 +3,11 @@ networks:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16602
     privateKeys:
-      - 2CE46A1C3B5E5F73EDB79C343BB869EF94709E6BEBB3B29B70937D7B5C6D5751
+      - "${PRIVATE_KEY}"  # Set via environment variable
     transactionLimit: 10000000
     gasEstimationBuffer: 100000
 service:
-  servingUrl: "https://60c6da1c900a0ff19801c2ae7f8e54fa85d7d4ba-80.dstack-pha-use2.phala.network"
+  servingUrl: "${SERVING_URL}"  # Your broker's public URL
   pricePerToken: 1
   quota:
     cpuCount: 8
