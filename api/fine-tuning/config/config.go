@@ -125,6 +125,8 @@ type Config struct {
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
 	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
 	MaxTaskQueueSize            uint                `yaml:"maxTaskQueueSize"`
+	RateLimitRPS                float64             `yaml:"rateLimitRPS"`   // Rate limit requests per second
+	RateLimitBurst              int                 `yaml:"rateLimitBurst"` // Rate limit burst size
 }
 
 type StorageClientConfig struct {
@@ -206,6 +208,8 @@ func GetConfig() *Config {
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
+			RateLimitRPS:                10,  // Default: 10 requests per second
+			RateLimitBurst:              20,  // Default: burst of 20 requests
 		}
 
 		if err := loadConfig(instance); err != nil {
