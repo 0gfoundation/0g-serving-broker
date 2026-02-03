@@ -1,10 +1,10 @@
 package ctrl
 
 import (
-	"archive/zip"
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"os"
 	"path/filepath"
 
@@ -140,7 +140,7 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(os.TempDir(), id.String(), utils.TaskLogFileName), nil
+	return filepath.Join(utils.GetDataDir(), id.String(), utils.TaskLogFileName), nil
 }
 
 func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string) error {
@@ -198,7 +198,8 @@ func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
 	return c.db.PendingTrainingTaskCount()
 }
 
-// GetLoRAModel returns the path to the LoRA model zip file for a completed task
+// GetLoRAModel returns the path to the encrypted LoRA model file for a completed task
+// The file is encrypted with AES and the key is available through contract settlement
 func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	task, err := c.db.GetTask(id)
 	if err != nil {
@@ -210,89 +211,62 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 		return "", errors.New("unauthorized: task does not belong to this user")
 	}
 
-	// Check if task is trained (at least)
+	// Check if task is delivered (encryption completed)
 	progress := task.Progress
-	if progress != db.ProgressStateTrained.String() &&
-		progress != db.ProgressStateDelivering.String() &&
-		progress != db.ProgressStateDelivered.String() &&
+	if progress != db.ProgressStateDelivered.String() &&
 		progress != db.ProgressStateUserAcknowledged.String() &&
 		progress != db.ProgressStateFinished.String() {
-		return "", errors.New("task is not trained yet")
+		return "", errors.New("task is not ready for download. Please wait for 'Delivered' status")
 	}
 
 	// Build paths
-	paths := utils.NewTaskPaths(filepath.Join(os.TempDir(), id.String()))
+	paths := utils.NewTaskPaths(filepath.Join(utils.GetDataDir(), id.String()))
 
-	// Create zip of LoRA output if not exists
-	loraZipPath := filepath.Join(os.TempDir(), id.String(), "lora_output.zip")
-	if _, err := os.Stat(loraZipPath); os.IsNotExist(err) {
-		// Zip the output directory
-		if _, err := os.Stat(paths.Output); os.IsNotExist(err) {
-			return "", errors.New("LoRA output not found")
-		}
-
-		// Create zip file
-		if err := zipDirectory(paths.Output, loraZipPath); err != nil {
-			return "", errors.Wrap(err, "failed to create LoRA zip")
-		}
+	// Return encrypted file path (created by finalizer)
+	encryptedFilePath := paths.Output + "_encrypted.data"
+	if _, err := os.Stat(encryptedFilePath); os.IsNotExist(err) {
+		return "", errors.New("encrypted LoRA file not found. The task may not have completed encryption yet")
 	}
 
-	return loraZipPath, nil
+	return encryptedFilePath, nil
 }
 
-// zipDirectory creates a zip file from a directory
-func zipDirectory(sourceDir, destZip string) error {
-	zipFile, err := os.Create(destZip)
+// SaveDataset saves an uploaded dataset file and returns its hash
+// The dataset is stored in a user-specific directory and can be referenced by hash in task creation
+func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (string, error) {
+	// Create dataset directory for user
+	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
+	if err := os.MkdirAll(datasetDir, 0755); err != nil {
+		return "", errors.Wrap(err, "create dataset directory")
+	}
+
+	// Open uploaded file
+	src, err := file.Open()
 	if err != nil {
-		return err
+		return "", errors.Wrap(err, "open uploaded file")
 	}
-	defer zipFile.Close()
+	defer src.Close()
 
-	archive := zip.NewWriter(zipFile)
-	defer archive.Close()
+	// Read file content to calculate hash
+	content, err := io.ReadAll(src)
+	if err != nil {
+		return "", errors.Wrap(err, "read file content")
+	}
 
-	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+	// Calculate hash of the dataset
+	datasetHash := crypto.Keccak256Hash(content)
+	hashStr := datasetHash.Hex()
 
-		// Get relative path
-		relPath, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return err
-		}
+	// Save file with hash as filename
+	destPath := filepath.Join(datasetDir, hashStr)
+	if err := os.WriteFile(destPath, content, 0644); err != nil {
+		return "", errors.Wrap(err, "write dataset file")
+	}
 
-		// Skip the root directory
-		if relPath == "." {
-			return nil
-		}
+	// Also update config's DatasetLocalPaths dynamically (if supported)
+	// For now, we'll rely on the setup service to check this path
+	c.logger.Infof("Dataset saved: %s (hash: %s, size: %d bytes)", destPath, hashStr, len(content))
 
-		// Create header
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = relPath
-		header.Method = zip.Deflate
-
-		if info.IsDir() {
-			header.Name += "/"
-			_, err = archive.CreateHeader(header)
-			return err
-		}
-
-		writer, err := archive.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		_, err = io.Copy(writer, file)
-		return err
-	})
+	return hashStr, nil
 }
+

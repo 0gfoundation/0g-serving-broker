@@ -371,8 +371,19 @@ func (s *Settlement) CleanUp(paths *utils.TaskPaths) {
 		s.logger.Errorf("error removing output model folder: %v", err)
 	}
 
+	// Also remove encrypted LoRA file if exists
+	encryptedFile := paths.Output + "_encrypted.data"
+	if err = os.Remove(encryptedFile); err != nil && !os.IsNotExist(err) {
+		s.logger.Errorf("error removing encrypted LoRA file: %v", err)
+	}
+
 	if err = removeAllZipFiles(paths.BasePath); err != nil {
 		s.logger.Errorf("error removing zip files: %v", err)
+	}
+
+	// Remove .data files (encrypted files)
+	if err = removeAllDataFiles(paths.BasePath); err != nil {
+		s.logger.Errorf("error removing data files: %v", err)
 	}
 }
 
@@ -392,6 +403,28 @@ func removeAllZipFiles(dir string) error {
 		fmt.Printf("Removing: %s\n", zipFile)
 		if err := os.RemoveAll(zipFile); err != nil {
 			return errors.Wrapf(err, "failed to remove %s", zipFile)
+		}
+	}
+
+	return nil
+}
+
+// removeAllDataFiles removes all .data files (encrypted files) in the specified directory.
+func removeAllDataFiles(dir string) error {
+	// Construct a pattern like "/path/to/dir/*.data"
+	pattern := filepath.Join(dir, "*.data")
+
+	// Find all matching data files
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return errors.Wrap(err, "failed to glob pattern")
+	}
+
+	// Iterate and remove each file
+	for _, dataFile := range matches {
+		fmt.Printf("Removing encrypted file: %s\n", dataFile)
+		if err := os.RemoveAll(dataFile); err != nil {
+			return errors.Wrapf(err, "failed to remove %s", dataFile)
 		}
 	}
 

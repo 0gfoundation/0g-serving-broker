@@ -78,35 +78,30 @@ func (s *Finalizer) GetTaskTimeout(ctx context.Context) (time.Duration, error) {
 }
 
 func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-	// Check if storage upload should be skipped
-	// When skipped, users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
-	if f.config.Service.SkipStorageUpload {
-		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true), task %s will be marked as finished", task.ID)
+	var settlementMetadata *SettlementMetadata
+	var err error
 
-		// Update task with minimal info - no encryption needed since we're not uploading
-		if err := f.db.UpdateTask(task.ID,
-			db.Task{
-				OutputRootHash:  "", // No root hash since not uploaded
-				Secret:          "", // No secret since not encrypted
-				EncryptedSecret: "",
-				DeliverIndex:    0,
-				DeliverTime:     time.Now().Unix(),
-			}); err != nil {
-			f.logger.Errorf("Failed to update task: %v", err)
+	userAddr := common.HexToAddress(task.UserAddress)
+
+	// Check if storage upload should be skipped
+	// When skipped, still encrypt but save locally for TEE download via /v1/user/:address/task/:id/lora
+	if f.config.Service.SkipStorageUpload {
+		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true), encrypting locally for task %s", task.ID)
+
+		// Encrypt and save locally (no upload to storage)
+		settlementMetadata, err = f.encryptModelLocal(paths.Output, task)
+		if err != nil {
 			return err
 		}
 
-		f.logger.Infof("Task %s finished without storage upload. LoRA available at /v1/user/%s/task/%s/lora", task.ID, task.UserAddress, task.ID)
-		return nil
+		f.logger.Infof("Task %s encrypted locally. LoRA available at /v1/user/%s/task/%s/lora", task.ID, task.UserAddress, task.ID)
+	} else {
+		// Normal flow: encrypt and upload to 0G Storage
+		settlementMetadata, err = f.encryptAndUploadModel(ctx, paths.Output, task)
+		if err != nil {
+			return err
+		}
 	}
-
-	// Normal flow: encrypt and upload to 0G Storage
-	settlementMetadata, err := f.encryptAndUploadModel(ctx, paths.Output, task)
-	if err != nil {
-		return err
-	}
-
-	userAddr := common.HexToAddress(task.UserAddress)
 
 	// Note: DeliverIndex is deprecated since we now use task ID for deliverable identification
 	// Setting to 0 for backward compatibility
@@ -122,6 +117,7 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 		return err
 	}
 
+	// Add deliverable to contract (required for settlement and key exchange)
 	if err = f.contract.AddDeliverable(ctx, userAddr, task.ID.String(), settlementMetadata.ModelRootHash); err != nil {
 		return errors.Wrapf(err, "add deliverable failed: %v", settlementMetadata.ModelRootHash)
 	}
@@ -135,6 +131,63 @@ func (f *Finalizer) HandleNoTask(ctx context.Context) error {
 
 func (f *Finalizer) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
 	return f.db.HandleFinalizerFailure(dbTask, f.config.MaxFinalizerRetriesPerTask, f.states.Intermediate, f.states.Initial)
+}
+
+// encryptModelLocal encrypts the model and saves it locally (no upload to storage)
+// The encrypted file is saved as lora_encrypted.data in the task output directory
+func (f *Finalizer) encryptModelLocal(sourceDir string, task *db.Task) (*SettlementMetadata, error) {
+	aesKey, err := util.GenerateAESKey(aesKeySize)
+	if err != nil {
+		return nil, err
+	}
+
+	plainFile, err := util.Zip(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := os.Remove(plainFile); err != nil && !os.IsNotExist(err) {
+			f.logger.Errorf("Failed to remove temporary file %s: %v", plainFile, err)
+		}
+	}()
+
+	// Save encrypted file in the same directory as lora_encrypted.data
+	encryptFile := sourceDir + "_encrypted.data"
+
+	tag, err := util.AesEncryptLargeFile(aesKey, plainFile, encryptFile)
+	if err != nil {
+		return nil, err
+	}
+
+	tagSig, err := crypto.Sign(crypto.Keccak256(tag[:]), f.teeService.ProviderSigner)
+	if err != nil {
+		return nil, errors.Wrap(err, "sign tag failed")
+	}
+
+	err = util.WriteToFileHead(encryptFile, tagSig)
+	if err != nil {
+		return nil, err
+	}
+
+	f.logger.Infof("Encrypted LoRA saved locally: %s", encryptFile)
+
+	// Generate a local root hash (hash of the encrypted file) for contract
+	encryptedData, err := os.ReadFile(encryptFile)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read encrypted file")
+	}
+	localRootHash := crypto.Keccak256(encryptedData)
+
+	encryptKey, err := f.encryptAESKey(aesKey, task.UserPublicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SettlementMetadata{
+		ModelRootHash:   localRootHash,
+		Secret:          aesKey,
+		EncryptedSecret: encryptKey,
+	}, nil
 }
 
 func (f *Finalizer) encryptAndUploadModel(ctx context.Context, sourceDir string, task *db.Task) (*SettlementMetadata, error) {
