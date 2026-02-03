@@ -1,21 +1,26 @@
 package handler
 
 import (
+	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
-	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
-	ctrl   *ctrl.Ctrl
-	logger log.Logger
+	ctrl        *ctrl.Ctrl
+	logger      log.Logger
+	rateLimiter *middleware.RateLimiter
 }
 
-func New(ctrl *ctrl.Ctrl, logger log.Logger) *Handler {
+func New(ctrl *ctrl.Ctrl, logger log.Logger, rateLimitRPS float64, rateLimitBurst int) *Handler {
 	h := &Handler{
-		ctrl:   ctrl,
-		logger: logger,
+		ctrl:        ctrl,
+		logger:      logger,
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(rateLimitRPS), rateLimitBurst),
 	}
 	return h
 }
@@ -31,7 +36,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
 	group.GET("/task/pending", h.GetPendingTrainingTaskCount)
 
-	group.GET("/quote", h.GetQuote)
+	group.GET("/quote", middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
 
 	group.GET("/model", h.ListModel)
 	group.GET("/model/:name", h.GetModel)

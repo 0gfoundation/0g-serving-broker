@@ -25,13 +25,13 @@ type Proxy struct {
 	ctrl   *ctrl.Ctrl
 	logger log.Logger
 
-	allowOrigins        []string
-	serviceRoutesLock   sync.RWMutex
-	serviceTarget       string
-	serviceType         string
-	serviceGroup        *gin.RouterGroup
-	rateLimiter         *middleware.RateLimiter
-	concurrencyLimiter  *middleware.ConcurrencyLimiter
+	allowOrigins       []string
+	serviceRoutesLock  sync.RWMutex
+	serviceTarget      string
+	serviceType        string
+	serviceGroup       *gin.RouterGroup
+	rateLimiter        *middleware.RateLimiter
+	concurrencyLimiter *middleware.ConcurrencyLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, logger log.Logger) *Proxy {
@@ -288,7 +288,13 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 }
 
 func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {
-	p.logger.Errorf("Proxy broker error: %v, context: %s", err, context)
+	// Skip error logging for expected errors (e.g., context.Canceled)
+	// when ignoreError flag is set in the context
+	ignoreErrorVal, exists := ctx.Get("ignoreError")
+	ignoreError, ok := ignoreErrorVal.(bool)
+	if !exists || !ok || !ignoreError {
+		p.logger.Errorf("Proxy broker error: %v, context: %s", err, context)
+	}
 	info := "Provider proxy: handle proxied service"
 	if context != "" {
 		info += (", " + context)

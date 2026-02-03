@@ -55,7 +55,7 @@ func Main() {
 	}
 	defer services.contract.Close()
 
-	if err := runApplication(ctx, services, logger, imageChan); err != nil {
+	if err := runApplication(ctx, cfg, services, logger, imageChan); err != nil {
 		panic(err)
 	}
 }
@@ -239,7 +239,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 	}, nil
 }
 
-func runApplication(ctx context.Context, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
+func runApplication(ctx context.Context, cfg *config.Config, services *ApplicationServices, logger log.Logger, imageChan <-chan bool) error {
 	if err := services.db.MarkInProgressTasksAsFailed(); err != nil {
 		return err
 	}
@@ -261,7 +261,7 @@ func runApplication(ctx context.Context, services *ApplicationServices, logger l
 	}
 
 	engine := gin.New()
-	h := handler.New(services.ctrl, logger)
+	h := handler.New(services.ctrl, logger, cfg.RateLimitRPS, cfg.RateLimitBurst)
 	h.Register(engine)
 
 	if _, ok := <-imageChan; !ok {
