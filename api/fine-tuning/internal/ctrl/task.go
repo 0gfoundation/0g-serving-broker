@@ -334,6 +334,7 @@ func (c *Ctrl) convertJSONLToHF(jsonlPath string) error {
 	}
 
 	// Python script to convert JSONL to HF format
+	// Supports both instruction/input/output format and messages format (chat)
 	pythonScript := `
 import json
 import sys
@@ -343,11 +344,40 @@ from datasets import Dataset, DatasetDict
 jsonl_file = sys.argv[1]
 output_dir = sys.argv[2]
 
-# Read JSONL
+# Read JSONL and detect format
 data = {"instruction": [], "input": [], "output": []}
+messages_format = False
+
 with open(jsonl_file, 'r') as f:
-    for line in f:
-        item = json.loads(line.strip())
+    lines = [line.strip() for line in f if line.strip()]
+
+if lines:
+    first_item = json.loads(lines[0])
+    if "messages" in first_item:
+        messages_format = True
+
+if messages_format:
+    # Convert messages format to instruction/input/output
+    for line in lines:
+        item = json.loads(line)
+        messages = item.get("messages", [])
+        # Extract user message as instruction, assistant message as output
+        instruction = ""
+        output = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                instruction = content
+            elif role == "assistant":
+                output = content
+        data["instruction"].append(instruction)
+        data["input"].append("")
+        data["output"].append(output)
+else:
+    # Standard instruction/input/output format
+    for line in lines:
+        item = json.loads(line)
         data["instruction"].append(item.get("instruction", ""))
         data["input"].append(item.get("input", ""))
         data["output"].append(item.get("output", ""))
@@ -365,16 +395,24 @@ print(f"Converted {len(data['instruction'])} examples to {output_dir}")
 	}
 	defer os.Remove(scriptPath)
 
-	// Run Python script via Docker
-	// Mount the parent directory so script, input, and output are all accessible
-	cmd := exec.Command("docker", "run", "--rm",
+	// Try running Python directly first (for environments where Python is available)
+	cmd := exec.Command("python3", scriptPath, jsonlPath, hfPath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		c.logger.Infof("Converted dataset using direct Python: %s", string(output))
+		return nil
+	}
+	c.logger.Warnf("Direct Python conversion failed: %v, trying docker...", err)
+
+	// Fall back to Docker if direct Python fails
+	cmd = exec.Command("docker", "run", "--rm",
 		"-v", filepath.Dir(jsonlPath)+":/data",
 		"qwen-lora:v3",
 		"python3", "/data/"+filepath.Base(scriptPath),
 		"/data/"+filepath.Base(jsonlPath),
 		"/data/"+filepath.Base(hfPath))
 
-	output, err := cmd.CombinedOutput()
+	output, err = cmd.CombinedOutput()
 	if err != nil {
 		return errors.Wrapf(err, "convert dataset: %s", string(output))
 	}
