@@ -21,6 +21,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/handler"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/services"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
 	"github.com/docker/docker/client"
 	"github.com/gin-gonic/gin"
 )
@@ -40,6 +41,11 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// Initialize data directory for task storage
+	// Uses configured dataDir or falls back to os.TempDir()
+	utils.SetDataDir(cfg.Service.DataDir)
+	logger.Infof("Data directory set to: %s", utils.GetDataDir())
 
 	if err := util.CheckPythonEnv(util.TrainingPackages, logger); err != nil {
 		panic(err)

@@ -29,3 +29,24 @@ pip-delete-this-directory.txt
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Binary files
+*.exe
+*.dll
+*.dylib
+*.bin
+0g-fine-tuning-server
+0g-inference-server
+
+# Environment-specific configs (keep only *-example.yaml)
+api/**/config-*.yaml
+!api/**/config-example.yaml
+
+# Test configs
+api/**/config-test*.yaml
+
+# Sensitive files
+*.pem
+*.key
+*.crt
+*.p12

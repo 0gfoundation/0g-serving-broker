@@ -2,12 +2,30 @@
 
 This guide describes how to test the 0G Fine-Tuning service end-to-end.
 
+## Overview
+
+The fine-tuning service allows users to:
+1. Upload datasets to TEE
+2. Create fine-tuning tasks using pre-trained models
+3. Download encrypted LoRA adapters
+4. Decrypt using keys obtained through contract settlement
+
 ## Prerequisites
 
 1. **CVM Access**: SSH access to the Phala TEE CVM
 2. **Broker Binary**: Built broker binary for Linux AMD64
-3. **Wallet**: A funded wallet with A0GI tokens on testnetDev
+3. **Wallet**: A funded wallet with A0GI tokens
 4. **Client SDK**: The `0g-serving-user-broker` package
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/user/:address/dataset` | POST | Upload dataset to TEE |
+| `/v1/user/:address/task` | POST | Create fine-tuning task |
+| `/v1/user/:address/task/:id` | GET | Get task status |
+| `/v1/user/:address/task/:id/lora` | GET | Download encrypted LoRA |
+| `/v1/task/pending` | GET | Get pending task count |
 
 ## Configuration
 
@@ -15,251 +33,234 @@ This guide describes how to test the 0G Fine-Tuning service end-to-end.
 
 ```yaml
 service:
-  # Skip 0G Storage upload - users download LoRA directly from TEE
-  # Useful for testing or when 0G Storage is unavailable
+  # Skip 0G Storage upload - encrypt locally for TEE download
   skipStorageUpload: true
   
+  # File retention (hours) - how long to keep files before cleanup
+  fileRetentionHours: 72
+  
   # Local model paths - maps model hash to local file path
-  # When set, broker uses local model instead of downloading from 0G Storage
   modelLocalPaths:
     "0x<model_hash>": "/path/to/model"
   
-  # HuggingFace fallback - maps model hash to HuggingFace repo name
-  # Used as fallback when local model path doesn't exist
+  # HuggingFace fallback - used when local model doesn't exist
   modelHuggingFaceFallback:
     "0x<model_hash>": "Qwen/Qwen2.5-0.5B-Instruct"
   
-  # Local dataset paths - maps dataset hash to local path
-  # Useful for testing with pre-prepared datasets
+  # Local dataset paths (for pre-configured datasets)
   datasetLocalPaths:
     "0x<dataset_hash>": "/path/to/dataset"
 ```
 
-### Model/Dataset Fallback Chain
+### Data Loading Priority
 
-**Model Loading Priority:**
-1. Local path from `modelLocalPaths` (symlink + bind mount)
+**Model Loading:**
+1. Local path from `modelLocalPaths`
 2. HuggingFace download from `modelHuggingFaceFallback`
 3. 0G Storage download
 
-**Dataset Loading Priority:**
-1. Local path from `datasetLocalPaths` (symlink + bind mount)
-2. 0G Storage download
+**Dataset Loading:**
+1. Config `datasetLocalPaths`
+2. User-uploaded dataset (via `/v1/user/:address/dataset`)
+3. 0G Storage download
+
+## Complete Flow
+
+### Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Fine-Tuning Complete Flow                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  1. User uploads dataset                                            │
+│     POST /v1/user/:address/dataset                                  │
+│     Returns: datasetHash                                            │
+│       ↓                                                             │
+│  2. User creates task                                               │
+│     POST /v1/user/:address/task                                     │
+│     Body: { preTrainedModelHash, datasetHash, trainingParams, ... } │
+│       ↓                                                             │
+│  3. Broker executes training                                        │
+│     Status: Init → SetUp → Training → Trained                       │
+│       ↓                                                             │
+│  4. Broker encrypts LoRA with AES key                               │
+│     - Encrypts user's AES key with user's public key                │
+│     - Calls contract.AddDeliverable()                               │
+│     Status: Delivered                                               │
+│       ↓                                                             │
+│  5. User downloads encrypted LoRA                                   │
+│     GET /v1/user/:address/task/:id/lora                             │
+│       ↓                                                             │
+│  6. User calls contract.acknowledge()                               │
+│     - Pays for the task                                             │
+│     - Gets encryptedSecret from contract                            │
+│       ↓                                                             │
+│  7. User decrypts                                                   │
+│     - Decrypt encryptedSecret with private key → AES key            │
+│     - Decrypt LoRA file with AES key                                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ## Step-by-Step Testing
 
-### Step 1: Prepare Test Dataset on CVM
-
-Create a HuggingFace-format dataset on the CVM:
+### Step 1: Upload Dataset
 
 ```bash
-docker run --rm -v /tmp:/tmp qwen-lora:v3 python3 << 'EOF'
-from datasets import Dataset, DatasetDict
+curl -X POST \
+  -F "file=@/path/to/dataset.jsonl" \
+  "http://<BROKER_URL>/v1/user/<USER_ADDRESS>/dataset"
+```
 
-data = {
-    "instruction": [
-        "What is machine learning?",
-        "Explain neural networks.",
-        "What is deep learning?",
-        "Describe reinforcement learning.",
-        "What is natural language processing?",
-    ],
-    "input": ["", "", "", "", ""],
-    "output": [
-        "Machine learning is a subset of artificial intelligence that enables systems to learn from data.",
-        "Neural networks are computing systems inspired by biological neural networks in the brain.",
-        "Deep learning is a type of machine learning using multi-layered neural networks.",
-        "Reinforcement learning is a type of ML where agents learn by interacting with environments.",
-        "NLP is a field of AI focused on interaction between computers and human language.",
-    ]
+Response:
+```json
+{
+  "datasetHash": "0x1234...",
+  "message": "Dataset uploaded successfully..."
 }
-
-ds = DatasetDict({"train": Dataset.from_dict(data)})
-ds.save_to_disk("/tmp/test_dataset_hf")
-print("Dataset created at /tmp/test_dataset_hf")
-EOF
 ```
 
-### Step 2: Configure the Broker
+### Step 2: Create Fine-Tuning Task
 
-Create `/tmp/config-testnetdev.yaml` on the CVM:
-
-```yaml
-database:
-  connectionString: "file:/tmp/fine-tuning.db"
-
-blockchain:
-  rpcUrl: "https://evmrpc-testnet.0g.ai"
-  chainId: 16601
-  signerKey: "${SIGNER_PRIVATE_KEY}"
-  fineTuning: "0xae1D93dd9Ccc5FD7ed16785F5D92f7cDbFCbb45f"
-  ledger: "0x4BC4A34c2D77fcb54c5D20CF50F9CB03C0Cd63D6"
-
-service:
-  providerAddress: "${PROVIDER_ADDRESS}"
-  preTrainedModels:
-    - name: "Qwen2.5-0.5B-Instruct"
-      hash: "0x1234567890..."  # Replace with actual hash
-  skipStorageUpload: true
-  modelLocalPaths:
-    "0x1234567890...": "/dstack/persistent/models/Qwen2.5-0.5B-Instruct"
-  modelHuggingFaceFallback:
-    "0x1234567890...": "Qwen/Qwen2.5-0.5B-Instruct"
-  datasetLocalPaths:
-    "0x0000000000000000000000000000000000000000000000000000000000000001": "/tmp/test_dataset_hf"
+```javascript
+const taskRequest = {
+  userAddress: wallet.address,
+  preTrainedModelHash: MODEL_HASH,
+  datasetHash: DATASET_HASH,
+  trainingParams: JSON.stringify({
+    num_train_epochs: 1,
+    per_device_train_batch_size: 1,
+    learning_rate: 0.0001,
+    max_steps: 10,
+    lora_r: 8,
+    lora_alpha: 16,
+  }),
+  fee: "1000000000000000000",
+  nonce: Date.now().toString(),
+  signature: signature,
+  userPublicKey: wallet.signingKey.publicKey,
+}
 ```
 
-### Step 3: Start the Broker
+### Step 3: Monitor Task Progress
 
 ```bash
-docker run -d \
-  --name broker \
-  --network provider_default \
-  --runtime=nvidia \
-  --gpus all \
-  -p 80:8080 \
-  -v /path/to/broker:/usr/bin/broker \
-  -v /tmp/config-testnetdev.yaml:/etc/config/config.yaml \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /var/run/dstack.sock:/var/run/dstack.sock \
-  -v /var/run/tappd.sock:/var/run/tappd.sock \
-  -v /tmp:/tmp \
-  -v /dstack:/dstack \
-  ghcr.io/0gfoundation/0g-serving-broker:dev-amd64 \
-  0g-fine-tuning-server
+curl "http://<BROKER_URL>/v1/user/<USER_ADDRESS>/task/<TASK_ID>"
 ```
 
-### Step 4: Verify Broker is Running
-
-```bash
-# Check container status
-docker ps | grep broker
-
-# Check logs
-docker logs broker
-
-# Test API endpoint
-curl http://localhost/v1/task/pending
+Expected progress flow:
+```
+Init → SettingUp → SetUp → Training → Trained → Delivering → Delivered
 ```
 
-### Step 5: Run Test Client
-
-On your local machine:
+### Step 4: Download Encrypted LoRA
 
 ```bash
-cd 0g-serving-user-broker
-node test-full-flow.mjs
-```
-
-## Expected Task Flow
-
-| Step | Status | Description | Duration |
-|------|--------|-------------|----------|
-| 1 | `Init` | Task created, broker initializing | ~10s |
-| 2 | `SetUp` | Loading model and dataset | ~30-60s |
-| 3 | `Training` | LoRA training in progress | ~30-60s |
-| 4 | `Trained` | Training complete | instant |
-| 5 | `Delivering` | Finalizing (skip if `skipStorageUpload=true`) | instant |
-| 6 | `Delivered` | Task finished | - |
-
-## Downloading LoRA from TEE
-
-After task completion, download the trained LoRA adapter directly from TEE:
-
-```bash
-# Using curl
-curl -o lora.zip \
+curl -o lora_encrypted.data \
   "http://<BROKER_URL>/v1/user/<USER_ADDRESS>/task/<TASK_ID>/lora"
-
-# Verify contents
-unzip -l lora.zip
 ```
 
-The downloaded `lora.zip` contains:
-- `adapter_config.json` - LoRA configuration
-- `adapter_model.safetensors` - Trained weights (~34MB for Qwen2.5-0.5B)
+**Important**: The downloaded file is AES encrypted. You need to:
+1. Call `acknowledge()` on the contract
+2. Get `encryptedSecret` from the contract
+3. Decrypt with your private key to get AES key
+4. Decrypt the LoRA file
+
+### Step 5: Decrypt LoRA (Client-Side)
+
+```javascript
+// After acknowledge(), get encryptedSecret from contract
+const encryptedSecret = await contract.getDeliverable(taskId)
+
+// Decrypt with user's private key (ECIES)
+const aesKey = ecies.decrypt(userPrivateKey, encryptedSecret)
+
+// Decrypt the LoRA file with AES
+const decryptedLoRA = aesDecrypt(aesKey, encryptedLoraData)
+```
+
+## Base Model Download
+
+After fine-tuning, users need the base model to use the LoRA adapter:
+
+**Option 1: Download from 0G Storage**
+```bash
+# Use 0g-storage-client
+0g-storage-client download --root <model_root_hash>
+```
+
+**Option 2: Download from HuggingFace**
+```bash
+# For Qwen models
+huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct
+huggingface-cli download Qwen/Qwen3-32B
+```
+
+## File Cleanup
+
+Files are automatically cleaned up based on `fileRetentionHours` config:
+- Task directories (dataset, model, output)
+- Encrypted LoRA files (.data)
+- Temporary zip files
+
+Default retention: 72 hours (3 days)
 
 ## Troubleshooting
 
 ### Task stuck at `Init`
-
-Check broker logs for dataset/model path errors:
-
-```bash
-docker logs broker 2>&1 | grep -i error
-```
-
-Common causes:
-- Dataset path doesn't exist
-- Dataset format is incorrect (must be HuggingFace DatasetDict format)
+- Check broker logs: `docker logs broker`
+- Verify dataset exists or can be downloaded
 
 ### Task stuck at `SetUp`
-
-Check if model is loading correctly:
-
-```bash
-docker logs broker 2>&1 | grep -i model
-```
-
-Common causes:
-- Model path doesn't exist and no HuggingFace fallback configured
-- HuggingFace download failed (network issues)
+- Model download may be in progress (large models take time)
+- Check HuggingFace fallback configuration
 
 ### Task stuck at `Training`
+- Check training container: `docker logs <container_id>`
+- Verify GPU memory is sufficient
 
-Check the training container logs:
+### Download returns 404
+- Task may not be in `Delivered` status
+- Encryption may not have completed
 
-```bash
-# Find training container
-docker ps -a | grep qwen-lora
+### Decryption fails
+- Ensure you've called `acknowledge()` first
+- Verify the encryptedSecret from contract
 
-# Check logs
-docker logs <container_id>
-```
-
-Common causes:
-- GPU out of memory
-- Training script errors
-
-### Empty LoRA zip
-
-Check training output directory:
+## Example Test Script
 
 ```bash
-ls -la /tmp/<task_id>/output/
-```
+#!/bin/bash
 
-Common causes:
-- Training failed before saving checkpoint
-- Wrong output path configuration
+BROKER_URL="http://localhost:8080"
+USER_ADDRESS="0x1234..."
+MODEL_HASH="0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7"
 
-## Test Summary
+# 1. Upload dataset
+echo "Uploading dataset..."
+RESPONSE=$(curl -s -X POST -F "file=@test_data.jsonl" \
+  "$BROKER_URL/v1/user/$USER_ADDRESS/dataset")
+DATASET_HASH=$(echo $RESPONSE | jq -r '.datasetHash')
+echo "Dataset hash: $DATASET_HASH"
 
-A successful test produces output like:
+# 2. Create task
+echo "Creating task..."
+# (Use your client SDK to create task with proper signature)
 
-```
-============================================================
-0G Fine-Tuning Full Flow Test
-============================================================
+# 3. Monitor progress
+echo "Monitoring..."
+while true; do
+  STATUS=$(curl -s "$BROKER_URL/v1/user/$USER_ADDRESS/task/$TASK_ID" | jq -r '.progress')
+  echo "Status: $STATUS"
+  if [ "$STATUS" = "Delivered" ]; then
+    break
+  fi
+  sleep 10
+done
 
-1. Setting up wallet...
-   Wallet: 0x1F0E...
-   Balance: 2609.70 A0GI
-
-2. Checking broker status...
-   Pending tasks: 0
-
-3. Creating fine-tuning task...
-   Task created! ID: 68ec47d2-...
-
-4. Monitoring task progress...
-   Progress: Init → SetUp → Training → Trained → Delivered
-   Task completed successfully!
-
-5. Testing LoRA download from TEE...
-   LoRA model downloaded: /tmp/lora_model_68ec47d2-....zip
-   Size: 34374.84 KB
-
-   SUCCESS! Full flow test completed!
-============================================================
+# 4. Download encrypted LoRA
+echo "Downloading..."
+curl -o lora_encrypted.data "$BROKER_URL/v1/user/$USER_ADDRESS/task/$TASK_ID/lora"
+echo "Done! File: lora_encrypted.data"
 ```

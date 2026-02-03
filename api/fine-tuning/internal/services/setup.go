@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,29 +106,50 @@ func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
 }
 
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
-	var localErr error
+	var localErr, uploadedErr error
+	var datasetReady bool
 
-	// Step 1: Try local dataset path if configured
+	// Step 1: Try local dataset path if configured in config
 	if s.config.Service.DatasetLocalPaths != nil {
 		if localPath, ok := s.config.Service.DatasetLocalPaths[task.DatasetHash]; ok && localPath != "" {
 			localErr = s.useLocalDataset(localPath, paths)
 			if localErr == nil {
-				s.logger.Infof("Using local dataset from: %s", localPath)
-				goto prepareModel
+				s.logger.Infof("Using local dataset from config: %s", localPath)
+				datasetReady = true
+			} else {
+				s.logger.Warnf("Failed to use local dataset from config: %v", localErr)
 			}
-			s.logger.Warnf("Failed to use local dataset: %v, falling back to 0G Storage", localErr)
 		}
 	}
 
-	// Step 2: Fall back to 0G Storage
-	if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
-		if localErr != nil {
-			s.logger.Errorf("Local dataset error: %v", localErr)
+	// Step 2: Try user-uploaded dataset (stored in {dataDir}/datasets/{userAddress}/{datasetHash})
+	if !datasetReady {
+		uploadedDatasetPath := filepath.Join(utils.GetDataDir(), "datasets", task.UserAddress, task.DatasetHash)
+		if _, err := os.Stat(uploadedDatasetPath); err == nil {
+			uploadedErr = s.useLocalDataset(uploadedDatasetPath, paths)
+			if uploadedErr == nil {
+				s.logger.Infof("Using user-uploaded dataset: %s", uploadedDatasetPath)
+				datasetReady = true
+			} else {
+				s.logger.Warnf("Failed to use uploaded dataset: %v", uploadedErr)
+			}
 		}
-		return fmt.Errorf("dataset sources failed - local: %v, 0G Storage: %v", localErr, err)
 	}
 
-prepareModel:
+	// Step 3: Fall back to 0G Storage
+	if !datasetReady {
+		if err := s.downloadDatasetFromStorage(ctx, task, paths); err != nil {
+			if localErr != nil {
+				s.logger.Errorf("Local dataset (config) error: %v", localErr)
+			}
+			if uploadedErr != nil {
+				s.logger.Errorf("Uploaded dataset error: %v", uploadedErr)
+			}
+			return fmt.Errorf("dataset sources failed - config: %v, uploaded: %v, 0G Storage: %v", localErr, uploadedErr, err)
+		}
+	}
+
+	// prepareModel:
 
 	// Check if model has a local path configured (skip 0G Storage download)
 	if err := s.prepareModel(ctx, task, paths); err != nil {

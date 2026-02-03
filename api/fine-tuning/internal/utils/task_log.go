@@ -19,6 +19,26 @@ const (
 	TaskLogFileName     = "progress.log"
 )
 
+// dataDir is the root directory for storing task data
+// Can be set via SetDataDir, defaults to os.TempDir()
+var dataDir string
+
+// SetDataDir sets the root directory for task data storage
+// Should be called during initialization with config value
+func SetDataDir(dir string) {
+	if dir != "" {
+		dataDir = dir
+	}
+}
+
+// GetDataDir returns the configured data directory or os.TempDir() as default
+func GetDataDir() string {
+	if dataDir != "" {
+		return dataDir
+	}
+	return os.TempDir()
+}
+
 type TaskPaths struct {
 	BasePath                 string
 	Dataset                  string
@@ -46,7 +66,7 @@ func NewTaskPaths(basePath string) *TaskPaths {
 }
 
 func GetTaskLogDir(id *uuid.UUID) string {
-	return filepath.Join(os.TempDir(), id.String())
+	return filepath.Join(GetDataDir(), id.String())
 }
 
 func InitTaskDirectory(id *uuid.UUID) error {

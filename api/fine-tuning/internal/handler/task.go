@@ -13,6 +13,8 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
+// Note: mime/multipart is used implicitly by gin for FormFile
+
 // CreateTask
 //
 //	@Description  This endpoint allows you to create a fine-tuning task
@@ -182,14 +184,16 @@ func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 }
 
 // DownloadLoRA godoc
-// @Summary Download LoRA model from TEE
-// @Description Download the trained LoRA adapter directly from TEE. This is a fallback when 0G Storage download fails.
+// @Summary Download encrypted LoRA model from TEE
+// @Description Download the encrypted LoRA adapter from TEE. The file is AES encrypted.
+// @Description User must call contract acknowledge() to settle and get the decryption key.
+// @Description Flow: Download encrypted file -> acknowledge on contract -> get encryptedSecret -> decrypt with user private key -> get AES key -> decrypt LoRA
 // @Tags Task
-// @Produce application/zip
+// @Produce application/octet-stream
 // @Router /user/{userAddress}/task/{taskID}/lora [get]
 // @Param userAddress path string true "user address"
 // @Param taskID path string true "task ID"
-// @Success 200 {file} file "lora_model.zip"
+// @Success 200 {file} file "lora_encrypted.data"
 func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
 	id, err := uuid.Parse(ctx.Param("taskID"))
@@ -206,12 +210,50 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 
 	// Check if file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "LoRA model not found. Task may not be trained yet."})
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "Encrypted LoRA not found. Task may not have completed encryption yet."})
 		return
 	}
 
 	ctx.Header("Content-Description", "File Transfer")
-	ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=lora_model_%s.zip", id.String()))
-	ctx.Header("Content-Type", "application/zip")
+	ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=lora_encrypted_%s.data", id.String()))
+	ctx.Header("Content-Type", "application/octet-stream")
 	ctx.File(filePath)
+}
+
+// UploadDataset godoc
+// @Summary Upload dataset to TEE
+// @Description Upload a dataset file to TEE for fine-tuning. Returns a dataset hash for use in task creation.
+// @Tags Dataset
+// @Accept multipart/form-data
+// @Produce json
+// @Router /user/{userAddress}/dataset [post]
+// @Param userAddress path string true "user address"
+// @Param file formance formData file true "dataset file (JSONL format)"
+// @Success 200 {object} object{datasetHash=string} "Dataset uploaded successfully"
+func (h *Handler) UploadDataset(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	
+	file, err := ctx.FormFile("file")
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
+		return
+	}
+
+	// Check file size (max 500MB)
+	maxSize := int64(500 * 1024 * 1024)
+	if file.Size > maxSize {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 500MB"})
+		return
+	}
+
+	datasetHash, err := h.ctrl.SaveDataset(userAddress, file)
+	if err != nil {
+		handleBrokerError(ctx, err, "save dataset")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"datasetHash": datasetHash,
+		"message":     "Dataset uploaded successfully. Use this hash when creating a fine-tuning task.",
+	})
 }
