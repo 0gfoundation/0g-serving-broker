@@ -2,6 +2,8 @@
 
 
 0g-serving-broker
+broker-*
+
 # example
 .env
 data-node
@@ -38,9 +40,11 @@ htmlcov/
 0g-fine-tuning-server
 0g-inference-server
 
-# Environment-specific configs (keep only *-example.yaml)
+# Environment-specific configs (keep only *example*.yaml)
+api/**/config.yaml
 api/**/config-*.yaml
 !api/**/config-example.yaml
+!api/**/config.example.yaml
 
 # Test configs
 api/**/config-test*.yaml

@@ -188,17 +188,31 @@ func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 // @Description Download the encrypted LoRA adapter from TEE. The file is AES encrypted.
 // @Description User must call contract acknowledge() to settle and get the decryption key.
 // @Description Flow: Download encrypted file -> acknowledge on contract -> get encryptedSecret -> decrypt with user private key -> get AES key -> decrypt LoRA
+// @Description Authentication: Requires signature of keccak256(taskID) signed by user's private key
 // @Tags Task
 // @Produce application/octet-stream
 // @Router /user/{userAddress}/task/{taskID}/lora [get]
 // @Param userAddress path string true "user address"
 // @Param taskID path string true "task ID"
+// @Param signature query string true "signature of keccak256(taskID) signed by user"
 // @Success 200 {file} file "lora_encrypted.data"
 func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
 	id, err := uuid.Parse(ctx.Param("taskID"))
 	if err != nil {
 		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
+
+	// Verify signature - user must prove they own the userAddress
+	signature := ctx.Query("signature")
+	if signature == "" {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "signature required"})
+		return
+	}
+
+	if err := h.ctrl.VerifyDownloadSignature(&id, userAddress, signature); err != nil {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
 		return
 	}
 

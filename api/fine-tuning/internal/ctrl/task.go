@@ -199,9 +199,55 @@ func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
 	return c.db.PendingTrainingTaskCount()
 }
 
+// VerifyDownloadSignature verifies that the signature is valid for the given task ID and user address
+// The message to sign is keccak256(taskID)
+func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signature string) error {
+	if id == nil {
+		return errors.New("task ID cannot be nil")
+	}
+
+	// Decode signature
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return errors.Wrap(err, "decode signature")
+	}
+
+	// Create message hash: keccak256(taskID)
+	message := []byte(id.String())
+	messageHash := accounts.TextHash(message)
+
+	// Recover signer from signature
+	if len(sigBytes) != 65 {
+		return errors.New("invalid signature length")
+	}
+
+	// Adjust v value for recovery
+	if sigBytes[64] >= 27 {
+		sigBytes[64] -= 27
+	}
+
+	pubKey, err := crypto.SigToPub(messageHash, sigBytes)
+	if err != nil {
+		return errors.Wrap(err, "recover public key from signature")
+	}
+
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	expectedAddr := common.HexToAddress(userAddress)
+
+	if recoveredAddr != expectedAddr {
+		return fmt.Errorf("signature verification failed: expected %s, got %s", expectedAddr.Hex(), recoveredAddr.Hex())
+	}
+
+	return nil
+}
+
 // GetLoRAModel returns the path to the encrypted LoRA model file for a completed task
 // The file is encrypted with AES and the key is available through contract settlement
 func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
+	if id == nil {
+		return "", errors.New("task ID cannot be nil")
+	}
+
 	task, err := c.db.GetTask(id)
 	if err != nil {
 		return "", errors.Wrap(err, "get task from db")
