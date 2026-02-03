@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime/multipart"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -233,6 +234,7 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 
 // SaveDataset saves an uploaded dataset file and returns its hash
 // The dataset is stored in a user-specific directory and can be referenced by hash in task creation
+// JSONL files are automatically converted to HuggingFace DatasetDict format for training
 func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (string, error) {
 	// Create dataset directory for user
 	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
@@ -257,16 +259,81 @@ func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (stri
 	datasetHash := crypto.Keccak256Hash(content)
 	hashStr := datasetHash.Hex()
 
-	// Save file with hash as filename
-	destPath := filepath.Join(datasetDir, hashStr)
-	if err := os.WriteFile(destPath, content, 0644); err != nil {
+	// Save JSONL file with hash as filename
+	jsonlPath := filepath.Join(datasetDir, hashStr)
+	if err := os.WriteFile(jsonlPath, content, 0644); err != nil {
 		return "", errors.Wrap(err, "write dataset file")
 	}
 
-	// Also update config's DatasetLocalPaths dynamically (if supported)
-	// For now, we'll rely on the setup service to check this path
-	c.logger.Infof("Dataset saved: %s (hash: %s, size: %d bytes)", destPath, hashStr, len(content))
+	c.logger.Infof("Dataset saved: %s (hash: %s, size: %d bytes)", jsonlPath, hashStr, len(content))
+
+	// Convert JSONL to HF format is required by the fine-tuning executor's token counter
+	if err := c.convertJSONLToHF(jsonlPath); err != nil {
+		c.logger.Warnf("Failed to convert dataset to HF format: %v", err)
+		// Don't return error - the setup service will try to handle it
+	}
 
 	return hashStr, nil
+}
+
+// convertJSONLToHF converts a JSONL dataset file to HuggingFace DatasetDict format
+// This conversion is best-effort. If it fails, the setup service will try to handle the raw JSONL.
+func (c *Ctrl) convertJSONLToHF(jsonlPath string) error {
+	hfPath := jsonlPath + "_hf"
+
+	// Check if already converted
+	if _, err := os.Stat(hfPath); err == nil {
+		c.logger.Infof("HF dataset already exists: %s", hfPath)
+		return nil
+	}
+
+	// Python script to convert JSONL to HF format
+	pythonScript := `
+import json
+import sys
+import os
+from datasets import Dataset, DatasetDict
+
+jsonl_file = sys.argv[1]
+output_dir = sys.argv[2]
+
+# Read JSONL
+data = {"instruction": [], "input": [], "output": []}
+with open(jsonl_file, 'r') as f:
+    for line in f:
+        item = json.loads(line.strip())
+        data["instruction"].append(item.get("instruction", ""))
+        data["input"].append(item.get("input", ""))
+        data["output"].append(item.get("output", ""))
+
+# Create and save DatasetDict
+ds = DatasetDict({"train": Dataset.from_dict(data)})
+ds.save_to_disk(output_dir)
+print(f"Converted {len(data['instruction'])} examples to {output_dir}")
+`
+
+	// Save Python script to temp file
+	scriptPath := jsonlPath + "_convert.py"
+	if err := os.WriteFile(scriptPath, []byte(pythonScript), 0644); err != nil {
+		return errors.Wrap(err, "write conversion script")
+	}
+	defer os.Remove(scriptPath)
+
+	// Run Python script via Docker
+	// Mount the parent directory so script, input, and output are all accessible
+	cmd := exec.Command("docker", "run", "--rm",
+		"-v", filepath.Dir(jsonlPath)+":/data",
+		"qwen-lora:v3",
+		"python3", "/data/"+filepath.Base(scriptPath),
+		"/data/"+filepath.Base(jsonlPath),
+		"/data/"+filepath.Base(hfPath))
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "convert dataset: %s", string(output))
+	}
+
+	c.logger.Infof("Converted dataset to HF format: %s (output: %s)", hfPath, string(output))
+	return nil
 }
 

@@ -123,15 +123,34 @@ func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.Tas
 	}
 
 	// Step 2: Try user-uploaded dataset (stored in {dataDir}/datasets/{userAddress}/{datasetHash})
+	// First check for pre-converted HF format (_hf suffix), then fall back to raw JSONL
 	if !datasetReady {
 		uploadedDatasetPath := filepath.Join(utils.GetDataDir(), "datasets", task.UserAddress, task.DatasetHash)
-		if _, err := os.Stat(uploadedDatasetPath); err == nil {
-			uploadedErr = s.useLocalDataset(uploadedDatasetPath, paths)
+		hfDatasetPath := uploadedDatasetPath + "_hf"
+
+		// Try HF format first
+		if _, err := os.Stat(hfDatasetPath); err == nil {
+			uploadedErr = s.useLocalDataset(hfDatasetPath, paths)
 			if uploadedErr == nil {
-				s.logger.Infof("Using user-uploaded dataset: %s", uploadedDatasetPath)
+				s.logger.Infof("Using user-uploaded dataset (HF format): %s", hfDatasetPath)
 				datasetReady = true
 			} else {
-				s.logger.Warnf("Failed to use uploaded dataset: %v", uploadedErr)
+				s.logger.Warnf("Failed to use uploaded HF dataset: %v", uploadedErr)
+			}
+		}
+
+		// Fall back to raw JSONL
+		if !datasetReady {
+			if _, err := os.Stat(uploadedDatasetPath); err == nil {
+				uploadedErr = s.useLocalDataset(uploadedDatasetPath, paths)
+				if uploadedErr == nil {
+					s.logger.Infof("Using user-uploaded dataset (raw): %s", uploadedDatasetPath)
+					datasetReady = true
+				} else {
+					s.logger.Warnf("Failed to use uploaded dataset: %v", uploadedErr)
+				}
+			} else {
+				s.logger.Warnf("User-uploaded dataset not found at %s", uploadedDatasetPath)
 			}
 		}
 	}
