@@ -146,9 +146,22 @@ func (c *Ctrl) GetLogPath() string {
 	return c.logPath
 }
 
-// IsWhitelistedUser checks if the user address is in the whitelist
-// Whitelist users bypass all billing and contract verification
+// IsWhitelistedUser checks if the user address is in the whitelist.
+//
+// Whitelist users bypass all billing and contract verification including:
+//   - Contract account validation (GetUserAccount)
+//   - Acknowledged status checks
+//   - TeeSignerAcknowledged checks
+//   - Balance validation
+//   - Fee calculation and charging
+//   - Database request logging (CreateRequest)
+//
+// Security: Session validation is still required for all users including whitelist.
+// This ensures the request comes from a legitimate holder of the private key.
+//
+// Returns true if the address (case-insensitive) is in the whitelist.
 func (c *Ctrl) IsWhitelistedUser(userAddress string) bool {
+
 	if len(c.whitelistUsers) == 0 {
 		return false
 	}
