@@ -24,6 +24,12 @@ type Service struct {
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 }
 
+// WhitelistConfig configuration for whitelisted users that bypass billing
+type WhitelistConfig struct {
+	Enabled       bool     `yaml:"enabled"`       // Enable whitelist feature
+	UserAddresses []string `yaml:"userAddresses"` // List of whitelisted user addresses
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
@@ -60,6 +66,7 @@ type Config struct {
 	Logger              *config.LoggerConfig `yaml:"logger"`
 	LogPaths            LogPathsConfig       `yaml:"logPaths"`
 	Controller          ControllerConfig     `yaml:"controller"`
+	Whitelist           WhitelistConfig      `yaml:"whitelist"`
 }
 
 type LogPathsConfig struct {
@@ -215,6 +222,10 @@ func GetConfig() *Config {
 					Path:          "./logs/controller.log",
 					RotationCount: 7,
 				},
+			},
+			Whitelist: WhitelistConfig{
+				Enabled:       false,
+				UserAddresses: []string{},
 			},
 		}
 
