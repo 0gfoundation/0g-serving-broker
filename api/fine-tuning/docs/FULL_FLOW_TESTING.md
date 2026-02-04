@@ -414,6 +414,199 @@ if [ "$STATUS" = "Delivered" ]; then
 fi
 ```
 
+## Qwen3-32B Full Flow Test
+
+Qwen3-32B is a large 32B parameter model that requires special handling:
+
+### Requirements
+
+- **GPU Memory**: H200 (141GB) or similar high-memory GPU
+- **Disk Space**: ~70GB for model files
+- **transformers**: >= 4.51.0 (for Qwen3 architecture support)
+- **4-bit Quantization**: Automatically enabled for large models
+
+### Model Setup on CVM
+
+```bash
+# Download Qwen3-32B to CVM (if not already present)
+docker run --rm -v /dstack/persistent/models:/models python:3.11-slim bash -c "
+pip install -q huggingface_hub
+python3 -c \"
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='Qwen/Qwen3-32B',
+    local_dir='/models/Qwen3-32B',
+    local_dir_use_symlinks=False,
+    resume_download=True
+)
+\"
+"
+
+# Verify model files (~61GB)
+ls -lh /dstack/persistent/models/Qwen3-32B/
+```
+
+### Broker config.yaml
+
+Ensure Qwen3-32B is configured in `modelLocalPaths`:
+
+```yaml
+service:
+  modelLocalPaths:
+    "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "/dstack/persistent/models/Qwen3-32B"
+  modelHuggingFaceFallback:
+    "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "Qwen/Qwen3-32B"
+```
+
+### Complete Test Script
+
+```bash
+#!/bin/bash
+# Qwen3-32B Fine-tuning Full Flow Test
+
+# Setup
+export ZG_DEV_MODE=true
+export ZEROG_PRIVATE_KEY="your_private_key"
+PROVIDER="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+
+# Prepare test data
+mkdir -p /tmp/qwen3-test
+cat > /tmp/qwen3-test/dataset.jsonl << 'EOF'
+{"instruction": "Translate to French", "input": "Hello world", "output": "Bonjour le monde"}
+{"instruction": "Translate to French", "input": "Good morning", "output": "Bonjour"}
+{"instruction": "Translate to French", "input": "Thank you", "output": "Merci"}
+{"instruction": "Translate to French", "input": "How are you?", "output": "Comment allez-vous?"}
+EOF
+
+cat > /tmp/qwen3-test/config.json << 'EOF'
+{
+    "num_train_epochs": 1,
+    "per_device_train_batch_size": 1,
+    "learning_rate": 0.0001,
+    "max_steps": 5,
+    "max_seq_length": 128,
+    "lora_r": 8,
+    "lora_alpha": 16
+}
+EOF
+
+# Step 1: Create Task
+echo "=== Creating Qwen3-32B fine-tuning task ==="
+RESULT=$(0g-compute-cli fine-tuning create-task \
+  --provider $PROVIDER \
+  --model Qwen3-32B \
+  --dataset-path /tmp/qwen3-test/dataset.jsonl \
+  --config-path /tmp/qwen3-test/config.json \
+  --data-size 100 2>&1)
+echo "$RESULT"
+TASK_ID=$(echo "$RESULT" | grep "Created Task ID" | awk '{print $NF}')
+echo "Task ID: $TASK_ID"
+
+# Step 2: Monitor Progress (expect ~5-10 minutes)
+echo "=== Monitoring task (Qwen3-32B takes longer due to model size) ==="
+while true; do
+  STATUS=$(0g-compute-cli fine-tuning get-task --provider $PROVIDER --task $TASK_ID 2>&1 | grep "Progress" | awk '{print $4}')
+  echo "$(date +%H:%M:%S) - Status: $STATUS"
+  if [ "$STATUS" = "Delivered" ] || [ "$STATUS" = "Failed" ]; then
+    break
+  fi
+  sleep 30
+done
+
+# Step 3: Download and Acknowledge
+if [ "$STATUS" = "Delivered" ]; then
+  echo "=== Downloading model ==="
+  0g-compute-cli fine-tuning acknowledge-model \
+    --provider $PROVIDER \
+    --task-id $TASK_ID \
+    --data-path /tmp/qwen3-test/output
+  
+  # Wait for Finished status
+  sleep 30
+  
+  # Step 4: Decrypt
+  echo "=== Decrypting model ==="
+  0g-compute-cli fine-tuning decrypt-model \
+    --provider $PROVIDER \
+    --task-id $TASK_ID \
+    --encrypted-model /tmp/qwen3-test/output/lora_model_${TASK_ID}.zip \
+    --output /tmp/qwen3-test/output/lora_decrypted.zip
+  
+  # Step 5: Extract
+  echo "=== Extracting LoRA adapter ==="
+  unzip -o /tmp/qwen3-test/output/lora_decrypted.zip -d /tmp/qwen3-test/output/
+  
+  # Verify output
+  echo "=== Final Output ==="
+  ls -lh /tmp/qwen3-test/output/output_model/
+  cat /tmp/qwen3-test/output/output_model/adapter_config.json
+fi
+```
+
+### Expected Output
+
+```
+output/output_model/
+├── adapter_config.json          # LoRA configuration
+├── adapter_model.safetensors    # LoRA weights (~257MB for 32B model)
+├── tokenizer.json               # Tokenizer (~11MB)
+├── tokenizer_config.json
+├── chat_template.jinja
+├── README.md
+└── checkpoint-5/                # Training checkpoint
+```
+
+### Timing Reference (Qwen3-32B, 5 steps)
+
+| Stage | Time |
+|-------|------|
+| Setup (model loading with 4-bit) | ~2 minutes |
+| Training (5 steps) | ~2-3 minutes |
+| Finalize (encryption) | ~1 minute |
+| **Total** | **~5-6 minutes** |
+
+### Qwen3-32B Troubleshooting
+
+#### "Transformers does not recognize architecture qwen3"
+
+**Cause:** transformers version < 4.51.0
+
+**Solution:** Update Docker image with newer transformers:
+```dockerfile
+RUN pip install "transformers>=4.51.0" "accelerate>=0.30.0" "peft>=0.11.0"
+```
+
+#### "TypeError: Trainer.__init__() got an unexpected keyword argument 'tokenizer'"
+
+**Cause:** transformers 5.x API change - `tokenizer` parameter deprecated
+
+**Solution:** Use `data_collator` instead:
+```python
+# Before (deprecated)
+trainer = Trainer(model=model, tokenizer=tokenizer, ...)
+
+# After (transformers 5.x compatible)
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+trainer = Trainer(model=model, data_collator=data_collator, ...)
+```
+
+#### Model loading crashes silently
+
+**Cause:** OOM or 4-bit quantization not triggering
+
+**Solution:** Ensure training script auto-detects large models:
+```python
+# Auto-enable 4-bit for large models (hidden_size * num_layers > 100000)
+if hidden_size * num_layers > 100000:
+    use_4bit = True
+```
+
+#### "Using a device_map requires accelerate"
+
+**Cause:** accelerate version incompatible with transformers 5.x
+
+**Solution:** Update accelerate >= 0.30.0
+
 ## Output Structure
 
 After successful decryption:
@@ -424,12 +617,21 @@ output/
 ├── lora_decrypted.zip            # Decrypted zip
 └── output_model/                 # Extracted LoRA adapter
     ├── adapter_config.json       # LoRA configuration
-    ├── adapter_model.safetensors # LoRA weights (~8MB for 0.5B model)
+    ├── adapter_model.safetensors # LoRA weights (see sizes below)
+    ├── tokenizer.json            # Tokenizer
+    ├── tokenizer_config.json
+    ├── chat_template.jinja       # Chat template (for Qwen models)
     ├── README.md
-    ├── added_tokens.json
     └── checkpoint-N/             # Training checkpoint
         ├── adapter_model.safetensors
         ├── optimizer.pt
         ├── scheduler.pt
         └── trainer_state.json
 ```
+
+### LoRA Adapter Sizes by Model
+
+| Model | adapter_model.safetensors | Total Output |
+|-------|--------------------------|--------------|
+| Qwen2.5-0.5B-Instruct | ~8 MB | ~20 MB |
+| Qwen3-32B | ~257 MB | ~670 MB |
