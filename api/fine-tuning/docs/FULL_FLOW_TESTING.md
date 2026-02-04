@@ -167,6 +167,59 @@ docker run -d --name broker \
 | `/var/run/dstack.sock` | Key derivation for encryption |
 | `/dstack/persistent` | Persistent model storage |
 
+#### How Docker Volume Mounts Work
+
+**Why `/tmp:/tmp` is Required:**
+
+1. **Task Directory Creation**: When a task is created, the broker creates a temporary directory at `/tmp/<task-id>` inside the broker container (via `utils.GetDataDir()` which defaults to `os.TempDir()` = `/tmp`).
+
+2. **Training Container Mounts**: When the executor creates a training container, it needs to mount the task directory (`paths.BasePath`, e.g., `/tmp/<task-id>`) into the training container using Docker bind mount.
+
+3. **Docker Bind Mount Requirement**: Docker bind mounts require the **source path to exist on the host machine**, not just inside the container. Without `-v /tmp:/tmp`:
+   - Broker creates `/tmp/<task-id>` inside its container filesystem
+   - This path doesn't exist on the host
+   - Docker cannot create a bind mount from a non-existent host path
+   - Result: `bind source path does not exist` error
+
+4. **With `/tmp:/tmp` Mount**:
+   - Broker's `/tmp` is directly mapped to host's `/tmp`
+   - When broker creates `/tmp/<task-id>`, it's actually created on the host
+   - Executor can successfully mount `/tmp/<task-id>` from host to training container
+   - Training container can access all task files (dataset, model, config, output)
+
+**Visual Flow:**
+
+```
+Host Machine                    Broker Container              Training Container
+─────────────────              ──────────────────            ──────────────────
+/tmp/                           /tmp/ (mapped)                 
+  └─ <task-id>/  ◄───────────────┘                              /app/mnt/ (mounted)
+      ├─ data/                                                  ├─ data/
+      ├─ model/                                                 ├─ model/
+      ├─ config.json                                            ├─ config.json
+      └─ output_model/                                          └─ output_model/
+```
+
+**Alternative: Using `/dstack/persistent` for Large Models**
+
+For large models like Qwen3-32B, task directories should be stored in `/dstack/persistent` instead of `/tmp`:
+
+```bash
+# In broker config.yaml
+service:
+  dataDir: /dstack/persistent/tasks  # Override default /tmp
+```
+
+Then mount `/dstack/persistent`:
+```bash
+-v /dstack/persistent:/dstack/persistent
+```
+
+This ensures:
+- Large model files don't fill up `/tmp`
+- Persistent storage survives container restarts
+- Better disk space management
+
 ## Flow Diagram
 
 ```
