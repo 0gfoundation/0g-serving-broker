@@ -277,12 +277,13 @@ def main():
     )
     
     # Initialize trainer
+    # Note: tokenizer is passed via data_collator, not directly to Trainer
+    # (direct tokenizer parameter is deprecated in transformers >= 5.0)
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         data_collator=data_collator,
-        tokenizer=tokenizer,
     )
     
     # Train
