@@ -244,19 +244,6 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 		})
 	}
 
-	// Check if fixed training script exists and mount it
-	// This fixes the file:// prefix issue with fsspec in newer datasets library versions
-	fixedScriptPath := "/tmp/train_lora_fixed.py"
-	if _, err := os.Stat(fixedScriptPath); err == nil {
-		c.logger.Infof("Using fixed training script from: %s", fixedScriptPath)
-		mounts = append(mounts, mount.Mount{
-			Type:     mount.TypeBind,
-			Source:   fixedScriptPath,
-			Target:   "/app/train_lora.py",
-			ReadOnly: true,
-		})
-	}
-
 	hostConfig := &container.HostConfig{
 		Mounts:  mounts,
 		Runtime: runtime,

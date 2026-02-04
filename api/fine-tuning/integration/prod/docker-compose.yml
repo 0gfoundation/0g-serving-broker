@@ -28,11 +28,11 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - TOKEN=PHALA@2025
     ports:
-      - "80:3080"
+      - "#PORT#:3080"
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./config.yaml:/etc/config.yaml
+      - /dstack/user_config:/etc/config.yaml
       - /tmp:/tmp
       - /tmp/0g-transformer-bridge:/opt/transformer-bridge
       - ./models:/fine-tuning/execution/models

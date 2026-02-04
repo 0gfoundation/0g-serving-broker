@@ -200,11 +200,20 @@ func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
 }
 
 // VerifyDownloadSignature verifies that the signature is valid for the given task ID and user address
-// The message to sign is keccak256(taskID)
+// Uses the same message format as validateSignature: TextHash(keccak256(binaryTaskID))
 func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signature string) error {
 	if id == nil {
 		return errors.New("task ID cannot be nil")
 	}
+
+	// Get binary representation of UUID (same as task.ID.MarshalBinary())
+	idBytes, err := id.MarshalBinary()
+	if err != nil {
+		return errors.Wrap(err, "marshal task ID")
+	}
+
+	// Create message hash using same format as validateSignature
+	hash := accounts.TextHash(crypto.Keccak256(idBytes)[:])
 
 	// Decode signature
 	sigBytes, err := hexutil.Decode(signature)
@@ -212,21 +221,17 @@ func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signat
 		return errors.Wrap(err, "decode signature")
 	}
 
-	// Create message hash: keccak256(taskID)
-	message := []byte(id.String())
-	messageHash := accounts.TextHash(message)
-
-	// Recover signer from signature
+	// Validate signature length and recovery ID
 	if len(sigBytes) != 65 {
-		return errors.New("invalid signature length")
+		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
 	}
 
-	// Adjust v value for recovery
-	if sigBytes[64] >= 27 {
-		sigBytes[64] -= 27
+	if sigBytes[64] != 27 && sigBytes[64] != 28 {
+		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
 	}
 
-	pubKey, err := crypto.SigToPub(messageHash, sigBytes)
+	sigBytes[64] -= 27
+	pubKey, err := crypto.SigToPub(hash, sigBytes)
 	if err != nil {
 		return errors.Wrap(err, "recover public key from signature")
 	}
@@ -281,6 +286,11 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 // SaveDataset saves an uploaded dataset file and returns its hash
 // The dataset is stored in a user-specific directory and can be referenced by hash in task creation
 // JSONL files are automatically converted to HuggingFace DatasetDict format for training
+//
+// Design note: We use content hash as the filename (not task ID) because:
+// 1. Task ID doesn't exist at dataset upload time - user uploads dataset first, then creates task
+// 2. Content hash ensures deduplication - same dataset uploaded twice won't create duplicate files
+// 3. Content hash guarantees data integrity - any modification creates a different hash
 func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (string, error) {
 	// Create dataset directory for user
 	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)

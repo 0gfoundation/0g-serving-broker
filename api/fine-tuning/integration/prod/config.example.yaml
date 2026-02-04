@@ -1,39 +1,66 @@
+# Example configuration for fine-tuning broker
+# Copy this file to config.yaml and fill in the actual values before deployment
+# DO NOT commit actual credentials to the repository
+
+# Network configuration
 networks:
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"
     chainID: 16602
     privateKeys:
-      - 1111111111111111111111111111111111111111111111111111111111111111
+      - "${PRIVATE_KEY}"  # Set via environment variable or replace with actual key
     transactionLimit: 1000000
     gasEstimationBuffer: 10000
+
+# Service configuration
 service:
-  servingUrl: "<Serving_URL>"
+  servingUrl: "${SERVING_URL}"  # Your broker's public URL
   pricePerToken: 1
   quota:
     cpuCount: 8
-    memory: 16
-    storage: 10
+    memory: 187
+    storage: 900
     gpuType: "H200"
     gpuCount: 1
-  # Customized models with optional local path support
-  # If localPath is set, the broker will use the local model instead of downloading from 0G Storage
+
+  # Customized models - define new models that providers want to support
+  # Each model requires: name, hash, image, dataType, trainingScript
   customizedModels:
     - name: "Qwen2.5-0.5B-Instruct"
       hash: "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7"
-      image: "0glab/qwen-lora:latest"
+      image: "ghcr.io/0gfoundation/fine-tuning-test:v1"
       dataType: "text"
       trainingScript: "/app/train_lora.py"
       description: "Qwen2.5-0.5B LoRA fine-tuning"
       tokenizer: "Qwen/Qwen2.5-0.5B-Instruct"
-      # localPath: "/path/to/local/model"  # Optional: skip 0G Storage download if model is pre-downloaded
-    - name: "Qwen2.5-32B-Instruct"
-      hash: "0x..."  # Replace with actual hash
-      image: "0glab/qwen-lora:latest"
+      # localPath: "/path/to/local/model"  # Optional: use pre-downloaded model
+    - name: "Qwen3-32B"
+      hash: "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5"
+      image: "ghcr.io/0gfoundation/fine-tuning-test:v1"
       dataType: "text"
       trainingScript: "/app/train_lora.py"
-      description: "Qwen2.5-32B LoRA fine-tuning"
-      tokenizer: "Qwen/Qwen2.5-32B-Instruct"
-      localPath: "/dstack/persistent/models/Qwen2.5-32B-Instruct"  # Use pre-downloaded model
+      description: "Qwen3-32B LoRA fine-tuning"
+      tokenizer: "Qwen/Qwen3-32B"
+      localPath: "/dstack/persistent/models/Qwen3-32B"  # Use pre-downloaded model
+
+  # Model local paths - map model hash to local filesystem path
+  # Can be used for any model (including predefined models like Llama, Mistral)
+  # When set, broker uses local model instead of downloading from 0G Storage
+  modelLocalPaths:
+    "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "/path/to/models/Qwen2.5-0.5B-Instruct"
+
+  # HuggingFace fallback - download from HF when local path doesn't exist
+  modelHuggingFaceFallback:
+    "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "Qwen/Qwen2.5-0.5B-Instruct"
+    "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "Qwen/Qwen3-32B"
+
+  # Skip 0G Storage upload - encrypt locally for direct TEE download
+  skipStorageUpload: false
+
+  # File retention (hours) - how long to keep files before cleanup
+  fileRetentionHours: 72
+
+# 0G Storage client configuration
 storageClient:
   indexerStandard: "https://indexer-storage-testnet-standard.0g.ai"
   indexerTurbo: "https://indexer-storage-testnet-turbo.0g.ai"
@@ -43,6 +70,30 @@ storageClient:
     expectedReplica: 1
     skipTx: false
     fragmentSize: 4294967296
+
+# Database configuration
+database:
+  mysql:
+    host: "mysql"
+    port: 3306
+    user: "root"
+    password: "${MYSQL_PASSWORD}"  # Set via environment variable
+    db: "fineTune"
+
+# Logger configuration
 logger:
   level: "debug"
   path: "/tmp/fine-tuning.log"
+
+# Worker configuration
+finalizerWorkerCount: 1
+executorWorkerCount: 1
+setupWorkerCount: 1
+maxSetupRetriesPerTask: 3
+maxExecutorRetriesPerTask: 3
+maxFinalizerRetriesPerTask: 10
+maxSettlementRetriesPerTask: 10
+settlementBatchSize: 1
+deliveredTaskAckTimeoutSecs: 21600
+dataRetentionDays: 3
+maxTaskQueueSize: 5
