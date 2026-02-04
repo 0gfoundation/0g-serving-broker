@@ -26,14 +26,16 @@ COPY transformer/train_lora.py /app/train_lora.py
 # Install Python libraries with compatible versions
 # Note: Pin numpy<2.0.0 for pyarrow compatibility
 #       Pin datasets and pyarrow to avoid version conflicts
+#       Use transformers>=4.51.0 for Qwen3 support
+#       Use accelerate>=0.30.0 for transformers 5.x compatibility
 RUN pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir \
     "numpy<2.0.0" \
-    transformers==4.45.0 \
+    "transformers>=4.51.0" \
     datasets==2.19.0 \
     pyarrow==14.0.2 \
-    accelerate==0.28.0 \
-    peft==0.10.0 \
+    "accelerate>=0.30.0" \
+    "peft>=0.11.0" \
     evaluate \
     toml \
     sentencepiece \
