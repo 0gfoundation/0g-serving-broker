@@ -20,6 +20,9 @@ type Request struct {
 	OutputCount  int64      `gorm:"type:bigint;not null;default:0" json:"outputCount"`
 	// Skip this request in settlement until this time
 	SkipUntil    *time.Time `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
+	// IsWhitelisted indicates if this is a whitelisted user request (skip billing but process normally)
+	// This field is not persisted to database
+	IsWhitelisted bool `gorm:"-" json:"-"`
 }
 
 type RequestList struct {

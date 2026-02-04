@@ -196,7 +196,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Record unique user for DAU tracking
 	monitor.RecordUniqueUser(userAddress)
 
-	// Check if user is whitelisted - whitelist users bypass all billing and verification
+	// Check if user is whitelisted - whitelist users bypass billing but still need normal response processing
 	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
 	if isWhitelisted {
 		// Sanitize path for logging - never log query parameters that may contain sensitive data
@@ -207,17 +207,31 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		}
 		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
 
-		// Skip all contract verification and billing
-		// Directly prepare and forward the request
+		// Create a minimal request model for whitelist user
+		// IsWhitelisted flag will skip billing but preserve response processing (stream handling, signing, etc.)
+		whitelistReq := model.Request{
+			UserAddress:   userAddress,
+			IsWhitelisted: true,
+			Nonce:         uuid.New().String(),
+		}
+		whitelistReq.RequestHash = whitelistReq.Nonce
+
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return
 		}
 
-		// Process request without charging (charging=false)
-		// Pass empty reqModel and "0" as outputPrice since no billing is needed
-		if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false); err != nil {
+		// Get service for output price (won't be used for billing, but needed for processing)
+		service, err := p.ctrl.GetCachedService(ctx)
+		if err != nil {
+			p.handleBrokerError(ctx, err, "get cached service for whitelist request")
+			return
+		}
+
+		// Process with charging=true to enable normal response handling (stream, signing)
+		// Actual billing will be skipped due to IsWhitelisted flag
+		if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, whitelistReq, service.OutputPrice, true); err != nil {
 			p.logger.Errorf("process whitelist http request failed: %v", err)
 		}
 		return

@@ -16,8 +16,9 @@ import (
 )
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte, svcType string) (*http.Request, error) {
-	// For chatbot requests, ensure stream_options is set for stream requests
-	if svcType == "chatbot" {
+	// For chatbot requests with body (e.g., /chat/completions), ensure stream_options is set for stream requests
+	// Skip for requests without body (e.g., GET /models)
+	if svcType == "chatbot" && len(reqBody) > 0 {
 		modifiedBody, err := c.EnsureStreamOptions(reqBody)
 		if err != nil {
 			return nil, errors.Wrap(err, "ensure stream options")
@@ -251,11 +252,17 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
 // EnsureStreamOptions ensures that stream requests include stream_options with include_usage: true
 // This is required for some LLM services to return usage information in streaming responses
 func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
+	// Return original body if empty (e.g., GET requests)
+	if len(body) == 0 {
+		return body, nil
+	}
+
 	var bodyMap map[string]interface{}
 
 	err := json.Unmarshal(body, &bodyMap)
 	if err != nil {
-		return body, errors.Wrap(err, "failed to parse JSON body")
+		// Return original body for non-JSON requests
+		return body, nil
 	}
 
 	// Check if this is a stream request

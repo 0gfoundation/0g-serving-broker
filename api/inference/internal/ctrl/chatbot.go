@@ -233,11 +233,11 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		// Detect format for non-stream response
 		format := detectResponseFormat(decodedBody)
 		if format == FormatLiteLLM {
-			if err := c.processLiteLLMSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash, &usage); err != nil {
+			if err := c.processLiteLLMSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash, &usage, reqModel.IsWhitelisted); err != nil {
 				return err
 			}
 		} else {
-			if err := c.processSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash, &usage); err != nil {
+			if err := c.processSingleResponse(ctx, decodedBody, outputPrice, &output, reqModel.RequestHash, &usage, reqModel.IsWhitelisted); err != nil {
 				return err
 			}
 		}
@@ -255,11 +255,11 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 
 		if format == FormatLiteLLM {
-			if err := c.processLiteLLMStream(ctx, lines, outputPrice, &output, &usage, reqModel.RequestHash); err != nil {
+			if err := c.processLiteLLMStream(ctx, lines, outputPrice, &output, &usage, reqModel.RequestHash, reqModel.IsWhitelisted); err != nil {
 				return err
 			}
 		} else {
-			if err := c.processOpenAIStream(ctx, lines, outputPrice, &output, &usage, reqModel.RequestHash); err != nil {
+			if err := c.processOpenAIStream(ctx, lines, outputPrice, &output, &usage, reqModel.RequestHash, reqModel.IsWhitelisted); err != nil {
 				return err
 			}
 		}
@@ -312,7 +312,7 @@ func (*Ctrl) chatCacheKey(chatID string) string {
 	return fmt.Sprintf("%s:%s", ChatPrefix, chatID)
 }
 
-func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage) error {
+func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage, isWhitelisted bool) error {
 	line := bytes.TrimPrefix(decodedBody, []byte("data: "))
 	var chunk CompletionChunk
 	if err := json.Unmarshal(line, &chunk); err != nil {
@@ -321,6 +321,14 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 
 	for _, choice := range chunk.Choices {
 		*output += choice.Message.Content
+	}
+
+	// Skip billing for whitelisted users
+	if isWhitelisted {
+		if chunk.Usage != nil {
+			*usage = chunk.Usage
+		}
+		return nil
 	}
 
 	// For non-stream responses, usage info is in the same response
@@ -521,9 +529,14 @@ func (c *Ctrl) isClientDisconnectError(err error) bool {
 }
 
 // processOpenAIStream processes OpenAI-format streaming responses
-func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string) error {
+func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string, isWhitelisted bool) error {
 	for _, line := range lines {
 		if isStreamDone(line) {
+			// Skip billing for whitelisted users
+			if isWhitelisted {
+				break
+			}
+
 			// For stream responses, usage info comes before [DONE]
 			if *usage != nil {
 				// Get service price from cache/contract instead of config
