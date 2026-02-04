@@ -196,6 +196,34 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Record unique user for DAU tracking
 	monitor.RecordUniqueUser(userAddress)
 
+	// Check if user is whitelisted - whitelist users bypass all billing and verification
+	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
+	if isWhitelisted {
+		// Sanitize path for logging - never log query parameters that may contain sensitive data
+		// Note: targetPath may already be sanitized at L149-152, but we ensure it here for clarity
+		logPath := targetPath
+		if idx := strings.Index(logPath, "?"); idx != -1 {
+			logPath = logPath[:idx]
+		}
+		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
+
+		// Skip all contract verification and billing
+		// Directly prepare and forward the request
+		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
+		if err != nil {
+			p.handleBrokerError(ctx, err, "prepare HTTP request")
+			return
+		}
+
+		// Process request without charging (charging=false)
+		// Pass empty reqModel and "0" as outputPrice since no billing is needed
+		if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false); err != nil {
+			p.logger.Errorf("process whitelist http request failed: %v", err)
+		}
+		return
+	}
+
+	// Non-whitelist users: normal billing flow
 	req := model.Request{
 		UserAddress: userAddress,
 	}

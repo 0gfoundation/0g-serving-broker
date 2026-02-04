@@ -24,6 +24,19 @@ type Service struct {
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 }
 
+// WhitelistConfig defines configuration for whitelisted users that bypass billing
+// and contract verification. Whitelist users are intended for internal services
+// (e.g., health checks, monitoring) that require free access without account setup.
+//
+// Security: Whitelist users still require valid session token authentication.
+// The bypass only applies to billing, balance checks, and database logging.
+//
+// Expected usage: Small whitelist (< 10 addresses) for internal services only.
+type WhitelistConfig struct {
+	Enabled       bool     `yaml:"enabled"`       // Enable whitelist feature
+	UserAddresses []string `yaml:"userAddresses"` // List of whitelisted user addresses (case-insensitive)
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
@@ -60,6 +73,7 @@ type Config struct {
 	Logger              *config.LoggerConfig `yaml:"logger"`
 	LogPaths            LogPathsConfig       `yaml:"logPaths"`
 	Controller          ControllerConfig     `yaml:"controller"`
+	Whitelist           WhitelistConfig      `yaml:"whitelist"`
 }
 
 type LogPathsConfig struct {
@@ -215,6 +229,10 @@ func GetConfig() *Config {
 					Path:          "./logs/controller.log",
 					RotationCount: 7,
 				},
+			},
+			Whitelist: WhitelistConfig{
+				Enabled:       false,
+				UserAddresses: []string{},
 			},
 		}
 

@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,9 @@ type Ctrl struct {
 	logPath      string
 	brokerLogDir string
 	eventLogDir  string
+
+	// Whitelist for users that bypass billing
+	whitelistUsers map[string]struct{}
 }
 
 func New(
@@ -106,6 +110,32 @@ func New(
 				ForceAttemptHTTP2:     false,             // Use HTTP/1.1 for stability
 			},
 		},
+		// Initialize whitelist users map
+		whitelistUsers: make(map[string]struct{}),
+	}
+
+	// Initialize whitelist from config
+	if cfg.Whitelist.Enabled {
+		validCount := 0
+		for _, addr := range cfg.Whitelist.UserAddresses {
+			// Validate Ethereum address format before adding
+			if !isValidEthereumAddress(addr) {
+				logger.Warnf("Whitelist: invalid address format '%s', skipping", addr)
+				continue
+			}
+			// Convert to lowercase for case-insensitive comparison
+			normalizedAddr := strings.ToLower(addr)
+			p.whitelistUsers[normalizedAddr] = struct{}{}
+			logger.Infof("Whitelist: added user %s", addr)
+			validCount++
+		}
+		if validCount > 0 {
+			logger.Infof("Whitelist: enabled with %d valid users", validCount)
+		} else {
+			logger.Warn("Whitelist: enabled but no valid addresses configured")
+		}
+	} else {
+		logger.Info("Whitelist: disabled")
 	}
 
 	return p
@@ -114,6 +144,54 @@ func New(
 // GetLogPath returns the configured log file path
 func (c *Ctrl) GetLogPath() string {
 	return c.logPath
+}
+
+// IsWhitelistedUser checks if the user address is in the whitelist.
+//
+// Whitelist users bypass all billing and contract verification including:
+//   - Contract account validation (GetUserAccount)
+//   - Acknowledged status checks
+//   - TeeSignerAcknowledged checks
+//   - Balance validation
+//   - Fee calculation and charging
+//   - Database request logging (CreateRequest)
+//
+// Security: Session validation is still required for all users including whitelist.
+// This ensures the request comes from a legitimate holder of the private key.
+//
+// Returns true if the address (case-insensitive) is in the whitelist.
+func (c *Ctrl) IsWhitelistedUser(userAddress string) bool {
+
+	if len(c.whitelistUsers) == 0 {
+		return false
+	}
+	// Case-insensitive comparison
+	normalizedAddr := strings.ToLower(userAddress)
+	_, exists := c.whitelistUsers[normalizedAddr]
+	return exists
+}
+
+// isValidEthereumAddress validates Ethereum address format
+// Valid format: 0x prefix followed by 40 hexadecimal characters
+func isValidEthereumAddress(addr string) bool {
+	// Check length: "0x" + 40 hex chars = 42 total
+	if len(addr) != 42 {
+		return false
+	}
+
+	// Check 0x prefix (case-insensitive)
+	if !strings.HasPrefix(strings.ToLower(addr), "0x") {
+		return false
+	}
+
+	// Check all characters after 0x are hexadecimal
+	for _, c := range addr[2:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // GetComponentLogDir returns the log directory for the specified component
