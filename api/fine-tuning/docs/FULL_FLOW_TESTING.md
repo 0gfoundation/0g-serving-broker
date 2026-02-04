@@ -4,47 +4,81 @@ This guide documents the complete end-to-end testing flow for the 0G Fine-Tuning
 
 ## Prerequisites
 
-1. **CVM Environment**
-   - Broker service running in Docker
-   - Pre-trained model available (local path or HuggingFace fallback configured)
-   - `qwen-lora:v3` Docker image for training execution
+### 1. CVM Environment (Broker Side)
 
-2. **Client Environment**
-   - Node.js with ethers.js installed
-   - Private key with sufficient balance for gas fees
-   - Network access to CVM broker endpoint
+- Docker running with access to `/var/run/docker.sock`
+- Pre-trained model available (local path or HuggingFace fallback)
+- `qwen-lora:v3` Docker image for training execution
+- MySQL database container running
 
-3. **Contract Setup**
-   - Fine-tuning contract deployed
-   - Provider registered on the contract
-   - User account created with the provider
+### 2. Client Environment
 
-## Test Flow Overview
+- Node.js 18+
+- `0g-compute-cli` installed and linked
+- Private key with sufficient balance for gas fees
+- Network access to CVM broker endpoint
 
-```
-User                          Broker (TEE)                    Contract
-  │                              │                               │
-  │──── 1. Upload Dataset ──────▶│                               │
-  │◀─── Dataset Hash ───────────│                               │
-  │                              │                               │
-  │──── 2. Create Task ─────────▶│                               │
-  │◀─── Task ID ────────────────│                               │
-  │                              │                               │
-  │                              │── Setup (load model/data) ───▶│
-  │                              │── Training (LoRA) ───────────▶│
-  │                              │── Encrypt LoRA ──────────────▶│
-  │                              │── 3. Add Deliverable ────────▶│
-  │                              │                               │
-  │──── 4. Download LoRA ───────▶│                               │
-  │◀─── Encrypted LoRA ─────────│                               │
-  │                              │                               │
-  │──── 5. Acknowledge ─────────────────────────────────────────▶│
-  │                              │                               │
+### 3. Contract Setup
+
+- Fine-tuning contract deployed (testnetDev or mainnet)
+- Provider registered on the contract
+- User account created with the provider
+
+## Quick Start (CLI)
+
+### Install CLI
+
+```bash
+cd 0g-serving-user-broker
+npm install && npm run build
+npm link
 ```
 
-## Step-by-Step Testing
+### Complete Flow Commands
 
-### Step 1: Prepare Test Dataset
+```bash
+# Set dev mode for testnet
+export ZG_DEV_MODE=true
+
+# 1. List available providers
+0g-compute-cli fine-tuning list-providers
+
+# 2. List available models
+0g-compute-cli fine-tuning list-models
+
+# 3. Create task with dataset upload to TEE
+0g-compute-cli fine-tuning create-task \
+  --provider <PROVIDER_ADDRESS> \
+  --model Qwen2.5-0.5B-Instruct \
+  --dataset-path ./dataset.jsonl \
+  --config-path ./config.json \
+  --data-size 100
+
+# 4. Monitor task progress
+0g-compute-cli fine-tuning get-task \
+  --provider <PROVIDER_ADDRESS> \
+  --task <TASK_ID>
+
+# 5. Download and acknowledge model (after status = Delivered)
+0g-compute-cli fine-tuning acknowledge-model \
+  --provider <PROVIDER_ADDRESS> \
+  --task-id <TASK_ID> \
+  --data-path ./output
+
+# 6. Decrypt the model
+0g-compute-cli fine-tuning decrypt-model \
+  --provider <PROVIDER_ADDRESS> \
+  --task-id <TASK_ID> \
+  --encrypted-model ./output/lora_model_<TASK_ID>.zip \
+  --output ./output/lora_decrypted.zip
+
+# 7. Unzip to get LoRA adapter
+unzip ./output/lora_decrypted.zip -d ./output/
+```
+
+## Test Data Preparation
+
+### Dataset (dataset.jsonl)
 
 Create a JSONL file with instruction-input-output format:
 
@@ -52,109 +86,124 @@ Create a JSONL file with instruction-input-output format:
 {"instruction": "Translate to French", "input": "Hello world", "output": "Bonjour le monde"}
 {"instruction": "Translate to French", "input": "Good morning", "output": "Bonjour"}
 {"instruction": "Translate to French", "input": "Thank you", "output": "Merci"}
+{"instruction": "Translate to French", "input": "How are you?", "output": "Comment allez-vous?"}
+{"instruction": "Translate to French", "input": "Goodbye", "output": "Au revoir"}
 ```
 
-### Step 2: Upload Dataset
+Or use chat/messages format:
 
-```javascript
-// Calculate dataset hash
-const datasetContent = fs.readFileSync('dataset.jsonl');
-const datasetHash = ethers.keccak256(datasetContent);
-
-// Upload to broker
-const response = await fetch(`${BROKER_URL}/v1/user/${userAddress}/dataset`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: datasetContent
-});
-
-const result = await response.json();
-console.log('Dataset hash:', result.hash);
+```json
+{"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "2+2 equals 4."}]}
+{"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}]}
 ```
 
-**Expected Response:**
+### Training Config (config.json)
+
 ```json
 {
-  "hash": "0x88f241037ce5c842906598cd43bb42e27e21f6f755ea7ea71e8e62ff3a2c7a2e",
-  "size": 515
+    "num_train_epochs": 1,
+    "per_device_train_batch_size": 1,
+    "learning_rate": 0.0001,
+    "max_steps": 5,
+    "max_seq_length": 128,
+    "lora_r": 8,
+    "lora_alpha": 16
 }
 ```
 
-### Step 3: Create Fine-Tuning Task
+## Broker Configuration
 
-```javascript
-// Task parameters
-const taskRequest = {
-    preTrainedModelHash: MODEL_HASH,  // e.g., Qwen2.5-0.5B hash
-    datasetHash: datasetHash,
-    trainingParams: JSON.stringify({
-        num_train_epochs: 1,
-        per_device_train_batch_size: 1,
-        learning_rate: 0.0001,
-        max_steps: 5,
-        max_seq_length: 128,
-        lora_r: 8,
-        lora_alpha: 16
-    }),
-    fee: ethers.parseEther("1").toString(),
-    nonce: Date.now().toString()
-};
+### config.yaml (CVM)
 
-// Sign the request (must match broker's verification logic)
-const message = ethers.concat([
-    ethers.zeroPadValue(userAddress, 20),
-    ethers.zeroPadValue(ethers.toBeHex(BigInt(taskRequest.nonce)), 32),
-    ethers.toUtf8Bytes(taskRequest.datasetHash),
-    ethers.zeroPadValue(ethers.toBeHex(BigInt(taskRequest.fee)), 32)
-]);
-const messageHash = ethers.keccak256(message);
-const signature = await wallet.signMessage(ethers.getBytes(messageHash));
+```yaml
+contract:
+  fineTuning:
+    address: "0xYourContractAddress"
+    chainRpc: "https://evmrpc-testnet.0g.ai"
+    privateKey: "your_provider_private_key"
 
-taskRequest.signature = signature;
+service:
+  # Skip 0G Storage upload - users download LoRA directly from TEE
+  # Useful for testing or when 0G Storage is unavailable
+  skipStorageUpload: true
+  
+  # Price per token in neuron (1 neuron = 10^-18 A0GI)
+  pricePerToken: 1
+  
+  # Minimum provider balance required
+  minBalance: 100000000000000000  # 0.1 A0GI
+  
+  # Local model paths - maps model name to local file path
+  # When set, broker uses local model instead of downloading from HuggingFace
+  modelLocalPaths:
+    "Qwen2.5-0.5B-Instruct": "/dstack/persistent/models/Qwen2.5-0.5B-Instruct"
+    "Qwen3-32B": "/dstack/persistent/models/Qwen3-32B"
 
-// Create task
-const response = await fetch(`${BROKER_URL}/v1/user/${userAddress}/task`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(taskRequest)
-});
-
-const task = await response.json();
-console.log('Task ID:', task.id);
+database:
+  fineTune: root:password@tcp(db-host:3306)/fineTune?parseTime=true
 ```
 
-**Expected Response:**
-```json
-{
-  "id": "9d04f438-b672-4bc9-b506-95f66b8cfa19"
-}
+### Docker Run Command (Broker)
+
+```bash
+docker run -d --name broker \
+  --network provider_default \
+  -p 80:8080 \
+  -v /tmp:/tmp \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /var/run/dstack.sock:/var/run/dstack.sock \
+  -v /dstack/persistent:/dstack/persistent \
+  -v /path/to/config.yaml:/etc/config.yaml \
+  ghcr.io/0gfoundation/0g-serving-broker:latest \
+  /dstack/broker --config /etc/config.yaml
 ```
 
-### Step 4: Monitor Task Progress
+**Important Volume Mounts:**
 
-```javascript
-async function pollTaskStatus(taskId) {
-    while (true) {
-        const response = await fetch(
-            `${BROKER_URL}/v1/user/${userAddress}/task/${taskId}`
-        );
-        const task = await response.json();
-        
-        console.log(`Status: ${task.progress}`);
-        
-        if (task.progress === 'Delivered') {
-            return task;
-        }
-        if (task.progress === 'Failed') {
-            throw new Error('Task failed');
-        }
-        
-        await sleep(30000); // Poll every 30 seconds
-    }
-}
+| Mount | Purpose |
+|-------|---------|
+| `/tmp:/tmp` | Share temp directories with training containers |
+| `/var/run/docker.sock` | Allow broker to create training containers |
+| `/var/run/dstack.sock` | Key derivation for encryption |
+| `/dstack/persistent` | Persistent model storage |
+
+## Flow Diagram
+
+```
+User (CLI)                    Broker (TEE)                    Contract
+  │                              │                               │
+  │── 1. Upload Dataset ────────▶│                               │
+  │     (--dataset-path)         │── Convert JSONL to HF ───────▶│
+  │◀── Dataset Hash ────────────│                               │
+  │                              │                               │
+  │── 2. Create Task ───────────▶│                               │
+  │     (create-task cmd)        │                               │
+  │◀── Task ID ─────────────────│                               │
+  │                              │                               │
+  │                              │── Setup (load model/data) ──▶│
+  │                              │── Training (LoRA) ──────────▶│
+  │                              │── Encrypt LoRA ─────────────▶│
+  │                              │                               │
+  │                              │  [if skipStorageUpload=false] │
+  │                              │── Upload to 0G Storage ─────▶│
+  │                              │                               │
+  │                              │── Add Deliverable ──────────▶│
+  │                              │                               │
+  │── 3. Get Task Status ───────▶│                               │
+  │◀── Progress: Delivered ─────│                               │
+  │                              │                               │
+  │── 4. Download LoRA ─────────▶│                               │
+  │     (acknowledge-model)      │                               │
+  │◀── Encrypted LoRA ──────────│                               │
+  │                              │                               │
+  │── 5. Acknowledge ──────────────────────────────────────────▶│
+  │                              │                               │
+  │── 6. Decrypt LoRA ──────────▶│ (local decryption)           │
+  │     (decrypt-model)          │                               │
 ```
 
-**Progress States:**
+## Task Progress States
+
 | State | Description |
 |-------|-------------|
 | `Init` | Task created, waiting for setup |
@@ -167,54 +216,24 @@ async function pollTaskStatus(taskId) {
 | `Finished` | Complete |
 | `Failed` | Error occurred |
 
-### Step 5: Download Encrypted LoRA
+## Model Configuration
 
-```javascript
-const response = await fetch(
-    `${BROKER_URL}/v1/user/${userAddress}/task/${taskId}/lora`
-);
-
-if (response.ok) {
-    const loraData = await response.arrayBuffer();
-    fs.writeFileSync('lora_encrypted.data', Buffer.from(loraData));
-    console.log(`Downloaded: ${loraData.byteLength} bytes`);
-}
-```
-
-**Expected:** Binary file ~50-100MB depending on model size.
-
-### Step 6: Acknowledge Deliverable (Contract Call)
-
-```javascript
-const FINE_TUNING_ABI = [
-    "function acknowledgeDeliverable(address provider, string id) external"
-];
-
-const contract = new ethers.Contract(FINE_TUNING_CA, FINE_TUNING_ABI, wallet);
-const tx = await contract.acknowledgeDeliverable(PROVIDER_ADDRESS, taskId);
-await tx.wait();
-
-console.log('Deliverable acknowledged');
-```
-
-**Important:** You must acknowledge the current deliverable before creating a new task. The contract enforces this to ensure users confirm receipt of each delivery.
-
-## Model Hashes
-
-| Model | Hash |
-|-------|------|
-| Qwen2.5-0.5B-Instruct | `0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7` |
-| Qwen3-32B | `0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5` |
+| Model | Local Path | HuggingFace Fallback |
+|-------|------------|---------------------|
+| Qwen2.5-0.5B-Instruct | `/dstack/persistent/models/Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B-Instruct` |
+| Qwen3-32B | `/dstack/persistent/models/Qwen3-32B` | `Qwen/Qwen3-32B` |
 
 ## Timing Reference
 
-For Qwen2.5-0.5B-Instruct with 5 training steps:
+### Qwen2.5-0.5B-Instruct (5 training steps)
+
 - Setup: ~1 minute
 - Training: ~30 seconds
-- Encryption & Contract: ~30 seconds
+- Finalize: ~30 seconds
 - **Total: ~2-3 minutes**
 
-For Qwen3-32B:
+### Qwen3-32B (5 training steps)
+
 - Setup: ~5-10 minutes (model loading)
 - Training: ~10-20 minutes
 - **Total: ~15-30 minutes**
@@ -225,57 +244,139 @@ For Qwen3-32B:
 
 **Cause:** A previous task's deliverable exists but hasn't been acknowledged.
 
-**Solution:** Call `acknowledgeDeliverable()` for the previous task before creating a new one.
+**Solution:** Call `acknowledge-model` for the previous task before creating a new one.
 
-```javascript
-// Check existing deliverables
-const deliverables = await contract.getDeliverables(userAddress, providerAddress);
-for (const d of deliverables) {
-    if (!d.acknowledged) {
-        await contract.acknowledgeDeliverable(providerAddress, d.id);
-    }
-}
+### "signature required" when downloading
+
+**Cause:** The LoRA download endpoint requires authentication.
+
+**Solution:** Use the CLI command which handles signature automatically:
+```bash
+0g-compute-cli fine-tuning acknowledge-model --provider ... --task-id ...
 ```
-
-### "signature verification failed"
-
-**Cause:** Signature format doesn't match broker's expected format.
-
-**Solution:** Ensure you're using the correct signing method:
-1. Concatenate: address (20 bytes) + nonce (32 bytes) + datasetHash (UTF8) + fee (32 bytes)
-2. Hash with keccak256
-3. Sign the hash bytes with `signMessage()`
 
 ### Task stuck in "SettingUp"
 
 **Cause:** Model or dataset loading issues.
 
 **Check:**
-- Model exists at configured local path or HuggingFace fallback is correct
+- Model exists at configured local path or HuggingFace fallback is accessible
 - Dataset was successfully converted to HuggingFace format
 - Sufficient disk space on CVM
 
-## Contract ABI Reference
+### "bind source path does not exist"
 
-```solidity
-// Provider calls
-function addDeliverable(address user, string id, bytes modelRootHash) external;
+**Cause:** Docker volume mount issue - broker's `/tmp` not shared with host.
 
-// User calls
-function acknowledgeDeliverable(address provider, string id) external;
+**Solution:** Ensure broker container has `-v /tmp:/tmp` mount.
 
-// View functions
-function getDeliverable(address user, address provider, string id) 
-    external view returns (Deliverable);
-function getDeliverables(address user, address provider) 
-    external view returns (Deliverable[]);
-```
+### "dial unix /var/run/dstack.sock: connect: no such file or directory"
+
+**Cause:** dstack socket not mounted in broker container.
+
+**Solution:** Add `-v /var/run/dstack.sock:/var/run/dstack.sock` to broker container.
+
+### "insufficient provider balance"
+
+**Cause:** Provider wallet balance below minimum required.
+
+**Solution:** Transfer funds to provider wallet address.
 
 ## Test Success Criteria
 
-- [ ] Dataset uploaded and hash returned
-- [ ] Task created successfully
-- [ ] Task progresses through all states to `Delivered`
-- [ ] Encrypted LoRA downloaded (non-empty file)
+- [ ] Dataset uploaded to TEE and hash returned
+- [ ] Task created successfully with Task ID
+- [ ] Task progresses: Init → SetUp → Training → Trained → Delivered
+- [ ] Encrypted LoRA downloaded (non-empty file, ~50-100MB)
 - [ ] Deliverable acknowledged on contract
-- [ ] Task status reaches `Finished`
+- [ ] Model decrypted successfully
+- [ ] LoRA adapter files present (adapter_config.json, adapter_model.safetensors)
+
+## Example Complete Test Session
+
+```bash
+# Prepare test files
+mkdir -p /tmp/finetuning-test
+cat > /tmp/finetuning-test/dataset.jsonl << 'EOF'
+{"instruction": "Translate to French", "input": "Hello world", "output": "Bonjour le monde"}
+{"instruction": "Translate to French", "input": "Good morning", "output": "Bonjour"}
+{"instruction": "Translate to French", "input": "Thank you", "output": "Merci"}
+{"instruction": "Translate to French", "input": "How are you?", "output": "Comment allez-vous?"}
+{"instruction": "Translate to French", "input": "Goodbye", "output": "Au revoir"}
+EOF
+
+cat > /tmp/finetuning-test/config.json << 'EOF'
+{
+    "num_train_epochs": 1,
+    "per_device_train_batch_size": 1,
+    "learning_rate": 0.0001,
+    "max_steps": 5,
+    "max_seq_length": 128,
+    "lora_r": 8,
+    "lora_alpha": 16
+}
+EOF
+
+# Run test
+export ZG_DEV_MODE=true
+PROVIDER=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+
+# Create task
+TASK_ID=$(0g-compute-cli fine-tuning create-task \
+  --provider $PROVIDER \
+  --model Qwen2.5-0.5B-Instruct \
+  --dataset-path /tmp/finetuning-test/dataset.jsonl \
+  --config-path /tmp/finetuning-test/config.json \
+  --data-size 100 2>&1 | grep "Created Task ID" | awk '{print $NF}')
+
+echo "Task ID: $TASK_ID"
+
+# Poll until delivered
+while true; do
+  STATUS=$(0g-compute-cli fine-tuning get-task --provider $PROVIDER --task $TASK_ID 2>&1 | grep -o 'Progress: [^,]*' | cut -d' ' -f2)
+  echo "Status: $STATUS"
+  if [ "$STATUS" = "Delivered" ] || [ "$STATUS" = "Failed" ]; then
+    break
+  fi
+  sleep 15
+done
+
+# Download and decrypt
+if [ "$STATUS" = "Delivered" ]; then
+  0g-compute-cli fine-tuning acknowledge-model \
+    --provider $PROVIDER \
+    --task-id $TASK_ID \
+    --data-path /tmp/finetuning-test/output
+    
+  0g-compute-cli fine-tuning decrypt-model \
+    --provider $PROVIDER \
+    --task-id $TASK_ID \
+    --encrypted-model /tmp/finetuning-test/output/lora_model_${TASK_ID}.zip \
+    --output /tmp/finetuning-test/output/lora_decrypted.zip
+    
+  unzip /tmp/finetuning-test/output/lora_decrypted.zip -d /tmp/finetuning-test/output/
+  
+  echo "LoRA files:"
+  ls -la /tmp/finetuning-test/output/output_model/
+fi
+```
+
+## Output Structure
+
+After successful decryption:
+
+```
+output/
+├── lora_model_<task-id>.zip      # Encrypted model from TEE
+├── lora_decrypted.zip            # Decrypted zip
+└── output_model/                 # Extracted LoRA adapter
+    ├── adapter_config.json       # LoRA configuration
+    ├── adapter_model.safetensors # LoRA weights (~8MB for 0.5B model)
+    ├── README.md
+    ├── added_tokens.json
+    └── checkpoint-N/             # Training checkpoint
+        ├── adapter_model.safetensors
+        ├── optimizer.pt
+        ├── scheduler.pt
+        └── trainer_state.json
+```
