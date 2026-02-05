@@ -44,7 +44,9 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	if len(reqBody) > 0 {
 		body = bytes.NewBuffer(reqBody)
 	}
-	req, err := http.NewRequest(ctx.Request.Method, targetURL, body)
+	// Use request context to support client cancellation
+	// This ensures that if the client disconnects, the backend request is also cancelled
+	req, err := http.NewRequestWithContext(ctx.Request.Context(), ctx.Request.Method, targetURL, body)
 	if err != nil {
 		return nil, err
 	}
