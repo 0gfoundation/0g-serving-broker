@@ -343,6 +343,11 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	}
 
 	// Fallback to old logic if no usage info
+	// This check is defensive - whitelisted users should have already returned at L326-331
+	// but we add this for code clarity and future-proofing
+	if isWhitelisted {
+		return nil
+	}
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
 

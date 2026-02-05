@@ -229,8 +229,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			return
 		}
 
-		// Process with charging=true to enable normal response handling (stream, signing)
-		// Actual billing will be skipped due to IsWhitelisted flag
+		// Pass charging=true to enable full response processing (stream handling, TEE signing, chat verification)
+		// IsWhitelisted=true will skip only the billing/settlement operations
 		if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, whitelistReq, service.OutputPrice, true); err != nil {
 			p.logger.Errorf("process whitelist http request failed: %v", err)
 		}
