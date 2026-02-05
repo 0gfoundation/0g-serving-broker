@@ -59,6 +59,11 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
+	// Skip billing for whitelisted users
+	if reqModel.IsWhitelisted {
+		return nil
+	}
+
 	// Get imageNum from request for billing
 	imageNum := reqModel.OutputCount // previously stored imageNum count
 

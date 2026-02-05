@@ -119,6 +119,11 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
+	// Skip billing for whitelisted users
+	if reqModel.IsWhitelisted {
+		return nil
+	}
+
 	// Update billing with actual usage data
 	if transcriptionResp.Usage != nil {
 		return c.updateSpeechToTextWithUsage(context.Background(), transcriptionResp.Usage, reqModel.RequestHash)
@@ -193,6 +198,11 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing streaming speech-to-text response")
 		_ = c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey)
+	}
+
+	// Skip billing for whitelisted users
+	if reqModel.IsWhitelisted {
+		return nil
 	}
 
 	// Update billing

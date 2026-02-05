@@ -196,6 +196,11 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
+	// Skip billing for whitelisted users
+	if reqModel.IsWhitelisted {
+		return nil
+	}
+
 	// Get image count from request model (stored during preprocessing)
 	imageNum := reqModel.OutputCount
 
