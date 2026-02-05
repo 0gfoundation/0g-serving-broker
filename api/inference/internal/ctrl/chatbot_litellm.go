@@ -73,7 +73,7 @@ type LiteLLMDelta struct {
 }
 
 // processLiteLLMSingleResponse processes a non-stream LiteLLM response
-func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage) error {
+func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []byte, outputPrice string, output *string, requestHash string, usage **Usage, isWhitelisted bool) error {
 	var response LiteLLMResponse
 	if err := json.Unmarshal(decodedBody, &response); err != nil {
 		return errors.Wrap(err, "Error unmarshaling LiteLLM JSON")
@@ -94,6 +94,11 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 			TotalTokens:      response.Usage.InputTokens + response.Usage.OutputTokens,
 		}
 
+		// Skip billing for whitelisted users
+		if isWhitelisted {
+			return nil
+		}
+
 		service, err := c.GetCachedService(ctx)
 		if err != nil {
 			return errors.Wrap(err, "get cached service for LiteLLM single response billing")
@@ -101,12 +106,17 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 		return c.updateAccountWithUsage(ctx, *usage, service.OutputPrice, requestHash, service.InputPrice)
 	}
 
+	// Skip billing for whitelisted users
+	if isWhitelisted {
+		return nil
+	}
+
 	// Fallback to old logic if no usage info
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
 
 // processLiteLLMStream processes a streaming LiteLLM response
-func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string) error {
+func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string, isWhitelisted bool) error {
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 
@@ -155,6 +165,11 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 					}
 
 				case "message_stop":
+					// Skip billing for whitelisted users
+					if isWhitelisted {
+						return nil
+					}
+
 					// Stream finished
 					if *usage != nil {
 						service, err := c.GetCachedService(ctx)
