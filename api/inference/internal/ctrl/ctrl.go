@@ -95,15 +95,15 @@ func New(
 		// Initialize shared HTTP client with connection pooling
 		// Optimized for single backend container with many concurrent users
 		httpClient: &http.Client{
-			Timeout: 6 * time.Minute, // Default timeout for all requests
+			Timeout: 10 * time.Minute, // Increased for long-running image generation tasks
 			Transport: &http.Transport{
-				// Since we have a single backend container, MaxIdleConnsPerHost is the key parameter
-				MaxIdleConns:          100,               // Total idle connections (across all hosts)
-				MaxIdleConnsPerHost:   100,               // Idle connections per host (critical for single backend)
-				MaxConnsPerHost:       0,                 // 0 = unlimited active connections per host
+				// Connection pool settings for high concurrency scenarios
+				MaxIdleConns:          200,               // Increased total idle connections to handle more concurrent users
+				MaxIdleConnsPerHost:   200,               // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       500,               // Limit max active connections to prevent resource exhaustion
 				IdleConnTimeout:       90 * time.Second,  // How long idle connections stay open
 				TLSHandshakeTimeout:   10 * time.Second,  // TLS handshake timeout
-				ResponseHeaderTimeout: 30 * time.Second,  // Time to wait for response headers
+				ResponseHeaderTimeout: 5 * time.Minute,   // Increased for complex LLM processing before response starts
 				ExpectContinueTimeout: 1 * time.Second,   // Time to wait for 100-continue response
 				DisableKeepAlives:     false,             // Enable connection reuse (critical)
 				DisableCompression:    false,             // Allow gzip compression
