@@ -72,13 +72,9 @@ storageClient:
     fragmentSize: 4294967296
 
 # Database configuration
+# Format: user:password@tcp(host:port)/database?parseTime=true
 database:
-  mysql:
-    host: "mysql"
-    port: 3306
-    user: "root"
-    password: "${MYSQL_PASSWORD}"  # Set via environment variable
-    db: "fineTune"
+  fineTune: "root:${MYSQL_PASSWORD}@tcp(db:3306)/fineTune?parseTime=true"
 
 # Logger configuration
 logger:
