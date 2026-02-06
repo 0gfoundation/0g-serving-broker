@@ -191,10 +191,10 @@ func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 // @Description Authentication: Requires signature of keccak256(taskID) signed by user's private key
 // @Tags Task
 // @Produce application/octet-stream
-// @Router /user/{userAddress}/task/{taskID}/lora [get]
+// @Router /user/{userAddress}/task/{taskID}/lora [post]
 // @Param userAddress path string true "user address"
 // @Param taskID path string true "task ID"
-// @Param signature query string true "signature of keccak256(taskID) signed by user"
+// @Param body body object true "Request body with signature" example({"signature": "0x..."})
 // @Success 200 {file} file "lora_encrypted.data"
 func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
@@ -205,11 +205,15 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 	}
 
 	// Verify signature - user must prove they own the userAddress
-	signature := ctx.Query("signature")
-	if signature == "" {
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "signature required"})
+	// Use POST body for signature (consistent with CancelTask)
+	var jsonData struct {
+		Signature string `json:"signature" binding:"required"`
+	}
+	if err := ctx.Bind(&jsonData); err != nil {
+		handleBrokerError(ctx, err, "bind request body")
 		return
 	}
+	signature := jsonData.Signature
 
 	if err := h.ctrl.VerifyDownloadSignature(&id, userAddress, signature); err != nil {
 		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
