@@ -73,8 +73,8 @@ jobs:
 
           claude_args: |
             --model claude-sonnet-4-5-20250929
-            --max-turns 15
-            --allowedTools "Bash(git *),Bash(go test *),Bash(go build *),Bash(go mod *),Bash(golangci-lint *),Bash(make *),Bash(docker *)"
+            --max-turns 40
+            --allowedTools "Bash(*)"
             --system-prompt "You are a code review expert for the 0G Serving Broker project.
 
             Project Background:
