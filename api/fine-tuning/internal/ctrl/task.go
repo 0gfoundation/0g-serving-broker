@@ -417,7 +417,7 @@ print(f"Converted {len(data['instruction'])} examples to {output_dir}")
 	// Fall back to Docker if direct Python fails
 	cmd = exec.Command("docker", "run", "--rm",
 		"-v", filepath.Dir(jsonlPath)+":/data",
-		"qwen-lora:v3",
+		c.config.Images.ExecutionImageName,
 		"python3", "/data/"+filepath.Base(scriptPath),
 		"/data/"+filepath.Base(jsonlPath),
 		"/data/"+filepath.Base(hfPath))
