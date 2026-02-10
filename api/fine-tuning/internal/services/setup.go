@@ -447,13 +447,19 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 		return err
 	}
 
-	fee, err := util.ConvertToBigInt(task.Fee)
+	// Calculate actual fee based on token count
+	service, err := s.contract.GetService(ctx)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "get service from contract")
 	}
 
-	if err := s.verifyTaskFee(tokenSize, trainEpochs, fee); err != nil {
-		return err
+	actualFee := new(big.Int).Mul(new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(s.config.Service.PricePerToken)), big.NewInt(trainEpochs))
+	s.logger.Infof("Calculated fee: %v (tokenSize=%d, trainEpochs=%d, pricePerToken=%d)", actualFee, tokenSize, trainEpochs, s.config.Service.PricePerToken)
+
+	// Update task fee in memory and database
+	task.Fee = actualFee.String()
+	if err := s.db.UpdateTaskFee(task.ID, actualFee.String()); err != nil {
+		return errors.Wrap(err, "update task fee in database")
 	}
 
 	userAddress := common.HexToAddress(task.UserAddress)
@@ -462,8 +468,8 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 		return err
 	}
 	remainingBalance := new(big.Int).Sub(account.Balance, account.PendingRefund)
-	if remainingBalance.Cmp(fee) < 0 {
-		return fmt.Errorf("insufficient account balance after pending refund: expected %v, got %v", fee, remainingBalance)
+	if remainingBalance.Cmp(actualFee) < 0 {
+		return fmt.Errorf("insufficient account balance after pending refund: required %v, available %v", actualFee, remainingBalance)
 	}
 
 	nonce, err := util.ConvertToBigInt(task.Nonce)
@@ -475,11 +481,6 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 	}
 
 	// Verify that the service's TEE signer has been acknowledged by the owner
-	service, err := s.contract.GetService(ctx)
-	if err != nil {
-		return errors.Wrap(err, "get service from contract")
-	}
-
 	if !service.TeeSignerAcknowledged {
 		return errors.New("service TEE signer has not been acknowledged by the 0G team")
 	}
@@ -489,7 +490,7 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 		return errors.New("user has not acknowledged the provider's TEE signer yet")
 	}
 
-	messageHash := s.getHash(fee, task.DatasetHash, userAddress, nonce)
+	messageHash := s.getHash(task.DatasetHash, userAddress, nonce)
 	return s.verifySignature(task.Signature, messageHash, userAddress, task)
 }
 
@@ -506,17 +507,8 @@ func (s *Setup) verifyProviderBalance(ctx context.Context) error {
 	return nil
 }
 
-func (s *Setup) verifyTaskFee(tokenSize int64, trainEpochs int64, fee *big.Int) error {
-	totalFee := new(big.Int).Mul(new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(s.config.Service.PricePerToken)), big.NewInt(trainEpochs))
-
-	if totalFee.Cmp(fee) > 0 {
-		return fmt.Errorf("insufficient task fee: expected %v, got %v", totalFee, fee)
-	}
-	return nil
-}
 
 func (s *Setup) getHash(
-	taskFee *big.Int,
 	fileRootHash string,
 	userAddress common.Address,
 	nonce *big.Int,
@@ -525,7 +517,6 @@ func (s *Setup) getHash(
 	buf.Write(userAddress.Bytes())
 	buf.Write(common.LeftPadBytes(nonce.Bytes(), 32))
 	buf.Write([]byte(fileRootHash))
-	buf.Write(common.LeftPadBytes(taskFee.Bytes(), 32))
 
 	msg := crypto.Keccak256Hash(buf.Bytes())
 	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), msg.Bytes())
