@@ -31,7 +31,7 @@ var (
 
 // VerifierLibraryMetaData contains all meta data concerning the VerifierLibrary contract.
 var VerifierLibraryMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"length\",\"type\":\"uint256\"}],\"name\":\"DeliverableIdTooLong\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"InvalidSignature\",\"type\":\"error\"}]",
+	ABI: "[{\"inputs\":[],\"name\":\"InvalidSignature\",\"type\":\"error\"}]",
 }
 
 // VerifierLibraryABI is the input ABI used to generate the binding from.
