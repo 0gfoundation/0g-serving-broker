@@ -359,11 +359,11 @@ func (s *Setup) tryHuggingFaceFallback(modelHash string, paths *utils.TaskPaths)
 		return err
 	}
 
-	// Use huggingface-cli to download the model
-	// huggingface-cli is provided by the huggingface_hub package (installed in api/Dockerfile)
-	// Command: huggingface-cli download <repo> --local-dir <path>
+	// Use hf CLI to download the model
+	// hf is provided by the huggingface_hub package (installed in api/Dockerfile)
+	// Command: hf download <repo> --local-dir <path>
 	args := []string{"download", hfRepo, "--local-dir", paths.PretrainedModel}
-	output, err := util.RunCommand("huggingface-cli", args, s.logger)
+	output, err := util.RunCommand("hf", args, s.logger)
 	if err != nil {
 		s.logger.Errorf("Error downloading from HuggingFace: %v, output: %s\n", err, output)
 		return fmt.Errorf("failed to download from HuggingFace: %v", err)
