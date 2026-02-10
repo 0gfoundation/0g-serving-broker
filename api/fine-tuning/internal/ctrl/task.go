@@ -3,7 +3,10 @@ package ctrl
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -138,7 +141,7 @@ func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(os.TempDir(), id.String(), utils.TaskLogFileName), nil
+	return filepath.Join(utils.GetDataDir(), id.String(), utils.TaskLogFileName), nil
 }
 
 func (c *Ctrl) validateProviderSigner(ctx context.Context, userAddressHex string) error {
@@ -195,3 +198,236 @@ func (c *Ctrl) validateModelType(task *schema.Task) error {
 func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
 	return c.db.PendingTrainingTaskCount()
 }
+
+// VerifyDownloadSignature verifies that the signature is valid for the given task ID and user address
+// Uses the same message format as validateSignature: TextHash(keccak256(binaryTaskID))
+func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signature string) error {
+	if id == nil {
+		return errors.New("task ID cannot be nil")
+	}
+
+	// Get binary representation of UUID (same as task.ID.MarshalBinary())
+	idBytes, err := id.MarshalBinary()
+	if err != nil {
+		return errors.Wrap(err, "marshal task ID")
+	}
+
+	// Create message hash using same format as validateSignature
+	hash := accounts.TextHash(crypto.Keccak256(idBytes)[:])
+
+	// Decode signature
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return errors.Wrap(err, "decode signature")
+	}
+
+	// Validate signature length and recovery ID
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
+	}
+
+	if sigBytes[64] != 27 && sigBytes[64] != 28 {
+		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
+	}
+
+	sigBytes[64] -= 27
+	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	if err != nil {
+		return errors.Wrap(err, "recover public key from signature")
+	}
+
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	expectedAddr := common.HexToAddress(userAddress)
+
+	if recoveredAddr != expectedAddr {
+		return fmt.Errorf("signature verification failed: expected %s, got %s", expectedAddr.Hex(), recoveredAddr.Hex())
+	}
+
+	return nil
+}
+
+// GetLoRAModel returns the path to the encrypted LoRA model file for a completed task
+// The file is encrypted with AES and the key is available through contract settlement
+func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
+	if id == nil {
+		return "", errors.New("task ID cannot be nil")
+	}
+
+	task, err := c.db.GetTask(id)
+	if err != nil {
+		return "", errors.Wrap(err, "get task from db")
+	}
+
+	// Verify user owns this task
+	if task.UserAddress != userAddress {
+		return "", errors.New("unauthorized: task does not belong to this user")
+	}
+
+	// Check if task is delivered (encryption completed)
+	progress := task.Progress
+	if progress != db.ProgressStateDelivered.String() &&
+		progress != db.ProgressStateUserAcknowledged.String() &&
+		progress != db.ProgressStateFinished.String() {
+		return "", errors.New("task is not ready for download. Please wait for 'Delivered' status")
+	}
+
+	// Build paths
+	paths := utils.NewTaskPaths(filepath.Join(utils.GetDataDir(), id.String()))
+
+	// Return encrypted file path (created by finalizer)
+	encryptedFilePath := paths.Output + "_encrypted.data"
+	if _, err := os.Stat(encryptedFilePath); os.IsNotExist(err) {
+		return "", errors.New("encrypted LoRA file not found. The task may not have completed encryption yet")
+	}
+
+	return encryptedFilePath, nil
+}
+
+// SaveDataset saves an uploaded dataset file and returns its hash
+// The dataset is stored in a user-specific directory and can be referenced by hash in task creation
+// JSONL files are automatically converted to HuggingFace DatasetDict format for training
+//
+// Design note: We use content hash as the filename (not task ID) because:
+// 1. Task ID doesn't exist at dataset upload time - user uploads dataset first, then creates task
+// 2. Content hash ensures deduplication - same dataset uploaded twice won't create duplicate files
+// 3. Content hash guarantees data integrity - any modification creates a different hash
+func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (string, error) {
+	// Create dataset directory for user
+	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
+	if err := os.MkdirAll(datasetDir, 0755); err != nil {
+		return "", errors.Wrap(err, "create dataset directory")
+	}
+
+	// Open uploaded file
+	src, err := file.Open()
+	if err != nil {
+		return "", errors.Wrap(err, "open uploaded file")
+	}
+	defer src.Close()
+
+	// Read file content to calculate hash
+	content, err := io.ReadAll(src)
+	if err != nil {
+		return "", errors.Wrap(err, "read file content")
+	}
+
+	// Calculate hash of the dataset
+	datasetHash := crypto.Keccak256Hash(content)
+	hashStr := datasetHash.Hex()
+
+	// Save JSONL file with hash as filename
+	jsonlPath := filepath.Join(datasetDir, hashStr)
+	if err := os.WriteFile(jsonlPath, content, 0644); err != nil {
+		return "", errors.Wrap(err, "write dataset file")
+	}
+
+	c.logger.Infof("Dataset saved: %s (hash: %s, size: %d bytes)", jsonlPath, hashStr, len(content))
+
+	// Convert JSONL to HF format is required by the fine-tuning executor's token counter
+	if err := c.convertJSONLToHF(jsonlPath); err != nil {
+		c.logger.Warnf("Failed to convert dataset to HF format: %v", err)
+		// Don't return error - the setup service will try to handle it
+	}
+
+	return hashStr, nil
+}
+
+// convertJSONLToHF converts a JSONL dataset file to HuggingFace DatasetDict format
+// This conversion is best-effort. If it fails, the setup service will try to handle the raw JSONL.
+func (c *Ctrl) convertJSONLToHF(jsonlPath string) error {
+	hfPath := jsonlPath + "_hf"
+
+	// Check if already converted
+	if _, err := os.Stat(hfPath); err == nil {
+		c.logger.Infof("HF dataset already exists: %s", hfPath)
+		return nil
+	}
+
+	// Python script to convert JSONL to HF format
+	// Supports both instruction/input/output format and messages format (chat)
+	pythonScript := `
+import json
+import sys
+import os
+from datasets import Dataset, DatasetDict
+
+jsonl_file = sys.argv[1]
+output_dir = sys.argv[2]
+
+# Read JSONL and detect format
+data = {"instruction": [], "input": [], "output": []}
+messages_format = False
+
+with open(jsonl_file, 'r') as f:
+    lines = [line.strip() for line in f if line.strip()]
+
+if lines:
+    first_item = json.loads(lines[0])
+    if "messages" in first_item:
+        messages_format = True
+
+if messages_format:
+    # Convert messages format to instruction/input/output
+    for line in lines:
+        item = json.loads(line)
+        messages = item.get("messages", [])
+        # Extract user message as instruction, assistant message as output
+        instruction = ""
+        output = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                instruction = content
+            elif role == "assistant":
+                output = content
+        data["instruction"].append(instruction)
+        data["input"].append("")
+        data["output"].append(output)
+else:
+    # Standard instruction/input/output format
+    for line in lines:
+        item = json.loads(line)
+        data["instruction"].append(item.get("instruction", ""))
+        data["input"].append(item.get("input", ""))
+        data["output"].append(item.get("output", ""))
+
+# Create and save DatasetDict
+ds = DatasetDict({"train": Dataset.from_dict(data)})
+ds.save_to_disk(output_dir)
+print(f"Converted {len(data['instruction'])} examples to {output_dir}")
+`
+
+	// Save Python script to temp file
+	scriptPath := jsonlPath + "_convert.py"
+	if err := os.WriteFile(scriptPath, []byte(pythonScript), 0644); err != nil {
+		return errors.Wrap(err, "write conversion script")
+	}
+	defer os.Remove(scriptPath)
+
+	// Try running Python directly first (for environments where Python is available)
+	cmd := exec.Command("python3", scriptPath, jsonlPath, hfPath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		c.logger.Infof("Converted dataset using direct Python: %s", string(output))
+		return nil
+	}
+	c.logger.Warnf("Direct Python conversion failed: %v, trying docker...", err)
+
+	// Fall back to Docker if direct Python fails
+	cmd = exec.Command("docker", "run", "--rm",
+		"-v", filepath.Dir(jsonlPath)+":/data",
+		c.config.Images.ExecutionImageName,
+		"python3", "/data/"+filepath.Base(scriptPath),
+		"/data/"+filepath.Base(jsonlPath),
+		"/data/"+filepath.Base(hfPath))
+
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "convert dataset: %s", string(output))
+	}
+
+	c.logger.Infof("Converted dataset to HF format: %s (output: %s)", hfPath, string(output))
+	return nil
+}
+

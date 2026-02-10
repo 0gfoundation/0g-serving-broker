@@ -36,6 +36,7 @@ services:
       - /tmp:/tmp
       - /tmp/0g-transformer-bridge:/opt/transformer-bridge
       - ./models:/fine-tuning/execution/models
+      - /dstack/persistent:/dstack/persistent
     command: 0g-fine-tuning-server
     networks:
       - localhost
@@ -44,7 +45,6 @@ services:
       options:
         max-size: "100m"
         max-file: "5"
-    runtime: nvidia
     depends_on:
       mysql:
         condition: service_healthy

@@ -13,6 +13,8 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
+// Note: mime/multipart is used implicitly by gin for FormFile
+
 // CreateTask
 //
 //	@Description  This endpoint allows you to create a fine-tuning task
@@ -179,4 +181,97 @@ func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 	}
 
 	ctx.String(http.StatusOK, strconv.Itoa(int(counter)))
+}
+
+// DownloadLoRA godoc
+// @Summary Download encrypted LoRA model from TEE
+// @Description Download the encrypted LoRA adapter from TEE. The file is AES encrypted.
+// @Description User must call contract acknowledge() to settle and get the decryption key.
+// @Description Flow: Download encrypted file -> acknowledge on contract -> get encryptedSecret -> decrypt with user private key -> get AES key -> decrypt LoRA
+// @Description Authentication: Requires signature of keccak256(taskID) signed by user's private key
+// @Tags Task
+// @Produce application/octet-stream
+// @Router /user/{userAddress}/task/{taskID}/lora [post]
+// @Param userAddress path string true "user address"
+// @Param taskID path string true "task ID"
+// @Param body body object true "Request body with signature" example({"signature": "0x..."})
+// @Success 200 {file} file "lora_encrypted.data"
+func (h *Handler) DownloadLoRA(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	id, err := uuid.Parse(ctx.Param("taskID"))
+	if err != nil {
+		handleBrokerError(ctx, err, "parse task id")
+		return
+	}
+
+	// Verify signature - user must prove they own the userAddress
+	// Use POST body for signature (consistent with CancelTask)
+	var jsonData struct {
+		Signature string `json:"signature" binding:"required"`
+	}
+	if err := ctx.Bind(&jsonData); err != nil {
+		handleBrokerError(ctx, err, "bind request body")
+		return
+	}
+	signature := jsonData.Signature
+
+	if err := h.ctrl.VerifyDownloadSignature(&id, userAddress, signature); err != nil {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
+		return
+	}
+
+	filePath, err := h.ctrl.GetLoRAModel(&id, userAddress)
+	if err != nil {
+		handleBrokerError(ctx, err, "get LoRA model")
+		return
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "Encrypted LoRA not found. Task may not have completed encryption yet."})
+		return
+	}
+
+	ctx.Header("Content-Description", "File Transfer")
+	ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=lora_encrypted_%s.data", id.String()))
+	ctx.Header("Content-Type", "application/octet-stream")
+	ctx.File(filePath)
+}
+
+// UploadDataset godoc
+// @Summary Upload dataset to TEE
+// @Description Upload a dataset file to TEE for fine-tuning. Returns a dataset hash for use in task creation.
+// @Tags Dataset
+// @Accept multipart/form-data
+// @Produce json
+// @Router /user/{userAddress}/dataset [post]
+// @Param userAddress path string true "user address"
+// @Param file formance formData file true "dataset file (JSONL format)"
+// @Success 200 {object} object{datasetHash=string} "Dataset uploaded successfully"
+func (h *Handler) UploadDataset(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	
+	file, err := ctx.FormFile("file")
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
+		return
+	}
+
+	// Check file size (max 500MB)
+	maxSize := int64(500 * 1024 * 1024)
+	if file.Size > maxSize {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 500MB"})
+		return
+	}
+
+	datasetHash, err := h.ctrl.SaveDataset(userAddress, file)
+	if err != nil {
+		handleBrokerError(ctx, err, "save dataset")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"datasetHash": datasetHash,
+		"message":     "Dataset uploaded successfully. Use this hash when creating a fine-tuning task.",
+	})
 }

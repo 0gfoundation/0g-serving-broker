@@ -28,6 +28,28 @@ type Service struct {
 	} `yaml:"quota"`
 	PricePerToken    int64             `yaml:"pricePerToken"`
 	CustomizedModels []CustomizedModel `yaml:"customizedModels"`
+	// ModelLocalPaths maps model hash to local file path for any model (including predefined models)
+	// When set, the broker will use the local model instead of downloading from 0G Storage
+	ModelLocalPaths map[string]string `yaml:"modelLocalPaths"`
+	// ModelHuggingFaceFallback maps model hash to HuggingFace repo name
+	// Used as fallback when local model path doesn't exist
+	ModelHuggingFaceFallback map[string]string `yaml:"modelHuggingFaceFallback"`
+	// DatasetLocalPaths maps dataset hash to local file path
+	// When set, the broker will use the local dataset instead of downloading from 0G Storage
+	// Useful for testing or pre-cached datasets
+	DatasetLocalPaths map[string]string `yaml:"datasetLocalPaths"`
+	// SkipStorageUpload when true, skips uploading trained model to 0G Storage
+	// Users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
+	// Useful for testing or when 0G Storage is not available
+	SkipStorageUpload bool `yaml:"skipStorageUpload"`
+	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
+	// After this period, files will be automatically cleaned up
+	// Default: 72 hours (3 days)
+	FileRetentionHours int `yaml:"fileRetentionHours"`
+	// DataDir specifies the root directory for storing task data (datasets, models, outputs)
+	// Default: /tmp (uses os.TempDir())
+	// Recommended: /dstack/persistent for large models to avoid memory pressure
+	DataDir string `yaml:"dataDir"`
 }
 
 func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
@@ -89,6 +111,7 @@ type CustomizedModel struct {
 	Description    string           `yaml:"description" json:"description"`
 	Tokenizer      string           `yaml:"tokenizer" json:"tokenizer"`
 	UsageFile      string           `yaml:"usageFile" json:"usageFile"`
+	LocalPath      string           `yaml:"localPath" json:"localPath"` // Local path to pre-downloaded model, skip 0G Storage download if set
 }
 
 type Images struct {

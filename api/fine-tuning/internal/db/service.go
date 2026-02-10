@@ -152,6 +152,19 @@ func (d *DB) UpdateTaskProgress(id *uuid.UUID, oldProgress, newProgress Progress
 	return nil
 }
 
+func (d *DB) UpdateTaskFee(id *uuid.UUID, fee string) error {
+	ret := d.db.Model(&Task{}).Where("id = ?", id).Update("fee", fee)
+	if ret.Error != nil {
+		return ret.Error
+	}
+
+	if ret.RowsAffected == 0 {
+		return errors.New(fmt.Sprintf("Failed to update task fee: task %v not found", id))
+	}
+
+	return nil
+}
+
 func (d *DB) CancelTask(id *uuid.UUID, userAddress string) error {
 	validStates := []string{
 		ProgressStateInit.String(),
