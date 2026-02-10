@@ -110,7 +110,7 @@ def load_model_and_tokenizer(model_path, quantization_config=None):
     
     model_kwargs = {
         "trust_remote_code": True,
-        "torch_dtype": torch.bfloat16,
+        "dtype": torch.bfloat16,
         "device_map": "auto",
     }
     
@@ -265,7 +265,6 @@ def main():
         lr_scheduler_type="cosine",
         report_to="none",
         gradient_checkpointing=config.get("gradient_checkpointing", False),
-        save_safetensors=True,
         dataloader_pin_memory=False,
     )
     
