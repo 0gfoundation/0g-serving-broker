@@ -334,7 +334,9 @@ func (s *Setup) downloadDatasetFromStorage(ctx context.Context, task *db.Task, p
 	return nil
 }
 
-// tryHuggingFaceFallback attempts to download model from HuggingFace if configured
+// tryHuggingFaceFallback attempts to download model from HuggingFace if configured.
+// If ModelLocalPaths is configured for this model, downloads to that shared location
+// and creates a symlink; otherwise downloads directly to the task directory.
 func (s *Setup) tryHuggingFaceFallback(modelHash string, paths *utils.TaskPaths) error {
 	if s.config.Service.ModelHuggingFaceFallback == nil {
 		return fmt.Errorf("no HuggingFace fallback configured")
@@ -347,14 +349,31 @@ func (s *Setup) tryHuggingFaceFallback(modelHash string, paths *utils.TaskPaths)
 
 	s.logger.Infof("Downloading model from HuggingFace: %s", hfRepo)
 
+	// Determine download location: shared path if configured, otherwise task-specific
+	var downloadPath string
+	var useSharedPath bool
+	if s.config.Service.ModelLocalPaths != nil {
+		if localPath, ok := s.config.Service.ModelLocalPaths[modelHash]; ok && localPath != "" {
+			downloadPath = localPath
+			useSharedPath = true
+			s.logger.Infof("Will download to shared location: %s", downloadPath)
+		}
+	}
+
+	// If no shared path configured, download to task directory
+	if !useSharedPath {
+		downloadPath = paths.PretrainedModel
+		s.logger.Infof("Will download to task directory: %s", downloadPath)
+	}
+
 	// Remove existing model folder if exists
-	if err := os.RemoveAll(paths.PretrainedModel); err != nil {
+	if err := os.RemoveAll(downloadPath); err != nil {
 		s.logger.Errorf("Error removing existing model folder: %v\n", err)
 		return err
 	}
 
 	// Create the model directory
-	if err := os.MkdirAll(paths.PretrainedModel, os.ModePerm); err != nil {
+	if err := os.MkdirAll(downloadPath, os.ModePerm); err != nil {
 		s.logger.Errorf("Error creating model folder: %v\n", err)
 		return err
 	}
@@ -362,14 +381,32 @@ func (s *Setup) tryHuggingFaceFallback(modelHash string, paths *utils.TaskPaths)
 	// Use hf CLI to download the model
 	// hf is provided by the huggingface_hub package (installed in api/Dockerfile)
 	// Command: hf download <repo> --local-dir <path>
-	args := []string{"download", hfRepo, "--local-dir", paths.PretrainedModel}
+	args := []string{"download", hfRepo, "--local-dir", downloadPath}
 	output, err := util.RunCommand("hf", args, s.logger)
 	if err != nil {
 		s.logger.Errorf("Error downloading from HuggingFace: %v, output: %s\n", err, output)
 		return fmt.Errorf("failed to download from HuggingFace: %v", err)
 	}
 
-	s.logger.Infof("Successfully downloaded model from HuggingFace: %s to %s", hfRepo, paths.PretrainedModel)
+	s.logger.Infof("Successfully downloaded model from HuggingFace: %s to %s", hfRepo, downloadPath)
+
+	// If downloaded to shared path, create symlink to task directory
+	if useSharedPath {
+		// Remove task directory if exists
+		if err := os.RemoveAll(paths.PretrainedModel); err != nil {
+			s.logger.Errorf("Error removing existing model folder: %v\n", err)
+			return err
+		}
+
+		// Create symlink
+		if err := os.Symlink(downloadPath, paths.PretrainedModel); err != nil {
+			s.logger.Errorf("Error creating symlink from %s to %s: %v\n", downloadPath, paths.PretrainedModel, err)
+			return err
+		}
+
+		s.logger.Infof("Created symlink from %s to %s", downloadPath, paths.PretrainedModel)
+	}
+
 	return nil
 }
 
