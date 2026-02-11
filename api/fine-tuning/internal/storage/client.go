@@ -145,6 +145,10 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return "", err
 	}
+	// Remove existing target (may exist from a previous attempt, could be a file or directory)
+	if err := os.RemoveAll(filePath); err != nil {
+		return "", errors.Wrap(err, "remove existing target path before move")
+	}
 	if err := os.Rename(tmpFile, filePath); err != nil {
 		return "", errors.Wrap(err, "move downloaded file to target path")
 	}
