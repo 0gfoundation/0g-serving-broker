@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/google/uuid"
@@ -172,16 +174,42 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetPath]; !ok {
+		// Check if this is a signature endpoint with special handling (targetSeparated=false)
+		// handleSignatureRoute returns true if it handled the request from broker cache
+		// returns false if it should be forwarded to backend (targetSeparated=true)
 		if p.handleSignatureRoute(ctx, targetPath) {
 			return
 		}
 
-		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
-		if err != nil {
-			p.handleBrokerError(ctx, err, "prepare HTTP request")
+		// Check if this path matches any free prefixes (attestation, signature, etc.)
+		isFree := false
+		for _, prefix := range constant.FreePrefixes {
+			if strings.HasPrefix(strings.ToLower(targetPath), prefix) {
+				isFree = true
+				break
+			}
+		}
+
+		if isFree {
+			// Log free endpoint access for audit purposes
+			p.logger.Infof("Free endpoint access: path=%s, method=%s, remote=%s, user_agent=%s",
+				targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
+
+			httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
+			if err != nil {
+				p.handleBrokerError(ctx, err, "prepare HTTP request")
+				return
+			}
+			p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
 			return
 		}
-		p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
+
+		// Reject all other endpoints that are not in TargetRoute or FreePrefixes
+		// This prevents unauthorized access to unknown endpoints
+		p.logger.Warnf("Blocked unsupported endpoint: path=%s, method=%s, remote=%s, user_agent=%s",
+			targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
+		ctx.Set("ignoreError", true)
+		p.handleBrokerError(ctx, errors.New("endpoint not supported"), "unsupported endpoint")
 		return
 	}
 
@@ -190,6 +218,24 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Session validation errors are user-caused (invalid token, expired session, etc.)
 		ctx.Set("ignoreError", true)
 		p.handleBrokerError(ctx, err, "validate session")
+		return
+	}
+
+	// Store user address in context for rate limiting
+	ctx.Set("userAddress", userAddress)
+
+	// Check if user is rate-limited due to excessive model mismatch attempts
+	rateLimiter := ctrl.GetRateLimiter()
+	if blocked, blockedUntil := rateLimiter.IsBlocked(userAddress); blocked {
+		// User is blocked - return error immediately without processing
+		ctx.Set("ignoreError", true)
+		remainingTime := blockedUntil.Sub(time.Now())
+		p.logger.Warnf("User blocked due to excessive model mismatch attempts: user=%s, blocked_until=%s, remaining=%v",
+			userAddress, blockedUntil.Format(time.RFC3339), remainingTime)
+
+		ctx.JSON(http.StatusTooManyRequests, gin.H{
+			"error": fmt.Sprintf("Rate limit exceeded: too many invalid model requests. Please try again in %v", remainingTime.Round(time.Minute)),
+		})
 		return
 	}
 
