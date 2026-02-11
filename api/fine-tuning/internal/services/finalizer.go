@@ -206,12 +206,16 @@ func (f *Finalizer) uploadModel(ctx context.Context, encryptFile string) ([]byte
 		return nil, err
 	}
 
+	if len(modelRootHashes) == 1 {
+		// Single fragment: return raw 32-byte hash
+		// This is consistent with localRootHash (crypto.Keccak256) which also returns raw bytes
+		return modelRootHashes[0].Bytes(), nil
+	}
+
+	// Multi-fragment: concatenate raw bytes of all hashes
 	var data []byte
-	for i, hash := range modelRootHashes {
-		if i > 0 {
-			data = append(data, ',')
-		}
-		data = append(data, []byte(hash.Hex())...)
+	for _, hash := range modelRootHashes {
+		data = append(data, hash.Bytes()...)
 	}
 	return data, nil
 }

@@ -220,13 +220,12 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
+	// In v1.2.2, Routines is set internally via UploaderConfig in NewUploaderFromIndexerNodes
 	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method, opt.FullTrusted)
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
 		return nil, err
 	}
-
-	uploader.WithRoutines(c.storageUploadUrgs.Routines)
 
 	_, roots, err := uploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
 
@@ -241,7 +240,6 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 			return nil, err
 		}
 
-		fullUploader.WithRoutines(c.storageUploadUrgs.Routines)
 		_, roots, err = fullUploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
 	}
 
