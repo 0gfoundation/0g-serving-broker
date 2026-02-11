@@ -18,6 +18,14 @@ var (
 		"/audio/transcriptions": {},
 	}
 
+	// FreePrefixes defines path prefixes that can be accessed without charging
+	// These are typically metadata or system endpoints that don't consume GPU resources
+	// Note: Paths here should NOT include /v1/proxy prefix (it's already stripped)
+	FreePrefixes = []string{
+		"/attestation", // TEE attestation endpoints (e.g., /attestation/report)
+		"/signature",   // TEE signature endpoints (e.g., /signature/{chatID})
+	}
+
 	// Keep this as to remove duplicate headers from incoming request
 	RequestMetaDataDuplicate = map[string]struct{}{
 		"Address":           {},

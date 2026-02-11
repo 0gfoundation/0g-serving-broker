@@ -3,6 +3,7 @@ package ctrl
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,6 +23,19 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		modifiedBody, err := c.EnsureStreamOptions(reqBody)
 		if err != nil {
 			return nil, errors.Wrap(err, "ensure stream options")
+		}
+		reqBody = modifiedBody
+
+		// Enforce configured model to prevent users from requesting more expensive models
+		// Pass user address from context for rate limiting
+		userAddr, _ := ctx.Get("userAddress")
+		userAddrStr, _ := userAddr.(string)
+		modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
+		if err != nil {
+			// Model validation failure is a user input error (similar to invalid token, bad request body)
+			// Mark as expected error to prevent polluting error monitoring
+			ctx.Set("ignoreError", true)
+			return nil, errors.Wrap(err, "enforce configured model")
 		}
 		reqBody = modifiedBody
 	}
@@ -306,6 +320,88 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 	modifiedBody, err := json.Marshal(bodyMap)
 	if err != nil {
 		return body, errors.Wrap(err, "failed to marshal modified JSON body")
+	}
+
+	return modifiedBody, nil
+}
+
+// EnforceConfiguredModel ensures that requests use the configured model from the service config.
+// This prevents users from requesting more expensive models while paying for cheaper ones.
+//
+// Security rationale:
+// - Provider advertises a specific model in the service configuration
+// - Pricing is based on that specific model
+// - Allowing users to change the model could result in:
+//   1. Provider paying more to backend service than they charge users
+//   2. Users getting access to premium models at cheaper prices
+//
+// This function forcibly overwrites any "model" field in the request body with the
+// configured model from c.Service.ModelType.
+func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, error) {
+	// Return original body if empty (e.g., GET requests)
+	if len(body) == 0 {
+		return body, nil
+	}
+
+	// Return original body if no model is configured
+	if c.Service.ModelType == "" {
+		c.logger.Warnf("Model enforcement skipped: c.Service.ModelType is empty (Type=%s)", c.Service.Type)
+		return body, nil
+	}
+
+	// Debug log to verify configuration
+	c.logger.Debugf("EnforceConfiguredModel: Service.Type=%s, Service.ModelType=%s",
+		c.Service.Type, c.Service.ModelType)
+
+	var bodyMap map[string]interface{}
+
+	err := json.Unmarshal(body, &bodyMap)
+	if err != nil {
+		// Return original body for non-JSON requests
+		return body, nil
+	}
+
+	// Check if request contains a model field
+	requestModel, hasModel := bodyMap["model"]
+	if !hasModel {
+		// No model specified, add the configured model
+		c.logger.Infof("No model specified in request, adding configured model: %s", c.Service.ModelType)
+		bodyMap["model"] = c.Service.ModelType
+	} else {
+		// Model specified in request, check if it matches configured model
+		requestModelStr, ok := requestModel.(string)
+		if !ok {
+			// Invalid model type, reject request
+			return nil, errors.New(fmt.Sprintf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType))
+		}
+
+		if requestModelStr != c.Service.ModelType {
+			// Model mismatch detected - record in rate limiter and REJECT
+			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, configured=%s",
+				userAddr, requestModelStr, c.Service.ModelType)
+
+			// Record this attempt in rate limiter if user address is available
+			if userAddr != "" {
+				rateLimiter := GetRateLimiter()
+				shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr)
+				if shouldBlock {
+					c.logger.Warnf("User will be blocked due to excessive model mismatch: user=%s, blocked_until=%s",
+						userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
+				}
+			}
+
+			return nil, errors.New(fmt.Sprintf("model not supported: requested '%s', only '%s' is available for this service",
+				requestModelStr, c.Service.ModelType))
+		}
+
+		// Model matches - log for audit
+		c.logger.Debugf("Model validation passed: requested=%s matches configured=%s", requestModelStr, c.Service.ModelType)
+	}
+
+	// Marshal back to JSON
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to marshal modified JSON body after enforcing model")
 	}
 
 	return modifiedBody, nil
