@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -313,7 +314,9 @@ func (s *Setup) useLocalDataset(localPath string, paths *utils.TaskPaths) error 
 	return nil
 }
 
-// downloadDatasetFromStorage downloads dataset from 0G Storage
+// downloadDatasetFromStorage downloads dataset from 0G Storage.
+// Handles both ZIP archives (containing HF dataset) and raw JSONL files.
+// If the downloaded file is a raw JSONL, it is converted to HuggingFace DatasetDict format.
 func (s *Setup) downloadDatasetFromStorage(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
 	datasetTopLevelDir, err := s.storage.DownloadFromStorage(ctx, task.DatasetHash, paths.Dataset, constant.IS_TURBO)
 	if err != nil {
@@ -331,6 +334,124 @@ func (s *Setup) downloadDatasetFromStorage(ctx context.Context, task *db.Task, p
 			return err
 		}
 	}
+
+	// Check if the downloaded dataset is a file (raw JSONL) rather than a directory (HF format).
+	// The token counter and training executor require HF DatasetDict format.
+	info, err := os.Stat(paths.Dataset)
+	if err != nil {
+		return errors.Wrap(err, "stat downloaded dataset")
+	}
+	if !info.IsDir() {
+		s.logger.Infof("Downloaded dataset is a raw file (likely JSONL), converting to HF format...")
+		if err := s.convertRawDatasetToHF(paths.Dataset); err != nil {
+			return errors.Wrap(err, "convert raw dataset from 0G Storage to HF format")
+		}
+	}
+
+	return nil
+}
+
+// convertRawDatasetToHF converts a raw JSONL dataset file to HuggingFace DatasetDict format.
+// It replaces the raw file with a directory containing the HF dataset.
+func (s *Setup) convertRawDatasetToHF(datasetPath string) error {
+	// Move the raw file to a temporary location
+	rawPath := datasetPath + ".jsonl"
+	if err := os.Rename(datasetPath, rawPath); err != nil {
+		return errors.Wrap(err, "move raw dataset to temp path")
+	}
+
+	// Python script to convert JSONL to HF format
+	pythonScript := `
+import json
+import sys
+import os
+from datasets import Dataset, DatasetDict
+
+jsonl_file = sys.argv[1]
+output_dir = sys.argv[2]
+
+data = {"instruction": [], "input": [], "output": []}
+messages_format = False
+text_format = False
+
+with open(jsonl_file, 'r') as f:
+    lines = [line.strip() for line in f if line.strip()]
+
+if lines:
+    first_item = json.loads(lines[0])
+    if "messages" in first_item:
+        messages_format = True
+    elif "text" in first_item and "instruction" not in first_item:
+        text_format = True
+
+if messages_format:
+    for line in lines:
+        item = json.loads(line)
+        messages = item.get("messages", [])
+        instruction = ""
+        output = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                instruction = content
+            elif role == "assistant":
+                output = content
+        data["instruction"].append(instruction)
+        data["input"].append("")
+        data["output"].append(output)
+elif text_format:
+    data = {"text": []}
+    for line in lines:
+        item = json.loads(line)
+        data["text"].append(item.get("text", ""))
+else:
+    for line in lines:
+        item = json.loads(line)
+        data["instruction"].append(item.get("instruction", ""))
+        data["input"].append(item.get("input", ""))
+        data["output"].append(item.get("output", ""))
+
+ds = DatasetDict({"train": Dataset.from_dict(data)})
+ds.save_to_disk(output_dir)
+print(f"Converted {len(lines)} examples to {output_dir}")
+`
+
+	// Save Python script to temp file
+	scriptPath := rawPath + "_convert.py"
+	if err := os.WriteFile(scriptPath, []byte(pythonScript), 0644); err != nil {
+		return errors.Wrap(err, "write conversion script")
+	}
+	defer os.Remove(scriptPath)
+
+	// Try running Python directly first
+	cmd := exec.Command("python3", scriptPath, rawPath, datasetPath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		s.logger.Infof("Converted raw dataset to HF format using Python: %s", string(output))
+		os.Remove(rawPath)
+		return nil
+	}
+	s.logger.Warnf("Direct Python conversion failed: %v (output: %s), trying Docker...", err, string(output))
+
+	// Fall back to Docker
+	parentDir := filepath.Dir(rawPath)
+	cmd = exec.Command("docker", "run", "--rm",
+		"-v", parentDir+":/data",
+		s.config.Images.ExecutionImageName,
+		"python3", "/data/"+filepath.Base(scriptPath),
+		"/data/"+filepath.Base(rawPath),
+		"/data/"+filepath.Base(datasetPath))
+
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		// Restore the raw file on failure
+		os.Rename(rawPath, datasetPath)
+		return errors.Wrapf(err, "convert raw dataset to HF format: %s", string(output))
+	}
+
+	s.logger.Infof("Converted raw dataset to HF format using Docker: %s", string(output))
+	os.Remove(rawPath)
 	return nil
 }
 
