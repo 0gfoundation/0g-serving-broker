@@ -507,7 +507,6 @@ func (s *Setup) verifyProviderBalance(ctx context.Context) error {
 	return nil
 }
 
-
 func (s *Setup) getHash(
 	fileRootHash string,
 	userAddress common.Address,

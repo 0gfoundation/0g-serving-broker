@@ -283,6 +283,29 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	return encryptedFilePath, nil
 }
 
+// GetUserDatasetStorageSize calculates total storage used by a user's datasets
+func (c *Ctrl) GetUserDatasetStorageSize(userAddress string) (int64, error) {
+	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
+
+	// If directory doesn't exist, user has no datasets
+	if _, err := os.Stat(datasetDir); os.IsNotExist(err) {
+		return 0, nil
+	}
+
+	var totalSize int64
+	err := filepath.Walk(datasetDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+
+	return totalSize, err
+}
+
 // SaveDataset saves an uploaded dataset file and returns its hash
 // The dataset is stored in a user-specific directory and can be referenced by hash in task creation
 // JSONL files are automatically converted to HuggingFace DatasetDict format for training
@@ -431,3 +454,82 @@ print(f"Converted {len(data['instruction'])} examples to {output_dir}")
 	return nil
 }
 
+// VerifyDatasetDeleteSignature verifies the signature for dataset deletion
+// User must sign keccak256(datasetHash) to prove ownership
+func (c *Ctrl) VerifyDatasetDeleteSignature(datasetHash, userAddress, signature string) error {
+	// Remove 0x prefix if present
+	hashStr := datasetHash
+	if len(hashStr) > 2 && hashStr[:2] == "0x" {
+		hashStr = hashStr[2:]
+	}
+
+	// Convert hash string to bytes
+	hashBytes, err := hexutil.Decode("0x" + hashStr)
+	if err != nil {
+		return errors.Wrap(err, "decode dataset hash")
+	}
+
+	// Create message hash (similar to DownloadLoRA authentication)
+	messageHash := accounts.TextHash(crypto.Keccak256(hashBytes))
+
+	// Recover signer address
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return errors.Wrap(err, "decode signature")
+	}
+
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
+	}
+
+	if sigBytes[64] != 27 && sigBytes[64] != 28 {
+		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
+	}
+
+	sigBytes[64] -= 27
+	pubKey, err := crypto.SigToPub(messageHash, sigBytes)
+	if err != nil {
+		return errors.Wrap(err, "recover public key")
+	}
+
+	recoveredAddress := crypto.PubkeyToAddress(*pubKey)
+	expectedAddress := common.HexToAddress(userAddress)
+
+	if recoveredAddress != expectedAddress {
+		return errors.New("signature verification failed: address mismatch")
+	}
+
+	return nil
+}
+
+// DeleteDataset removes a dataset and its HF conversion
+func (c *Ctrl) DeleteDataset(userAddress, datasetHash string) error {
+	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
+
+	// Check if dataset is in use by any active tasks
+	tasks, err := c.db.GetTasksByDatasetHash(datasetHash)
+	if err != nil {
+		return errors.Wrap(err, "check dataset usage")
+	}
+
+	for _, task := range tasks {
+		// Only allow deletion if all tasks using this dataset are in terminal states
+		if task.Progress != db.ProgressStateFinished.String() &&
+			task.Progress != db.ProgressStateFailed.String() {
+			return fmt.Errorf("cannot delete dataset: in use by active task %s (status: %s)", task.ID.String(), task.Progress)
+		}
+	}
+
+	// Delete dataset file
+	jsonlPath := filepath.Join(datasetDir, datasetHash)
+	if err := os.Remove(jsonlPath); err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "delete dataset file")
+	}
+
+	// Delete HF converted dataset
+	hfPath := jsonlPath + "_hf"
+	os.RemoveAll(hfPath) // Ignore errors for HF path
+
+	c.logger.Infof("Dataset deleted: %s (user: %s)", datasetHash, userAddress)
+	return nil
+}

@@ -33,16 +33,16 @@ var (
 	ErrSecretShouldNotBeEmpty             = errors.New("secret should not be empty")
 
 	// ServiceLibrary errors
-	ErrServiceNotExist              = errors.New("service not exist")
-	ErrInsufficientStake            = errors.New("insufficient stake")
-	ErrCannotAddStakeWhenUpdating   = errors.New("cannot add stake when updating")
-	ErrInvalidLedgerAddress         = errors.New("invalid ledger address")
-	ErrDirectDepositsDisabled       = errors.New("direct deposits disabled")
-	ErrETHTransferFailed            = errors.New("eth transfer failed")
-	ErrTransferToLedgerFailed       = errors.New("transfer to ledger failed")
-	ErrLimitTooLarge                = errors.New("limit too large")
-	ErrLockTimeOutOfRange           = errors.New("lock time out of range")
-	ErrPenaltyPercentageTooHigh     = errors.New("penalty percentage too high")
+	ErrServiceNotExist            = errors.New("service not exist")
+	ErrInsufficientStake          = errors.New("insufficient stake")
+	ErrCannotAddStakeWhenUpdating = errors.New("cannot add stake when updating")
+	ErrInvalidLedgerAddress       = errors.New("invalid ledger address")
+	ErrDirectDepositsDisabled     = errors.New("direct deposits disabled")
+	ErrETHTransferFailed          = errors.New("eth transfer failed")
+	ErrTransferToLedgerFailed     = errors.New("transfer to ledger failed")
+	ErrLimitTooLarge              = errors.New("limit too large")
+	ErrLockTimeOutOfRange         = errors.New("lock time out of range")
+	ErrPenaltyPercentageTooHigh   = errors.New("penalty percentage too high")
 
 	// VerifierLibrary errors
 	ErrDeliverableIdTooLong = errors.New("deliverable id too long")
@@ -61,7 +61,6 @@ func init() {
 	}
 	contractABI = &parsed
 }
-
 
 // WrapContractError extracts and wraps contract errors from RPC responses
 // It uses errors.As with rpc.DataError and abi.ABI.ErrorByID for robust error parsing

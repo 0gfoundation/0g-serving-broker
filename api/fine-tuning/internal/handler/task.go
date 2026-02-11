@@ -250,7 +250,7 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 // @Success 200 {object} object{datasetHash=string} "Dataset uploaded successfully"
 func (h *Handler) UploadDataset(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
-	
+
 	file, err := ctx.FormFile("file")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
@@ -264,6 +264,23 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 		return
 	}
 
+	// Check user storage quota if configured
+	if h.ctrl.GetConfig().Service.DatasetQuotaPerUser > 0 {
+		totalSize, err := h.ctrl.GetUserDatasetStorageSize(userAddress)
+		if err != nil {
+			handleBrokerError(ctx, err, "check storage quota")
+			return
+		}
+
+		if totalSize+file.Size > h.ctrl.GetConfig().Service.DatasetQuotaPerUser {
+			ctx.JSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("Storage quota exceeded. Used: %d bytes, Limit: %d bytes",
+					totalSize, h.ctrl.GetConfig().Service.DatasetQuotaPerUser),
+			})
+			return
+		}
+	}
+
 	datasetHash, err := h.ctrl.SaveDataset(userAddress, file)
 	if err != nil {
 		handleBrokerError(ctx, err, "save dataset")
@@ -274,4 +291,37 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 		"datasetHash": datasetHash,
 		"message":     "Dataset uploaded successfully. Use this hash when creating a fine-tuning task.",
 	})
+}
+
+// DeleteDataset godoc
+// @Summary Delete a dataset
+// @Description Delete a dataset from TEE. Requires signature authentication.
+// @Tags Dataset
+// @Router /user/{userAddress}/dataset/{datasetHash} [delete]
+// @Param userAddress path string true "user address"
+// @Param datasetHash path string true "dataset hash (0x...)"
+// @Param signature query string true "signature of keccak256(datasetHash) signed by user"
+// @Success 200 {string} string "Dataset deleted successfully"
+func (h *Handler) DeleteDataset(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	datasetHash := ctx.Param("datasetHash")
+	signature := ctx.Query("signature")
+
+	if signature == "" {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "signature required"})
+		return
+	}
+
+	// Verify signature (similar to DownloadLoRA authentication)
+	if err := h.ctrl.VerifyDatasetDeleteSignature(datasetHash, userAddress, signature); err != nil {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
+		return
+	}
+
+	if err := h.ctrl.DeleteDataset(userAddress, datasetHash); err != nil {
+		handleBrokerError(ctx, err, "delete dataset")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "Dataset deleted successfully"})
 }

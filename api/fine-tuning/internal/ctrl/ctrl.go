@@ -35,3 +35,7 @@ func New(db *db.DB, cfg *config.Config, contract *providercontract.ProviderContr
 
 	return p
 }
+
+func (c *Ctrl) GetConfig() *config.Config {
+	return c.config
+}

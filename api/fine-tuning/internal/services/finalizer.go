@@ -110,7 +110,7 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
 			Secret:          hexutil.Encode(settlementMetadata.Secret),
 			EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
-			DeliverIndex:    0, // Deprecated: now using task ID instead of index
+			DeliverIndex:    0,                 // Deprecated: now using task ID instead of index
 			DeliverTime:     time.Now().Unix(), // TODO: better use tx timestamp
 		}); err != nil {
 		f.logger.Errorf("Failed to update task: %v", err)

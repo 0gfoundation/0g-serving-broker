@@ -35,7 +35,8 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
 	group.POST("/user/:userAddress/task/:taskID/lora", h.DownloadLoRA)
-	group.POST("/user/:userAddress/dataset", h.UploadDataset) // Upload dataset to TEE
+	group.POST("/user/:userAddress/dataset", h.UploadDataset)                // Upload dataset to TEE
+	group.DELETE("/user/:userAddress/dataset/:datasetHash", h.DeleteDataset) // Delete dataset from TEE
 	group.GET("/task/pending", h.GetPendingTrainingTaskCount)
 
 	group.GET("/quote", middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)

@@ -93,7 +93,7 @@ func (c *ProviderContract) addOrUpdateServiceWithOld(ctx context.Context, servic
 	// If old exists, it's an update, stakeValue remains nil (no additional stake)
 
 	c.logger.Infof("[addOrUpdateService] Starting to add or update service - TeeSignerAddress=%s, type=%v, url=%s, pricePerToken=%s, occupied=%s",
-		c.TeeSignerAddress, quota, service.ServingUrl, pricePerToken,occupied)
+		c.TeeSignerAddress, quota, service.ServingUrl, pricePerToken, occupied)
 
 	// Pre-validate the transaction to get detailed error before sending
 	// Use PreValidateCallWithValue to include the stake value in validation
