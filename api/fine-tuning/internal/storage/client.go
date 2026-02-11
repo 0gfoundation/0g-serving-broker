@@ -107,27 +107,68 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 	} else {
 		indexerClient = c.indexerStandardClient
 	}
-	fileName := fmt.Sprintf("%s.zip", filePath)
-	if err := os.Remove(fileName); err != nil && !errors.Is(err, os.ErrNotExist) {
+
+	// Download to a temporary file first (don't assume ZIP)
+	tmpFile := filePath + ".download"
+	if err := os.Remove(tmpFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 
-	c.logger.Infof("Begin downloading and unzipping %s\n, with root: %v", fileName, hash)
-	if err := indexerClient.Download(context.Background(), hash, fileName, true); err != nil {
+	c.logger.Infof("Begin downloading %s, with root: %v", tmpFile, hash)
+	if err := indexerClient.Download(context.Background(), hash, tmpFile, true); err != nil {
 		err = errors.Wrapf(err, "Error downloading data with root: %v", hash)
 		c.logger.Errorf("%v", err)
 		return "", err
 	}
 
-	topLevelDir, err := util.Unzip(fileName, filepath.Dir(filePath))
+	// Detect file type: check if it's a ZIP by reading the magic bytes
+	isZip, err := isZipFile(tmpFile)
 	if err != nil {
-		c.logger.Errorf("Error unzipping data: %v\n", err)
-		return "", err
+		c.logger.Warnf("Could not detect file type for %s: %v, treating as raw file", tmpFile, err)
+		isZip = false
 	}
 
-	c.logger.Infof("Downloaded and unzipped %s\n", fileName)
+	if isZip {
+		// ZIP file: unzip as before
+		topLevelDir, err := util.Unzip(tmpFile, filepath.Dir(filePath))
+		if err != nil {
+			c.logger.Errorf("Error unzipping data: %v\n", err)
+			return "", err
+		}
+		// Clean up the downloaded zip
+		os.Remove(tmpFile)
+		c.logger.Infof("Downloaded and unzipped %s", tmpFile)
+		return topLevelDir, nil
+	}
 
-	return topLevelDir, nil
+	// Raw file (e.g., JSONL): move directly to the target path
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		return "", errors.Wrap(err, "move downloaded file to target path")
+	}
+	c.logger.Infof("Downloaded raw file to %s", filePath)
+	return filePath, nil
+}
+
+// isZipFile checks if a file is a ZIP archive by reading its magic bytes.
+// ZIP files start with the bytes "PK" (0x50, 0x4B).
+func isZipFile(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4)
+	n, err := f.Read(buf)
+	if err != nil || n < 4 {
+		return false, nil
+	}
+
+	// ZIP magic bytes: PK\x03\x04
+	return buf[0] == 0x50 && buf[1] == 0x4B && buf[2] == 0x03 && buf[3] == 0x04, nil
 }
 
 func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo bool) ([]ethcommon.Hash, error) {
