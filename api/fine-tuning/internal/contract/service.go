@@ -2,7 +2,6 @@ package providercontract
 
 import (
 	"context"
-	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -46,7 +45,7 @@ func (c *ProviderContract) OccupyService(ctx context.Context, service config.Ser
 func (c *ProviderContract) AddOrUpdateService(ctx context.Context, service config.Service, occupied bool) error {
 	// Get existing service if any
 	old, err := c.GetService(ctx)
-	if err != nil && err.Error() != "service not found" {
+	if err != nil && !IsServiceNotExist(err) {
 		return errors.Wrap(err, "get service from contract")
 	}
 
@@ -88,7 +87,14 @@ func (c *ProviderContract) addOrUpdateServiceWithOld(ctx context.Context, servic
 	if old == nil {
 		// First-time registration: need to stake
 		stakeValue = DefaultProviderStake
-		c.logger.Infof("First-time service registration, staking %s", stakeValue.String())
+		if service.ProviderStake != "" {
+			stakeValue, err = util.ConvertToBigInt(service.ProviderStake)
+			if err != nil {
+				c.logger.Errorf("[addOrUpdateServiceWithOld] Failed to convert provider stake - stake=%s, error=%v", service.ProviderStake, err)
+				return errors.Wrap(err, "convert provider stake")
+			}
+		}
+		c.logger.Infof("[addOrUpdateServiceWithOld] First-time service registration, stake amount: %s", stakeValue.String())
 	}
 	// If old exists, it's an update, stakeValue remains nil (no additional stake)
 
@@ -154,26 +160,29 @@ func (c *ProviderContract) DeleteService(ctx context.Context) error {
 }
 
 func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, error) {
+	c.logger.Infof("[GetService] Starting to get service - provider=%s", c.ProviderAddress)
+
 	callOpts := &bind.CallOpts{
 		Context: ctx,
 	}
 
-	list, err := c.Contract.GetAllServices(callOpts)
+	service, err := c.Contract.GetService(callOpts, common.HexToAddress(c.ProviderAddress))
 	if err != nil {
-		return nil, err
-	}
-	for i := range list {
-		if list[i].Provider.String() == c.ProviderAddress {
-			return &list[i], nil
-		}
+		// Wrap error to extract details from rpc.jsonError Data field
+		wrappedErr := WrapContractError(err)
+		c.logger.Errorf("[GetService] Contract error - provider=%s: %v", c.ProviderAddress, wrappedErr)
+		return nil, wrappedErr
 	}
 
-	return nil, fmt.Errorf("service not found")
+	c.logger.Infof("[GetService] Retrieved service from contract - url=%s, models=%v, pricePerToken=%s, occupied=%v",
+		service.Url, service.Models, service.PricePerToken.String(), service.Occupied)
+
+	return &service, nil
 }
 
 func (c *ProviderContract) SyncServices(ctx context.Context, new config.Service) error {
 	old, err := c.GetService(ctx)
-	if err != nil && err.Error() != "service not found" {
+	if err != nil && !IsServiceNotExist(err) {
 		return err
 	}
 

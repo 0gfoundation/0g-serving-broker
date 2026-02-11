@@ -27,6 +27,7 @@ type Service struct {
 		GpuCount int64  `yaml:"gpuCount"`
 	} `yaml:"quota"`
 	PricePerToken    int64             `yaml:"pricePerToken"`
+	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 	CustomizedModels []CustomizedModel `yaml:"customizedModels"`
 	// ModelLocalPaths maps model hash to local file path for any model (including predefined models)
 	// When set, the broker will use the local model instead of downloading from 0G Storage
@@ -202,7 +203,7 @@ func GetConfig() *Config {
 			Database: struct {
 				FineTune string `yaml:"fineTune"`
 			}{
-				FineTune: "root:123456@tcp(0g-fine-tune-broker-db:3306)/fineTune?parseTime=true",
+				FineTune: "root:123456@tcp(mysql:3306)/fineTune?parseTime=true",
 			},
 			GasPrice: "",
 			Images: Images{
