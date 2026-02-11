@@ -244,3 +244,10 @@ func (d *DB) UpdateUserPublicKey(task *Task, key string) error {
 		UserPublicKey: key,
 	})
 }
+
+// GetTasksByDatasetHash returns all tasks that reference the given dataset hash
+func (d *DB) GetTasksByDatasetHash(datasetHash string) ([]Task, error) {
+	var tasks []Task
+	ret := d.db.Where("dataset_hash = ?", datasetHash).Find(&tasks)
+	return tasks, ret.Error
+}

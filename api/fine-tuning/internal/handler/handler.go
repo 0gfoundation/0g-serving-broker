@@ -7,18 +7,21 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/ctrl"
 )
 
 type Handler struct {
 	ctrl        *ctrl.Ctrl
+	config      *config.Config
 	logger      log.Logger
 	rateLimiter *middleware.RateLimiter
 }
 
-func New(ctrl *ctrl.Ctrl, logger log.Logger, rateLimitRPS float64, rateLimitBurst int) *Handler {
+func New(ctrl *ctrl.Ctrl, cfg *config.Config, logger log.Logger, rateLimitRPS float64, rateLimitBurst int) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
+		config:      cfg,
 		logger:      logger,
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(rateLimitRPS), rateLimitBurst),
 	}
@@ -35,7 +38,8 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
 	group.POST("/user/:userAddress/task/:taskID/lora", h.DownloadLoRA)
-	group.POST("/user/:userAddress/dataset", h.UploadDataset) // Upload dataset to TEE
+	group.POST("/user/:userAddress/dataset", h.UploadDataset)             // Upload dataset to TEE
+	group.DELETE("/user/:userAddress/dataset/:datasetHash", h.DeleteDataset) // Delete dataset from TEE
 	group.GET("/task/pending", h.GetPendingTrainingTaskCount)
 
 	group.GET("/quote", middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)

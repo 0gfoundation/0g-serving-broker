@@ -267,7 +267,7 @@ func runApplication(ctx context.Context, cfg *config.Config, services *Applicati
 	}
 
 	engine := gin.New()
-	h := handler.New(services.ctrl, logger, cfg.RateLimitRPS, cfg.RateLimitBurst)
+	h := handler.New(services.ctrl, cfg, logger, cfg.RateLimitRPS, cfg.RateLimitBurst)
 	h.Register(engine)
 
 	if _, ok := <-imageChan; !ok {

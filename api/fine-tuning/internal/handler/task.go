@@ -241,6 +241,7 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 // UploadDataset godoc
 // @Summary Upload dataset to TEE
 // @Description Upload a dataset file to TEE for fine-tuning. Returns a dataset hash for use in task creation.
+// @Description Per-user storage quota is enforced. Check config.service.datasetQuotaPerUser.
 // @Tags Dataset
 // @Accept multipart/form-data
 // @Produce json
@@ -250,18 +251,38 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 // @Success 200 {object} object{datasetHash=string} "Dataset uploaded successfully"
 func (h *Handler) UploadDataset(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
-	
+
 	file, err := ctx.FormFile("file")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
 		return
 	}
 
-	// Check file size (max 500MB)
+	// Check file size (max 500MB per file)
 	maxSize := int64(500 * 1024 * 1024)
 	if file.Size > maxSize {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 500MB"})
 		return
+	}
+
+	// Check per-user storage quota
+	quotaPerUser := h.config.Service.DatasetQuotaPerUser
+	if quotaPerUser > 0 {
+		totalSize, err := h.ctrl.GetUserDatasetStorageSize(userAddress)
+		if err != nil {
+			handleBrokerError(ctx, err, "check storage quota")
+			return
+		}
+
+		if totalSize+file.Size > quotaPerUser {
+			ctx.JSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf(
+					"Storage quota exceeded. Used: %d bytes, Limit: %d bytes, Requested: %d bytes. "+
+						"Delete unused datasets to free up space.",
+					totalSize, quotaPerUser, file.Size),
+			})
+			return
+		}
 	}
 
 	datasetHash, err := h.ctrl.SaveDataset(userAddress, file)
@@ -274,4 +295,40 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 		"datasetHash": datasetHash,
 		"message":     "Dataset uploaded successfully. Use this hash when creating a fine-tuning task.",
 	})
+}
+
+// DeleteDataset godoc
+// @Summary Delete a dataset
+// @Description Delete a dataset from TEE. Requires signature authentication.
+// @Description Cannot delete datasets that are in use by active (non-terminal) tasks.
+// @Tags Dataset
+// @Router /user/{userAddress}/dataset/{datasetHash} [delete]
+// @Param userAddress path string true "user address"
+// @Param datasetHash path string true "dataset hash (0x...)"
+// @Param body body object true "Request body with signature" example({"signature": "0x..."})
+// @Success 200 {string} string "Dataset deleted successfully"
+func (h *Handler) DeleteDataset(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	datasetHash := ctx.Param("datasetHash")
+
+	var jsonData struct {
+		Signature string `json:"signature" binding:"required"`
+	}
+	if err := ctx.Bind(&jsonData); err != nil {
+		handleBrokerError(ctx, err, "bind request body")
+		return
+	}
+
+	// Verify signature
+	if err := h.ctrl.VerifyDatasetDeleteSignature(datasetHash, userAddress, jsonData.Signature); err != nil {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
+		return
+	}
+
+	if err := h.ctrl.DeleteDataset(userAddress, datasetHash); err != nil {
+		handleBrokerError(ctx, err, "delete dataset")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "Dataset deleted successfully"})
 }

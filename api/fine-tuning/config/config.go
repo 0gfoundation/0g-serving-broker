@@ -42,6 +42,9 @@ type Service struct {
 	// Users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
 	// Useful for testing or when 0G Storage is not available
 	SkipStorageUpload bool `yaml:"skipStorageUpload"`
+	// DatasetQuotaPerUser is the maximum total storage (in bytes) allowed per user for uploaded datasets
+	// Default: 10737418240 (10 GB). Set to 0 for unlimited.
+	DatasetQuotaPerUser int64 `yaml:"datasetQuotaPerUser"`
 	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
 	// After this period, files will be automatically cleaned up
 	// Default: 72 hours (3 days)
@@ -231,8 +234,11 @@ func GetConfig() *Config {
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
-			RateLimitRPS:                10,  // Default: 10 requests per second
-			RateLimitBurst:              20,  // Default: burst of 20 requests
+		RateLimitRPS:                10,           // Default: 10 requests per second
+		RateLimitBurst:              20,           // Default: burst of 20 requests
+		Service: Service{
+			DatasetQuotaPerUser: 10 * 1024 * 1024 * 1024, // Default: 10 GB per user
+		},
 		}
 
 		if err := loadConfig(instance); err != nil {
