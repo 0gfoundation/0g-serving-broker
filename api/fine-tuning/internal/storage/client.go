@@ -115,11 +115,19 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 	}
 
 	c.logger.Infof("Begin downloading %s, with root: %v", tmpFile, hash)
-	if err := indexerClient.Download(context.Background(), hash, tmpFile, true); err != nil {
+	if err := indexerClient.Download(ctx, hash, tmpFile, true); err != nil {
 		err = errors.Wrapf(err, "Error downloading data with root: %v", hash)
 		c.logger.Errorf("%v", err)
 		return "", err
 	}
+	// Ensure temp file is cleaned up if we return early with error
+	defer func() {
+		if _, statErr := os.Stat(tmpFile); statErr == nil {
+			if rmErr := os.Remove(tmpFile); rmErr != nil && !os.IsNotExist(rmErr) {
+				c.logger.Warnf("Failed to remove temp file %s: %v", tmpFile, rmErr)
+			}
+		}
+	}()
 
 	// Detect file type: check if it's a ZIP by reading the magic bytes
 	isZip, err := isZipFile(tmpFile)
@@ -157,7 +165,7 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 }
 
 // isZipFile checks if a file is a ZIP archive by reading its magic bytes.
-// ZIP files start with the bytes "PK" (0x50, 0x4B).
+// ZIP files start with the bytes "PK" (0x50, 0x4B, 0x03, 0x04).
 func isZipFile(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -167,7 +175,11 @@ func isZipFile(path string) (bool, error) {
 
 	buf := make([]byte, 4)
 	n, err := f.Read(buf)
-	if err != nil || n < 4 {
+	if err != nil {
+		return false, fmt.Errorf("failed to read file magic bytes: %w", err)
+	}
+	if n < 4 {
+		// File too small to be a ZIP archive
 		return false, nil
 	}
 
