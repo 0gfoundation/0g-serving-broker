@@ -182,16 +182,26 @@ func (c *Ctrl) validateNoUnfinishedTasks(task *schema.Task) error {
 
 func (c *Ctrl) validateModelType(task *schema.Task) error {
 	modelHash := ethcommon.HexToHash(task.PreTrainedModelHash)
-	if _, ok := c.customizedModels[modelHash]; !ok {
-		if _, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]; !ok {
-			return errors.New("unsupported model")
-		} else {
-			task.ModelType = db.PreDefinedModel
-		}
-	} else {
+
+	// Check if it's a customized model
+	if _, ok := c.customizedModels[modelHash]; ok {
 		task.ModelType = db.CustomizedModel
+		return nil
 	}
 
+	// Check if it's a predefined model in SCRIPT_MAP
+	if _, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]; !ok {
+		return errors.New("unsupported model: not found in predefined models")
+	}
+
+	// If SupportedPredefinedModels is configured, check if model is in the whitelist
+	if len(c.supportedPredefinedModels) > 0 {
+		if !c.supportedPredefinedModels[task.PreTrainedModelHash] {
+			return errors.New("unsupported model: not in provider's supported model list")
+		}
+	}
+
+	task.ModelType = db.PreDefinedModel
 	return nil
 }
 

@@ -259,7 +259,7 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 
 func (c *Executor) getContainerImage(task *db.Task) (string, string, bool, error) {
 	image := ""
-	trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+	var trainScript string
 	needPull := !c.config.Images.BuildImage
 
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH || os.Getenv("NETWORK") == "hardhat" {
@@ -268,6 +268,11 @@ func (c *Executor) getContainerImage(task *db.Task) (string, string, bool, error
 		switch task.ModelType {
 		case db.PreDefinedModel:
 			image = c.config.Images.ExecutionImageName
+			modelConfig, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+			if !ok {
+				return "", "", false, errors.New("model not found in SCRIPT_MAP")
+			}
+			trainScript = modelConfig.TrainingScript
 		case db.CustomizedModel:
 			customizedModel, ok := c.customizedModels[ethcommon.HexToHash(task.PreTrainedModelHash)]
 			if !ok {

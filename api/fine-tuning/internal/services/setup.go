@@ -536,8 +536,8 @@ func (s *Setup) getDataSetType(task *db.Task) (token.DataSetType, error) {
 
 	switch task.ModelType {
 	case db.PreDefinedModel:
-		trainScript := constant.SCRIPT_MAP[task.PreTrainedModelHash]
-		if strings.HasSuffix(trainScript, "finetune-img.py") {
+		modelConfig := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+		if strings.HasSuffix(modelConfig.TrainingScript, "finetune-img.py") {
 			dataSetType = token.Image
 		} else {
 			dataSetType = token.Text
@@ -574,8 +574,31 @@ func (s *Setup) verify(ctx context.Context, tokenSize, trainEpochs int64, task *
 		return errors.Wrap(err, "get service from contract")
 	}
 
-	actualFee := new(big.Int).Mul(new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(s.config.Service.PricePerToken)), big.NewInt(trainEpochs))
-	s.logger.Infof("Calculated fee: %v (tokenSize=%d, trainEpochs=%d, pricePerToken=%d)", actualFee, tokenSize, trainEpochs, s.config.Service.PricePerToken)
+	// Get model configuration (price coefficient and storage fee)
+	modelConfig, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]
+	if !ok {
+		return errors.New("model configuration not found in SCRIPT_MAP")
+	}
+
+	// Calculate training fee: tokenSize × pricePerToken × trainEpochs × priceCoefficient
+	trainingFee := new(big.Int).Mul(
+		new(big.Int).Mul(
+			new(big.Int).Mul(big.NewInt(tokenSize), big.NewInt(s.config.Service.PricePerToken)),
+			big.NewInt(trainEpochs),
+		),
+		big.NewInt(modelConfig.PriceCoefficient),
+	)
+
+	// Storage reserve fee is a fixed absolute value per model
+	// Qwen3-32B (~300 MB LoRA): 4 units
+	// Qwen2.5-0.5B (~100 MB LoRA): 1 unit
+	storageReserveFee := big.NewInt(modelConfig.StorageFee)
+
+	// Total fee = training fee + storage reserve fee
+	actualFee := new(big.Int).Add(trainingFee, storageReserveFee)
+
+	s.logger.Infof("Calculated fee: %v (trainingFee=%v, storageReserveFee=%v, tokenSize=%d, trainEpochs=%d, pricePerToken=%d, priceCoefficient=%d)",
+		actualFee, trainingFee, storageReserveFee, tokenSize, trainEpochs, s.config.Service.PricePerToken, modelConfig.PriceCoefficient)
 
 	// Update task fee in memory and database
 	task.Fee = actualFee.String()

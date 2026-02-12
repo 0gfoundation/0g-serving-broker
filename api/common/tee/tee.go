@@ -110,7 +110,6 @@ func (s *TeeService) getSigningKey(ctx context.Context, client TappdClient) (*ec
 				return nil, errors.Wrap(err, "converting to ECDSA private key")
 			}
 		}
-		s.logger.Debugf("privateKey: %v", privateKey.PublicKey)
 	case GCP, AliCloud:
 		privateKey, err = crypto.HexToECDSA(key)
 		if err != nil {
