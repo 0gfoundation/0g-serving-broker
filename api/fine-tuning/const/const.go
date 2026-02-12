@@ -49,13 +49,13 @@ var (
 		"0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": {
 			TrainingScript:   "/app/train_lora.py",
 			PriceCoefficient: 1,
-			StorageFee:       1, // ~100 MB LoRA: 0.01 tokens
+			StorageFee:       10000000000000000, // ~100 MB LoRA: 0.01 tokens
 		},
 		// Qwen3-32B (turbo)
 		"0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": {
 			TrainingScript:   "/app/train_lora.py",
 			PriceCoefficient: 8,
-			StorageFee:       4, // ~300 MB LoRA: 0.04 tokens
+			StorageFee:       90000000000000000, // ~800 MB LoRA: 0.04 tokens
 		},
 	}
 
