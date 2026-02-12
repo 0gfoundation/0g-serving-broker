@@ -29,6 +29,10 @@ type Service struct {
 	PricePerToken    int64             `yaml:"pricePerToken"`
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 	CustomizedModels []CustomizedModel `yaml:"customizedModels"`
+	// SupportedPredefinedModels is a whitelist of predefined model hashes that this provider supports
+	// If empty, all models in SCRIPT_MAP are allowed (backward compatible)
+	// If specified, only models in this list will be accepted for fine-tuning tasks
+	SupportedPredefinedModels []string `yaml:"supportedPredefinedModels"`
 	// ModelLocalPaths maps model hash to local file path for any model (including predefined models)
 	// When set, the broker will use the local model instead of downloading from 0G Storage
 	ModelLocalPaths map[string]string `yaml:"modelLocalPaths"`

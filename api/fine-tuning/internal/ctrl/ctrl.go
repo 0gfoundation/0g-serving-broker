@@ -17,20 +17,28 @@ type Ctrl struct {
 	config   *config.Config
 	logger   log.Logger
 
-	teeService       *tee.TeeService
-	customizedModels map[ethcommon.Hash]config.CustomizedModel
+	teeService                *tee.TeeService
+	customizedModels          map[ethcommon.Hash]config.CustomizedModel
+	supportedPredefinedModels map[string]bool // Set of supported predefined model hashes
 
 	taskMutex sync.Mutex
 }
 
 func New(db *db.DB, cfg *config.Config, contract *providercontract.ProviderContract, teeService *tee.TeeService, logger log.Logger) *Ctrl {
+	// Build supported predefined models set for fast lookup
+	supportedModels := make(map[string]bool)
+	for _, modelHash := range cfg.Service.SupportedPredefinedModels {
+		supportedModels[modelHash] = true
+	}
+
 	p := &Ctrl{
-		db:               db,
-		contract:         contract,
-		config:           cfg,
-		teeService:       teeService,
-		customizedModels: cfg.Service.GetCustomizedModels(),
-		logger:           logger,
+		db:                        db,
+		contract:                  contract,
+		config:                    cfg,
+		teeService:                teeService,
+		customizedModels:          cfg.Service.GetCustomizedModels(),
+		supportedPredefinedModels: supportedModels,
+		logger:                    logger,
 	}
 
 	return p
