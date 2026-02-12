@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -146,25 +147,42 @@ func (h *Handler) ListTask(ctx *gin.Context) {
 //	@Param		taskID		path	string	true	"task ID"
 //	@Success	200	{file}	file	"progress.log"
 func (h *Handler) GetTaskProgress(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
 	id, err := uuid.Parse(ctx.Param("taskID"))
 	if err != nil {
 		handleBrokerError(ctx, err, "parse task id")
 		return
 	}
-	filePath, err := h.ctrl.GetProgress(&id)
+
+	// Verify task ownership
+	filePath, err := h.ctrl.GetProgress(&id, userAddress)
 	if err != nil {
 		handleBrokerError(ctx, err, "get task")
 		return
 	}
 
-	data, err := os.ReadFile(filePath)
+	// Stream file instead of loading to memory
+	file, err := os.Open(filePath)
 	if err != nil {
-		h.logger.Errorf("read file %v, err: %v", filePath, err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to read log file: %s, please ensure the task is running", err.Error())})
+		h.logger.Errorf("open log file %v, err: %v", filePath, err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read log file. Please ensure the task is running"})
 		return
 	}
+	defer file.Close()
 
-	ctx.Data(http.StatusOK, "text/plain", data)
+	// Get file size for Content-Length header
+	fileInfo, err := file.Stat()
+	if err == nil {
+		ctx.Header("Content-Length", fmt.Sprintf("%d", fileInfo.Size()))
+	}
+
+	ctx.Header("Content-Type", "text/plain; charset=utf-8")
+	ctx.Status(http.StatusOK)
+
+	// Stream the file
+	if _, err := io.Copy(ctx.Writer, file); err != nil {
+		h.logger.Errorf("stream log file %v, err: %v", filePath, err)
+	}
 }
 
 // GetPendingTrainingTaskCount godoc
@@ -188,13 +206,14 @@ func (h *Handler) GetPendingTrainingTaskCount(ctx *gin.Context) {
 // @Description Download the encrypted LoRA adapter from TEE. The file is AES encrypted.
 // @Description User must call contract acknowledge() to settle and get the decryption key.
 // @Description Flow: Download encrypted file -> acknowledge on contract -> get encryptedSecret -> decrypt with user private key -> get AES key -> decrypt LoRA
-// @Description Authentication: Requires signature of keccak256(taskID) signed by user's private key
+// @Description Authentication: Requires signature of keccak256(taskIDHex + timestamp) signed by user's private key
+// @Description The timestamp must be within 5 minutes to prevent replay attacks
 // @Tags Task
 // @Produce application/octet-stream
 // @Router /user/{userAddress}/task/{taskID}/lora [post]
 // @Param userAddress path string true "user address"
 // @Param taskID path string true "task ID"
-// @Param body body object true "Request body with signature" example({"signature": "0x..."})
+// @Param body body object true "Request body with signature and timestamp" example({"signature": "0x...", "timestamp": 1234567890})
 // @Success 200 {file} file "lora_encrypted.data"
 func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
@@ -204,18 +223,18 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 		return
 	}
 
-	// Verify signature - user must prove they own the userAddress
-	// Use POST body for signature (consistent with CancelTask)
+	// Verify signature with timestamp - prevents replay attacks
 	var jsonData struct {
 		Signature string `json:"signature" binding:"required"`
+		Timestamp int64  `json:"timestamp" binding:"required"`
 	}
 	if err := ctx.Bind(&jsonData); err != nil {
 		handleBrokerError(ctx, err, "bind request body")
 		return
 	}
-	signature := jsonData.Signature
 
-	if err := h.ctrl.VerifyDownloadSignature(&id, userAddress, signature); err != nil {
+	if err := h.ctrl.VerifyDownloadSignature(&id, userAddress, jsonData.Signature, jsonData.Timestamp); err != nil {
+		h.logger.Warnf("download signature verification failed for %s task %s: %v", userAddress, id.String(), err)
 		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
 		return
 	}
@@ -241,26 +260,64 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 // UploadDataset godoc
 // @Summary Upload dataset to TEE
 // @Description Upload a dataset file to TEE for fine-tuning. Returns a dataset hash for use in task creation.
+// @Description Authentication: Requires signature of keccak256(userAddress + timestamp) signed by user's private key
+// @Description The timestamp must be within 5 minutes to prevent replay attacks
 // @Tags Dataset
 // @Accept multipart/form-data
 // @Produce json
 // @Router /user/{userAddress}/dataset [post]
 // @Param userAddress path string true "user address"
-// @Param file formance formData file true "dataset file (JSONL format)"
+// @Param file formData file true "dataset file (JSONL format)"
+// @Param signature formData string true "signature of keccak256(userAddress + timestamp)"
+// @Param timestamp formData string true "unix timestamp in seconds"
 // @Success 200 {object} object{datasetHash=string} "Dataset uploaded successfully"
 func (h *Handler) UploadDataset(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
-	
+
+	// Get and validate signature
+	signature := ctx.PostForm("signature")
+	if signature == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Signature is required"})
+		return
+	}
+
+	// Get and validate timestamp
+	timestampStr := ctx.PostForm("timestamp")
+	if timestampStr == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Timestamp is required"})
+		return
+	}
+
+	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid timestamp format"})
+		return
+	}
+
+	// Verify signature with timestamp (prevents replay attacks)
+	if err := h.ctrl.VerifyUploadSignature(userAddress, signature, timestamp); err != nil {
+		h.logger.Warnf("signature verification failed for %s: %v", userAddress, err)
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("Authentication failed: %v", err)})
+		return
+	}
+
 	file, err := ctx.FormFile("file")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
 		return
 	}
 
-	// Check file size (max 500MB)
-	maxSize := int64(500 * 1024 * 1024)
+	// Check file size (max 100MB)
+	maxSize := int64(100 * 1024 * 1024)
 	if file.Size > maxSize {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 500MB"})
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 100MB"})
+		return
+	}
+
+	// Validate file extension
+	filename := strings.ToLower(file.Filename)
+	if !strings.HasSuffix(filename, ".jsonl") && !strings.HasSuffix(filename, ".json") {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Only JSONL/JSON files are allowed"})
 		return
 	}
 

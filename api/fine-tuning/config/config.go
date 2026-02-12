@@ -236,8 +236,8 @@ func GetConfig() *Config {
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
-			RateLimitRPS:                10,  // Default: 10 requests per second
-			RateLimitBurst:              20,  // Default: burst of 20 requests
+			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations
+			RateLimitBurst:              2,   // Default: burst of 2 requests - allows retry on failure
 		}
 
 		if err := loadConfig(instance); err != nil {
