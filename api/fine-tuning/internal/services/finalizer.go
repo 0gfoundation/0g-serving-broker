@@ -83,35 +83,41 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 
 	userAddr := common.HexToAddress(task.UserAddress)
 
-	// Check if storage upload should be skipped
-	// When skipped, still encrypt but save locally for TEE download via /v1/user/:address/task/:id/lora
-	if f.config.Service.SkipStorageUpload {
-		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true), encrypting locally for task %s", task.ID)
+	// Step 1: Always encrypt and save locally first (this creates the TEE backup)
+	f.logger.Infof("Encrypting LoRA model locally for task %s", task.ID)
+	settlementMetadata, err = f.encryptModelLocal(paths.Output, task)
+	if err != nil {
+		return err
+	}
+	f.logger.Infof("Task %s encrypted locally. TEE backup available at /v1/user/%s/task/%s/lora", task.ID, task.UserAddress, task.ID)
 
-		// Encrypt and save locally (no upload to storage)
-		settlementMetadata, err = f.encryptModelLocal(paths.Output, task)
-		if err != nil {
-			return err
+	// Step 2: Try to upload to 0G Storage (unless explicitly skipped)
+	if !f.config.Service.SkipStorageUpload {
+		encryptedFilePath := paths.Output + "_encrypted.data"
+		f.logger.Infof("Uploading encrypted LoRA to 0G Storage for task %s", task.ID)
+
+		storageRootHash, uploadErr := f.uploadModel(ctx, encryptedFilePath)
+		if uploadErr != nil {
+			// Upload failed - log warning but continue with local backup
+			f.logger.Warnf("Failed to upload to 0G Storage for task %s: %v. Using local backup hash.", task.ID, uploadErr)
+			// Keep the local hash (keccak256 of encrypted file) as the root hash
+		} else {
+			// Upload succeeded - use the storage root hash instead
+			f.logger.Infof("Successfully uploaded to 0G Storage for task %s, root hash: %s", task.ID, string(storageRootHash))
+			settlementMetadata.ModelRootHash = storageRootHash
 		}
-
-		f.logger.Infof("Task %s encrypted locally. LoRA available at /v1/user/%s/task/%s/lora", task.ID, task.UserAddress, task.ID)
 	} else {
-		// Normal flow: encrypt and upload to 0G Storage
-		settlementMetadata, err = f.encryptAndUploadModel(ctx, paths.Output, task)
-		if err != nil {
-			return err
-		}
+		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true) for task %s", task.ID)
 	}
 
-	// Note: DeliverIndex is deprecated since we now use task ID for deliverable identification
-	// Setting to 0 for backward compatibility
+	// Step 3: Update task in DB and contract
 	if err = f.db.UpdateTask(task.ID,
 		db.Task{
 			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
 			Secret:          hexutil.Encode(settlementMetadata.Secret),
 			EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
 			DeliverIndex:    0, // Deprecated: now using task ID instead of index
-			DeliverTime:     time.Now().Unix(), // TODO: better use tx timestamp
+			DeliverTime:     time.Now().Unix(),
 		}); err != nil {
 		f.logger.Errorf("Failed to update task: %v", err)
 		return err
@@ -190,64 +196,9 @@ func (f *Finalizer) encryptModelLocal(sourceDir string, task *db.Task) (*Settlem
 	}, nil
 }
 
-func (f *Finalizer) encryptAndUploadModel(ctx context.Context, sourceDir string, task *db.Task) (*SettlementMetadata, error) {
-	aesKey, err := util.GenerateAESKey(aesKeySize)
-	if err != nil {
-		return nil, err
-	}
-
-	plainFile, err := util.Zip(sourceDir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := os.Remove(plainFile); err != nil && !os.IsNotExist(err) {
-			f.logger.Errorf("Failed to remove temporary file %s: %v", plainFile, err)
-		}
-	}()
-
-	encryptFile, err := util.GetFileName(sourceDir, ".data")
-	if err != nil {
-		return nil, err
-	}
-
-	tag, err := util.AesEncryptLargeFile(aesKey, plainFile, encryptFile)
-	if err != nil {
-		return nil, err
-	}
-
-	tagSig, err := crypto.Sign(crypto.Keccak256(tag[:]), f.teeService.ProviderSigner)
-	if err != nil {
-		return nil, errors.Wrap(err, "sign tag failed")
-	}
-
-	err = util.WriteToFileHead(encryptFile, tagSig)
-	defer func() {
-		if err := os.Remove(encryptFile); err != nil && !os.IsNotExist(err) {
-			f.logger.Errorf("Failed to remove temporary file %s: %v", encryptFile, err)
-		}
-	}()
-
-	if err != nil {
-		return nil, err
-	}
-
-	modelRootHashes, err := f.uploadModel(ctx, encryptFile)
-	if err != nil {
-		return nil, err
-	}
-
-	encryptKey, err := f.encryptAESKey(aesKey, task.UserPublicKey)
-	if err != nil {
-		return nil, err
-	}
-
-	return &SettlementMetadata{
-		ModelRootHash:   modelRootHashes,
-		Secret:          aesKey,
-		EncryptedSecret: encryptKey,
-	}, nil
-}
+// encryptAndUploadModel is deprecated - kept for reference.
+// The new flow uses encryptModelLocal() + uploadModel() separately,
+// so the encrypted file is always kept as a local backup.
 
 func (f *Finalizer) uploadModel(ctx context.Context, encryptFile string) ([]byte, error) {
 	modelRootHashes, err := f.uploadModelWithTimeout(ctx, encryptFile)
@@ -255,12 +206,16 @@ func (f *Finalizer) uploadModel(ctx context.Context, encryptFile string) ([]byte
 		return nil, err
 	}
 
+	if len(modelRootHashes) == 1 {
+		// Single fragment: return raw 32-byte hash
+		// This is consistent with localRootHash (crypto.Keccak256) which also returns raw bytes
+		return modelRootHashes[0].Bytes(), nil
+	}
+
+	// Multi-fragment: concatenate raw bytes of all hashes
 	var data []byte
-	for i, hash := range modelRootHashes {
-		if i > 0 {
-			data = append(data, ',')
-		}
-		data = append(data, []byte(hash.Hex())...)
+	for _, hash := range modelRootHashes {
+		data = append(data, hash.Bytes()...)
 	}
 	return data, nil
 }

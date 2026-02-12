@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.9
 
 require (
-	github.com/0gfoundation/0g-storage-client v1.2.1
+	github.com/0gfoundation/0g-storage-client v1.2.2
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20251023024755-9304e6d533e7
 	github.com/andybalholm/brotli v1.1.0
 	github.com/docker/docker v28.0.0+incompatible
