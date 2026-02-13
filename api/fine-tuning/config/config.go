@@ -233,7 +233,7 @@ func GetConfig() *Config {
 			MaxFinalizerRetriesPerTask:  10,
 			MaxSettlementRetriesPerTask: 10,
 			SettlementBatchSize:         1,
-			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
+			DeliveredTaskAckTimeoutSecs: 60 * 60 * 48,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
 			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations

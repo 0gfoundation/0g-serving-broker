@@ -31,6 +31,10 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, err
 	}
 
+	if err := c.validateTrainingParams(task); err != nil {
+		return nil, err
+	}
+
 	if err := c.validateProviderSigner(ctx, task.UserAddress); err != nil {
 		return nil, err
 	}
@@ -211,6 +215,121 @@ func (c *Ctrl) validateModelType(task *schema.Task) error {
 	}
 
 	task.ModelType = db.PreDefinedModel
+	return nil
+}
+
+// validateTrainingParams validates the training configuration parameters
+// according to the documented requirements to prevent resource waste
+func (c *Ctrl) validateTrainingParams(task *schema.Task) error {
+	// Parse the JSON training parameters
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(task.TrainingParams), &params); err != nil {
+		return fmt.Errorf("invalid training params JSON format: %w", err)
+	}
+
+	// Define required parameters and their constraints
+	requiredParams := map[string]bool{
+		"neftune_noise_alpha":           true,
+		"num_train_epochs":              true,
+		"per_device_train_batch_size":   true,
+		"learning_rate":                 true,
+		"max_steps":                     true,
+	}
+
+	// Define forbidden parameters that users often add by mistake
+	forbiddenParams := []string{
+		"fp16", "bf16", "gradient_accumulation_steps",
+		"warmup_ratio", "warmup_steps", "logging_steps",
+		"save_steps", "save_total_limit", "max_seq_length",
+		"lora_r", "lora_alpha", "lora_dropout",
+		"use_4bit", "use_8bit", "optim", "lr_scheduler_type",
+	}
+
+	// Check for forbidden parameters
+	for _, forbidden := range forbiddenParams {
+		if _, exists := params[forbidden]; exists {
+			return fmt.Errorf("training config contains forbidden parameter '%s'. Please use only the standard configuration template. See documentation: https://docs.0g.ai/developer-hub/building-on-0g/compute-network/fine-tuning#prepare-configuration-file", forbidden)
+		}
+	}
+
+	// Check that only required parameters are present
+	for key := range params {
+		if !requiredParams[key] {
+			return fmt.Errorf("training config contains unexpected parameter '%s'. Only these parameters are allowed: neftune_noise_alpha, num_train_epochs, per_device_train_batch_size, learning_rate, max_steps", key)
+		}
+	}
+
+	// Check that all required parameters are present
+	for key := range requiredParams {
+		if _, exists := params[key]; !exists {
+			return fmt.Errorf("training config missing required parameter '%s'", key)
+		}
+	}
+
+	// Validate parameter values and types
+	// neftune_noise_alpha: 0-10
+	if val, ok := params["neftune_noise_alpha"].(float64); ok {
+		if val < 0 || val > 10 {
+			return errors.New("neftune_noise_alpha must be between 0 and 10")
+		}
+	} else {
+		return errors.New("neftune_noise_alpha must be a number")
+	}
+
+	// num_train_epochs: positive integer (represented as float64 in JSON)
+	if val, ok := params["num_train_epochs"].(float64); ok {
+		if val <= 0 || val != float64(int(val)) {
+			return errors.New("num_train_epochs must be a positive integer")
+		}
+		if val > 10 {
+			return errors.New("num_train_epochs should not exceed 10 for fine-tuning (typical: 1-3)")
+		}
+	} else {
+		return errors.New("num_train_epochs must be a number")
+	}
+
+	// per_device_train_batch_size: 1-4
+	if val, ok := params["per_device_train_batch_size"].(float64); ok {
+		if val < 1 || val > 4 || val != float64(int(val)) {
+			return errors.New("per_device_train_batch_size must be an integer between 1 and 4")
+		}
+	} else {
+		return errors.New("per_device_train_batch_size must be a number")
+	}
+
+	// learning_rate: 0.00001-0.001, check for scientific notation
+	learningRateStr := ""
+	if err := json.Unmarshal([]byte(task.TrainingParams), &params); err == nil {
+		// Re-parse as raw JSON to check for scientific notation
+		var rawParams map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(task.TrainingParams), &rawParams); err == nil {
+			if lr, ok := rawParams["learning_rate"]; ok {
+				learningRateStr = string(lr)
+				// Check for scientific notation (e, E, e+, e-, E+, E-)
+				if strings.Contains(learningRateStr, "e") || strings.Contains(learningRateStr, "E") {
+					return errors.New("learning_rate must use decimal notation (e.g., 0.0002), not scientific notation (e.g., 2e-4)")
+				}
+			}
+		}
+	}
+
+	if val, ok := params["learning_rate"].(float64); ok {
+		if val < 0.00001 || val > 0.001 {
+			return errors.New("learning_rate must be between 0.00001 and 0.001 (typical: 0.0002)")
+		}
+	} else {
+		return errors.New("learning_rate must be a number")
+	}
+
+	// max_steps: -1 or positive integer
+	if val, ok := params["max_steps"].(float64); ok {
+		if val != -1 && (val <= 0 || val != float64(int(val))) {
+			return errors.New("max_steps must be -1 (to use epochs) or a positive integer")
+		}
+	} else {
+		return errors.New("max_steps must be a number")
+	}
+
 	return nil
 }
 

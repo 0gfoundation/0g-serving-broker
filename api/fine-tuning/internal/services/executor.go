@@ -151,12 +151,28 @@ func (c *Executor) handleContainerLifecycle(ctx context.Context, paths *utils.Ta
 		return err
 	}
 
-	if err := c.waitForContainer(ctx, cli, containerID, task); err != nil {
-		return err
+	// Wait for container to finish and get exit status
+	waitErr := c.waitForContainer(ctx, cli, containerID, task)
+
+	// Always fetch container logs regardless of exit status
+	// This ensures users can see error messages even when container fails
+	logErr := c.fetchContainerLogs(ctx, cli, containerID, task.ID)
+	if logErr != nil {
+		c.logger.Errorf("Failed to fetch container logs: %v", logErr)
 	}
 
-	if err := c.fetchContainerLogs(ctx, cli, containerID, task.ID); err != nil {
-		return err
+	// If container failed (non-zero exit code), append error summary to log file
+	if waitErr != nil {
+		errMsg := fmt.Sprintf("\n=== Container Failed ===\n%s\n", waitErr.Error())
+		if err := utils.WriteToLogFile(task.ID, errMsg); err != nil {
+			c.logger.Errorf("failed to write error summary to log file: %v", err)
+		}
+		return waitErr
+	}
+
+	// Return log fetch error if container succeeded but log fetch failed
+	if logErr != nil {
+		return logErr
 	}
 
 	return nil
@@ -337,8 +353,13 @@ func (c *Executor) waitForContainer(ctx context.Context, cli *client.Client, con
 			c.logger.Errorf("Error waiting for container: %v", err)
 			return err
 		}
-	case <-statusCh:
-		c.logger.Infof("Container %s has stopped\n", containerID)
+	case status := <-statusCh:
+		c.logger.Infof("Container %s has stopped with exit code %d\n", containerID, status.StatusCode)
+		// Check container exit code - don't write to log file yet,
+		// we'll do that after fetching container logs
+		if status.StatusCode != 0 {
+			return fmt.Errorf("container exited with non-zero status code: %d", status.StatusCode)
+		}
 	case <-ctx.Done():
 		if err := cli.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
 			c.logger.Errorf("Error stopping container: %v", err)
@@ -362,6 +383,11 @@ func (c *Executor) fetchContainerLogs(ctx context.Context, cli *client.Client, c
 	builder.WriteString("Container logs:\n")
 
 	scanner := bufio.NewScanner(out)
+	// Increase scanner buffer size to handle long log lines (up to 1MB per line)
+	// Default buffer is 64KB which may be too small for model loading logs
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		c.logger.Debug(line)
@@ -372,12 +398,21 @@ func (c *Executor) fetchContainerLogs(ctx context.Context, cli *client.Client, c
 		}
 	}
 
+	// Write collected logs to file first (even if incomplete due to scanner error)
 	if err := utils.WriteToLogFile(taskID, builder.String()); err != nil {
 		c.logger.Errorf("failed to write container log: %v", err)
 	}
 
+	// Check for scanner errors and handle them properly
 	if err := scanner.Err(); err != nil {
 		c.logger.Errorf("Error reading logs: %v", err)
+		// Write error to task log file so user can see it via API
+		errMsg := fmt.Sprintf("\n=== Log Reading Error ===\nFailed to read complete container logs: %v\nSome logs may be missing.\n", err)
+		if writeErr := utils.WriteToLogFile(taskID, errMsg); writeErr != nil {
+			c.logger.Errorf("failed to write error to log file: %v", writeErr)
+		}
+		// Return error to mark task as failed
+		return fmt.Errorf("failed to read container logs: %w", err)
 	}
 
 	return nil
