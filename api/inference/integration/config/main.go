@@ -287,7 +287,7 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:ghcr.io/0gfoundation/0g-serving-broker@sha256:14d0d94d6ff217f664fc7a4007fb31b49400d0139cfe3debe9cfb5e87d892c3a
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:ghcr.io/0gfoundation/0g-serving-broker@sha256:e4df3cdac0b01ce78327f862e13fdac69714dda11c784467bd72a9e4cabe86a5
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -361,7 +361,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:ghcr.io/0gfoundation/0g-serving-broker@sha256:14d0d94d6ff217f664fc7a4007fb31b49400d0139cfe3debe9cfb5e87d892c3a
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:ghcr.io/0gfoundation/0g-serving-broker@sha256:e4df3cdac0b01ce78327f862e13fdac69714dda11c784467bd72a9e4cabe86a5
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if eq .TeeNode "hardhat"}}
@@ -411,7 +411,7 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:ghcr.io/0gfoundation/0g-serving-broker@sha256:14d0d94d6ff217f664fc7a4007fb31b49400d0139cfe3debe9cfb5e87d892c3a
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:ghcr.io/0gfoundation/0g-serving-broker@sha256:e4df3cdac0b01ce78327f862e13fdac69714dda11c784467bd72a9e4cabe86a5
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
@@ -1092,7 +1092,7 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		config.Controller = ControllerConfig{
 			Enable:         true,
 			AdminAddresses: []string{controllerAdminAddress},
-			Image:          "ghcr.io/0gfoundation/0g-serving-broker@sha256:14d0d94d6ff217f664fc7a4007fb31b49400d0139cfe3debe9cfb5e87d892c3a",
+			Image:          "ghcr.io/0gfoundation/0g-serving-broker@sha256:e4df3cdac0b01ce78327f862e13fdac69714dda11c784467bd72a9e4cabe86a5",
 		}
 	}
 
