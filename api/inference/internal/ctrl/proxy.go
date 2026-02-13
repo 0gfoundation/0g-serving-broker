@@ -206,7 +206,7 @@ func (c *Ctrl) addNoCacheHeaders(ctx *gin.Context) {
 
 func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 	// Set 'Access-Control-Expose-Headers' for CORS
-	exposeHeaders := []string{"Provider", "content-encoding"}
+	exposeHeaders := []string{"Provider", "content-encoding", "ZG-Res-Key"}
 	existing := ctx.Writer.Header().Get("Access-Control-Expose-Headers")
 	var newHeaders string
 	if existing != "" {
