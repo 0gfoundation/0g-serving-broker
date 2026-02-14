@@ -26,18 +26,22 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 		reqBody = modifiedBody
 
-		// Enforce configured model to prevent users from requesting more expensive models
-		// Pass user address from context for rate limiting
-		userAddr, _ := ctx.Get("userAddress")
-		userAddrStr, _ := userAddr.(string)
-		modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
-		if err != nil {
-			// Model validation failure is a user input error (similar to invalid token, bad request body)
-			// Mark as expected error to prevent polluting error monitoring
-			ctx.Set("ignoreError", true)
-			return nil, errors.Wrap(err, "enforce configured model")
+		// Enforce configured model only when TargetSeparated is true.
+		// When TargetSeparated=true, the broker proxies to a shared backend where model
+		// substitution could lead to pricing abuse. When false, each service maps to a
+		// dedicated backend, so model enforcement is unnecessary.
+		if c.Service.TargetSeparated {
+			userAddr, _ := ctx.Get("userAddress")
+			userAddrStr, _ := userAddr.(string)
+			modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
+			if err != nil {
+				// Model validation failure is a user input error (similar to invalid token, bad request body)
+				// Mark as expected error to prevent polluting error monitoring
+				ctx.Set("ignoreError", true)
+				return nil, errors.Wrap(err, "enforce configured model")
+			}
+			reqBody = modifiedBody
 		}
-		reqBody = modifiedBody
 	}
 
 	// For text-to-image requests, ensure wait=true query parameter is set
