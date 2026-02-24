@@ -21,35 +21,19 @@ type Service struct {
 	ServingUrl string `yaml:"servingUrl"`
 	Quota      struct {
 		CpuCount int64  `yaml:"cpuCount"`
-		Memory   int64  `yaml:"memory"`  // Memory limit in GB
-		Storage  int64  `yaml:"storage"` // Storage limit in GB
+		Memory   int64  `yaml:"memory"`
+		Storage  int64  `yaml:"storage"`
 		GpuType  string `yaml:"gpuType"`
 		GpuCount int64  `yaml:"gpuCount"`
 	} `yaml:"quota"`
-	PricePerToken    int64             `yaml:"pricePerToken"`
-	CustomizedModels []CustomizedModel `yaml:"customizedModels"`
-	// ModelLocalPaths maps model hash to local file path for any model (including predefined models)
-	// When set, the broker will use the local model instead of downloading from 0G Storage
-	ModelLocalPaths map[string]string `yaml:"modelLocalPaths"`
-	// ModelHuggingFaceFallback maps model hash to HuggingFace repo name
-	// Used as fallback when local model path doesn't exist
+	PricePerToken            int64             `yaml:"pricePerToken"`
+	CustomizedModels         []CustomizedModel `yaml:"customizedModels"`
+	ModelLocalPaths          map[string]string `yaml:"modelLocalPaths"`
 	ModelHuggingFaceFallback map[string]string `yaml:"modelHuggingFaceFallback"`
-	// DatasetLocalPaths maps dataset hash to local file path
-	// When set, the broker will use the local dataset instead of downloading from 0G Storage
-	// Useful for testing or pre-cached datasets
-	DatasetLocalPaths map[string]string `yaml:"datasetLocalPaths"`
-	// SkipStorageUpload when true, skips uploading trained model to 0G Storage
-	// Users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
-	// Useful for testing or when 0G Storage is not available
-	SkipStorageUpload bool `yaml:"skipStorageUpload"`
-	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
-	// After this period, files will be automatically cleaned up
-	// Default: 72 hours (3 days)
-	FileRetentionHours int `yaml:"fileRetentionHours"`
-	// DataDir specifies the root directory for storing task data (datasets, models, outputs)
-	// Default: /tmp (uses os.TempDir())
-	// Recommended: /dstack/persistent for large models to avoid memory pressure
-	DataDir string `yaml:"dataDir"`
+	DatasetLocalPaths        map[string]string `yaml:"datasetLocalPaths"`
+	SkipStorageUpload        bool              `yaml:"skipStorageUpload"`
+	FileRetentionHours       int               `yaml:"fileRetentionHours"`
+	DataDir                  string            `yaml:"dataDir"`
 }
 
 func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
@@ -58,7 +42,6 @@ func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
 		hash := ethcommon.HexToHash(model.Hash)
 		customizedModels[hash] = model
 	}
-
 	return customizedModels
 }
 
@@ -111,7 +94,7 @@ type CustomizedModel struct {
 	Description    string           `yaml:"description" json:"description"`
 	Tokenizer      string           `yaml:"tokenizer" json:"tokenizer"`
 	UsageFile      string           `yaml:"usageFile" json:"usageFile"`
-	LocalPath      string           `yaml:"localPath" json:"localPath"` // Local path to pre-downloaded model, skip 0G Storage download if set
+	LocalPath      string           `yaml:"localPath" json:"localPath"`
 }
 
 type Images struct {
@@ -119,6 +102,23 @@ type Images struct {
 	ExecutionImageName     string `yaml:"executionImageName"`
 	BuildImage             bool   `yaml:"buildImage"`
 	OverrideImage          bool   `yaml:"overrideImage"`
+}
+
+type MonitorConfig struct {
+	Enable       bool   `yaml:"enable"`
+	EventAddress string `yaml:"eventAddress"`
+}
+
+type ServingConfig struct {
+	Enable          bool   `yaml:"enable"`
+	BaseModelPath   string `yaml:"baseModelPath"`
+	InferenceGPUIDs string `yaml:"inferenceGpuIds"`
+	VLLMPort        int    `yaml:"vllmPort"`
+	MaxLoraRank     int    `yaml:"maxLoraRank"`
+	MaxLoraModules  int    `yaml:"maxLoraModules"`
+	LoraModulesDir  string `yaml:"loraModulesDir"`
+	InputPrice      string `yaml:"inputPrice"`
+	OutputPrice     string `yaml:"outputPrice"`
 }
 
 type Config struct {
@@ -133,6 +133,8 @@ type Config struct {
 	Service                     Service             `yaml:"service"`
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
 	Logger                      config.LoggerConfig `yaml:"logger"`
+	Monitor                     MonitorConfig       `yaml:"monitor"`
+	Serving                     ServingConfig       `yaml:"serving"`
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
 	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 	GasPrice                    string              `yaml:"gasPrice"`
@@ -148,8 +150,8 @@ type Config struct {
 	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
 	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
 	MaxTaskQueueSize            uint                `yaml:"maxTaskQueueSize"`
-	RateLimitRPS                float64             `yaml:"rateLimitRPS"`   // Rate limit requests per second
-	RateLimitBurst              int                 `yaml:"rateLimitBurst"` // Rate limit burst size
+	RateLimitRPS                float64             `yaml:"rateLimitRPS"`
+	RateLimitBurst              int                 `yaml:"rateLimitBurst"`
 }
 
 type StorageClientConfig struct {
@@ -161,12 +163,10 @@ type StorageClientConfig struct {
 type UploadArgs struct {
 	Tags            string `yaml:"tags"`
 	ExpectedReplica uint   `yaml:"expectedReplica"`
-
 	SkipTx           bool `yaml:"skipTx"`
 	FinalityRequired bool `yaml:"finalityRequired"`
 	TaskSize         uint `yaml:"taskSize"`
 	Routines         int  `yaml:"routines"`
-
 	FragmentSize int64 `yaml:"fragmentSize"`
 	FullTrusted  bool  `yaml:"fullTrusted"`
 	FastMode     bool  `yaml:"fastMode"`
@@ -217,6 +217,19 @@ func GetConfig() *Config {
 				Path:          "",
 				RotationCount: 50,
 			},
+			Monitor: MonitorConfig{
+				Enable:       false,
+				EventAddress: ":3081",
+			},
+			Serving: ServingConfig{
+				Enable:         false,
+				VLLMPort:       8000,
+				MaxLoraRank:    64,
+				MaxLoraModules: 16,
+				LoraModulesDir: "/tmp/lora-modules",
+				InputPrice:     "10000000",
+				OutputPrice:    "10000000",
+			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,
 			MaxGasPrice:                 "1000000000000",
@@ -231,8 +244,8 @@ func GetConfig() *Config {
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
-			RateLimitRPS:                10,  // Default: 10 requests per second
-			RateLimitBurst:              20,  // Default: burst of 20 requests
+			RateLimitRPS:                10,
+			RateLimitBurst:              20,
 		}
 
 		if err := loadConfig(instance); err != nil {

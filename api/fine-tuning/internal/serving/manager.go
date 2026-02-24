@@ -1,0 +1,404 @@
+package serving
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
+	"github.com/google/uuid"
+)
+
+type ServedModel struct {
+	TaskID       uuid.UUID
+	UserAddress  string
+	BaseModel    string
+	LoRAPath     string
+	ModelName    string
+	RegisteredAt time.Time
+}
+
+type Manager struct {
+	mu             sync.RWMutex
+	servedModels   map[string]*ServedModel // key: modelName
+	db             *db.DB
+	logger         log.Logger
+	config         ServingConfig
+	vllmProcess    *exec.Cmd
+	vllmReady      bool
+	loraModulesDir string
+	httpClient     *http.Client
+}
+
+type ServingConfig struct {
+	Enable          bool   `yaml:"enable"`
+	BaseModelPath   string `yaml:"baseModelPath"`
+	InferenceGPUIDs string `yaml:"inferenceGpuIds"`
+	VLLMPort        int    `yaml:"vllmPort"`
+	MaxLoraRank     int    `yaml:"maxLoraRank"`
+	MaxLoraModules  int    `yaml:"maxLoraModules"`
+	LoraModulesDir  string `yaml:"loraModulesDir"`
+}
+
+func NewManager(db *db.DB, config ServingConfig, logger log.Logger) *Manager {
+	loraDir := config.LoraModulesDir
+	if loraDir == "" {
+		loraDir = "/tmp/lora-modules"
+	}
+
+	return &Manager{
+		servedModels:   make(map[string]*ServedModel),
+		db:             db,
+		logger:         logger,
+		config:         config,
+		loraModulesDir: loraDir,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
+}
+
+func (m *Manager) Start(ctx context.Context) error {
+	if !m.config.Enable {
+		m.logger.Info("LoRA serving is disabled")
+		return nil
+	}
+
+	if m.config.BaseModelPath == "" {
+		return errors.New("serving.baseModelPath is required when serving is enabled")
+	}
+
+	if err := os.MkdirAll(m.loraModulesDir, 0755); err != nil {
+		return errors.Wrap(err, "create lora modules directory")
+	}
+
+	go m.startVLLM(ctx)
+	go m.pollFinishedTasks(ctx)
+	return nil
+}
+
+func (m *Manager) startVLLM(ctx context.Context) {
+	port := m.config.VLLMPort
+	if port == 0 {
+		port = 8000
+	}
+
+	maxLoraRank := m.config.MaxLoraRank
+	if maxLoraRank == 0 {
+		maxLoraRank = 64
+	}
+
+	args := []string{
+		"serve", m.config.BaseModelPath,
+		"--port", fmt.Sprintf("%d", port),
+		"--enable-lora",
+		"--max-lora-rank", fmt.Sprintf("%d", maxLoraRank),
+	}
+
+	if m.config.MaxLoraModules > 0 {
+		args = append(args, "--max-loras", fmt.Sprintf("%d", m.config.MaxLoraModules))
+	}
+
+	if m.config.InferenceGPUIDs != "" {
+		os.Setenv("CUDA_VISIBLE_DEVICES", m.config.InferenceGPUIDs)
+	}
+
+	m.logger.Infof("starting vLLM with args: %v", args)
+
+	cmd := exec.CommandContext(ctx, "vllm", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	m.mu.Lock()
+	m.vllmProcess = cmd
+	m.mu.Unlock()
+
+	if err := cmd.Start(); err != nil {
+		m.logger.Errorf("failed to start vLLM: %v", err)
+		return
+	}
+
+	go m.waitForVLLMReady(ctx)
+
+	if err := cmd.Wait(); err != nil {
+		if ctx.Err() != nil {
+			m.logger.Info("vLLM stopped due to context cancellation")
+			return
+		}
+		m.logger.Errorf("vLLM exited with error: %v", err)
+	}
+}
+
+func (m *Manager) waitForVLLMReady(ctx context.Context) {
+	endpoint := m.GetVLLMEndpoint()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			resp, err := m.httpClient.Get(endpoint + "/health")
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					m.mu.Lock()
+					m.vllmReady = true
+					m.mu.Unlock()
+					m.logger.Info("vLLM is ready (health check passed)")
+					return
+				}
+			}
+		}
+	}
+}
+
+func (m *Manager) pollFinishedTasks(ctx context.Context) {
+	// Wait for vLLM to be ready before polling
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+			if m.IsReady() {
+				goto poll
+			}
+			m.logger.Debug("waiting for vLLM to be ready before polling tasks...")
+		}
+	}
+
+poll:
+	m.logger.Info("starting finished task polling for LoRA auto-registration")
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	m.discoverAndRegisterModels()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.discoverAndRegisterModels()
+		}
+	}
+}
+
+func (m *Manager) discoverAndRegisterModels() {
+	tasks, err := m.db.GetFinishedTasksForServing()
+	if err != nil {
+		m.logger.Warnf("failed to query finished tasks for serving: %v", err)
+		return
+	}
+
+	for _, task := range tasks {
+		taskDir := filepath.Join(utils.GetDataDir(), task.ID.String())
+		paths := utils.NewTaskPaths(taskDir)
+		loraPath := paths.Output
+
+		if _, err := os.Stat(loraPath); os.IsNotExist(err) {
+			continue
+		}
+
+		m.mu.RLock()
+		modelName := m.makeModelName(task.PreTrainedModelHash, *task.ID)
+		_, exists := m.servedModels[modelName]
+		m.mu.RUnlock()
+
+		if exists {
+			continue
+		}
+
+		registeredName, err := m.RegisterModel(*task.ID, task.UserAddress, task.PreTrainedModelHash, loraPath)
+		if err != nil {
+			m.logger.Warnf("failed to auto-register model for task %s: %v", task.ID, err)
+			continue
+		}
+
+		m.logger.Infof("auto-registered LoRA model: %s (task: %s, user: %s)", registeredName, task.ID, task.UserAddress)
+	}
+
+	m.pruneStaleModels()
+}
+
+func (m *Manager) pruneStaleModels() {
+	if m.config.MaxLoraModules <= 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.servedModels) <= m.config.MaxLoraModules {
+		return
+	}
+
+	var oldest *ServedModel
+	for _, model := range m.servedModels {
+		if oldest == nil || model.RegisteredAt.Before(oldest.RegisteredAt) {
+			oldest = model
+		}
+	}
+
+	if oldest != nil {
+		destDir := filepath.Join(m.loraModulesDir, oldest.ModelName)
+		os.Remove(destDir)
+		delete(m.servedModels, oldest.ModelName)
+		m.logger.Infof("pruned oldest served model: %s (task: %s)", oldest.ModelName, oldest.TaskID)
+	}
+}
+
+func (m *Manager) RegisterModel(taskID uuid.UUID, userAddress, baseModel, loraPath string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.config.Enable {
+		return "", errors.New("LoRA serving is not enabled")
+	}
+
+	modelName := m.makeModelName(baseModel, taskID)
+
+	destDir := filepath.Join(m.loraModulesDir, modelName)
+	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
+		return "", errors.Wrap(err, "create lora destination directory")
+	}
+
+	if err := os.Symlink(loraPath, destDir); err != nil && !os.IsExist(err) {
+		return "", errors.Wrap(err, "symlink lora adapter")
+	}
+
+	served := &ServedModel{
+		TaskID:       taskID,
+		UserAddress:  userAddress,
+		BaseModel:    baseModel,
+		LoRAPath:     loraPath,
+		ModelName:    modelName,
+		RegisteredAt: time.Now(),
+	}
+
+	m.servedModels[modelName] = served
+	m.logger.Infof("registered LoRA model for serving: %s (task: %s, user: %s)", modelName, taskID, userAddress)
+
+	return modelName, nil
+}
+
+func (m *Manager) UnregisterModel(modelName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	served, exists := m.servedModels[modelName]
+	if !exists {
+		return errors.New("model not found: " + modelName)
+	}
+
+	destDir := filepath.Join(m.loraModulesDir, modelName)
+	os.Remove(destDir)
+
+	delete(m.servedModels, modelName)
+	m.logger.Infof("unregistered LoRA model: %s (task: %s)", modelName, served.TaskID)
+
+	return nil
+}
+
+func (m *Manager) ListServedModels() []*ServedModel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	models := make([]*ServedModel, 0, len(m.servedModels))
+	for _, model := range m.servedModels {
+		models = append(models, model)
+	}
+	return models
+}
+
+func (m *Manager) ListServedModelsForUser(userAddress string) []*ServedModel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var models []*ServedModel
+	for _, model := range m.servedModels {
+		if strings.EqualFold(model.UserAddress, userAddress) {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func (m *Manager) GetServedModel(modelName string) (*ServedModel, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	model, exists := m.servedModels[modelName]
+	return model, exists
+}
+
+func (m *Manager) IsModelOwner(modelName, userAddress string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	model, exists := m.servedModels[modelName]
+	if !exists {
+		return false
+	}
+	return strings.EqualFold(model.UserAddress, userAddress)
+}
+
+func (m *Manager) IsReady() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.vllmReady
+}
+
+func (m *Manager) GetVLLMEndpoint() string {
+	port := m.config.VLLMPort
+	if port == 0 {
+		port = 8000
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
+}
+
+func (m *Manager) makeModelName(baseModel string, taskID uuid.UUID) string {
+	shortBase := baseModel
+	if len(shortBase) > 16 {
+		shortBase = shortBase[:16]
+	}
+	shortBase = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, shortBase)
+	return fmt.Sprintf("ft-%s-%s", shortBase, taskID.String()[:8])
+}
+
+func (m *Manager) GetVLLMModels() ([]string, error) {
+	resp, err := m.httpClient.Get(m.GetVLLMEndpoint() + "/v1/models")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	var models []string
+	for _, m := range result.Data {
+		models = append(models, m.ID)
+	}
+	return models, nil
+}

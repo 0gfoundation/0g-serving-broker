@@ -257,3 +257,54 @@ func (d *DB) UpdateUserPublicKey(task *Task, key string) error {
 		UserPublicKey: key,
 	})
 }
+
+func (d *DB) GetFinishedTasksForServing() ([]Task, error) {
+	var tasks []Task
+	servableStates := []string{
+		ProgressStateFinished.String(),
+		ProgressStateUserAcknowledged.String(),
+	}
+	ret := d.db.Where("progress IN ?", servableStates).Order("created_at DESC").Find(&tasks)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
+	return tasks, nil
+}
+
+func (d *DB) CountTasksByState() (map[string]float64, error) {
+	type stateCount struct {
+		Progress string
+		Count    float64
+	}
+
+	var results []stateCount
+	ret := d.db.Model(&Task{}).
+		Select("progress, COUNT(*) as count").
+		Group("progress").
+		Find(&results)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
+
+	counts := make(map[string]float64)
+	allStates := []string{
+		ProgressStateInit.String(),
+		ProgressStateSettingUp.String(),
+		ProgressStateSetUp.String(),
+		ProgressStateTraining.String(),
+		ProgressStateTrained.String(),
+		ProgressStateDelivering.String(),
+		ProgressStateDelivered.String(),
+		ProgressStateUserAcknowledged.String(),
+		ProgressStateFinished.String(),
+		ProgressStateFailed.String(),
+	}
+	for _, s := range allStates {
+		counts[s] = 0
+	}
+	for _, r := range results {
+		counts[r.Progress] = r.Count
+	}
+
+	return counts, nil
+}

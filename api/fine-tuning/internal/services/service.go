@@ -11,6 +11,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/monitor"
 	"github.com/gammazero/workerpool"
 )
 
@@ -211,6 +212,7 @@ func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
 	}
 
 	if errors.Is(err, errSignature) {
+		monitor.RecordTaskFailed()
 		return s.db.MarkTaskFailed(dbTask)
 	}
 
@@ -219,6 +221,8 @@ func (s *Service) handleTaskFailure(err error, dbTask *db.Task) error {
 		if err := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("Retrying task %v\n", dbTask.ID)); err != nil {
 			s.logger.Errorf("Write into task log failed: %v", err)
 		}
+	} else {
+		monitor.RecordTaskFailed()
 	}
 
 	return err
