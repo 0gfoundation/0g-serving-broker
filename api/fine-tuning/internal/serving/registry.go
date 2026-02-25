@@ -41,7 +41,10 @@ func NewRegistry(contract *providercontract.ProviderContract, manager *Manager, 
 }
 
 // Start begins the background sync loop that tracks model registrations.
+// NOTE: On-chain contract registration is not yet implemented; the loop
+// only maintains local serving state. See registerOnContract for details.
 func (r *Registry) Start(ctx context.Context) {
+	r.logger.Info("registry started (local tracking only — contract registration not yet implemented)")
 	go r.syncLoop(ctx)
 }
 

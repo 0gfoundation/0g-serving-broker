@@ -327,7 +327,7 @@ func (m *Manager) UnregisterModel(modelName string) error {
 
 	served, exists := m.servedModels[modelName]
 	if !exists {
-		return errors.New("model not found: " + modelName)
+		return fmt.Errorf("model not found: %s", modelName)
 	}
 
 	destDir := filepath.Join(m.loraModulesDir, modelName)
@@ -402,6 +402,9 @@ func (m *Manager) GetVLLMEndpoint() string {
 	return fmt.Sprintf("http://localhost:%d", port)
 }
 
+// makeModelName builds a deterministic, vLLM-safe model identifier from the
+// base model name and task UUID. Non-alphanumeric characters (except - and _)
+// are replaced with hyphens so the name is valid for vLLM's model registry.
 func (m *Manager) makeModelName(baseModel string, taskID uuid.UUID) string {
 	shortBase := baseModel
 	if len(shortBase) > 16 {
@@ -417,8 +420,12 @@ func (m *Manager) makeModelName(baseModel string, taskID uuid.UUID) string {
 }
 
 // GetVLLMModels queries the vLLM server for its currently loaded model names.
-func (m *Manager) GetVLLMModels() ([]string, error) {
-	resp, err := m.httpClient.Get(m.GetVLLMEndpoint() + "/v1/models")
+func (m *Manager) GetVLLMModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.GetVLLMEndpoint()+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

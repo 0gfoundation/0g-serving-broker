@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -263,11 +264,17 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 
 	engine := gin.New()
 
+	var wg sync.WaitGroup
+
 	if cfg.Monitor.Enable {
 		monitor.Init(cfg.Service.ServingUrl, ctx)
 		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
 		engine.Use(monitor.TrackMetrics())
-		go startTaskStatePoller(ctx, svc.db, logger)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			startTaskStatePoller(ctx, svc.db, logger)
+		}()
 	}
 
 	var servingProxy *serving.Proxy
@@ -324,6 +331,7 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 
 	<-stop
 	logger.Info("shutting down server...")
+	wg.Wait()
 	return nil
 }
 

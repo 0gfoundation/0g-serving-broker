@@ -162,6 +162,7 @@ func Init(serverName string, ctx context.Context) {
 		UniqueUsersTotal,
 	)
 
+	// 10 000 provides ~100 s of burst capacity at 100 tasks/s before drops.
 	uniqueUsersChan = make(chan string, 10000)
 	go processUniqueUsers(ctx)
 }
