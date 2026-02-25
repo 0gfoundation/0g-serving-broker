@@ -244,8 +244,8 @@ func GetConfig() *Config {
 			DeliveredTaskAckTimeoutSecs: 60 * 60 * 6,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
-			RateLimitRPS:                10,
-			RateLimitBurst:              20,
+			RateLimitRPS:                0.1,
+			RateLimitBurst:              2,
 		}
 
 		if err := loadConfig(instance); err != nil {

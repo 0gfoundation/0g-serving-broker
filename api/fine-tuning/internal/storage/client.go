@@ -7,14 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/chain"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
-	"github.com/0glabs/0g-serving-broker/fine-tuning/monitor"
 	"github.com/0gfoundation/0g-storage-client/common"
 	"github.com/0gfoundation/0g-storage-client/common/blockchain"
 	"github.com/0gfoundation/0g-storage-client/core"
@@ -102,10 +100,7 @@ func New(config *config.Config, logger log.Logger) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string, isTurbo bool) (_ string, retErr error) {
-	startTime := time.Now()
-	defer func() { monitor.RecordStorageDownload(retErr, time.Since(startTime)) }()
-
+func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string, isTurbo bool) (string, error) {
 	var indexerClient *indexer.Client
 	if isTurbo {
 		indexerClient = c.indexerTurboClient
@@ -113,6 +108,7 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 		indexerClient = c.indexerStandardClient
 	}
 
+	// Download to a temporary file first (don't assume ZIP)
 	tmpFile := filePath + ".download"
 	if err := os.Remove(tmpFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -124,6 +120,7 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 		c.logger.Errorf("%v", err)
 		return "", err
 	}
+	// Ensure temp file is cleaned up if we return early with error
 	defer func() {
 		if _, statErr := os.Stat(tmpFile); statErr == nil {
 			if rmErr := os.Remove(tmpFile); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -132,6 +129,7 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 		}
 	}()
 
+	// Detect file type: check if it's a ZIP by reading the magic bytes
 	isZip, err := isZipFile(tmpFile)
 	if err != nil {
 		c.logger.Warnf("Could not detect file type for %s: %v, treating as raw file", tmpFile, err)
@@ -139,19 +137,23 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 	}
 
 	if isZip {
+		// ZIP file: unzip as before
 		topLevelDir, err := util.Unzip(tmpFile, filepath.Dir(filePath))
 		if err != nil {
 			c.logger.Errorf("Error unzipping data: %v\n", err)
 			return "", err
 		}
+		// Clean up the downloaded zip
 		os.Remove(tmpFile)
 		c.logger.Infof("Downloaded and unzipped %s", tmpFile)
 		return topLevelDir, nil
 	}
 
+	// Raw file (e.g., JSONL): move directly to the target path
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return "", err
 	}
+	// Remove existing target (may exist from a previous attempt, could be a file or directory)
 	if err := os.RemoveAll(filePath); err != nil {
 		return "", errors.Wrap(err, "remove existing target path before move")
 	}
@@ -162,6 +164,8 @@ func (c *Client) DownloadFromStorage(ctx context.Context, hash, filePath string,
 	return filePath, nil
 }
 
+// isZipFile checks if a file is a ZIP archive by reading its magic bytes.
+// ZIP files start with the bytes "PK" (0x50, 0x4B, 0x03, 0x04).
 func isZipFile(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -175,16 +179,15 @@ func isZipFile(path string) (bool, error) {
 		return false, fmt.Errorf("failed to read file magic bytes: %w", err)
 	}
 	if n < 4 {
+		// File too small to be a ZIP archive
 		return false, nil
 	}
 
+	// ZIP magic bytes: PK\x03\x04
 	return buf[0] == 0x50 && buf[1] == 0x4B && buf[2] == 0x03 && buf[3] == 0x04, nil
 }
 
-func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo bool) (_ []ethcommon.Hash, retErr error) {
-	startTime := time.Now()
-	defer func() { monitor.RecordStorageUpload(retErr, time.Since(startTime)) }()
-
+func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo bool) ([]ethcommon.Hash, error) {
 	finalityRequired := transfer.TransactionPacked
 	if c.storageUploadUrgs.FinalityRequired {
 		finalityRequired = transfer.FileFinalized
@@ -217,6 +220,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 		indexerClient = c.indexerStandardClient
 	}
 
+	// In v1.2.2, Routines is set internally via UploaderConfig in NewUploaderFromIndexerNodes
 	uploader, err := indexerClient.NewUploaderFromIndexerNodes(ctx, file.NumSegments(), c.w3Client, opt.ExpectedReplica, nil, c.Method, opt.FullTrusted)
 	if err != nil {
 		c.logger.Errorf("Error creating uploader: %v\n", err)
@@ -225,6 +229,7 @@ func (c *Client) UploadToStorage(ctx context.Context, fileName string, isTurbo b
 
 	_, roots, err := uploader.SplitableUpload(ctx, file, c.storageUploadUrgs.FragmentSize, opt)
 
+	// Retry with full trusted nodes if initial upload fails and FullTrusted was false
 	if err != nil && !opt.FullTrusted {
 		c.logger.Warnf("Upload with non-full-trusted nodes failed, retrying with full trusted nodes: %v", err)
 		opt.FullTrusted = true

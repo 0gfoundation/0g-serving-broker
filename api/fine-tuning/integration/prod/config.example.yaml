@@ -23,6 +23,13 @@ service:
     gpuType: "H200"
     gpuCount: 1
 
+  # Supported predefined models - whitelist of model hashes from SCRIPT_MAP
+  # If empty/omitted, all models in SCRIPT_MAP are allowed (backward compatible)
+  # Use this to restrict which predefined models this provider accepts
+  supportedPredefinedModels:
+    - "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7"  # Qwen2.5-0.5B-Instruct
+    - "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5"  # Qwen3-32B
+
   # Customized models - define new models that providers want to support
   # Each model requires: name, hash, image, dataType, trainingScript
   customizedModels:

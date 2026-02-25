@@ -2,12 +2,15 @@ package ctrl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -25,6 +28,10 @@ import (
 
 func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, error) {
 	if err := c.validateModelType(task); err != nil {
+		return nil, err
+	}
+
+	if err := c.validateTrainingParams(task); err != nil {
 		return nil, err
 	}
 
@@ -136,9 +143,15 @@ func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest, desc bo
 	return taskRes, nil
 }
 
-func (c *Ctrl) GetProgress(id *uuid.UUID) (string, error) {
-	if _, err := c.db.GetTask(id); err != nil {
+func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
+	task, err := c.db.GetTask(id)
+	if err != nil {
 		return "", err
+	}
+
+	// Verify user owns this task
+	if task.UserAddress != userAddress {
+		return "", errors.New("unauthorized: task does not belong to this user")
 	}
 
 	return filepath.Join(utils.GetDataDir(), id.String(), utils.TaskLogFileName), nil
@@ -182,14 +195,139 @@ func (c *Ctrl) validateNoUnfinishedTasks(task *schema.Task) error {
 
 func (c *Ctrl) validateModelType(task *schema.Task) error {
 	modelHash := ethcommon.HexToHash(task.PreTrainedModelHash)
-	if _, ok := c.customizedModels[modelHash]; !ok {
-		if _, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]; !ok {
-			return errors.New("unsupported model")
-		} else {
-			task.ModelType = db.PreDefinedModel
+
+	// Check if it's a customized model
+	if _, ok := c.customizedModels[modelHash]; ok {
+		task.ModelType = db.CustomizedModel
+		return nil
+	}
+
+	// Check if it's a predefined model in SCRIPT_MAP
+	if _, ok := constant.SCRIPT_MAP[task.PreTrainedModelHash]; !ok {
+		return errors.New("unsupported model: not found in predefined models")
+	}
+
+	// If SupportedPredefinedModels is configured, check if model is in the whitelist
+	if len(c.supportedPredefinedModels) > 0 {
+		if !c.supportedPredefinedModels[task.PreTrainedModelHash] {
+			return errors.New("unsupported model: not in provider's supported model list")
+		}
+	}
+
+	task.ModelType = db.PreDefinedModel
+	return nil
+}
+
+// validateTrainingParams validates the training configuration parameters
+// according to the documented requirements to prevent resource waste
+func (c *Ctrl) validateTrainingParams(task *schema.Task) error {
+	// Parse the JSON training parameters
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(task.TrainingParams), &params); err != nil {
+		return fmt.Errorf("invalid training params JSON format: %w", err)
+	}
+
+	// Define required parameters and their constraints
+	requiredParams := map[string]bool{
+		"neftune_noise_alpha":           true,
+		"num_train_epochs":              true,
+		"per_device_train_batch_size":   true,
+		"learning_rate":                 true,
+		"max_steps":                     true,
+	}
+
+	// Define forbidden parameters that users often add by mistake
+	forbiddenParams := []string{
+		"fp16", "bf16", "gradient_accumulation_steps",
+		"warmup_ratio", "warmup_steps", "logging_steps",
+		"save_steps", "save_total_limit", "max_seq_length",
+		"lora_r", "lora_alpha", "lora_dropout",
+		"use_4bit", "use_8bit", "optim", "lr_scheduler_type",
+	}
+
+	// Check for forbidden parameters
+	for _, forbidden := range forbiddenParams {
+		if _, exists := params[forbidden]; exists {
+			return fmt.Errorf("training config contains forbidden parameter '%s'. Please use only the standard configuration template. See documentation: https://docs.0g.ai/developer-hub/building-on-0g/compute-network/fine-tuning#prepare-configuration-file", forbidden)
+		}
+	}
+
+	// Check that only required parameters are present
+	for key := range params {
+		if !requiredParams[key] {
+			return fmt.Errorf("training config contains unexpected parameter '%s'. Only these parameters are allowed: neftune_noise_alpha, num_train_epochs, per_device_train_batch_size, learning_rate, max_steps", key)
+		}
+	}
+
+	// Check that all required parameters are present
+	for key := range requiredParams {
+		if _, exists := params[key]; !exists {
+			return fmt.Errorf("training config missing required parameter '%s'", key)
+		}
+	}
+
+	// Validate parameter values and types
+	// neftune_noise_alpha: 0-10
+	if val, ok := params["neftune_noise_alpha"].(float64); ok {
+		if val < 0 || val > 10 {
+			return errors.New("neftune_noise_alpha must be between 0 and 10")
 		}
 	} else {
-		task.ModelType = db.CustomizedModel
+		return errors.New("neftune_noise_alpha must be a number")
+	}
+
+	// num_train_epochs: positive integer (represented as float64 in JSON)
+	if val, ok := params["num_train_epochs"].(float64); ok {
+		if val <= 0 || val != float64(int(val)) {
+			return errors.New("num_train_epochs must be a positive integer")
+		}
+		if val > 10 {
+			return errors.New("num_train_epochs should not exceed 10 for fine-tuning (typical: 1-3)")
+		}
+	} else {
+		return errors.New("num_train_epochs must be a number")
+	}
+
+	// per_device_train_batch_size: 1-4
+	if val, ok := params["per_device_train_batch_size"].(float64); ok {
+		if val < 1 || val > 4 || val != float64(int(val)) {
+			return errors.New("per_device_train_batch_size must be an integer between 1 and 4")
+		}
+	} else {
+		return errors.New("per_device_train_batch_size must be a number")
+	}
+
+	// learning_rate: 0.00001-0.001, check for scientific notation
+	learningRateStr := ""
+	if err := json.Unmarshal([]byte(task.TrainingParams), &params); err == nil {
+		// Re-parse as raw JSON to check for scientific notation
+		var rawParams map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(task.TrainingParams), &rawParams); err == nil {
+			if lr, ok := rawParams["learning_rate"]; ok {
+				learningRateStr = string(lr)
+				// Check for scientific notation (e, E, e+, e-, E+, E-)
+				if strings.Contains(learningRateStr, "e") || strings.Contains(learningRateStr, "E") {
+					return errors.New("learning_rate must use decimal notation (e.g., 0.0002), not scientific notation (e.g., 2e-4)")
+				}
+			}
+		}
+	}
+
+	if val, ok := params["learning_rate"].(float64); ok {
+		if val < 0.00001 || val > 0.001 {
+			return errors.New("learning_rate must be between 0.00001 and 0.001 (typical: 0.0002)")
+		}
+	} else {
+		return errors.New("learning_rate must be a number")
+	}
+
+	// max_steps: -1 or positive integer
+	if val, ok := params["max_steps"].(float64); ok {
+		if val != -1 && (val <= 0 || val != float64(int(val))) {
+			return errors.New("max_steps must be -1 (to use epochs) or a positive integer")
+		}
+	} else {
+		return errors.New("max_steps must be a number")
 	}
 
 	return nil
@@ -200,20 +338,96 @@ func (c *Ctrl) GetPendingTrainingTaskCount(ctx context.Context) (int64, error) {
 }
 
 // VerifyDownloadSignature verifies that the signature is valid for the given task ID and user address
-// Uses the same message format as validateSignature: TextHash(keccak256(binaryTaskID))
-func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signature string) error {
+// Uses the message format: TextHash(keccak256(taskID + timestamp))
+// Validates that the timestamp is within an acceptable time window (5 minutes)
+func (c *Ctrl) VerifyDownloadSignature(id *uuid.UUID, userAddress string, signature string, timestamp int64) error {
 	if id == nil {
 		return errors.New("task ID cannot be nil")
 	}
 
-	// Get binary representation of UUID (same as task.ID.MarshalBinary())
+	// Validate timestamp is within acceptable window (5 minutes = 300 seconds)
+	currentTime := time.Now().Unix()
+	timeDiff := currentTime - timestamp
+
+	if timeDiff < -60 {
+		// Timestamp is more than 1 minute in the future (allow some clock skew)
+		return fmt.Errorf("timestamp is too far in the future: %d seconds ahead", -timeDiff)
+	}
+
+	if timeDiff > 300 {
+		// Timestamp is more than 5 minutes old
+		return fmt.Errorf("timestamp is too old: %d seconds ago (max 300 seconds)", timeDiff)
+	}
+
+	// Get binary representation of UUID
 	idBytes, err := id.MarshalBinary()
 	if err != nil {
 		return errors.Wrap(err, "marshal task ID")
 	}
 
-	// Create message hash using same format as validateSignature
-	hash := accounts.TextHash(crypto.Keccak256(idBytes)[:])
+	// Create message: keccak256(taskIDHex + timestamp)
+	// This ensures each signature is unique and time-bound
+	idHex := common.Bytes2Hex(idBytes)
+	message := fmt.Sprintf("%s%d", idHex, timestamp)
+	hash := accounts.TextHash(crypto.Keccak256([]byte(message)))
+
+	// Decode signature
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return errors.Wrap(err, "decode signature")
+	}
+
+	// Validate signature length and recovery ID
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
+	}
+
+	if sigBytes[64] != 27 && sigBytes[64] != 28 {
+		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
+	}
+
+	sigBytes[64] -= 27
+	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	if err != nil {
+		return errors.Wrap(err, "recover public key from signature")
+	}
+
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	expectedAddr := common.HexToAddress(userAddress)
+
+	if recoveredAddr != expectedAddr {
+		return fmt.Errorf("signature verification failed: expected %s, got %s", expectedAddr.Hex(), recoveredAddr.Hex())
+	}
+
+	return nil
+}
+
+// VerifyUploadSignature verifies that the signature is valid for dataset upload
+// Uses the message format: TextHash(keccak256(userAddress + timestamp))
+// Validates that the timestamp is within an acceptable time window (5 minutes)
+func (c *Ctrl) VerifyUploadSignature(userAddress string, signature string, timestamp int64) error {
+	if !common.IsHexAddress(userAddress) {
+		return errors.New("invalid user address format")
+	}
+
+	// Validate timestamp is within acceptable window (5 minutes = 300 seconds)
+	currentTime := time.Now().Unix()
+	timeDiff := currentTime - timestamp
+
+	if timeDiff < -60 {
+		// Timestamp is more than 1 minute in the future (allow some clock skew)
+		return fmt.Errorf("timestamp is too far in the future: %d seconds ahead", -timeDiff)
+	}
+
+	if timeDiff > 300 {
+		// Timestamp is more than 5 minutes old
+		return fmt.Errorf("timestamp is too old: %d seconds ago (max 300 seconds)", timeDiff)
+	}
+
+	// Create message: keccak256(userAddress + timestamp)
+	// This ensures each signature is unique and time-bound
+	message := fmt.Sprintf("%s%d", userAddress, timestamp)
+	hash := accounts.TextHash(crypto.Keccak256([]byte(message)))
 
 	// Decode signature
 	sigBytes, err := hexutil.Decode(signature)
@@ -292,36 +506,100 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 // 2. Content hash ensures deduplication - same dataset uploaded twice won't create duplicate files
 // 3. Content hash guarantees data integrity - any modification creates a different hash
 func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (string, error) {
-	// Create dataset directory for user
-	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
+	// 1. Validate user address format
+	if !common.IsHexAddress(userAddress) {
+		return "", errors.New("invalid user address format")
+	}
+
+	// 2. Validate filename (check for path traversal)
+	filename := filepath.Base(file.Filename) // Get base filename only
+	if filename != file.Filename || filename == "." || filename == ".." {
+		return "", errors.New("invalid filename")
+	}
+
+	// 3. Clean and validate user address path component
+	userAddress = filepath.Clean(userAddress)
+	if filepath.IsAbs(userAddress) || filepath.Dir(userAddress) != "." {
+		return "", errors.New("invalid user address: path traversal detected")
+	}
+
+	// 4. Create dataset directory and validate path
+	baseDir := filepath.Join(utils.GetDataDir(), "datasets")
+	datasetDir := filepath.Join(baseDir, userAddress)
+
+	// Ensure datasetDir is within baseDir (prevent path traversal)
+	absDatasetDir, err := filepath.Abs(datasetDir)
+	if err != nil {
+		return "", errors.Wrap(err, "resolve dataset directory")
+	}
+	absBaseDir, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", errors.Wrap(err, "resolve base directory")
+	}
+	// Use strings.HasPrefix with proper path separator check
+	if !strings.HasPrefix(absDatasetDir, absBaseDir+string(filepath.Separator)) && absDatasetDir != absBaseDir {
+		return "", errors.New("path traversal detected")
+	}
+
 	if err := os.MkdirAll(datasetDir, 0755); err != nil {
 		return "", errors.Wrap(err, "create dataset directory")
 	}
 
-	// Open uploaded file
+	// 5. Open uploaded file
 	src, err := file.Open()
 	if err != nil {
 		return "", errors.Wrap(err, "open uploaded file")
 	}
 	defer src.Close()
 
-	// Read file content to calculate hash
-	content, err := io.ReadAll(src)
+	// 6. Stream file to temp location while computing hash
+	tempID := uuid.New().String()
+	tempPath := filepath.Join(datasetDir, "temp_"+tempID)
+	tempFile, err := os.Create(tempPath)
 	if err != nil {
-		return "", errors.Wrap(err, "read file content")
+		return "", errors.Wrap(err, "create temp file")
+	}
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempPath) // Clean up temp file on any error
+	}()
+
+	// 7. Compute hash while writing (streaming to avoid memory issues)
+	hasher := crypto.NewKeccakState()
+	multiWriter := io.MultiWriter(tempFile, hasher)
+
+	bytesWritten, err := io.Copy(multiWriter, src)
+	if err != nil {
+		return "", errors.Wrap(err, "process file content")
 	}
 
-	// Calculate hash of the dataset
-	datasetHash := crypto.Keccak256Hash(content)
-	hashStr := datasetHash.Hex()
+	// 8. Finalize hash
+	var hashBytes []byte
+	hashBytes = hasher.Sum(hashBytes)
+	hashStr := "0x" + common.Bytes2Hex(hashBytes)
 
-	// Save JSONL file with hash as filename
+	// 9. Read content for validation
+	tempFile.Close() // Close before reading
+	content, err := os.ReadFile(tempPath)
+	if err != nil {
+		return "", errors.Wrap(err, "read temp file for validation")
+	}
+
+	// 10. Validate JSONL format
+	if err := validateJSONLFormat(content); err != nil {
+		return "", errors.Wrap(err, "invalid JSONL format")
+	}
+
+	// 11. Move to final location with hash as filename
 	jsonlPath := filepath.Join(datasetDir, hashStr)
-	if err := os.WriteFile(jsonlPath, content, 0644); err != nil {
-		return "", errors.Wrap(err, "write dataset file")
+	if err := os.Rename(tempPath, jsonlPath); err != nil {
+		// If rename fails, try copy and delete
+		if err := os.WriteFile(jsonlPath, content, 0644); err != nil {
+			return "", errors.Wrap(err, "write dataset file")
+		}
 	}
 
-	c.logger.Infof("Dataset saved: %s (hash: %s, size: %d bytes)", jsonlPath, hashStr, len(content))
+	c.logger.Infof("Dataset saved: %s (hash: %s, size: %d bytes)", jsonlPath, hashStr, bytesWritten)
 
 	// Convert JSONL to HF format is required by the fine-tuning executor's token counter
 	if err := c.convertJSONLToHF(jsonlPath); err != nil {
@@ -428,6 +706,45 @@ print(f"Converted {len(data['instruction'])} examples to {output_dir}")
 	}
 
 	c.logger.Infof("Converted dataset to HF format: %s (output: %s)", hfPath, string(output))
+	return nil
+}
+
+// validateJSONLFormat validates that the content is valid JSONL format
+// Each line must be valid JSON (empty lines are allowed)
+func validateJSONLFormat(content []byte) error {
+	lines := string(content)
+	lineNum := 0
+	start := 0
+
+	for i := 0; i <= len(lines); i++ {
+		if i == len(lines) || lines[i] == '\n' {
+			lineNum++
+			line := lines[start:i]
+			start = i + 1
+
+			// Skip empty lines and whitespace-only lines
+			trimmed := ""
+			for _, ch := range line {
+				if ch != ' ' && ch != '\t' && ch != '\r' {
+					trimmed += string(ch)
+				}
+			}
+			if trimmed == "" {
+				continue
+			}
+
+			// Validate JSON
+			var obj map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &obj); err != nil {
+				return fmt.Errorf("line %d is not valid JSON: %w", lineNum, err)
+			}
+		}
+	}
+
+	if lineNum == 0 {
+		return errors.New("dataset file is empty")
+	}
+
 	return nil
 }
 

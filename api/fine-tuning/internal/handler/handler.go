@@ -37,8 +37,8 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/user/:userAddress/task/:taskID", h.GetTask)
 
 	group.GET("/user/:userAddress/task/:taskID/log", h.GetTaskProgress)
-	group.POST("/user/:userAddress/task/:taskID/lora", h.DownloadLoRA)
-	group.POST("/user/:userAddress/dataset", h.UploadDataset)
+	group.POST("/user/:userAddress/task/:taskID/lora", middleware.RateLimitMiddleware(h.rateLimiter), h.DownloadLoRA)
+	group.POST("/user/:userAddress/dataset", middleware.RateLimitMiddleware(h.rateLimiter), h.UploadDataset)
 	group.GET("/task/pending", h.GetPendingTrainingTaskCount)
 
 	group.GET("/quote", middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
