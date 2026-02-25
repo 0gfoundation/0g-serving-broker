@@ -18,12 +18,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// Proxy exposes OpenAI-compatible HTTP endpoints for serving fine-tuned LoRA models
+// and implements authentication and model ownership enforcement.
 type Proxy struct {
 	manager *Manager
 	logger  log.Logger
 	client  *http.Client
 }
 
+// NewProxy creates a Proxy with the given Manager and logger.
 func NewProxy(manager *Manager, logger log.Logger) *Proxy {
 	return &Proxy{
 		manager: manager,
@@ -34,6 +37,7 @@ func NewProxy(manager *Manager, logger log.Logger) *Proxy {
 	}
 }
 
+// RegisterRoutes adds the LoRA serving endpoints to the given Gin router group.
 func (p *Proxy) RegisterRoutes(group *gin.RouterGroup) {
 	serving := group.Group("/serving")
 	serving.POST("/v1/chat/completions", p.authMiddleware(), p.handleChatCompletions)

@@ -264,7 +264,7 @@ func (d *DB) GetFinishedTasksForServing() ([]Task, error) {
 		ProgressStateFinished.String(),
 		ProgressStateUserAcknowledged.String(),
 	}
-	ret := d.db.Where("progress IN ?", servableStates).Order("created_at DESC").Find(&tasks)
+	ret := d.db.Where("progress IN ?", servableStates).Order("created_at DESC").Limit(1000).Find(&tasks)
 	if ret.Error != nil {
 		return nil, ret.Error
 	}

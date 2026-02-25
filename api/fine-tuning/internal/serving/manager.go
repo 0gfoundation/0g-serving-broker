@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// ServedModel represents a LoRA adapter that has been loaded for inference serving.
 type ServedModel struct {
 	TaskID       uuid.UUID
 	UserAddress  string
@@ -28,6 +29,7 @@ type ServedModel struct {
 	RegisteredAt time.Time
 }
 
+// Manager controls the lifecycle of the vLLM process and LoRA adapter loading/unloading.
 type Manager struct {
 	mu             sync.RWMutex
 	servedModels   map[string]*ServedModel // key: modelName
@@ -40,6 +42,7 @@ type Manager struct {
 	httpClient     *http.Client
 }
 
+// ServingConfig holds configuration for the LoRA inference serving subsystem.
 type ServingConfig struct {
 	Enable          bool   `yaml:"enable"`
 	BaseModelPath   string `yaml:"baseModelPath"`
@@ -50,6 +53,7 @@ type ServingConfig struct {
 	LoraModulesDir  string `yaml:"loraModulesDir"`
 }
 
+// NewManager creates a new serving Manager with the given database, config, and logger.
 func NewManager(db *db.DB, config ServingConfig, logger log.Logger) *Manager {
 	loraDir := config.LoraModulesDir
 	if loraDir == "" {
@@ -68,6 +72,7 @@ func NewManager(db *db.DB, config ServingConfig, logger log.Logger) *Manager {
 	}
 }
 
+// Start launches the vLLM subprocess and begins polling for finished fine-tuning tasks.
 func (m *Manager) Start(ctx context.Context) error {
 	if !m.config.Enable {
 		m.logger.Info("LoRA serving is disabled")
@@ -280,6 +285,7 @@ func (m *Manager) pruneStaleModels() {
 	}
 }
 
+// RegisterModel creates a symlink for a LoRA adapter and adds it to the served model set.
 func (m *Manager) RegisterModel(taskID uuid.UUID, userAddress, baseModel, loraPath string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -314,6 +320,7 @@ func (m *Manager) RegisterModel(taskID uuid.UUID, userAddress, baseModel, loraPa
 	return modelName, nil
 }
 
+// UnregisterModel removes a LoRA adapter from serving and cleans up its symlink.
 func (m *Manager) UnregisterModel(modelName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -334,6 +341,7 @@ func (m *Manager) UnregisterModel(modelName string) error {
 	return nil
 }
 
+// ListServedModels returns all currently served LoRA models.
 func (m *Manager) ListServedModels() []*ServedModel {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -345,6 +353,7 @@ func (m *Manager) ListServedModels() []*ServedModel {
 	return models
 }
 
+// ListServedModelsForUser returns served models owned by the given user address.
 func (m *Manager) ListServedModelsForUser(userAddress string) []*ServedModel {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -358,6 +367,7 @@ func (m *Manager) ListServedModelsForUser(userAddress string) []*ServedModel {
 	return models
 }
 
+// GetServedModel retrieves a served model by name.
 func (m *Manager) GetServedModel(modelName string) (*ServedModel, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -365,6 +375,7 @@ func (m *Manager) GetServedModel(modelName string) (*ServedModel, bool) {
 	return model, exists
 }
 
+// IsModelOwner checks whether the given user address owns the specified model.
 func (m *Manager) IsModelOwner(modelName, userAddress string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -375,12 +386,14 @@ func (m *Manager) IsModelOwner(modelName, userAddress string) bool {
 	return strings.EqualFold(model.UserAddress, userAddress)
 }
 
+// IsReady reports whether the vLLM backend has passed its health check.
 func (m *Manager) IsReady() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.vllmReady
 }
 
+// GetVLLMEndpoint returns the base URL of the local vLLM server.
 func (m *Manager) GetVLLMEndpoint() string {
 	port := m.config.VLLMPort
 	if port == 0 {
@@ -403,6 +416,7 @@ func (m *Manager) makeModelName(baseModel string, taskID uuid.UUID) string {
 	return fmt.Sprintf("ft-%s-%s", shortBase, taskID.String()[:12])
 }
 
+// GetVLLMModels queries the vLLM server for its currently loaded model names.
 func (m *Manager) GetVLLMModels() ([]string, error) {
 	resp, err := m.httpClient.Get(m.GetVLLMEndpoint() + "/v1/models")
 	if err != nil {

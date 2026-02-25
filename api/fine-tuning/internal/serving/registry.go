@@ -9,11 +9,16 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 )
 
+// RegistryConfig holds pricing configuration for registering inference services.
 type RegistryConfig struct {
 	InputPrice  string `yaml:"inputPrice"`
 	OutputPrice string `yaml:"outputPrice"`
 }
 
+// Registry periodically synchronises the set of served LoRA models with the
+// inference contract. Currently contract registration is a no-op (see registerOnContract);
+// this component tracks serving state locally until the fine-tuning and inference
+// brokers share a unified contract interface.
 type Registry struct {
 	mu               sync.Mutex
 	contract         *providercontract.ProviderContract
@@ -23,6 +28,8 @@ type Registry struct {
 	registeredModels map[string]bool
 }
 
+// NewRegistry creates a Registry that will track served models and (eventually)
+// register them on the inference contract.
 func NewRegistry(contract *providercontract.ProviderContract, manager *Manager, config RegistryConfig, logger log.Logger) *Registry {
 	return &Registry{
 		contract:         contract,
@@ -33,6 +40,7 @@ func NewRegistry(contract *providercontract.ProviderContract, manager *Manager, 
 	}
 }
 
+// Start begins the background sync loop that tracks model registrations.
 func (r *Registry) Start(ctx context.Context) {
 	go r.syncLoop(ctx)
 }
@@ -87,11 +95,11 @@ func (r *Registry) registerOnContract(ctx context.Context, model *ServedModel) e
 	r.logger.Infof("registering fine-tuned model on contract: name=%s, task=%s, owner=%s, inputPrice=%s, outputPrice=%s",
 		model.ModelName, model.TaskID, model.UserAddress, r.config.InputPrice, r.config.OutputPrice)
 
-	// The fine-tuning contract tracks deliverables per task.
-	// The model is already recorded on-chain as a deliverable during the finalizer phase.
-	// Here we just track locally that the model is available for inference.
-	// Full inference contract registration would require a separate inference contract instance,
-	// which is out of scope for the fine-tuning broker — the inference broker handles that.
+	// TODO: When fine-tuning and inference brokers share a contract interface, this method
+	// should call contract.AddOrUpdateService() to register the LoRA model as an inference
+	// service endpoint. For now the fine-tuning contract only tracks deliverables per task
+	// (recorded during the finalizer phase), so we track serving state locally.
+	// The inference broker is responsible for on-chain inference service registration.
 
 	r.logger.Infof("model %s marked as registered for inference serving (task: %s, owner: %s)",
 		model.ModelName, model.TaskID, model.UserAddress)
@@ -99,6 +107,7 @@ func (r *Registry) registerOnContract(ctx context.Context, model *ServedModel) e
 	return nil
 }
 
+// IsRegistered reports whether the given model name has been tracked as registered.
 func (r *Registry) IsRegistered(modelName string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
