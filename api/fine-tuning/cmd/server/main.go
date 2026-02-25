@@ -264,7 +264,7 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 	engine := gin.New()
 
 	if cfg.Monitor.Enable {
-		monitor.Init(cfg.Service.ServingUrl)
+		monitor.Init(cfg.Service.ServingUrl, ctx)
 		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
 		engine.Use(monitor.TrackMetrics())
 		go startTaskStatePoller(ctx, svc.db, logger)
@@ -284,6 +284,11 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 		if err := servingMgr.Start(ctx); err != nil {
 			return err
 		}
+		defer func() {
+			if err := servingMgr.Stop(); err != nil {
+				logger.Warnf("failed to stop vLLM: %v", err)
+			}
+		}()
 
 		registry := serving.NewRegistry(svc.contract, servingMgr, serving.RegistryConfig{
 			InputPrice:  cfg.Serving.InputPrice,

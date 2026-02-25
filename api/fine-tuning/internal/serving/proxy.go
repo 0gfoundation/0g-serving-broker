@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -27,7 +28,9 @@ func NewProxy(manager *Manager, logger log.Logger) *Proxy {
 	return &Proxy{
 		manager: manager,
 		logger:  logger,
-		client:  &http.Client{},
+		client: &http.Client{
+			Timeout: 5 * time.Minute,
+		},
 	}
 }
 
@@ -174,8 +177,15 @@ func (p *Proxy) handleChatCompletions(c *gin.Context) {
 			}
 		}
 	} else {
-		respBody, _ := io.ReadAll(resp.Body)
-		c.Writer.Write(respBody)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			p.logger.Errorf("failed to read response: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read backend response"})
+			return
+		}
+		if _, err := c.Writer.Write(respBody); err != nil {
+			p.logger.Warnf("failed to write response: %v", err)
+		}
 	}
 }
 

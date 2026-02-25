@@ -1,12 +1,12 @@
 package monitor
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -37,7 +37,9 @@ var (
 	uniqueUsersChan chan string
 )
 
-func Init(serverName string) {
+// Init initializes all Prometheus metrics for the fine-tuning service.
+// The context is used for graceful shutdown of background goroutines.
+func Init(serverName string, ctx context.Context) {
 	if serverName == "" {
 		serverName = "fine-tuning"
 	}
@@ -161,28 +163,34 @@ func Init(serverName string) {
 	)
 
 	uniqueUsersChan = make(chan string, 10000)
-	go processUniqueUsers()
+	go processUniqueUsers(ctx)
 }
 
-func processUniqueUsers() {
+func processUniqueUsers(ctx context.Context) {
 	uniqueUsers := make(map[string]struct{})
 	lastResetDay := time.Now().UTC().YearDay()
 
-	for userAddress := range uniqueUsersChan {
-		currentDay := time.Now().UTC().YearDay()
-		if currentDay != lastResetDay {
-			uniqueUsers = make(map[string]struct{})
-			lastResetDay = currentDay
-			UniqueUsersTotal.Set(0)
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case userAddress := <-uniqueUsersChan:
+			currentDay := time.Now().UTC().YearDay()
+			if currentDay != lastResetDay {
+				uniqueUsers = make(map[string]struct{})
+				lastResetDay = currentDay
+				UniqueUsersTotal.Set(0)
+			}
 
-		if _, exists := uniqueUsers[userAddress]; !exists {
-			uniqueUsers[userAddress] = struct{}{}
-			UniqueUsersTotal.Set(float64(len(uniqueUsers)))
+			if _, exists := uniqueUsers[userAddress]; !exists {
+				uniqueUsers[userAddress] = struct{}{}
+				UniqueUsersTotal.Set(float64(len(uniqueUsers)))
+			}
 		}
 	}
 }
 
+// TrackMetrics returns a Gin middleware that records HTTP request count, errors, and duration.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
@@ -201,6 +209,7 @@ func TrackMetrics() gin.HandlerFunc {
 	}
 }
 
+// RecordUniqueUser tracks a unique user address for the current day.
 func RecordUniqueUser(userAddress string) {
 	if userAddress == "" || uniqueUsersChan == nil {
 		return
@@ -212,30 +221,35 @@ func RecordUniqueUser(userAddress string) {
 	}
 }
 
+// RecordTaskCreated increments the counter for total fine-tuning tasks created.
 func RecordTaskCreated() {
 	if TasksCreatedTotal != nil {
 		TasksCreatedTotal.Inc()
 	}
 }
 
+// RecordTaskCompleted increments the counter for successfully completed tasks.
 func RecordTaskCompleted() {
 	if TasksCompletedTotal != nil {
 		TasksCompletedTotal.Inc()
 	}
 }
 
+// RecordTaskFailed increments the counter for tasks that ended in failure.
 func RecordTaskFailed() {
 	if TasksFailedTotal != nil {
 		TasksFailedTotal.Inc()
 	}
 }
 
+// RecordPhaseDuration records how long a task spent in a given phase.
 func RecordPhaseDuration(phase string, duration time.Duration) {
 	if TaskPhaseDuration != nil {
 		TaskPhaseDuration.WithLabelValues(phase).Observe(duration.Seconds())
 	}
 }
 
+// UpdateTaskStateGauge sets the current task count for each state.
 func UpdateTaskStateGauge(stateCounts map[string]float64) {
 	if TasksByState == nil {
 		return
@@ -245,6 +259,7 @@ func UpdateTaskStateGauge(stateCounts map[string]float64) {
 	}
 }
 
+// RecordStorageUpload records an upload attempt, its error status, and duration.
 func RecordStorageUpload(err error, duration time.Duration) {
 	if StorageUploadTotal != nil {
 		StorageUploadTotal.Inc()
@@ -257,6 +272,7 @@ func RecordStorageUpload(err error, duration time.Duration) {
 	}
 }
 
+// RecordStorageDownload records a download attempt, its error status, and duration.
 func RecordStorageDownload(err error, duration time.Duration) {
 	if StorageDownloadTotal != nil {
 		StorageDownloadTotal.Inc()
@@ -269,6 +285,7 @@ func RecordStorageDownload(err error, duration time.Duration) {
 	}
 }
 
+// RecordSettlement records a settlement attempt and its error status.
 func RecordSettlement(err error) {
 	if SettlementTotal != nil {
 		SettlementTotal.Inc()
@@ -278,12 +295,3 @@ func RecordSettlement(err error) {
 	}
 }
 
-func StartMetricsServer(address string) {
-	r := gin.New()
-	r.Use(gin.Recovery())
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-	if err := r.Run(address); err != nil {
-		panic(err)
-	}
-}

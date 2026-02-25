@@ -26,8 +26,10 @@ type Service struct {
 		GpuType  string `yaml:"gpuType"`
 		GpuCount int64  `yaml:"gpuCount"`
 	} `yaml:"quota"`
-	PricePerToken            int64             `yaml:"pricePerToken"`
-	CustomizedModels         []CustomizedModel `yaml:"customizedModels"`
+	PricePerToken             int64             `yaml:"pricePerToken"`
+	ProviderStake             string            `yaml:"providerStake"`
+	CustomizedModels          []CustomizedModel `yaml:"customizedModels"`
+	SupportedPredefinedModels []string          `yaml:"supportedPredefinedModels"`
 	ModelLocalPaths          map[string]string `yaml:"modelLocalPaths"`
 	ModelHuggingFaceFallback map[string]string `yaml:"modelHuggingFaceFallback"`
 	DatasetLocalPaths        map[string]string `yaml:"datasetLocalPaths"`

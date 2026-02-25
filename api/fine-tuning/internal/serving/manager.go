@@ -87,6 +87,21 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop gracefully terminates the vLLM process if it is running.
+func (m *Manager) Stop() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.vllmProcess != nil && m.vllmProcess.Process != nil {
+		m.logger.Info("stopping vLLM process")
+		if err := m.vllmProcess.Process.Signal(os.Interrupt); err != nil {
+			m.logger.Warnf("interrupt failed, killing vLLM: %v", err)
+			return m.vllmProcess.Process.Kill()
+		}
+	}
+	return nil
+}
+
 func (m *Manager) startVLLM(ctx context.Context) {
 	port := m.config.VLLMPort
 	if port == 0 {
@@ -109,15 +124,15 @@ func (m *Manager) startVLLM(ctx context.Context) {
 		args = append(args, "--max-loras", fmt.Sprintf("%d", m.config.MaxLoraModules))
 	}
 
-	if m.config.InferenceGPUIDs != "" {
-		os.Setenv("CUDA_VISIBLE_DEVICES", m.config.InferenceGPUIDs)
-	}
-
 	m.logger.Infof("starting vLLM with args: %v", args)
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	if m.config.InferenceGPUIDs != "" {
+		cmd.Env = append(os.Environ(), "CUDA_VISIBLE_DEVICES="+m.config.InferenceGPUIDs)
+	}
 
 	m.mu.Lock()
 	m.vllmProcess = cmd
@@ -149,7 +164,11 @@ func (m *Manager) waitForVLLMReady(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			resp, err := m.httpClient.Get(endpoint + "/health")
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health", nil)
+			if err != nil {
+				continue
+			}
+			resp, err := m.httpClient.Do(req)
 			if err == nil {
 				resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
@@ -253,7 +272,9 @@ func (m *Manager) pruneStaleModels() {
 
 	if oldest != nil {
 		destDir := filepath.Join(m.loraModulesDir, oldest.ModelName)
-		os.Remove(destDir)
+		if err := os.RemoveAll(destDir); err != nil {
+			m.logger.Warnf("failed to remove pruned model directory %s: %v", destDir, err)
+		}
 		delete(m.servedModels, oldest.ModelName)
 		m.logger.Infof("pruned oldest served model: %s (task: %s)", oldest.ModelName, oldest.TaskID)
 	}
@@ -303,7 +324,9 @@ func (m *Manager) UnregisterModel(modelName string) error {
 	}
 
 	destDir := filepath.Join(m.loraModulesDir, modelName)
-	os.Remove(destDir)
+	if err := os.RemoveAll(destDir); err != nil {
+		m.logger.Warnf("failed to remove model directory %s: %v", destDir, err)
+	}
 
 	delete(m.servedModels, modelName)
 	m.logger.Infof("unregistered LoRA model: %s (task: %s)", modelName, served.TaskID)
@@ -377,7 +400,7 @@ func (m *Manager) makeModelName(baseModel string, taskID uuid.UUID) string {
 		}
 		return '-'
 	}, shortBase)
-	return fmt.Sprintf("ft-%s-%s", shortBase, taskID.String()[:8])
+	return fmt.Sprintf("ft-%s-%s", shortBase, taskID.String()[:12])
 }
 
 func (m *Manager) GetVLLMModels() ([]string, error) {
