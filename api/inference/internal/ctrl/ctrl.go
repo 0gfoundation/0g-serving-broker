@@ -49,6 +49,11 @@ type Ctrl struct {
 
 	// Whitelist for users that bypass billing
 	whitelistUsers map[string]struct{}
+
+	// Async processing
+	asyncJobQueue  chan asyncJobParams
+	asyncResultTTL time.Duration
+	asyncEnabled   bool
 }
 
 func New(

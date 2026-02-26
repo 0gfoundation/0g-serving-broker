@@ -67,6 +67,14 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/logs", corsMiddleware(), h.ListLogs)                           // List all log files
 	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile)    // Download specific log file
 
+	// Async job endpoints (OpenAI-style paths)
+	asyncGroup := group.Group("/async")
+	asyncGroup.Use(corsMiddleware())
+	asyncGroup.Use(middleware.RateLimitMiddleware(h.rateLimiter))
+	asyncGroup.POST("/images/generations", h.SubmitAsyncImageGeneration)
+	asyncGroup.POST("/images/edits", h.SubmitAsyncImageEdit)
+	asyncGroup.GET("/jobs/:jobID", h.GetAsyncJob)
+
 	// TODO: should be verified by client
 	// //nvidia TEE verification
 	// group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)

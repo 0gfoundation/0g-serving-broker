@@ -99,6 +99,20 @@ func Main() {
 		panic(err)
 	}
 
+	// Initialize async processing if enabled
+	if config.Async.Enabled {
+		resultTTL := time.Duration(config.Async.ResultTTLMinutes) * time.Minute
+		cleanupInterval := time.Duration(config.Async.CleanupIntervalSeconds) * time.Second
+		if err := ctrl.InitAsyncProcessing(
+			config.Async.MaxConcurrentJobs,
+			config.Async.MaxQueueSize,
+			resultTTL,
+			cleanupInterval,
+		); err != nil {
+			logger.Errorf("Failed to initialize async processing: %v", err)
+		}
+	}
+
 	h := handler.New(ctrl, proxy)
 	h.Register(engine)
 

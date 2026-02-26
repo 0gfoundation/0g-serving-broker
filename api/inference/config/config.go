@@ -74,6 +74,16 @@ type Config struct {
 	LogPaths            LogPathsConfig       `yaml:"logPaths"`
 	Controller          ControllerConfig     `yaml:"controller"`
 	Whitelist           WhitelistConfig      `yaml:"whitelist"`
+	Async               AsyncConfig          `yaml:"async"`
+}
+
+// AsyncConfig defines configuration for async job processing.
+type AsyncConfig struct {
+	Enabled                bool `yaml:"enabled"`                // Enable async endpoints (default: false)
+	MaxConcurrentJobs      int  `yaml:"maxConcurrentJobs"`      // Max concurrent worker goroutines (default: 10)
+	MaxQueueSize           int  `yaml:"maxQueueSize"`           // Max pending jobs waiting for a worker (default: 100)
+	ResultTTLMinutes       int  `yaml:"resultTTLMinutes"`       // How long to keep completed results (default: 30)
+	CleanupIntervalSeconds int  `yaml:"cleanupIntervalSeconds"` // Interval for expired job cleanup (default: 60)
 }
 
 type LogPathsConfig struct {
@@ -233,6 +243,13 @@ func GetConfig() *Config {
 			Whitelist: WhitelistConfig{
 				Enabled:       false,
 				UserAddresses: []string{},
+			},
+			Async: AsyncConfig{
+				Enabled:                false,
+				MaxConcurrentJobs:      10,
+				MaxQueueSize:           100,
+				ResultTTLMinutes:       30,
+				CleanupIntervalSeconds: 60,
 			},
 		}
 

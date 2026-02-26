@@ -138,6 +138,26 @@ func (d *DB) Migrate() error {
 				return nil
 			},
 		},
+		{
+			ID: "create-async-job",
+			Migrate: func(tx *gorm.DB) error {
+				type AsyncJob struct {
+					model.Model
+					JobID           string     `gorm:"type:varchar(64);not null;primaryKey"`
+					Status          string     `gorm:"type:varchar(32);not null;default:'pending';index"`
+					UserAddress     string     `gorm:"type:varchar(255);not null;index"`
+					ServiceType     string     `gorm:"type:varchar(64);not null"`
+					RequestBody     []byte     `gorm:"type:mediumblob"`
+					ResponseBody    []byte     `gorm:"type:mediumblob"`
+					ResponseHeaders []byte     `gorm:"type:mediumblob"`
+					ErrorMessage    string     `gorm:"type:text"`
+					RequestHash     string     `gorm:"type:varchar(255);not null"`
+					OutputCount     int64      `gorm:"type:bigint;not null;default:1"`
+					ExpiresAt       *time.Time `gorm:"type:datetime;index"`
+				}
+				return tx.AutoMigrate(&AsyncJob{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
