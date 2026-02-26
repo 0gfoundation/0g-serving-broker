@@ -19,17 +19,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// ServedModel represents a LoRA adapter that has been loaded for inference serving.
+// ServedModel represents a LoRA adapter tracked by the serving system.
+// State indicates its current storage tier (active on disk, archived in 0G Storage, or loading).
 type ServedModel struct {
-	TaskID       uuid.UUID
-	UserAddress  string
-	BaseModel    string
-	LoRAPath     string
-	ModelName    string
-	RegisteredAt time.Time
+	TaskID         uuid.UUID
+	UserAddress    string
+	BaseModel      string
+	LoRAPath       string
+	ModelName      string
+	RegisteredAt   time.Time
+	LastAccessedAt time.Time
+	State          ModelState
+	OutputRootHash string
 }
 
-// Manager controls the lifecycle of the vLLM process and LoRA adapter loading/unloading.
+// Manager controls the lifecycle of the vLLM process, LoRA adapter loading/unloading,
+// and multi-tier caching (GPU → CPU → Disk → 0G Storage).
 type Manager struct {
 	mu             sync.RWMutex
 	servedModels   map[string]*ServedModel // key: modelName
@@ -40,21 +45,26 @@ type Manager struct {
 	vllmReady      bool
 	loraModulesDir string
 	httpClient     *http.Client
+	storageClient  StorageDownloader
 }
 
 // ServingConfig holds configuration for the LoRA inference serving subsystem.
 type ServingConfig struct {
-	Enable          bool   `yaml:"enable"`
-	BaseModelPath   string `yaml:"baseModelPath"`
-	InferenceGPUIDs string `yaml:"inferenceGpuIds"`
-	VLLMPort        int    `yaml:"vllmPort"`
-	MaxLoraRank     int    `yaml:"maxLoraRank"`
-	MaxLoraModules  int    `yaml:"maxLoraModules"`
-	LoraModulesDir  string `yaml:"loraModulesDir"`
+	Enable              bool   `yaml:"enable"`
+	BaseModelPath       string `yaml:"baseModelPath"`
+	InferenceGPUIDs     string `yaml:"inferenceGpuIds"`
+	VLLMPort            int    `yaml:"vllmPort"`
+	MaxLoraRank         int    `yaml:"maxLoraRank"`
+	MaxLoraModules      int    `yaml:"maxLoraModules"`
+	MaxCpuLoras         int    `yaml:"maxCpuLoras"`
+	LoraModulesDir      string `yaml:"loraModulesDir"`
+	OffloadAfterMinutes int    `yaml:"offloadAfterMinutes"`
+	EnableColdStorage   bool   `yaml:"enableColdStorage"`
 }
 
-// NewManager creates a new serving Manager with the given database, config, and logger.
-func NewManager(db *db.DB, config ServingConfig, logger log.Logger) *Manager {
+// NewManager creates a new serving Manager with the given database, config, logger,
+// and optional storage client for cold-storage offload/restore.
+func NewManager(db *db.DB, config ServingConfig, logger log.Logger, storageClient StorageDownloader) *Manager {
 	loraDir := config.LoraModulesDir
 	if loraDir == "" {
 		loraDir = "/tmp/lora-modules"
@@ -69,6 +79,7 @@ func NewManager(db *db.DB, config ServingConfig, logger log.Logger) *Manager {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		storageClient: storageClient,
 	}
 }
 
@@ -89,6 +100,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	go m.startVLLM(ctx)
 	go m.pollFinishedTasks(ctx)
+	go m.offloadLoop(ctx)
 	return nil
 }
 
@@ -128,6 +140,9 @@ func (m *Manager) startVLLM(ctx context.Context) {
 	if m.config.MaxLoraModules > 0 {
 		args = append(args, "--max-loras", fmt.Sprintf("%d", m.config.MaxLoraModules))
 	}
+	if m.config.MaxCpuLoras > 0 {
+		args = append(args, "--max-cpu-loras", fmt.Sprintf("%d", m.config.MaxCpuLoras))
+	}
 
 	m.logger.Infof("starting vLLM with args: %v", args)
 
@@ -135,9 +150,15 @@ func (m *Manager) startVLLM(ctx context.Context) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	cmd.Env = os.Environ()
 	if m.config.InferenceGPUIDs != "" {
-		cmd.Env = append(os.Environ(), "CUDA_VISIBLE_DEVICES="+m.config.InferenceGPUIDs)
+		cmd.Env = append(cmd.Env, "CUDA_VISIBLE_DEVICES="+m.config.InferenceGPUIDs)
 	}
+	cmd.Env = append(cmd.Env,
+		"VLLM_ALLOW_RUNTIME_LORA_UPDATING=True",
+		"VLLM_PLUGINS=lora_filesystem_resolver",
+		"VLLM_LORA_RESOLVER_CACHE_DIR="+m.loraModulesDir,
+	)
 
 	m.mu.Lock()
 	m.vllmProcess = cmd
@@ -244,7 +265,7 @@ func (m *Manager) discoverAndRegisterModels() {
 			continue
 		}
 
-		registeredName, err := m.RegisterModel(*task.ID, task.UserAddress, task.PreTrainedModelHash, loraPath)
+		registeredName, err := m.RegisterModel(*task.ID, task.UserAddress, task.PreTrainedModelHash, loraPath, task.OutputRootHash)
 		if err != nil {
 			m.logger.Warnf("failed to auto-register model for task %s: %v", task.ID, err)
 			continue
@@ -286,7 +307,9 @@ func (m *Manager) pruneStaleModels() {
 }
 
 // RegisterModel creates a symlink for a LoRA adapter and adds it to the served model set.
-func (m *Manager) RegisterModel(taskID uuid.UUID, userAddress, baseModel, loraPath string) (string, error) {
+// outputRootHash is the 0G Storage root hash used for cold-storage restore if the adapter
+// is later offloaded.
+func (m *Manager) RegisterModel(taskID uuid.UUID, userAddress, baseModel, loraPath, outputRootHash string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -305,17 +328,22 @@ func (m *Manager) RegisterModel(taskID uuid.UUID, userAddress, baseModel, loraPa
 		return "", errors.Wrap(err, "symlink lora adapter")
 	}
 
+	now := time.Now()
 	served := &ServedModel{
-		TaskID:       taskID,
-		UserAddress:  userAddress,
-		BaseModel:    baseModel,
-		LoRAPath:     loraPath,
-		ModelName:    modelName,
-		RegisteredAt: time.Now(),
+		TaskID:         taskID,
+		UserAddress:    userAddress,
+		BaseModel:      baseModel,
+		LoRAPath:       loraPath,
+		ModelName:      modelName,
+		RegisteredAt:   now,
+		LastAccessedAt: now,
+		State:          ModelStateActive,
+		OutputRootHash: outputRootHash,
 	}
 
 	m.servedModels[modelName] = served
-	m.logger.Infof("registered LoRA model for serving: %s (task: %s, user: %s)", modelName, taskID, userAddress)
+	m.logger.Infof("registered LoRA model for serving: %s (task: %s, user: %s, hash: %s)",
+		modelName, taskID, userAddress, outputRootHash)
 
 	return modelName, nil
 }

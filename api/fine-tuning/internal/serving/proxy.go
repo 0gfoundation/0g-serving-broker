@@ -132,6 +132,30 @@ func (p *Proxy) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	switch served.State {
+	case ModelStateArchived:
+		if err := p.manager.RestoreModel(c.Request.Context(), modelName); err != nil {
+			p.logger.Errorf("failed to trigger restore for model %s: %v", modelName, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate model loading"})
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{
+			"error":  "Model is being loaded from cold storage. Please retry in a few moments.",
+			"status": "loading",
+			"model":  modelName,
+		})
+		return
+	case ModelStateLoading:
+		c.JSON(http.StatusAccepted, gin.H{
+			"error":  "Model is currently being loaded. Please retry shortly.",
+			"status": "loading",
+			"model":  modelName,
+		})
+		return
+	}
+
+	p.manager.RecordAccess(modelName)
+
 	endpoint := p.manager.GetVLLMEndpoint()
 	targetURL := endpoint + "/v1/chat/completions"
 
@@ -204,6 +228,7 @@ func (p *Proxy) handleListModelsForUser(c *gin.Context) {
 		Object  string `json:"object"`
 		OwnedBy string `json:"owned_by"`
 		TaskID  string `json:"task_id"`
+		State   string `json:"state"`
 	}
 
 	data := make([]modelData, 0, len(models))
@@ -213,6 +238,7 @@ func (p *Proxy) handleListModelsForUser(c *gin.Context) {
 			Object:  "model",
 			OwnedBy: m.UserAddress,
 			TaskID:  m.TaskID.String(),
+			State:   m.State.String(),
 		})
 	}
 
@@ -226,21 +252,25 @@ func (p *Proxy) handleListServedModels(c *gin.Context) {
 	models := p.manager.ListServedModels()
 
 	type modelInfo struct {
-		ModelName    string `json:"modelName"`
-		TaskID       string `json:"taskId"`
-		UserAddress  string `json:"userAddress"`
-		BaseModel    string `json:"baseModel"`
-		RegisteredAt string `json:"registeredAt"`
+		ModelName      string `json:"modelName"`
+		TaskID         string `json:"taskId"`
+		UserAddress    string `json:"userAddress"`
+		BaseModel      string `json:"baseModel"`
+		RegisteredAt   string `json:"registeredAt"`
+		LastAccessedAt string `json:"lastAccessedAt"`
+		State          string `json:"state"`
 	}
 
 	result := make([]modelInfo, 0, len(models))
 	for _, m := range models {
 		result = append(result, modelInfo{
-			ModelName:    m.ModelName,
-			TaskID:       m.TaskID.String(),
-			UserAddress:  m.UserAddress,
-			BaseModel:    m.BaseModel,
-			RegisteredAt: m.RegisteredAt.Format("2006-01-02T15:04:05Z"),
+			ModelName:      m.ModelName,
+			TaskID:         m.TaskID.String(),
+			UserAddress:    m.UserAddress,
+			BaseModel:      m.BaseModel,
+			RegisteredAt:   m.RegisteredAt.Format("2006-01-02T15:04:05Z"),
+			LastAccessedAt: m.LastAccessedAt.Format("2006-01-02T15:04:05Z"),
+			State:          m.State.String(),
 		})
 	}
 
@@ -251,9 +281,10 @@ func (p *Proxy) handleRegisterModel(c *gin.Context) {
 	taskIDStr := c.Param("taskID")
 
 	var req struct {
-		UserAddress string `json:"userAddress" binding:"required"`
-		BaseModel   string `json:"baseModel" binding:"required"`
-		LoRAPath    string `json:"loraPath" binding:"required"`
+		UserAddress    string `json:"userAddress" binding:"required"`
+		BaseModel      string `json:"baseModel" binding:"required"`
+		LoRAPath       string `json:"loraPath" binding:"required"`
+		OutputRootHash string `json:"outputRootHash"`
 	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -266,7 +297,7 @@ func (p *Proxy) handleRegisterModel(c *gin.Context) {
 		return
 	}
 
-	modelName, err := p.manager.RegisterModel(taskID, req.UserAddress, req.BaseModel, req.LoRAPath)
+	modelName, err := p.manager.RegisterModel(taskID, req.UserAddress, req.BaseModel, req.LoRAPath, req.OutputRootHash)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -301,9 +332,26 @@ func (p *Proxy) handleHealth(c *gin.Context) {
 	ready := p.manager.IsReady()
 	models := p.manager.ListServedModels()
 
+	active, archived, loading := 0, 0, 0
+	for _, m := range models {
+		switch m.State {
+		case ModelStateActive:
+			active++
+		case ModelStateArchived:
+			archived++
+		case ModelStateLoading:
+			loading++
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"vllm_ready":    ready,
-		"served_models": len(models),
+		"vllm_ready":      ready,
+		"total_models":    len(models),
+		"active_on_disk":  active,
+		"archived_cold":   archived,
+		"loading":         loading,
+		"cold_storage":    p.manager.config.EnableColdStorage,
+		"offload_minutes": p.manager.config.OffloadAfterMinutes,
 	})
 }
 

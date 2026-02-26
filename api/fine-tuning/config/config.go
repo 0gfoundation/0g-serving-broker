@@ -112,15 +112,18 @@ type MonitorConfig struct {
 }
 
 type ServingConfig struct {
-	Enable          bool   `yaml:"enable"`
-	BaseModelPath   string `yaml:"baseModelPath"`
-	InferenceGPUIDs string `yaml:"inferenceGpuIds"`
-	VLLMPort        int    `yaml:"vllmPort"`
-	MaxLoraRank     int    `yaml:"maxLoraRank"`
-	MaxLoraModules  int    `yaml:"maxLoraModules"`
-	LoraModulesDir  string `yaml:"loraModulesDir"`
-	InputPrice      string `yaml:"inputPrice"`
-	OutputPrice     string `yaml:"outputPrice"`
+	Enable              bool   `yaml:"enable"`
+	BaseModelPath       string `yaml:"baseModelPath"`
+	InferenceGPUIDs     string `yaml:"inferenceGpuIds"`
+	VLLMPort            int    `yaml:"vllmPort"`
+	MaxLoraRank         int    `yaml:"maxLoraRank"`
+	MaxLoraModules      int    `yaml:"maxLoraModules"`
+	MaxCpuLoras         int    `yaml:"maxCpuLoras"`
+	LoraModulesDir      string `yaml:"loraModulesDir"`
+	InputPrice          string `yaml:"inputPrice"`
+	OutputPrice         string `yaml:"outputPrice"`
+	OffloadAfterMinutes int    `yaml:"offloadAfterMinutes"`
+	EnableColdStorage   bool   `yaml:"enableColdStorage"`
 }
 
 type Config struct {
@@ -224,13 +227,16 @@ func GetConfig() *Config {
 				EventAddress: ":3081",
 			},
 			Serving: ServingConfig{
-				Enable:         false,
-				VLLMPort:       8000,
-				MaxLoraRank:    64,
-				MaxLoraModules: 16,
-				LoraModulesDir: "/tmp/lora-modules",
-				InputPrice:     "10000000",
-				OutputPrice:    "10000000",
+				Enable:              false,
+				VLLMPort:            8000,
+				MaxLoraRank:         64,
+				MaxLoraModules:      16,
+				MaxCpuLoras:         32,
+				LoraModulesDir:      "/tmp/lora-modules",
+				InputPrice:          "10000000",
+				OutputPrice:         "10000000",
+				OffloadAfterMinutes: 60,
+				EnableColdStorage:   false,
 			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,

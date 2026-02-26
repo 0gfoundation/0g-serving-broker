@@ -280,14 +280,17 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 	var servingProxy *serving.Proxy
 	if cfg.Serving.Enable {
 		servingMgr := serving.NewManager(svc.db, serving.ServingConfig{
-			Enable:          cfg.Serving.Enable,
-			BaseModelPath:   cfg.Serving.BaseModelPath,
-			InferenceGPUIDs: cfg.Serving.InferenceGPUIDs,
-			VLLMPort:        cfg.Serving.VLLMPort,
-			MaxLoraRank:     cfg.Serving.MaxLoraRank,
-			MaxLoraModules:  cfg.Serving.MaxLoraModules,
-			LoraModulesDir:  cfg.Serving.LoraModulesDir,
-		}, logger)
+			Enable:              cfg.Serving.Enable,
+			BaseModelPath:       cfg.Serving.BaseModelPath,
+			InferenceGPUIDs:     cfg.Serving.InferenceGPUIDs,
+			VLLMPort:            cfg.Serving.VLLMPort,
+			MaxLoraRank:         cfg.Serving.MaxLoraRank,
+			MaxLoraModules:      cfg.Serving.MaxLoraModules,
+			MaxCpuLoras:         cfg.Serving.MaxCpuLoras,
+			LoraModulesDir:      cfg.Serving.LoraModulesDir,
+			OffloadAfterMinutes: cfg.Serving.OffloadAfterMinutes,
+			EnableColdStorage:   cfg.Serving.EnableColdStorage,
+		}, logger, svc.storageClient)
 		if err := servingMgr.Start(ctx); err != nil {
 			return err
 		}
