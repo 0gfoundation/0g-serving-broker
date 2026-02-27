@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"gorm.io/gorm"
 )
 
 // CreateAsyncJob creates a new async job record.
@@ -51,6 +52,48 @@ func (d *DB) UpdateAsyncJobExpiry(jobID string, expiresAt *time.Time) error {
 	return d.db.Model(&model.AsyncJob{}).
 		Where("job_id = ?", jobID).
 		Update("expires_at", expiresAt).Error
+}
+
+// CompleteAsyncJobWithBilling atomically stores the job result and updates billing fees
+// in a single database transaction. If either operation fails, both are rolled back —
+// ensuring the user is never billed for a result they cannot retrieve.
+func (d *DB) CompleteAsyncJobWithBilling(
+	jobID string,
+	responseBody []byte,
+	responseHeaders []byte,
+	expiresAt *time.Time,
+	requestHash string,
+	outputFee string,
+	totalFee string,
+	outputCount int64,
+) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		// 1. Mark job as completed with response data
+		if err := tx.Model(&model.AsyncJob{}).
+			Where("job_id = ?", jobID).
+			Updates(map[string]interface{}{
+				"status":           string(model.AsyncJobStatusCompleted),
+				"response_body":    responseBody,
+				"response_headers": responseHeaders,
+				"error_message":    "",
+				"expires_at":       expiresAt,
+			}).Error; err != nil {
+			return err
+		}
+
+		// 2. Update billing fees
+		if err := tx.
+			Where(&model.Request{RequestHash: requestHash}).
+			Updates(&model.Request{
+				OutputFee:   outputFee,
+				Fee:         totalFee,
+				OutputCount: outputCount,
+			}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
 }
 
 // DeleteExpiredAsyncJobs deletes completed or failed jobs whose expiry time has passed.

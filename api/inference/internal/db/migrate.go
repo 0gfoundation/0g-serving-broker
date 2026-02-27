@@ -147,6 +147,7 @@ func (d *DB) Migrate() error {
 					Status          string     `gorm:"type:varchar(32);not null;default:'pending';index"`
 					UserAddress     string     `gorm:"type:varchar(255);not null;index"`
 					ServiceType     string     `gorm:"type:varchar(64);not null"`
+					RequestHeaders  []byte     `gorm:"type:mediumblob"`
 					RequestBody     []byte     `gorm:"type:mediumblob"`
 					ResponseBody    []byte     `gorm:"type:mediumblob"`
 					ResponseHeaders []byte     `gorm:"type:mediumblob"`

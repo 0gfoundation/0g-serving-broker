@@ -84,6 +84,21 @@ func (m *mockDB) UpdateAsyncJobExpiry(jobID string, expiresAt *time.Time) error 
 	return nil
 }
 
+func (m *mockDB) CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("job not found: %s", jobID)
+	}
+	job.Status = model.AsyncJobStatusCompleted
+	job.ResponseBody = responseBody
+	job.ResponseHeaders = responseHeaders
+	job.ExpiresAt = expiresAt
+	job.ErrorMessage = ""
+	return nil
+}
+
 func (m *mockDB) DeleteExpiredAsyncJobs() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

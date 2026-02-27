@@ -44,8 +44,15 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	// Check whitelist
 	isWhitelisted := h.ctrl.IsWhitelistedUser(userAddress)
 
+	// Store only necessary request headers (Content-Type is critical for multipart boundary)
+	headerMap := map[string][]string{}
+	if ct := ctx.GetHeader("Content-Type"); ct != "" {
+		headerMap["Content-Type"] = []string{ct}
+	}
+	reqHeaders, _ := json.Marshal(headerMap)
+
 	// Submit the job
-	jobID, err := h.ctrl.SubmitAsyncJob(ctx, userAddress, svcType, reqBody, isWhitelisted)
+	jobID, err := h.ctrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
 	if err != nil {
 		handleBrokerError(ctx, err, "submit async job")
 		return

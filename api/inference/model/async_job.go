@@ -22,13 +22,14 @@ type AsyncJob struct {
 	Model
 	JobID        string         `gorm:"type:varchar(64);not null;primaryKey" json:"jobId"`
 	Status       AsyncJobStatus `gorm:"type:varchar(32);not null;default:'pending';index" json:"status"`
-	UserAddress  string         `gorm:"type:varchar(255);not null;index" json:"userAddress"`
-	ServiceType  string         `gorm:"type:varchar(64);not null" json:"serviceType"`
-	RequestBody  []byte         `gorm:"type:mediumblob" json:"-"`
+	UserAddress     string         `gorm:"type:varchar(255);not null;index" json:"userAddress"`
+	ServiceType     string         `gorm:"type:varchar(64);not null" json:"serviceType"`
+	RequestHeaders  []byte         `gorm:"type:mediumblob" json:"-"`
+	RequestBody     []byte         `gorm:"type:mediumblob" json:"-"`
 	ResponseBody    []byte         `gorm:"type:mediumblob" json:"-"`
 	ResponseHeaders []byte         `gorm:"type:mediumblob" json:"-"`
 	ErrorMessage    string         `gorm:"type:text" json:"errorMessage,omitempty"`
-	RequestHash  string         `gorm:"type:varchar(255);not null" json:"requestHash"`
+	RequestHash     string         `gorm:"type:varchar(255);not null" json:"requestHash"`
 	OutputCount  int64          `gorm:"type:bigint;not null;default:1" json:"outputCount"`
 	ExpiresAt    *time.Time     `gorm:"type:datetime;index" json:"expiresAt,omitempty"`
 }

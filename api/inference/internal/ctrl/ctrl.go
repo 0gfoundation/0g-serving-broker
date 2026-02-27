@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
@@ -54,6 +55,8 @@ type Ctrl struct {
 	asyncJobQueue  chan asyncJobParams
 	asyncResultTTL time.Duration
 	asyncEnabled   bool
+	asyncCancel    context.CancelFunc // cancels worker and cleanup goroutines
+	asyncWg        sync.WaitGroup     // tracks running worker goroutines
 }
 
 func New(

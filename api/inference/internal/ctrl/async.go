@@ -19,20 +19,30 @@ import (
 
 // asyncJobParams holds everything a worker needs to process a job.
 type asyncJobParams struct {
-	JobID         string
-	ServiceType   string
-	RequestBody   []byte
-	BillingReq    model.Request
-	IsWhitelisted bool
+	JobID          string
+	ServiceType    string
+	RequestHeaders []byte
+	RequestBody    []byte
+	BillingReq     model.Request
+	IsWhitelisted  bool
 }
 
 // InitAsyncProcessing initializes the async processing subsystem.
-// It creates a bounded job queue, starts a fixed worker pool, marks stale processing
-// jobs as failed (crash recovery), and starts a periodic cleanup goroutine.
+//
+// It performs the following:
+//   - Creates a bounded job queue of maxQueueSize capacity
+//   - Starts a fixed pool of maxConcurrent worker goroutines
+//   - Marks any leftover "processing" jobs as failed (crash recovery)
+//   - Starts a periodic goroutine that deletes expired jobs every cleanupInterval
+//
+// resultTTL controls how long completed/failed job results are retained before cleanup.
 func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, cleanupInterval time.Duration) error {
 	c.asyncJobQueue = make(chan asyncJobParams, maxQueueSize)
 	c.asyncResultTTL = resultTTL
 	c.asyncEnabled = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c.asyncCancel = cancel
 
 	// Crash recovery: mark any leftover "processing" jobs as failed
 	if err := c.db.MarkProcessingAsyncJobsAsFailed(); err != nil {
@@ -41,16 +51,24 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 
 	// Start fixed worker pool — exactly maxConcurrent goroutines, never more
 	for i := 0; i < maxConcurrent; i++ {
-		go c.asyncWorker(i)
+		c.asyncWg.Add(1)
+		go c.asyncWorker(ctx, i)
 	}
 
 	// Start periodic cleanup of expired jobs
+	c.asyncWg.Add(1)
 	go func() {
+		defer c.asyncWg.Done()
 		ticker := time.NewTicker(cleanupInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := c.db.DeleteExpiredAsyncJobs(); err != nil {
-				c.logger.Errorf("Failed to cleanup expired async jobs: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := c.db.DeleteExpiredAsyncJobs(); err != nil {
+					c.logger.Errorf("Failed to cleanup expired async jobs: %v", err)
+				}
 			}
 		}
 	}()
@@ -61,10 +79,34 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 }
 
 // asyncWorker is a long-lived goroutine that pulls jobs from the queue and processes them.
-func (c *Ctrl) asyncWorker(workerID int) {
-	for job := range c.asyncJobQueue {
-		c.processAsyncJob(job)
+// It exits when the context is cancelled and the queue is drained.
+func (c *Ctrl) asyncWorker(ctx context.Context, workerID int) {
+	defer c.asyncWg.Done()
+	for {
+		select {
+		case job, ok := <-c.asyncJobQueue:
+			if !ok {
+				return // channel closed
+			}
+			c.processAsyncJob(job)
+		case <-ctx.Done():
+			return
+		}
 	}
+}
+
+// ShutdownAsync gracefully shuts down async processing.
+// It closes the job queue, cancels the context, and waits for all workers to finish.
+func (c *Ctrl) ShutdownAsync() {
+	if !c.asyncEnabled {
+		return
+	}
+	c.logger.Info("Shutting down async processing...")
+	close(c.asyncJobQueue)
+	c.asyncCancel()
+	c.asyncWg.Wait()
+	c.asyncEnabled = false
+	c.logger.Info("Async processing shut down")
 }
 
 // IsAsyncEnabled returns whether async processing is enabled.
@@ -72,15 +114,24 @@ func (c *Ctrl) IsAsyncEnabled() bool {
 	return c.asyncEnabled
 }
 
-// GetAsyncResultTTL returns the configured result TTL duration.
+// GetAsyncResultTTL returns how long completed/failed job results are retained
+// before being cleaned up by the periodic cleanup goroutine.
 func (c *Ctrl) GetAsyncResultTTL() time.Duration {
 	return c.asyncResultTTL
 }
 
 // SubmitAsyncJob validates the request, creates a billing record, persists the job,
-// and enqueues it for background processing.
-// Returns immediately with a job ID. If the queue is full, returns an error.
-func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqBody []byte, isWhitelisted bool) (string, error) {
+// and enqueues it for background processing. It returns immediately with a job ID.
+//
+// Parameters:
+//   - userAddress: the authenticated user's blockchain address
+//   - svcType: service type, must be "text-to-image" or "image-editing"
+//   - reqHeaders: JSON-serialized request headers to forward to the provider (e.g. Content-Type)
+//   - reqBody: raw request body bytes
+//   - isWhitelisted: if true, billing validation and fee recording are skipped
+//
+// Returns the job ID or an error if the queue is full or validation fails.
+func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error) {
 	if !c.asyncEnabled {
 		return "", errors.New("async processing is not enabled")
 	}
@@ -89,7 +140,9 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		return "", errors.New("async jobs only support text-to-image and image-editing service types")
 	}
 
-	// Fail fast if the queue is full — avoid unnecessary DB writes
+	// Optimization: check queue capacity before DB write to fail fast.
+	// Note: This is not guaranteed — queue could fill up between check and enqueue,
+	// but it avoids unnecessary DB writes in the common case.
 	if len(c.asyncJobQueue) >= cap(c.asyncJobQueue) {
 		return "", errors.New("async job queue is full, please try again later")
 	}
@@ -140,14 +193,15 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 	now := time.Now()
 	expiresAt := now.Add(c.asyncResultTTL)
 	job := model.AsyncJob{
-		JobID:       jobID,
-		Status:      model.AsyncJobStatusPending,
-		UserAddress: userAddress,
-		ServiceType: svcType,
-		RequestBody: reqBody,
-		RequestHash: billingReq.RequestHash,
-		OutputCount: outputCount,
-		ExpiresAt:   &expiresAt,
+		JobID:          jobID,
+		Status:         model.AsyncJobStatusPending,
+		UserAddress:    userAddress,
+		ServiceType:    svcType,
+		RequestHeaders: reqHeaders,
+		RequestBody:    reqBody,
+		RequestHash:    billingReq.RequestHash,
+		OutputCount:    outputCount,
+		ExpiresAt:      &expiresAt,
 	}
 	if err := c.db.CreateAsyncJob(job); err != nil {
 		return "", errors.Wrap(err, "create async job in db")
@@ -155,11 +209,12 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 
 	// Enqueue for background processing (non-blocking)
 	params := asyncJobParams{
-		JobID:         jobID,
-		ServiceType:   svcType,
-		RequestBody:   reqBody,
-		BillingReq:    billingReq,
-		IsWhitelisted: isWhitelisted,
+		JobID:          jobID,
+		ServiceType:    svcType,
+		RequestHeaders: reqHeaders,
+		RequestBody:    reqBody,
+		BillingReq:     billingReq,
+		IsWhitelisted:  isWhitelisted,
 	}
 
 	select {
@@ -174,7 +229,8 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 	return jobID, nil
 }
 
-// GetAsyncJob retrieves an async job by ID.
+// GetAsyncJob retrieves an async job by its unique job ID.
+// Returns the job record or an error if the job does not exist.
 func (c *Ctrl) GetAsyncJob(jobID string) (model.AsyncJob, error) {
 	return c.db.GetAsyncJob(jobID)
 }
@@ -226,10 +282,23 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		httpReq.ContentLength = int64(len(reqBody))
 	}
 
-	// Set Content-Type header — default to application/json
-	httpReq.Header.Set("Content-Type", "application/json")
+	// Restore stored request headers (e.g. Content-Type with multipart boundary)
+	if len(params.RequestHeaders) > 0 {
+		var savedHeaders map[string][]string
+		if err := json.Unmarshal(params.RequestHeaders, &savedHeaders); err == nil {
+			for k, vals := range savedHeaders {
+				for _, v := range vals {
+					httpReq.Header.Add(k, v)
+				}
+			}
+		}
+	}
+	// Ensure Content-Type is set even if no headers were stored
+	if httpReq.Header.Get("Content-Type") == "" {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 
-	// Set additional secret headers if configured
+	// Set additional secret headers if configured (overrides any stored headers)
 	if c.Service.AdditionalSecret != nil {
 		for k, v := range c.Service.AdditionalSecret {
 			httpReq.Header.Set(k, v)
@@ -264,51 +333,63 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	}
 	headerBytes, _ := json.Marshal(headerMap)
 
-	// Store result and mark as completed
+	// Store result and bill atomically — if either fails, both roll back.
+	// This ensures the user is never billed for a result they cannot retrieve.
 	expiresAt := time.Now().Add(c.asyncResultTTL)
-	if err := c.db.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusCompleted, respBody, headerBytes, ""); err != nil {
-		c.logger.Errorf("Failed to mark async job %s as completed: %v", jobID, err)
-		return
-	}
-	c.db.UpdateAsyncJobExpiry(jobID, &expiresAt)
 
-	// Handle billing
-	if !params.IsWhitelisted {
-		c.billAsyncJob(params.BillingReq, svcType)
+	if params.IsWhitelisted {
+		// Whitelisted users: just store the result, no billing
+		if err := c.db.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusCompleted, respBody, headerBytes, ""); err != nil {
+			c.logger.Errorf("Failed to store result for async job %s, marking as failed: %v", jobID, err)
+			c.markAsyncJobFailed(jobID, "failed to store result: "+err.Error())
+			return
+		}
+		c.db.UpdateAsyncJobExpiry(jobID, &expiresAt)
+	} else {
+		// Non-whitelisted users: store result + billing in a single transaction
+		outputFeeStr, totalFeeStr, err := c.calculateAsyncJobFees(params.BillingReq, svcType)
+		if err != nil {
+			c.logger.Errorf("Failed to calculate fees for async job %s, marking as failed: %v", jobID, err)
+			c.markAsyncJobFailed(jobID, "failed to calculate fees: "+err.Error())
+			return
+		}
+
+		if err := c.db.CompleteAsyncJobWithBilling(
+			jobID, respBody, headerBytes, &expiresAt,
+			params.BillingReq.RequestHash, outputFeeStr, totalFeeStr, params.BillingReq.OutputCount,
+		); err != nil {
+			c.logger.Errorf("Failed to store result and bill async job %s, marking as failed (user will not be billed): %v", jobID, err)
+			c.markAsyncJobFailed(jobID, "failed to store result: "+err.Error())
+			return
+		}
 	}
 
 	c.logger.Infof("Async job completed: jobID=%s, svcType=%s, responseSize=%d bytes",
 		jobID, svcType, len(respBody))
 }
 
-// billAsyncJob calculates and records fees for a completed async job.
-func (c *Ctrl) billAsyncJob(billingReq model.Request, svcType string) {
+// calculateAsyncJobFees computes the output fee and total fee for an async job.
+func (c *Ctrl) calculateAsyncJobFees(billingReq model.Request, svcType string) (outputFeeStr, totalFeeStr string, err error) {
 	service, err := c.GetCachedService(context.Background())
 	if err != nil {
-		c.logger.Errorf("Failed to get cached service for async billing: %v", err)
-		return
+		return "", "", errors.Wrap(err, "get cached service")
 	}
 
-	outputCount := billingReq.OutputCount
-	outputFee, err := util.Multiply(service.OutputPrice, outputCount)
+	outputFee, err := util.Multiply(service.OutputPrice, billingReq.OutputCount)
 	if err != nil {
-		c.logger.Errorf("Failed to calculate output fee for async job: %v", err)
-		return
+		return "", "", errors.Wrap(err, "calculate output fee")
 	}
 
-	totalFeeStr := outputFee.String()
+	totalFeeStr = outputFee.String()
 	if svcType == "image-editing" && billingReq.InputFee != "" && billingReq.InputFee != "0" {
 		totalFee, err := util.Add(billingReq.InputFee, outputFee.String())
 		if err != nil {
-			c.logger.Errorf("Failed to calculate total fee for async image-editing job: %v", err)
-			return
+			return "", "", errors.Wrap(err, "calculate total fee")
 		}
 		totalFeeStr = totalFee.String()
 	}
 
-	if err := c.db.UpdateRequestFeesAndCount(billingReq.RequestHash, outputFee.String(), totalFeeStr, outputCount); err != nil {
-		c.logger.Errorf("Failed to update request fees for async job: %v", err)
-	}
+	return outputFee.String(), totalFeeStr, nil
 }
 
 // markAsyncJobFailed is a helper to mark a job as failed with an error message.
