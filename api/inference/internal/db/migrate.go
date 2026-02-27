@@ -152,7 +152,7 @@ func (d *DB) Migrate() error {
 					ResponseBody    []byte     `gorm:"type:mediumblob"`
 					ResponseHeaders []byte     `gorm:"type:mediumblob"`
 					ErrorMessage    string     `gorm:"type:text"`
-					RequestHash     string     `gorm:"type:varchar(255);not null"`
+					RequestHash     string     `gorm:"type:varchar(255);not null;index"`
 					OutputCount     int64      `gorm:"type:bigint;not null;default:1"`
 					ExpiresAt       *time.Time `gorm:"type:datetime;index"`
 				}

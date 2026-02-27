@@ -52,11 +52,12 @@ type Ctrl struct {
 	whitelistUsers map[string]struct{}
 
 	// Async processing
-	asyncJobQueue  chan asyncJobParams
-	asyncResultTTL time.Duration
-	asyncEnabled   bool
-	asyncCancel    context.CancelFunc // cancels worker and cleanup goroutines
-	asyncWg        sync.WaitGroup     // tracks running worker goroutines
+	asyncJobQueue   chan asyncJobParams
+	asyncResultTTL  time.Duration
+	asyncJobTimeout time.Duration
+	asyncEnabled    bool
+	asyncCancel     context.CancelFunc // cancels worker and cleanup goroutines
+	asyncWg         sync.WaitGroup     // tracks running worker goroutines
 }
 
 func New(

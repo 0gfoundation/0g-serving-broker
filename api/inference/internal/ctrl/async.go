@@ -36,9 +36,11 @@ type asyncJobParams struct {
 //   - Starts a periodic goroutine that deletes expired jobs every cleanupInterval
 //
 // resultTTL controls how long completed/failed job results are retained before cleanup.
-func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, cleanupInterval time.Duration) error {
+// jobTimeout controls the per-job HTTP request timeout for provider calls.
+func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, cleanupInterval, jobTimeout time.Duration) error {
 	c.asyncJobQueue = make(chan asyncJobParams, maxQueueSize)
 	c.asyncResultTTL = resultTTL
+	c.asyncJobTimeout = jobTimeout
 	c.asyncEnabled = true
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -73,8 +75,8 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 		}
 	}()
 
-	c.logger.Infof("Async processing initialized: workers=%d, queueSize=%d, resultTTL=%v, cleanupInterval=%v",
-		maxConcurrent, maxQueueSize, resultTTL, cleanupInterval)
+	c.logger.Infof("Async processing initialized: workers=%d, queueSize=%d, resultTTL=%v, cleanupInterval=%v, jobTimeout=%v",
+		maxConcurrent, maxQueueSize, resultTTL, cleanupInterval, jobTimeout)
 	return nil
 }
 
@@ -264,8 +266,8 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		targetURL += "/images/edits"
 	}
 
-	// Create HTTP request with background context + timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Create HTTP request with background context + configurable timeout
+	ctx, cancel := context.WithTimeout(context.Background(), c.asyncJobTimeout)
 	defer cancel()
 
 	var body io.Reader

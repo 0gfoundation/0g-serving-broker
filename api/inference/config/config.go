@@ -84,6 +84,7 @@ type AsyncConfig struct {
 	MaxQueueSize           int  `yaml:"maxQueueSize"`           // Max pending jobs waiting for a worker (default: 100)
 	ResultTTLMinutes       int  `yaml:"resultTTLMinutes"`       // How long to keep completed results (default: 30)
 	CleanupIntervalSeconds int  `yaml:"cleanupIntervalSeconds"` // Interval for expired job cleanup (default: 60)
+	JobTimeoutMinutes      int  `yaml:"jobTimeoutMinutes"`      // Per-job HTTP request timeout (default: 10)
 }
 
 type LogPathsConfig struct {
@@ -250,6 +251,7 @@ func GetConfig() *Config {
 				MaxQueueSize:           100,
 				ResultTTLMinutes:       30,
 				CleanupIntervalSeconds: 60,
+				JobTimeoutMinutes:      10,
 			},
 		}
 

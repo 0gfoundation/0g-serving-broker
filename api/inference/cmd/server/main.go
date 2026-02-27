@@ -103,11 +103,13 @@ func Main() {
 	if config.Async.Enabled {
 		resultTTL := time.Duration(config.Async.ResultTTLMinutes) * time.Minute
 		cleanupInterval := time.Duration(config.Async.CleanupIntervalSeconds) * time.Second
+		jobTimeout := time.Duration(config.Async.JobTimeoutMinutes) * time.Minute
 		if err := ctrl.InitAsyncProcessing(
 			config.Async.MaxConcurrentJobs,
 			config.Async.MaxQueueSize,
 			resultTTL,
 			cleanupInterval,
+			jobTimeout,
 		); err != nil {
 			logger.Errorf("Failed to initialize async processing: %v", err)
 		}

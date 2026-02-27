@@ -22,8 +22,10 @@ func (d *DB) GetAsyncJob(jobID string) (model.AsyncJob, error) {
 // UpdateAsyncJobStatus updates the status, response body, response headers, and error message of a job.
 func (d *DB) UpdateAsyncJobStatus(jobID string, status model.AsyncJobStatus, responseBody []byte, responseHeaders []byte, errorMessage string) error {
 	updates := map[string]interface{}{
-		"status":        string(status),
-		"error_message": errorMessage,
+		"status": string(status),
+	}
+	if errorMessage != "" {
+		updates["error_message"] = errorMessage
 	}
 	if responseBody != nil {
 		updates["response_body"] = responseBody

@@ -29,7 +29,7 @@ type AsyncJob struct {
 	ResponseBody    []byte         `gorm:"type:mediumblob" json:"-"`
 	ResponseHeaders []byte         `gorm:"type:mediumblob" json:"-"`
 	ErrorMessage    string         `gorm:"type:text" json:"errorMessage,omitempty"`
-	RequestHash     string         `gorm:"type:varchar(255);not null" json:"requestHash"`
+	RequestHash     string         `gorm:"type:varchar(255);not null;index" json:"requestHash"`
 	OutputCount  int64          `gorm:"type:bigint;not null;default:1" json:"outputCount"`
 	ExpiresAt    *time.Time     `gorm:"type:datetime;index" json:"expiresAt,omitempty"`
 }
