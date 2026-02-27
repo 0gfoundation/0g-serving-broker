@@ -348,7 +348,9 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 			c.markAsyncJobFailed(jobID, "failed to store result: "+err.Error())
 			return
 		}
-		c.db.UpdateAsyncJobExpiry(jobID, &expiresAt)
+		if err := c.db.UpdateAsyncJobExpiry(jobID, &expiresAt); err != nil {
+			c.logger.Warnf("Failed to update expiry for job %s (non-critical): %v", jobID, err)
+		}
 	} else {
 		// Non-whitelisted users: store result + billing in a single transaction
 		outputFeeStr, totalFeeStr, err := c.calculateAsyncJobFees(params.BillingReq, svcType)
