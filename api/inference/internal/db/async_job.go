@@ -84,12 +84,12 @@ func (d *DB) CompleteAsyncJobWithBilling(
 		}
 
 		// 2. Update billing fees
-		if err := tx.
-			Where(&model.Request{RequestHash: requestHash}).
-			Updates(&model.Request{
-				OutputFee:   outputFee,
-				Fee:         totalFee,
-				OutputCount: outputCount,
+		if err := tx.Model(&model.Request{}).
+			Where("request_hash = ?", requestHash).
+			Updates(map[string]interface{}{
+				"output_fee":   outputFee,
+				"fee":          totalFee,
+				"output_count": outputCount,
 			}).Error; err != nil {
 			return err
 		}

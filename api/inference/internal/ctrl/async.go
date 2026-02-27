@@ -246,6 +246,8 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// Mark as processing
 	if err := c.db.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusProcessing, nil, nil, ""); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as processing: %v", jobID, err)
+		// Try to mark as failed so user knows
+		c.markAsyncJobFailed(jobID, "failed to update status: "+err.Error())
 		return
 	}
 

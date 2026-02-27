@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -118,8 +121,38 @@ func Main() {
 	h := handler.New(ctrl, proxy)
 	h.Register(engine)
 
-	// Listen and Serve, config port with PORT=X
-	if err := engine.Run(); err != nil {
-		panic(err)
+	// Listen and Serve with graceful shutdown
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3080"
 	}
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: engine,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("Server error: %v", err)
+			panic(err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	logger.Info("Shutting down server...")
+
+	// Shutdown HTTP server with a timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Errorf("Server forced to shutdown: %v", err)
+	}
+
+	// Shutdown async processing (drain queue, wait for workers)
+	ctrl.ShutdownAsync()
+
+	logger.Info("Server exited")
 }
