@@ -206,6 +206,12 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		ExpiresAt:      &expiresAt,
 	}
 	if err := c.asyncDB.CreateAsyncJob(job); err != nil {
+		// Clean up orphaned billing record so the user is not left with a dangling request
+		if !isWhitelisted {
+			if delErr := c.db.DeleteRequestsByHashes([]string{billingReq.RequestHash}); delErr != nil {
+				c.logger.Errorf("Failed to cleanup billing request %s after async job creation failed: %v", billingReq.RequestHash, delErr)
+			}
+		}
 		return "", errors.Wrap(err, "create async job in db")
 	}
 
@@ -225,6 +231,12 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 	default:
 		// Queue became full between the check and here (rare race) — mark job as failed
 		c.markAsyncJobFailed(jobID, "job queue is full")
+		// Clean up orphaned billing record so the user is not left with a dangling request
+		if !isWhitelisted {
+			if delErr := c.db.DeleteRequestsByHashes([]string{billingReq.RequestHash}); delErr != nil {
+				c.logger.Errorf("Failed to cleanup billing request %s after enqueue failed: %v", billingReq.RequestHash, delErr)
+			}
+		}
 		return "", errors.New("async job queue is full, please try again later")
 	}
 
