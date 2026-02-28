@@ -14,11 +14,25 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// asyncDB is the interface for database operations used by the async job subsystem.
+// The real *db.DB satisfies this interface. Tests can inject a mock implementation.
+type asyncDB interface {
+	CreateAsyncJob(job model.AsyncJob) error
+	GetAsyncJob(jobID string) (model.AsyncJob, error)
+	UpdateAsyncJobStatus(jobID string, status model.AsyncJobStatus, responseBody []byte, responseHeaders []byte, errorMessage string) error
+	MarkProcessingAsyncJobsAsFailed() error
+	DeleteExpiredAsyncJobs() error
+	UpdateAsyncJobExpiry(jobID string, expiresAt *time.Time) error
+	CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error
+}
 
 type Ctrl struct {
 	mu       sync.RWMutex
 	db       *db.DB
+	asyncDB  asyncDB
 	contract *providercontract.ProviderContract
 	svcCache *cache.Cache
 	logger   log.Logger
@@ -87,6 +101,7 @@ func New(
 	p := &Ctrl{
 		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
 		db:                   db,
+		asyncDB:              db,
 		contract:             contract,
 		Service:              cfg.Service,
 		svcCache:             svcCache,

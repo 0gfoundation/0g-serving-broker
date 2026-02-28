@@ -13,7 +13,7 @@ import (
 // submitAsyncJob is the shared logic for all async submit endpoints.
 // The service type is determined by the route, not a query parameter.
 func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
-	if !h.ctrl.IsAsyncEnabled() {
+	if !h.asyncCtrl.IsAsyncEnabled() {
 		ctx.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "async processing is not enabled",
 		})
@@ -21,7 +21,7 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	}
 
 	// Validate session
-	userAddress, err := h.ctrl.ValidateSession(ctx)
+	userAddress, err := h.asyncCtrl.ValidateSession(ctx)
 	if err != nil {
 		ctx.Set("ignoreError", true)
 		handleBrokerError(ctx, err, "validate session")
@@ -42,7 +42,7 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	}
 
 	// Check whitelist
-	isWhitelisted := h.ctrl.IsWhitelistedUser(userAddress)
+	isWhitelisted := h.asyncCtrl.IsWhitelistedUser(userAddress)
 
 	// Store only necessary request headers (Content-Type is critical for multipart boundary)
 	headerMap := map[string][]string{}
@@ -52,7 +52,7 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	reqHeaders, _ := json.Marshal(headerMap)
 
 	// Submit the job
-	jobID, err := h.ctrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
+	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
 	if err != nil {
 		handleBrokerError(ctx, err, "submit async job")
 		return
@@ -77,7 +77,7 @@ func (h *Handler) SubmitAsyncImageEdit(ctx *gin.Context) {
 // GetAsyncJob handles GET /v1/async/jobs/:jobID
 // It validates the user session, checks job ownership, and returns the job status or result.
 func (h *Handler) GetAsyncJob(ctx *gin.Context) {
-	if !h.ctrl.IsAsyncEnabled() {
+	if !h.asyncCtrl.IsAsyncEnabled() {
 		ctx.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "async processing is not enabled",
 		})
@@ -85,7 +85,7 @@ func (h *Handler) GetAsyncJob(ctx *gin.Context) {
 	}
 
 	// Validate session
-	userAddress, err := h.ctrl.ValidateSession(ctx)
+	userAddress, err := h.asyncCtrl.ValidateSession(ctx)
 	if err != nil {
 		ctx.Set("ignoreError", true)
 		handleBrokerError(ctx, err, "validate session")
@@ -100,7 +100,7 @@ func (h *Handler) GetAsyncJob(ctx *gin.Context) {
 		return
 	}
 
-	job, err := h.ctrl.GetAsyncJob(jobID)
+	job, err := h.asyncCtrl.GetAsyncJob(jobID)
 	if err != nil {
 		ctx.JSON(http.StatusNotFound, gin.H{
 			"error": "job not found",

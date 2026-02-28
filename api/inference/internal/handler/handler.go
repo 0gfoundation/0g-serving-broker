@@ -8,10 +8,22 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// asyncCtrl is the interface for controller operations used by the async job handlers.
+// The real *ctrl.Ctrl satisfies this interface. Tests can inject a mock implementation.
+type asyncCtrl interface {
+	IsAsyncEnabled() bool
+	ValidateSession(ctx *gin.Context) (string, error)
+	IsWhitelistedUser(userAddress string) bool
+	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error)
+	GetAsyncJob(jobID string) (model.AsyncJob, error)
+}
 
 type Handler struct {
 	ctrl        *ctrl.Ctrl
+	asyncCtrl   asyncCtrl
 	proxy       *proxy.Proxy
 	rateLimiter *middleware.RateLimiter
 }
@@ -19,6 +31,7 @@ type Handler struct {
 func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
+		asyncCtrl:   ctrl,
 		proxy:       proxy,
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
 	}

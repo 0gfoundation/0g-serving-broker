@@ -47,7 +47,7 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 	c.asyncCancel = cancel
 
 	// Crash recovery: mark any leftover "processing" jobs as failed
-	if err := c.db.MarkProcessingAsyncJobsAsFailed(); err != nil {
+	if err := c.asyncDB.MarkProcessingAsyncJobsAsFailed(); err != nil {
 		return errors.Wrap(err, "mark stale processing jobs as failed")
 	}
 
@@ -68,7 +68,7 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := c.db.DeleteExpiredAsyncJobs(); err != nil {
+				if err := c.asyncDB.DeleteExpiredAsyncJobs(); err != nil {
 					c.logger.Errorf("Failed to cleanup expired async jobs: %v", err)
 				}
 			}
@@ -205,7 +205,7 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		OutputCount:    outputCount,
 		ExpiresAt:      &expiresAt,
 	}
-	if err := c.db.CreateAsyncJob(job); err != nil {
+	if err := c.asyncDB.CreateAsyncJob(job); err != nil {
 		return "", errors.Wrap(err, "create async job in db")
 	}
 
@@ -234,7 +234,7 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 // GetAsyncJob retrieves an async job by its unique job ID.
 // Returns the job record or an error if the job does not exist.
 func (c *Ctrl) GetAsyncJob(jobID string) (model.AsyncJob, error) {
-	return c.db.GetAsyncJob(jobID)
+	return c.asyncDB.GetAsyncJob(jobID)
 }
 
 // processAsyncJob is called by a worker goroutine to execute a single job.
@@ -244,7 +244,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	reqBody := params.RequestBody
 
 	// Mark as processing
-	if err := c.db.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusProcessing, nil, nil, ""); err != nil {
+	if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusProcessing, nil, nil, ""); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as processing: %v", jobID, err)
 		// Try to mark as failed so user knows
 		c.markAsyncJobFailed(jobID, "failed to update status: "+err.Error())
@@ -343,12 +343,12 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 
 	if params.IsWhitelisted {
 		// Whitelisted users: just store the result, no billing
-		if err := c.db.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusCompleted, respBody, headerBytes, ""); err != nil {
+		if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusCompleted, respBody, headerBytes, ""); err != nil {
 			c.logger.Errorf("Failed to store result for async job %s, marking as failed: %v", jobID, err)
 			c.markAsyncJobFailed(jobID, "failed to store result: "+err.Error())
 			return
 		}
-		if err := c.db.UpdateAsyncJobExpiry(jobID, &expiresAt); err != nil {
+		if err := c.asyncDB.UpdateAsyncJobExpiry(jobID, &expiresAt); err != nil {
 			c.logger.Warnf("Failed to update expiry for job %s (non-critical): %v", jobID, err)
 		}
 	} else {
@@ -360,7 +360,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 			return
 		}
 
-		if err := c.db.CompleteAsyncJobWithBilling(
+		if err := c.asyncDB.CompleteAsyncJobWithBilling(
 			jobID, respBody, headerBytes, &expiresAt,
 			params.BillingReq.RequestHash, outputFeeStr, totalFeeStr, params.BillingReq.OutputCount,
 		); err != nil {
@@ -401,7 +401,7 @@ func (c *Ctrl) calculateAsyncJobFees(billingReq model.Request, svcType string) (
 // markAsyncJobFailed is a helper to mark a job as failed with an error message.
 func (c *Ctrl) markAsyncJobFailed(jobID, errMsg string) {
 	c.logger.Errorf("Async job failed: jobID=%s, error=%s", jobID, errMsg)
-	if err := c.db.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusFailed, nil, nil, errMsg); err != nil {
+	if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusFailed, nil, nil, errMsg); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as failed: %v", jobID, err)
 	}
 }
