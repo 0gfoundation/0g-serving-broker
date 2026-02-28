@@ -79,7 +79,7 @@ type Config struct {
 
 // AsyncConfig defines configuration for async job processing.
 type AsyncConfig struct {
-	Enabled                bool `yaml:"enabled"`                // Enable async endpoints (default: false)
+	Enabled                bool `yaml:"enabled"`                // Enable async endpoints (default: true)
 	MaxConcurrentJobs      int  `yaml:"maxConcurrentJobs"`      // Max concurrent worker goroutines (default: 10)
 	MaxQueueSize           int  `yaml:"maxQueueSize"`           // Max pending jobs waiting for a worker (default: 100)
 	ResultTTLMinutes       int  `yaml:"resultTTLMinutes"`       // How long to keep completed results (default: 30)
@@ -246,7 +246,7 @@ func GetConfig() *Config {
 				UserAddresses: []string{},
 			},
 			Async: AsyncConfig{
-				Enabled:                false,
+				Enabled:                true,
 				MaxConcurrentJobs:      10,
 				MaxQueueSize:           100,
 				ResultTTLMinutes:       30,
