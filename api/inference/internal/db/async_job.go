@@ -59,6 +59,9 @@ func (d *DB) UpdateAsyncJobExpiry(jobID string, expiresAt *time.Time) error {
 // CompleteAsyncJobWithBilling atomically stores the job result and updates billing fees
 // in a single database transaction. If either operation fails, both are rolled back —
 // ensuring the user is never billed for a result they cannot retrieve.
+//
+// Retries up to 3 times with backoff for transient DB errors (connection blips, deadlocks),
+// since by this point the expensive provider work is already done.
 func (d *DB) CompleteAsyncJobWithBilling(
 	jobID string,
 	responseBody []byte,
@@ -69,7 +72,8 @@ func (d *DB) CompleteAsyncJobWithBilling(
 	totalFee string,
 	outputCount int64,
 ) error {
-	return d.db.Transaction(func(tx *gorm.DB) error {
+	return withRetry(3, func() error {
+		return d.db.Transaction(func(tx *gorm.DB) error {
 		// 1. Mark job as completed with response data
 		if err := tx.Model(&model.AsyncJob{}).
 			Where("job_id = ?", jobID).
@@ -95,7 +99,23 @@ func (d *DB) CompleteAsyncJobWithBilling(
 		}
 
 		return nil
+		})
 	})
+}
+
+// withRetry retries fn up to maxAttempts times with incremental backoff.
+// Safe for idempotent operations like database transactions.
+func withRetry(maxAttempts int, fn func() error) error {
+	var err error
+	for i := 0; i < maxAttempts; i++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if i < maxAttempts-1 {
+			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+		}
+	}
+	return err
 }
 
 // DeleteExpiredAsyncJobs deletes completed or failed jobs whose expiry time has passed.
