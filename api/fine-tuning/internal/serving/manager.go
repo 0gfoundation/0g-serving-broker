@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -104,18 +105,45 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully terminates the vLLM process if it is running.
+// Stop gracefully terminates the vLLM process and all its child processes.
+// vLLM runs a multi-process architecture (APIServer + EngineCore), so we kill
+// the entire process group to avoid orphaned GPU-holding processes.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.vllmProcess != nil && m.vllmProcess.Process != nil {
-		m.logger.Info("stopping vLLM process")
-		if err := m.vllmProcess.Process.Signal(os.Interrupt); err != nil {
-			m.logger.Warnf("interrupt failed, killing vLLM: %v", err)
-			return m.vllmProcess.Process.Kill()
+	if m.vllmProcess == nil || m.vllmProcess.Process == nil {
+		return nil
+	}
+
+	pid := m.vllmProcess.Process.Pid
+	m.logger.Infof("stopping vLLM process group (pid %d)", pid)
+
+	// Kill the entire process group (negative PID) to ensure EngineCore
+	// and other child processes are terminated and GPU memory is released.
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		m.logger.Warnf("SIGTERM to process group failed: %v, escalating to SIGKILL", err)
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+			m.logger.Errorf("SIGKILL to process group also failed: %v", err)
+			return err
 		}
 	}
+
+	// Wait briefly for graceful shutdown, then force kill if still alive.
+	done := make(chan struct{})
+	go func() {
+		m.vllmProcess.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		m.logger.Info("vLLM process group terminated gracefully")
+	case <-time.After(10 * time.Second):
+		m.logger.Warn("vLLM did not exit within 10s, sending SIGKILL")
+		syscall.Kill(-pid, syscall.SIGKILL)
+	}
+
 	return nil
 }
 
@@ -149,6 +177,7 @@ func (m *Manager) startVLLM(ctx context.Context) {
 	cmd := exec.CommandContext(ctx, "vllm", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	cmd.Env = os.Environ()
 	if m.config.InferenceGPUIDs != "" {
