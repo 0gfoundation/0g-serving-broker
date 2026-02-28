@@ -122,8 +122,9 @@ type ServingConfig struct {
 	LoraModulesDir      string `yaml:"loraModulesDir"`
 	InputPrice          string `yaml:"inputPrice"`
 	OutputPrice         string `yaml:"outputPrice"`
-	OffloadAfterMinutes int    `yaml:"offloadAfterMinutes"`
-	EnableColdStorage   bool   `yaml:"enableColdStorage"`
+	OffloadAfterMinutes     int  `yaml:"offloadAfterMinutes"`
+	EnableColdStorage       bool `yaml:"enableColdStorage"`
+	ModelLoadTimeoutSeconds int  `yaml:"modelLoadTimeoutSeconds"`
 }
 
 type Config struct {
@@ -235,8 +236,9 @@ func GetConfig() *Config {
 				LoraModulesDir:      "/tmp/lora-modules",
 				InputPrice:          "10000000",
 				OutputPrice:         "10000000",
-				OffloadAfterMinutes: 60,
-				EnableColdStorage:   false,
+			OffloadAfterMinutes:     60,
+			EnableColdStorage:       false,
+			ModelLoadTimeoutSeconds: 300,
 			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,

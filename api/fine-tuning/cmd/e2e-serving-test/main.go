@@ -96,8 +96,9 @@ func main() {
 		MaxLoraModules:      16,
 		MaxCpuLoras:         32,
 		LoraModulesDir:      "/root/e2e-lora-modules",
-		OffloadAfterMinutes: 60,
-		EnableColdStorage:   false,
+		OffloadAfterMinutes:     60,
+		EnableColdStorage:       false,
+		ModelLoadTimeoutSeconds: 300,
 	}
 
 	mgr := serving.NewManager(database, servingCfg, logger, nil)
@@ -316,6 +317,45 @@ func main() {
 		if chunks < 2 {
 			return fmt.Errorf("expected multiple chunks, got %d", chunks)
 		}
+		return nil
+	})
+
+	run("Chat completion with wait_for_model on active model", func() error {
+		reqBody := map[string]interface{}{
+			"model":          modelNames[0],
+			"messages":       []map[string]string{{"role": "user", "content": "What is 2+2?"}},
+			"max_tokens":     30,
+			"wait_for_model": true,
+		}
+		bodyBytes, _ := json.Marshal(reqBody)
+		resp, body, err := httpPost("http://localhost:3080/v1/serving/v1/chat/completions", bodyBytes, map[string]string{
+			"Authorization": authHeader,
+			"Content-Type":  "application/json",
+		})
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != 200 {
+			return fmt.Errorf("expected 200 for active model with wait_for_model, got %d: %s", resp.StatusCode, body)
+		}
+		fmt.Printf("  Response (wait_for_model=true, active): %s\n", truncate(body, 120))
+		return nil
+	})
+
+	run("Health endpoint shows model_load_timeout_sec", func() error {
+		resp, body, err := httpGet("http://localhost:3080/v1/serving/health", nil)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != 200 {
+			return fmt.Errorf("expected 200, got %d", resp.StatusCode)
+		}
+		var health map[string]interface{}
+		json.Unmarshal([]byte(body), &health)
+		if _, ok := health["model_load_timeout_sec"]; !ok {
+			return fmt.Errorf("model_load_timeout_sec missing from health response: %s", body)
+		}
+		fmt.Printf("  model_load_timeout_sec: %v\n", health["model_load_timeout_sec"])
 		return nil
 	})
 

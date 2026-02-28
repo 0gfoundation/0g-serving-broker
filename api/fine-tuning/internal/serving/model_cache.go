@@ -103,6 +103,62 @@ func (m *Manager) offloadStaleModels() {
 	}
 }
 
+// getOrCreateReadyCh returns a channel that will be closed when the model
+// transitions out of the loading state. Must be called with m.mu held.
+func (m *Manager) getOrCreateReadyCh(modelName string) chan struct{} {
+	ch, exists := m.modelReadyChs[modelName]
+	if !exists {
+		ch = make(chan struct{})
+		m.modelReadyChs[modelName] = ch
+	}
+	return ch
+}
+
+// notifyModelReady closes the ready channel for a model, waking all waiters.
+// Must be called with m.mu held.
+func (m *Manager) notifyModelReady(modelName string) {
+	if ch, exists := m.modelReadyChs[modelName]; exists {
+		close(ch)
+		delete(m.modelReadyChs, modelName)
+	}
+}
+
+// WaitForModel blocks until the model reaches the active state, the context
+// is cancelled, or the timeout expires. Returns the final model state.
+func (m *Manager) WaitForModel(ctx context.Context, modelName string, timeout time.Duration) (ModelState, error) {
+	m.mu.RLock()
+	model, exists := m.servedModels[modelName]
+	if !exists {
+		m.mu.RUnlock()
+		return 0, fmt.Errorf("model not found: %s", modelName)
+	}
+	if model.State == ModelStateActive {
+		m.mu.RUnlock()
+		return ModelStateActive, nil
+	}
+	m.mu.RUnlock()
+
+	// Get or create the notification channel (needs write lock).
+	m.mu.Lock()
+	ch := m.getOrCreateReadyCh(modelName)
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case <-ch:
+		// Channel closed — model restored (or failed). Check final state.
+		state, ok := m.GetModelState(modelName)
+		if !ok {
+			return 0, fmt.Errorf("model disappeared: %s", modelName)
+		}
+		return state, nil
+	case <-ctx.Done():
+		return ModelStateLoading, ctx.Err()
+	}
+}
+
 // RestoreModel triggers an async download of an archived model from 0G Storage.
 // Returns nil immediately if the model is already active or already loading.
 func (m *Manager) RestoreModel(ctx context.Context, modelName string) error {
@@ -122,16 +178,18 @@ func (m *Manager) RestoreModel(ctx context.Context, modelName string) error {
 		return nil
 	case ModelStateArchived:
 		model.State = ModelStateLoading
+		m.getOrCreateReadyCh(modelName)
 		m.mu.Unlock()
 	}
 
 	go func() {
-		if err := m.downloadAndActivate(ctx, modelName); err != nil {
+		if err := m.downloadAndActivate(context.Background(), modelName); err != nil {
 			m.logger.Errorf("failed to restore model %s from cold storage: %v", modelName, err)
 			m.mu.Lock()
 			if mdl, ok := m.servedModels[modelName]; ok {
 				mdl.State = ModelStateArchived
 			}
+			m.notifyModelReady(modelName)
 			m.mu.Unlock()
 		}
 	}()
@@ -175,6 +233,7 @@ func (m *Manager) downloadAndActivate(ctx context.Context, modelName string) err
 		mdl.State = ModelStateActive
 		mdl.LastAccessedAt = time.Now()
 	}
+	m.notifyModelReady(modelName)
 	m.mu.Unlock()
 
 	m.logger.Infof("model %s restored from cold storage and activated", modelName)

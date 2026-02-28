@@ -132,6 +132,8 @@ func (p *Proxy) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	waitForModel, _ := reqMap["wait_for_model"].(bool)
+
 	switch served.State {
 	case ModelStateArchived:
 		if err := p.manager.RestoreModel(c.Request.Context(), modelName); err != nil {
@@ -139,19 +141,45 @@ func (p *Proxy) handleChatCompletions(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate model loading"})
 			return
 		}
-		c.JSON(http.StatusAccepted, gin.H{
-			"error":  "Model is being loaded from cold storage. Please retry in a few moments.",
-			"status": "loading",
-			"model":  modelName,
-		})
-		return
+		if !waitForModel {
+			c.JSON(http.StatusAccepted, gin.H{
+				"error":  "Model is being loaded from cold storage. Please retry in a few moments, or set wait_for_model=true to wait.",
+				"status": "loading",
+				"model":  modelName,
+			})
+			return
+		}
+		timeout := p.modelLoadTimeout()
+		p.logger.Infof("client waiting for model %s to load from cold storage (timeout: %s)", modelName, timeout)
+		state, err := p.manager.WaitForModel(c.Request.Context(), modelName, timeout)
+		if err != nil || state != ModelStateActive {
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error":  "Model loading timed out or failed. Please retry.",
+				"status": "timeout",
+				"model":  modelName,
+			})
+			return
+		}
 	case ModelStateLoading:
-		c.JSON(http.StatusAccepted, gin.H{
-			"error":  "Model is currently being loaded. Please retry shortly.",
-			"status": "loading",
-			"model":  modelName,
-		})
-		return
+		if !waitForModel {
+			c.JSON(http.StatusAccepted, gin.H{
+				"error":  "Model is currently being loaded. Please retry shortly, or set wait_for_model=true to wait.",
+				"status": "loading",
+				"model":  modelName,
+			})
+			return
+		}
+		timeout := p.modelLoadTimeout()
+		p.logger.Infof("client waiting for model %s (already loading, timeout: %s)", modelName, timeout)
+		state, err := p.manager.WaitForModel(c.Request.Context(), modelName, timeout)
+		if err != nil || state != ModelStateActive {
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error":  "Model loading timed out or failed. Please retry.",
+				"status": "timeout",
+				"model":  modelName,
+			})
+			return
+		}
 	}
 
 	p.manager.RecordAccess(modelName)
@@ -345,13 +373,14 @@ func (p *Proxy) handleHealth(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"vllm_ready":      ready,
-		"total_models":    len(models),
-		"active_on_disk":  active,
-		"archived_cold":   archived,
-		"loading":         loading,
-		"cold_storage":    p.manager.config.EnableColdStorage,
-		"offload_minutes": p.manager.config.OffloadAfterMinutes,
+		"vllm_ready":             ready,
+		"total_models":           len(models),
+		"active_on_disk":         active,
+		"archived_cold":          archived,
+		"loading":                loading,
+		"cold_storage":           p.manager.config.EnableColdStorage,
+		"offload_minutes":        p.manager.config.OffloadAfterMinutes,
+		"model_load_timeout_sec": p.manager.config.ModelLoadTimeoutSeconds,
 	})
 }
 
@@ -362,6 +391,14 @@ func isStreamRequest(body []byte) bool {
 	}
 	stream, ok := m["stream"].(bool)
 	return ok && stream
+}
+
+func (p *Proxy) modelLoadTimeout() time.Duration {
+	secs := p.manager.config.ModelLoadTimeoutSeconds
+	if secs <= 0 {
+		secs = 300
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func parseUUID(s string) (uuid.UUID, error) {

@@ -2,6 +2,7 @@ package serving
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,15 +47,17 @@ func newTestManager(t *testing.T) (*Manager, string) {
 	}
 
 	m := &Manager{
-		servedModels: make(map[string]*ServedModel),
-		logger:       newTestLogger(),
+		servedModels:   make(map[string]*ServedModel),
+		modelReadyChs:  make(map[string]chan struct{}),
+		logger:         newTestLogger(),
 		config: ServingConfig{
-			Enable:              true,
-			MaxLoraModules:      16,
-			MaxCpuLoras:         32,
-			LoraModulesDir:      loraDir,
-			OffloadAfterMinutes: 5,
-			EnableColdStorage:   true,
+			Enable:                  true,
+			MaxLoraModules:          16,
+			MaxCpuLoras:             32,
+			LoraModulesDir:          loraDir,
+			OffloadAfterMinutes:     5,
+			EnableColdStorage:       true,
+			ModelLoadTimeoutSeconds: 10,
 		},
 		loraModulesDir: loraDir,
 		storageClient:  &mockStorageClient{},
@@ -557,5 +560,186 @@ func TestFullOffloadRestoreCycle(t *testing.T) {
 	symlink := filepath.Join(m.loraModulesDir, name)
 	if _, err := os.Lstat(symlink); err != nil {
 		t.Fatalf("symlink should be restored: %v", err)
+	}
+}
+
+func TestWaitForModelAlreadyActive(t *testing.T) {
+	m, tmpDir := newTestManager(t)
+	loraPath := createFakeLoRA(t, tmpDir)
+	name, _ := m.RegisterModel(uuid.New(), "0xUser1", "base", loraPath, "")
+
+	ctx := context.Background()
+	state, err := m.WaitForModel(ctx, name, 1*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForModel on active model should not error: %v", err)
+	}
+	if state != ModelStateActive {
+		t.Fatalf("expected Active, got %v", state)
+	}
+}
+
+func TestWaitForModelRestoreCompletes(t *testing.T) {
+	m, tmpDir := newTestManager(t)
+	storage := &mockStorageClient{
+		downloadFn: func(ctx context.Context, hash, filePath string, isTurbo bool) (string, error) {
+			time.Sleep(200 * time.Millisecond)
+			if err := os.MkdirAll(filePath, 0755); err != nil {
+				return "", err
+			}
+			return filePath, nil
+		},
+	}
+	m.storageClient = storage
+
+	loraPath := createFakeLoRA(t, tmpDir)
+	name, _ := m.RegisterModel(uuid.New(), "0xUser1", "base", loraPath, "0xHash")
+
+	m.mu.Lock()
+	m.servedModels[name].State = ModelStateArchived
+	m.mu.Unlock()
+	os.RemoveAll(filepath.Join(m.loraModulesDir, name))
+	os.RemoveAll(loraPath)
+
+	ctx := context.Background()
+	if err := m.RestoreModel(ctx, name); err != nil {
+		t.Fatalf("RestoreModel failed: %v", err)
+	}
+
+	state, err := m.WaitForModel(ctx, name, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForModel should succeed: %v", err)
+	}
+	if state != ModelStateActive {
+		t.Fatalf("expected Active after wait, got %v", state)
+	}
+}
+
+func TestWaitForModelTimeout(t *testing.T) {
+	m, tmpDir := newTestManager(t)
+	storage := &mockStorageClient{
+		downloadFn: func(ctx context.Context, hash, filePath string, isTurbo bool) (string, error) {
+			time.Sleep(5 * time.Second)
+			return filePath, nil
+		},
+	}
+	m.storageClient = storage
+
+	loraPath := createFakeLoRA(t, tmpDir)
+	name, _ := m.RegisterModel(uuid.New(), "0xUser1", "base", loraPath, "0xHash")
+
+	m.mu.Lock()
+	m.servedModels[name].State = ModelStateArchived
+	m.mu.Unlock()
+
+	ctx := context.Background()
+	m.RestoreModel(ctx, name)
+
+	_, err := m.WaitForModel(ctx, name, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("WaitForModel should timeout")
+	}
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestWaitForModelContextCancelled(t *testing.T) {
+	m, tmpDir := newTestManager(t)
+	storage := &mockStorageClient{
+		downloadFn: func(ctx context.Context, hash, filePath string, isTurbo bool) (string, error) {
+			time.Sleep(5 * time.Second)
+			return filePath, nil
+		},
+	}
+	m.storageClient = storage
+
+	loraPath := createFakeLoRA(t, tmpDir)
+	name, _ := m.RegisterModel(uuid.New(), "0xUser1", "base", loraPath, "0xHash")
+
+	m.mu.Lock()
+	m.servedModels[name].State = ModelStateArchived
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.RestoreModel(ctx, name)
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := m.WaitForModel(ctx, name, 10*time.Second)
+	if err == nil {
+		t.Fatal("WaitForModel should fail on context cancellation")
+	}
+}
+
+func TestWaitForModelMultipleWaiters(t *testing.T) {
+	m, tmpDir := newTestManager(t)
+	storage := &mockStorageClient{
+		downloadFn: func(ctx context.Context, hash, filePath string, isTurbo bool) (string, error) {
+			time.Sleep(200 * time.Millisecond)
+			if err := os.MkdirAll(filePath, 0755); err != nil {
+				return "", err
+			}
+			return filePath, nil
+		},
+	}
+	m.storageClient = storage
+
+	loraPath := createFakeLoRA(t, tmpDir)
+	name, _ := m.RegisterModel(uuid.New(), "0xUser1", "base", loraPath, "0xHash")
+
+	m.mu.Lock()
+	m.servedModels[name].State = ModelStateArchived
+	m.mu.Unlock()
+	os.RemoveAll(filepath.Join(m.loraModulesDir, name))
+	os.RemoveAll(loraPath)
+
+	ctx := context.Background()
+	m.RestoreModel(ctx, name)
+
+	results := make(chan ModelState, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			state, _ := m.WaitForModel(ctx, name, 5*time.Second)
+			results <- state
+		}()
+	}
+
+	for i := 0; i < 3; i++ {
+		state := <-results
+		if state != ModelStateActive {
+			t.Fatalf("waiter %d got state %v, want Active", i, state)
+		}
+	}
+}
+
+func TestWaitForModelRestoreFails(t *testing.T) {
+	m, tmpDir := newTestManager(t)
+	storage := &mockStorageClient{
+		downloadFn: func(ctx context.Context, hash, filePath string, isTurbo bool) (string, error) {
+			time.Sleep(100 * time.Millisecond)
+			return "", fmt.Errorf("storage unavailable")
+		},
+	}
+	m.storageClient = storage
+
+	loraPath := createFakeLoRA(t, tmpDir)
+	name, _ := m.RegisterModel(uuid.New(), "0xUser1", "base", loraPath, "0xHash")
+
+	m.mu.Lock()
+	m.servedModels[name].State = ModelStateArchived
+	m.mu.Unlock()
+
+	ctx := context.Background()
+	m.RestoreModel(ctx, name)
+
+	state, err := m.WaitForModel(ctx, name, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForModel should not return error on restore failure: %v", err)
+	}
+	if state != ModelStateArchived {
+		t.Fatalf("expected Archived (restore failed), got %v", state)
 	}
 }

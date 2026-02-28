@@ -288,8 +288,9 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 			MaxLoraModules:      cfg.Serving.MaxLoraModules,
 			MaxCpuLoras:         cfg.Serving.MaxCpuLoras,
 			LoraModulesDir:      cfg.Serving.LoraModulesDir,
-			OffloadAfterMinutes: cfg.Serving.OffloadAfterMinutes,
-			EnableColdStorage:   cfg.Serving.EnableColdStorage,
+			OffloadAfterMinutes:     cfg.Serving.OffloadAfterMinutes,
+			EnableColdStorage:       cfg.Serving.EnableColdStorage,
+			ModelLoadTimeoutSeconds: cfg.Serving.ModelLoadTimeoutSeconds,
 		}, logger, svc.storageClient)
 		if err := servingMgr.Start(ctx); err != nil {
 			return err
