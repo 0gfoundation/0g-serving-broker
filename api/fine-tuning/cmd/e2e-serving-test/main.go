@@ -99,6 +99,7 @@ func main() {
 		OffloadAfterMinutes:     60,
 		EnableColdStorage:       false,
 		ModelLoadTimeoutSeconds: 300,
+		GpuMemoryUtilization:    0.6,
 	}
 
 	mgr := serving.NewManager(database, servingCfg, logger, nil)

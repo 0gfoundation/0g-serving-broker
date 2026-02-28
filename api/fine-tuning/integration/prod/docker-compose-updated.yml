@@ -1,0 +1,167 @@
+services:
+  config-init:
+    image: alpine:latest
+    container_name: config-init
+    volumes:
+      - /dstack/user_config:/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat > /config/config.yaml << 'EOF'
+        networks:
+          ethereum0g:
+            url: "https://evmrpc-testnet.0g.ai"
+            chainID: 16602
+            privateKeys:
+              - "2CE46A1C3B5E5F73EDB79C343BB869EF94709E6BEBB3B29B70937D7B5C6D5751"
+            transactionLimit: 1000000
+
+        service:
+          servingUrl: "#DSTACK_APP_URL#"
+          pricePerToken: 1
+          quota:
+            cpuCount: 8
+            memory: 187
+            storage: 900
+            gpuType: "H200"
+            gpuCount: 1
+
+          customizedModels:
+            - name: "Qwen2.5-0.5B-Instruct"
+              hash: "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7"
+              image: "ghcr.io/0gfoundation/fine-tuning-test:v1"
+              dataType: "text"
+              trainingScript: "/app/train_lora.py"
+              description: "Qwen2.5-0.5B LoRA fine-tuning"
+              tokenizer: "Qwen/Qwen2.5-0.5B-Instruct"
+            - name: "Qwen3-32B"
+              hash: "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5"
+              image: "ghcr.io/0gfoundation/fine-tuning-test:v1"
+              dataType: "text"
+              trainingScript: "/app/train_lora.py"
+              description: "Qwen3-32B LoRA fine-tuning"
+              tokenizer: "Qwen/Qwen3-32B"
+              localPath: "/dstack/persistent/models/Qwen3-32B"
+
+          modelHuggingFaceFallback:
+            "0xb4f76a886b8655c92bb021922d60b5e4d9271a5c9da98b6cb10937a06c2c75a7": "Qwen/Qwen2.5-0.5B-Instruct"
+            "0x2e6f9620c35bdcb2b753cc7aa34e78077a8ed133e36fa36008fd6bdfd29af3a5": "Qwen/Qwen3-32B"
+
+          # IMPORTANT: Skip 0G Storage upload - users download directly from TEE
+          skipStorageUpload: true
+          fileRetentionHours: 72
+
+        database:
+          fineTune: "root:123456@tcp(0g-fine-tune-broker-db:3306)/fineTune?parseTime=true"
+
+        logger:
+          level: "debug"
+          path: "/tmp/fine-tuning.log"
+
+        finalizerWorkerCount: 1
+        executorWorkerCount: 1
+        setupWorkerCount: 1
+        maxSetupRetriesPerTask: 3
+        maxExecutorRetriesPerTask: 3
+        maxFinalizerRetriesPerTask: 10
+        maxSettlementRetriesPerTask: 10
+        settlementBatchSize: 1
+        deliveredTaskAckTimeoutSecs: 21600
+        dataRetentionDays: 3
+        maxTaskQueueSize: 5
+        EOF
+        echo "Config created with skipStorageUpload: true"
+
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-fine-tune-broker-db
+    ports:
+      - "33060:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=fineTune
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - localhost
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+
+  model-downloader:
+    image: python:3.11-slim
+    container_name: model-downloader
+    volumes:
+      - /dstack/persistent:/dstack/persistent
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        if [ -d "/dstack/persistent/models/Qwen3-32B" ]; then
+          echo "Model already exists at /dstack/persistent/models/Qwen3-32B"
+          echo "Model ready!"
+        else
+          echo "Installing huggingface_hub..."
+          pip install -q huggingface_hub
+          echo "Downloading Qwen/Qwen3-32B to /dstack/persistent/models/Qwen3-32B..."
+          python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='Qwen/Qwen3-32B',
+    local_dir='/dstack/persistent/models/Qwen3-32B',
+    local_dir_use_symlinks=False,
+    resume_download=True
+)
+print('Downloaded to: /dstack/persistent/models/Qwen3-32B')
+"
+          echo "Model ready!"
+        fi
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+
+  0g-fine-tune-broker:
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    privileged: true
+    restart: always
+    container_name: 0g-fine-tune-broker
+    environment:
+      - PORT=3080
+      - CONFIG_FILE=/etc/config.yaml
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TOKEN=PHALA@2025
+    ports:
+      - "#PORT#:3080"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /dstack/user_config/config.yaml:/etc/config.yaml
+      - /tmp:/tmp
+      - /tmp/0g-transformer-bridge:/opt/transformer-bridge
+      - ./models:/fine-tuning/execution/models
+      - /dstack/persistent:/dstack/persistent
+    command: 0g-fine-tuning-server
+    networks:
+      - localhost
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      model-downloader:
+        condition: service_completed_successfully
+
+volumes:
+  mysql-data:
+
+networks:
+  localhost:
+    name: localhost
+    external: false

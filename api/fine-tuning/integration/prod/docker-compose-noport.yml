@@ -1,0 +1,68 @@
+services:
+  config-init:
+    image: alpine:latest
+    volumes:
+      - config-vol:/config
+    command: sh -c 'echo "bmV0d29ya3M6CiAgZXRoZXJldW0wZzoKICAgIHVybDogImh0dHBzOi8vZXZtcnBjLXRlc3RuZXQuMGcuYWkiCiAgICBjaGFpbklEOiAxNjYwMgogICAgcHJpdmF0ZUtleXM6CiAgICAgIC0gIjJDRTQ2QTFDM0I1RTVGNzNFREI3OUMzNDNCQjg2OUVGOTQ3MDlFNkJFQkIzQjI5QjcwOTM3RDdCNUM2RDU3NTEiCiAgICB0cmFuc2FjdGlvbkxpbWl0OiAxMDAwMDAwCnNlcnZpY2U6CiAgc2VydmluZ1VybDogIiNEU1RBQ0tfQVBQX1VSTCMiCiAgcHJpY2VQZXJUb2tlbjogMQogIHF1b3RhOgogICAgY3B1Q291bnQ6IDgKICAgIG1lbW9yeTogMTg3CiAgICBzdG9yYWdlOiA5MDAKICAgIGdwdVR5cGU6IEgyMDAKICAgIGdwdUNvdW50OiAxCiAgY3VzdG9taXplZE1vZGVsczoKICAgIC0gbmFtZTogUXdlbjMtMzJCCiAgICAgIGhhc2g6ICIweDJlNmY5NjIwYzM1YmRjYjJiNzUzY2M3YWEzNGU3ODA3N2E4ZWQxMzNlMzZmYTM2MDA4ZmQ2YmRmZDI5YWYzYTUiCiAgICAgIGltYWdlOiBnaGNyLmlvLzBnZm91bmRhdGlvbi9maW5lLXR1bmluZy10ZXN0OnYxCiAgICAgIGRhdGFUeXBlOiB0ZXh0CiAgICAgIHRyYWluaW5nU2NyaXB0OiAvYXBwL3RyYWluX2xvcmEucHkKICAgICAgZGVzY3JpcHRpb246IFF3ZW4zLTMyQiBMb1JBIGZpbmUtdHVuaW5nCiAgICAgIHRva2VuaXplcjogUXdlbi9Rd2VuMy0zMkIKICAgICAgbG9jYWxQYXRoOiAvZHN0YWNrL3BlcnNpc3RlbnQvbW9kZWxzL1F3ZW4zLTMyQgogIG1vZGVsSHVnZ2luZ0ZhY2VGYWxsYmFjazoKICAgICIweDJlNmY5NjIwYzM1YmRjYjJiNzUzY2M3YWEzNGU3ODA3N2E4ZWQxMzNlMzZmYTM2MDA4ZmQ2YmRmZDI5YWYzYTUiOiBRd2VuL1F3ZW4zLTMyQgogIHNraXBTdG9yYWdlVXBsb2FkOiB0cnVlCiAgZmlsZVJldGVudGlvbkhvdXJzOiA3MgpkYXRhYmFzZToKICBmaW5lVHVuZTogcm9vdDoxMjM0NTZAdGNwKDBnLWZpbmUtdHVuZS1icm9rZXItZGI6MzMwNikvZmluZVR1bmU/cGFyc2VUaW1lPXRydWUKbG9nZ2VyOgogIGxldmVsOiBkZWJ1ZwogIHBhdGg6IC90bXAvZmluZS10dW5pbmcubG9nCmZpbmFsaXplcldvcmtlckNvdW50OiAxCmV4ZWN1dG9yV29ya2VyQ291bnQ6IDEKc2V0dXBXb3JrZXJDb3VudDogMQptYXhTZXR1cFJldHJpZXNQZXJUYXNrOiAzCm1heEV4ZWN1dG9yUmV0cmllc1BlclRhc2s6IDMKbWF4RmluYWxpemVyUmV0cmllc1BlclRhc2s6IDEwCm1heFNldHRsZW1lbnRSZXRyaWVzUGVyVGFzazogMTAKc2V0dGxlbWVudEJhdGNoU2l6ZTogMQpkZWxpdmVyZWRUYXNrQWNrVGltZW91dFNlY3M6IDIxNjAwCmRhdGFSZXRlbnRpb25EYXlzOiAzCm1heFRhc2tRdWV1ZVNpemU6IDUK" | base64 -d > /config/config.yaml'
+
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-fine-tune-broker-db
+    ports:
+      - "33060:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=fineTune
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - localhost
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+
+  0g-fine-tune-broker:
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    privileged: true
+    restart: always
+    container_name: 0g-fine-tune-broker
+    environment:
+      - PORT=3080
+      - CONFIG_FILE=/etc/config/config.yaml
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TOKEN=PHALA@2025
+    ports:
+      - "80:3080"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - /var/run/docker.sock:/var/run/docker.sock
+      - config-vol:/etc/config:ro
+      - /tmp:/tmp
+      - /tmp/0g-transformer-bridge:/opt/transformer-bridge
+      - ./models:/fine-tuning/execution/models
+      - /dstack/persistent:/dstack/persistent
+    command: ["0g-fine-tuning-server", "--config", "/etc/config/config.yaml"]
+    networks:
+      - localhost
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
+  config-vol:
+
+networks:
+  localhost:
+    name: localhost
+    external: false

@@ -60,9 +60,10 @@ type ServingConfig struct {
 	MaxLoraModules      int    `yaml:"maxLoraModules"`
 	MaxCpuLoras         int    `yaml:"maxCpuLoras"`
 	LoraModulesDir      string `yaml:"loraModulesDir"`
-	OffloadAfterMinutes     int  `yaml:"offloadAfterMinutes"`
-	EnableColdStorage       bool `yaml:"enableColdStorage"`
-	ModelLoadTimeoutSeconds int  `yaml:"modelLoadTimeoutSeconds"`
+	OffloadAfterMinutes     int     `yaml:"offloadAfterMinutes"`
+	EnableColdStorage       bool    `yaml:"enableColdStorage"`
+	ModelLoadTimeoutSeconds int     `yaml:"modelLoadTimeoutSeconds"`
+	GpuMemoryUtilization    float64 `yaml:"gpuMemoryUtilization"`
 }
 
 // NewManager creates a new serving Manager with the given database, config, logger,
@@ -173,6 +174,9 @@ func (m *Manager) startVLLM(ctx context.Context) {
 	}
 	if m.config.MaxCpuLoras > 0 {
 		args = append(args, "--max-cpu-loras", fmt.Sprintf("%d", m.config.MaxCpuLoras))
+	}
+	if m.config.GpuMemoryUtilization > 0 && m.config.GpuMemoryUtilization < 1.0 {
+		args = append(args, "--gpu-memory-utilization", fmt.Sprintf("%.2f", m.config.GpuMemoryUtilization))
 	}
 
 	m.logger.Infof("starting vLLM with args: %v", args)

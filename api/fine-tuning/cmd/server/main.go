@@ -291,6 +291,7 @@ func runApplication(ctx context.Context, cfg *config.Config, svc *ApplicationSer
 			OffloadAfterMinutes:     cfg.Serving.OffloadAfterMinutes,
 			EnableColdStorage:       cfg.Serving.EnableColdStorage,
 			ModelLoadTimeoutSeconds: cfg.Serving.ModelLoadTimeoutSeconds,
+			GpuMemoryUtilization:    cfg.Serving.GpuMemoryUtilization,
 		}, logger, svc.storageClient)
 		if err := servingMgr.Start(ctx); err != nil {
 			return err
