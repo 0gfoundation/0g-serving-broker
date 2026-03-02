@@ -126,6 +126,11 @@ type Images struct {
 	OverrideImage          bool   `yaml:"overrideImage"`
 }
 
+type MonitorConfig struct {
+	Enable       bool   `yaml:"enable"`
+	EventAddress string `yaml:"eventAddress"`
+}
+
 type Config struct {
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
@@ -138,6 +143,7 @@ type Config struct {
 	Service                     Service             `yaml:"service"`
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
 	Logger                      config.LoggerConfig `yaml:"logger"`
+	Monitor                     MonitorConfig       `yaml:"monitor"`
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
 	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 	GasPrice                    string              `yaml:"gasPrice"`
@@ -221,6 +227,10 @@ func GetConfig() *Config {
 				Level:         "info",
 				Path:          "",
 				RotationCount: 50,
+			},
+			Monitor: MonitorConfig{
+				Enable:       false,
+				EventAddress: ":3081",
 			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,

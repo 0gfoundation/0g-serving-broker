@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 
 	image "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -22,8 +24,10 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/services"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/monitor"
 	"github.com/docker/docker/client"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 //go:generate swag fmt
@@ -267,6 +271,20 @@ func runApplication(ctx context.Context, cfg *config.Config, services *Applicati
 	}
 
 	engine := gin.New()
+
+	var wg sync.WaitGroup
+
+	if cfg.Monitor.Enable {
+		monitor.Init(cfg.Service.ServingUrl, ctx)
+		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+		engine.Use(monitor.TrackMetrics())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			startTaskStatePoller(ctx, services.db, logger)
+		}()
+	}
+
 	h := handler.New(services.ctrl, logger, cfg.RateLimitRPS, cfg.RateLimitBurst)
 	h.Register(engine)
 
@@ -281,7 +299,6 @@ func runApplication(ctx context.Context, cfg *config.Config, services *Applicati
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	// Listen and Serve, config port with PORT=X
 	go func() {
 		logger.Info("starting http server...")
 		if err := engine.Run(); err != nil {
@@ -292,7 +309,27 @@ func runApplication(ctx context.Context, cfg *config.Config, services *Applicati
 
 	<-stop
 	logger.Info("shutting down server...")
+	wg.Wait()
 	return nil
+}
+
+func startTaskStatePoller(ctx context.Context, database *db.DB, logger log.Logger) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			counts, err := database.CountTasksByState()
+			if err != nil {
+				logger.Warnf("failed to count tasks by state for metrics: %v", err)
+				continue
+			}
+			monitor.UpdateTaskStateGauge(counts)
+		}
+	}
 }
 
 // copyDirectory recursively copies a directory from src to dst

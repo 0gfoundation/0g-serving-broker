@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/0glabs/0g-serving-broker/fine-tuning/monitor"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
@@ -38,6 +39,8 @@ func (h *Handler) CreateTask(ctx *gin.Context) {
 		return
 	}
 
+	monitor.RecordTaskCreated()
+	monitor.RecordUniqueUser(task.UserAddress)
 	ctx.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
