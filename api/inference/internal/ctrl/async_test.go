@@ -49,6 +49,16 @@ func (m *mockDB) CreateAsyncJob(job model.AsyncJob) error {
 	return nil
 }
 
+func (m *mockDB) CreateAsyncJobWithBilling(job model.AsyncJob, req model.Request) error {
+	if m.errOnCreate != nil {
+		return m.errOnCreate
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobs[job.JobID] = &job
+	return nil
+}
+
 func (m *mockDB) GetAsyncJob(jobID string) (model.AsyncJob, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -89,7 +99,7 @@ func (m *mockDB) MarkProcessingAsyncJobsAsFailed() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, job := range m.jobs {
-		if job.Status == model.AsyncJobStatusProcessing {
+		if job.Status == model.AsyncJobStatusPending || job.Status == model.AsyncJobStatusProcessing {
 			job.Status = model.AsyncJobStatusFailed
 			job.ErrorMessage = "broker restarted"
 		}
@@ -139,7 +149,7 @@ func (m *mockDB) DeleteExpiredAsyncJobs() error {
 	now := time.Now()
 	for id, job := range m.jobs {
 		if job.ExpiresAt != nil && job.ExpiresAt.Before(now) {
-			if job.Status == model.AsyncJobStatusCompleted || job.Status == model.AsyncJobStatusFailed {
+			if job.Status == model.AsyncJobStatusPending || job.Status == model.AsyncJobStatusCompleted || job.Status == model.AsyncJobStatusFailed {
 				delete(m.jobs, id)
 			}
 		}
@@ -169,6 +179,8 @@ func newTestCtrl(store *mockDB, providerURL string) *Ctrl {
 		whitelistUsers:  make(map[string]struct{}),
 		serviceCache:    svcCache,
 	}
+	// Skip TEE signing in tests (no teeService available)
+	c.Service.TargetSeparated = true
 	if providerURL != "" {
 		c.Service.TargetURL = providerURL
 	}
@@ -191,8 +203,8 @@ func TestInitAsyncProcessing_CrashRecovery(t *testing.T) {
 	store := newMockDB()
 	store.CreateAsyncJob(model.AsyncJob{JobID: "stale-1", Status: model.AsyncJobStatusProcessing})
 	store.CreateAsyncJob(model.AsyncJob{JobID: "stale-2", Status: model.AsyncJobStatusProcessing})
+	store.CreateAsyncJob(model.AsyncJob{JobID: "stale-3", Status: model.AsyncJobStatusPending})
 	store.CreateAsyncJob(model.AsyncJob{JobID: "ok-1", Status: model.AsyncJobStatusCompleted})
-	store.CreateAsyncJob(model.AsyncJob{JobID: "ok-2", Status: model.AsyncJobStatusPending})
 
 	ctrl := &Ctrl{
 		logger:         &testAsyncLoggerImpl{},
@@ -209,8 +221,8 @@ func TestInitAsyncProcessing_CrashRecovery(t *testing.T) {
 
 	j1, _ := store.GetAsyncJob("stale-1")
 	j2, _ := store.GetAsyncJob("stale-2")
-	j3, _ := store.GetAsyncJob("ok-1")
-	j4, _ := store.GetAsyncJob("ok-2")
+	j3, _ := store.GetAsyncJob("stale-3")
+	j4, _ := store.GetAsyncJob("ok-1")
 
 	if j1.Status != model.AsyncJobStatusFailed || j1.ErrorMessage != "broker restarted" {
 		t.Errorf("stale-1: expected failed with 'broker restarted', got %s / %q", j1.Status, j1.ErrorMessage)
@@ -218,11 +230,12 @@ func TestInitAsyncProcessing_CrashRecovery(t *testing.T) {
 	if j2.Status != model.AsyncJobStatusFailed {
 		t.Errorf("stale-2: expected failed, got %s", j2.Status)
 	}
-	if j3.Status != model.AsyncJobStatusCompleted {
-		t.Errorf("ok-1: expected completed (unchanged), got %s", j3.Status)
+	// Pending jobs from previous instance are also marked as failed (in-memory queue is gone)
+	if j3.Status != model.AsyncJobStatusFailed || j3.ErrorMessage != "broker restarted" {
+		t.Errorf("stale-3: expected failed with 'broker restarted', got %s / %q", j3.Status, j3.ErrorMessage)
 	}
-	if j4.Status != model.AsyncJobStatusPending {
-		t.Errorf("ok-2: expected pending (unchanged), got %s", j4.Status)
+	if j4.Status != model.AsyncJobStatusCompleted {
+		t.Errorf("ok-1: expected completed (unchanged), got %s", j4.Status)
 	}
 }
 
@@ -1294,6 +1307,8 @@ func TestConcurrentWorkersRespectLimit(t *testing.T) {
 		whitelistUsers:  make(map[string]struct{}),
 	}
 	ctrl.Service.TargetURL = provider.URL
+	// Skip TEE signing in tests (no teeService available)
+	ctrl.Service.TargetSeparated = true
 
 	if err := ctrl.InitAsyncProcessing(maxWorkers, 20, 5*time.Minute, 1*time.Hour, 1*time.Minute); err != nil {
 		t.Fatalf("InitAsyncProcessing failed: %v", err)
@@ -1346,6 +1361,9 @@ type countingMockDB struct {
 
 func (c *countingMockDB) CreateAsyncJob(job model.AsyncJob) error {
 	return c.inner.CreateAsyncJob(job)
+}
+func (c *countingMockDB) CreateAsyncJobWithBilling(job model.AsyncJob, req model.Request) error {
+	return c.inner.CreateAsyncJobWithBilling(job, req)
 }
 func (c *countingMockDB) GetAsyncJob(jobID string) (model.AsyncJob, error) {
 	return c.inner.GetAsyncJob(jobID)

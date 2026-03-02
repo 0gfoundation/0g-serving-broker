@@ -41,7 +41,6 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 	c.asyncJobQueue = make(chan asyncJobParams, maxQueueSize)
 	c.asyncResultTTL = resultTTL
 	c.asyncJobTimeout = jobTimeout
-	c.asyncEnabled = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.asyncCancel = cancel
@@ -75,39 +74,39 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 		}
 	}()
 
+	c.asyncEnabled = true
 	c.logger.Infof("Async processing initialized: workers=%d, queueSize=%d, resultTTL=%v, cleanupInterval=%v, jobTimeout=%v",
 		maxConcurrent, maxQueueSize, resultTTL, cleanupInterval, jobTimeout)
 	return nil
 }
 
 // asyncWorker is a long-lived goroutine that pulls jobs from the queue and processes them.
-// It exits when the context is cancelled and the queue is drained.
-func (c *Ctrl) asyncWorker(ctx context.Context, workerID int) {
+// It blocks until a job is available, processes it, and repeats. When the channel is closed
+// (by ShutdownAsync), range drains all remaining buffered jobs before exiting — ensuring
+// no accepted jobs are silently dropped.
+func (c *Ctrl) asyncWorker(_ context.Context, workerID int) {
 	defer c.asyncWg.Done()
-	for {
-		select {
-		case job, ok := <-c.asyncJobQueue:
-			if !ok {
-				return // channel closed
-			}
-			c.processAsyncJob(job)
-		case <-ctx.Done():
-			return
-		}
+	for job := range c.asyncJobQueue {
+		c.processAsyncJob(job)
 	}
 }
 
 // ShutdownAsync gracefully shuts down async processing.
-// It closes the job queue, cancels the context, and waits for all workers to finish.
+// It atomically disables new submissions and closes the job queue under asyncMu,
+// then cancels the context and waits for all workers to drain.
 func (c *Ctrl) ShutdownAsync() {
+	c.asyncMu.Lock()
 	if !c.asyncEnabled {
+		c.asyncMu.Unlock()
 		return
 	}
 	c.logger.Info("Shutting down async processing...")
+	c.asyncEnabled = false
 	close(c.asyncJobQueue)
+	c.asyncMu.Unlock()
+
 	c.asyncCancel()
 	c.asyncWg.Wait()
-	c.asyncEnabled = false
 	c.logger.Info("Async processing shut down")
 }
 
@@ -181,17 +180,13 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 	billingReq.RequestHash = billingReq.Nonce
 
 	if !isWhitelisted {
-		// Validate balance
+		// Validate balance before any DB writes
 		if err := c.ValidateRequestWithEstimatedFee(ctx, billingReq, expectedInputFee); err != nil {
-			return "", err
-		}
-		// Persist the billing request
-		if err := c.CreateRequest(billingReq); err != nil {
 			return "", err
 		}
 	}
 
-	// Persist the async job
+	// Persist the async job (and billing request atomically if non-whitelisted)
 	now := time.Now()
 	expiresAt := now.Add(c.asyncResultTTL)
 	job := model.AsyncJob{
@@ -205,17 +200,21 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		OutputCount:    outputCount,
 		ExpiresAt:      &expiresAt,
 	}
-	if err := c.asyncDB.CreateAsyncJob(job); err != nil {
-		// Clean up orphaned billing record so the user is not left with a dangling request
-		if !isWhitelisted {
-			if delErr := c.db.DeleteRequestsByHashes([]string{billingReq.RequestHash}); delErr != nil {
-				c.logger.Errorf("Failed to cleanup billing request %s after async job creation failed: %v", billingReq.RequestHash, delErr)
-			}
+
+	if isWhitelisted {
+		if err := c.asyncDB.CreateAsyncJob(job); err != nil {
+			return "", errors.Wrap(err, "create async job in db")
 		}
-		return "", errors.Wrap(err, "create async job in db")
+	} else {
+		// Single transaction: both billing request and async job succeed or fail together
+		if err := c.asyncDB.CreateAsyncJobWithBilling(job, billingReq); err != nil {
+			return "", errors.Wrap(err, "create async job with billing in db")
+		}
 	}
 
-	// Enqueue for background processing (non-blocking)
+	// Enqueue for background processing (non-blocking).
+	// Protected by asyncMu to prevent send-on-closed-channel panic
+	// if ShutdownAsync runs concurrently.
 	params := asyncJobParams{
 		JobID:          jobID,
 		ServiceType:    svcType,
@@ -225,19 +224,29 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		IsWhitelisted:  isWhitelisted,
 	}
 
-	select {
-	case c.asyncJobQueue <- params:
-		// Enqueued successfully
-	default:
-		// Queue became full between the check and here (rare race) — mark job as failed
-		c.markAsyncJobFailed(jobID, "job queue is full")
+	var enqueueErr error
+	c.asyncMu.RLock()
+	if !c.asyncEnabled {
+		enqueueErr = errors.New("async processing is shutting down")
+	} else {
+		select {
+		case c.asyncJobQueue <- params:
+			// Enqueued successfully
+		default:
+			enqueueErr = errors.New("async job queue is full, please try again later")
+		}
+	}
+	c.asyncMu.RUnlock()
+
+	if enqueueErr != nil {
+		c.markAsyncJobFailed(jobID, enqueueErr.Error())
 		// Clean up orphaned billing record so the user is not left with a dangling request
 		if !isWhitelisted {
 			if delErr := c.db.DeleteRequestsByHashes([]string{billingReq.RequestHash}); delErr != nil {
 				c.logger.Errorf("Failed to cleanup billing request %s after enqueue failed: %v", billingReq.RequestHash, delErr)
 			}
 		}
-		return "", errors.New("async job queue is full, please try again later")
+		return "", enqueueErr
 	}
 
 	return jobID, nil
@@ -270,12 +279,14 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		targetURL += "/images/generations"
 		// Force wait=true for text-to-image
 		parsedURL, err := url.Parse(targetURL)
-		if err == nil {
-			q := parsedURL.Query()
-			q.Set("wait", "true")
-			parsedURL.RawQuery = q.Encode()
-			targetURL = parsedURL.String()
+		if err != nil {
+			c.markAsyncJobFailed(jobID, "invalid target URL: "+err.Error())
+			return
 		}
+		q := parsedURL.Query()
+		q.Set("wait", "true")
+		parsedURL.RawQuery = q.Encode()
+		targetURL = parsedURL.String()
 	case "image-editing":
 		targetURL += "/images/edits"
 	}
@@ -342,12 +353,32 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		return
 	}
 
-	// Serialize response headers
+	// TEE response signing — same as sync path (text_to_image.go, image_editing.go).
+	// When TargetSeparated is false, the broker signs the request+response pair and
+	// caches the signature under a chatKey. The client retrieves the chatKey via the
+	// ZG-Res-Key header on the poll response to verify TEE integrity.
+	var chatKey string
+	if !c.Service.TargetSeparated {
+		chatKey = uuid.NewString()
+		if err := c.signChatWithKey(params.RequestBody, respBody, chatKey); err != nil {
+			c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, err)
+			chatKey = "" // don't store an unusable key
+		}
+	}
+
+	// Serialize response headers, including ZG-Res-Key for TEE verification
 	headerMap := make(map[string][]string)
 	for k, v := range resp.Header {
 		headerMap[k] = v
 	}
-	headerBytes, _ := json.Marshal(headerMap)
+	if chatKey != "" {
+		headerMap["ZG-Res-Key"] = []string{chatKey}
+	}
+	headerBytes, err := json.Marshal(headerMap)
+	if err != nil {
+		c.markAsyncJobFailed(jobID, "failed to marshal response headers: "+err.Error())
+		return
+	}
 
 	// Store result and bill atomically — if either fails, both roll back.
 	// This ensures the user is never billed for a result they cannot retrieve.

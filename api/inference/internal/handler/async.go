@@ -49,7 +49,11 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	if ct := ctx.GetHeader("Content-Type"); ct != "" {
 		headerMap["Content-Type"] = []string{ct}
 	}
-	reqHeaders, _ := json.Marshal(headerMap)
+	reqHeaders, err := json.Marshal(headerMap)
+	if err != nil {
+		handleBrokerError(ctx, err, "marshal request headers")
+		return
+	}
 
 	// Submit the job
 	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
@@ -125,13 +129,30 @@ func (h *Handler) GetAsyncJob(ctx *gin.Context) {
 		ErrorMessage: job.ErrorMessage,
 	}
 
+	// For completed jobs, restore ZG-Res-Key header for TEE verification.
+	// The chatKey was generated and signed during background processing; the client
+	// needs it to verify the response came from a TEE environment.
+	if job.Status == model.AsyncJobStatusCompleted && len(job.ResponseHeaders) > 0 {
+		var storedHeaders map[string][]string
+		if err := json.Unmarshal(job.ResponseHeaders, &storedHeaders); err == nil {
+			if keys, ok := storedHeaders["ZG-Res-Key"]; ok && len(keys) > 0 {
+				ctx.Header("ZG-Res-Key", keys[0])
+			}
+		}
+	}
+
 	// For completed jobs, embed the provider's response as raw JSON in the data field
 	if job.Status == model.AsyncJobStatusCompleted && len(job.ResponseBody) > 0 {
 		// Validate it's proper JSON before embedding; if not, wrap as a JSON string
 		if json.Valid(job.ResponseBody) {
 			resp.Data = json.RawMessage(job.ResponseBody)
 		} else {
-			resp.Data, _ = json.Marshal(string(job.ResponseBody))
+			wrapped, err := json.Marshal(string(job.ResponseBody))
+			if err != nil {
+				handleBrokerError(ctx, err, "marshal response data")
+				return
+			}
+			resp.Data = wrapped
 		}
 	}
 

@@ -12,6 +12,21 @@ func (d *DB) CreateAsyncJob(job model.AsyncJob) error {
 	return d.db.Create(&job).Error
 }
 
+// CreateAsyncJobWithBilling atomically creates an async job and its billing request
+// in a single transaction. If either insert fails, both are rolled back — preventing
+// orphaned billing records that would need manual cleanup.
+func (d *DB) CreateAsyncJobWithBilling(job model.AsyncJob, req model.Request) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&req).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&job).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // GetAsyncJob retrieves an async job by its job ID.
 func (d *DB) GetAsyncJob(jobID string) (model.AsyncJob, error) {
 	var job model.AsyncJob
@@ -38,11 +53,16 @@ func (d *DB) UpdateAsyncJobStatus(jobID string, status model.AsyncJobStatus, res
 		Updates(updates).Error
 }
 
-// MarkProcessingAsyncJobsAsFailed marks all jobs with status "processing" as "failed".
-// This is used on startup to recover from broker crashes.
+// MarkProcessingAsyncJobsAsFailed marks all pending and processing jobs as failed.
+// This is used on startup to recover from broker crashes. Both statuses must be
+// covered because pending jobs lived in the in-memory channel queue which is lost
+// on restart — they will never be picked up by a worker.
 func (d *DB) MarkProcessingAsyncJobsAsFailed() error {
 	return d.db.Model(&model.AsyncJob{}).
-		Where("status = ?", string(model.AsyncJobStatusProcessing)).
+		Where("status IN ?", []string{
+			string(model.AsyncJobStatusPending),
+			string(model.AsyncJobStatusProcessing),
+		}).
 		Updates(map[string]interface{}{
 			"status":        string(model.AsyncJobStatusFailed),
 			"error_message": "broker restarted",
@@ -118,12 +138,15 @@ func withRetry(maxAttempts int, fn func() error) error {
 	return err
 }
 
-// DeleteExpiredAsyncJobs deletes completed or failed jobs whose expiry time has passed.
+// DeleteExpiredAsyncJobs deletes jobs whose expiry time has passed.
+// Includes pending jobs as a safety net: if startup recovery misses orphaned
+// pending jobs (e.g., due to a bug), the TTL cleanup will catch them.
 func (d *DB) DeleteExpiredAsyncJobs() error {
 	now := time.Now()
 	return d.db.
 		Where("expires_at IS NOT NULL AND expires_at <= ?", now).
 		Where("status IN ?", []string{
+			string(model.AsyncJobStatusPending),
 			string(model.AsyncJobStatusCompleted),
 			string(model.AsyncJobStatusFailed),
 		}).

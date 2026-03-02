@@ -21,6 +21,7 @@ import (
 // The real *db.DB satisfies this interface. Tests can inject a mock implementation.
 type asyncDB interface {
 	CreateAsyncJob(job model.AsyncJob) error
+	CreateAsyncJobWithBilling(job model.AsyncJob, req model.Request) error
 	GetAsyncJob(jobID string) (model.AsyncJob, error)
 	UpdateAsyncJobStatus(jobID string, status model.AsyncJobStatus, responseBody []byte, responseHeaders []byte, errorMessage string) error
 	MarkProcessingAsyncJobsAsFailed() error
@@ -66,6 +67,7 @@ type Ctrl struct {
 	whitelistUsers map[string]struct{}
 
 	// Async processing
+	asyncMu         sync.RWMutex       // protects asyncEnabled + asyncJobQueue against send-on-closed-channel during shutdown
 	asyncJobQueue   chan asyncJobParams
 	asyncResultTTL  time.Duration
 	asyncJobTimeout time.Duration
