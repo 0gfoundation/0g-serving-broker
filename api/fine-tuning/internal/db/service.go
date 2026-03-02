@@ -257,3 +257,16 @@ func (d *DB) UpdateUserPublicKey(task *Task, key string) error {
 		UserPublicKey: key,
 	})
 }
+
+func (d *DB) GetFinishedTasksForServing() ([]Task, error) {
+	var tasks []Task
+	servableStates := []string{
+		ProgressStateFinished.String(),
+		ProgressStateUserAcknowledged.String(),
+	}
+	ret := d.db.Where("progress IN ?", servableStates).Order("created_at DESC").Limit(1000).Find(&tasks)
+	if ret.Error != nil {
+		return nil, ret.Error
+	}
+	return tasks, nil
+}

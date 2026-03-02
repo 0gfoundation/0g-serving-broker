@@ -126,6 +126,23 @@ type Images struct {
 	OverrideImage          bool   `yaml:"overrideImage"`
 }
 
+type ServingConfig struct {
+	Enable                  bool    `yaml:"enable"`
+	BaseModelPath           string  `yaml:"baseModelPath"`
+	InferenceGPUIDs         string  `yaml:"inferenceGpuIds"`
+	VLLMPort                int     `yaml:"vllmPort"`
+	MaxLoraRank             int     `yaml:"maxLoraRank"`
+	MaxLoraModules          int     `yaml:"maxLoraModules"`
+	MaxCpuLoras             int     `yaml:"maxCpuLoras"`
+	LoraModulesDir          string  `yaml:"loraModulesDir"`
+	InputPrice              string  `yaml:"inputPrice"`
+	OutputPrice             string  `yaml:"outputPrice"`
+	OffloadAfterMinutes     int     `yaml:"offloadAfterMinutes"`
+	EnableColdStorage       bool    `yaml:"enableColdStorage"`
+	ModelLoadTimeoutSeconds int     `yaml:"modelLoadTimeoutSeconds"`
+	GpuMemoryUtilization    float64 `yaml:"gpuMemoryUtilization"`
+}
+
 type Config struct {
 	ContractAddress string `yaml:"contractAddress"`
 	Database        struct {
@@ -138,6 +155,7 @@ type Config struct {
 	Service                     Service             `yaml:"service"`
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
 	Logger                      config.LoggerConfig `yaml:"logger"`
+	Serving                     ServingConfig       `yaml:"serving"`
 	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
 	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
 	GasPrice                    string              `yaml:"gasPrice"`
@@ -221,6 +239,19 @@ func GetConfig() *Config {
 				Level:         "info",
 				Path:          "",
 				RotationCount: 50,
+			},
+			Serving: ServingConfig{
+				Enable:                  false,
+				VLLMPort:                8000,
+				MaxLoraRank:             64,
+				MaxLoraModules:          16,
+				MaxCpuLoras:             32,
+				LoraModulesDir:          "/tmp/lora-modules",
+				InputPrice:              "10000000",
+				OutputPrice:             "10000000",
+				OffloadAfterMinutes:     60,
+				EnableColdStorage:       false,
+				ModelLoadTimeoutSeconds: 300,
 			},
 			SettlementCheckIntervalSecs: 60,
 			BalanceThresholdInEther:     1,

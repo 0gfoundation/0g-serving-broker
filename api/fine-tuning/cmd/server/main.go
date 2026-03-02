@@ -20,6 +20,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/handler"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/services"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/serving"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/storage"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
 	"github.com/docker/docker/client"
@@ -267,7 +268,43 @@ func runApplication(ctx context.Context, cfg *config.Config, services *Applicati
 	}
 
 	engine := gin.New()
-	h := handler.New(services.ctrl, logger, cfg.RateLimitRPS, cfg.RateLimitBurst)
+
+	var servingProxy *serving.Proxy
+	if cfg.Serving.Enable {
+		servingMgr := serving.NewManager(services.db, serving.ServingConfig{
+			Enable:                  cfg.Serving.Enable,
+			BaseModelPath:           cfg.Serving.BaseModelPath,
+			InferenceGPUIDs:         cfg.Serving.InferenceGPUIDs,
+			VLLMPort:                cfg.Serving.VLLMPort,
+			MaxLoraRank:             cfg.Serving.MaxLoraRank,
+			MaxLoraModules:          cfg.Serving.MaxLoraModules,
+			MaxCpuLoras:             cfg.Serving.MaxCpuLoras,
+			LoraModulesDir:          cfg.Serving.LoraModulesDir,
+			OffloadAfterMinutes:     cfg.Serving.OffloadAfterMinutes,
+			EnableColdStorage:       cfg.Serving.EnableColdStorage,
+			ModelLoadTimeoutSeconds: cfg.Serving.ModelLoadTimeoutSeconds,
+			GpuMemoryUtilization:    cfg.Serving.GpuMemoryUtilization,
+		}, logger, services.storageClient)
+		if err := servingMgr.Start(ctx); err != nil {
+			return err
+		}
+		defer func() {
+			if err := servingMgr.Stop(); err != nil {
+				logger.Warnf("failed to stop vLLM: %v", err)
+			}
+		}()
+
+		registry := serving.NewRegistry(services.contract, servingMgr, serving.RegistryConfig{
+			InputPrice:  cfg.Serving.InputPrice,
+			OutputPrice: cfg.Serving.OutputPrice,
+		}, logger)
+		registry.Start(ctx)
+
+		servingProxy = serving.NewProxy(servingMgr, logger)
+		logger.Info("LoRA serving module initialized")
+	}
+
+	h := handler.New(services.ctrl, logger, cfg.RateLimitRPS, cfg.RateLimitBurst, servingProxy)
 	h.Register(engine)
 
 	if _, ok := <-imageChan; !ok {
