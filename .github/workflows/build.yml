@@ -1,4 +1,4 @@
-name: Build and Sign Container Images
+name: Build, Sign and Release
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
       attestations: write
@@ -61,26 +61,26 @@ jobs:
       run: |
         # The buildpack created the image in local Docker daemon
         # Makefile creates image with -amd64 suffix
-        
+
         # The actual local image created by Makefile
         LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${{ github.ref_name }}-amd64"
         REGISTRY_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
-        
+
         # Check if image exists locally
         if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
           echo "Found local image: $LOCAL_IMAGE"
-          
+
           # Tag for registry
           docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE"
-          
+
           # Push to registry
           docker push "$REGISTRY_IMAGE"
-          
+
           # Get the pushed image digest
           DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REGISTRY_IMAGE" | cut -d'@' -f2)
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
           echo "image_url=${REGISTRY_IMAGE}" >> $GITHUB_OUTPUT
-          
+
           echo "Successfully pushed: $REGISTRY_IMAGE"
           echo "Image digest: $DIGEST"
         else
@@ -110,6 +110,49 @@ jobs:
           --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
 
+    # --- Release: build config binary, package, and create GitHub Release ---
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        cache: false
+
+    - name: Update config image digest
+      run: |
+        DIGEST="${{ steps.push.outputs.digest }}"
+        sed -i "s|ghcr.io/0gfoundation/0g-serving-broker@sha256:[a-f0-9]\+|ghcr.io/0gfoundation/0g-serving-broker@${DIGEST}|g" \
+          api/inference/integration/config/main.go
+
+    - name: Build config binary
+      run: |
+        cd api/inference/integration/config
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o config .
+
+    - name: Package inference broker
+      run: |
+        cd api
+        make package-inference
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
+        body: |
+          ## Built Image
+          **Image:** `${{ steps.push.outputs.image_url }}`
+          **Digest:** `${{ steps.push.outputs.digest }}`
+
+          ✅ **Signed with Sigstore cosign**
+          ✅ **SLSA Build Provenance attached**
+
+          🔍 **Verify on Sigstore:** [View Build Provenance](https://search.sigstore.dev/?hash=${{ steps.push.outputs.digest }})
+        files: |
+          /tmp/inference-broker.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Output build summary
       run: |
         echo "## Built Image" >> $GITHUB_STEP_SUMMARY
@@ -120,3 +163,6 @@ jobs:
         echo "✅ **SLSA Build Provenance attached**" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "🔍 **Verify on Sigstore:** [View Build Provenance](https://search.sigstore.dev/?hash=${{ steps.push.outputs.digest }})" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Release" >> $GITHUB_STEP_SUMMARY
+        echo "📦 **Package:** \`inference-broker.tar.gz\` uploaded to [Release ${{ github.ref_name }}](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
