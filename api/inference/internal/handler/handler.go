@@ -8,10 +8,22 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// asyncCtrl is the interface for controller operations used by the async job handlers.
+// The real *ctrl.Ctrl satisfies this interface. Tests can inject a mock implementation.
+type asyncCtrl interface {
+	IsAsyncEnabled() bool
+	ValidateSession(ctx *gin.Context) (string, error)
+	IsWhitelistedUser(userAddress string) bool
+	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error)
+	GetAsyncJob(jobID string) (model.AsyncJob, error)
+}
 
 type Handler struct {
 	ctrl        *ctrl.Ctrl
+	asyncCtrl   asyncCtrl
 	proxy       *proxy.Proxy
 	rateLimiter *middleware.RateLimiter
 }
@@ -19,6 +31,7 @@ type Handler struct {
 func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
+		asyncCtrl:   ctrl,
 		proxy:       proxy,
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
 	}
@@ -32,6 +45,7 @@ func corsMiddleware() gin.HandlerFunc {
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "ZG-Res-Key, Retry-After")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 
 		if c.Request.Method == "OPTIONS" {
@@ -66,6 +80,14 @@ func (h *Handler) Register(r *gin.Engine) {
 	// Provider-only endpoints for log management
 	group.GET("/logs", corsMiddleware(), h.ListLogs)                           // List all log files
 	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile)    // Download specific log file
+
+	// Async job endpoints (OpenAI-style paths)
+	asyncGroup := group.Group("/async")
+	asyncGroup.Use(corsMiddleware())
+	asyncGroup.Use(middleware.RateLimitMiddleware(h.rateLimiter))
+	asyncGroup.POST("/images/generations", h.SubmitAsyncImageGeneration)
+	asyncGroup.POST("/images/edits", h.SubmitAsyncImageEdit)
+	asyncGroup.GET("/jobs/:jobID", h.GetAsyncJob)
 
 	// TODO: should be verified by client
 	// //nvidia TEE verification
