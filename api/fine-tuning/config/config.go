@@ -173,6 +173,7 @@ type Config struct {
 	MaxTaskQueueSize            uint                `yaml:"maxTaskQueueSize"`
 	RateLimitRPS                float64             `yaml:"rateLimitRPS"`   // Rate limit requests per second
 	RateLimitBurst              int                 `yaml:"rateLimitBurst"` // Rate limit burst size
+	NvGPU                       bool                `yaml:"nvGPU"`
 }
 
 type StorageClientConfig struct {
@@ -269,6 +270,7 @@ func GetConfig() *Config {
 			MaxTaskQueueSize:            5,
 			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations
 			RateLimitBurst:              2,   // Default: burst of 2 requests - allows retry on failure
+			NvGPU:                       false,
 		}
 
 		if err := loadConfig(instance); err != nil {

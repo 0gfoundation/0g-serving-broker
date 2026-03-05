@@ -202,7 +202,7 @@ func initializeServices(ctx context.Context, cfg *config.Config, logger log.Logg
 
 	// Sync TEE quote to initialize Address before creating contract
 	logger.Info("syncing TEE quote during service initialization")
-	if err := teeService.SyncQuote(ctx, os.Getenv("NETWORK") != "hardhat"); err != nil {
+	if err := teeService.SyncQuote(ctx, cfg.NvGPU); err != nil {
 		return nil, err
 	}
 

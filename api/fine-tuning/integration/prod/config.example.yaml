@@ -88,9 +88,12 @@ logger:
   level: "debug"
   path: "/tmp/fine-tuning.log"
 
+# GPU TEE attestation (set to true only when NVIDIA GPU is available)
+nvGPU: false
+
 # Worker configuration
 finalizerWorkerCount: 1
-executorWorkerCount: 1
+trainingWorkerCount: 1
 setupWorkerCount: 1
 maxSetupRetriesPerTask: 3
 maxExecutorRetriesPerTask: 3
