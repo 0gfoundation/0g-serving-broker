@@ -28,7 +28,6 @@ type asyncCtrl interface {
 // The real *ctrl.Ctrl satisfies this interface. Tests can inject a mock implementation.
 type modelsCtrl interface {
 	GetCachedService(ctx context.Context) (model.Service, error)
-	ProviderAddress() string
 	GetServiceConfig() config.Service
 }
 

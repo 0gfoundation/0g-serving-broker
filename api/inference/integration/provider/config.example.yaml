@@ -18,6 +18,8 @@ service:
   type: "chatbot"
   model: <Model>
   verifiability: "TeeML"
+  # Optional: organization name shown in the owned_by field of GET /v1/models
+  # ownedBy: "0G Foundation"
   # Optional: enrich GET /v1/models response with model metadata
   # modelInfo:
   #   name: "Meta: Llama 3.1 8B Instruct"

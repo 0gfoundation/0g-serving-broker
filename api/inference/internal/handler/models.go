@@ -61,7 +61,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	obj := ModelObject{
 		ID:            svc.ModelType,
 		Object:        "model",
-		OwnedBy:       h.modelsCtrl.ProviderAddress(),
+		OwnedBy:       cfg.OwnedBy,
 		Type:          svc.Type,
 		Verifiability: svc.Verifiability,
 		TeeAttested:   svc.TeeSignerAcknowledged,

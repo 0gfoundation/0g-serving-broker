@@ -15,18 +15,13 @@ import (
 // --- Mock modelsCtrl ---
 
 type mockModelsCtrl struct {
-	service        model.Service
-	serviceErr     error
-	providerAddr   string
-	serviceConfig  config.Service
+	service       model.Service
+	serviceErr    error
+	serviceConfig config.Service
 }
 
 func (m *mockModelsCtrl) GetCachedService(_ context.Context) (model.Service, error) {
 	return m.service, m.serviceErr
-}
-
-func (m *mockModelsCtrl) ProviderAddress() string {
-	return m.providerAddr
 }
 
 func (m *mockModelsCtrl) GetServiceConfig() config.Service {
@@ -56,8 +51,8 @@ func TestGetModels_FullResponse(t *testing.T) {
 			TeeSignerAcknowledged: true,
 			AdditionalInfo:        `{"TEEVerifier":"cryptopilot","TargetSeparated":false}`,
 		},
-		providerAddr: "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12",
 		serviceConfig: config.Service{
+			OwnedBy: "0G Foundation",
 			ModelInfo: &config.ModelInfo{
 				Name:                "Meta: Llama 3.1 8B Instruct",
 				Description:         "General-purpose chat model",
@@ -105,8 +100,8 @@ func TestGetModels_FullResponse(t *testing.T) {
 	if m.Created != 1700000000 {
 		t.Errorf("expected created=1700000000, got %d", m.Created)
 	}
-	if m.OwnedBy != "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12" {
-		t.Errorf("expected owned_by=0xAbCdEf..., got %s", m.OwnedBy)
+	if m.OwnedBy != "0G Foundation" {
+		t.Errorf("expected owned_by=0G Foundation, got %s", m.OwnedBy)
 	}
 	if m.Type != "chatbot" {
 		t.Errorf("expected type=chatbot, got %s", m.Type)
@@ -185,7 +180,6 @@ func TestGetModels_WithoutModelInfo(t *testing.T) {
 			TeeSignerAcknowledged: false,
 			AdditionalInfo:        `{"TEEVerifier":"dstack"}`,
 		},
-		providerAddr:  "0x1111111111111111111111111111111111111111",
 		serviceConfig: config.Service{},
 	}
 
@@ -244,7 +238,6 @@ func TestGetModels_EmptyAdditionalInfo(t *testing.T) {
 			OutputPrice:    "200",
 			AdditionalInfo: "",
 		},
-		providerAddr:  "0x0000000000000000000000000000000000000000",
 		serviceConfig: config.Service{},
 	}
 
@@ -274,7 +267,6 @@ func TestGetModels_InvalidAdditionalInfoJSON(t *testing.T) {
 			OutputPrice:    "200",
 			AdditionalInfo: "not-valid-json",
 		},
-		providerAddr:  "0x0000000000000000000000000000000000000000",
 		serviceConfig: config.Service{},
 	}
 
@@ -297,8 +289,7 @@ func TestGetModels_InvalidAdditionalInfoJSON(t *testing.T) {
 
 func TestGetModels_ServiceError(t *testing.T) {
 	mock := &mockModelsCtrl{
-		serviceErr:   errors.New("contract unreachable"),
-		providerAddr: "0x0000000000000000000000000000000000000000",
+		serviceErr: errors.New("contract unreachable"),
 	}
 
 	h := newModelsTestHandler(mock)
