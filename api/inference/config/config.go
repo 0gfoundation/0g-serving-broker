@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -8,6 +9,63 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"gopkg.in/yaml.v2"
 )
+
+// ModelArchitecture describes the model's input/output modalities.
+type ModelArchitecture struct {
+	Modality         string   `yaml:"modality" json:"modality"`                  // Required. e.g., "text->text", "text+image->text"
+	InputModalities  []string `yaml:"inputModalities" json:"input_modalities"`   // Required. e.g., ["text"], ["text", "image"]
+	OutputModalities []string `yaml:"outputModalities" json:"output_modalities"` // Required. e.g., ["text"]
+}
+
+// Validate checks that all required ModelArchitecture fields are set.
+func (a *ModelArchitecture) Validate() error {
+	if a.Modality == "" {
+		return fmt.Errorf("service.modelInfo.architecture.modality is required")
+	}
+	if len(a.InputModalities) == 0 {
+		return fmt.Errorf("service.modelInfo.architecture.inputModalities is required")
+	}
+	if len(a.OutputModalities) == 0 {
+		return fmt.Errorf("service.modelInfo.architecture.outputModalities is required")
+	}
+	return nil
+}
+
+// ModelInfo holds optional metadata for the /v1/models endpoint.
+// These fields enrich the on-chain service data with static model details.
+// When provided, name, description, contextLength, architecture, and supportedParameters are required.
+type ModelInfo struct {
+	Name                string             `yaml:"name"`                // Required. Human-readable display name
+	Description         string             `yaml:"description"`         // Required. Model description
+	ContextLength       int                `yaml:"contextLength"`       // Required. Max context window size in tokens
+	MaxCompletionTokens int                `yaml:"maxCompletionTokens"` // Optional. Max output tokens
+	Architecture        *ModelArchitecture `yaml:"architecture"`        // Required. Model architecture details
+	SupportedParameters []string           `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
+	TeeType             string             `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
+}
+
+// Validate checks that all required ModelInfo fields are set.
+func (m *ModelInfo) Validate() error {
+	if m.Name == "" {
+		return fmt.Errorf("service.modelInfo.name is required")
+	}
+	if m.Description == "" {
+		return fmt.Errorf("service.modelInfo.description is required")
+	}
+	if m.ContextLength <= 0 {
+		return fmt.Errorf("service.modelInfo.contextLength is required and must be positive")
+	}
+	if m.Architecture == nil {
+		return fmt.Errorf("service.modelInfo.architecture is required")
+	}
+	if err := m.Architecture.Validate(); err != nil {
+		return err
+	}
+	if len(m.SupportedParameters) == 0 {
+		return fmt.Errorf("service.modelInfo.supportedParameters is required")
+	}
+	return nil
+}
 
 type Service struct {
 	ServingURL       string            `yaml:"servingUrl"`
@@ -22,6 +80,7 @@ type Service struct {
 	TargetTeeAddress string            `yaml:"targetTeeAddress"`
 	TargetSeparated  bool              `yaml:"targetSeparated"`
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
+	ModelInfo        *ModelInfo        `yaml:"modelInfo"`
 }
 
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
@@ -153,7 +212,17 @@ func loadConfig(config *Config) error {
 		return err
 	}
 
-	return yaml.UnmarshalStrict(data, config)
+	if err := yaml.UnmarshalStrict(data, config); err != nil {
+		return err
+	}
+
+	if config.Service.ModelInfo != nil {
+		if err := config.Service.ModelInfo.Validate(); err != nil {
+			return fmt.Errorf("invalid config: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func GetConfig() *Config {

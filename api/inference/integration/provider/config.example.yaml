@@ -18,3 +18,22 @@ service:
   type: "chatbot"
   model: <Model>
   verifiability: "TeeML"
+  # Optional: enrich GET /v1/models response with model metadata
+  # modelInfo:
+  #   name: "Meta: Llama 3.1 8B Instruct"
+  #   description: "Meta's Llama 3.1 8B Instruct model for general-purpose chat"
+  #   contextLength: 131072
+  #   maxCompletionTokens: 4096
+  #   architecture:
+  #     modality: "text->text"
+  #     inputModalities: ["text"]
+  #     outputModalities: ["text"]
+  #   teeType: "TDX"
+  #   supportedParameters:
+  #     - temperature
+  #     - top_p
+  #     - top_k
+  #     - max_tokens
+  #     - frequency_penalty
+  #     - presence_penalty
+  #     - stop

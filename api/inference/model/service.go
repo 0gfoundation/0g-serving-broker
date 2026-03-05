@@ -15,6 +15,7 @@ type Service struct {
 	OutputPrice           string                `gorm:"type:varchar(255);not null" json:"outputPrice" binding:"required"`
 	DeletedAt             soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_name" json:"-" readonly:"true"`
 	TeeSignerAcknowledged bool                  `gorm:"not null;default:false" json:"teeSignerAcknowledged" binding:"required"`
+	AdditionalInfo        string                `gorm:"type:text" json:"additionalInfo,omitempty"`
 }
 
 type ServiceList struct {
