@@ -37,6 +37,23 @@ type WhitelistConfig struct {
 	UserAddresses []string `yaml:"userAddresses"` // List of whitelisted user addresses (case-insensitive)
 }
 
+// LoRAConfig configures LoRA adapter serving for fine-tuned models.
+// When enabled, the inference broker can serve fine-tuned LoRA adapters
+// via ServerlessLLM, with per-user access control and automatic adapter
+// lifecycle management driven by on-chain events.
+type LoRAConfig struct {
+	Enable                   bool   `yaml:"enable"`
+	BaseModel                string `yaml:"baseModel"`                // Base model name (e.g., "Qwen2.5-7B")
+	LoraModulesDir           string `yaml:"loraModulesDir"`           // Local directory for LoRA adapter files
+	OffloadAfterMinutes      int    `yaml:"offloadAfterMinutes"`      // Idle time before offloading adapter from ServerlessLLM
+	EnableColdStorage        bool   `yaml:"enableColdStorage"`        // Enable offload to 0G Storage
+	FineTuningContractAddr   string `yaml:"fineTuningContractAddress"`
+	ChainRpcUrl              string `yaml:"chainRpcUrl"`
+	PollBlockIntervalSeconds int    `yaml:"pollBlockIntervalSeconds"` // How often to poll for new on-chain events
+	StorageIndexerUrl        string `yaml:"storageIndexerUrl"`        // 0G Storage indexer URL for downloading adapters
+	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
@@ -54,11 +71,12 @@ type Config struct {
 		SettlementProcessor      int `yaml:"settlementProcessor"`
 	} `yaml:"interval"`
 	RevenueTransfer struct {
-		TargetAddress string `yaml:"targetAddress"` // Target address to transfer revenue to
-		ReserveAmount string `yaml:"reserveAmount"` // Amount of 0G to reserve for gas (default: 10000000000000000000 = 10 0G)
-		Interval      int    `yaml:"interval"`      // Interval in seconds for revenue transfer (0 to disable)
+		TargetAddress string `yaml:"targetAddress"`
+		ReserveAmount string `yaml:"reserveAmount"`
+		Interval      int    `yaml:"interval"`
 	} `yaml:"revenueTransfer"`
 	Service  Service         `yaml:"service"`
+	LoRA     LoRAConfig      `yaml:"lora"`
 	Networks config.Networks `mapstructure:"networks" yaml:"networks"`
 	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
@@ -205,7 +223,15 @@ func GetConfig() *Config {
 				Provider:      "nginx:3001",
 				RequestLength: 40,
 			},
-			ChatCacheExpiration: time.Minute * 20,
+			LoRA: LoRAConfig{
+			Enable:                   false,
+			LoraModulesDir:           "/data/lora-modules",
+			OffloadAfterMinutes:      60,
+			EnableColdStorage:        false,
+			PollBlockIntervalSeconds: 5,
+			StorageTurbo:             false,
+		},
+		ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
 			Logger: &config.LoggerConfig{
 				Format:        "text",

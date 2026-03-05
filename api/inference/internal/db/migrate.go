@@ -159,6 +159,25 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&AsyncJob{})
 			},
 		},
+		{
+			ID: "create-lora-adapter",
+			Migrate: func(tx *gorm.DB) error {
+				type LoRAAdapter struct {
+					model.Model
+					TaskID          string     `gorm:"type:varchar(255);not null;uniqueIndex"`
+					UserAddress     string     `gorm:"type:varchar(255);not null;index"`
+					BaseModel       string     `gorm:"type:varchar(255);not null"`
+					AdapterName     string     `gorm:"type:varchar(255);not null;uniqueIndex"`
+					StorageRootHash string     `gorm:"type:varchar(255);not null"`
+					State           string     `gorm:"type:varchar(32);not null;default:'loading'"`
+					LastAccessAt    *time.Time `gorm:"type:datetime"`
+					AdapterPath     string     `gorm:"type:varchar(512)"`
+					DeployedAt      *time.Time `gorm:"type:datetime"`
+					BlockNumber     uint64     `gorm:"type:bigint unsigned;not null;default:0"`
+				}
+				return tx.AutoMigrate(&LoRAAdapter{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

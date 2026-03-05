@@ -15,11 +15,14 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	cfg "github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
+	lorapkg "github.com/0glabs/0g-serving-broker/inference/internal/lora"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 )
 
@@ -97,6 +100,26 @@ func Main() {
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
 	}
+	// Initialize LoRA Manager if enabled
+	if config.LoRA.Enable {
+		loraManager, err := lorapkg.NewManager(config.LoRA, db, logger)
+		if err != nil {
+			panic(err)
+		}
+		ctrl.SetLoRAManager(loraManager)
+
+		if err := loraManager.Start(ctx); err != nil {
+			logger.Errorf("failed to start LoRA manager: %v", err)
+		}
+
+		// Start event watcher in background
+		providerAddr := common.HexToAddress(contract.ProviderAddress)
+		eventWatcher := lorapkg.NewEventWatcher(loraManager, db, config.LoRA, providerAddr, logger)
+		go eventWatcher.Start(ctx)
+
+		logger.Info("LoRA serving enabled: manager and event watcher started")
+	}
+
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)

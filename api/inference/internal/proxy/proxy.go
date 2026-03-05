@@ -242,6 +242,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Record unique user for DAU tracking
 	monitor.RecordUniqueUser(userAddress)
 
+	// LoRA owner check: for ft-* models, verify requester is the task owner
+	reqModelName := ctrl.ExtractModelName(reqBody)
+	if err := p.ctrl.CheckLoRAOwnership(reqModelName, userAddress); err != nil {
+		ctx.Set("ignoreError", true)
+		p.handleBrokerError(ctx, err, "LoRA owner check")
+		return
+	}
+
 	// Check if user is whitelisted - whitelist users bypass billing but still need normal response processing
 	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
 	if isWhitelisted {

@@ -14,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -74,6 +75,9 @@ type Ctrl struct {
 	asyncEnabled    bool
 	asyncCancel     context.CancelFunc // cancels worker and cleanup goroutines
 	asyncWg         sync.WaitGroup     // tracks running worker goroutines
+
+	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
+	loraManager *lora.Manager
 }
 
 func New(
