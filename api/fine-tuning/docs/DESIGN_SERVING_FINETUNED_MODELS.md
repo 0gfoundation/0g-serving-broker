@@ -3,7 +3,7 @@
 > Status: **Phase 1–3 Implemented (0G Storage download + decryption done), E2E Verified on CPU**  
 > Author: Zeyu  
 > Date: 2026-03-02  
-> Updated: 2026-03-05
+> Updated: 2026-03-06
 
 ## 1. Problem Statement
 
@@ -250,6 +250,8 @@ lora:
   fineTuningContractAddress: "0x1234..."   # FineTuningServing contract to watch events
   chainRpcUrl: "https://evmrpc-testnet.0g.ai"
   pollBlockIntervalSeconds: 5
+  storageIndexerUrl: "https://indexer-storage-testnet-turbo.0g.ai"  # 0G Storage indexer for downloading adapters
+  storageTurbo: true                    # Use turbo indexer
   mockDeploy: false                     # Set true for E2E testing without 0G Storage
 ```
 
@@ -258,7 +260,10 @@ lora:
 - `fineTuningContractAddress` + `chainRpcUrl` added — LoRA Manager watches on-chain events instead
 - `service.targetUrl` now points to **ServerlessLLM** (port 8343) instead of vLLM (port 8000)
 - `sllmUrl` added — configurable SLLM endpoint (previously hardcoded)
+- `storageIndexerUrl` added — 0G Storage indexer URL for downloading encrypted adapters (inference broker)
 - `mockDeploy` added — when `true`, creates placeholder adapter files instead of downloading from 0G Storage (for CPU-only E2E testing)
+
+**Provider wallet key** (used for ECIES decrypt): The inference broker reuses the same `networks.privateKeys` as the fine-tuning broker. No additional key configuration needed — see Section 4.7 for details.
 
 Everything else stays the same — same model name on-chain, same prices, same contract registration.
 
@@ -266,11 +271,11 @@ Everything else stays the same — same model name on-chain, same prices, same c
 
 Lives in `api/inference/internal/lora/`. Manages the LoRA adapter lifecycle via ServerlessLLM HTTP API + on-chain event watching.
 
-**Implementation status**: Core manager, SLLM client, event watcher, and DB persistence are **implemented and E2E tested**. 0G Storage download + decryption is a **TODO** (see Section 9).
+**Implementation status**: Core manager, SLLM client, event watcher, DB persistence, 0G Storage download + decryption (via provider ECIES key sharing, see Section 4.7) are all **implemented**. E2E tested on CPU with mock SLLM (see Section 8). Full testnet E2E pending.
 
 **Responsibilities**:
 1. Watch the `FineTuningServing` contract for `DeliverableAcknowledged` events (new completed + acknowledged tasks)
-2. Download encrypted adapter from 0G Storage → decrypt with provider key → place in `loraModulesDir` (**TODO**)
+2. Download encrypted adapter from 0G Storage → decrypt with provider key → place in `loraModulesDir`
 3. Call ServerlessLLM HTTP API to register adapter (`POST /v1/models/deploy`)
 4. Maintain an in-memory map of `model name → adapter info (owner address, state, last access, 0G root hash)`
 5. Persist adapter metadata to local DB (inference node's own MySQL) for crash recovery
@@ -346,7 +351,8 @@ A2. User creates fine-tuning task
 
 A3. Fine-tuning broker delivers result
     → Encrypted LoRA adapter uploaded to 0G Storage
-    → FineTuningServing.addDeliverable(taskID, rootHash, encryptedSecret)
+    → AES key encrypted with provider wallet ECIES pubkey → providerEncKey
+    → FineTuningServing.addDeliverable(taskID, storageHash + providerEncKey)
 
 A4. User acknowledges the result
     → FineTuningServing.acknowledgeDeliverable(taskID)
@@ -696,7 +702,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 
 ---
 
-## 7. Implementation Status (as of 2026-03-05)
+## 7. Implementation Status (as of 2026-03-06)
 
 ### 7.1 Implemented Components
 
@@ -799,8 +805,8 @@ The test validates the **control plane** (contract interactions, event-driven ad
 
 ## 9. Open Questions
 
-1. **LoRA decryption key management** (critical, needs TEE team input)  
-   The fine-tuning node encrypts the LoRA adapter with the user's public key before uploading to 0G Storage. The inference node (a separate TEE) needs the decrypted version. How does the inference node obtain the decryption key? This likely requires a provider-level key scheme: the fine-tuning node re-encrypts with a provider key so any of the provider's TEE nodes can decrypt.
+1. ~~**LoRA decryption key management**~~ — **RESOLVED (Plan B, Section 4.7)**  
+   The fine-tuning broker encrypts the AES key with the provider wallet's ECIES public key and embeds it in the contract's `modelRootHash` bytes. The inference broker (same provider wallet) extracts and decrypts it. No contract change or cross-node DB access needed. Implemented in commit `e5fd692`.
 
 2. **On-chain event reliability**  
    The LoRA Manager watches `FineTuningServing` contract events. It must handle: missed events during downtime (replay from checkpoint block number), chain reorgs (sufficient confirmation depth), and event indexing at scale.
