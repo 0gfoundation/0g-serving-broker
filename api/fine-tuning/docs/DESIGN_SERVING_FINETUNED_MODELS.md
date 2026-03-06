@@ -1,8 +1,9 @@
 # Design: Serving Fine-Tuned Models to End Users
 
-> Status: **Draft**  
+> Status: **Phase 1–2 Implemented, E2E Verified on CPU**  
 > Author: Zeyu  
-> Date: 2026-03-02
+> Date: 2026-03-02  
+> Updated: 2026-03-05
 
 ## 1. Problem Statement
 
@@ -243,32 +244,38 @@ lora:
   enable: true
   baseModel: "Qwen2.5-7B"
   loraModulesDir: "/data/lora-modules"
+  sllmUrl: "http://sllm:8343"          # ServerlessLLM HTTP endpoint (configurable)
   offloadAfterMinutes: 60
   enableColdStorage: true
   fineTuningContractAddress: "0x1234..."   # FineTuningServing contract to watch events
   chainRpcUrl: "https://evmrpc-testnet.0g.ai"
   pollBlockIntervalSeconds: 5
+  mockDeploy: false                     # Set true for E2E testing without 0G Storage
 ```
 
 **Key changes from previous version**:
 - `fineTuningDbProvider` removed — no shared DB between TEE nodes
 - `fineTuningContractAddress` + `chainRpcUrl` added — LoRA Manager watches on-chain events instead
 - `service.targetUrl` now points to **ServerlessLLM** (port 8343) instead of vLLM (port 8000)
+- `sllmUrl` added — configurable SLLM endpoint (previously hardcoded)
+- `mockDeploy` added — when `true`, creates placeholder adapter files instead of downloading from 0G Storage (for CPU-only E2E testing)
 
 Everything else stays the same — same model name on-chain, same prices, same contract registration.
 
-### 4.2 LoRA Manager (New Component in Inference Module)
+### 4.2 LoRA Manager (Implemented in Inference Module)
 
-Lives in the inference module. Manages the LoRA adapter lifecycle via ServerlessLLM CLI + on-chain event watching.
+Lives in `api/inference/internal/lora/`. Manages the LoRA adapter lifecycle via ServerlessLLM HTTP API + on-chain event watching.
+
+**Implementation status**: Core manager, SLLM client, event watcher, and DB persistence are **implemented and E2E tested**. 0G Storage download + decryption is a **TODO** (see Section 9).
 
 **Responsibilities**:
 1. Watch the `FineTuningServing` contract for `DeliverableAcknowledged` events (new completed + acknowledged tasks)
-2. Download encrypted adapter from 0G Storage → decrypt with provider key → place in `loraModulesDir`
-3. Call `sllm deploy` to register adapter with ServerlessLLM
+2. Download encrypted adapter from 0G Storage → decrypt with provider key → place in `loraModulesDir` (**TODO**)
+3. Call ServerlessLLM HTTP API to register adapter (`POST /v1/models/deploy`)
 4. Maintain an in-memory map of `model name → adapter info (owner address, state, last access, 0G root hash)`
 5. Persist adapter metadata to local DB (inference node's own MySQL) for crash recovery
-6. Track access times, offload idle adapters (`sllm delete`)
-7. Restore from 0G Storage on demand (download → decrypt → `sllm deploy`)
+6. Track access times, offload idle adapters (`DELETE /v1/models/<name>`)
+7. Restore from 0G Storage on demand (download → decrypt → deploy)
 
 **Startup sequence**:
 ```
@@ -571,66 +578,86 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 
 ## 6. Implementation Plan
 
-### Phase 1: ServerlessLLM Setup + Proxy LoRA Routing
+### Phase 1: ServerlessLLM Setup + Proxy LoRA Routing — DONE
 
 **Goal**: Deploy ServerlessLLM, add model name mapping and owner check to broker proxy.
 
-1. **Deploy ServerlessLLM cluster**
-   - Set up ServerlessLLM head + worker(s) via Docker Compose
-   - Deploy base model with `--enable-lora`
-   - Verify OpenAI-compatible API (`/v1/chat/completions`)
-   - Pin ServerlessLLM version
+1. **~~Deploy ServerlessLLM cluster~~** ✅
+   - ServerlessLLM requires GPU (compute capability 7.0+); for CPU-only E2E testing, a mock SLLM server (`mock_sllm.py`) was created that implements the same HTTP API
+   - The real ServerlessLLM deployment is deferred to GPU environment testing
+   - `sllmUrl` is now configurable so the broker can point to either real SLLM or the mock
 
-2. **Point broker `targetUrl` to ServerlessLLM**
-   - Change `service.targetUrl` from `http://vllm:8000` to `http://sllm:8343`
-   - Verify base model inference still works end-to-end
+2. **~~Point broker `targetUrl` to ServerlessLLM~~** ✅
+   - `service.targetUrl` now configurable to SLLM endpoint
+   - Verified with mock SLLM in E2E test
 
-3. **Add LoRA request rewriting in proxy**
-   - Detect `ft-*` in request `model` field
-   - Rewrite: `model` → base model name, add `lora_adapter_name`
-   - Forward to ServerlessLLM
+3. **~~Add LoRA request rewriting in proxy~~** ✅
+   - `ft-*` model detection and rewrite implemented in `api/inference/internal/ctrl/proxy.go`
+   - Rewrites `model` → base model name, adds `lora_adapter_name`
 
-4. **Add owner-check middleware**
-   - For `ft-*` models, look up adapter owner from LoRA Manager's in-memory map
-   - Reject if requester != owner
+4. **~~Add owner-check middleware~~** ✅
+   - Owner check for `ft-*` models implemented in proxy
+   - Looks up adapter owner from LoRA Manager's in-memory map
 
-### Phase 2: LoRA Manager + On-Chain Event Watching
+### Phase 2: LoRA Manager + On-Chain Event Watching — DONE (except 0G Storage download)
 
 **Goal**: Automate adapter lifecycle — discover via chain events, deploy, offload, restore.
 
-1. **Build Go client wrapper for ServerlessLLM CLI**
-   - `DeployAdapter(baseModel, adapterName, adapterPath)` → `sllm deploy`
-   - `DeleteAdapter(baseModel, adapterName)` → `sllm delete`
-   - `ListModels()` → `sllm status`
-   - Health check, error handling, retry
+1. **~~Build Go HTTP client for ServerlessLLM~~** ✅
+   - `api/inference/internal/lora/sllm_client.go` — HTTP client (not CLI-based)
+   - `DeployAdapter(baseModel, adapterName, adapterPath)` → `POST /v1/models/deploy`
+   - `DeleteAdapter(adapterName)` → `DELETE /v1/models/<name>`
+   - `ListModels()` → `GET /v1/models`
+   - `HealthCheck()` → `GET /health`
 
-2. **Build LoRA Manager in inference module**
-   - Subscribe to `FineTuningServing` contract events (DeliverableAcknowledged)
-   - On event: download from 0G Storage → decrypt → `sllm deploy` → update adapter map
-   - Persist adapter metadata to inference node's local DB for crash recovery
-   - Offload loop: track last access, `sllm delete` idle adapters
-   - Restore: download from 0G Storage → decrypt → `sllm deploy`
+2. **~~Build LoRA Manager in inference module~~** ✅
+   - `api/inference/internal/lora/manager.go` — full adapter lifecycle management
+   - In-memory adapter map with state tracking (Pending → Active → Offloaded → Failed)
+   - DB persistence for crash recovery (`lora_adapters` table via GORM)
+   - Offload loop with configurable idle timeout
+   - `mockDeploy` mode for CPU-only testing (creates placeholder files)
+   - **TODO**: 0G Storage download + AES-GCM decryption (currently uses mock or expects files on disk)
 
-3. **Local adapter metadata table** (inference node's own DB, NOT shared)
-   - Fields: taskID, userAddress, baseModel, adapterName, storageRootHash, state (active/offloaded/loading), lastAccess
-   - Used for crash recovery: on restart, re-deploy known adapters
+3. **~~Build Event Watcher~~** ✅
+   - `api/inference/internal/lora/event_watcher.go` — polls `FineTuningServing` contract
+   - Watches for `DeliverableAcknowledged` events from a checkpoint block number
+   - On event: extracts task ID, user address, model root hash → calls LoRA Manager `RegisterAdapter()`
+   - Configurable poll interval (`pollBlockIntervalSeconds`)
 
-4. **End-to-end test**
-   - Fine-tune task → delivered → user acknowledges → LoRA Manager detects event → adapter deployed → user queries → billing → settlement
+4. **~~Local adapter metadata table~~** ✅
+   - `api/inference/internal/lora/model/adapter.go` — GORM model
+   - Fields: adapterName, taskID, userAddress, baseModel, adapterPath, storageRootHash, state, lastAccessedAt
+   - Crash recovery: on restart, loads adapters from DB → re-deploys to SLLM
 
-### Phase 3: Optimization
+5. **~~End-to-end test~~** ✅
+   - `api/e2e-lora-serving/e2e_test.py` — 14/14 tests passed (see Section 9)
+   - Full chain: register service → deposit → deliver → acknowledge → event detect → adapter deploy → inference request
 
-1. **`sllm-store` for faster cold restore**
+### Phase 3: 0G Storage Integration + Optimization — TODO
+
+1. **0G Storage download + decryption in LoRA Manager**
+   - Implement actual download from 0G Storage by root hash
+   - AES-GCM decryption with provider key
+   - Replace `mockDeploy` placeholder logic with real download path
+
+2. **Real ServerlessLLM deployment (GPU required)**
+   - ServerlessLLM requires GPU with compute capability >= 7.0
+   - Set up ServerlessLLM head + worker(s) via Docker Compose on GPU nodes
+   - Deploy base model with `--enable-lora`
+   - Point broker `sllmUrl` to real SLLM cluster
+   - Alternative: use vLLM directly with `--enable-lora` (simpler, no Ray dependency)
+
+3. **`sllm-store` for faster cold restore**
    - Convert adapters to ServerlessLLM's optimized format
    - Benchmark loading speedup
 
-2. **Streaming billing**
+4. **Streaming billing**
    - Token counting from SSE chunks
 
-3. **Adapter sharing**
+5. **Adapter sharing**
    - Allow task owners to grant access to other users
 
-### Phase 4: Production Hardening
+### Phase 4: Production Hardening — TODO
 
 1. **Monitoring**: Prometheus metrics for active adapters, loading latencies, cache hit rates
 2. **Rate limiting**: Per-user request limits
@@ -639,7 +666,104 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 
 ---
 
-## 7. Open Questions
+## 7. Implementation Status (as of 2026-03-05)
+
+### 7.1 Implemented Components
+
+| Component | File(s) | Status |
+|-----------|---------|--------|
+| **LoRA Manager** | `api/inference/internal/lora/manager.go` | Implemented — adapter lifecycle, in-memory map, DB persistence, mock deploy mode |
+| **SLLM HTTP Client** | `api/inference/internal/lora/sllm_client.go` | Implemented — deploy, delete, list, health check via HTTP API |
+| **Event Watcher** | `api/inference/internal/lora/event_watcher.go` | Implemented — polls FineTuningServing contract for DeliverableAcknowledged events |
+| **DB Model** | `api/inference/internal/lora/model/adapter.go` | Implemented — GORM model for crash recovery |
+| **Proxy LoRA routing** | `api/inference/internal/ctrl/proxy.go` | Implemented — ft-* model name rewrite + owner check |
+| **Config** | `api/inference/config/config.go` | Implemented — LoRAConfig with sllmUrl, mockDeploy fields |
+| **Server init** | `api/inference/cmd/server/main.go` | Implemented — initializes LoRA Manager + Event Watcher on startup when `lora.enable: true` |
+| **CPU-only executor** | `api/fine-tuning/internal/services/executor.go` | Implemented — skips nvidia runtime when gpuCount=0 |
+| **Mock SLLM** | `api/e2e-lora-serving/mock_sllm.py` | Implemented — Python HTTP server mimicking ServerlessLLM API |
+| **E2E test script** | `api/e2e-lora-serving/e2e_test.py` | Implemented — 14 test assertions covering full lifecycle |
+
+### 7.2 Not Yet Implemented
+
+| Component | Blocker | Notes |
+|-----------|---------|-------|
+| **0G Storage download** in LoRA Manager | None (code path exists, marked TODO) | `manager.go:downloadAndDeploy()` currently uses mockDeploy or expects files on disk |
+| **AES-GCM decryption** of adapter | Depends on key management design (Open Question #1) | Provider key derivation scheme needed |
+| **Real ServerlessLLM deployment** | Requires GPU (compute capability >= 7.0) | Can use vLLM with `--enable-lora` as lighter alternative |
+| **Adapter offload to 0G Storage** | Depends on 0G Storage integration | Currently offload only calls `sllm delete`, does not re-upload |
+
+---
+
+## 8. E2E Test Results (2026-03-05)
+
+### 8.1 Test Environment
+
+Two **CPU-only** machines (no GPU), all components running locally:
+
+| Component | Implementation | Port |
+|-----------|---------------|------|
+| **Hardhat local chain** | Docker container, auto-deploys LedgerManager + InferenceServing + FineTuningServing | 8545 |
+| **Inference Broker** | Real Go binary from `feat/serverless-llm-serving` branch | 3081 |
+| **Mock ServerlessLLM** | Python HTTP server (`mock_sllm.py`) | 8343 |
+| **MySQL** | Docker container for inference broker DB | 3308 |
+
+Fine-tuning broker was **not** started — the test script simulates the fine-tuning side by directly calling contract functions via `web3.py`.
+
+### 8.2 Test Flow and Results
+
+```
+14 passed / 0 failed / 14 total
+```
+
+| Step | Test | Result | Detail |
+|------|------|--------|--------|
+| 0 | Hardhat chain connectivity | PASS | Block height > 0 |
+| 0 | Inference broker health | PASS | `GET /v1/quote` → 200 |
+| 0 | Mock SLLM health | PASS | `GET /health` → 200 |
+| 1 | Provider registers FT service | PASS | `addOrUpdateService()` with 100 ETH stake |
+| 2 | User creates ledger | PASS | `addLedger()` with 5 ETH deposit |
+| 2 | User transfers to FT provider | PASS | `transferFund("fine-tuning-v1.0", 1 ETH)` |
+| 3 | Provider adds deliverable | PASS | `addDeliverable(taskID, modelRootHash)` |
+| 3 | Deliverable readable on-chain | PASS | `getDeliverable()` returns data |
+| 4 | User acknowledges deliverable | PASS | `acknowledgeDeliverable()` tx confirmed |
+| 4 | DeliverableAcknowledged event | PASS | Event emitted in block |
+| 5 | Event Watcher detects adapter | PASS | Adapter appeared in mock SLLM within 3s |
+| 6 | Inference request to mock SLLM | PASS | `POST /v1/chat/completions` → 200 |
+| 6 | Response content correct | PASS | Echo response with adapter name |
+| 6 | Token usage reported | PASS | `{prompt_tokens: 4, completion_tokens: 8, total_tokens: 12}` |
+
+### 8.3 Key Findings During Testing
+
+1. **LedgerManager service name** — `transferFund()` requires the full registered name including version (e.g., `fine-tuning-v1.0`), not just the base name (`fine-tuning`). Using the wrong name causes `ServiceNotFound("0x0000...")`.
+
+2. **Minimum deposit** — `addLedger()` requires at least 3 ETH; `transferFund()` requires at least 1 ETH. Below these thresholds, the contract reverts with `MinimumDepositRequired`.
+
+3. **Broker auto-registration** — The inference broker auto-registers its service on-chain at startup. The E2E script handles this idempotently (catches `CannotAddStakeWhenUpdating` and `LedgerExists` errors gracefully).
+
+4. **Event Watcher latency** — From `acknowledgeDeliverable()` tx to adapter appearing in mock SLLM: ~3 seconds (1 poll cycle at `pollBlockIntervalSeconds: 3`).
+
+5. **CPU-only executor** — Added `gpuCount=0` check in `executor.go` to skip nvidia runtime request. Without this, the executor would fail on CPU-only machines even for mock training.
+
+### 8.4 What the E2E Test Validates vs. What It Mocks
+
+| Layer | Real or Mock? | Detail |
+|-------|--------------|--------|
+| Smart contracts (LedgerManager, FT, INF) | **Real** | Actual Solidity contracts deployed on Hardhat |
+| On-chain transactions | **Real** | Signed and executed via web3.py |
+| Inference Broker (Go binary) | **Real** | Full binary from feat/serverless-llm-serving branch |
+| Event Watcher | **Real** | Polls Hardhat chain, processes events |
+| LoRA Manager | **Real** | Registers adapter, calls SLLM client, persists to DB |
+| SLLM Client (Go HTTP calls) | **Real** | Makes actual HTTP requests to SLLM endpoint |
+| ServerlessLLM | **Mock** | Python server, no real model loading or inference |
+| Fine-tuning training | **Mock** | Test script calls `addDeliverable()` directly |
+| 0G Storage download | **Mock** | `mockDeploy: true` creates placeholder files |
+| Model inference | **Mock** | Returns echo response, no real LLM computation |
+
+The test validates the **control plane** (contract interactions, event-driven adapter discovery, adapter lifecycle management) but not the **data plane** (real model loading, GPU inference, 0G Storage transfer). Validating the data plane requires GPU machines + real ServerlessLLM.
+
+---
+
+## 9. Open Questions
 
 1. **LoRA decryption key management** (critical, needs TEE team input)  
    The fine-tuning node encrypts the LoRA adapter with the user's public key before uploading to 0G Storage. The inference node (a separate TEE) needs the decrypted version. How does the inference node obtain the decryption key? This likely requires a provider-level key scheme: the fine-tuning node re-encrypts with a provider key so any of the provider's TEE nodes can decrypt.
@@ -664,7 +788,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 
 ---
 
-## 8. References
+## 10. References
 
 - [ServerlessLLM (OSDI'24)](https://github.com/ServerlessLLM/ServerlessLLM) — Fast multi-model serving with GPU multiplexing
 - [ServerlessLLM Paper](https://www.usenix.org/system/files/osdi24-fu.pdf) — Architecture details, checkpoint loading optimization
@@ -674,3 +798,5 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 - [0G Fine-Tuning Module](./) — Task lifecycle, 0G Storage, TEE
 - PR #373 — Fine-tuning monitoring (merged)
 - PR #374 — Previous serving implementation (on hold, to be superseded by this design)
+- PR #379 — ServerlessLLM-based LoRA serving implementation + E2E test (this design)
+- `api/e2e-lora-serving/` — E2E test script and mock SLLM server
