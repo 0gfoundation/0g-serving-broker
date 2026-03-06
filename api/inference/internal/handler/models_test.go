@@ -62,9 +62,13 @@ func TestGetModels_FullResponse(t *testing.T) {
 					Modality:         "text->text",
 					InputModalities:  []string{"text"},
 					OutputModalities: []string{"text"},
+					InstructType:     "chatml",
+					Tokenizer:        "llama3",
 				},
 				SupportedParameters: []string{"temperature", "top_p", "max_tokens"},
+				DefaultParameters:   map[string]interface{}{"temperature": 0.7, "top_p": 0.9},
 				TeeType:             "TDX",
+				ExpirationDate:      "2026-12-31T00:00:00Z",
 			},
 		},
 	}
@@ -129,6 +133,9 @@ func TestGetModels_FullResponse(t *testing.T) {
 	if m.Pricing.Completion != "200000000000" {
 		t.Errorf("expected pricing.completion=200000000000, got %s", m.Pricing.Completion)
 	}
+	if m.Pricing.Image != "" {
+		t.Errorf("expected empty pricing.image for chatbot type, got %s", m.Pricing.Image)
+	}
 
 	// Config-enriched fields
 	if m.Name != "Meta: Llama 3.1 8B Instruct" {
@@ -157,6 +164,21 @@ func TestGetModels_FullResponse(t *testing.T) {
 	if len(m.Architecture.OutputModalities) != 1 || m.Architecture.OutputModalities[0] != "text" {
 		t.Errorf("expected architecture.output_modalities=[text], got %v", m.Architecture.OutputModalities)
 	}
+	if m.Architecture.InstructType != "chatml" {
+		t.Errorf("expected architecture.instruct_type=chatml, got %s", m.Architecture.InstructType)
+	}
+	if m.Architecture.Tokenizer != "llama3" {
+		t.Errorf("expected architecture.tokenizer=llama3, got %s", m.Architecture.Tokenizer)
+	}
+
+	// Default parameters
+	if m.DefaultParameters == nil {
+		t.Fatal("expected default_parameters to be present")
+	}
+	if temp, ok := m.DefaultParameters["temperature"].(float64); !ok || temp != 0.7 {
+		t.Errorf("expected default_parameters.temperature=0.7, got %v", m.DefaultParameters["temperature"])
+	}
+
 	// Supported parameters
 	if len(m.SupportedParameters) != 3 {
 		t.Fatalf("expected 3 supported_parameters, got %d", len(m.SupportedParameters))
@@ -166,6 +188,11 @@ func TestGetModels_FullResponse(t *testing.T) {
 		if m.SupportedParameters[i] != p {
 			t.Errorf("expected supported_parameters[%d]=%s, got %s", i, p, m.SupportedParameters[i])
 		}
+	}
+
+	// Expiration date
+	if m.ExpirationDate != "2026-12-31T00:00:00Z" {
+		t.Errorf("expected expiration_date=2026-12-31T00:00:00Z, got %s", m.ExpirationDate)
 	}
 }
 
@@ -284,6 +311,40 @@ func TestGetModels_InvalidAdditionalInfoJSON(t *testing.T) {
 
 	if resp.Data[0].TeeVerifier != "" {
 		t.Errorf("expected empty tee_verifier for invalid JSON, got %s", resp.Data[0].TeeVerifier)
+	}
+}
+
+func TestGetModels_ImagePricingForImageTypes(t *testing.T) {
+	types := []string{"text-to-image", "image-editing"}
+	for _, svcType := range types {
+		t.Run(svcType, func(t *testing.T) {
+			mock := &mockModelsCtrl{
+				service: model.Service{
+					ModelType:   "stable-diffusion-xl",
+					Type:        svcType,
+					InputPrice:  "100",
+					OutputPrice: "5000000000000",
+				},
+				serviceConfig: config.Service{},
+			}
+
+			h := newModelsTestHandler(mock)
+			w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", w.Code)
+			}
+
+			var resp ModelListResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+
+			m := resp.Data[0]
+			if m.Pricing.Image != "5000000000000" {
+				t.Errorf("expected pricing.image=5000000000000 for %s, got %s", svcType, m.Pricing.Image)
+			}
+		})
 	}
 }
 

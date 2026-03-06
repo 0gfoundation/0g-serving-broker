@@ -30,7 +30,13 @@ service:
   #     modality: "text->text"
   #     inputModalities: ["text"]
   #     outputModalities: ["text"]
+  #     instructType: "chatml"  # Instruction format: "none", "alpaca", "chatml", etc.
+  #     tokenizer: "llama3"    # Tokenizer identifier: "cl100k_base", "o200k_base", "llama3", etc.
+  #   defaultParameters:
+  #     temperature: 0.7
+  #     top_p: 0.9
   #   teeType: "TDX"
+  #   expirationDate: "2026-12-31T00:00:00Z"  # Model availability expiration (RFC3339)
   #   supportedParameters:
   #     - temperature
   #     - top_p

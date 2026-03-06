@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
 // ModelObject represents a single model in the OpenAI-compatible /v1/models response.
@@ -22,17 +23,20 @@ type ModelObject struct {
 	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
 	Architecture        *config.ModelArchitecture `json:"architecture,omitempty"`
 	SupportedParameters []string                  `json:"supported_parameters,omitempty"`
+	DefaultParameters   map[string]interface{}    `json:"default_parameters,omitempty"`
 	Pricing             *ModelPricing             `json:"pricing,omitempty"`
 	Verifiability       string                    `json:"verifiability,omitempty"`
 	TeeAttested         bool                      `json:"tee_attested"`
 	TeeType             string                    `json:"tee_type,omitempty"`
 	TeeVerifier         string                    `json:"tee_verifier,omitempty"`
+	ExpirationDate      string                    `json:"expiration_date,omitempty"`
 }
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
 type ModelPricing struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
+	Image      string `json:"image,omitempty"`
 }
 
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
@@ -83,7 +87,14 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.MaxCompletionTokens = cfg.ModelInfo.MaxCompletionTokens
 		obj.Architecture = cfg.ModelInfo.Architecture
 		obj.SupportedParameters = cfg.ModelInfo.SupportedParameters
+		obj.DefaultParameters = cfg.ModelInfo.DefaultParameters
 		obj.TeeType = cfg.ModelInfo.TeeType
+		obj.ExpirationDate = cfg.ModelInfo.ExpirationDate
+	}
+
+	// Set image pricing from output price for image service types
+	if svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing {
+		obj.Pricing.Image = svc.OutputPrice
 	}
 
 	// Extract TEE verifier from on-chain additionalInfo JSON

@@ -12,9 +12,11 @@ import (
 
 // ModelArchitecture describes the model's input/output modalities.
 type ModelArchitecture struct {
-	Modality         string   `yaml:"modality" json:"modality"`                  // Required. e.g., "text->text", "text+image->text"
-	InputModalities  []string `yaml:"inputModalities" json:"input_modalities"`   // Required. e.g., ["text"], ["text", "image"]
-	OutputModalities []string `yaml:"outputModalities" json:"output_modalities"` // Required. e.g., ["text"]
+	Modality         string   `yaml:"modality" json:"modality"`                    // Required. e.g., "text->text", "text+image->text"
+	InputModalities  []string `yaml:"inputModalities" json:"input_modalities"`     // Required. e.g., ["text"], ["text", "image"]
+	OutputModalities []string `yaml:"outputModalities" json:"output_modalities"`   // Required. e.g., ["text"]
+	InstructType     string   `yaml:"instructType" json:"instruct_type,omitempty"` // Optional. e.g., "none", "alpaca", "chatml"
+	Tokenizer        string   `yaml:"tokenizer" json:"tokenizer,omitempty"`        // Optional. Tokenizer identifier, e.g., "cl100k_base", "o200k_base", "llama3"
 }
 
 // Validate checks that all required ModelArchitecture fields are set.
@@ -35,13 +37,15 @@ func (a *ModelArchitecture) Validate() error {
 // These fields enrich the on-chain service data with static model details.
 // When provided, name, description, contextLength, architecture, and supportedParameters are required.
 type ModelInfo struct {
-	Name                string             `yaml:"name"`                // Required. Human-readable display name
-	Description         string             `yaml:"description"`         // Required. Model description
-	ContextLength       int                `yaml:"contextLength"`       // Required. Max context window size in tokens
-	MaxCompletionTokens int                `yaml:"maxCompletionTokens"` // Optional. Max output tokens
-	Architecture        *ModelArchitecture `yaml:"architecture"`        // Required. Model architecture details
-	SupportedParameters []string           `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
-	TeeType             string             `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
+	Name                string                 `yaml:"name"`                // Required. Human-readable display name
+	Description         string                 `yaml:"description"`         // Required. Model description
+	ContextLength       int                    `yaml:"contextLength"`       // Required. Max context window size in tokens
+	MaxCompletionTokens int                    `yaml:"maxCompletionTokens"` // Optional. Max output tokens
+	Architecture        *ModelArchitecture     `yaml:"architecture"`        // Required. Model architecture details
+	SupportedParameters []string               `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
+	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
+	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
+	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z"
 }
 
 // Validate checks that all required ModelInfo fields are set.
