@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
@@ -24,9 +25,10 @@ import (
 )
 
 type SettlementMetadata struct {
-	ModelRootHash   []byte
-	Secret          []byte
-	EncryptedSecret []byte
+	ModelRootHash           []byte
+	Secret                  []byte
+	EncryptedSecret         []byte
+	ProviderEncryptedSecret []byte
 }
 
 type uploadResult struct {
@@ -110,22 +112,51 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true) for task %s", task.ID)
 	}
 
-	// Step 3: Update task in DB and contract
-	if err = f.db.UpdateTask(task.ID,
-		db.Task{
-			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
-			Secret:          hexutil.Encode(settlementMetadata.Secret),
-			EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
-			DeliverIndex:    0, // Deprecated: now using task ID instead of index
-			DeliverTime:     time.Now().Unix(),
-		}); err != nil {
+	// Step 3: Encrypt AES key with provider wallet's ECIES public key.
+	// This allows the inference broker (same provider wallet) to decrypt the adapter
+	// without needing cross-node DB access or contract changes.
+	var providerEncKey []byte
+	providerPrivKey, privKeyErr := commonconfig.GetProviderPrivateKey(f.config.Networks)
+	if privKeyErr != nil {
+		f.logger.Warnf("Could not get provider private key for ECIES encryption: %v", privKeyErr)
+	} else {
+		providerEncKey, err = util.ProviderECIESEncrypt(providerPrivKey, settlementMetadata.Secret)
+		if err != nil {
+			f.logger.Warnf("Failed to ECIES-encrypt AES key for provider: %v", err)
+			providerEncKey = nil
+		} else {
+			f.logger.Infof("AES key encrypted with provider wallet ECIES public key (%d bytes)", len(providerEncKey))
+		}
+	}
+
+	// Step 4: Update task in DB (store only the storage hash as OutputRootHash, keeping client CLI compatible)
+	dbTask := db.Task{
+		OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
+		Secret:          hexutil.Encode(settlementMetadata.Secret),
+		EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
+		DeliverIndex:    0,
+		DeliverTime:     time.Now().Unix(),
+	}
+	if providerEncKey != nil {
+		dbTask.ProviderEncryptedSecret = hexutil.Encode(providerEncKey)
+	}
+	if err = f.db.UpdateTask(task.ID, dbTask); err != nil {
 		f.logger.Errorf("Failed to update task: %v", err)
 		return err
 	}
 
+	// Step 5: Build contract modelRootHash = [storage hash][provider-encrypted AES key]
+	// The inference broker's event watcher reads this combined bytes from the contract,
+	// splits at byte 32 to get the storage hash and the encrypted key.
+	contractModelRootHash := append([]byte{}, settlementMetadata.ModelRootHash...)
+	if providerEncKey != nil {
+		contractModelRootHash = append(contractModelRootHash, providerEncKey...)
+		f.logger.Infof("Contract modelRootHash: %d bytes (32 storage + %d provider key)", len(contractModelRootHash), len(providerEncKey))
+	}
+
 	// Add deliverable to contract (required for settlement and key exchange)
-	if err = f.contract.AddDeliverable(ctx, userAddr, task.ID.String(), settlementMetadata.ModelRootHash); err != nil {
-		return errors.Wrapf(err, "add deliverable failed: %v", settlementMetadata.ModelRootHash)
+	if err = f.contract.AddDeliverable(ctx, userAddr, task.ID.String(), contractModelRootHash); err != nil {
+		return errors.Wrapf(err, "add deliverable failed: %v", contractModelRootHash)
 	}
 
 	return nil

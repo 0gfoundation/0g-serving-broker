@@ -49,7 +49,8 @@ type Task struct {
 	OutputRootHash      string                `gorm:"type:text;" json:"outputRootHash" readonly:"true"`
 	Progress            string                `gorm:"type:varchar(255);not null;default 'Init'" json:"progress" readonly:"true"`
 	Secret              string                `gorm:"type:varchar(66)" json:"secret" readonly:"true"`
-	EncryptedSecret     string                `gorm:"type:varchar(300)" json:"encryptedSecret" readonly:"true"`
+	EncryptedSecret          string                `gorm:"type:varchar(300)" json:"encryptedSecret" readonly:"true"`
+	ProviderEncryptedSecret  string                `gorm:"type:text" json:"providerEncryptedSecret,omitempty" readonly:"true"`
 	TeeSignature        string                `gorm:"type:varchar(132)" json:"teeSignature" readonly:"true" `
 	DeliverIndex        uint64                `gorm:"type:bigint" json:"deliverIndex" readonly:"true"`
 	DeliverTime         int64                 `gorm:"type:bigint" json:"deliverTime"`

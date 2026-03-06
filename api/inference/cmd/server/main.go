@@ -102,7 +102,7 @@ func Main() {
 	}
 	// Initialize LoRA Manager if enabled
 	if config.LoRA.Enable {
-		loraManager, err := lorapkg.NewManager(config.LoRA, db, logger)
+		loraManager, err := lorapkg.NewManager(config.LoRA, config.Networks, db, logger)
 		if err != nil {
 			panic(err)
 		}

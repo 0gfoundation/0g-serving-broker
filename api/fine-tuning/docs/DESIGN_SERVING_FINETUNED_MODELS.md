@@ -1,6 +1,6 @@
 # Design: Serving Fine-Tuned Models to End Users
 
-> Status: **Phase 1–2 Implemented, E2E Verified on CPU**  
+> Status: **Phase 1–3 Implemented (0G Storage download + decryption done), E2E Verified on CPU**  
 > Author: Zeyu  
 > Date: 2026-03-02  
 > Updated: 2026-03-05
@@ -473,7 +473,35 @@ Active (ServerlessLLM manages GPU/CPU/Disk) ←──→ Archived (0G Storage)
 
 ServerlessLLM handles the fast tier (GPU ↔ CPU ↔ Disk) automatically. The LoRA Manager only manages the cold tier (Disk ↔ 0G Storage) for adapters that need to be fully offloaded.
 
-### 4.7 Serving Lifecycle
+### 4.7 Provider Key Management (Plan B — No Contract Change)
+
+The fine-tuning broker encrypts the LoRA adapter with a random AES key. The user gets the AES key encrypted with their ECIES public key (`EncryptedSecret`). But the inference broker (on a separate node) also needs the AES key to download and decrypt the adapter from 0G Storage.
+
+**Solution**: Embed the provider-encrypted AES key directly in the on-chain `modelRootHash`:
+
+```
+Fine-tuning broker (finalizer):
+  1. Generate random AES key → encrypt adapter → upload to 0G Storage → storageHash (32 bytes)
+  2. Encrypt AES key with user's ECIES public key → EncryptedSecret (for user CLI download)
+  3. Encrypt AES key with provider wallet's ECIES public key → providerEncKey (~81 bytes)
+  4. Store in DB:  OutputRootHash = hex(storageHash)  (32 bytes, for client CLI compatibility)
+  5. Store in contract:  modelRootHash = storageHash + providerEncKey  (~113 bytes)
+
+Inference broker (LoRA Manager):
+  1. Event watcher detects DeliverableAcknowledged → calls GetDeliverable() → gets modelRootHash bytes
+  2. Parse: storageHash = modelRootHash[:32], providerEncKey = modelRootHash[32:]
+  3. Decrypt providerEncKey with provider wallet's ECIES private key → AES key
+  4. Download encrypted adapter from 0G Storage using storageHash
+  5. Decrypt with AES-GCM using AES key → unzip → deploy to ServerlessLLM
+```
+
+**Why this works**:
+- Both brokers share the same provider wallet (`networks.privateKeys` in config)
+- The `modelRootHash` is `bytes memory` in Solidity — variable length, no contract change needed
+- The client CLI reads `OutputRootHash` from the broker API (32-byte hash), not from the contract
+- On-chain gas cost increase is negligible (~81 extra bytes ≈ 5,500 gas)
+
+### 4.8 Serving Lifecycle
 
 ```
 Fine-tuning task completes (Delivered state)
@@ -599,7 +627,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
    - Owner check for `ft-*` models implemented in proxy
    - Looks up adapter owner from LoRA Manager's in-memory map
 
-### Phase 2: LoRA Manager + On-Chain Event Watching — DONE (except 0G Storage download)
+### Phase 2: LoRA Manager + On-Chain Event Watching — DONE
 
 **Goal**: Automate adapter lifecycle — discover via chain events, deploy, offload, restore.
 
@@ -616,7 +644,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
    - DB persistence for crash recovery (`lora_adapters` table via GORM)
    - Offload loop with configurable idle timeout
    - `mockDeploy` mode for CPU-only testing (creates placeholder files)
-   - **TODO**: 0G Storage download + AES-GCM decryption (currently uses mock or expects files on disk)
+   - 0G Storage download + AES-GCM decryption now implemented (Phase 3), `mockDeploy` mode still available for CPU-only testing
 
 3. **~~Build Event Watcher~~** ✅
    - `api/inference/internal/lora/event_watcher.go` — polls `FineTuningServing` contract
@@ -633,28 +661,30 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
    - `api/e2e-lora-serving/e2e_test.py` — 14/14 tests passed (see Section 9)
    - Full chain: register service → deposit → deliver → acknowledge → event detect → adapter deploy → inference request
 
-### Phase 3: 0G Storage Integration + Optimization — TODO
+### Phase 3: 0G Storage Integration + Optimization — PARTIALLY DONE
 
-1. **0G Storage download + decryption in LoRA Manager**
-   - Implement actual download from 0G Storage by root hash
-   - AES-GCM decryption with provider key
-   - Replace `mockDeploy` placeholder logic with real download path
+1. **~~0G Storage download + decryption in LoRA Manager~~** ✅
+   - `StorageDownloader` (`api/inference/internal/lora/storage_downloader.go`) — downloads encrypted adapter from 0G Storage via indexer client
+   - `AesDecryptLargeFile` (`api/common/util/crypto.go`) — streaming AES-GCM decryption matching the chunk-based encryption format
+   - `ProviderECIESEncrypt/Decrypt` (`api/common/util/crypto.go`) — encrypt/decrypt AES key with provider wallet's ECIES key pair
+   - `ParseCombinedModelRootHash` (`api/common/util/crypto.go`) — splits `[32-byte storage hash][N-byte provider-encrypted AES key]` from contract data
+   - **Key management approach (Plan B)**: No contract change needed. The fine-tuning broker encrypts the AES key with the provider wallet's ECIES public key and appends it to `modelRootHash` in the contract. The inference broker (same provider wallet) extracts and decrypts it. The DB `OutputRootHash` keeps only the 32-byte storage hash for client CLI compatibility.
 
-2. **Real ServerlessLLM deployment (GPU required)**
+2. **Real ServerlessLLM deployment (GPU required)** — TODO
    - ServerlessLLM requires GPU with compute capability >= 7.0
    - Set up ServerlessLLM head + worker(s) via Docker Compose on GPU nodes
    - Deploy base model with `--enable-lora`
    - Point broker `sllmUrl` to real SLLM cluster
    - Alternative: use vLLM directly with `--enable-lora` (simpler, no Ray dependency)
 
-3. **`sllm-store` for faster cold restore**
+3. **`sllm-store` for faster cold restore** — TODO
    - Convert adapters to ServerlessLLM's optimized format
    - Benchmark loading speedup
 
-4. **Streaming billing**
+4. **Streaming billing** — TODO
    - Token counting from SSE chunks
 
-5. **Adapter sharing**
+5. **Adapter sharing** — TODO
    - Allow task owners to grant access to other users
 
 ### Phase 4: Production Hardening — TODO
@@ -672,14 +702,19 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 
 | Component | File(s) | Status |
 |-----------|---------|--------|
-| **LoRA Manager** | `api/inference/internal/lora/manager.go` | Implemented — adapter lifecycle, in-memory map, DB persistence, mock deploy mode |
+| **LoRA Manager** | `api/inference/internal/lora/manager.go` | Implemented — adapter lifecycle, in-memory map, DB persistence, mock deploy mode, 0G Storage download+decrypt |
 | **SLLM HTTP Client** | `api/inference/internal/lora/sllm_client.go` | Implemented — deploy, delete, list, health check via HTTP API |
-| **Event Watcher** | `api/inference/internal/lora/event_watcher.go` | Implemented — polls FineTuningServing contract for DeliverableAcknowledged events |
+| **Event Watcher** | `api/inference/internal/lora/event_watcher.go` | Implemented — polls FineTuningServing contract for DeliverableAcknowledged events, handles combined modelRootHash |
+| **Storage Downloader** | `api/inference/internal/lora/storage_downloader.go` | Implemented — 0G Storage download → ECIES decrypt AES key → AES-GCM decrypt adapter → unzip |
 | **DB Model** | `api/inference/internal/lora/model/adapter.go` | Implemented — GORM model for crash recovery |
 | **Proxy LoRA routing** | `api/inference/internal/ctrl/proxy.go` | Implemented — ft-* model name rewrite + owner check |
-| **Config** | `api/inference/config/config.go` | Implemented — LoRAConfig with sllmUrl, mockDeploy fields |
+| **Config** | `api/inference/config/config.go` | Implemented — LoRAConfig with sllmUrl, mockDeploy, storageIndexerUrl fields |
 | **Server init** | `api/inference/cmd/server/main.go` | Implemented — initializes LoRA Manager + Event Watcher on startup when `lora.enable: true` |
 | **CPU-only executor** | `api/fine-tuning/internal/services/executor.go` | Implemented — skips nvidia runtime when gpuCount=0 |
+| **Provider ECIES key sharing** | `api/fine-tuning/internal/services/finalizer.go` | Implemented — encrypts AES key with provider wallet ECIES pubkey, embeds in contract modelRootHash |
+| **AES large file decrypt** | `api/common/util/crypto.go` | Implemented — `AesDecryptLargeFile` (streaming, matches `AesEncryptLargeFile` chunk format) |
+| **Provider ECIES encrypt/decrypt** | `api/common/util/crypto.go` | Implemented — `ProviderECIESEncrypt`, `ProviderECIESDecrypt`, `ParseCombinedModelRootHash` |
+| **Provider key helper** | `api/common/config/network.go` | Implemented — `GetProviderPrivateKey` extracts wallet key from config for both brokers |
 | **Mock SLLM** | `api/e2e-lora-serving/mock_sllm.py` | Implemented — Python HTTP server mimicking ServerlessLLM API |
 | **E2E test script** | `api/e2e-lora-serving/e2e_test.py` | Implemented — 14 test assertions covering full lifecycle |
 
@@ -687,10 +722,9 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 
 | Component | Blocker | Notes |
 |-----------|---------|-------|
-| **0G Storage download** in LoRA Manager | None (code path exists, marked TODO) | `manager.go:downloadAndDeploy()` currently uses mockDeploy or expects files on disk |
-| **AES-GCM decryption** of adapter | Depends on key management design (Open Question #1) | Provider key derivation scheme needed |
 | **Real ServerlessLLM deployment** | Requires GPU (compute capability >= 7.0) | Can use vLLM with `--enable-lora` as lighter alternative |
-| **Adapter offload to 0G Storage** | Depends on 0G Storage integration | Currently offload only calls `sllm delete`, does not re-upload |
+| **Adapter offload to 0G Storage** | Depends on cold storage design | Currently offload only calls `sllm delete`, does not re-upload |
+| **Full E2E with real 0G Storage** | Needs 0G Storage testnet connectivity from E2E env | Code path implemented, needs integration test on testnet |
 
 ---
 

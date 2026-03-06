@@ -2,6 +2,7 @@ package lora
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,8 +10,10 @@ import (
 	"sync"
 	"time"
 
+	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -34,13 +37,14 @@ type Manager struct {
 	mu       sync.RWMutex
 	adapters map[string]*AdapterInfo // adapterName → info
 
-	config     config.LoRAConfig
-	db         *db.DB
-	sllmClient *SLLMClient
-	logger     log.Logger
+	config             config.LoRAConfig
+	db                 *db.DB
+	sllmClient         *SLLMClient
+	storageDownloader  *StorageDownloader
+	logger             log.Logger
 }
 
-func NewManager(cfg config.LoRAConfig, database *db.DB, logger log.Logger) (*Manager, error) {
+func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database *db.DB, logger log.Logger) (*Manager, error) {
 	if cfg.LoraModulesDir != "" {
 		if err := os.MkdirAll(cfg.LoraModulesDir, 0755); err != nil {
 			return nil, errors.Wrap(err, "create lora modules directory")
@@ -53,12 +57,26 @@ func NewManager(cfg config.LoRAConfig, database *db.DB, logger log.Logger) (*Man
 	}
 	sllmClient := NewSLLMClient(sllmURL, logger)
 
+	var downloader *StorageDownloader
+	providerKey, err := commonconfig.GetProviderPrivateKey(networks)
+	if err != nil {
+		logger.Warnf("provider private key not available for 0G Storage download: %v", err)
+	} else if cfg.StorageIndexerUrl != "" {
+		downloader, err = NewStorageDownloader(cfg, providerKey, logger)
+		if err != nil {
+			logger.Warnf("failed to create storage downloader: %v", err)
+		} else {
+			logger.Infof("0G Storage downloader initialized (indexer: %s)", cfg.StorageIndexerUrl)
+		}
+	}
+
 	m := &Manager{
-		adapters:   make(map[string]*AdapterInfo),
-		config:     cfg,
-		db:         database,
-		sllmClient: sllmClient,
-		logger:     logger,
+		adapters:          make(map[string]*AdapterInfo),
+		config:            cfg,
+		db:                database,
+		sllmClient:        sllmClient,
+		storageDownloader: downloader,
+		logger:            logger,
 	}
 
 	return m, nil
@@ -179,7 +197,7 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 
 // downloadAndDeploy downloads the adapter from 0G Storage, decrypts, and deploys to ServerlessLLM.
 func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
-	m.logger.Infof("downloading adapter %s from 0G Storage (hash: %s)", info.AdapterName, info.StorageRootHash)
+	m.logger.Infof("preparing adapter %s (hash: %s)", info.AdapterName, info.StorageRootHash)
 
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
 		if m.config.MockDeploy {
@@ -191,9 +209,8 @@ func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 			}
 			placeholder := filepath.Join(info.AdapterPath, "adapter_config.json")
 			_ = os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
-		} else {
-			// TODO: Integrate with 0G Storage client for actual download + decryption.
-			m.logger.Warnf("adapter path %s not found on disk; 0G Storage download not yet implemented", info.AdapterPath)
+		} else if err := m.downloadFromStorage(ctx, info); err != nil {
+			m.logger.Errorf("failed to download adapter %s from 0G Storage: %v", info.AdapterName, err)
 			m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
 			return
 		}
@@ -215,6 +232,35 @@ func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 
 	_ = m.db.UpdateLoRAAdapterState(info.AdapterName, model.AdapterStateActive)
 	m.logger.Infof("adapter %s deployed successfully", info.AdapterName)
+}
+
+// downloadFromStorage handles the full 0G Storage download → ECIES decrypt → AES decrypt → unzip pipeline.
+// The StorageRootHash is expected to be a hex string of the combined modelRootHash:
+// [32 bytes storage hash][N bytes provider-encrypted AES key].
+func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) error {
+	if m.storageDownloader == nil {
+		return errors.New("0G Storage downloader not configured; set storageIndexerUrl and provider private key")
+	}
+
+	// Parse combined hash: the on-chain modelRootHash contains both the storage hash
+	// and the provider-ECIES-encrypted AES key.
+	combined, err := hex.DecodeString(info.StorageRootHash)
+	if err != nil {
+		return errors.Wrapf(err, "decode combined root hash: %s", info.StorageRootHash)
+	}
+
+	storageHashHex, providerEncKey, err := util.ParseCombinedModelRootHash(combined)
+	if err != nil {
+		return errors.Wrap(err, "parse combined model root hash")
+	}
+
+	if providerEncKey == nil || len(providerEncKey) == 0 {
+		return errors.New("modelRootHash does not contain provider-encrypted AES key (legacy format?)")
+	}
+
+	m.logger.Infof("parsed combined hash: storage=%s, encrypted key=%d bytes", storageHashHex, len(providerEncKey))
+
+	return m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath)
 }
 
 // RestoreAdapter downloads and redeploys an offloaded/archived adapter.
