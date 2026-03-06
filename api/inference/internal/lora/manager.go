@@ -47,7 +47,11 @@ func NewManager(cfg config.LoRAConfig, database *db.DB, logger log.Logger) (*Man
 		}
 	}
 
-	sllmClient := NewSLLMClient("http://sllm:8343", logger)
+	sllmURL := cfg.SllmUrl
+	if sllmURL == "" {
+		sllmURL = "http://sllm:8343"
+	}
+	sllmClient := NewSLLMClient(sllmURL, logger)
 
 	m := &Manager{
 		adapters:   make(map[string]*AdapterInfo),
@@ -177,12 +181,22 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 	m.logger.Infof("downloading adapter %s from 0G Storage (hash: %s)", info.AdapterName, info.StorageRootHash)
 
-	// TODO: Integrate with 0G Storage client for actual download + decryption.
-	// For now, check if adapter files already exist on disk.
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
-		m.logger.Warnf("adapter path %s not found on disk; 0G Storage download not yet implemented", info.AdapterPath)
-		m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
-		return
+		if m.config.MockDeploy {
+			m.logger.Infof("mock deploy: creating placeholder adapter at %s", info.AdapterPath)
+			if mkErr := os.MkdirAll(info.AdapterPath, 0755); mkErr != nil {
+				m.logger.Errorf("mock deploy: failed to create dir: %v", mkErr)
+				m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+				return
+			}
+			placeholder := filepath.Join(info.AdapterPath, "adapter_config.json")
+			_ = os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
+		} else {
+			// TODO: Integrate with 0G Storage client for actual download + decryption.
+			m.logger.Warnf("adapter path %s not found on disk; 0G Storage download not yet implemented", info.AdapterPath)
+			m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+			return
+		}
 	}
 
 	if err := m.sllmClient.DeployAdapter(ctx, info.BaseModel, info.AdapterName, info.AdapterPath); err != nil {

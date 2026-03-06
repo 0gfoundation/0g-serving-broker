@@ -199,7 +199,7 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 	deviceRequests := make([]container.DeviceRequest, 0)
 	if task.PreTrainedModelHash == constant.MOCK_MODEL_ROOT_HASH || os.Getenv("NETWORK") == "hardhat" {
 		runtime = ""
-	} else {
+	} else if c.config.Service.Quota.GpuCount > 0 {
 		if _, ok := info.Runtimes["nvidia"]; ok {
 			runtime = "nvidia"
 
@@ -214,6 +214,8 @@ func (c *Executor) generateHostConfig(ctx context.Context, cli *client.Client, p
 		} else {
 			c.logger.Warn("nvidia runtime not found.")
 		}
+	} else {
+		c.logger.Info("GPU not required (gpuCount=0), running container in CPU-only mode.")
 	}
 
 	cpuCount := c.config.Service.Quota.CpuCount

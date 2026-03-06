@@ -45,6 +45,7 @@ type LoRAConfig struct {
 	Enable                   bool   `yaml:"enable"`
 	BaseModel                string `yaml:"baseModel"`                // Base model name (e.g., "Qwen2.5-7B")
 	LoraModulesDir           string `yaml:"loraModulesDir"`           // Local directory for LoRA adapter files
+	SllmUrl                  string `yaml:"sllmUrl"`                  // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
 	OffloadAfterMinutes      int    `yaml:"offloadAfterMinutes"`      // Idle time before offloading adapter from ServerlessLLM
 	EnableColdStorage        bool   `yaml:"enableColdStorage"`        // Enable offload to 0G Storage
 	FineTuningContractAddr   string `yaml:"fineTuningContractAddress"`
@@ -52,6 +53,7 @@ type LoRAConfig struct {
 	PollBlockIntervalSeconds int    `yaml:"pollBlockIntervalSeconds"` // How often to poll for new on-chain events
 	StorageIndexerUrl        string `yaml:"storageIndexerUrl"`        // 0G Storage indexer URL for downloading adapters
 	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
+	MockDeploy               bool   `yaml:"mockDeploy"`               // If true, create placeholder files when adapter not on disk (for E2E testing without 0G Storage)
 }
 
 type Config struct {
@@ -223,14 +225,16 @@ func GetConfig() *Config {
 				Provider:      "nginx:3001",
 				RequestLength: 40,
 			},
-			LoRA: LoRAConfig{
-			Enable:                   false,
-			LoraModulesDir:           "/data/lora-modules",
-			OffloadAfterMinutes:      60,
-			EnableColdStorage:        false,
-			PollBlockIntervalSeconds: 5,
-			StorageTurbo:             false,
-		},
+		LoRA: LoRAConfig{
+		Enable:                   false,
+		LoraModulesDir:           "/data/lora-modules",
+		SllmUrl:                  "http://sllm:8343",
+		OffloadAfterMinutes:      60,
+		EnableColdStorage:        false,
+		PollBlockIntervalSeconds: 5,
+		StorageTurbo:             false,
+		MockDeploy:               false,
+	},
 		ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
 			Logger: &config.LoggerConfig{
