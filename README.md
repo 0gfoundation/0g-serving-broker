@@ -78,9 +78,9 @@ For TEE-verified services, you need to set up a TEE node:
 
 ## Documentation
 
-- [Inference Provider Guide](https://docs.0g.ai/build-with-0g/compute-network/inference-provider)
-- [Fine-tuning Provider Guide](https://docs.0g.ai/build-with-0g/compute-network/fine-tuning-provider)
-- [0G Compute Network SDK](https://docs.0g.ai/build-with-0g/compute-network/sdk)
+- [Inference Provider Guide](https://docs.0g.ai/developer-hub/building-on-0g/compute-network/inference-provider)
+- [Fine-tuning Provider Guide](https://docs.0g.ai/developer-hub/building-on-0g/compute-network/fine-tuning-provider)
+- [0G Compute Overview](https://docs.0g.ai/developer-hub/building-on-0g/compute-network/overview)
 
 ## Support
 
