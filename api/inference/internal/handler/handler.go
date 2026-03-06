@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -21,9 +24,17 @@ type asyncCtrl interface {
 	GetAsyncJob(jobID string) (model.AsyncJob, error)
 }
 
+// modelsCtrl is the interface for controller operations used by the models handler.
+// The real *ctrl.Ctrl satisfies this interface. Tests can inject a mock implementation.
+type modelsCtrl interface {
+	GetCachedService(ctx context.Context) (model.Service, error)
+	GetServiceConfig() config.Service
+}
+
 type Handler struct {
 	ctrl        *ctrl.Ctrl
 	asyncCtrl   asyncCtrl
+	modelsCtrl  modelsCtrl
 	proxy       *proxy.Proxy
 	rateLimiter *middleware.RateLimiter
 }
@@ -32,6 +43,7 @@ func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
 		asyncCtrl:   ctrl,
+		modelsCtrl:  ctrl,
 		proxy:       proxy,
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
 	}
@@ -76,6 +88,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	// group.GET("/request", corsMiddleware(), h.ListRequest)
 
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
+	group.GET("/models", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetModels)
 
 	// Provider-only endpoints for log management
 	group.GET("/logs", corsMiddleware(), h.ListLogs)                           // List all log files

@@ -6,6 +6,14 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// Service type constants matching on-chain service type values.
+const (
+	ServiceTypeChatbot      = "chatbot"
+	ServiceTypeTextToImage  = "text-to-image"
+	ServiceTypeImageEditing = "image-editing"
+	ServiceTypeSpeechToText = "speech-to-text"
+)
+
 var (
 	ServicePrefix = "/v1/proxy"
 

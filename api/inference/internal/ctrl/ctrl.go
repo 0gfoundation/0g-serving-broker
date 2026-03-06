@@ -172,6 +172,16 @@ func (c *Ctrl) GetLogPath() string {
 	return c.logPath
 }
 
+// ProviderAddress returns the provider's on-chain address.
+func (c *Ctrl) ProviderAddress() string {
+	return c.contract.ProviderAddress
+}
+
+// GetServiceConfig returns the service configuration from the YAML config.
+func (c *Ctrl) GetServiceConfig() config.Service {
+	return c.Service
+}
+
 // IsWhitelistedUser checks if the user address is in the whitelist.
 //
 // Whitelist users bypass all billing and contract verification including:
