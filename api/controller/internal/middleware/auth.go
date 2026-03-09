@@ -3,6 +3,7 @@ package middleware
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -116,7 +117,7 @@ func recoverAddress(message string, signature string) (string, error) {
 
 	// Ethereum signatures are 65 bytes: R (32) + S (32) + V (1)
 	if len(sigBytes) != 65 {
-		return "", err
+		return "", fmt.Errorf("invalid signature length: expected 65 bytes, got %d", len(sigBytes))
 	}
 
 	// Adjust V value for Ethereum signature recovery
