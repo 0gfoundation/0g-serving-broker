@@ -220,7 +220,15 @@ The flow:
 
 **Why trigger on acknowledge (not deliver)?** The user must explicitly confirm they want the fine-tuned result before the provider starts serving it. If the user never acknowledges (e.g., unhappy with quality), the adapter is NOT deployed for inference — no wasted GPU resources.
 
-**Adapter file transfer**: The inference node downloads the encrypted adapter from **0G Storage** (not from the fine-tuning node's disk). This avoids any direct file sharing between TEE nodes. The provider holds the decryption key (or re-derives it) to decrypt the adapter locally.
+**Adapter file transfer**: The inference node downloads the encrypted adapter from **0G Storage** (not from the fine-tuning node's disk). This avoids any direct file sharing between TEE nodes.
+
+**Decryption key sharing** (Q: "finetune 模块怎么获取解密用的密钥呢？"):  
+Fine-tuning broker **生成** AES key，同时做两件事：(1) 用 user 的 ECIES 公钥加密 → `EncryptedSecret`（用户可下载解密），(2) 用 provider 钱包的 ECIES 公钥加密 → 嵌入 `modelRootHash`。Inference broker 用同一个 provider 钱包的私钥解密即可得到 AES key。详见 Section 4.7。
+
+**0G Storage 上传失败的 fallback** (Q: "如果 finetune 的结果上传到 storage 失败呢？"):  
+当前实现（`finalizer.go`）在 0G Storage 上传失败时回退到本地 hash（`keccak256(encrypted_file)`）。此时 inference broker **无法从 0G Storage 下载**（因为这不是一个有效的 0G Storage root hash）。两种应对策略：
+- **策略 A（当前）**：用户通过 TEE backup 路径下载（`GET /v1/user/{addr}/task/{id}/lora`），自行托管推理。Inference broker 不参与。
+- **策略 B（待实现）**：Fine-tuning broker 重试上传，或提供一个 cross-TEE 的 adapter 传输 API。只要 0G Storage 上传成功，inference broker 才会被触发部署。
 
 ---
 
@@ -266,6 +274,12 @@ lora:
 **Provider wallet key** (used for ECIES decrypt): The inference broker reuses the same `networks.privateKeys` as the fine-tuning broker. No additional key configuration needed — see Section 4.7 for details.
 
 Everything else stays the same — same model name on-chain, same prices, same contract registration.
+
+**TEE 环境约束** (Q: "tee 机器不能挂内容的卷哈"):  
+TEE 机器不支持外部存储卷挂载。因此：
+- **Base model**: 只能在 TEE 容器启动时自动拉取（从 HuggingFace 或 0G Storage），不能通过挂卷预置。`service.model` 指定模型名，ServerlessLLM/vLLM 在启动时自动下载。
+- **LoRA adapters**: `loraModulesDir` 使用 TEE 的临时存储。Adapter 文件在 TEE 重启后会丢失，LoRA Manager 通过 DB checkpoint + 0G Storage 重新下载来恢复。
+- **Persistent storage**: 唯一的持久层是 0G Storage（链上） + MySQL（inference broker 自身的 DB，也应在 TEE 外部或使用持久卷）。
 
 ### 4.2 LoRA Manager (Implemented in Inference Module)
 
@@ -350,9 +364,12 @@ A2. User creates fine-tuning task
     → Task enters queue: Pending → Setup → Training → Finalize → Delivered
 
 A3. Fine-tuning broker delivers result
-    → Encrypted LoRA adapter uploaded to 0G Storage
-    → AES key encrypted with provider wallet ECIES pubkey → providerEncKey
-    → FineTuningServing.addDeliverable(taskID, storageHash + providerEncKey)
+    → Encrypted LoRA adapter uploaded to 0G Storage → storageHash
+    → AES key encrypted with user's ECIES pubkey → EncryptedSecret (用户CLI下载解密用，保持不变)
+    → AES key ALSO encrypted with provider wallet ECIES pubkey → providerEncKey (新增，inference broker解密用)
+    → DB: OutputRootHash = storageHash (32 bytes，客户端兼容)
+    → Contract: addDeliverable(taskID, storageHash + providerEncKey)
+    (注：两种加密并存。user 加密走原有路径，provider 加密是为了 inference broker 能自主解密)
 
 A4. User acknowledges the result
     → FineTuningServing.acknowledgeDeliverable(taskID)
@@ -386,6 +403,12 @@ B3. User creates session token (done on USER's side, via SDK/CLI)
     → This token is sent as Authorization header in all inference requests
     (Where: user's local machine, using 0G inference SDK. NOT on the broker.)
 
+    ⚠️ 访问控制说明 (Q: "这么配置别人都可以用了？"):
+    Session token 只证明"我是 userAddress"，但 proxy 在 C2.b 步还会做 OWNER CHECK：
+    LoRA Manager 通过链上事件记录了每个 adapter 的 task owner address。
+    只有 task owner 的请求才能通过，其他地址一律返回 403 Forbidden。
+    所以即使别人知道 model name (ft-xxx)，没有 owner 的钱包私钥也无法使用。
+
 
 Phase C: Inference Request (user ↔ inference broker ↔ ServerlessLLM)
 ────────────────────────────────────────────────────────────────────
@@ -396,8 +419,9 @@ C1. User sends inference request:
 
 C2. Inference broker proxy:
     a. Validate session token → recover userAddress from signature
-    b. Detect "ft-*" model → owner check:
-       LoRA Manager lookup: is userAddress the task owner? If not → 403
+    b. Detect "ft-*" model → ⚠️ OWNER CHECK (核心访问控制):
+       LoRA Manager lookup: is userAddress the task owner? If not → 403 Forbidden
+       (adapter owner = DeliverableAcknowledged 事件中的 user address，链上不可伪造)
     c. Rewrite request body for ServerlessLLM:
        { "model": "Qwen2.5-7B", "lora_adapter_name": "ft-Qwen2-5-7B-abc123", ... }
     d. Check balance ≥ estimatedFee + unsettledFees
