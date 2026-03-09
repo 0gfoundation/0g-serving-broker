@@ -101,6 +101,8 @@ func Main() {
 		panic(err)
 	}
 	// Initialize LoRA Manager if enabled
+	var loraCancel context.CancelFunc
+	var eventWatcher *lorapkg.EventWatcher
 	if config.LoRA.Enable {
 		loraManager, err := lorapkg.NewManager(config.LoRA, config.Networks, db, logger)
 		if err != nil {
@@ -108,14 +110,20 @@ func Main() {
 		}
 		ctrl.SetLoRAManager(loraManager)
 
-		if err := loraManager.Start(ctx); err != nil {
+		var loraCtx context.Context
+		loraCtx, loraCancel = context.WithCancel(ctx)
+
+		if err := loraManager.Start(loraCtx); err != nil {
 			logger.Errorf("failed to start LoRA manager: %v", err)
 		}
 
-		// Start event watcher in background
 		providerAddr := common.HexToAddress(contract.ProviderAddress)
-		eventWatcher := lorapkg.NewEventWatcher(loraManager, db, config.LoRA, providerAddr, logger)
-		go eventWatcher.Start(ctx)
+		eventWatcher, err = lorapkg.NewEventWatcher(loraManager, db, config.LoRA, providerAddr, logger)
+		if err != nil {
+			logger.Errorf("failed to create event watcher: %v", err)
+		} else {
+			go eventWatcher.Start(loraCtx)
+		}
 
 		logger.Info("LoRA serving enabled: manager and event watcher started")
 	}
@@ -172,6 +180,14 @@ func Main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Errorf("Server forced to shutdown: %v", err)
+	}
+
+	// Shutdown LoRA event watcher and manager
+	if loraCancel != nil {
+		loraCancel()
+	}
+	if eventWatcher != nil {
+		eventWatcher.Stop()
 	}
 
 	// Shutdown async processing (drain queue, wait for workers)

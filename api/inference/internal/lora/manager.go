@@ -146,7 +146,9 @@ func (m *Manager) RecordAccess(adapterName string) {
 	m.mu.Unlock()
 
 	if m.db != nil {
-		_ = m.db.UpdateLoRAAdapterAccess(adapterName)
+		if err := m.db.UpdateLoRAAdapterAccess(adapterName); err != nil {
+			m.logger.Errorf("failed to update adapter %s access time in DB: %v", adapterName, err)
+		}
 	}
 }
 
@@ -230,7 +232,9 @@ func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 	}
 	m.mu.Unlock()
 
-	_ = m.db.UpdateLoRAAdapterState(info.AdapterName, model.AdapterStateActive)
+	if err := m.db.UpdateLoRAAdapterState(info.AdapterName, model.AdapterStateActive); err != nil {
+		m.logger.Errorf("failed to update adapter %s state in DB: %v", info.AdapterName, err)
+	}
 	m.logger.Infof("adapter %s deployed successfully", info.AdapterName)
 }
 
@@ -242,11 +246,13 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 		return errors.New("0G Storage downloader not configured; set storageIndexerUrl and provider private key")
 	}
 
-	// Parse combined hash: the on-chain modelRootHash contains both the storage hash
-	// and the provider-ECIES-encrypted AES key.
 	combined, err := hex.DecodeString(info.StorageRootHash)
 	if err != nil {
 		return errors.Wrapf(err, "decode combined root hash: %s", info.StorageRootHash)
+	}
+
+	if len(combined) < 32 {
+		return fmt.Errorf("invalid StorageRootHash: expected at least 32 bytes, got %d", len(combined))
 	}
 
 	storageHashHex, providerEncKey, err := util.ParseCombinedModelRootHash(combined)
@@ -288,7 +294,9 @@ func (m *Manager) setAdapterState(adapterName string, state model.AdapterState) 
 	}
 	m.mu.Unlock()
 	if m.db != nil {
-		_ = m.db.UpdateLoRAAdapterState(adapterName, state)
+		if err := m.db.UpdateLoRAAdapterState(adapterName, state); err != nil {
+			m.logger.Errorf("failed to update adapter %s state to %s in DB: %v", adapterName, state, err)
+		}
 	}
 }
 

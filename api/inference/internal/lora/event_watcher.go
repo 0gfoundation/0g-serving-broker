@@ -2,6 +2,7 @@ package lora
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -14,6 +15,8 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 )
 
+const defaultEventLookbackBlocks = 1000
+
 // EventWatcher watches the FineTuningServing contract for DeliverableAcknowledged events
 // and triggers adapter registration in the LoRA Manager.
 type EventWatcher struct {
@@ -22,6 +25,7 @@ type EventWatcher struct {
 	config          config.LoRAConfig
 	providerAddress common.Address
 	logger          log.Logger
+	client          *ethclient.Client
 }
 
 func NewEventWatcher(
@@ -30,14 +34,20 @@ func NewEventWatcher(
 	cfg config.LoRAConfig,
 	providerAddress common.Address,
 	logger log.Logger,
-) *EventWatcher {
+) (*EventWatcher, error) {
+	client, err := ethclient.Dial(cfg.ChainRpcUrl)
+	if err != nil {
+		return nil, fmt.Errorf("connect to chain RPC %s: %w", cfg.ChainRpcUrl, err)
+	}
+
 	return &EventWatcher{
 		manager:         manager,
 		db:              database,
 		config:          cfg,
 		providerAddress: providerAddress,
 		logger:          logger,
-	}
+		client:          client,
+	}, nil
 }
 
 // Start begins polling for on-chain events. Blocks until ctx is cancelled.
@@ -76,31 +86,31 @@ func (w *EventWatcher) Start(ctx context.Context) {
 	}
 }
 
-func (w *EventWatcher) pollEvents(ctx context.Context, fromBlock *uint64) {
-	client, err := ethclient.DialContext(ctx, w.config.ChainRpcUrl)
-	if err != nil {
-		w.logger.Errorf("failed to connect to chain RPC: %v", err)
-		return
+// Stop closes the underlying RPC client connection.
+func (w *EventWatcher) Stop() {
+	if w.client != nil {
+		w.client.Close()
+		w.logger.Info("event watcher RPC client closed")
 	}
-	defer client.Close()
+}
 
+func (w *EventWatcher) pollEvents(ctx context.Context, fromBlock *uint64) {
 	contractAddr := common.HexToAddress(w.config.FineTuningContractAddr)
-	filterer, err := ftcontract.NewFineTuningServingFilterer(contractAddr, client)
+	filterer, err := ftcontract.NewFineTuningServingFilterer(contractAddr, w.client)
 	if err != nil {
 		w.logger.Errorf("failed to create contract filterer: %v", err)
 		return
 	}
 
-	currentBlock, err := client.BlockNumber(ctx)
+	currentBlock, err := w.client.BlockNumber(ctx)
 	if err != nil {
 		w.logger.Errorf("failed to get current block number: %v", err)
 		return
 	}
 
 	if *fromBlock == 0 {
-		// Start from a recent block if no checkpoint
-		if currentBlock > 1000 {
-			*fromBlock = currentBlock - 1000
+		if currentBlock > defaultEventLookbackBlocks {
+			*fromBlock = currentBlock - defaultEventLookbackBlocks
 		}
 	}
 
@@ -108,7 +118,7 @@ func (w *EventWatcher) pollEvents(ctx context.Context, fromBlock *uint64) {
 		return
 	}
 
-	w.processAcknowledgedEvents(ctx, filterer, client, contractAddr, *fromBlock, currentBlock)
+	w.processAcknowledgedEvents(ctx, filterer, contractAddr, *fromBlock, currentBlock)
 
 	*fromBlock = currentBlock + 1
 }
@@ -116,7 +126,6 @@ func (w *EventWatcher) pollEvents(ctx context.Context, fromBlock *uint64) {
 func (w *EventWatcher) processAcknowledgedEvents(
 	ctx context.Context,
 	filterer *ftcontract.FineTuningServingFilterer,
-	client *ethclient.Client,
 	contractAddr common.Address,
 	startBlock, endBlock uint64,
 ) {
@@ -142,7 +151,7 @@ func (w *EventWatcher) processAcknowledgedEvents(
 			event.User.Hex(), event.DeliverableId, event.Raw.BlockNumber)
 
 		// Fetch the deliverable details to get the ModelRootHash
-		rootHash, err := w.getDeliverableRootHash(ctx, client, contractAddr, event.User, event.DeliverableId)
+		rootHash, err := w.getDeliverableRootHash(ctx, contractAddr, event.User, event.DeliverableId)
 		if err != nil {
 			w.logger.Errorf("failed to get deliverable root hash for %s: %v", event.DeliverableId, err)
 			continue
@@ -166,12 +175,11 @@ func (w *EventWatcher) processAcknowledgedEvents(
 // provider-encrypted AES key appended after the storage hash.
 func (w *EventWatcher) getDeliverableRootHash(
 	ctx context.Context,
-	client *ethclient.Client,
 	contractAddr common.Address,
 	user common.Address,
 	deliverableId string,
 ) (string, error) {
-	caller, err := ftcontract.NewFineTuningServingCaller(contractAddr, client)
+	caller, err := ftcontract.NewFineTuningServingCaller(contractAddr, w.client)
 	if err != nil {
 		return "", err
 	}
