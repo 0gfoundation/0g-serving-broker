@@ -178,6 +178,12 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&LoRAAdapter{})
 			},
 		},
+		{
+			ID: "add-lora-adapter-state-access-index",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.Exec("CREATE INDEX IF NOT EXISTS idx_lora_state_access ON lo_ra_adapters (state, last_access_at)").Error
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
