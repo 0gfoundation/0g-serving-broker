@@ -32,7 +32,8 @@ PROVIDER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b7869
 # Hardhat account #2 = user: 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 USER_KEY = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
 
-TASK_ID = "e2e-test-task-001"
+import uuid as _uuid
+TASK_ID = f"e2e-{_uuid.uuid4().hex[:12]}"
 MODEL_ROOT_HASH = b'\xaa' * 32  # dummy 32-byte hash
 
 w3 = Web3(Web3.HTTPProvider(HARDHAT_RPC))
@@ -160,9 +161,28 @@ except Exception as e:
 
 
 # ============================================================
-# Step 3: Provider adds deliverable (simulates training done)
+# Step 3a: Push adapter key to inference broker via HTTP
 # ============================================================
-print("\n=== Step 3: Provider adds deliverable ===")
+print("\n=== Step 3a: Push adapter key to inference broker ===")
+
+try:
+    r = requests.post(
+        f"{INFERENCE_BROKER}/internal/v1/adapter-keys",
+        json={
+            "taskId": TASK_ID,
+            "storageHash": "0x" + MODEL_ROOT_HASH.hex(),
+            "providerEncKey": "0xdeadbeef",
+        },
+        timeout=5,
+    )
+    result(r.status_code == 200, f"Adapter key pushed: {r.json()}")
+except Exception as e:
+    result(False, f"Push adapter key failed: {e}")
+
+# ============================================================
+# Step 3b: Provider adds deliverable (simulates training done)
+# ============================================================
+print("\n=== Step 3b: Provider adds deliverable ===")
 
 try:
     receipt = send_tx(

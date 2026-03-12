@@ -91,6 +91,16 @@ func (c *Ctrl) RewriteLoRARequest(body []byte) ([]byte, string, error) {
 	return modified, modelName, nil
 }
 
+// CreateAdapterKey stores a pre-pushed adapter key from the fine-tuning broker.
+func (c *Ctrl) CreateAdapterKey(key *model.AdapterKey) error {
+	return c.db.CreateAdapterKey(key)
+}
+
+// GetAdapterKey retrieves a pre-pushed adapter key by task ID.
+func (c *Ctrl) GetAdapterKey(taskID string) (*model.AdapterKey, error) {
+	return c.db.GetAdapterKeyByTaskID(taskID)
+}
+
 // ExtractModelName extracts the "model" field from a JSON request body.
 func ExtractModelName(body []byte) string {
 	if len(body) == 0 {

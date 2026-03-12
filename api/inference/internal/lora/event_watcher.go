@@ -171,8 +171,7 @@ func (w *EventWatcher) processAcknowledgedEvents(
 }
 
 // getDeliverableRootHash fetches the on-chain modelRootHash for a deliverable.
-// Returns the raw hex (no 0x prefix) which may be >32 bytes if it contains the
-// provider-encrypted AES key appended after the storage hash.
+// Returns the raw hex (no 0x prefix). With HTTP key sharing, this is always a pure 32-byte storage hash.
 func (w *EventWatcher) getDeliverableRootHash(
 	ctx context.Context,
 	contractAddr common.Address,
@@ -190,11 +189,5 @@ func (w *EventWatcher) getDeliverableRootHash(
 		return deliverableId, nil
 	}
 
-	rawHex := common.Bytes2Hex(deliverable.ModelRootHash)
-	if len(deliverable.ModelRootHash) > 32 {
-		w.logger.Infof("deliverable %s has combined modelRootHash (%d bytes: 32-byte storage hash + %d-byte provider key)",
-			deliverableId, len(deliverable.ModelRootHash), len(deliverable.ModelRootHash)-32)
-	}
-
-	return rawHex, nil
+	return common.Bytes2Hex(deliverable.ModelRootHash), nil
 }

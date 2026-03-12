@@ -13,7 +13,6 @@ import (
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -239,32 +238,24 @@ func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 }
 
 // downloadFromStorage handles the full 0G Storage download → ECIES decrypt → AES decrypt → unzip pipeline.
-// The StorageRootHash is expected to be a hex string of the combined modelRootHash:
-// [32 bytes storage hash][N bytes provider-encrypted AES key].
+// It looks up the provider-encrypted AES key from the local adapter_keys table (pre-pushed by fine-tuning broker via HTTP).
 func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) error {
 	if m.storageDownloader == nil {
 		return errors.New("0G Storage downloader not configured; set storageIndexerUrl and provider private key")
 	}
 
-	combined, err := hex.DecodeString(info.StorageRootHash)
+	adapterKey, err := m.db.GetAdapterKeyByTaskID(info.TaskID)
 	if err != nil {
-		return errors.Wrapf(err, "decode combined root hash: %s", info.StorageRootHash)
+		return errors.Wrapf(err, "look up adapter key for task %s (was it pushed by fine-tuning broker?)", info.TaskID)
 	}
 
-	if len(combined) < 32 {
-		return fmt.Errorf("invalid StorageRootHash: expected at least 32 bytes, got %d", len(combined))
-	}
-
-	storageHashHex, providerEncKey, err := util.ParseCombinedModelRootHash(combined)
+	providerEncKey, err := hex.DecodeString(adapterKey.ProviderEncKey)
 	if err != nil {
-		return errors.Wrap(err, "parse combined model root hash")
+		return errors.Wrapf(err, "decode provider encrypted key for task %s", info.TaskID)
 	}
 
-	if providerEncKey == nil || len(providerEncKey) == 0 {
-		return errors.New("modelRootHash does not contain provider-encrypted AES key (legacy format?)")
-	}
-
-	m.logger.Infof("parsed combined hash: storage=%s, encrypted key=%d bytes", storageHashHex, len(providerEncKey))
+	storageHashHex := info.StorageRootHash
+	m.logger.Infof("adapter key found: storage=%s, encrypted key=%d bytes", storageHashHex, len(providerEncKey))
 
 	return m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath)
 }

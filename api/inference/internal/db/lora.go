@@ -74,3 +74,15 @@ func (d *DB) ListIdleAdapters(idleThreshold time.Duration) ([]model.LoRAAdapter,
 	}
 	return adapters, nil
 }
+
+func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
+	return d.db.Create(key).Error
+}
+
+func (d *DB) GetAdapterKeyByTaskID(taskID string) (*model.AdapterKey, error) {
+	var key model.AdapterKey
+	if err := d.db.Where("task_id = ?", taskID).First(&key).Error; err != nil {
+		return nil, err
+	}
+	return &key, nil
+}

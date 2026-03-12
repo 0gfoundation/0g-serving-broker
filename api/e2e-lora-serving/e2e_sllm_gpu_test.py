@@ -172,8 +172,25 @@ except Exception as e:
     else:
         result(False, f"transferFund failed: {e}")
 
-# ── Step 4: Provider adds deliverable ────────────────────────
-print("\n=== Step 4: Provider adds deliverable (simulates training done) ===")
+# ── Step 4a: Push adapter key to inference broker via HTTP ────
+print("\n=== Step 4a: Push adapter key to inference broker ===")
+
+try:
+    r = requests.post(
+        f"{INFERENCE_BROKER}/internal/v1/adapter-keys",
+        json={
+            "taskId": TASK_ID,
+            "storageHash": "0x" + MODEL_ROOT_HASH.hex(),
+            "providerEncKey": "0xdeadbeef",
+        },
+        timeout=5,
+    )
+    result(r.status_code == 200, f"Adapter key pushed: {r.json()}")
+except Exception as e:
+    result(False, f"Push adapter key failed: {e}")
+
+# ── Step 4b: Provider adds deliverable ────────────────────────
+print("\n=== Step 4b: Provider adds deliverable (simulates training done) ===")
 
 try:
     receipt = send_tx(

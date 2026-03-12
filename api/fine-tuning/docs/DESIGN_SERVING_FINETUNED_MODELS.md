@@ -223,7 +223,7 @@ The flow:
 **Adapter file transfer**: The inference node downloads the encrypted adapter from **0G Storage** (not from the fine-tuning node's disk). This avoids any direct file sharing between TEE nodes.
 
 **Decryption key sharing** (Q: "finetune 模块怎么获取解密用的密钥呢？"):  
-Fine-tuning broker **生成** AES key，同时做两件事：(1) 用 user 的 ECIES 公钥加密 → `EncryptedSecret`（用户可下载解密），(2) 用 provider 钱包的 ECIES 公钥加密 → 嵌入 `modelRootHash`。Inference broker 用同一个 provider 钱包的私钥解密即可得到 AES key。详见 Section 4.7。
+Fine-tuning broker **生成** AES key，同时做两件事：(1) 用 user 的 ECIES 公钥加密 → `EncryptedSecret`（用户可下载解密），(2) 用 provider 钱包的 ECIES 公钥加密 → 通过 HTTP 推送给 inference broker。Inference broker 用同一个 provider 钱包的私钥解密即可得到 AES key。详见 Section 4.7。
 
 **0G Storage 上传失败的 fallback** (Q: "如果 finetune 的结果上传到 storage 失败呢？"):  
 当前实现（`finalizer.go`）在 0G Storage 上传失败时回退到本地 hash（`keccak256(encrypted_file)`）。此时 inference broker **无法从 0G Storage 下载**（因为这不是一个有效的 0G Storage root hash）。两种应对策略：
@@ -285,7 +285,7 @@ TEE 机器不支持外部存储卷挂载。因此：
 
 Lives in `api/inference/internal/lora/`. Manages the LoRA adapter lifecycle via ServerlessLLM HTTP API + on-chain event watching.
 
-**Implementation status**: Core manager, SLLM client, event watcher, DB persistence, 0G Storage download + decryption (via provider ECIES key sharing, see Section 4.7) are all **implemented**. E2E tested on CPU with mock SLLM (see Section 8). Full testnet E2E pending.
+**Implementation status**: Core manager, SLLM client, event watcher, DB persistence, 0G Storage download + decryption (via HTTP key sharing, see Section 4.7), internal adapter-keys API are all **implemented**. E2E tested on CPU with mock SLLM (see Section 8) and on GPU with real vLLM + ServerlessLLM wrapper.
 
 **Responsibilities**:
 1. Watch the `FineTuningServing` contract for `DeliverableAcknowledged` events (new completed + acknowledged tasks)
@@ -364,12 +364,11 @@ A2. User creates fine-tuning task
     → Task enters queue: Pending → Setup → Training → Finalize → Delivered
 
 A3. Fine-tuning broker delivers result
-    → Encrypted LoRA adapter uploaded to 0G Storage → storageHash
+    → Encrypted LoRA adapter uploaded to 0G Storage → storageHash (32 bytes)
     → AES key encrypted with user's ECIES pubkey → EncryptedSecret (用户CLI下载解密用，保持不变)
-    → AES key ALSO encrypted with provider wallet ECIES pubkey → providerEncKey (新增，inference broker解密用)
-    → DB: OutputRootHash = storageHash (32 bytes，客户端兼容)
-    → Contract: addDeliverable(taskID, storageHash + providerEncKey)
-    (注：两种加密并存。user 加密走原有路径，provider 加密是为了 inference broker 能自主解密)
+    → AES key encrypted with provider wallet ECIES pubkey → providerEncKey (inference broker解密用)
+    → HTTP POST providerEncKey to inference broker (内部通信，不上链)
+    → Contract: addDeliverable(taskID, storageHash) — 纯 32 bytes，向后兼容
 
 A4. User acknowledges the result
     → FineTuningServing.acknowledgeDeliverable(taskID)
@@ -503,33 +502,37 @@ Active (ServerlessLLM manages GPU/CPU/Disk) ←──→ Archived (0G Storage)
 
 ServerlessLLM handles the fast tier (GPU ↔ CPU ↔ Disk) automatically. The LoRA Manager only manages the cold tier (Disk ↔ 0G Storage) for adapters that need to be fully offloaded.
 
-### 4.7 Provider Key Management (Plan B — No Contract Change)
+### 4.7 Provider Key Management (HTTP Key Sharing)
 
 The fine-tuning broker encrypts the LoRA adapter with a random AES key. The user gets the AES key encrypted with their ECIES public key (`EncryptedSecret`). But the inference broker (on a separate node) also needs the AES key to download and decrypt the adapter from 0G Storage.
 
-**Solution**: Embed the provider-encrypted AES key directly in the on-chain `modelRootHash`:
+**Solution**: Fine-tuning broker pushes the provider-encrypted AES key to the inference broker via HTTP, keeping the on-chain `modelRootHash` as a pure 32-byte storage hash.
 
 ```
 Fine-tuning broker (finalizer):
   1. Generate random AES key → encrypt adapter → upload to 0G Storage → storageHash (32 bytes)
   2. Encrypt AES key with user's ECIES public key → EncryptedSecret (for user CLI download)
   3. Encrypt AES key with provider wallet's ECIES public key → providerEncKey (~81 bytes)
-  4. Store in DB:  OutputRootHash = hex(storageHash)  (32 bytes, for client CLI compatibility)
-  5. Store in contract:  modelRootHash = storageHash + providerEncKey  (~113 bytes)
+  4. HTTP POST to inference broker: POST /internal/v1/adapter-keys
+     { taskId, storageHash, providerEncKey }
+  5. Store in contract: addDeliverable(taskID, storageHash)  — pure 32 bytes, backward compatible
 
-Inference broker (LoRA Manager):
-  1. Event watcher detects DeliverableAcknowledged → calls GetDeliverable() → gets modelRootHash bytes
-  2. Parse: storageHash = modelRootHash[:32], providerEncKey = modelRootHash[32:]
-  3. Decrypt providerEncKey with provider wallet's ECIES private key → AES key
-  4. Download encrypted adapter from 0G Storage using storageHash
-  5. Decrypt with AES-GCM using AES key → unzip → deploy to ServerlessLLM
+Inference broker:
+  1. Receives HTTP POST → stores (taskId, storageHash, providerEncKey) in local adapter_keys table
+  2. Event watcher detects DeliverableAcknowledged → gets storageHash from contract (pure 32 bytes)
+  3. Looks up providerEncKey from adapter_keys table by taskId
+  4. Decrypt providerEncKey with provider wallet's ECIES private key → AES key
+  5. Download encrypted adapter from 0G Storage using storageHash
+  6. Decrypt with AES-GCM using AES key → unzip → deploy to ServerlessLLM
 ```
 
-**Why this works**:
-- Both brokers share the same provider wallet (`networks.privateKeys` in config)
-- The `modelRootHash` is `bytes memory` in Solidity — variable length, no contract change needed
-- The client CLI reads `OutputRootHash` from the broker API (32-byte hash), not from the contract
-- On-chain gas cost increase is negligible (~81 extra bytes ≈ 5,500 gas)
+**Why HTTP instead of contract embedding**:
+- **Backward compatible**: on-chain `modelRootHash` stays 32 bytes — old client CLI versions work without changes
+- **Clean separation**: the contract stores storage data only, not inter-service communication
+- **No on-chain secrets**: the provider-encrypted AES key is not exposed on-chain
+- Fine-tuning and inference are run by the same provider, so internal HTTP is natural
+
+**Configuration**: Fine-tuning broker needs `inferenceServiceUrl` in config to know where to push keys.
 
 ### 4.8 Serving Lifecycle
 
@@ -697,8 +700,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
    - `StorageDownloader` (`api/inference/internal/lora/storage_downloader.go`) — downloads encrypted adapter from 0G Storage via indexer client
    - `AesDecryptLargeFile` (`api/common/util/crypto.go`) — streaming AES-GCM decryption matching the chunk-based encryption format
    - `ProviderECIESEncrypt/Decrypt` (`api/common/util/crypto.go`) — encrypt/decrypt AES key with provider wallet's ECIES key pair
-   - `ParseCombinedModelRootHash` (`api/common/util/crypto.go`) — splits `[32-byte storage hash][N-byte provider-encrypted AES key]` from contract data
-   - **Key management approach (Plan B)**: No contract change needed. The fine-tuning broker encrypts the AES key with the provider wallet's ECIES public key and appends it to `modelRootHash` in the contract. The inference broker (same provider wallet) extracts and decrypts it. The DB `OutputRootHash` keeps only the 32-byte storage hash for client CLI compatibility.
+   - **Key management approach (HTTP key sharing)**: Fine-tuning broker encrypts the AES key with the provider wallet's ECIES public key and pushes it to the inference broker via `POST /internal/v1/adapter-keys`. The inference broker stores it locally and uses it when the on-chain event triggers adapter deployment. The on-chain `modelRootHash` remains a pure 32-byte storage hash — fully backward compatible with existing client CLI.
 
 2. **Real ServerlessLLM deployment (GPU required)** — TODO
    - ServerlessLLM requires GPU with compute capability >= 7.0
@@ -734,16 +736,17 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 |-----------|---------|--------|
 | **LoRA Manager** | `api/inference/internal/lora/manager.go` | Implemented — adapter lifecycle, in-memory map, DB persistence, mock deploy mode, 0G Storage download+decrypt |
 | **SLLM HTTP Client** | `api/inference/internal/lora/sllm_client.go` | Implemented — deploy, delete, list, health check via HTTP API |
-| **Event Watcher** | `api/inference/internal/lora/event_watcher.go` | Implemented — polls FineTuningServing contract for DeliverableAcknowledged events, handles combined modelRootHash |
+| **Event Watcher** | `api/inference/internal/lora/event_watcher.go` | Implemented — polls FineTuningServing contract for DeliverableAcknowledged events |
+| **Internal API** | `api/inference/internal/handler/handler.go` | Implemented — `POST /internal/v1/adapter-keys` receives pre-pushed keys from fine-tuning broker |
 | **Storage Downloader** | `api/inference/internal/lora/storage_downloader.go` | Implemented — 0G Storage download → ECIES decrypt AES key → AES-GCM decrypt adapter → unzip |
-| **DB Model** | `api/inference/internal/lora/model/adapter.go` | Implemented — GORM model for crash recovery |
+| **DB Model** | `api/inference/model/lora.go` | Implemented — GORM models for crash recovery (LoRAAdapter, AdapterKey) |
 | **Proxy LoRA routing** | `api/inference/internal/ctrl/proxy.go` | Implemented — ft-* model name rewrite + owner check |
 | **Config** | `api/inference/config/config.go` | Implemented — LoRAConfig with sllmUrl, mockDeploy, storageIndexerUrl fields |
 | **Server init** | `api/inference/cmd/server/main.go` | Implemented — initializes LoRA Manager + Event Watcher on startup when `lora.enable: true` |
 | **CPU-only executor** | `api/fine-tuning/internal/services/executor.go` | Implemented — skips nvidia runtime when gpuCount=0 |
-| **Provider ECIES key sharing** | `api/fine-tuning/internal/services/finalizer.go` | Implemented — encrypts AES key with provider wallet ECIES pubkey, embeds in contract modelRootHash |
+| **Provider ECIES key sharing** | `api/fine-tuning/internal/services/finalizer.go` | Implemented — encrypts AES key with provider wallet ECIES pubkey, pushes to inference broker via HTTP |
 | **AES large file decrypt** | `api/common/util/crypto.go` | Implemented — `AesDecryptLargeFile` (streaming, matches `AesEncryptLargeFile` chunk format) |
-| **Provider ECIES encrypt/decrypt** | `api/common/util/crypto.go` | Implemented — `ProviderECIESEncrypt`, `ProviderECIESDecrypt`, `ParseCombinedModelRootHash` |
+| **Provider ECIES encrypt/decrypt** | `api/common/util/crypto.go` | Implemented — `ProviderECIESEncrypt`, `ProviderECIESDecrypt` |
 | **Provider key helper** | `api/common/config/network.go` | Implemented — `GetProviderPrivateKey` extracts wallet key from config for both brokers |
 | **Mock SLLM** | `api/e2e-lora-serving/mock_sllm.py` | Implemented — Python HTTP server mimicking ServerlessLLM API |
 | **E2E test script** | `api/e2e-lora-serving/e2e_test.py` | Implemented — 14 test assertions covering full lifecycle |
@@ -829,8 +832,8 @@ The test validates the **control plane** (contract interactions, event-driven ad
 
 ## 9. Open Questions
 
-1. ~~**LoRA decryption key management**~~ — **RESOLVED (Plan B, Section 4.7)**  
-   The fine-tuning broker encrypts the AES key with the provider wallet's ECIES public key and embeds it in the contract's `modelRootHash` bytes. The inference broker (same provider wallet) extracts and decrypts it. No contract change or cross-node DB access needed. Implemented in commit `e5fd692`.
+1. ~~**LoRA decryption key management**~~ — **RESOLVED (HTTP Key Sharing, Section 4.7)**  
+   The fine-tuning broker encrypts the AES key with the provider wallet's ECIES public key and pushes it to the inference broker via `POST /internal/v1/adapter-keys`. The on-chain `modelRootHash` stays a pure 32-byte storage hash, fully backward compatible with existing client CLI. No contract change needed.
 
 2. **On-chain event reliability**  
    The LoRA Manager watches `FineTuningServing` contract events. It must handle: missed events during downtime (replay from checkpoint block number), chain reorgs (sufficient confirmation depth), and event indexing at scale.

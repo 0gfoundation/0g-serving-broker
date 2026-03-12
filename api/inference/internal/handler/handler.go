@@ -89,6 +89,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	asyncGroup.POST("/images/edits", h.SubmitAsyncImageEdit)
 	asyncGroup.GET("/jobs/:jobID", h.GetAsyncJob)
 
+	// Internal API: fine-tuning broker pushes adapter keys here
+	internal := r.Group("/internal/v1")
+	internal.POST("/adapter-keys", h.ReceiveAdapterKey)
+
 	// TODO: should be verified by client
 	// //nvidia TEE verification
 	// group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)
