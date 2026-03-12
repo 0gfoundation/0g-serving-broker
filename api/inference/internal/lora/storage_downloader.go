@@ -62,9 +62,10 @@ func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashH
 		_ = os.Remove(encryptedFile)
 	}()
 
-	d.logger.Infof("downloading encrypted adapter from 0G Storage (hash: %s)", storageHashHex)
-	if err := d.indexerClient.Download(ctx, storageHashHex, encryptedFile, true); err != nil {
-		return errors.Wrapf(err, "download from 0G Storage (hash: %s)", storageHashHex)
+	rootWithPrefix := "0x" + storageHashHex
+	d.logger.Infof("downloading encrypted adapter from 0G Storage (hash: %s)", rootWithPrefix)
+	if err := d.indexerClient.Download(ctx, rootWithPrefix, encryptedFile, true); err != nil {
+		return errors.Wrapf(err, "download from 0G Storage (hash: %s)", rootWithPrefix)
 	}
 
 	fi, _ := os.Stat(encryptedFile)

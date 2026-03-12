@@ -20,7 +20,7 @@ type LoRAAdapter struct {
 	UserAddress     string       `json:"userAddress" gorm:"type:varchar(255);not null;index"`
 	BaseModel       string       `json:"baseModel" gorm:"type:varchar(255);not null"`
 	AdapterName     string       `json:"adapterName" gorm:"type:varchar(255);not null;uniqueIndex"`
-	StorageRootHash string       `json:"storageRootHash" gorm:"type:varchar(255);not null"`
+	StorageRootHash string       `json:"storageRootHash" gorm:"type:text;not null"`
 	State           AdapterState `json:"state" gorm:"type:varchar(32);not null;default:'loading'"`
 	LastAccessAt    *time.Time   `json:"lastAccessAt" gorm:"type:datetime"`
 	AdapterPath     string       `json:"adapterPath" gorm:"type:varchar(512)"`

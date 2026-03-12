@@ -168,7 +168,7 @@ func (d *DB) Migrate() error {
 					UserAddress     string     `gorm:"type:varchar(255);not null;index"`
 					BaseModel       string     `gorm:"type:varchar(255);not null"`
 					AdapterName     string     `gorm:"type:varchar(255);not null;uniqueIndex"`
-					StorageRootHash string     `gorm:"type:varchar(255);not null"`
+					StorageRootHash string     `gorm:"type:text;not null"`
 					State           string     `gorm:"type:varchar(32);not null;default:'loading'"`
 					LastAccessAt    *time.Time `gorm:"type:datetime"`
 					AdapterPath     string     `gorm:"type:varchar(512)"`
