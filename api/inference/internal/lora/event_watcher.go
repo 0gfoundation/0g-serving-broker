@@ -185,8 +185,7 @@ func (w *EventWatcher) getDeliverableRootHash(
 
 	deliverable, err := caller.GetDeliverable(&bind.CallOpts{Context: ctx}, user, w.providerAddress, deliverableId)
 	if err != nil {
-		w.logger.Warnf("could not fetch deliverable details, using deliverableId as reference: %v", err)
-		return deliverableId, nil
+		return "", fmt.Errorf("fetch deliverable %s from contract: %w", deliverableId, err)
 	}
 
 	return common.Bytes2Hex(deliverable.ModelRootHash), nil

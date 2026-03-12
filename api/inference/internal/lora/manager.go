@@ -254,7 +254,10 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 		return errors.Wrapf(err, "decode provider encrypted key for task %s", info.TaskID)
 	}
 
-	storageHashHex := info.StorageRootHash
+	storageHashHex := adapterKey.StorageHash
+	if storageHashHex == "" {
+		storageHashHex = info.StorageRootHash
+	}
 	m.logger.Infof("adapter key found: storage=%s, encrypted key=%d bytes", storageHashHex, len(providerEncKey))
 
 	return m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath)
