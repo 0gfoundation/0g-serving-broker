@@ -23,6 +23,7 @@ type ModelObject struct {
 	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
 	Architecture        *config.ModelArchitecture `json:"architecture,omitempty"`
 	SupportedParameters []string                  `json:"supported_parameters,omitempty"`
+	SupportedFormats    []string                  `json:"supported_formats,omitempty"`
 	DefaultParameters   map[string]interface{}    `json:"default_parameters,omitempty"`
 	Pricing             *ModelPricing             `json:"pricing,omitempty"`
 	Verifiability       string                    `json:"verifiability,omitempty"`
@@ -87,6 +88,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.MaxCompletionTokens = cfg.ModelInfo.MaxCompletionTokens
 		obj.Architecture = cfg.ModelInfo.Architecture
 		obj.SupportedParameters = cfg.ModelInfo.SupportedParameters
+		obj.SupportedFormats = cfg.ModelInfo.SupportedFormats
 		obj.DefaultParameters = cfg.ModelInfo.DefaultParameters
 		obj.TeeType = cfg.ModelInfo.TeeType
 		obj.ExpirationDate = cfg.ModelInfo.ExpirationDate

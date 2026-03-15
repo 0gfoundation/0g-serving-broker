@@ -45,3 +45,8 @@ service:
   #     - frequency_penalty
   #     - presence_penalty
   #     - stop
+  #   # Optional: API formats supported by this model. Defaults to ["openai"] if omitted.
+  #   # Add "anthropic" if the target service supports /v1/messages (Anthropic Messages API).
+  #   supportedFormats:
+  #     - openai
+  #     - anthropic
