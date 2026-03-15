@@ -66,6 +66,7 @@ func TestGetModels_FullResponse(t *testing.T) {
 					Tokenizer:        "llama3",
 				},
 				SupportedParameters: []string{"temperature", "top_p", "max_tokens"},
+				SupportedFormats:    []string{"openai", "anthropic"},
 				DefaultParameters:   map[string]interface{}{"temperature": 0.7, "top_p": 0.9},
 				TeeType:             "TDX",
 				ExpirationDate:      "2026-12-31T00:00:00Z",
@@ -190,6 +191,17 @@ func TestGetModels_FullResponse(t *testing.T) {
 		}
 	}
 
+	// Supported formats
+	expectedFormats := []string{"openai", "anthropic"}
+	if len(m.SupportedFormats) != len(expectedFormats) {
+		t.Fatalf("expected %d supported_formats, got %d", len(expectedFormats), len(m.SupportedFormats))
+	}
+	for i, f := range expectedFormats {
+		if m.SupportedFormats[i] != f {
+			t.Errorf("expected supported_formats[%d]=%s, got %s", i, f, m.SupportedFormats[i])
+		}
+	}
+
 	// Expiration date
 	if m.ExpirationDate != "2026-12-31T00:00:00Z" {
 		t.Errorf("expected expiration_date=2026-12-31T00:00:00Z, got %s", m.ExpirationDate)
@@ -241,6 +253,9 @@ func TestGetModels_WithoutModelInfo(t *testing.T) {
 	}
 	if m.SupportedParameters != nil {
 		t.Errorf("expected supported_parameters to be nil, got %v", m.SupportedParameters)
+	}
+	if m.SupportedFormats != nil {
+		t.Errorf("expected supported_formats to be nil, got %v", m.SupportedFormats)
 	}
 	if m.TeeAttested {
 		t.Error("expected tee_attested=false")
