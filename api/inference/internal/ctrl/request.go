@@ -344,27 +344,10 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("nil lockBalance in account")
 	}
 
-	// Get service price from cache/contract instead of config
-	service, err := c.GetCachedService(ctx)
-	if err != nil {
-		return errors.Wrap(err, "get cached service for balance validation")
-	}
-
-	var responseFeeReservation *big.Int
-	// Calculate response fee reservation
-	switch c.Service.Type {
-	case "zgStorage", "chatbot", "speech-to-text":
-		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactor)
-		if err != nil {
-			return errors.Wrap(err, "calculate response fee reservation")
-		}
-	case "text-to-image", "image-editing":
-		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactorForImage)
-		if err != nil {
-			return errors.Wrap(err, "calculate response fee reservation for image generation")
-		}
-	default:
-		return errors.New("unknown service type for balance adequacy validation")
+	// Use fixed minimum locked balance for all service types (3 0G)
+	responseFeeReservation, ok := new(big.Int).SetString(constant.MinimumLockedBalance, 10)
+	if !ok {
+		return errors.New("invalid MinimumLockedBalance constant")
 	}
 
 	// Use optimized calculation for unsettled fee using database aggregation
