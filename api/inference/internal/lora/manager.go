@@ -260,7 +260,19 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 	}
 	m.logger.Infof("adapter key found: storage=%s, encrypted key=%d bytes", storageHashHex, len(providerEncKey))
 
-	return m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath)
+	actualPath, err := m.storageDownloader.DownloadAndDecrypt(ctx, storageHashHex, providerEncKey, info.AdapterPath)
+	if err != nil {
+		return err
+	}
+
+	// The zip may contain a top-level wrapper directory (e.g. "adapter/"),
+	// so the actual adapter files may be in a subdirectory of info.AdapterPath.
+	// Update the path so vLLM can find the adapter_config.json.
+	if actualPath != "" && actualPath != info.AdapterPath {
+		m.logger.Infof("adapter path updated: %s → %s", info.AdapterPath, actualPath)
+		info.AdapterPath = actualPath
+	}
+	return nil
 }
 
 // RestoreAdapter downloads and redeploys an offloaded/archived adapter.
