@@ -89,6 +89,14 @@ type Service struct {
 	ModelInfo        *ModelInfo        `yaml:"modelInfo"`
 }
 
+// CacheTokenBillingConfig defines configuration for cached token discount billing.
+// When enabled, cached input tokens (reported by the LLM via prompt_tokens_details.cached_tokens)
+// are billed at a discounted rate: inputPrice / Divisor.
+type CacheTokenBillingConfig struct {
+	Enabled bool  `yaml:"enabled"` // Enable cached token discount billing (default: false)
+	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
+}
+
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
 // and contract verification. Whitelist users are intended for internal services
 // (e.g., health checks, monitoring) that require free access without account setup.
@@ -138,7 +146,8 @@ type Config struct {
 	Logger              *config.LoggerConfig `yaml:"logger"`
 	LogPaths            LogPathsConfig       `yaml:"logPaths"`
 	Controller          ControllerConfig     `yaml:"controller"`
-	Whitelist           WhitelistConfig      `yaml:"whitelist"`
+	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
+	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig          `yaml:"async"`
 }
 
@@ -315,6 +324,10 @@ func GetConfig() *Config {
 					Path:          "./logs/controller.log",
 					RotationCount: 7,
 				},
+			},
+			CacheTokenBilling: CacheTokenBillingConfig{
+				Enabled: false,
+				Divisor: 4,
 			},
 			Whitelist: WhitelistConfig{
 				Enabled:       false,

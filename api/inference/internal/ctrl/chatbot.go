@@ -27,7 +27,6 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
-	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -393,13 +392,12 @@ func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outp
 
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response
 func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
-	// Calculate actual fees based on LLM-provided token counts
-	// If cached tokens are reported, apply discounted pricing:
-	//   - Non-cached input tokens: full inputPrice
-	//   - Cached input tokens: inputPrice / CachedTokenPriceDivisor
+	// Calculate actual fees based on LLM-provided token counts.
+	// When cacheTokenBilling is enabled and cached tokens are reported,
+	// apply discounted pricing for cached input tokens.
 	var inputFee *big.Int
 	cachedTokens := 0
-	if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+	if c.cacheTokenBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
 		cachedTokens = usage.PromptTokensDetails.CachedTokens
 		if cachedTokens > usage.PromptTokens {
 			cachedTokens = usage.PromptTokens
@@ -413,20 +411,20 @@ func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPri
 		}
 
 		// Fee for cached tokens at discounted price
-		// cachedFee = inputPrice * cachedTokens / CachedTokenPriceDivisor
+		// cachedFee = inputPrice * cachedTokens / Divisor
 		cachedFullFee, err := util.Multiply(inputPrice, int64(cachedTokens))
 		if err != nil {
 			return errors.Wrap(err, "Error calculating cached input fee")
 		}
-		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(constant.CachedTokenPriceDivisor))
+		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(c.cacheTokenBilling.Divisor))
 
 		inputFee, err = util.Add(nonCachedFee, cachedFee)
 		if err != nil {
 			return errors.Wrap(err, "Error adding cached and non-cached input fees")
 		}
 
-		c.logger.Infof("Cache token billing: prompt_tokens=%d, cached_tokens=%d, non_cached=%d, inputFee=%s",
-			usage.PromptTokens, cachedTokens, nonCachedTokens, inputFee.String())
+		c.logger.Infof("Cache token billing: prompt_tokens=%d, cached_tokens=%d, non_cached=%d, divisor=%d, inputFee=%s",
+			usage.PromptTokens, cachedTokens, nonCachedTokens, c.cacheTokenBilling.Divisor, inputFee.String())
 	} else {
 		var err error
 		inputFee, err = util.Multiply(inputPrice, int64(usage.PromptTokens))
