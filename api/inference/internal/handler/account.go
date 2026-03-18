@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,47 @@ import (
 
 // 	ctx.JSON(http.StatusOK, account)
 // }
+
+// GetUnsettledFee returns the total unsettled fee for the authenticated user.
+// The caller must provide a valid session token (Authorization header).
+// The user address in the URL path must match the authenticated user.
+//
+//	@Description  Get the total unsettled fee for a specific user
+//	@ID           getUnsettledFee
+//	@Tags         user
+//	@Produce      json
+//	@Param        userAddress  path  string  true  "User address (0x...)"
+//	@Router       /user/{userAddress}/unsettledfee [get]
+//	@Success      200  {object}  map[string]string
+func (h *Handler) GetUnsettledFee(ctx *gin.Context) {
+	// Validate session token to get authenticated user address
+	authedUser, err := h.ctrl.ValidateSession(ctx)
+	if err != nil {
+		ctx.Set("ignoreError", true)
+		handleBrokerError(ctx, err, "validate session")
+		return
+	}
+
+	// Verify the authenticated user matches the requested user address
+	requestedUser := ctx.Param("userAddress")
+	if !strings.EqualFold(authedUser, requestedUser) {
+		ctx.JSON(http.StatusForbidden, gin.H{
+			"error": "you can only query your own unsettled fee",
+		})
+		return
+	}
+
+	unsettledFee, err := h.ctrl.GetUnsettledFee(authedUser)
+	if err != nil {
+		handleBrokerError(ctx, err, "calculate unsettled fee")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"userAddress":  authedUser,
+		"unsettledFee": unsettledFee.String(),
+	})
+}
 
 // syncUserAccounts
 //
