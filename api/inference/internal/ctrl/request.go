@@ -421,6 +421,13 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		totalInZG.Text('f', 6), balanceInZG.Text('f', 6), c.contract.ProviderAddress)
 }
 
+// GetUnsettledFee returns the total unsettled fee for a given user address.
+// This is used by clients to determine how much balance the provider requires
+// beyond the minimum locked balance.
+func (c *Ctrl) GetUnsettledFee(userAddress string) (*big.Int, error) {
+	return c.db.CalculateUnsettledFee(userAddress)
+}
+
 // validateTokenRevocation checks if the session token has been revoked
 // by comparing generation and checking the revoked bitmap from the contract.
 //
