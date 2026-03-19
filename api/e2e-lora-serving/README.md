@@ -20,6 +20,16 @@ After training, you **acknowledge** the model (downloads it), then **deploy** it
   ```
 - A wallet with 0G testnet tokens (for gas + training fees)
 
+## Step 0 — Environment Setup
+
+Current testnet providers are registered on the **dev** contracts. Set this before running any CLI command:
+
+```bash
+export ZG_DEV_MODE=true
+```
+
+> This tells the CLI to use the correct contract addresses. Without it, commands will fail with "provider not found" or similar errors.
+
 ## Step 1 — Set Up Your Wallet
 
 ```bash

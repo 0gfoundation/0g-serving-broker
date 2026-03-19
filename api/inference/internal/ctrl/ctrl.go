@@ -78,6 +78,8 @@ type Ctrl struct {
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
+
+	skipTEESignerCheck bool
 }
 
 func New(
@@ -141,7 +143,8 @@ func New(
 			},
 		},
 		// Initialize whitelist users map
-		whitelistUsers: make(map[string]struct{}),
+		whitelistUsers:     make(map[string]struct{}),
+		skipTEESignerCheck: cfg.SkipTEESignerCheck,
 	}
 
 	// Initialize whitelist from config

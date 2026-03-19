@@ -97,6 +97,7 @@ type Config struct {
 	LogPaths            LogPathsConfig       `yaml:"logPaths"`
 	Controller          ControllerConfig     `yaml:"controller"`
 	Whitelist           WhitelistConfig      `yaml:"whitelist"`
+	SkipTEESignerCheck  bool                 `yaml:"skipTEESignerCheck"` // Skip TEE signer acknowledgement check (for test environments where contract owner is unavailable)
 	Async               AsyncConfig          `yaml:"async"`
 }
 
