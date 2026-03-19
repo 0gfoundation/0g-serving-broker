@@ -77,7 +77,9 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing video-generation response")
-		_ = c.signChatWithKey(reqBody, body, chatKey)
+		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
+			c.logger.Warnf("Failed to sign video-generation response (TEE verification will be unavailable): %v", err)
+		}
 	}
 
 	if reqModel.IsWhitelisted {
