@@ -344,27 +344,10 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("nil lockBalance in account")
 	}
 
-	// Get service price from cache/contract instead of config
-	service, err := c.GetCachedService(ctx)
-	if err != nil {
-		return errors.Wrap(err, "get cached service for balance validation")
-	}
-
-	var responseFeeReservation *big.Int
-	// Calculate response fee reservation
-	switch c.Service.Type {
-	case "zgStorage", "chatbot", "speech-to-text":
-		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactor)
-		if err != nil {
-			return errors.Wrap(err, "calculate response fee reservation")
-		}
-	case "text-to-image", "image-editing", "video-generation":
-		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactorForImage)
-		if err != nil {
-			return errors.Wrap(err, "calculate response fee reservation for image/video generation")
-		}
-	default:
-		return errors.New("unknown service type for balance adequacy validation")
+	// Use fixed minimum locked balance for all service types (3 0G)
+	responseFeeReservation, ok := new(big.Int).SetString(constant.MinimumLockedBalance, 10)
+	if !ok {
+		return errors.New("invalid MinimumLockedBalance constant")
 	}
 
 	// Use optimized calculation for unsettled fee using database aggregation
@@ -425,17 +408,28 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 
 	// Convert neuron to 0G for display (1 0G = 10^18 neuron)
 	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	toZG := func(s string) string {
+		v := new(big.Int)
+		v.SetString(s, 10)
+		return new(big.Float).Quo(new(big.Float).SetInt(v), new(big.Float).SetInt(divisor)).Text('f', 6)
+	}
 
-	totalNewBig := new(big.Int)
-	totalNewBig.SetString(totalNew.String(), 10)
-	totalInZG := new(big.Float).Quo(new(big.Float).SetInt(totalNewBig), new(big.Float).SetInt(divisor))
+	balanceZG := toZG(*newAccount.LockBalance)
+	unsettledZG := toZG(unsettledFeeNew.String())
+	currentFeeZG := toZG(fee)
+	minLockedZG := toZG(responseFeeReservation.String())
 
-	balanceBig := new(big.Int)
-	balanceBig.SetString(*newAccount.LockBalance, 10)
-	balanceInZG := new(big.Float).Quo(new(big.Float).SetInt(balanceBig), new(big.Float).SetInt(divisor))
+	return fmt.Errorf("insufficient balance: your locked balance is %s 0G, but the required minimum is %s 0G "+
+		"(breakdown: minimum reserve %s 0G + unsettled fees %s 0G + current request fee %s 0G). "+
+		"Please add more funds with: 0g-compute-cli transfer-fund --provider %s --amount <amount>",
+		balanceZG, toZG(totalNew.String()), minLockedZG, unsettledZG, currentFeeZG, c.contract.ProviderAddress)
+}
 
-	return fmt.Errorf("insufficient balance: this service requires at least %s 0G in your account, but your current locked balance is only %s 0G (locked balance = total balance - pending retrieval amount). You can check your sub-account details with: 0g-compute-cli get-sub-account --provider %s --service inference",
-		totalInZG.Text('f', 6), balanceInZG.Text('f', 6), c.contract.ProviderAddress)
+// GetUnsettledFee returns the total unsettled fee for a given user address.
+// This is used by clients to determine how much balance the provider requires
+// beyond the minimum locked balance.
+func (c *Ctrl) GetUnsettledFee(userAddress string) (*big.Int, error) {
+	return c.db.CalculateUnsettledFee(userAddress)
 }
 
 // validateTokenRevocation checks if the session token has been revoked

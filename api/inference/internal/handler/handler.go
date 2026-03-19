@@ -90,6 +90,9 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
 	group.GET("/models", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetModels)
 
+	// User account query (authenticated: user can only query their own data)
+	group.GET("/user/:userAddress/unsettledfee", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetUnsettledFee)
+
 	// Provider-only endpoints for log management
 	group.GET("/logs", corsMiddleware(), h.ListLogs)                           // List all log files
 	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile)    // Download specific log file

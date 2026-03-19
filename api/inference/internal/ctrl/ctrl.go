@@ -40,7 +40,8 @@ type Ctrl struct {
 
 	autoSettleBufferTime time.Duration
 
-	Service config.Service
+	Service            config.Service
+	cacheTokenBilling  config.CacheTokenBillingConfig
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
@@ -106,6 +107,7 @@ func New(
 		asyncDB:              db,
 		contract:             contract,
 		Service:              cfg.Service,
+		cacheTokenBilling:    cfg.CacheTokenBilling,
 		svcCache:             svcCache,
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,

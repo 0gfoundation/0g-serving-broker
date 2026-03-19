@@ -133,6 +133,14 @@ func (s *Service) GetVideoSizeRatio(size string) float64 {
 	return 1.0
 }
 
+// CacheTokenBillingConfig defines configuration for cached token discount billing.
+// When enabled, cached input tokens (reported by the LLM via prompt_tokens_details.cached_tokens)
+// are billed at a discounted rate: inputPrice / Divisor.
+type CacheTokenBillingConfig struct {
+	Enabled bool  `yaml:"enabled"` // Enable cached token discount billing (default: false)
+	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
+}
+
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
 // and contract verification. Whitelist users are intended for internal services
 // (e.g., health checks, monitoring) that require free access without account setup.
@@ -177,13 +185,14 @@ type Config struct {
 		Provider      string `yaml:"provider"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zk"`
-	ChatCacheExpiration time.Duration        `yaml:"chatCacheExpiration"`
-	NvGPU               bool                 `yaml:"nvGPU"`
-	Logger              *config.LoggerConfig `yaml:"logger"`
-	LogPaths            LogPathsConfig       `yaml:"logPaths"`
-	Controller          ControllerConfig     `yaml:"controller"`
-	Whitelist           WhitelistConfig      `yaml:"whitelist"`
-	Async               AsyncConfig          `yaml:"async"`
+	ChatCacheExpiration time.Duration           `yaml:"chatCacheExpiration"`
+	NvGPU               bool                    `yaml:"nvGPU"`
+	Logger              *config.LoggerConfig    `yaml:"logger"`
+	LogPaths            LogPathsConfig          `yaml:"logPaths"`
+	Controller          ControllerConfig        `yaml:"controller"`
+	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
+	Whitelist           WhitelistConfig         `yaml:"whitelist"`
+	Async               AsyncConfig             `yaml:"async"`
 }
 
 // AsyncConfig defines configuration for async job processing.
@@ -359,6 +368,10 @@ func GetConfig() *Config {
 					Path:          "./logs/controller.log",
 					RotationCount: 7,
 				},
+			},
+			CacheTokenBilling: CacheTokenBillingConfig{
+				Enabled: false,
+				Divisor: 4,
 			},
 			Whitelist: WhitelistConfig{
 				Enabled:       false,
