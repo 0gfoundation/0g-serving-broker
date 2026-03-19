@@ -346,13 +346,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
 	case "video-generation":
-		_, outputCount, err := p.ctrl.GetVideoGenerationInputFeeAndOutputCount(reqBody)
-		if err != nil {
-			ctx.Set("ignoreError", true)
-			p.handleBrokerError(ctx, err, "get video-generation parameters")
-			return
-		}
-		req.OutputCount = outputCount
+		// Video billing is deferred to response time — the provider returns
+		// actual seconds/size in the JSON response, so we don't guess here.
 		expectedInputFee = "0"
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")

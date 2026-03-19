@@ -1,10 +1,10 @@
 package ctrl
 
 import (
+	"encoding/json"
 	"io"
 	"math"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -14,61 +14,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
-
-// defaultVideoSeconds is used when the request does not specify a duration.
-const defaultVideoSeconds = 10
-
-// defaultVideoSize is used when the request does not specify a resolution.
-const defaultVideoSize = "720x1280"
-
-// GetVideoGenerationInputFeeAndOutputCount extracts billing parameters from a video generation request.
-//
-// Billing formula: fee = seconds × sizeRatio × outputPrice
-//
-// To fit the existing billing infrastructure (outputPrice × outputCount), the "output count"
-// is computed as: ceil(seconds × sizeRatio). This represents "effective seconds" at baseline
-// resolution cost.
-//
-// Parameters are extracted from multipart/form-data (the only format supported by the OpenAI Video API):
-//   - seconds: video duration (default: 10)
-//   - size: output resolution (default: 720x1280)
-func (c *Ctrl) GetVideoGenerationInputFeeAndOutputCount(reqBody []byte) (string, int64, error) {
-	seconds, size := parseVideoSecondsAndSize(reqBody)
-
-	sizeRatio := c.Service.GetVideoSizeRatio(size)
-
-	// Effective output count = ceil(seconds × sizeRatio)
-	effectiveCount := int64(math.Ceil(float64(seconds) * sizeRatio))
-	if effectiveCount < 1 {
-		effectiveCount = 1
-	}
-
-	return "0", effectiveCount, nil
-}
-
-// parseVideoSecondsAndSize extracts the "seconds" and "size" fields from a video generation request.
-// Only multipart/form-data is supported (matching the OpenAI Video API).
-// Returns defaults if fields are missing or unparseable.
-func parseVideoSecondsAndSize(reqBody []byte) (seconds int64, size string) {
-	seconds = defaultVideoSeconds
-	size = defaultVideoSize
-
-	if len(reqBody) == 0 {
-		return
-	}
-
-	bodyStr := string(reqBody)
-	if val := parseMultipartField(bodyStr, "seconds"); val != "" {
-		if parsed, err := strconv.ParseInt(val, 10, 64); err == nil && parsed > 0 {
-			seconds = parsed
-		}
-	}
-	if val := parseMultipartField(bodyStr, "size"); val != "" {
-		size = val
-	}
-
-	return
-}
 
 // parseMultipartField extracts a named field value from multipart/form-data body.
 func parseMultipartField(bodyStr, fieldName string) string {
@@ -104,9 +49,15 @@ func parseMultipartField(bodyStr, fieldName string) string {
 	return strings.TrimSpace(bodyStr[valueStart:end])
 }
 
+// videoResponseFields holds the billing-relevant fields from a video generation response.
+type videoResponseFields struct {
+	Seconds json.Number `json:"seconds"`
+	Size    string      `json:"size"`
+}
+
 // handleVideoGenerationResponse handles the POST /videos response from the provider.
-// The provider returns a JSON object with the video job metadata (id, status, etc.).
-// Billing: fee = effectiveOutputCount × outputPrice (where effectiveOutputCount = seconds × sizeRatio).
+// Billing is computed from the provider's response (actual seconds/size), not from the request.
+// Fee = ceil(seconds × sizeRatio) × outputPrice.
 func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
@@ -133,8 +84,26 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return nil
 	}
 
-	// OutputCount was pre-computed as ceil(seconds × sizeRatio) during request extraction
-	outputCount := reqModel.OutputCount
+	// Parse actual seconds and size from the provider's JSON response
+	var fields videoResponseFields
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return errors.Wrap(err, "parse video generation response for billing")
+	}
+
+	seconds, err := fields.Seconds.Int64()
+	if err != nil || seconds <= 0 {
+		c.logger.Warnf("video response missing or invalid seconds field, skipping billing: %v", err)
+		return nil
+	}
+
+	sizeRatio := c.Service.GetVideoSizeRatio(fields.Size)
+
+	// Effective output count = ceil(seconds × sizeRatio)
+	outputCount := int64(math.Ceil(float64(seconds) * sizeRatio))
+	if outputCount < 1 {
+		outputCount = 1
+	}
+
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee for video generation")

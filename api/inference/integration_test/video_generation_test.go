@@ -39,6 +39,7 @@ func newMockVideoProvider(t *testing.T) *httptest.Server {
 				"object":  "video",
 				"model":   "sora-2",
 				"seconds": 5,
+				"size":    "720x1280",
 			})
 
 		case r.Method == "GET" && path == "/videos/video-test-001":

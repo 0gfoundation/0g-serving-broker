@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -17,216 +18,69 @@ func multipartBody(fields map[string]string) []byte {
 }
 
 // ==========================================================================
-// GetVideoGenerationInputFeeAndOutputCount
+// videoResponseFields JSON parsing (used by handleVideoGenerationResponse)
 // ==========================================================================
 
-func TestGetVideoGenerationInputFeeAndOutputCount(t *testing.T) {
-	ctrl := &Ctrl{logger: &testAsyncLoggerImpl{}}
-
-	tests := []struct {
-		name            string
-		reqBody         []byte
-		wantInputFee    string
-		wantOutputCount int64
-	}{
-		{
-			name:            "8 seconds, default size (720x1280, ratio 1.0)",
-			reqBody:         multipartBody(map[string]string{"model": "sora-2", "prompt": "A cat", "seconds": "8"}),
-			wantInputFee:    "0",
-			wantOutputCount: 8, // 8 × 1.0 = 8
-		},
-		{
-			name:            "8 seconds, high-res size (1024x1792, ratio 2.0)",
-			reqBody:         multipartBody(map[string]string{"model": "sora-2", "prompt": "A cat", "seconds": "8", "size": "1024x1792"}),
-			wantInputFee:    "0",
-			wantOutputCount: 16, // 8 × 2.0 = 16
-		},
-		{
-			name:            "landscape HD (1280x720, ratio 1.0)",
-			reqBody:         multipartBody(map[string]string{"seconds": "10", "size": "1280x720"}),
-			wantInputFee:    "0",
-			wantOutputCount: 10, // 10 × 1.0 = 10
-		},
-		{
-			name:            "wide resolution (1792x1024, ratio 2.0)",
-			reqBody:         multipartBody(map[string]string{"seconds": "5", "size": "1792x1024"}),
-			wantInputFee:    "0",
-			wantOutputCount: 10, // 5 × 2.0 = 10
-		},
-		{
-			name:            "no seconds field (defaults to 10)",
-			reqBody:         multipartBody(map[string]string{"model": "sora-2", "prompt": "A cat"}),
-			wantInputFee:    "0",
-			wantOutputCount: 10, // 10 × 1.0 = 10
-		},
-		{
-			name:            "unknown size falls back to ratio 1.0",
-			reqBody:         multipartBody(map[string]string{"seconds": "8", "size": "4096x2160"}),
-			wantInputFee:    "0",
-			wantOutputCount: 8, // 8 × 1.0 = 8
-		},
-		{
-			name:            "empty body (defaults: 10 seconds, 720x1280)",
-			reqBody:         []byte{},
-			wantInputFee:    "0",
-			wantOutputCount: 10, // 10 × 1.0 = 10
-		},
-		{
-			name:            "nil body",
-			reqBody:         nil,
-			wantInputFee:    "0",
-			wantOutputCount: 10,
-		},
-		{
-			name:            "only seconds, no size",
-			reqBody:         multipartBody(map[string]string{"seconds": "20"}),
-			wantInputFee:    "0",
-			wantOutputCount: 20, // 20 × 1.0 = 20
-		},
-		{
-			name:            "invalid seconds value uses default",
-			reqBody:         multipartBody(map[string]string{"seconds": "abc"}),
-			wantInputFee:    "0",
-			wantOutputCount: 10, // default 10 × 1.0 = 10
-		},
-		{
-			name:            "zero seconds uses default",
-			reqBody:         multipartBody(map[string]string{"seconds": "0"}),
-			wantInputFee:    "0",
-			wantOutputCount: 10, // default 10 × 1.0 = 10
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			inputFee, outputCount, err := ctrl.GetVideoGenerationInputFeeAndOutputCount(tt.reqBody)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if inputFee != tt.wantInputFee {
-				t.Errorf("inputFee = %v, want %v", inputFee, tt.wantInputFee)
-			}
-			if outputCount != tt.wantOutputCount {
-				t.Errorf("outputCount = %v, want %v", outputCount, tt.wantOutputCount)
-			}
-		})
-	}
-}
-
-func TestGetVideoGenerationInputFeeAndOutputCount_CustomRatios(t *testing.T) {
-	ctrl := &Ctrl{logger: &testAsyncLoggerImpl{}}
-	ctrl.Service.ModelInfo = &config.ModelInfo{
-		VideoSizeRatios: map[string]float64{
-			"720x1280":  1.0,
-			"1280x720":  1.5, // custom: landscape costs more
-			"1024x1792": 3.0, // custom: tall costs 3x
-		},
-	}
-
-	tests := []struct {
-		name            string
-		reqBody         []byte
-		wantOutputCount int64
-	}{
-		{
-			name:            "custom ratio landscape 1.5x",
-			reqBody:         multipartBody(map[string]string{"seconds": "10", "size": "1280x720"}),
-			wantOutputCount: 15, // 10 × 1.5 = 15
-		},
-		{
-			name:            "custom ratio tall 3.0x",
-			reqBody:         multipartBody(map[string]string{"seconds": "8", "size": "1024x1792"}),
-			wantOutputCount: 24, // 8 × 3.0 = 24
-		},
-		{
-			name:            "unknown size falls back to 1.0",
-			reqBody:         multipartBody(map[string]string{"seconds": "6", "size": "unknown"}),
-			wantOutputCount: 6, // 6 × 1.0 = 6
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, outputCount, err := ctrl.GetVideoGenerationInputFeeAndOutputCount(tt.reqBody)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if outputCount != tt.wantOutputCount {
-				t.Errorf("outputCount = %v, want %v", outputCount, tt.wantOutputCount)
-			}
-		})
-	}
-}
-
-// ==========================================================================
-// parseVideoSecondsAndSize
-// ==========================================================================
-
-func TestParseVideoSecondsAndSize(t *testing.T) {
+func TestVideoResponseFieldsParsing(t *testing.T) {
 	tests := []struct {
 		name        string
-		reqBody     []byte
+		respJSON    string
 		wantSeconds int64
 		wantSize    string
+		wantErr     bool
 	}{
 		{
-			name:        "both fields present",
-			reqBody:     multipartBody(map[string]string{"seconds": "16", "size": "1024x1792"}),
-			wantSeconds: 16,
+			name:        "full response with seconds and size",
+			respJSON:    `{"id":"video-001","status":"queued","seconds":8,"size":"1024x1792"}`,
+			wantSeconds: 8,
 			wantSize:    "1024x1792",
 		},
 		{
-			name:        "missing seconds",
-			reqBody:     multipartBody(map[string]string{"size": "1280x720"}),
-			wantSeconds: 10,
-			wantSize:    "1280x720",
-		},
-		{
-			name:        "missing size",
-			reqBody:     multipartBody(map[string]string{"seconds": "5"}),
+			name:        "seconds only, no size",
+			respJSON:    `{"id":"video-001","status":"queued","seconds":5}`,
 			wantSeconds: 5,
-			wantSize:    "720x1280",
+			wantSize:    "",
 		},
 		{
-			name:        "missing both",
-			reqBody:     multipartBody(map[string]string{"model": "sora-2"}),
+			name:        "seconds as string number",
+			respJSON:    `{"id":"video-001","seconds":"10","size":"720x1280"}`,
 			wantSeconds: 10,
 			wantSize:    "720x1280",
 		},
 		{
-			name:        "invalid seconds",
-			reqBody:     multipartBody(map[string]string{"seconds": "abc"}),
-			wantSeconds: 10,
-			wantSize:    "720x1280",
+			name:     "missing seconds field",
+			respJSON: `{"id":"video-001","status":"queued","size":"720x1280"}`,
+			wantErr:  true, // seconds will be 0, treated as invalid
 		},
 		{
-			name:        "zero seconds",
-			reqBody:     multipartBody(map[string]string{"seconds": "0"}),
-			wantSeconds: 10,
-			wantSize:    "720x1280",
-		},
-		{
-			name:        "negative seconds",
-			reqBody:     multipartBody(map[string]string{"seconds": "-5"}),
-			wantSeconds: 10,
-			wantSize:    "720x1280",
-		},
-		{
-			name:        "empty body",
-			reqBody:     []byte{},
-			wantSeconds: 10,
-			wantSize:    "720x1280",
+			name:     "zero seconds",
+			respJSON: `{"id":"video-001","seconds":0}`,
+			wantErr:  true, // seconds <= 0 is invalid
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			seconds, size := parseVideoSecondsAndSize(tt.reqBody)
+			var fields videoResponseFields
+			if err := json.Unmarshal([]byte(tt.respJSON), &fields); err != nil {
+				t.Fatalf("unexpected unmarshal error: %v", err)
+			}
+
+			seconds, err := fields.Seconds.Int64()
+			if tt.wantErr {
+				if err == nil && seconds > 0 {
+					t.Errorf("expected invalid seconds, got %d", seconds)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error parsing seconds: %v", err)
+			}
 			if seconds != tt.wantSeconds {
 				t.Errorf("seconds = %d, want %d", seconds, tt.wantSeconds)
 			}
-			if size != tt.wantSize {
-				t.Errorf("size = %s, want %s", size, tt.wantSize)
+			if fields.Size != tt.wantSize {
+				t.Errorf("size = %q, want %q", fields.Size, tt.wantSize)
 			}
 		})
 	}
@@ -352,4 +206,3 @@ func TestGetVideoSizeRatio(t *testing.T) {
 		})
 	}
 }
-
