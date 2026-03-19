@@ -93,7 +93,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Apply concurrency limiting middleware only for long-running services
 	// text-to-image: 10-30s, image-editing: 1-2min
 	// chatbot and speech-to-text are fast enough and don't need this limit
-	if ctrl.Service.Type == "text-to-image" || ctrl.Service.Type == "image-editing" {
+	if ctrl.Service.Type == "text-to-image" || ctrl.Service.Type == "image-editing" || ctrl.Service.Type == "video-generation" {
 		p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
 	}
 
@@ -109,7 +109,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 func (p *Proxy) Start() error {
 	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing":
+	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing", "video-generation":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	default:
 		return errors.New("invalid service type")
@@ -204,7 +204,38 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			return
 		}
 
-		// Reject all other endpoints that are not in TargetRoute or FreePrefixes
+		// Check if this path requires authentication but not billing
+		// (e.g., video status polling and content retrieval)
+		isAuthRequired := false
+		for _, prefix := range constant.AuthRequiredPrefixes {
+			if strings.HasPrefix(strings.ToLower(targetPath), prefix) {
+				isAuthRequired = true
+				break
+			}
+		}
+
+		if isAuthRequired {
+			// Validate session but skip billing
+			_, err := p.ctrl.ValidateSession(ctx)
+			if err != nil {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, err, "validate session")
+				return
+			}
+
+			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",
+				targetPath, ctx.Request.Method)
+
+			httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
+			if err != nil {
+				p.handleBrokerError(ctx, err, "prepare HTTP request")
+				return
+			}
+			p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
+			return
+		}
+
+		// Reject all other endpoints that are not in TargetRoute, FreePrefixes, or AuthRequiredPrefixes
 		// This prevents unauthorized access to unknown endpoints
 		p.logger.Warnf("Blocked unsupported endpoint: path=%s, method=%s, remote=%s, user_agent=%s",
 			targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
@@ -314,6 +345,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Store image count for later billing calculation
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
+	case "video-generation":
+		_, outputCount, err := p.ctrl.GetVideoGenerationInputFeeAndOutputCount(reqBody)
+		if err != nil {
+			ctx.Set("ignoreError", true)
+			p.handleBrokerError(ctx, err, "get video-generation parameters")
+			return
+		}
+		req.OutputCount = outputCount
+		expectedInputFee = "0"
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

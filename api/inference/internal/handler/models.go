@@ -38,6 +38,7 @@ type ModelPricing struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
 	Image      string `json:"image,omitempty"`
+	Video      string `json:"video,omitempty"`
 }
 
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
@@ -97,6 +98,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// Set image pricing from output price for image service types
 	if svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing {
 		obj.Pricing.Image = svc.OutputPrice
+	}
+
+	// Set video pricing from output price for video service type
+	if svc.Type == constant.ServiceTypeVideoGeneration {
+		obj.Pricing.Video = svc.OutputPrice
 	}
 
 	// Extract TEE verifier from on-chain additionalInfo JSON

@@ -8,10 +8,11 @@ import (
 
 // Service type constants matching on-chain service type values.
 const (
-	ServiceTypeChatbot      = "chatbot"
-	ServiceTypeTextToImage  = "text-to-image"
-	ServiceTypeImageEditing = "image-editing"
-	ServiceTypeSpeechToText = "speech-to-text"
+	ServiceTypeChatbot         = "chatbot"
+	ServiceTypeTextToImage     = "text-to-image"
+	ServiceTypeImageEditing    = "image-editing"
+	ServiceTypeSpeechToText    = "speech-to-text"
+	ServiceTypeVideoGeneration = "video-generation"
 )
 
 var (
@@ -24,6 +25,7 @@ var (
 		"/images/edits":         {},
 		"/images/generations":   {},
 		"/audio/transcriptions": {},
+		"/videos":               {}, // Video generation (OpenAI Video API)
 	}
 
 	// FreePrefixes defines path prefixes that can be accessed without charging
@@ -32,6 +34,14 @@ var (
 	FreePrefixes = []string{
 		"/attestation", // TEE attestation endpoints (e.g., /attestation/report)
 		"/signature",   // TEE signature endpoints (e.g., /signature/{chatID})
+	}
+
+	// AuthRequiredPrefixes defines path prefixes that require session validation
+	// but do not require billing. These are typically async status/retrieval endpoints
+	// where the initial creation was already billed.
+	// Note: Paths here should NOT include /v1/proxy prefix (it's already stripped)
+	AuthRequiredPrefixes = []string{
+		"/videos/", // Video status and content retrieval (e.g., /videos/{id}, /videos/{id}/content)
 	}
 
 	// Keep this as to remove duplicate headers from incoming request
@@ -53,7 +63,7 @@ var (
 	// Response fee reservation factor for balance adequacy validation:  chatbot, speech-to-text,
 	ResponseFeeReservationFactor = int64(1000000)
 
-	// Response fee reservation factor for balance adequacy validation: text-to-image
+	// Response fee reservation factor for balance adequacy validation: text-to-image, video-generation
 	ResponseFeeReservationFactorForImage = int64(100)
 
 	// TEE settlement batch size to avoid gas limit issues

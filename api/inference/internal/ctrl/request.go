@@ -358,10 +358,10 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		if err != nil {
 			return errors.Wrap(err, "calculate response fee reservation")
 		}
-	case "text-to-image", "image-editing":
+	case "text-to-image", "image-editing", "video-generation":
 		responseFeeReservation, err = util.Multiply(service.OutputPrice, constant.ResponseFeeReservationFactorForImage)
 		if err != nil {
-			return errors.Wrap(err, "calculate response fee reservation for image generation")
+			return errors.Wrap(err, "calculate response fee reservation for image/video generation")
 		}
 	default:
 		return errors.New("unknown service type for balance adequacy validation")

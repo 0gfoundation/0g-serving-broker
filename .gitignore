@@ -48,6 +48,9 @@ api/**/config-*.yaml
 
 # Test configs
 api/**/config-test*.yaml
+coverage
+coverage.out
+coverage.html
 
 # Sensitive files
 *.pem

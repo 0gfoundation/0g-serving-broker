@@ -58,6 +58,12 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		targetURL = parsedURL.String()
 	}
 
+	// For video-generation requests, ensure the "wait" form parameter is present.
+	// Defaults to "false" (async) since video generation is typically a long-running operation.
+	if svcType == "video-generation" && len(reqBody) > 0 {
+		reqBody = ensureMultipartWaitField(reqBody)
+	}
+
 	var body io.Reader
 	if len(reqBody) > 0 {
 		body = bytes.NewBuffer(reqBody)
@@ -166,6 +172,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleSpeechToTextResponse(ctx, resp, account, outputPrice, body, reqModel)
 	case "image-editing":
 		return c.handleImageEditingResponse(ctx, resp, account, outputPrice, body, reqModel)
+	case "video-generation":
+		return c.handleVideoGenerationResponse(ctx, resp, account, outputPrice, body, reqModel)
 	default:
 		err = errors.New("unknown service type")
 		c.handleBrokerError(ctx, err, "prepare request extractor")

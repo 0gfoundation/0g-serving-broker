@@ -1,0 +1,13 @@
+# .github/ISSUE_TEMPLATE/task.yml
+name: Task
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Describe the context and background of the task with as much detail as possible. Include any relevant information, links, or resources that can help the assignee understand the task better.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Use a checklist — Claude Code can execute item by item

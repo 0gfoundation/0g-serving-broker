@@ -47,17 +47,25 @@ type ModelInfo struct {
 	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
 	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
 	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z"
+
+	// VideoSizeRatios maps output resolution (e.g., "1280x720") to a cost multiplier.
+	// Used for video generation billing: fee = seconds × sizeRatio × outputPrice.
+	// Defaults are applied if not configured (see DefaultVideoSizeRatios).
+	VideoSizeRatios map[string]float64 `yaml:"videoSizeRatios"`
 }
 
 // Validate checks that all required ModelInfo fields are set.
-func (m *ModelInfo) Validate() error {
+// serviceType is the service type (e.g., "chatbot", "video-generation") and controls
+// which fields are required. For video-generation, contextLength is optional since
+// video models don't have a token context window.
+func (m *ModelInfo) Validate(serviceType string) error {
 	if m.Name == "" {
 		return fmt.Errorf("service.modelInfo.name is required")
 	}
 	if m.Description == "" {
 		return fmt.Errorf("service.modelInfo.description is required")
 	}
-	if m.ContextLength <= 0 {
+	if serviceType != "video-generation" && m.ContextLength <= 0 {
 		return fmt.Errorf("service.modelInfo.contextLength is required and must be positive")
 	}
 	if m.Architecture == nil {
@@ -87,6 +95,42 @@ type Service struct {
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 	OwnedBy          string            `yaml:"ownedBy"`       // Optional. Organization name for the owned_by field in /v1/models (e.g., "0G Foundation")
 	ModelInfo        *ModelInfo        `yaml:"modelInfo"`
+}
+
+// DefaultVideoSizeRatios provides default cost multipliers based on pixel count
+// relative to the baseline 720x1280 (921,600 pixels).
+//
+//	832x480   = 399,360 px → 0.5
+//	480x832   = 399,360 px → 0.5
+//	720x1280  = 921,600 px → 1.0 (baseline)
+//	1280x720  = 921,600 px → 1.0
+//	1024x1792 = 1,835,008 px → 2.0
+//	1792x1024 = 1,835,008 px → 2.0
+var DefaultVideoSizeRatios = map[string]float64{
+	"832x480":   0.5,
+	"480x832":   0.5,
+	"720x1280":  1.0,
+	"1280x720":  1.0,
+	"1024x1792": 2.0,
+	"1792x1024": 2.0,
+}
+
+// GetVideoSizeRatio returns the cost multiplier for a given resolution.
+// Falls back to DefaultVideoSizeRatios if ModelInfo is nil or has no custom ratios.
+// Returns the default resolution ratio (720x1280 = 1.0) if the size is unknown.
+func (s *Service) GetVideoSizeRatio(size string) float64 {
+	var ratios map[string]float64
+	if s.ModelInfo != nil {
+		ratios = s.ModelInfo.VideoSizeRatios
+	}
+	if len(ratios) == 0 {
+		ratios = DefaultVideoSizeRatios
+	}
+	if ratio, ok := ratios[size]; ok {
+		return ratio
+	}
+	// Unknown size: fall back to baseline ratio
+	return 1.0
 }
 
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
@@ -223,7 +267,7 @@ func loadConfig(config *Config) error {
 	}
 
 	if config.Service.ModelInfo != nil {
-		if err := config.Service.ModelInfo.Validate(); err != nil {
+		if err := config.Service.ModelInfo.Validate(config.Service.Type); err != nil {
 			return fmt.Errorf("invalid config: %w", err)
 		}
 	}

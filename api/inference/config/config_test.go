@@ -21,7 +21,7 @@ func validModelInfo() *ModelInfo {
 
 func TestModelInfo_Validate_Valid(t *testing.T) {
 	m := validModelInfo()
-	if err := m.Validate(); err != nil {
+	if err := m.Validate("chatbot"); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 }
@@ -29,8 +29,17 @@ func TestModelInfo_Validate_Valid(t *testing.T) {
 func TestModelInfo_Validate_OptionalFields(t *testing.T) {
 	m := validModelInfo()
 	m.MaxCompletionTokens = 0 // optional
-	if err := m.Validate(); err != nil {
+	if err := m.Validate("chatbot"); err != nil {
 		t.Errorf("expected no error for optional fields, got %v", err)
+	}
+}
+
+func TestModelInfo_Validate_VideoGeneration_NullContextLength(t *testing.T) {
+	m := validModelInfo()
+	m.ContextLength = 0
+	m.MaxCompletionTokens = 0
+	if err := m.Validate("video-generation"); err != nil {
+		t.Errorf("expected no error for video-generation with zero contextLength, got %v", err)
 	}
 }
 
@@ -91,7 +100,7 @@ func TestModelInfo_Validate_MissingRequired(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m := validModelInfo()
 			tt.modify(m)
-			err := m.Validate()
+			err := m.Validate("chatbot")
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 			}
