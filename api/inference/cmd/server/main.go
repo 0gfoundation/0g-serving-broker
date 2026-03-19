@@ -117,7 +117,11 @@ func Main() {
 			logger.Errorf("failed to start LoRA manager: %v", err)
 		}
 
-		providerAddr := common.HexToAddress(contract.ProviderAddress)
+		ftProviderAddr := config.LoRA.FineTuningProviderAddr
+		if ftProviderAddr == "" {
+			ftProviderAddr = contract.ProviderAddress
+		}
+		providerAddr := common.HexToAddress(ftProviderAddr)
 		eventWatcher, err = lorapkg.NewEventWatcher(loraManager, db, config.LoRA, providerAddr, logger)
 		if err != nil {
 			logger.Errorf("failed to create event watcher: %v", err)

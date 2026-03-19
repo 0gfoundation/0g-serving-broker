@@ -57,11 +57,20 @@ func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database 
 	sllmClient := NewSLLMClient(sllmURL, logger)
 
 	var downloader *StorageDownloader
-	providerKey, err := commonconfig.GetProviderPrivateKey(networks)
-	if err != nil {
-		logger.Warnf("provider private key not available for 0G Storage download: %v", err)
-	} else if cfg.StorageIndexerUrl != "" {
-		downloader, err = NewStorageDownloader(cfg, providerKey, logger)
+	eciesKey := cfg.EciesPrivateKey
+	if eciesKey == "" {
+		k, err := commonconfig.GetProviderPrivateKey(networks)
+		if err != nil {
+			logger.Warnf("provider private key not available for 0G Storage download: %v", err)
+		} else {
+			eciesKey = k
+		}
+	} else {
+		logger.Infof("using explicit ECIES private key for adapter decryption (2-CVM mode)")
+	}
+	if eciesKey != "" && cfg.StorageIndexerUrl != "" {
+		var err error
+		downloader, err = NewStorageDownloader(cfg, eciesKey, logger)
 		if err != nil {
 			logger.Warnf("failed to create storage downloader: %v", err)
 		} else {
@@ -102,6 +111,18 @@ func (m *Manager) GetAdapter(adapterName string) *AdapterInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.adapters[adapterName]
+}
+
+// FindAdapterByTaskID returns the first adapter matching the given task ID.
+func (m *Manager) FindAdapterByTaskID(taskID string) *AdapterInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, a := range m.adapters {
+		if a.TaskID == taskID {
+			return a
+		}
+	}
+	return nil
 }
 
 // GetAdaptersByUser returns all adapters owned by a specific user.
@@ -219,6 +240,11 @@ func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 		}
 	}
 
+	// Persist updated adapter path to DB so it survives broker restarts.
+	if err := m.db.UpdateLoRAAdapterPath(info.AdapterName, info.AdapterPath); err != nil {
+		m.logger.Errorf("failed to persist adapter path for %s: %v", info.AdapterName, err)
+	}
+
 	if m.config.AutoDeploy {
 		m.logger.Infof("auto-deploy enabled, deploying adapter %s", info.AdapterName)
 		m.deployToVLLM(ctx, info)
@@ -263,14 +289,14 @@ func (m *Manager) UserDeployAdapter(ctx context.Context, adapterName string) err
 
 	switch info.State {
 	case model.AdapterStateReady:
-		go m.deployToVLLM(ctx, info)
+		go m.deployToVLLM(context.Background(), info)
 		return nil
 	case model.AdapterStateActive:
 		return fmt.Errorf("adapter %s is already deployed", adapterName)
 	case model.AdapterStateLoading:
 		return fmt.Errorf("adapter %s is still being downloaded or deployed, please wait", adapterName)
 	case model.AdapterStateFailed:
-		go m.deployToVLLM(ctx, info)
+		go m.deployToVLLM(context.Background(), info)
 		return nil
 	default:
 		return fmt.Errorf("adapter %s is in state %s, cannot deploy", adapterName, info.State)
@@ -289,7 +315,8 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 		return errors.Wrapf(err, "look up adapter key for task %s (was it pushed by fine-tuning broker?)", info.TaskID)
 	}
 
-	providerEncKey, err := hex.DecodeString(adapterKey.ProviderEncKey)
+	encKeyHex := strings.TrimPrefix(adapterKey.ProviderEncKey, "0x")
+	providerEncKey, err := hex.DecodeString(encKeyHex)
 	if err != nil {
 		return errors.Wrapf(err, "decode provider encrypted key for task %s", info.TaskID)
 	}

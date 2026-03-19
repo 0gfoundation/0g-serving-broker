@@ -3,6 +3,7 @@ package lora
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -61,7 +62,10 @@ func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashH
 		_ = os.Remove(encryptedFile)
 	}()
 
-	rootWithPrefix := "0x" + storageHashHex
+	rootWithPrefix := storageHashHex
+	if !strings.HasPrefix(rootWithPrefix, "0x") {
+		rootWithPrefix = "0x" + rootWithPrefix
+	}
 	d.logger.Infof("downloading encrypted adapter from 0G Storage (hash: %s)", rootWithPrefix)
 	if err := d.indexerClient.Download(ctx, rootWithPrefix, encryptedFile, true); err != nil {
 		return "", errors.Wrapf(err, "download from 0G Storage (hash: %s)", rootWithPrefix)

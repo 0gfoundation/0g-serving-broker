@@ -47,6 +47,11 @@ func (d *DB) UpdateLoRAAdapterState(adapterName string, state model.AdapterState
 		Update("state", state).Error
 }
 
+func (d *DB) UpdateLoRAAdapterPath(adapterName, path string) error {
+	return d.db.Model(&model.LoRAAdapter{}).Where("adapter_name = ?", adapterName).
+		Update("adapter_path", path).Error
+}
+
 func (d *DB) UpdateLoRAAdapterAccess(adapterName string) error {
 	now := time.Now()
 	return d.db.Model(&model.LoRAAdapter{}).Where("adapter_name = ?", adapterName).

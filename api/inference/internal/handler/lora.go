@@ -49,6 +49,15 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 
 	adapterName := lora.MakeAdapterName(req.BaseModel, req.TaskID)
 
+	// The CLI may pass a different baseModel string than what the broker
+	// uses internally (e.g. "Qwen2.5-0.5B-Instruct" vs "/models/Qwen2.5-0.5B-Instruct"),
+	// so fall back to a taskID-based lookup when the computed name misses.
+	if mgr.GetAdapter(adapterName) == nil {
+		if found := mgr.FindAdapterByTaskID(req.TaskID); found != nil {
+			adapterName = found.AdapterName
+		}
+	}
+
 	if err := mgr.UserDeployAdapter(c.Request.Context(), adapterName); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
