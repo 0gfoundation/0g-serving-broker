@@ -1,18 +1,15 @@
 # Fine-tuning to Serving: Complete E2E Guide
 
-Fine-tune a model with your data, then chat with it — the serving happens automatically.
+Fine-tune a model with your data, then deploy and chat with it.
 
 ## How It Works
 
 ```
-  Upload Dataset ──→ Train ──→ Acknowledge ──→ Chat
-       (5 min)      (5–30 min)    (1 min)     (automatic!)
-                                     │
-                         Broker auto-deploys your
-                         adapter to GPU inference
+  Upload Dataset ──→ Train ──→ Acknowledge ──→ Deploy ──→ Chat
+       (5 min)      (5–30 min)    (1 min)     (instant)
 ```
 
-Once you acknowledge the trained model, the inference broker **automatically** downloads it, decrypts it, and loads it into the GPU. You just chat — no manual deployment needed.
+After training, you **acknowledge** the model (downloads it), then **deploy** it to the GPU. You control when the adapter goes live.
 
 ## Requirements
 
@@ -125,19 +122,42 @@ When it shows **Delivered**, move to the next step.
 
 > The flag is `--task-id` here (not `--task`).
 
-This does two things at once:
-1. Downloads an encrypted copy of the model to your machine
-2. Confirms receipt on-chain, which **triggers the inference broker to auto-deploy your adapter**
-
-Wait about 60 seconds for the task to reach **Finished**:
+This downloads the encrypted model and confirms receipt on-chain. Wait about 60 seconds for the task to reach **Finished**:
 
 ```bash
 0g-compute-cli fine-tuning get-task --provider <PROVIDER> --task <TASK_ID>
 ```
 
-## Step 6 — Chat with Your Model
+## Step 6 — Deploy the Adapter
 
-Your fine-tuned model is now live. Chat with it:
+Once the task is **Finished**, deploy the adapter to the GPU:
+
+```bash
+0g-compute-cli fine-tuning deploy-adapter \
+  --provider <PROVIDER> \
+  --model "Qwen2.5-0.5B-Instruct" \
+  --task-id <TASK_ID> \
+  --wait
+```
+
+The `--wait` flag polls until the adapter is fully loaded. Without it, the command returns immediately after sending the deploy request.
+
+### Shortcut: Acknowledge + Deploy in one step
+
+If you want to skip the separate deploy step, add `--deploy` to acknowledge:
+
+```bash
+0g-compute-cli fine-tuning acknowledge-model \
+  --provider <PROVIDER> \
+  --task-id <TASK_ID> \
+  --data-path ./my-model \
+  --model "Qwen2.5-0.5B-Instruct" \
+  --deploy
+```
+
+This acknowledges the model and immediately waits for the broker to deploy it.
+
+## Step 7 — Chat with Your Model
 
 ```bash
 0g-compute-cli fine-tuning chat \
@@ -147,11 +167,7 @@ Your fine-tuned model is now live. Chat with it:
   --message "Hello! What can you do?"
 ```
 
-That's it! The broker figured out everything else automatically.
-
 ### Alternative: Use an API key
-
-If you want to integrate with your own app (any OpenAI-compatible client works):
 
 ```bash
 # Get an API key
@@ -163,7 +179,7 @@ If you want to integrate with your own app (any OpenAI-compatible client works):
 # Example output: ft-Qwen2-5-0-5B-Instruct-1f6fef2b-e0f6
 ```
 
-Then use any OpenAI client:
+Then use any OpenAI-compatible client:
 
 ```bash
 curl -X POST https://<BROKER_URL>/v1/proxy/chat/completions \
@@ -207,9 +223,25 @@ ls ./my-adapter/
 | Check status | `0g-compute-cli fine-tuning get-task --provider <ADDR> --task <ID>` |
 | View training logs | `0g-compute-cli fine-tuning get-log --provider <ADDR> --task <ID>` |
 | Acknowledge model | `0g-compute-cli fine-tuning acknowledge-model --provider <ADDR> --task-id <ID> --data-path ./model` |
+| Deploy adapter | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --model <MODEL> --task-id <ID> --wait` |
+| Ack + Deploy | `0g-compute-cli fine-tuning acknowledge-model --provider <ADDR> --task-id <ID> --data-path ./model --model <MODEL> --deploy` |
 | Chat | `0g-compute-cli fine-tuning chat --provider <ADDR> --model <MODEL> --task-id <ID> --message "Hi"` |
 | Get API key | `0g-compute-cli inference get-secret --provider <ADDR> --duration 0` |
 | Get adapter name | `0g-compute-cli fine-tuning get-adapter-name --model <MODEL> --task-id <ID>` |
+
+## Adapter Status Flow
+
+```
+acknowledge (on-chain event)
+      │
+   loading        ← broker downloads + decrypts adapter
+      │
+    ready          ← downloaded, awaiting deploy
+      │
+  deploy-adapter (user CLI)
+      │
+   active          ← loaded into GPU, ready for chat
+```
 
 ## Common Gotchas
 
@@ -219,6 +251,7 @@ ls ./my-adapter/
 | Model names have no prefix | `Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B-Instruct` |
 | Learning rate format | `0.0002` | `2e-4` |
 | Provider flag name | `--provider` | `--provider-address` |
+| Deploy needs `--model` | `deploy-adapter --model Qwen2.5-0.5B-Instruct` | Forgetting `--model` |
 
 ---
 
@@ -252,17 +285,34 @@ The model may not be on 0G Storage yet. Try the TEE fallback:
 
 The decryption key is only available after the task reaches **Finished**. Check the status and wait.
 
-### Chat returns "adapter not found"
+### Chat returns "adapter not found" or "not deployed"
 
-The broker auto-deploys the adapter when you acknowledge, but it can take up to 30 seconds. Wait and try again.
+The adapter needs to be explicitly deployed. Run:
 
-If it persists, the provider might not have LoRA serving configured. Ask your team to confirm.
+```bash
+0g-compute-cli fine-tuning deploy-adapter \
+  --provider <ADDR> --model <MODEL> --task-id <ID> --wait
+```
+
+### Deploy times out
+
+The broker may still be downloading the adapter from 0G Storage. Check the adapter status:
+
+```bash
+curl <BROKER_URL>/v1/lora/adapters/<ADAPTER_NAME>
+```
+
+If state is `loading`, wait longer. If `failed`, check broker logs.
+
+### Provider config: auto-deploy mode
+
+Providers can set `lora.autoDeploy: true` in broker config to automatically deploy adapters on acknowledge (no user deploy step needed). Default is `false`.
 
 ---
 
 ## Automated E2E Test (for Developers)
 
-There is a script that automates the serving half of this flow (adapter encryption → 0G Storage upload → on-chain events → broker auto-deploy → GPU inference) in about 45 seconds:
+There is a script that automates the serving half of this flow (adapter encryption → 0G Storage upload → on-chain events → broker deploy → GPU inference) in about 45 seconds:
 
 ```bash
 cd api/e2e-lora-serving

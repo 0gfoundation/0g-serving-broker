@@ -6,10 +6,11 @@ type AdapterState string
 
 const (
 	AdapterStateActive    AdapterState = "active"    // Deployed in ServerlessLLM, ready to serve
-	AdapterStateLoading   AdapterState = "loading"   // Being downloaded/deployed
-	AdapterStateOffloaded AdapterState = "offloaded"  // Removed from ServerlessLLM, files may be on disk
-	AdapterStateArchived  AdapterState = "archived"   // Files removed from disk, only in 0G Storage
-	AdapterStateFailed    AdapterState = "failed"     // Deployment failed
+	AdapterStateReady     AdapterState = "ready"     // Downloaded and decrypted, awaiting user-triggered deploy
+	AdapterStateLoading   AdapterState = "loading"   // Being downloaded/decrypted
+	AdapterStateOffloaded AdapterState = "offloaded" // Removed from ServerlessLLM, files may be on disk
+	AdapterStateArchived  AdapterState = "archived"  // Files removed from disk, only in 0G Storage
+	AdapterStateFailed    AdapterState = "failed"    // Download or deployment failed
 )
 
 // LoRAAdapter represents a fine-tuned LoRA adapter managed by the inference broker.

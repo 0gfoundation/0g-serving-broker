@@ -89,6 +89,13 @@ func (h *Handler) Register(r *gin.Engine) {
 	asyncGroup.POST("/images/edits", h.SubmitAsyncImageEdit)
 	asyncGroup.GET("/jobs/:jobID", h.GetAsyncJob)
 
+	// LoRA adapter management API (called by user CLI)
+	loraGroup := group.Group("/lora")
+	loraGroup.Use(corsMiddleware())
+	loraGroup.POST("/adapters/deploy", h.DeployAdapter)
+	loraGroup.GET("/adapters", h.ListAdapters)
+	loraGroup.GET("/adapters/:name", h.GetAdapterStatus)
+
 	// Internal API: fine-tuning broker pushes adapter keys here
 	internal := r.Group("/internal/v1")
 	internal.POST("/adapter-keys", h.ReceiveAdapterKey)

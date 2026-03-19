@@ -192,13 +192,15 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 		m.logger.Errorf("failed to persist adapter %s to DB: %v", adapterName, err)
 	}
 
-	go m.downloadAndDeploy(ctx, info)
+	go m.downloadAdapter(ctx, info)
 	return nil
 }
 
-// downloadAndDeploy downloads the adapter from 0G Storage, decrypts, and deploys to ServerlessLLM.
-func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
-	m.logger.Infof("preparing adapter %s (hash: %s)", info.AdapterName, info.StorageRootHash)
+// downloadAdapter downloads the adapter from 0G Storage and decrypts it.
+// If AutoDeploy is enabled, it also deploys to ServerlessLLM immediately.
+// Otherwise, the adapter is left in "ready" state for user-triggered deployment.
+func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
+	m.logger.Infof("downloading adapter %s (hash: %s)", info.AdapterName, info.StorageRootHash)
 
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
 		if m.config.MockDeploy {
@@ -216,6 +218,19 @@ func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 			return
 		}
 	}
+
+	if m.config.AutoDeploy {
+		m.logger.Infof("auto-deploy enabled, deploying adapter %s", info.AdapterName)
+		m.deployToVLLM(ctx, info)
+	} else {
+		m.logger.Infof("adapter %s downloaded and ready (auto-deploy disabled, awaiting user deploy)", info.AdapterName)
+		m.setAdapterState(info.AdapterName, model.AdapterStateReady)
+	}
+}
+
+// deployToVLLM loads the adapter into ServerlessLLM/vLLM.
+func (m *Manager) deployToVLLM(ctx context.Context, info *AdapterInfo) {
+	m.setAdapterState(info.AdapterName, model.AdapterStateLoading)
 
 	if err := m.sllmClient.DeployAdapter(ctx, info.BaseModel, info.AdapterName, info.AdapterPath); err != nil {
 		m.logger.Errorf("failed to deploy adapter %s to ServerlessLLM: %v", info.AdapterName, err)
@@ -235,6 +250,31 @@ func (m *Manager) downloadAndDeploy(ctx context.Context, info *AdapterInfo) {
 		m.logger.Errorf("failed to update adapter %s state in DB: %v", info.AdapterName, err)
 	}
 	m.logger.Infof("adapter %s deployed successfully", info.AdapterName)
+}
+
+// UserDeployAdapter is called by the HTTP API to deploy an adapter that is in "ready" state.
+func (m *Manager) UserDeployAdapter(ctx context.Context, adapterName string) error {
+	m.mu.RLock()
+	info, ok := m.adapters[adapterName]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("adapter %s not found", adapterName)
+	}
+
+	switch info.State {
+	case model.AdapterStateReady:
+		go m.deployToVLLM(ctx, info)
+		return nil
+	case model.AdapterStateActive:
+		return fmt.Errorf("adapter %s is already deployed", adapterName)
+	case model.AdapterStateLoading:
+		return fmt.Errorf("adapter %s is still being downloaded or deployed, please wait", adapterName)
+	case model.AdapterStateFailed:
+		go m.deployToVLLM(ctx, info)
+		return nil
+	default:
+		return fmt.Errorf("adapter %s is in state %s, cannot deploy", adapterName, info.State)
+	}
 }
 
 // downloadFromStorage handles the full 0G Storage download → ECIES decrypt → AES decrypt → unzip pipeline.
@@ -289,7 +329,7 @@ func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error 
 	}
 
 	m.setAdapterState(adapterName, model.AdapterStateLoading)
-	go m.downloadAndDeploy(ctx, info)
+	go m.downloadAdapter(ctx, info)
 	return nil
 }
 
@@ -338,8 +378,13 @@ func (m *Manager) redeployExistingAdapters(ctx context.Context) error {
 	m.mu.RLock()
 	var toRedeploy []*AdapterInfo
 	for _, a := range m.adapters {
-		if a.State == model.AdapterStateActive || a.State == model.AdapterStateLoading {
+		switch a.State {
+		case model.AdapterStateActive, model.AdapterStateLoading:
 			toRedeploy = append(toRedeploy, a)
+		case model.AdapterStateReady:
+			if m.config.AutoDeploy {
+				toRedeploy = append(toRedeploy, a)
+			}
 		}
 	}
 	m.mu.RUnlock()

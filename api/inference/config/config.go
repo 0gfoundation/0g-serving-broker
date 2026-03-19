@@ -54,6 +54,7 @@ type LoRAConfig struct {
 	StorageIndexerUrl        string `yaml:"storageIndexerUrl"`        // 0G Storage indexer URL for downloading adapters
 	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
 	MockDeploy               bool   `yaml:"mockDeploy"`               // If true, create placeholder files when adapter not on disk (for E2E testing without 0G Storage)
+	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
 }
 
 type Config struct {

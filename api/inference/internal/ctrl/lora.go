@@ -45,6 +45,8 @@ func (c *Ctrl) CheckLoRAOwnership(modelName, userAddress string) error {
 	case model.AdapterStateActive:
 		c.loraManager.RecordAccess(modelName)
 		return nil
+	case model.AdapterStateReady:
+		return fmt.Errorf("model %s is downloaded but not deployed; call deploy-adapter first", modelName)
 	case model.AdapterStateLoading:
 		return fmt.Errorf("model %s is still loading, please retry later", modelName)
 	case model.AdapterStateOffloaded, model.AdapterStateArchived:
