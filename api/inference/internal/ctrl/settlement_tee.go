@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"crypto/rand"
 	"math/big"
 	"time"
 
@@ -476,8 +477,10 @@ func (c *Ctrl) groupRequestsByUser(reqs []model.Request) map[string]*UserRequest
 
 func (c *Ctrl) createUserSettlement(userAddr string, userReqs *UserRequests) (contract.TEESettlementData, error) {
 	requestsHash := c.hashUserRequests(userReqs.Requests)
-	nonce := big.NewInt(time.Now().Unix())
-	nonce.Mul(nonce, big.NewInt(10000000))
+	nonce, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return contract.TEESettlementData{}, errors.Wrap(err, "failed to generate random nonce")
+	}
 
 	settlementData := contract.TEESettlementData{
 		User:         common.HexToAddress(userAddr),
