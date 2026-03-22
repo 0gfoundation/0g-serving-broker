@@ -97,7 +97,7 @@ func Main() {
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
 	}
-	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, logger)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)
 	}
