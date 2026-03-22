@@ -246,18 +246,6 @@ func ProviderECIESDecrypt(providerPrivKeyHex string, ciphertext []byte) ([]byte,
 	return ecies.Decrypt(eciesPrivKey, ciphertext)
 }
 
-// ParseCombinedModelRootHash splits the combined modelRootHash into the 0G Storage root hash
-// and the provider-encrypted AES key. Format: [32-byte storage hash][N-byte encrypted key].
-// Returns (storageHash hex string, encryptedKey bytes, error).
-func ParseCombinedModelRootHash(combined []byte) (storageHashHex string, encryptedKey []byte, err error) {
-	if len(combined) <= 32 {
-		return fmt.Sprintf("%x", combined), nil, nil
-	}
-	storageHashHex = fmt.Sprintf("%x", combined[:32])
-	encryptedKey = combined[32:]
-	return storageHashHex, encryptedKey, nil
-}
-
 func UnmarshalPubkey(pub string) (*ecdsa.PublicKey, error) {
 	bytes, err := hexutil.Decode(pub)
 	if err != nil {

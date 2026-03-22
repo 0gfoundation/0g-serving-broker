@@ -71,8 +71,9 @@ func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashH
 		return "", errors.Wrapf(err, "download from 0G Storage (hash: %s)", rootWithPrefix)
 	}
 
-	fi, _ := os.Stat(encryptedFile)
-	d.logger.Infof("downloaded %d bytes from 0G Storage", fi.Size())
+	if fi, err := os.Stat(encryptedFile); err == nil {
+		d.logger.Infof("downloaded %d bytes from 0G Storage", fi.Size())
+	}
 
 	// Step 3: Decrypt with AES-GCM
 	decryptedZip := outputDir + "_decrypted.zip"

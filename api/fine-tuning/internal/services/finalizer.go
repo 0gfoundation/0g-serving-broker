@@ -165,6 +165,8 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 
 // pushAdapterKey sends the provider-encrypted AES key to the inference broker
 // via POST /internal/v1/adapter-keys, so it can later decrypt the adapter from 0G Storage.
+var adapterKeyHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) error {
 	url := fmt.Sprintf("%s/internal/v1/adapter-keys", f.config.Service.InferenceServiceUrl)
 	payload := map[string]string{
@@ -177,7 +179,10 @@ func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) e
 		return errors.Wrap(err, "marshal adapter key payload")
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return errors.Wrapf(err, "build request for %s", url)
 	}
@@ -186,7 +191,7 @@ func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) e
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := adapterKeyHTTPClient.Do(req)
 	if err != nil {
 		return errors.Wrapf(err, "POST %s", url)
 	}

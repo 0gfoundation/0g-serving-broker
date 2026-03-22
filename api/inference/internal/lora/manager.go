@@ -106,26 +106,32 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// GetAdapter returns adapter info by name (thread-safe).
+// GetAdapter returns a snapshot copy of adapter info by name (thread-safe).
 func (m *Manager) GetAdapter(adapterName string) *AdapterInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.adapters[adapterName]
+	a, ok := m.adapters[adapterName]
+	if !ok {
+		return nil
+	}
+	cp := *a
+	return &cp
 }
 
-// FindAdapterByTaskID returns the first adapter matching the given task ID.
+// FindAdapterByTaskID returns a snapshot copy of the first adapter matching the given task ID.
 func (m *Manager) FindAdapterByTaskID(taskID string) *AdapterInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, a := range m.adapters {
 		if a.TaskID == taskID {
-			return a
+			cp := *a
+			return &cp
 		}
 	}
 	return nil
 }
 
-// GetAdaptersByUser returns all adapters owned by a specific user.
+// GetAdaptersByUser returns snapshot copies of all adapters owned by a specific user.
 func (m *Manager) GetAdaptersByUser(userAddress string) []*AdapterInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -134,7 +140,8 @@ func (m *Manager) GetAdaptersByUser(userAddress string) []*AdapterInfo {
 	normalized := strings.ToLower(userAddress)
 	for _, a := range m.adapters {
 		if strings.EqualFold(a.UserAddress, normalized) {
-			result = append(result, a)
+			cp := *a
+			result = append(result, &cp)
 		}
 	}
 	return result
@@ -334,10 +341,12 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 
 	// The zip may contain a top-level wrapper directory (e.g. "adapter/"),
 	// so the actual adapter files may be in a subdirectory of info.AdapterPath.
-	// Update the path so vLLM can find the adapter_config.json.
+	// Update the path under lock so vLLM can find the adapter_config.json.
 	if actualPath != "" && actualPath != info.AdapterPath {
 		m.logger.Infof("adapter path updated: %s → %s", info.AdapterPath, actualPath)
+		m.mu.Lock()
 		info.AdapterPath = actualPath
+		m.mu.Unlock()
 	}
 	return nil
 }
@@ -495,13 +504,14 @@ func (m *Manager) InjectTestAdapter(name string, info *AdapterInfo) {
 	m.mu.Unlock()
 }
 
-// ListAdapters returns all known adapters (for API/debug).
+// ListAdapters returns snapshot copies of all known adapters (for API/debug).
 func (m *Manager) ListAdapters() []*AdapterInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	result := make([]*AdapterInfo, 0, len(m.adapters))
 	for _, a := range m.adapters {
-		result = append(result, a)
+		cp := *a
+		result = append(result, &cp)
 	}
 	return result
 }
