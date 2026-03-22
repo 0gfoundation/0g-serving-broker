@@ -343,6 +343,10 @@ result(True, f"ECIES encrypted: {len(provider_enc_key)} bytes")
 print("\n── Step 5: Push adapter key to broker ──")
 
 storage_hash_no_prefix = root_hash[2:]
+INTERNAL_API_SECRET = os.environ.get("INTERNAL_API_SECRET", "")
+push_headers = {}
+if INTERNAL_API_SECRET:
+    push_headers["Authorization"] = f"Bearer {INTERNAL_API_SECRET}"
 r = requests.post(
     f"{CVM_BROKER_URL}/internal/v1/adapter-keys",
     json={
@@ -350,6 +354,7 @@ r = requests.post(
         "storageHash": storage_hash_no_prefix,
         "providerEncKey": provider_enc_key.hex(),
     },
+    headers=push_headers,
     timeout=15,
 )
 result(r.status_code == 200, f"Key pushed: {r.json()}")

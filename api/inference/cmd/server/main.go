@@ -153,7 +153,7 @@ func Main() {
 		}
 	}
 
-	h := handler.New(ctrl, proxy)
+	h := handler.New(ctrl, proxy, config.LoRA.InternalApiSecret)
 	h.Register(engine)
 
 	// Listen and Serve with graceful shutdown

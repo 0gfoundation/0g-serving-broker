@@ -17,7 +17,7 @@ set -uo pipefail
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CLI_DIR="/home/zeyu/Downloads/0g-repos/0g-serving-user-broker"
+CLI_DIR="${CLI_DIR:-$(cd "${SCRIPT_DIR}/../../.." && pwd)/../0g-serving-user-broker}"
 CLI="node ${CLI_DIR}/cli.commonjs/cli/index.js"
 
 HARDHAT_RPC="http://127.0.0.1:8545"

@@ -177,7 +177,16 @@ func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) e
 		return errors.Wrap(err, "marshal adapter key payload")
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return errors.Wrapf(err, "build request for %s", url)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret := f.config.Service.InferenceServiceSecret; secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return errors.Wrapf(err, "POST %s", url)
 	}

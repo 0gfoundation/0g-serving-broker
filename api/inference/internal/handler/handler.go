@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
@@ -22,18 +24,20 @@ type asyncCtrl interface {
 }
 
 type Handler struct {
-	ctrl        *ctrl.Ctrl
-	asyncCtrl   asyncCtrl
-	proxy       *proxy.Proxy
-	rateLimiter *middleware.RateLimiter
+	ctrl              *ctrl.Ctrl
+	asyncCtrl         asyncCtrl
+	proxy             *proxy.Proxy
+	rateLimiter       *middleware.RateLimiter
+	internalApiSecret string
 }
 
-func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
+func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy, internalApiSecret string) *Handler {
 	h := &Handler{
-		ctrl:        ctrl,
-		asyncCtrl:   ctrl,
-		proxy:       proxy,
-		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
+		ctrl:              ctrl,
+		asyncCtrl:         ctrl,
+		proxy:             proxy,
+		rateLimiter:       middleware.NewRateLimiter(rate.Limit(10), 20),
+		internalApiSecret: internalApiSecret,
 	}
 	return h
 }
@@ -98,6 +102,7 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	// Internal API: fine-tuning broker pushes adapter keys here
 	internal := r.Group("/internal/v1")
+	internal.Use(h.internalApiAuth())
 	internal.POST("/adapter-keys", h.ReceiveAdapterKey)
 
 	// TODO: should be verified by client
@@ -106,6 +111,37 @@ func (h *Handler) Register(r *gin.Engine) {
 	// group.OPTIONS("/quote/verify/gpu", corsMiddleware(), func(c *gin.Context) {
 	// 	c.Status(204)
 	// })
+}
+
+// internalApiAuth returns middleware that validates a shared secret on internal API routes.
+// If no secret is configured, all requests are rejected to prevent unauthenticated access.
+func (h *Handler) internalApiAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.internalApiSecret == "" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "internal API is disabled (no secret configured)",
+			})
+			return
+		}
+
+		auth := c.GetHeader("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "missing or malformed Authorization header",
+			})
+			return
+		}
+
+		if auth[len(prefix):] != h.internalApiSecret {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "invalid internal API secret",
+			})
+			return
+		}
+
+		c.Next()
+	}
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

@@ -183,6 +183,7 @@ try:
             "storageHash": "0x" + MODEL_ROOT_HASH.hex(),
             "providerEncKey": "0xdeadbeef",
         },
+        headers={"Authorization": "Bearer e2e-test-secret"},
         timeout=5,
     )
     result(r.status_code == 200, f"Adapter key pushed: {r.json()}")
