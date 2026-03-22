@@ -17,6 +17,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -27,19 +28,28 @@ type Proxy struct {
 	ctrl   *ctrl.Ctrl
 	logger log.Logger
 
-	allowOrigins       []string
-	serviceRoutesLock  sync.RWMutex
-	serviceTarget      string
-	serviceType        string
-	serviceGroup       *gin.RouterGroup
-	rateLimiter        *middleware.RateLimiter
-	concurrencyLimiter *middleware.ConcurrencyLimiter
+	allowOrigins              []string
+	serviceRoutesLock         sync.RWMutex
+	serviceTarget             string
+	serviceType               string
+	serviceGroup              *gin.RouterGroup
+	rateLimiter               *middleware.RateLimiter
+	concurrencyLimiter        *middleware.ConcurrencyLimiter
+	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
 }
 
-func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, logger log.Logger) *Proxy {
+func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
 	// Ensure allowOrigins is not empty
 	if len(allowOrigins) == 0 {
 		allowOrigins = []string{"*"}
+	}
+
+	// Apply defaults if not configured
+	if concurrencyConfig.MaxGlobalConcurrent <= 0 {
+		concurrencyConfig.MaxGlobalConcurrent = 20
+	}
+	if concurrencyConfig.MaxPerUserConcurrent <= 0 {
+		concurrencyConfig.MaxPerUserConcurrent = 5
 	}
 
 	p := &Proxy{
@@ -49,10 +59,13 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		serviceGroup: engine.Group(constant.ServicePrefix),
 		// Configure rate limiter: 15 requests per second with burst of 20
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(15), 20),
-		// Configure concurrency limiter: max 50 concurrent requests
-		// For 2-minute requests: 50 concurrent × 2min = manageable load
-		concurrencyLimiter: middleware.NewConcurrencyLimiter(50),
+		// Configure concurrency limiter to match backend GPU capacity
+		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
+		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent),
 	}
+
+	logger.Infof("Concurrency limits: global=%d, per-user=%d",
+		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
 
 	// Configure CORS middleware
 	// IMPORTANT: This must handle OPTIONS preflight requests before they reach the proxy handler
@@ -90,12 +103,10 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
 
-	// Apply concurrency limiting middleware only for long-running services
-	// text-to-image: 10-30s, image-editing: 1-2min
-	// chatbot and speech-to-text are fast enough and don't need this limit
-	if ctrl.Service.Type == "text-to-image" || ctrl.Service.Type == "image-editing" {
-		p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
-	}
+	// Apply global concurrency limiting to all service types.
+	// This caps total in-flight requests to match backend GPU capacity,
+	// preventing queue buildup that degrades throughput.
+	p.serviceGroup.Use(middleware.ConcurrencyLimitMiddleware(p.concurrencyLimiter))
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
@@ -224,6 +235,21 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Store user address in context for rate limiting
 	ctx.Set("userAddress", userAddress)
 
+	// Check if user is whitelisted (checked early to skip per-user concurrency limit)
+	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
+
+	// Apply per-user concurrency limit only for non-whitelisted users.
+	// Whitelisted users (internal services, monitoring) are exempt to avoid
+	// blocking critical operations, but still subject to the global limit.
+	if !isWhitelisted {
+		if !middleware.CheckPerUserConcurrency(p.perUserConcurrencyLimiter, ctx, userAddress) {
+			p.logger.Warnf("Per-user concurrency limit reached: user=%s, active=%d",
+				userAddress, p.perUserConcurrencyLimiter.GetActiveForUser(userAddress))
+			return
+		}
+		defer p.perUserConcurrencyLimiter.Release(userAddress)
+	}
+
 	// Check if user is rate-limited due to excessive model mismatch attempts
 	rateLimiter := ctrl.GetRateLimiter()
 	if blocked, blockedUntil := rateLimiter.IsBlocked(userAddress); blocked {
@@ -242,8 +268,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Record unique user for DAU tracking
 	monitor.RecordUniqueUser(userAddress)
 
-	// Check if user is whitelisted - whitelist users bypass billing but still need normal response processing
-	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
+	// Whitelisted users bypass billing but still need normal response processing
 	if isWhitelisted {
 		// Sanitize path for logging - never log query parameters that may contain sensitive data
 		// Note: targetPath may already be sanitized at L149-152, but we ensure it here for clarity
