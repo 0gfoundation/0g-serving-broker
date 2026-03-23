@@ -152,6 +152,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if idx := strings.Index(targetPath, "?"); idx != -1 {
 		targetPath = targetPath[:idx]
 	}
+	// Normalize trailing slashes to prevent billing bypass
+	// (e.g., /videos/ would skip TargetRoute["/videos"] and fall through to auth-only path)
+	if targetPath != "/" {
+		targetPath = strings.TrimRight(targetPath, "/")
+	}
 
 	p.logger.Debugf("Proxy debug: method=%s, url=%s, Content-Length=%s, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header)
 	reqBody, err := io.ReadAll(ctx.Request.Body)
@@ -200,7 +205,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				p.handleBrokerError(ctx, err, "prepare HTTP request")
 				return
 			}
-			p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
+			if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false); err != nil {
+				p.logger.Errorf("process free endpoint http request failed: %v", err)
+			}
 			return
 		}
 
@@ -231,7 +238,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				p.handleBrokerError(ctx, err, "prepare HTTP request")
 				return
 			}
-			p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
+			if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false); err != nil {
+				p.logger.Errorf("process auth-required http request failed: %v", err)
+			}
 			return
 		}
 
