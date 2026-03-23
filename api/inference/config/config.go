@@ -193,6 +193,15 @@ type Config struct {
 	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
+	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
+}
+
+// ConcurrencyLimitConfig defines concurrency limiting for backend protection.
+// Global limit caps total in-flight requests to the backend (should match GPU capacity).
+// Per-user limit prevents a single user from monopolizing all slots.
+type ConcurrencyLimitConfig struct {
+	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent"`  // Max total concurrent requests to backend (default: 20)
+	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent"` // Max concurrent requests per user (default: 5, whitelisted users are exempt)
 }
 
 // AsyncConfig defines configuration for async job processing.
@@ -376,6 +385,10 @@ func GetConfig() *Config {
 			Whitelist: WhitelistConfig{
 				Enabled:       false,
 				UserAddresses: []string{},
+			},
+			ConcurrencyLimit: ConcurrencyLimitConfig{
+				MaxGlobalConcurrent:  20,
+				MaxPerUserConcurrent: 5,
 			},
 			Async: AsyncConfig{
 				Enabled:                true,
