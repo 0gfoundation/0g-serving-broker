@@ -17,10 +17,12 @@ var (
 	// UniqueUsersTotal tracks the number of unique users per day
 	UniqueUsersTotal prometheus.Gauge
 
-	// Token metrics
-	InputTokensTotal  *prometheus.CounterVec
+	// InputTokensTotal tracks cumulative input token count, labeled by service_type.
+	InputTokensTotal *prometheus.CounterVec
+	// OutputTokensTotal tracks cumulative output token count, labeled by service_type.
 	OutputTokensTotal *prometheus.CounterVec
-	TokensPerSecond   *prometheus.HistogramVec
+	// TokensPerSecond records per-request output token generation rate as a histogram, labeled by service_type.
+	TokensPerSecond *prometheus.HistogramVec
 
 	// uniqueUsersChan is a buffered channel for async user recording (non-blocking)
 	uniqueUsersChan chan string
