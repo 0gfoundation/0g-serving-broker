@@ -30,7 +30,9 @@ func newTestCtrlWithLoRA(t *testing.T) *Ctrl {
 		whitelistUsers: make(map[string]struct{}),
 	}
 
-	m := &lora.Manager{}
+	m := &lora.Manager{
+		logger: testLogger(),
+	}
 	c.loraManager = m
 	return c
 }
