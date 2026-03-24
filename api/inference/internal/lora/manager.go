@@ -352,6 +352,7 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 }
 
 // RestoreAdapter downloads and redeploys an offloaded/archived adapter.
+// When triggered by chat request, always deploy to make adapter immediately usable.
 func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error {
 	m.mu.RLock()
 	info, ok := m.adapters[adapterName]
@@ -365,7 +366,50 @@ func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error 
 	}
 
 	m.setAdapterState(adapterName, model.AdapterStateLoading)
-	go m.downloadAdapter(ctx, info)
+
+	// Start async download and auto-deploy for chat-triggered restore
+	go func() {
+		m.logger.Infof("restore: downloading adapter %s from 0G Storage", info.AdapterName)
+
+		// Download from 0G Storage if not exists
+		if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
+			if m.config.MockDeploy {
+				m.logger.Infof("mock deploy: creating placeholder adapter at %s", info.AdapterPath)
+				if mkErr := os.MkdirAll(info.AdapterPath, 0755); mkErr != nil {
+					m.logger.Errorf("mock deploy: failed to create dir: %v", mkErr)
+					m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+					return
+				}
+				placeholder := filepath.Join(info.AdapterPath, "adapter_config.json")
+				_ = os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
+			} else if dlErr := m.downloadFromStorage(ctx, info); dlErr != nil {
+				m.logger.Errorf("restore: failed to download adapter %s from 0G Storage: %v", info.AdapterName, dlErr)
+				m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+				return
+			}
+		}
+
+		// Persist updated adapter path to DB
+		if m.db != nil {
+			if err := m.db.UpdateLoRAAdapterPath(info.AdapterName, info.AdapterPath); err != nil {
+				m.logger.Errorf("restore: failed to persist adapter path for %s: %v", info.AdapterName, err)
+			}
+		}
+
+		// Check if download succeeded (not failed)
+		m.mu.RLock()
+		currentState := m.adapters[info.AdapterName].State
+		m.mu.RUnlock()
+
+		if currentState == model.AdapterStateFailed {
+			return
+		}
+
+		// Always auto-deploy for chat-triggered restore (ignore AutoDeploy config)
+		m.logger.Infof("restore: auto-deploying adapter %s to ServerlessLLM", info.AdapterName)
+		m.deployToVLLM(ctx, info)
+	}()
+
 	return nil
 }
 
