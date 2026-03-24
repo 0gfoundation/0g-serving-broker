@@ -17,6 +17,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // SpeechToTextUsage represents the usage information from speech-to-text API
@@ -91,7 +92,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	if err != nil {
 		c.logger.Warnf("Failed to decompress speech-to-text response: %v", err)
 		// Fallback to estimated billing if decompression fails
-		return c.updateSpeechToTextFallback(reqModel, string(decompressedBody))
+		return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
 	}
 
 	// Debug: log response content
@@ -110,7 +111,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
 		c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
 		// Fallback to estimated billing if parsing fails
-		return c.updateSpeechToTextFallback(reqModel, string(decompressedBody))
+		return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
 	}
 
 	// Sign response if needed
@@ -126,11 +127,11 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Update billing with actual usage data
 	if transcriptionResp.Usage != nil {
-		return c.updateSpeechToTextWithUsage(context.Background(), transcriptionResp.Usage, reqModel.RequestHash)
+		return c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel.RequestHash)
 	}
 
 	// Fallback if no usage data
-	return c.updateSpeechToTextFallback(reqModel, string(decompressedBody))
+	return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
 }
 
 // handleStreamingSpeechToText handles streaming speech-to-text response
@@ -207,11 +208,11 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Update billing
 	if usage != nil {
-		return c.updateSpeechToTextWithUsage(context.Background(), usage, reqModel.RequestHash)
+		return c.updateSpeechToTextWithUsage(ctx, usage, reqModel.RequestHash)
 	}
 
 	// Fallback if no usage data
-	return c.updateSpeechToTextFallback(reqModel, rawBody.String())
+	return c.updateSpeechToTextFallback(ctx, reqModel, rawBody.String())
 }
 
 // updateSpeechToTextWithUsage updates the request with accurate token counts from the API response
@@ -244,6 +245,10 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 
+	// Record token metrics
+	monitor.RecordTokens("speech_to_text", int64(usage.InputTokens), int64(usage.OutputTokens))
+	monitor.RecordTPSFromContext(ctx, "speech_to_text", int64(usage.OutputTokens))
+
 	return nil
 }
 
@@ -252,9 +257,9 @@ updateSpeechToTextFallback is used when no usage data is available.
 If text is provided, billing is based on the number of words in the text.
 Otherwise, falls back to a default estimation.
 */
-func (c *Ctrl) updateSpeechToTextFallback(reqModel model.Request, text string) error {
+func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Request, text string) error {
 	// Get service price from cache/contract instead of config
-	service, err := c.GetCachedService(context.Background())
+	service, err := c.GetCachedService(ctx)
 	if err != nil {
 		return errors.Wrap(err, "get cached service for speech-to-text fallback billing")
 	}
@@ -291,6 +296,10 @@ func (c *Ctrl) updateSpeechToTextFallback(reqModel model.Request, text string) e
 	if err := c.db.UpdateRequestFeesAndCount(reqModel.RequestHash, outputFee.String(), totalFee.String(), estimatedOutputTokens); err != nil {
 		return errors.Wrap(err, "update request fees and count")
 	}
+
+	// Record token metrics (estimated output tokens only, no input token data in fallback path)
+	monitor.RecordTokens("speech_to_text", 0, estimatedOutputTokens)
+	monitor.RecordTPSFromContext(ctx, "speech_to_text", estimatedOutputTokens)
 
 	return nil
 }

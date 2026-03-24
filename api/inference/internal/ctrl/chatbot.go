@@ -28,6 +28,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 const ChatPrefix = "chat"
@@ -391,7 +392,7 @@ func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outp
 }
 
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response
-func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
+func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
 	// Calculate actual fees based on LLM-provided token counts.
 	// When cacheTokenBilling is enabled and cached tokens are reported,
 	// apply discounted pricing for cached input tokens.
@@ -449,13 +450,17 @@ func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPri
 		return errors.Wrap(err, "Error updating request with accurate tokens")
 	}
 
+	// Record token metrics
+	monitor.RecordTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
+	monitor.RecordTPSFromContext(ctx, "chatbot", int64(usage.CompletionTokens))
+
 	return nil
 }
 
 // updateAccountWithOutput is the FALLBACK method when LLM doesn't provide usage information
 // It estimates tokens by counting space-separated words (inaccurate but better than nothing)
 // This should only be used when the LLM response doesn't include usage data
-func (c *Ctrl) updateAccountWithOutput(_ context.Context, output string, outputPrice string, requestHash string) error {
+func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outputPrice string, requestHash string) error {
 	// WARNING: This is a rough estimation based on word count, not actual tokens
 	outputCount := int64(len(strings.Fields(output)))
 	lastResponseFee, err := util.Multiply(outputPrice, outputCount)
@@ -478,6 +483,10 @@ func (c *Ctrl) updateAccountWithOutput(_ context.Context, output string, outputP
 	if err := c.db.UpdateRequestFeesAndCount(requestHash, lastResponseFee.String(), fee.String(), outputCount); err != nil {
 		return errors.Wrap(err, "Error updating request fees and count")
 	}
+
+	// Record token metrics (estimated output tokens only, no input token data in fallback path)
+	monitor.RecordTokens("chatbot", 0, outputCount)
+	monitor.RecordTPSFromContext(ctx, "chatbot", outputCount)
 
 	return nil
 }
