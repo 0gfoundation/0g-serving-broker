@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 
@@ -61,10 +62,15 @@ type CompletionChunk struct {
 	Usage   *Usage   `json:"usage,omitempty"`
 }
 
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 }
 
 type Choice struct {
@@ -386,10 +392,45 @@ func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outp
 
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response
 func (c *Ctrl) updateAccountWithUsage(_ context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
-	// Calculate actual fees based on LLM-provided token counts
-	inputFee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
-	if err != nil {
-		return errors.Wrap(err, "Error calculating input fee from actual tokens")
+	// Calculate actual fees based on LLM-provided token counts.
+	// When cacheTokenBilling is enabled and cached tokens are reported,
+	// apply discounted pricing for cached input tokens.
+	var inputFee *big.Int
+	cachedTokens := 0
+	if c.cacheTokenBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+		cachedTokens = usage.PromptTokensDetails.CachedTokens
+		if cachedTokens > usage.PromptTokens {
+			cachedTokens = usage.PromptTokens
+		}
+		nonCachedTokens := usage.PromptTokens - cachedTokens
+
+		// Fee for non-cached tokens at full price
+		nonCachedFee, err := util.Multiply(inputPrice, int64(nonCachedTokens))
+		if err != nil {
+			return errors.Wrap(err, "Error calculating non-cached input fee")
+		}
+
+		// Fee for cached tokens at discounted price
+		// cachedFee = inputPrice * cachedTokens / Divisor
+		cachedFullFee, err := util.Multiply(inputPrice, int64(cachedTokens))
+		if err != nil {
+			return errors.Wrap(err, "Error calculating cached input fee")
+		}
+		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(c.cacheTokenBilling.Divisor))
+
+		inputFee, err = util.Add(nonCachedFee, cachedFee)
+		if err != nil {
+			return errors.Wrap(err, "Error adding cached and non-cached input fees")
+		}
+
+		c.logger.Infof("Cache token billing: prompt_tokens=%d, cached_tokens=%d, non_cached=%d, divisor=%d, inputFee=%s",
+			usage.PromptTokens, cachedTokens, nonCachedTokens, c.cacheTokenBilling.Divisor, inputFee.String())
+	} else {
+		var err error
+		inputFee, err = util.Multiply(inputPrice, int64(usage.PromptTokens))
+		if err != nil {
+			return errors.Wrap(err, "Error calculating input fee from actual tokens")
+		}
 	}
 
 	outputFee, err := util.Multiply(outputPrice, int64(usage.CompletionTokens))

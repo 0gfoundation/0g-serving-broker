@@ -41,7 +41,8 @@ type Ctrl struct {
 
 	autoSettleBufferTime time.Duration
 
-	Service config.Service
+	Service            config.Service
+	cacheTokenBilling  config.CacheTokenBillingConfig
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
@@ -112,6 +113,7 @@ func New(
 		asyncDB:              db,
 		contract:             contract,
 		Service:              cfg.Service,
+		cacheTokenBilling:    cfg.CacheTokenBilling,
 		svcCache:             svcCache,
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
@@ -177,6 +179,16 @@ func New(
 // GetLogPath returns the configured log file path
 func (c *Ctrl) GetLogPath() string {
 	return c.logPath
+}
+
+// ProviderAddress returns the provider's on-chain address.
+func (c *Ctrl) ProviderAddress() string {
+	return c.contract.ProviderAddress
+}
+
+// GetServiceConfig returns the service configuration from the YAML config.
+func (c *Ctrl) GetServiceConfig() config.Service {
+	return c.Service
 }
 
 // IsWhitelistedUser checks if the user address is in the whitelist.

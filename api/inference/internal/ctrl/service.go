@@ -80,5 +80,6 @@ func parseService(svc contract.Service) model.Service {
 		OutputPrice:           svc.OutputPrice.String(),
 		Verifiability:         svc.Verifiability,
 		TeeSignerAcknowledged: svc.TeeSignerAcknowledged,
+		AdditionalInfo:        svc.AdditionalInfo,
 	}
 }

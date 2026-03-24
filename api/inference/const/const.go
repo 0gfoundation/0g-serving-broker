@@ -6,6 +6,14 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// Service type constants matching on-chain service type values.
+const (
+	ServiceTypeChatbot      = "chatbot"
+	ServiceTypeTextToImage  = "text-to-image"
+	ServiceTypeImageEditing = "image-editing"
+	ServiceTypeSpeechToText = "speech-to-text"
+)
+
 var (
 	ServicePrefix = "/v1/proxy"
 
@@ -47,6 +55,10 @@ var (
 
 	// Response fee reservation factor for balance adequacy validation: text-to-image
 	ResponseFeeReservationFactorForImage = int64(100)
+
+	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (1 0G in neuron).
+	// This replaces the dynamic per-service-type calculation in balance adequacy validation.
+	MinimumLockedBalance = "1000000000000000000"
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50

@@ -100,6 +100,7 @@ func Main() {
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
 	}
+
 	// Initialize LoRA Manager if enabled
 	var loraCancel context.CancelFunc
 	var eventWatcher *lorapkg.EventWatcher
@@ -132,7 +133,7 @@ func Main() {
 		logger.Info("LoRA serving enabled: manager and event watcher started")
 	}
 
-	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, logger)
+	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)
 	}
