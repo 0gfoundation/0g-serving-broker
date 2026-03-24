@@ -30,9 +30,12 @@ func newTestCtrlWithLoRA(t *testing.T) *Ctrl {
 		whitelistUsers: make(map[string]struct{}),
 	}
 
-	m := &lora.Manager{
-		logger: testLogger(),
+	// Create Manager using NewManager to properly initialize all fields
+	cfg := config.LoRAConfig{
+		Enable:         false,
+		LoraModulesDir: "",
 	}
+	m, _ := lora.NewManager(cfg, nil, nil, testLogger())
 	c.loraManager = m
 	return c
 }
