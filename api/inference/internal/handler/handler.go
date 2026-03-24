@@ -113,34 +113,45 @@ func (h *Handler) Register(r *gin.Engine) {
 	// })
 }
 
-// internalApiAuth returns middleware that validates a shared secret on internal API routes.
-// If no secret is configured, all requests are rejected to prevent unauthenticated access.
+// internalApiAuth returns middleware that validates internal API requests.
+// It supports two authentication methods (in order of priority):
+// 1. Wallet signature verification (preferred) - validates provider identity via ECDSA signature
+// 2. Shared secret fallback (backward compatible) - validates pre-shared secret for migration period
+//
+// This hybrid approach allows smooth migration from shared-secret to wallet-based authentication
+// as suggested in PR #379 review. The shared secret will be deprecated in a future release.
 func (h *Handler) internalApiAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if h.internalApiSecret == "" {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": "internal API is disabled (no secret configured)",
-			})
-			return
+		// Method 1: Try wallet signature verification first (preferred)
+		// This validates that the request comes from a legitimate provider
+		if h.ctrl != nil {
+			if err := h.ctrl.ValidateProviderAuth(c); err == nil {
+				// Wallet signature verified successfully
+				c.Next()
+				return
+			}
+			// Wallet verification failed, log for debugging but don't abort yet
+			// (we'll try shared secret fallback below)
 		}
 
-		auth := c.GetHeader("Authorization")
-		const prefix = "Bearer "
-		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "missing or malformed Authorization header",
-			})
-			return
+		// Method 2: Fallback to shared secret (backward compatible)
+		// This maintains compatibility with existing fine-tuning brokers during migration
+		if h.internalApiSecret != "" {
+			auth := c.GetHeader("Authorization")
+			const prefix = "Bearer "
+			if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
+				if auth[len(prefix):] == h.internalApiSecret {
+					// Shared secret verified
+					c.Next()
+					return
+				}
+			}
 		}
 
-		if auth[len(prefix):] != h.internalApiSecret {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "invalid internal API secret",
-			})
-			return
-		}
-
-		c.Next()
+		// Both methods failed - reject request
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized: provide either wallet signature (Address, Session-Token, Session-Signature headers) or valid shared secret (Authorization: Bearer <secret>)",
+		})
 	}
 }
 

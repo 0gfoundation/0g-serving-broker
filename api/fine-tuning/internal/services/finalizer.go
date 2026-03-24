@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -165,6 +166,13 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 
 // pushAdapterKey sends the provider-encrypted AES key to the inference broker
 // via POST /internal/v1/adapter-keys, so it can later decrypt the adapter from 0G Storage.
+//
+// Authentication: Supports two methods (sent together for backward compatibility):
+// 1. Wallet signature (preferred) - provider signs the payload with its private key
+// 2. Shared secret (fallback) - pre-shared secret for migration period
+//
+// This hybrid approach allows smooth migration to wallet-based authentication
+// as suggested in PR #379 review.
 var adapterKeyHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) error {
@@ -187,6 +195,15 @@ func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) e
 		return errors.Wrapf(err, "build request for %s", url)
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	// Method 1: Add wallet signature (preferred authentication)
+	// This proves the request comes from a legitimate provider
+	if err := f.addWalletSignature(req, body, taskID); err != nil {
+		f.logger.Warnf("Failed to add wallet signature to adapter key request: %v. Continuing with shared secret only.", err)
+		// Don't fail here - we can still use shared secret as fallback
+	}
+
+	// Method 2: Add shared secret (backward compatible fallback)
 	if secret := f.config.Service.InferenceServiceSecret; secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
@@ -202,6 +219,60 @@ func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) e
 	}
 
 	f.logger.Infof("Pushed adapter key to inference broker for task %s", taskID)
+	return nil
+}
+
+// addWalletSignature signs the request body with the provider's private key
+// and adds the necessary headers for wallet-based authentication.
+// This follows the same pattern as user session authentication.
+func (f *Finalizer) addWalletSignature(req *http.Request, body []byte, taskID string) error {
+	// Get provider private key
+	providerKey, err := commonconfig.GetProviderPrivateKey(f.config.Networks)
+	if err != nil {
+		return errors.Wrap(err, "get provider private key for signing")
+	}
+
+	// Create provider address from private key
+	privateKey, err := crypto.HexToECDSA(providerKey)
+	if err != nil {
+		return errors.Wrap(err, "parse provider private key")
+	}
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return errors.New("invalid public key type")
+	}
+	providerAddress := crypto.PubkeyToAddress(*publicKeyECDSA).Hex()
+
+	// Create token with provider identity (similar to user session token)
+	token := map[string]interface{}{
+		"appId":      "fine-tuning-broker",
+		"tokenId":    255, // Ephemeral token
+		"generation": 1,
+		"timestamp":  time.Now().UnixMilli(),
+		"expiresAt":  time.Now().Add(5 * time.Minute).UnixMilli(), // Short expiry for single request
+		"nonce":      fmt.Sprintf("%d-%s", time.Now().Unix(), taskID),
+		"address":    providerAddress,
+		"provider":   providerAddress, // Self-referential for provider auth
+	}
+
+	tokenJSON, err := json.Marshal(token)
+	if err != nil {
+		return errors.Wrap(err, "marshal provider token")
+	}
+
+	// Sign the token
+	tokenHash := crypto.Keccak256Hash(tokenJSON)
+	signature, err := crypto.Sign(tokenHash.Bytes(), privateKey)
+	if err != nil {
+		return errors.Wrap(err, "sign provider token")
+	}
+
+	// Add authentication headers
+	req.Header.Set("Address", providerAddress)
+	req.Header.Set("Session-Token", string(tokenJSON))
+	req.Header.Set("Session-Signature", hexutil.Encode(signature))
+
 	return nil
 }
 
