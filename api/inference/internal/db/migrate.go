@@ -159,6 +159,44 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&AsyncJob{})
 			},
 		},
+		{
+			ID: "add-settling-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Settling bool `gorm:"type:tinyint(1);not null;default:0"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "create-pending-settlement",
+			Migrate: func(tx *gorm.DB) error {
+				type PendingSettlement struct {
+					model.Model
+					ID             uint64     `gorm:"primaryKey;autoIncrement"`
+					TxHash         string     `gorm:"type:varchar(66);index"`
+					UserAddress    string     `gorm:"type:varchar(255);not null;index"`
+					TotalFee       string     `gorm:"type:varchar(255);not null"`
+					Nonce          string     `gorm:"type:varchar(255);not null"`
+					RequestHashes  string     `gorm:"type:text;not null"`
+					Status         string     `gorm:"type:varchar(32);not null;default:'pending';index"`
+					SubmittedBlock uint64     `gorm:"type:bigint unsigned;not null;default:0"`
+					ResolvedAt     *time.Time `gorm:"type:datetime"`
+				}
+				return tx.AutoMigrate(&PendingSettlement{})
+			},
+		},
+		{
+			ID: "create-reconciliation-cursor",
+			Migrate: func(tx *gorm.DB) error {
+				type ReconciliationCursor struct {
+					ID              uint64     `gorm:"primaryKey;autoIncrement"`
+					LastBlockNumber uint64     `gorm:"type:bigint unsigned;not null;default:0"`
+					UpdatedAt       *time.Time
+				}
+				return tx.AutoMigrate(&ReconciliationCursor{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
