@@ -122,9 +122,10 @@ type Config struct {
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
 	Interval    struct {
-		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-		SettlementProcessor      int `yaml:"settlementProcessor"`
+		AutoSettleBufferTime         int `yaml:"autoSettleBufferTime"`
+		ForceSettlementProcessor     int `yaml:"forceSettlementProcessor"`
+		SettlementProcessor          int `yaml:"settlementProcessor"`
+		ReconciliationProcessor      int `yaml:"reconciliationProcessor"`
 	} `yaml:"interval"`
 	RevenueTransfer struct {
 		TargetAddress string `yaml:"targetAddress"` // Target address to transfer revenue to
@@ -267,13 +268,15 @@ func GetConfig() *Config {
 			GasPrice:    "",
 			MaxGasPrice: "",
 			Interval: struct {
-				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-				SettlementProcessor      int `yaml:"settlementProcessor"`
+				AutoSettleBufferTime         int `yaml:"autoSettleBufferTime"`
+				ForceSettlementProcessor     int `yaml:"forceSettlementProcessor"`
+				SettlementProcessor          int `yaml:"settlementProcessor"`
+				ReconciliationProcessor      int `yaml:"reconciliationProcessor"`
 			}{
-				AutoSettleBufferTime:     60,
-				ForceSettlementProcessor: 600,
-				SettlementProcessor:      300,
+				AutoSettleBufferTime:         60,
+				ForceSettlementProcessor:     600,
+				SettlementProcessor:          300,
+				ReconciliationProcessor:      60,
 			},
 			RevenueTransfer: struct {
 				TargetAddress string `yaml:"targetAddress"`

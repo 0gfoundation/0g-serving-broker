@@ -3,6 +3,7 @@ package providercontract
 import (
 	"context"
 	"math/big"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
@@ -18,26 +19,44 @@ type TEESettlementData struct {
 	Signature    []byte
 }
 
-func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []contract.TEESettlementData) ([]common.Address, error) {
+// SettlementResult represents the on-chain result for a single user settlement
+type SettlementResult struct {
+	User            common.Address
+	Status          uint8
+	UnsettledAmount *big.Int
+}
+
+func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []contract.TEESettlementData) (common.Hash, []SettlementResult, error) {
 	// Execute the actual transaction
 	tx, err := c.Contract.Transact(ctx, nil, "settleFeesWithTEE", settlements)
 	if err != nil {
 		wrappedErr := WrapContractError(err)
 		c.logger.Errorf("[SettleFeesWithTEE] Contract error calling settleFeesWithTEE: %v", wrappedErr)
-		return nil, errors.Wrap(wrappedErr, "call settleFeesWithTEE")
+		return common.Hash{}, nil, errors.Wrap(wrappedErr, "call settleFeesWithTEE")
 	}
 
 	// Wait for transaction receipt
 	c.logger.Infof("Settlement transaction submitted with hash: %s", tx.Hash().Hex())
 	receipt, err := c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
-		wrappedErr := WrapContractError(err)
-		c.logger.Errorf("[SettleFeesWithTEE] Contract error waiting for receipt: %v", wrappedErr)
-		return nil, errors.Wrap(wrappedErr, "wait for receipt")
+		// WaitForReceipt timed out — but the tx may have been mined.
+		// Do one final check with a fresh context.
+		freshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		finalReceipt, finalErr := c.Contract.Client.Client.TransactionReceipt(freshCtx, tx.Hash())
+		if finalErr != nil || finalReceipt == nil {
+			wrappedErr := WrapContractError(err)
+			c.logger.Errorf("[SettleFeesWithTEE] Contract error waiting for receipt: %v", wrappedErr)
+			return tx.Hash(), nil, errors.Wrapf(wrappedErr, "wait for receipt (txHash=%s, may still be pending)", tx.Hash().Hex())
+		}
+		// Tx was actually mined! Use this receipt.
+		receipt = finalReceipt
+		c.logger.Warnf("Transaction %s was mined despite WaitForReceipt timeout (block %d)",
+			tx.Hash().Hex(), receipt.BlockNumber.Uint64())
 	}
 	
-	// Parse TEESettlementResult events from logs to determine failed users
-	var failedUsers []common.Address
+	// Parse TEESettlementResult events from logs to determine per-user results
+	var results []SettlementResult
 	for _, vLog := range receipt.Logs {
 		// Try to parse the log as a TEESettlementResult event
 		event, err := c.Contract.InferenceServing.ParseTEESettlementResult(*vLog)
@@ -45,15 +64,17 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 			// Not a TEESettlementResult event, skip
 			continue
 		}
-		
-		// Status 0 means SUCCESS, anything else is a failure or partial settlement
-		// For backward compatibility, we treat both failures and partial settlements as "failed"
+
 		if event.Status != 0 {
-			failedUsers = append(failedUsers, event.User)
-			c.logger.Infof("Settlement for user %s: status=%d (0=SUCCESS, 1=PARTIAL, 2=PROVIDER_MISMATCH, 3=NO_TEE_SIGNER, 4=INVALID_NONCE, 5=INVALID_SIG), unsettledAmount=%s", 
+			results = append(results, SettlementResult{
+				User:            event.User,
+				Status:          event.Status,
+				UnsettledAmount: event.UnsettledAmount,
+			})
+			c.logger.Infof("Settlement for user %s: status=%d, unsettledAmount=%s",
 				event.User.Hex(), event.Status, event.UnsettledAmount.String())
 		}
 	}
-	
-	return failedUsers, nil
+
+	return tx.Hash(), results, nil
 }
