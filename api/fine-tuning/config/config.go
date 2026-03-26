@@ -51,9 +51,6 @@ type Service struct {
 	// The fine-tuning broker pushes adapter keys here via POST /internal/v1/adapter-keys
 	// so the inference broker can decrypt adapters from 0G Storage.
 	InferenceServiceUrl string `yaml:"inferenceServiceUrl"`
-	// InferenceServiceSecret is the shared secret for authenticating internal API calls
-	// to the inference broker. Must match the inference broker's lora.internalApiSecret.
-	InferenceServiceSecret string `yaml:"inferenceServiceSecret"`
 	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
 	// After this period, files will be automatically cleaned up
 	// Default: 72 hours (3 days)

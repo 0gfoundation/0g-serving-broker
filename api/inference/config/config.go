@@ -130,7 +130,6 @@ type LoRAConfig struct {
 	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
 	FineTuningProviderAddr   string `yaml:"fineTuningProviderAddr"`   // Override FT provider address for event filtering (default: inference provider address)
 	EciesPrivateKey          string `yaml:"eciesPrivateKey"`          // Override ECIES private key for adapter decryption (2-CVM setup where FT and inference use different keys)
-	InternalApiSecret        string `yaml:"internalApiSecret"`        // Shared secret for authenticating internal API calls from fine-tuning broker (POST /internal/v1/adapter-keys)
 }
 
 type Config struct {

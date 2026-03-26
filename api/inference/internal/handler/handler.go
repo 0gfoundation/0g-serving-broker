@@ -33,22 +33,20 @@ type modelsCtrl interface {
 }
 
 type Handler struct {
-	ctrl              *ctrl.Ctrl
-	asyncCtrl         asyncCtrl
-	modelsCtrl        modelsCtrl
-	proxy             *proxy.Proxy
-	rateLimiter       *middleware.RateLimiter
-	internalApiSecret string
+	ctrl        *ctrl.Ctrl
+	asyncCtrl   asyncCtrl
+	modelsCtrl  modelsCtrl
+	proxy       *proxy.Proxy
+	rateLimiter *middleware.RateLimiter
 }
 
-func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy, internalApiSecret string) *Handler {
+func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
 	h := &Handler{
-		ctrl:              ctrl,
-		asyncCtrl:         ctrl,
-		modelsCtrl:        ctrl,
-		proxy:             proxy,
-		rateLimiter:       middleware.NewRateLimiter(rate.Limit(10), 20),
-		internalApiSecret: internalApiSecret,
+		ctrl:        ctrl,
+		asyncCtrl:   ctrl,
+		modelsCtrl:  ctrl,
+		proxy:       proxy,
+		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
 	}
 	return h
 }
@@ -128,44 +126,21 @@ func (h *Handler) Register(r *gin.Engine) {
 	// })
 }
 
-// internalApiAuth returns middleware that validates internal API requests.
-// It supports two authentication methods (in order of priority):
-// 1. Wallet signature verification (preferred) - validates provider identity via ECDSA signature
-// 2. Shared secret fallback (backward compatible) - validates pre-shared secret for migration period
-//
-// This hybrid approach allows smooth migration from shared-secret to wallet-based authentication
-// as suggested in PR #379 review. The shared secret will be deprecated in a future release.
+// internalApiAuth returns middleware that validates internal API requests
+// using wallet signature verification. The fine-tuning broker signs the request
+// with its provider private key, and the inference broker recovers the signer
+// address to validate that it matches the expected provider.
 func (h *Handler) internalApiAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Method 1: Try wallet signature verification first (preferred)
-		// This validates that the request comes from a legitimate provider
 		if h.ctrl != nil {
 			if err := h.ctrl.ValidateProviderAuth(c); err == nil {
-				// Wallet signature verified successfully
 				c.Next()
 				return
 			}
-			// Wallet verification failed, log for debugging but don't abort yet
-			// (we'll try shared secret fallback below)
 		}
 
-		// Method 2: Fallback to shared secret (backward compatible)
-		// This maintains compatibility with existing fine-tuning brokers during migration
-		if h.internalApiSecret != "" {
-			auth := c.GetHeader("Authorization")
-			const prefix = "Bearer "
-			if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
-				if auth[len(prefix):] == h.internalApiSecret {
-					// Shared secret verified
-					c.Next()
-					return
-				}
-			}
-		}
-
-		// Both methods failed - reject request
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": "unauthorized: provide either wallet signature (Address, Session-Token, Session-Signature headers) or valid shared secret (Authorization: Bearer <secret>)",
+			"error": "unauthorized: wallet signature required (Address, Session-Token, Session-Signature headers)",
 		})
 	}
 }
