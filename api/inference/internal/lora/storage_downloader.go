@@ -3,6 +3,7 @@ package lora
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -58,6 +59,9 @@ func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashH
 
 	// Step 2: Download encrypted file from 0G Storage
 	encryptedFile := outputDir + "_encrypted.download"
+	if err := os.MkdirAll(filepath.Dir(encryptedFile), 0755); err != nil {
+		return "", errors.Wrapf(err, "create parent directory for download: %s", filepath.Dir(encryptedFile))
+	}
 	defer func() {
 		_ = os.Remove(encryptedFile)
 	}()
