@@ -1,6 +1,9 @@
 package providercontract
 
 import (
+	"context"
+	"math/big"
+
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
@@ -31,6 +34,14 @@ func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, l
 		TeeSignerAddress: teeSignerAddress,
 		logger:           logger,
 	}, nil
+}
+
+func (c *ProviderContract) ChainID(ctx context.Context) (*big.Int, error) {
+	return c.Contract.Client.Client.ChainID(ctx)
+}
+
+func (c *ProviderContract) ContractAddr() string {
+	return c.ContractAddress
 }
 
 func (u *ProviderContract) Close() {

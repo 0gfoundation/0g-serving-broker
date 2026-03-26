@@ -25,3 +25,8 @@ func NewDB(conf *config.Config, logger log.Logger) (*DB, error) {
 
 	return &DB{db: db, logger: logger}, nil
 }
+
+// NewDBForTest creates a DB instance with a pre-configured gorm.DB for testing.
+func NewDBForTest(gormDB *gorm.DB, logger log.Logger) *DB {
+	return &DB{db: gormDB, logger: logger}
+}

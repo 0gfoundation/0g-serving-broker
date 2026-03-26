@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,10 +23,24 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// settlementContract abstracts the contract operations needed by the settlement service.
+type settlementContract interface {
+	GetDeliverable(ctx context.Context, user common.Address, id string) (contract.Deliverable, error)
+	SettleFees(ctx context.Context, verifierInput contract.VerifierInput) error
+	GetLockTime(ctx context.Context) (int64, error)
+	ChainID(ctx context.Context) (*big.Int, error)
+	ContractAddr() string
+}
+
+// teeSigner abstracts the TEE signing operations needed by the settlement service.
+type teeSigner interface {
+	SignEIP712(digest []byte) ([]byte, error)
+}
+
 type Settlement struct {
 	db         *db.DB
-	contract   *providercontract.ProviderContract
-	teeService *tee.TeeService
+	contract   settlementContract
+	teeService teeSigner
 	config     SettlementConfig
 	logger     log.Logger
 }
@@ -289,7 +304,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 // domainSeparator calculates the EIP-712 domain separator for fine-tuning
 // Must match the domain separator calculation in FineTuningVerifier.sol
 func (s *Settlement) domainSeparator(ctx context.Context) (common.Hash, error) {
-	chainID, err := s.contract.Contract.Client.Client.ChainID(ctx)
+	chainID, err := s.contract.ChainID(ctx)
 	if err != nil {
 		return common.Hash{}, errors.Wrap(err, "get chain ID")
 	}
@@ -300,7 +315,7 @@ func (s *Settlement) domainSeparator(ctx context.Context) (common.Hash, error) {
 		crypto.Keccak256([]byte(constant.DomainName)),
 		crypto.Keccak256([]byte(constant.DomainVersion)),
 		common.LeftPadBytes(chainID.Bytes(), 32),
-		common.LeftPadBytes(common.HexToAddress(s.contract.ContractAddress).Bytes(), 32),
+		common.LeftPadBytes(common.HexToAddress(s.contract.ContractAddr()).Bytes(), 32),
 	)
 
 	return domainSep, nil
