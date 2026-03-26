@@ -242,14 +242,14 @@ func (d *DB) HandleFinalizerFailure(task *Task, maxRetry uint, oldProgress, newP
 		oldProgress, newProgress)
 }
 
-func (d *DB) HandleSettlementFailure(task *Task, maxRetry uint) (bool, error) {
+func (d *DB) HandleSettlementFailure(task *Task, maxRetry uint, currentProgress ProgressState) (bool, error) {
 	return d.HandleFailure(task, task.SettlementRetries, maxRetry,
 		func(count uint) *Task {
 			return &Task{
 				SettlementRetries: count,
 			}
 		},
-		ProgressStateInit, ProgressStateInit)
+		currentProgress, currentProgress)
 }
 
 func (d *DB) UpdateUserPublicKey(task *Task, key string) error {

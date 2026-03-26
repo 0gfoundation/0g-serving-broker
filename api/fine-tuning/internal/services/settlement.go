@@ -120,7 +120,11 @@ func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool
 			s.logger.Errorf("Write into task log failed: %v", err)
 		}
 
-		_, err := s.db.HandleSettlementFailure(&task, s.config.MaxNumRetriesPerTask)
+		currentProgress := db.ProgressStateUserAcknowledged
+		if !userAcked {
+			currentProgress = db.ProgressStateDelivered
+		}
+		_, err := s.db.HandleSettlementFailure(&task, s.config.MaxNumRetriesPerTask, currentProgress)
 		if err != nil {
 			s.logger.Errorf("error handling failure task: %v", err)
 			return err
@@ -205,6 +209,21 @@ func (s *Settlement) getPendingSettlementTask(batchSize int) []db.Task {
 }
 
 func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked bool) error {
+	userAddress := common.HexToAddress(task.UserAddress)
+
+	// Idempotency check: if settlement already completed on-chain (e.g. previous
+	// SettleFees succeeded but DB update failed), skip the contract call and just
+	// update the local DB to avoid a permanent stuck state.
+	deliverable, err := s.contract.GetDeliverable(ctx, userAddress, task.ID.String())
+	if err != nil {
+		s.logger.Warnf("failed to check on-chain settlement status for task %s: %v", task.ID, err)
+	} else if deliverable.Settled {
+		s.logger.Infof("task %s already settled on-chain, syncing local DB", task.ID)
+		return s.db.UpdateTask(task.ID, db.Task{
+			Progress: db.ProgressStateFinished.String(),
+		})
+	}
+
 	modelRootHash, err := hexutil.Decode(task.OutputRootHash)
 	if err != nil {
 		return err
@@ -227,8 +246,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 			return err
 		}
 	}
-
-	userAddress := common.HexToAddress(task.UserAddress)
 
 	// Create EIP-712 signature
 	input := contract.VerifierInput{
