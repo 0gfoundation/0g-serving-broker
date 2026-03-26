@@ -137,9 +137,8 @@ func (m *Manager) GetAdaptersByUser(userAddress string) []*AdapterInfo {
 	defer m.mu.RUnlock()
 
 	var result []*AdapterInfo
-	normalized := strings.ToLower(userAddress)
 	for _, a := range m.adapters {
-		if strings.EqualFold(a.UserAddress, normalized) {
+		if strings.EqualFold(a.UserAddress, userAddress) {
 			cp := *a
 			result = append(result, &cp)
 		}
@@ -180,29 +179,18 @@ func (m *Manager) RecordAccess(adapterName string) {
 }
 
 // RegisterAdapter adds a new LoRA adapter (called when on-chain event detected).
+// DB is written first so that a failed DB write doesn't leave orphaned in-memory state.
 func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, baseModel, storageRootHash string, blockNumber uint64) error {
 	adapterName := MakeAdapterName(baseModel, taskID)
 	adapterPath := filepath.Join(m.config.LoraModulesDir, adapterName)
 
-	m.mu.Lock()
-	if _, exists := m.adapters[adapterName]; exists {
-		m.mu.Unlock()
+	m.mu.RLock()
+	_, exists := m.adapters[adapterName]
+	m.mu.RUnlock()
+	if exists {
 		m.logger.Infof("adapter %s already registered, skipping", adapterName)
 		return nil
 	}
-
-	info := &AdapterInfo{
-		TaskID:          taskID,
-		UserAddress:     userAddress,
-		BaseModel:       baseModel,
-		AdapterName:     adapterName,
-		StorageRootHash: storageRootHash,
-		State:           model.AdapterStateLoading,
-		LastAccessAt:    time.Now(),
-		AdapterPath:     adapterPath,
-	}
-	m.adapters[adapterName] = info
-	m.mu.Unlock()
 
 	now := time.Now()
 	dbAdapter := &model.LoRAAdapter{
@@ -217,11 +205,39 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 		BlockNumber:     blockNumber,
 	}
 	if err := m.db.CreateLoRAAdapter(dbAdapter); err != nil {
-		m.logger.Errorf("failed to persist adapter %s to DB: %v", adapterName, err)
+		return fmt.Errorf("persist adapter %s to DB: %w", adapterName, err)
 	}
+
+	info := &AdapterInfo{
+		TaskID:          taskID,
+		UserAddress:     userAddress,
+		BaseModel:       baseModel,
+		AdapterName:     adapterName,
+		StorageRootHash: storageRootHash,
+		State:           model.AdapterStateLoading,
+		LastAccessAt:    now,
+		AdapterPath:     adapterPath,
+	}
+
+	m.mu.Lock()
+	if _, dup := m.adapters[adapterName]; dup {
+		m.mu.Unlock()
+		return nil
+	}
+	m.adapters[adapterName] = info
+	m.mu.Unlock()
 
 	go m.downloadAdapter(ctx, info)
 	return nil
+}
+
+// createMockAdapter creates a placeholder adapter directory for testing without 0G Storage.
+func (m *Manager) createMockAdapter(adapterPath string) error {
+	if err := os.MkdirAll(adapterPath, 0755); err != nil {
+		return fmt.Errorf("create dir: %w", err)
+	}
+	placeholder := filepath.Join(adapterPath, "adapter_config.json")
+	return os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
 }
 
 // downloadAdapter downloads the adapter from 0G Storage and decrypts it.
@@ -233,13 +249,11 @@ func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
 		if m.config.MockDeploy {
 			m.logger.Infof("mock deploy: creating placeholder adapter at %s", info.AdapterPath)
-			if mkErr := os.MkdirAll(info.AdapterPath, 0755); mkErr != nil {
-				m.logger.Errorf("mock deploy: failed to create dir: %v", mkErr)
+			if mkErr := m.createMockAdapter(info.AdapterPath); mkErr != nil {
+				m.logger.Errorf("mock deploy: failed to create adapter: %v", mkErr)
 				m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
 				return
 			}
-			placeholder := filepath.Join(info.AdapterPath, "adapter_config.json")
-			_ = os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
 		} else if err := m.downloadFromStorage(ctx, info); err != nil {
 			m.logger.Errorf("failed to download adapter %s from 0G Storage: %v", info.AdapterName, err)
 			m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
@@ -285,27 +299,32 @@ func (m *Manager) deployToVLLM(ctx context.Context, info *AdapterInfo) {
 	m.logger.Infof("adapter %s deployed successfully", info.AdapterName)
 }
 
-// UserDeployAdapter is called by the HTTP API to deploy an adapter that is in "ready" state.
+// UserDeployAdapter is called by the HTTP API to deploy an adapter that is in "ready" or "failed" state.
+// Uses CAS (Compare-And-Swap) pattern: checks state and transitions to Loading atomically under write lock
+// to prevent duplicate deploys from concurrent requests.
 func (m *Manager) UserDeployAdapter(ctx context.Context, adapterName string) error {
-	m.mu.RLock()
+	m.mu.Lock()
 	info, ok := m.adapters[adapterName]
-	m.mu.RUnlock()
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("adapter %s not found", adapterName)
 	}
 
 	switch info.State {
-	case model.AdapterStateReady:
-		go m.deployToVLLM(context.Background(), info)
+	case model.AdapterStateReady, model.AdapterStateFailed:
+		info.State = model.AdapterStateLoading
+		infoCopy := *info
+		m.mu.Unlock()
+		go m.deployToVLLM(context.Background(), &infoCopy)
 		return nil
 	case model.AdapterStateActive:
+		m.mu.Unlock()
 		return fmt.Errorf("adapter %s is already deployed", adapterName)
 	case model.AdapterStateLoading:
+		m.mu.Unlock()
 		return fmt.Errorf("adapter %s is still being downloaded or deployed, please wait", adapterName)
-	case model.AdapterStateFailed:
-		go m.deployToVLLM(context.Background(), info)
-		return nil
 	default:
+		m.mu.Unlock()
 		return fmt.Errorf("adapter %s is in state %s, cannot deploy", adapterName, info.State)
 	}
 }
@@ -341,73 +360,79 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 
 	// The zip may contain a top-level wrapper directory (e.g. "adapter/"),
 	// so the actual adapter files may be in a subdirectory of info.AdapterPath.
-	// Update the path under lock so vLLM can find the adapter_config.json.
+	// Update the map entry by name (info may be a copy) and also update the caller's copy.
 	if actualPath != "" && actualPath != info.AdapterPath {
 		m.logger.Infof("adapter path updated: %s → %s", info.AdapterPath, actualPath)
 		m.mu.Lock()
-		info.AdapterPath = actualPath
+		if a, ok := m.adapters[info.AdapterName]; ok {
+			a.AdapterPath = actualPath
+		}
 		m.mu.Unlock()
+		info.AdapterPath = actualPath
 	}
 	return nil
 }
 
 // RestoreAdapter downloads and redeploys an offloaded/archived adapter.
 // When triggered by chat request, always deploy to make adapter immediately usable.
+// Uses CAS pattern: atomically checks and transitions state under write lock.
 func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error {
-	m.mu.RLock()
+	m.mu.Lock()
 	info, ok := m.adapters[adapterName]
-	m.mu.RUnlock()
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("adapter %s not found", adapterName)
 	}
 
 	if info.State == model.AdapterStateActive || info.State == model.AdapterStateLoading {
+		m.mu.Unlock()
 		return nil
 	}
 
-	m.setAdapterState(adapterName, model.AdapterStateLoading)
+	info.State = model.AdapterStateLoading
+	infoCopy := *info
+	m.mu.Unlock()
 
-	// Start async download and auto-deploy for chat-triggered restore
+	if m.db != nil {
+		if err := m.db.UpdateLoRAAdapterState(adapterName, model.AdapterStateLoading); err != nil {
+			m.logger.Errorf("failed to update adapter %s state to loading in DB: %v", adapterName, err)
+		}
+	}
+
 	go func() {
-		m.logger.Infof("restore: downloading adapter %s from 0G Storage", info.AdapterName)
+		m.logger.Infof("restore: downloading adapter %s from 0G Storage", infoCopy.AdapterName)
 
-		// Download from 0G Storage if not exists
-		if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
+		if _, err := os.Stat(infoCopy.AdapterPath); os.IsNotExist(err) {
 			if m.config.MockDeploy {
-				m.logger.Infof("mock deploy: creating placeholder adapter at %s", info.AdapterPath)
-				if mkErr := os.MkdirAll(info.AdapterPath, 0755); mkErr != nil {
-					m.logger.Errorf("mock deploy: failed to create dir: %v", mkErr)
-					m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+				m.logger.Infof("mock deploy: creating placeholder adapter at %s", infoCopy.AdapterPath)
+				if mkErr := m.createMockAdapter(infoCopy.AdapterPath); mkErr != nil {
+					m.logger.Errorf("mock deploy: failed to create adapter: %v", mkErr)
+					m.setAdapterState(infoCopy.AdapterName, model.AdapterStateFailed)
 					return
 				}
-				placeholder := filepath.Join(info.AdapterPath, "adapter_config.json")
-				_ = os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
-			} else if dlErr := m.downloadFromStorage(ctx, info); dlErr != nil {
-				m.logger.Errorf("restore: failed to download adapter %s from 0G Storage: %v", info.AdapterName, dlErr)
-				m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+			} else if dlErr := m.downloadFromStorage(ctx, &infoCopy); dlErr != nil {
+				m.logger.Errorf("restore: failed to download adapter %s from 0G Storage: %v", infoCopy.AdapterName, dlErr)
+				m.setAdapterState(infoCopy.AdapterName, model.AdapterStateFailed)
 				return
 			}
 		}
 
-		// Persist updated adapter path to DB
 		if m.db != nil {
-			if err := m.db.UpdateLoRAAdapterPath(info.AdapterName, info.AdapterPath); err != nil {
-				m.logger.Errorf("restore: failed to persist adapter path for %s: %v", info.AdapterName, err)
+			if err := m.db.UpdateLoRAAdapterPath(infoCopy.AdapterName, infoCopy.AdapterPath); err != nil {
+				m.logger.Errorf("restore: failed to persist adapter path for %s: %v", infoCopy.AdapterName, err)
 			}
 		}
 
-		// Check if download succeeded (not failed)
 		m.mu.RLock()
-		currentState := m.adapters[info.AdapterName].State
+		currentState := m.adapters[infoCopy.AdapterName].State
 		m.mu.RUnlock()
 
 		if currentState == model.AdapterStateFailed {
 			return
 		}
 
-		// Always auto-deploy for chat-triggered restore (ignore AutoDeploy config)
-		m.logger.Infof("restore: auto-deploying adapter %s to ServerlessLLM", info.AdapterName)
-		m.deployToVLLM(ctx, info)
+		m.logger.Infof("restore: auto-deploying adapter %s to ServerlessLLM", infoCopy.AdapterName)
+		m.deployToVLLM(ctx, &infoCopy)
 	}()
 
 	return nil

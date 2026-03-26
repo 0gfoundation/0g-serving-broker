@@ -149,6 +149,10 @@ func New(
 		skipTEESignerCheck: cfg.SkipTEESignerCheck,
 	}
 
+	if p.skipTEESignerCheck {
+		logger.Warn("TEE signer check is DISABLED (skipTEESignerCheck=true). This should only be used in test environments.")
+	}
+
 	// Initialize whitelist from config
 	if cfg.Whitelist.Enabled {
 		validCount := 0

@@ -1,9 +1,11 @@
 package db
 
 import (
+	"errors"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"gorm.io/gorm"
 )
 
 func (d *DB) CreateLoRAAdapter(adapter *model.LoRAAdapter) error {
@@ -65,7 +67,10 @@ func (d *DB) DeleteLoRAAdapter(adapterName string) error {
 func (d *DB) GetLastProcessedBlock() (uint64, error) {
 	var adapter model.LoRAAdapter
 	if err := d.db.Order("block_number DESC").First(&adapter).Error; err != nil {
-		return 0, nil // No adapters yet, start from 0
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	return adapter.BlockNumber, nil
 }

@@ -6,9 +6,12 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
+
+	"golang.org/x/crypto/sha3"
 
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -322,12 +325,12 @@ func (f *Finalizer) encryptModelLocal(sourceDir string, task *db.Task) (*Settlem
 
 	f.logger.Infof("Encrypted LoRA saved locally: %s", encryptFile)
 
-	// Generate a local root hash (hash of the encrypted file) for contract
-	encryptedData, err := os.ReadFile(encryptFile)
+	// Generate a local root hash (Keccak-256 of the encrypted file) for contract.
+	// Uses streaming hash to avoid loading the entire file into memory.
+	localRootHash, err := keccak256File(encryptFile)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read encrypted file")
+		return nil, errors.Wrap(err, "hash encrypted file")
 	}
-	localRootHash := crypto.Keccak256(encryptedData)
 
 	encryptKey, err := f.encryptAESKey(aesKey, task.UserPublicKey)
 	if err != nil {
@@ -409,4 +412,20 @@ func (f *Finalizer) encryptAESKey(aesKey []byte, userPublicKey string) ([]byte, 
 	}
 
 	return encryptedSecret, nil
+}
+
+// keccak256File computes the Keccak-256 hash of a file using streaming I/O
+// to avoid loading the entire file into memory.
+func keccak256File(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	h := sha3.NewLegacyKeccak256()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }
