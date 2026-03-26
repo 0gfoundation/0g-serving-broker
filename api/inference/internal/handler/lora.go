@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -35,15 +34,12 @@ func toAdapterResponse(a *lora.AdapterInfo) adapterStatusResponse {
 }
 
 // DeployAdapter triggers deployment of a "ready" adapter to vLLM.
-// Requires session auth; only the adapter owner can trigger deployment.
 func (h *Handler) DeployAdapter(c *gin.Context) {
 	var req deployAdapterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	userAddress, _ := c.Get("userAddress")
 
 	mgr := h.ctrl.GetLoRAManager()
 	if mgr == nil {
@@ -56,22 +52,10 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 	// The CLI may pass a different baseModel string than what the broker
 	// uses internally (e.g. "Qwen2.5-0.5B-Instruct" vs "/models/Qwen2.5-0.5B-Instruct"),
 	// so fall back to a taskID-based lookup when the computed name misses.
-	adapter := mgr.GetAdapter(adapterName)
-	if adapter == nil {
+	if mgr.GetAdapter(adapterName) == nil {
 		if found := mgr.FindAdapterByTaskID(req.TaskID); found != nil {
-			adapter = found
 			adapterName = found.AdapterName
 		}
-	}
-
-	if adapter == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "adapter not found"})
-		return
-	}
-
-	if !strings.EqualFold(adapter.UserAddress, userAddress.(string)) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "you do not own this adapter"})
-		return
 	}
 
 	if err := mgr.UserDeployAdapter(c.Request.Context(), adapterName); err != nil {
@@ -87,10 +71,8 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 }
 
 // GetAdapterStatus returns the current status of a single adapter.
-// Only the adapter owner can view its status.
 func (h *Handler) GetAdapterStatus(c *gin.Context) {
 	name := c.Param("name")
-	userAddress, _ := c.Get("userAddress")
 
 	mgr := h.ctrl.GetLoRAManager()
 	if mgr == nil {
@@ -104,25 +86,18 @@ func (h *Handler) GetAdapterStatus(c *gin.Context) {
 		return
 	}
 
-	if !strings.EqualFold(adapter.UserAddress, userAddress.(string)) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "you do not own this adapter"})
-		return
-	}
-
 	c.JSON(http.StatusOK, toAdapterResponse(adapter))
 }
 
-// ListAdapters returns only the authenticated user's adapters.
+// ListAdapters returns all known adapters.
 func (h *Handler) ListAdapters(c *gin.Context) {
-	userAddress, _ := c.Get("userAddress")
-
 	mgr := h.ctrl.GetLoRAManager()
 	if mgr == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "LoRA serving not enabled"})
 		return
 	}
 
-	adapters := mgr.GetAdaptersByUser(userAddress.(string))
+	adapters := mgr.ListAdapters()
 	result := make([]adapterStatusResponse, 0, len(adapters))
 	for _, a := range adapters {
 		result = append(result, toAdapterResponse(a))

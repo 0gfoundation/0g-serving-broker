@@ -106,10 +106,9 @@ func (h *Handler) Register(r *gin.Engine) {
 	asyncGroup.POST("/images/edits", h.SubmitAsyncImageEdit)
 	asyncGroup.GET("/jobs/:jobID", h.GetAsyncJob)
 
-	// LoRA adapter management API (called by user CLI, requires session auth)
+	// LoRA adapter management API (called by user CLI)
 	loraGroup := group.Group("/lora")
 	loraGroup.Use(corsMiddleware())
-	loraGroup.Use(h.loraSessionAuth())
 	loraGroup.POST("/adapters/deploy", h.DeployAdapter)
 	loraGroup.GET("/adapters", h.ListAdapters)
 	loraGroup.GET("/adapters/:name", h.GetAdapterStatus)
@@ -125,24 +124,6 @@ func (h *Handler) Register(r *gin.Engine) {
 	// group.OPTIONS("/quote/verify/gpu", corsMiddleware(), func(c *gin.Context) {
 	// 	c.Status(204)
 	// })
-}
-
-// loraSessionAuth validates user session for LoRA management endpoints.
-// On success, stores the authenticated user address in gin context as "userAddress".
-func (h *Handler) loraSessionAuth() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if h.ctrl == nil {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "service not ready"})
-			return
-		}
-		userAddress, err := h.ctrl.ValidateSession(c)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: " + err.Error()})
-			return
-		}
-		c.Set("userAddress", userAddress)
-		c.Next()
-	}
 }
 
 // internalApiAuth returns middleware that validates internal API requests
