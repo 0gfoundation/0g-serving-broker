@@ -90,6 +90,15 @@ func Main() {
 		panic(err)
 	}
 
+	// Add reconciliation processor for event-based settlement verification
+	if conf.Interval.ReconciliationProcessor > 0 {
+		reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, logger)
+		if err := mgr.Add(reconciliationProcessor); err != nil {
+			panic(err)
+		}
+		logger.Infof("Starting reconciliation processor: interval=%ds", conf.Interval.ReconciliationProcessor)
+	}
+
 	// Add revenue transfer processor if configured
 	if conf.RevenueTransfer.Interval > 0 && conf.RevenueTransfer.TargetAddress != "" {
 		revenueTransferProcessor, err := event.NewRevenueTransferProcessor(

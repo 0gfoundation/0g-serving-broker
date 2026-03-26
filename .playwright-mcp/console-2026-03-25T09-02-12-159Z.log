@@ -1,0 +1,10 @@
+[    1685ms] [ERROR] Error: Not connected to alive
+    at i (https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:2:3357)
+    at https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:2:7440 @ https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:1
+[    1686ms] [ERROR] Error: Not connected to alive
+    at i (https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:2:3357)
+    at https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:2:7440 @ https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:1
+[    1687ms] [ERROR] Error: Not connected to alive
+    at i (https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:2:3357)
+    at https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:2:7440 @ https://github.githubassets.com/assets/60989-27bd11e9f867f8d9.js:1
+[    1743ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://github.com/0gfoundation/0g-serving-user-broker/issues/191/edit_form?textarea_id=issue-4098919474-body&comment_context=:0

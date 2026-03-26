@@ -27,6 +27,9 @@ func (d *DB) ListRequest(q model.RequestListOptions) ([]model.Request, *big.Int,
 			ret = ret.Where("output_count != ?", 0)
 		}
 
+		// Exclude requests currently being settled on-chain
+		ret = ret.Where("settling = ?", false)
+
 		// Exclude temporarily skipped requests unless explicitly included
 		if !q.IncludeSkipped {
 			now := time.Now()
