@@ -320,16 +320,6 @@ Providers can set `lora.autoDeploy: true` in broker config to automatically depl
 
 ---
 
-## Automated E2E Test (for Developers)
+## Automated E2E Test
 
-There is a script that automates the serving half of this flow (adapter encryption → 0G Storage upload → on-chain events → broker deploy → GPU inference) in about 45 seconds:
-
-```bash
-cd api/e2e-lora-serving
-pip install web3 eciespy cryptography eth_keys requests
-cp .env.example .env    # edit with your values
-set -a && source .env && set +a
-python3 e2e_real_0g_storage_test.py
-```
-
-See `.env.example` for configuration options.
+A CPU-only E2E test (`e2e_test.py`) validates the full LoRA serving pipeline using a local Hardhat chain and `mock_sllm.py`. See `e2e_test.py` header comments for setup instructions.
