@@ -109,16 +109,29 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
-	var rawBody bytes.Buffer
-	reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
-
-	_, err := reader.WriteTo(ctx.Writer)
+	// Read the full response body first to ensure complete data for billing,
+	// regardless of whether the client is still connected.
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
 
-	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes(), chatKey); err != nil {
+	// Attempt to write the response to the client. If the client has already
+	// disconnected (broken pipe, connection reset), log a warning but continue
+	// to billing so GPU work is not wasted without payment.
+	if _, writeErr := ctx.Writer.Write(respBody); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during non-streaming response, billing for completed response (%d bytes)", len(respBody))
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write response body")
+			// Still proceed to billing below
+		}
+	}
+
+	// Always process billing regardless of client connection state
+	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, chatKey); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}

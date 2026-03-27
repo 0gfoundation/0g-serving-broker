@@ -78,10 +78,15 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		return err
 	}
 
-	// Write raw response to client first
-	if _, err := ctx.Writer.Write(body); err != nil {
-		c.handleBrokerError(ctx, err, "write transcription response")
-		return err
+	// Attempt to write raw response to client. If client disconnected, continue to billing.
+	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during speech-to-text response, billing for completed response (%d bytes)", len(body))
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write transcription response")
+			// Still proceed to billing below
+		}
 	}
 
 	// Decompress body if needed for parsing
@@ -147,6 +152,9 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	var rawBody bytes.Buffer
 	var usage *SpeechToTextUsage
 	var streamErr error
+	var clientDisconnected bool
+	var silentReadBytes int64
+	const maxSilentReadBytes int64 = 10 * 1024 * 1024 // 10MB limit to prevent abuse
 
 	ctx.Stream(func(w io.Writer) bool {
 		// Apply decompression if needed
@@ -174,14 +182,31 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 				}
 			}
 
-			// Write line to client
-			_, streamErr = w.Write(line)
-			if streamErr != nil {
-				c.handleBrokerError(ctx, streamErr, "write to stream")
-				return false
+			// Only write to client if still connected
+			if !clientDisconnected {
+				_, streamErr = w.Write(line)
+				if streamErr != nil {
+					if c.isClientDisconnectError(streamErr) {
+						ctx.Set("ignoreError", true)
+						clientDisconnected = true
+						c.logger.Warnf("Client disconnected during speech-to-text stream, continuing to read for billing")
+					} else {
+						c.handleBrokerError(ctx, streamErr, "write to stream")
+						return false
+					}
+				} else {
+					ctx.Writer.Flush()
+				}
 			}
 
-			ctx.Writer.Flush()
+			// If client disconnected, count silent read bytes and check limit
+			if clientDisconnected {
+				silentReadBytes += int64(len(line))
+				if silentReadBytes > maxSilentReadBytes {
+					c.logger.Warnf("Reached max silent read limit (%d bytes), stopping", maxSilentReadBytes)
+					return false
+				}
+			}
 
 			// Check if stream is done
 			if chunk.Type == "transcript.text.done" {
@@ -189,10 +214,6 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 			}
 		}
 	})
-
-	if streamErr != nil {
-		return streamErr
-	}
 
 	// Sign response if needed
 	if !c.Service.TargetSeparated {
