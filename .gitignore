@@ -54,3 +54,4 @@ api/**/config-test*.yaml
 *.key
 *.crt
 *.p12api/broker
+.playwright-mcp/
