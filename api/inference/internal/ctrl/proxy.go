@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,9 +63,13 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	if len(reqBody) > 0 {
 		body = bytes.NewBuffer(reqBody)
 	}
-	// Use request context to support client cancellation
-	// This ensures that if the client disconnects, the backend request is also cancelled
-	req, err := http.NewRequestWithContext(ctx.Request.Context(), ctx.Request.Method, targetURL, body)
+	// Use a server-side context decoupled from the client connection.
+	// This prevents client disconnection from canceling backend GPU computation,
+	// ensuring we always receive the response for accurate billing.
+	// The HTTP client's own Timeout (10min) and ResponseHeaderTimeout (5min)
+	// still apply as safety bounds. Rate limiting (RPM/TPM) is the primary
+	// defense against cancel-retry abuse.
+	req, err := http.NewRequestWithContext(context.Background(), ctx.Request.Method, targetURL, body)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +115,8 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
 			ctx.Set("ignoreError", true)
 		}
-		// Skip error logging for context canceled errors (client-side cancellations)
-		// These are normal when users close browser, refresh page, or lose connection
+		// With server-side context, context canceled errors should only occur
+		// on HTTP client timeout, not client disconnection.
 		if strings.Contains(err.Error(), "context canceled") {
 			ctx.Set("ignoreError", true)
 		}
@@ -410,3 +415,4 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 
 	return modifiedBody, nil
 }
+

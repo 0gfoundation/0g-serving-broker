@@ -48,10 +48,15 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		return err
 	}
 
-	// Return image to client
-	if _, err := ctx.Writer.Write(body); err != nil {
-		c.handleBrokerError(ctx, err, "write image response")
-		return err
+	// Attempt to return image to client. If client disconnected, continue to billing.
+	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during text-to-image response, billing for completed response (%d bytes)", len(body))
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write image response")
+			// Still proceed to billing below
+		}
 	}
 
 	if !c.Service.TargetSeparated {
