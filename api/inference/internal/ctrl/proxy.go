@@ -29,12 +29,15 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// LoRA request rewriting: rewrite ft-* model to base model + lora_adapter_name.
 		// This must happen BEFORE EnforceConfiguredModel so the model field matches the base model.
 		if c.loraManager != nil {
-			rewritten, _, err := c.RewriteLoRARequest(reqBody)
+			rewritten, originalModel, err := c.RewriteLoRARequest(reqBody)
 			if err != nil {
 				ctx.Set("ignoreError", true)
 				return nil, errors.Wrap(err, "rewrite LoRA request")
 			}
 			reqBody = rewritten
+			if originalModel != "" && originalModel != c.Service.ModelType {
+				ctx.Set("loraOriginalModel", originalModel)
+			}
 		}
 
 		// Enforce configured model only when TargetSeparated is true.
@@ -201,7 +204,8 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
-	if _, err := ctx.Writer.Write(body); err != nil {
+	clientBody := c.rewriteResponseModel(ctx, body)
+	if _, err := ctx.Writer.Write(clientBody); err != nil {
 		c.handleBrokerError(ctx, err, "write response body")
 		return err
 	}

@@ -1,10 +1,13 @@
 package ctrl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
@@ -117,4 +120,27 @@ func ExtractModelName(body []byte) string {
 	}
 	modelName, _ := bodyMap["model"].(string)
 	return modelName
+}
+
+// rewriteResponseModel patches the "model" field in a non-streaming JSON response
+// to return the original ft-* model name instead of the base model name that vLLM returns.
+func (c *Ctrl) rewriteResponseModel(ctx *gin.Context, body []byte) []byte {
+	originalModel, exists := ctx.Get("loraOriginalModel")
+	if !exists {
+		return body
+	}
+	old := fmt.Sprintf(`"model":"%s"`, c.Service.ModelType)
+	new := fmt.Sprintf(`"model":"%s"`, originalModel.(string))
+	return bytes.Replace(body, []byte(old), []byte(new), 1)
+}
+
+// rewriteResponseModelLine patches the "model" field in a single SSE streaming line.
+func (c *Ctrl) rewriteResponseModelLine(ctx *gin.Context, line string) string {
+	originalModel, exists := ctx.Get("loraOriginalModel")
+	if !exists {
+		return line
+	}
+	old := fmt.Sprintf(`"model":"%s"`, c.Service.ModelType)
+	new := fmt.Sprintf(`"model":"%s"`, originalModel.(string))
+	return strings.Replace(line, old, new, 1)
 }

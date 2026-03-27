@@ -181,6 +181,59 @@ func TestCheckLoRAOwnership_OffloadedAdapter(t *testing.T) {
 	}
 }
 
+func TestRewriteResponseModel_LoRA(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+	ctx := newTestGinContext()
+	ctx.Set("loraOriginalModel", "ft-Qwen2-5-7B-abc123")
+
+	body := []byte(`{"id":"chatcmpl-1","model":"Qwen2.5-7B","choices":[{"message":{"content":"hi"}}]}`)
+	result := c.rewriteResponseModel(ctx, body)
+
+	var parsed map[string]interface{}
+	json.Unmarshal(result, &parsed)
+	if parsed["model"] != "ft-Qwen2-5-7B-abc123" {
+		t.Errorf("model = %q, want %q", parsed["model"], "ft-Qwen2-5-7B-abc123")
+	}
+}
+
+func TestRewriteResponseModel_NonLoRA(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+	ctx := newTestGinContext()
+
+	body := []byte(`{"id":"chatcmpl-1","model":"Qwen2.5-7B","choices":[]}`)
+	result := c.rewriteResponseModel(ctx, body)
+
+	if string(result) != string(body) {
+		t.Errorf("expected no change for non-LoRA response")
+	}
+}
+
+func TestRewriteResponseModelLine_Streaming(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+	ctx := newTestGinContext()
+	ctx.Set("loraOriginalModel", "ft-Qwen2-5-7B-abc123")
+
+	line := `data: {"id":"chatcmpl-1","model":"Qwen2.5-7B","choices":[{"delta":{"content":"hi"}}]}`
+	result := c.rewriteResponseModelLine(ctx, line)
+
+	expected := `data: {"id":"chatcmpl-1","model":"ft-Qwen2-5-7B-abc123","choices":[{"delta":{"content":"hi"}}]}`
+	if result != expected {
+		t.Errorf("got %q, want %q", result, expected)
+	}
+}
+
+func TestRewriteResponseModelLine_NoLoRA(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+	ctx := newTestGinContext()
+
+	line := `data: {"id":"chatcmpl-1","model":"Qwen2.5-7B","choices":[]}`
+	result := c.rewriteResponseModelLine(ctx, line)
+
+	if result != line {
+		t.Errorf("expected no change for non-LoRA line")
+	}
+}
+
 func TestExtractModelName(t *testing.T) {
 	tests := []struct {
 		body     string

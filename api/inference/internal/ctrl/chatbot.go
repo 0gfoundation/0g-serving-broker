@@ -109,16 +109,20 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
-	var rawBody bytes.Buffer
-	reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
-
-	_, err := reader.WriteTo(ctx.Writer)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
 
-	if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, rawBody.Bytes(), chatKey); err != nil {
+	clientBody := c.rewriteResponseModel(ctx, body)
+
+	if _, err := ctx.Writer.Write(clientBody); err != nil {
+		c.handleBrokerError(ctx, err, "write response body")
+		return err
+	}
+
+	if err := c.decodeAndProcess(ctx, body, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, body, chatKey); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
@@ -164,7 +168,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 			// Only write to client if still connected
 			if !clientDisconnected {
-				_, streamErr = w.Write([]byte(line))
+				clientLine := c.rewriteResponseModelLine(ctx, line)
+				_, streamErr = w.Write([]byte(clientLine))
 				if streamErr != nil {
 					// Check if this is a client disconnection error
 					if c.isClientDisconnectError(streamErr) {
