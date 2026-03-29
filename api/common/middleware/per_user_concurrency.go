@@ -70,6 +70,8 @@ func CheckPerUserConcurrency(limiter *PerUserConcurrencyLimiter, c *gin.Context,
 
 	if !limiter.Acquire(userAddress) {
 		active := limiter.GetActiveForUser(userAddress)
+		// Mark as expected so metrics don't count concurrency limiting as a service error
+		c.Set("ignoreError", true)
 		c.JSON(http.StatusTooManyRequests, gin.H{
 			"error": fmt.Sprintf(
 				"Too many concurrent requests. You have %d active requests (limit: %d). Please wait for some to complete.",

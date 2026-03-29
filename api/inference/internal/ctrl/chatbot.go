@@ -109,20 +109,31 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Read the full response body first to ensure complete data for billing,
+	// regardless of whether the client is still connected.
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
 
-	clientBody := c.rewriteResponseModel(ctx, body)
+	clientBody := c.rewriteResponseModel(ctx, respBody)
 
-	if _, err := ctx.Writer.Write(clientBody); err != nil {
-		c.handleBrokerError(ctx, err, "write response body")
-		return err
+	// Attempt to write the response to the client. If the client has already
+	// disconnected (broken pipe, connection reset), log a warning but continue
+	// to billing so GPU work is not wasted without payment.
+	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during non-streaming response, billing for completed response (%d bytes)", len(respBody))
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write response body")
+			// Still proceed to billing below
+		}
 	}
 
-	if err := c.decodeAndProcess(ctx, body, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, body, chatKey); err != nil {
+	// Always process billing regardless of client connection state
+	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, chatKey); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}

@@ -56,6 +56,8 @@ func (cl *ConcurrencyLimiter) GetActive() int64 {
 func ConcurrencyLimitMiddleware(limiter *ConcurrencyLimiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !limiter.Acquire() {
+			// Mark as expected so metrics don't count capacity limiting as a service error
+			c.Set("ignoreError", true)
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": "Server is currently processing too many requests. Please try again later.",
 			})

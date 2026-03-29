@@ -36,6 +36,7 @@ type Proxy struct {
 	rateLimiter               *middleware.RateLimiter
 	concurrencyLimiter        *middleware.ConcurrencyLimiter
 	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
+	perUserRateLimiter        *middleware.PerUserRateLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -62,6 +63,16 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		// Configure concurrency limiter to match backend GPU capacity
 		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
 		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent),
+	}
+
+	// Initialize per-user rate limiter if configured
+	if concurrencyConfig.PerUserRPM > 0 {
+		burst := concurrencyConfig.PerUserBurst
+		if burst <= 0 {
+			burst = 10
+		}
+		p.perUserRateLimiter = middleware.NewPerUserRateLimiter(concurrencyConfig.PerUserRPM, burst)
+		logger.Infof("Per-user rate limit: %d RPM, burst=%d", concurrencyConfig.PerUserRPM, burst)
 	}
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
@@ -238,10 +249,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Check if user is whitelisted (checked early to skip per-user concurrency limit)
 	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
 
-	// Apply per-user concurrency limit only for non-whitelisted users.
+	// Apply per-user rate limit and concurrency limit for non-whitelisted users.
 	// Whitelisted users (internal services, monitoring) are exempt to avoid
 	// blocking critical operations, but still subject to the global limit.
+	// Rate limit is checked first (cheap, no slot to release) before concurrency.
 	if !isWhitelisted {
+		if !middleware.CheckPerUserRateLimit(p.perUserRateLimiter, ctx, userAddress) {
+			p.logger.Warnf("Per-user rate limit exceeded: user=%s", userAddress)
+			return
+		}
 		if !middleware.CheckPerUserConcurrency(p.perUserConcurrencyLimiter, ctx, userAddress) {
 			p.logger.Warnf("Per-user concurrency limit reached: user=%s, active=%d",
 				userAddress, p.perUserConcurrencyLimiter.GetActiveForUser(userAddress))
