@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -15,6 +16,13 @@ var (
 
 	// UniqueUsersTotal tracks the number of unique users per day
 	UniqueUsersTotal prometheus.Gauge
+
+	// InputTokensTotal tracks cumulative input token count, labeled by service_type.
+	InputTokensTotal *prometheus.CounterVec
+	// OutputTokensTotal tracks cumulative output token count, labeled by service_type.
+	OutputTokensTotal *prometheus.CounterVec
+	// TokensPerSecond records per-request output token generation rate as a histogram, labeled by service_type.
+	TokensPerSecond *prometheus.HistogramVec
 
 	// uniqueUsersChan is a buffered channel for async user recording (non-blocking)
 	uniqueUsersChan chan string
@@ -61,10 +69,41 @@ func PrometheusInit(serverName string) {
 		},
 	)
 
+	InputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_input_tokens_total",
+			Help:        "Cumulative input token count.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	OutputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_output_tokens_total",
+			Help:        "Cumulative output token count.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	TokensPerSecond = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:        "broker_tokens_per_second",
+			Help:        "Per-request output token generation rate (output_tokens / request_duration_seconds).",
+			Buckets:     []float64{1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500},
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
 	prometheus.MustRegister(RequestCount)
 	prometheus.MustRegister(ErrorCount)
 	prometheus.MustRegister(RequestDuration)
 	prometheus.MustRegister(UniqueUsersTotal)
+	prometheus.MustRegister(InputTokensTotal)
+	prometheus.MustRegister(OutputTokensTotal)
+	prometheus.MustRegister(TokensPerSecond)
 
 	// Initialize buffered channel and start background processor
 	uniqueUsersChan = make(chan string, 10000)
@@ -93,10 +132,14 @@ func processUniqueUsers() {
 	}
 }
 
+// RequestStartTimeKey is the gin context key for the request start time.
+const RequestStartTimeKey = "requestStartTime"
+
 // TrackMetrics is a Gin middleware that tracks request metrics.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
+		c.Set(RequestStartTimeKey, startTime)
 
 		path := c.Request.URL.Path
 		c.Next() // Process the request
@@ -128,5 +171,43 @@ func RecordUniqueUser(userAddress string) {
 	case uniqueUsersChan <- userAddress:
 	default:
 		// Channel full, skip to avoid blocking request
+	}
+}
+
+// RecordTokens increments the cumulative input and output token counters.
+func RecordTokens(serviceType string, inputTokens, outputTokens int64) {
+	if InputTokensTotal == nil || OutputTokensTotal == nil {
+		return
+	}
+	if inputTokens > 0 {
+		InputTokensTotal.WithLabelValues(serviceType).Add(float64(inputTokens))
+	}
+	if outputTokens > 0 {
+		OutputTokensTotal.WithLabelValues(serviceType).Add(float64(outputTokens))
+	}
+}
+
+// RecordTPS records the per-request output tokens per second as a histogram observation.
+func RecordTPS(serviceType string, tps float64) {
+	if TokensPerSecond == nil || tps <= 0 {
+		return
+	}
+	TokensPerSecond.WithLabelValues(serviceType).Observe(tps)
+}
+
+// RecordTPSFromContext calculates TPS from the request start time stored in context
+// and records it. This is a convenience wrapper combining start-time extraction,
+// duration calculation, and TPS recording.
+func RecordTPSFromContext(ctx context.Context, serviceType string, outputTokens int64) {
+	if outputTokens <= 0 {
+		return
+	}
+	startTime, ok := ctx.Value(RequestStartTimeKey).(time.Time)
+	if !ok {
+		return
+	}
+	duration := time.Since(startTime).Seconds()
+	if duration > 0 {
+		RecordTPS(serviceType, float64(outputTokens)/duration)
 	}
 }
