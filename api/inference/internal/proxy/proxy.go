@@ -131,7 +131,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 func (p *Proxy) Start() error {
 	switch p.ctrl.Service.Type {
-	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing":
+	case "zgStorage", "chatbot", "text-to-image", "speech-to-text", "image-editing", "video-generation":
 		p.AddHTTPRoute(p.ctrl.Service.TargetURL, p.ctrl.Service.Type)
 	default:
 		return errors.New("invalid service type")
@@ -173,6 +173,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	targetPath := targetRoute
 	if idx := strings.Index(targetPath, "?"); idx != -1 {
 		targetPath = targetPath[:idx]
+	}
+	// Normalize trailing slashes to prevent billing bypass
+	// (e.g., /videos/ would skip TargetRoute["/videos"] and fall through to auth-only path)
+	if targetPath != "/" {
+		targetPath = strings.TrimRight(targetPath, "/")
 	}
 
 	p.logger.Debugf("Proxy debug: method=%s, url=%s, Content-Length=%s, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header)
@@ -222,11 +227,46 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				p.handleBrokerError(ctx, err, "prepare HTTP request")
 				return
 			}
-			p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false)
+			if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false); err != nil {
+				p.logger.Errorf("process free endpoint http request failed: %v", err)
+			}
 			return
 		}
 
-		// Reject all other endpoints that are not in TargetRoute or FreePrefixes
+		// Check if this path requires authentication but not billing
+		// (e.g., video status polling and content retrieval)
+		isAuthRequired := false
+		for _, prefix := range constant.AuthRequiredPrefixes {
+			if strings.HasPrefix(strings.ToLower(targetPath), prefix) {
+				isAuthRequired = true
+				break
+			}
+		}
+
+		if isAuthRequired {
+			// Validate session but skip billing
+			_, err := p.ctrl.ValidateSession(ctx)
+			if err != nil {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, err, "validate session")
+				return
+			}
+
+			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",
+				targetPath, ctx.Request.Method)
+
+			httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
+			if err != nil {
+				p.handleBrokerError(ctx, err, "prepare HTTP request")
+				return
+			}
+			if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, model.Request{}, "0", false); err != nil {
+				p.logger.Errorf("process auth-required http request failed: %v", err)
+			}
+			return
+		}
+
+		// Reject all other endpoints that are not in TargetRoute, FreePrefixes, or AuthRequiredPrefixes
 		// This prevents unauthorized access to unknown endpoints
 		p.logger.Warnf("Blocked unsupported endpoint: path=%s, method=%s, remote=%s, user_agent=%s",
 			targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
@@ -355,6 +395,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// Store image count for later billing calculation
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
+	case "video-generation":
+		// Video billing is deferred to response time — the provider returns
+		// actual seconds/size in the JSON response, so we don't guess here.
+		expectedInputFee = "0"
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

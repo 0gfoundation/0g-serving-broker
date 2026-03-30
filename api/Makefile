@@ -94,10 +94,20 @@ package-fine-tuning:
 	rm -rf /tmp/fine-tuning-broker && \
 	echo "Package created at /tmp/fine-tuning-broker.tar.gz"
 
+coverage:
+	go test ./... -coverprofile=coverage.out -covermode=atomic
+	go tool cover -html=coverage.out -o coverage.html
+	go tool cover -func=coverage.out
+
+coverage-int:
+	go test -tags integration ./inference/... -coverpkg=./... -coverprofile=coverage.out -covermode=atomic -timeout 600s
+	go tool cover -html=coverage.out -o coverage.html
+	go tool cover -func=coverage.out
+
 install-tools:
 	go install -v github.com/go-swagger/go-swagger/cmd/swagger@v0.30.3
 	go install -v github.com/swaggo/swag/cmd/swag@v1.8.10
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
 	go install github.com/ethereum/go-ethereum/cmd/abigen@v1.14.5
 
-.PHONY: lint build clean oci release hardhat-env install-tools
+.PHONY: lint build clean oci release hardhat-env install-tools coverage coverage-int
