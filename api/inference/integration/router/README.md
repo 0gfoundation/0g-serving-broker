@@ -18,7 +18,7 @@ This Docker container provides a high-availability router service for 0G inferen
 
 ## Prerequisites
 
-Ensure you have an compute network account and deposit sufficient funds. If not, refer to the [0g-compute-cli documentation](https://docs.0g.ai/build-with-0g/compute-network/cli#create-account)
+Ensure you have an compute network account and deposit sufficient funds. If not, refer to the [0g-compute-cli documentation](https://docs.0g.ai/developer-hub/building-on-0g/compute-network/cli#create-account)
 
 ## Quick Start
 
