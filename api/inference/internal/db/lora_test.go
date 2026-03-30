@@ -1,22 +1,51 @@
+//go:build integration
+
 package db
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/testcontainers/testcontainers-go"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+
 	"github.com/0glabs/0g-serving-broker/inference/model"
-	"gorm.io/driver/sqlite"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
 func setupTestDB(t *testing.T) *DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+	ctx := context.Background()
+
+	container, err := tcmysql.Run(ctx, "mysql:8.0",
+		tcmysql.WithDatabase("testdb"),
+		tcmysql.WithUsername("test"),
+		tcmysql.WithPassword("test"),
+	)
+	if err != nil {
+		t.Fatalf("start mysql container: %v", err)
+	}
+	t.Cleanup(func() { testcontainers.CleanupContainer(t, container) })
+
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatalf("get container host: %v", err)
+	}
+	port, err := container.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		t.Fatalf("get container port: %v", err)
+	}
+
+	dsn := fmt.Sprintf("test:test@tcp(%s:%s)/testdb?charset=utf8mb4&parseTime=True&loc=Local", host, port.Port())
+	gdb, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		NamingStrategy: schema.NamingStrategy{SingularTable: true},
 	})
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("connect to mysql: %v", err)
 	}
 	if err := gdb.AutoMigrate(&model.LoRAAdapter{}, &model.AdapterKey{}); err != nil {
 		t.Fatalf("auto-migrate: %v", err)

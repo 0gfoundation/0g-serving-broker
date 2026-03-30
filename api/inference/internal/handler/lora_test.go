@@ -9,8 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	commonConfig "github.com/0glabs/0g-serving-broker/common/config"
-	commonLog "github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
@@ -21,23 +19,9 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-func loraTestLogger() commonLog.Logger {
-	l, _ := commonLog.GetLogger(&commonConfig.LoggerConfig{
-		Format: "text", Level: "error", Path: "",
-	})
-	return l
-}
-
-func newHandlerWithLoRA(t *testing.T) *Handler {
-	t.Helper()
-	c := ctrl.NewForTest(config.Service{ModelType: "Qwen2.5-7B"}, loraTestLogger())
-	return &Handler{ctrl: c}
-}
-
 func newHandlerNoLoRA(t *testing.T) *Handler {
 	t.Helper()
-	c := ctrl.NewForTest(config.Service{ModelType: "Qwen2.5-7B"}, loraTestLogger())
-	return &Handler{ctrl: c}
+	return &Handler{ctrl: &ctrl.Ctrl{Service: config.Service{ModelType: "Qwen2.5-7B"}}}
 }
 
 func TestToAdapterResponse(t *testing.T) {
