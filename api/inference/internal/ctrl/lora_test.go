@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	commonConfig "github.com/0glabs/0g-serving-broker/common/config"
@@ -179,6 +180,103 @@ func TestCheckLoRAOwnership_OffloadedAdapter(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for offloaded adapter")
 	}
+}
+
+func TestCheckLoRAOwnership_ReadyAdapter(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+
+	m := c.loraManager
+	m.InjectTestAdapter("ft-ready", &lora.AdapterInfo{
+		TaskID:      "task-003",
+		UserAddress: "0xOwnerA",
+		AdapterName: "ft-ready",
+		State:       model.AdapterStateReady,
+	})
+
+	err := c.CheckLoRAOwnership("ft-ready", "0xOwnerA")
+	if err == nil {
+		t.Error("expected error for ready adapter (not yet deployed)")
+	}
+	if err != nil && !strContains(err.Error(), "deploy-adapter") {
+		t.Errorf("error should mention deploy-adapter, got: %v", err)
+	}
+}
+
+func TestCheckLoRAOwnership_LoadingAdapter(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+
+	m := c.loraManager
+	m.InjectTestAdapter("ft-loading", &lora.AdapterInfo{
+		TaskID:      "task-004",
+		UserAddress: "0xOwnerA",
+		AdapterName: "ft-loading",
+		State:       model.AdapterStateLoading,
+	})
+
+	err := c.CheckLoRAOwnership("ft-loading", "0xOwnerA")
+	if err == nil {
+		t.Error("expected error for loading adapter")
+	}
+	if err != nil && !strContains(err.Error(), "loading") {
+		t.Errorf("error should mention loading, got: %v", err)
+	}
+}
+
+func TestCheckLoRAOwnership_FailedAdapter(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+
+	m := c.loraManager
+	m.InjectTestAdapter("ft-failed", &lora.AdapterInfo{
+		TaskID:      "task-005",
+		UserAddress: "0xOwnerA",
+		AdapterName: "ft-failed",
+		State:       model.AdapterStateFailed,
+	})
+
+	err := c.CheckLoRAOwnership("ft-failed", "0xOwnerA")
+	if err == nil {
+		t.Error("expected error for failed adapter")
+	}
+	if err != nil && !strContains(err.Error(), "failed") {
+		t.Errorf("error should mention failed, got: %v", err)
+	}
+}
+
+func TestCheckLoRAOwnership_ArchivedAdapter(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+
+	m := c.loraManager
+	m.InjectTestAdapter("ft-archived", &lora.AdapterInfo{
+		TaskID:      "task-006",
+		UserAddress: "0xOwnerA",
+		AdapterName: "ft-archived",
+		State:       model.AdapterStateArchived,
+	})
+
+	err := c.CheckLoRAOwnership("ft-archived", "0xOwnerA")
+	if err == nil {
+		t.Error("expected error for archived adapter")
+	}
+	if err != nil && !strContains(err.Error(), "restoring") {
+		t.Errorf("error should mention restoring, got: %v", err)
+	}
+}
+
+func TestCheckLoRAOwnership_NilManager(t *testing.T) {
+	c := &Ctrl{
+		Service: config.Service{ModelType: "Qwen2.5-7B"},
+		logger:  testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+
+	err := c.CheckLoRAOwnership("ft-test", "0xOwnerA")
+	if err == nil {
+		t.Error("expected error when loraManager is nil")
+	}
+}
+
+func strContains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 func TestRewriteResponseModel_LoRA(t *testing.T) {

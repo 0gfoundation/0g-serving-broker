@@ -81,6 +81,15 @@ type Ctrl struct {
 	loraManager *lora.Manager
 }
 
+// NewForTest creates a minimal Ctrl for handler/unit tests (no DB, contract, or proxy).
+func NewForTest(svc config.Service, logger log.Logger) *Ctrl {
+	return &Ctrl{
+		Service:        svc,
+		logger:         logger,
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
 func New(
 	db *db.DB,
 	contract *providercontract.ProviderContract,
