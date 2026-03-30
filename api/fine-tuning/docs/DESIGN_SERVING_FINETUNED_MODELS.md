@@ -260,7 +260,6 @@ lora:
   pollBlockIntervalSeconds: 5
   storageIndexerUrl: "https://indexer-storage-testnet-turbo.0g.ai"  # 0G Storage indexer for downloading adapters
   storageTurbo: true                    # Use turbo indexer
-  mockDeploy: false                     # Set true for E2E testing without 0G Storage
 ```
 
 **Key changes from previous version**:
@@ -269,7 +268,7 @@ lora:
 - `service.targetUrl` now points to **ServerlessLLM** (port 8343) instead of vLLM (port 8000)
 - `sllmUrl` added — configurable SLLM endpoint (previously hardcoded)
 - `storageIndexerUrl` added — 0G Storage indexer URL for downloading encrypted adapters (inference broker)
-- `mockDeploy` added — when `true`, creates placeholder adapter files instead of downloading from 0G Storage (for CPU-only E2E testing)
+- For CPU-only E2E testing, pre-place adapter files at the expected path (broker skips download when files exist)
 
 **Provider wallet key** (used for ECIES decrypt): The inference broker reuses the same `networks.privateKeys` as the fine-tuning broker. No additional key configuration needed — see Section 4.7 for details.
 
@@ -676,8 +675,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
    - In-memory adapter map with state tracking (Pending → Active → Offloaded → Failed)
    - DB persistence for crash recovery (`lora_adapters` table via GORM)
    - Offload loop with configurable idle timeout
-   - `mockDeploy` mode for CPU-only testing (creates placeholder files)
-   - 0G Storage download + AES-GCM decryption now implemented (Phase 3), `mockDeploy` mode still available for CPU-only testing
+   - 0G Storage download + AES-GCM decryption implemented (Phase 3); for CPU-only testing, pre-place adapter files on disk
 
 3. **~~Build Event Watcher~~** ✅
    - `api/inference/internal/lora/event_watcher.go` — polls `FineTuningServing` contract
@@ -741,7 +739,7 @@ ServerlessLLM is NOT used for fine-tuning because: (1) it's not designed for TEE
 | **Storage Downloader** | `api/inference/internal/lora/storage_downloader.go` | Implemented — 0G Storage download → ECIES decrypt AES key → AES-GCM decrypt adapter → unzip |
 | **DB Model** | `api/inference/model/lora.go` | Implemented — GORM models for crash recovery (LoRAAdapter, AdapterKey) |
 | **Proxy LoRA routing** | `api/inference/internal/ctrl/proxy.go` | Implemented — ft-* model name rewrite + owner check |
-| **Config** | `api/inference/config/config.go` | Implemented — LoRAConfig with sllmUrl, mockDeploy, storageIndexerUrl fields |
+| **Config** | `api/inference/config/config.go` | Implemented — LoRAConfig with sllmUrl, storageIndexerUrl fields |
 | **Server init** | `api/inference/cmd/server/main.go` | Implemented — initializes LoRA Manager + Event Watcher on startup when `lora.enable: true` |
 | **CPU-only executor** | `api/fine-tuning/internal/services/executor.go` | Implemented — skips nvidia runtime when gpuCount=0 |
 | **Provider ECIES key sharing** | `api/fine-tuning/internal/services/finalizer.go` | Implemented — encrypts AES key with provider wallet ECIES pubkey, pushes to inference broker via HTTP |
@@ -823,7 +821,7 @@ Fine-tuning broker was **not** started — the test script simulates the fine-tu
 | SLLM Client (Go HTTP calls) | **Real** | Makes actual HTTP requests to SLLM endpoint |
 | ServerlessLLM | **Mock** | Python server, no real model loading or inference |
 | Fine-tuning training | **Mock** | Test script calls `addDeliverable()` directly |
-| 0G Storage download | **Mock** | `mockDeploy: true` creates placeholder files |
+| 0G Storage download | **Mock** | Pre-placed adapter files on disk (broker skips download when files exist) |
 | Model inference | **Mock** | Returns echo response, no real LLM computation |
 
 The test validates the **control plane** (contract interactions, event-driven adapter discovery, adapter lifecycle management) but not the **data plane** (real model loading, GPU inference, 0G Storage transfer). Validating the data plane requires GPU machines + real ServerlessLLM.

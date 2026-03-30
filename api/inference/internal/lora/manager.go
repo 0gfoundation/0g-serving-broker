@@ -231,15 +231,6 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 	return nil
 }
 
-// createMockAdapter creates a placeholder adapter directory for testing without 0G Storage.
-func (m *Manager) createMockAdapter(adapterPath string) error {
-	if err := os.MkdirAll(adapterPath, 0755); err != nil {
-		return fmt.Errorf("create dir: %w", err)
-	}
-	placeholder := filepath.Join(adapterPath, "adapter_config.json")
-	return os.WriteFile(placeholder, []byte(`{"mock":true}`), 0644)
-}
-
 // downloadAdapter downloads the adapter from 0G Storage and decrypts it.
 // If AutoDeploy is enabled, it also deploys to ServerlessLLM immediately.
 // Otherwise, the adapter is left in "ready" state for user-triggered deployment.
@@ -247,14 +238,7 @@ func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 	m.logger.Infof("downloading adapter %s (hash: %s)", info.AdapterName, info.StorageRootHash)
 
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
-		if m.config.MockDeploy {
-			m.logger.Infof("mock deploy: creating placeholder adapter at %s", info.AdapterPath)
-			if mkErr := m.createMockAdapter(info.AdapterPath); mkErr != nil {
-				m.logger.Errorf("mock deploy: failed to create adapter: %v", mkErr)
-				m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
-				return
-			}
-		} else if err := m.downloadFromStorage(ctx, info); err != nil {
+		if err := m.downloadFromStorage(ctx, info); err != nil {
 			m.logger.Errorf("failed to download adapter %s from 0G Storage: %v", info.AdapterName, err)
 			m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
 			return
@@ -403,14 +387,7 @@ func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error 
 		m.logger.Infof("restore: downloading adapter %s from 0G Storage", infoCopy.AdapterName)
 
 		if _, err := os.Stat(infoCopy.AdapterPath); os.IsNotExist(err) {
-			if m.config.MockDeploy {
-				m.logger.Infof("mock deploy: creating placeholder adapter at %s", infoCopy.AdapterPath)
-				if mkErr := m.createMockAdapter(infoCopy.AdapterPath); mkErr != nil {
-					m.logger.Errorf("mock deploy: failed to create adapter: %v", mkErr)
-					m.setAdapterState(infoCopy.AdapterName, model.AdapterStateFailed)
-					return
-				}
-			} else if dlErr := m.downloadFromStorage(ctx, &infoCopy); dlErr != nil {
+			if dlErr := m.downloadFromStorage(ctx, &infoCopy); dlErr != nil {
 				m.logger.Errorf("restore: failed to download adapter %s from 0G Storage: %v", infoCopy.AdapterName, dlErr)
 				m.setAdapterState(infoCopy.AdapterName, model.AdapterStateFailed)
 				return

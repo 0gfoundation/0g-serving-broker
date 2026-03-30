@@ -206,30 +206,14 @@ func (d *DB) Migrate() error {
 					UserAddress     string     `gorm:"type:varchar(255);not null;index"`
 					BaseModel       string     `gorm:"type:varchar(255);not null"`
 					AdapterName     string     `gorm:"type:varchar(255);not null;uniqueIndex"`
-					StorageRootHash string     `gorm:"type:text;not null"`
-					State           string     `gorm:"type:varchar(32);not null;default:'loading'"`
-					LastAccessAt    *time.Time `gorm:"type:datetime"`
+					StorageRootHash string     `gorm:"type:varchar(255);not null"`
+					State           string     `gorm:"type:varchar(32);not null;default:'loading';index:idx_lora_state_access"`
+					LastAccessAt    *time.Time `gorm:"type:datetime;index:idx_lora_state_access"`
 					AdapterPath     string     `gorm:"type:varchar(512)"`
 					DeployedAt      *time.Time `gorm:"type:datetime"`
 					BlockNumber     uint64     `gorm:"type:bigint unsigned;not null;default:0"`
 				}
 				return tx.AutoMigrate(&LoRAAdapter{})
-			},
-		},
-		{
-			ID: "add-lora-adapter-state-access-index",
-			Migrate: func(tx *gorm.DB) error {
-				var tableCount int64
-				tx.Raw("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'lo_ra_adapter'").Scan(&tableCount)
-				if tableCount == 0 {
-					return nil
-				}
-				var idxCount int64
-				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'lo_ra_adapter' AND index_name = 'idx_lora_state_access'").Scan(&idxCount)
-				if idxCount == 0 {
-					return tx.Exec("CREATE INDEX idx_lora_state_access ON lo_ra_adapter (state, last_access_at)").Error
-				}
-				return nil
 			},
 		},
 		{
@@ -242,17 +226,6 @@ func (d *DB) Migrate() error {
 					ProviderEncKey string `gorm:"type:text;not null"`
 				}
 				return tx.AutoMigrate(&AdapterKey{})
-			},
-		},
-		{
-			ID: "change-lora-storage-root-hash-to-varchar",
-			Migrate: func(tx *gorm.DB) error {
-				var tableCount int64
-				tx.Raw("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'lo_ra_adapter'").Scan(&tableCount)
-				if tableCount == 0 {
-					return nil
-				}
-				return tx.Exec("ALTER TABLE lo_ra_adapter MODIFY COLUMN storage_root_hash VARCHAR(255) NOT NULL").Error
 			},
 		},
 	})
