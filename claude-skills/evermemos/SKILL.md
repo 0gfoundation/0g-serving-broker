@@ -1,7 +1,7 @@
 ---
 name: evermemos
-description: Search and store memories using EverMemOS. Use when user asks about past conversations, previous decisions, or when important information should be remembered. Also use to recall project context and historical knowledge.
-argument-hint: "[search|store|recent] [query/content]"
+description: Search memories using EverMemOS. PROACTIVELY search before answering ANY project-related questions. Use when user asks about past conversations, previous decisions. ALWAYS check history before implementing features, debugging issues, or suggesting solutions. Maintain project continuity across sessions. Always put search results into your context window to improve your response.
+argument-hint: search <query> [method] [top_k]
 allowed-tools: Bash(python3 *)
 ---
 
@@ -9,58 +9,83 @@ allowed-tools: Bash(python3 *)
 
 ## Commands
 
-### Search
-```
-python3 "$HOME/.claude/skills/evermemos/scripts/evermemos_client.py" search "<query>" [method] [top_k]
-```
-- `method`: `keyword` | `vector` | `hybrid` (default) | `rrf` | `agentic`
-- `top_k`: max results (default: 5)
+The script to invoke is always:
+`~/.claude/skills/evermemos/scripts/evermemos_client.py`
 
-### Store
+### search
+
 ```
-python3 "$HOME/.claude/skills/evermemos/scripts/evermemos_client.py" store "<content>" [user|assistant]
+/evermemos search <query> [method] [top_k]
 ```
 
-### Recent
-```
-python3 "$HOME/.claude/skills/evermemos/scripts/evermemos_client.py" recent [limit]
-```
+- `method`: `hybrid` (default), `agentic`
+- `top_k`: max results (default: 10)
 
----
-
-## When to Use (Automatic Triggers)
-
-**Search** when:
-- User references past work: "remember when…", "last time", "what did we discuss about X"
-- Before implementing a feature or debugging — check for prior context
-- A specific module or component is mentioned that may have history
-
-**Store** when:
-- User says "remember this" or "make a note"
-- An important decision, bug fix, or pattern is established
-- A project milestone is reached
-
-**Recent** when:
-- User asks "what were we working on?" or returns after a break
-
-> When in doubt, search. A missed context costs hours; an unnecessary search costs seconds.
-
----
-
-## Configuration
+**When to use — ALWAYS trigger when:**
+- User asks "What did we discuss about X?" / "Did we fix that bug?" / "How did we solve Y?"
+- Any question containing: "last time", "before", "previously", "remember", "earlier"
+- Before implementing features — check for prior decisions, patterns, gotchas
+- Before debugging — check if this issue was seen before
+- User mentions specific modules, files, or components — search for prior context
+- User references a decision or approach without full explanation
 
 ```bash
-export EVERMEMOS_BASE_URL="http://localhost:1995"
-export EVERMEMOS_USER_ID="claude_code_user"
-# group_id is auto-derived from working directory
+python3 "$HOME/.claude/skills/evermemos/scripts/evermemos_client.py" search "<query>"
 ```
+
+**Agentic search example** (for complex or vague queries):
+```bash
+python3 "$HOME/.claude/skills/evermemos/scripts/evermemos_client.py" search "authentication flow" agentic
+```
+
+---
+
+## Proactive Usage Rules
+
+**Rule 1 — Search first, answer second:**
+
+```
+User asks a question
+       ↓
+Is it about THIS project?
+   YES → SEARCH FIRST, then answer with context
+   NO  → Answer directly
+```
+
+> When in doubt, search. Missing context costs hours; an unnecessary search costs seconds.
+
+**Rule 2 — Multi-angle search for complex questions:**
+
+Don't stop at one query. Search from multiple angles to surface all relevant history:
+
+```
+Topic: authentication implementation
+Search 1: "authentication flow"
+Search 2: "JWT token handling"
+Search 3: "login session management"
+```
+
+Combine results before answering. Prior decisions may be stored under different terminology.
+
+**Rule 3 — Never search and ignore results:**
+
+After retrieving memories, always incorporate them into your response or reasoning. If results are irrelevant, say so explicitly — don't silently discard them. Search results are context for improving accuracy, not noise to filter.
+
+---
+
+## Retrieval Methods
+
+**Default**: `hybrid` — combines keyword and vector search. Use for all standard queries.
+
+**Only use `agentic` when:**
+- Query is vague or ambiguous
+- `hybrid` returned nothing useful
+- User explicitly asks for a deep or thorough memory search
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Connection error | Verify `curl $EVERMEMOS_BASE_URL` responds |
-| No results | Try different keywords, switch to `vector` or increase `top_k` |
-| Permission error | `chmod +x ~/.claude/skills/evermemos/scripts/evermemos_client.py` |
+**Connection error**: Verify EverMemOS is running. Check with `curl http://localhost:1995` — if it doesn't respond, start the EverMemOS service.
+
+**No results**: Try different keywords or switch to `agentic` method. Increase `top_k` (e.g., `top_k=20`). The memory may be stored under different terminology.
