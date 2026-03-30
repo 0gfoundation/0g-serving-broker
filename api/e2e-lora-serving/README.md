@@ -320,6 +320,39 @@ Providers can set `lora.autoDeploy: true` in broker config to automatically depl
 
 ---
 
-## Automated E2E Test
+## Automated E2E Tests
 
-A CPU-only E2E test (`e2e_test.py`) validates the full LoRA serving pipeline using a local Hardhat chain and `mock_sllm.py`. See `e2e_test.py` header comments for setup instructions.
+CPU-only E2E tests validate the full LoRA serving pipeline using a local Hardhat chain and `mock_sllm.py` (no GPU required).
+
+### Files
+
+| File | What it tests |
+|------|---------------|
+| `e2e_test.py` | On-chain lifecycle: provider registration, user deposit, deliverable creation, acknowledge event, adapter deploy via event watcher, inference request through broker proxy |
+| `e2e_cli_test.sh` | CLI commands: `get-adapter-name`, `deposit`, `transfer-fund`, `get-secret`, `acknowledge-provider`, `fine-tuning chat`, curl with API key |
+| `mock_sllm.py` | Mock ServerlessLLM server that implements deploy/delete/models/chat APIs |
+
+### Prerequisites
+
+- Docker containers running: `e2e-hardhat` (local chain), `e2e-mysql-inf` (MySQL for inference broker)
+- Python 3 with `web3` and `requests` packages
+- Node.js >= 22 with `0g-compute-cli` built (`npm run build` in `0g-serving-user-broker`)
+- Inference broker binary built (`go build` in `api/`)
+
+### Running
+
+```bash
+# 1. Start mock SLLM
+python3 mock_sllm.py &
+
+# 2. Start inference broker with local config
+PORT=3081 NETWORK=hardhat CONFIG_FILE=/path/to/config.local.yml ./broker 0g-inference-server &
+
+# 3. Run Python E2E (sets up chain state + tests on-chain flow)
+python3 e2e_test.py
+
+# 4. Run CLI E2E (tests CLI commands against the chain state from step 3)
+bash e2e_cli_test.sh
+```
+
+See `e2e_test.py` and `e2e_cli_test.sh` header comments for detailed setup instructions.

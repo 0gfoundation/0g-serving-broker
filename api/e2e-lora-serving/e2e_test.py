@@ -32,8 +32,9 @@ PROVIDER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b7869
 # Hardhat account #2 = user: 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 USER_KEY = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
 
+import os as _os
 import uuid as _uuid
-TASK_ID = f"e2e-{_uuid.uuid4().hex[:12]}"
+TASK_ID = _os.environ.get("E2E_TASK_ID", f"e2e-{_uuid.uuid4().hex[:12]}")
 MODEL_ROOT_HASH = b'\xaa' * 32  # dummy 32-byte hash
 
 w3 = Web3(Web3.HTTPProvider(HARDHAT_RPC))
@@ -161,24 +162,23 @@ except Exception as e:
 
 
 # ============================================================
-# Step 3a: Push adapter key to inference broker via HTTP
+# Step 3a: Pre-create adapter directory (skip 0G Storage download)
 # ============================================================
-print("\n=== Step 3a: Push adapter key to inference broker ===")
+print("\n=== Step 3a: Pre-create adapter directory ===")
 
-try:
-    r = requests.post(
-        f"{INFERENCE_BROKER}/internal/v1/adapter-keys",
-        json={
-            "taskId": TASK_ID,
-            "storageHash": "0x" + MODEL_ROOT_HASH.hex(),
-            "providerEncKey": "0xdeadbeef",
-        },
-        headers={"Authorization": "Bearer e2e-test-secret"},
-        timeout=5,
-    )
-    result(r.status_code == 200, f"Adapter key pushed: {r.json()}")
-except Exception as e:
-    result(False, f"Push adapter key failed: {e}")
+import re as _re
+
+def _make_adapter_name(base_model: str, task_id: str) -> str:
+    sanitized = _re.sub(r'[/. ]', '-', base_model)
+    short = task_id[:12]
+    return f"ft-{sanitized}-{short}"
+
+_adapter_name = _make_adapter_name("mock-base-model", TASK_ID)
+_adapter_dir = f"/tmp/e2e-lora/adapters/{_adapter_name}"
+import pathlib as _pathlib
+_pathlib.Path(_adapter_dir).mkdir(parents=True, exist_ok=True)
+(_pathlib.Path(_adapter_dir) / "adapter_config.json").write_text('{"dummy": true}')
+result(True, f"Adapter directory pre-created: {_adapter_name}")
 
 # ============================================================
 # Step 3b: Provider adds deliverable (simulates training done)
