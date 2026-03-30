@@ -322,7 +322,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 		c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
 	}
 
-	if !service.TeeSignerAcknowledged && !c.skipTEESignerCheck {
+	if !service.TeeSignerAcknowledged {
 		return errors.New("service not acknowledge the tee signer")
 	}
 

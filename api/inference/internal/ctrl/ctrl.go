@@ -79,8 +79,6 @@ type Ctrl struct {
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
-
-	skipTEESignerCheck bool
 }
 
 func New(
@@ -145,12 +143,7 @@ func New(
 			},
 		},
 		// Initialize whitelist users map
-		whitelistUsers:     make(map[string]struct{}),
-		skipTEESignerCheck: cfg.SkipTEESignerCheck,
-	}
-
-	if p.skipTEESignerCheck {
-		logger.Warn("TEE signer check is DISABLED (skipTEESignerCheck=true). This should only be used in test environments.")
+		whitelistUsers: make(map[string]struct{}),
 	}
 
 	// Initialize whitelist from config

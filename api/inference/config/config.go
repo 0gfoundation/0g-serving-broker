@@ -171,7 +171,6 @@ type Config struct {
 	Controller          ControllerConfig     `yaml:"controller"`
 	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
-	SkipTEESignerCheck  bool                    `yaml:"skipTEESignerCheck"` // Skip TEE signer acknowledgement check (for test environments where contract owner is unavailable)
 	Async               AsyncConfig             `yaml:"async"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 }
