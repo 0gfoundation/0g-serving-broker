@@ -357,7 +357,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("nil lockBalance in account")
 	}
 
-	// Use fixed minimum locked balance for all service types (3 0G)
+	// Use fixed minimum locked balance for all service types (5 0G)
 	responseFeeReservation, ok := new(big.Int).SetString(constant.MinimumLockedBalance, 10)
 	if !ok {
 		return errors.New("invalid MinimumLockedBalance constant")

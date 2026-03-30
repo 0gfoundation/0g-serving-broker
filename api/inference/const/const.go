@@ -56,9 +56,9 @@ var (
 	// Response fee reservation factor for balance adequacy validation: text-to-image
 	ResponseFeeReservationFactorForImage = int64(100)
 
-	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (1 0G in neuron).
+	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (5 0G in neuron).
 	// This replaces the dynamic per-service-type calculation in balance adequacy validation.
-	MinimumLockedBalance = "1000000000000000000"
+	MinimumLockedBalance = "5000000000000000000"
 
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50
