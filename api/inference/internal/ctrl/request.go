@@ -15,7 +15,6 @@ import (
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -363,27 +362,23 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("invalid MinimumLockedBalance constant")
 	}
 
+	feeBI, ok := new(big.Int).SetString(fee, 10)
+	if !ok {
+		return errors.New("invalid fee value")
+	}
+
+	lockBalance, ok := new(big.Int).SetString(*account.LockBalance, 10)
+	if !ok {
+		return errors.New("invalid lock balance value")
+	}
+
 	// Use optimized calculation for unsettled fee using database aggregation
 	unsettledFee, err := c.db.CalculateUnsettledFee(account.User)
 	if err != nil {
 		return errors.Wrap(err, "calculate unsettled fee")
 	}
 
-	// Add input fee, unsettled fee, and response fee reservation
-	totalWithInput, err := util.Add(fee, unsettledFee.String())
-	if err != nil {
-		return err
-	}
-	total, err := util.Add(totalWithInput, responseFeeReservation)
-	if err != nil {
-		return err
-	}
-
-	cmp1, err := util.Compare(total, account.LockBalance)
-	if err != nil {
-		return err
-	}
-	if cmp1 <= 0 {
+	if balanceSufficient(lockBalance, feeBI, unsettledFee, responseFeeReservation) {
 		return nil
 	}
 
@@ -402,19 +397,16 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.Wrap(err, "recalculate unsettled fee")
 	}
 
-	totalWithInputNew, err := util.Add(fee, unsettledFeeNew.String())
-	if err != nil {
-		return err
+	if newAccount.LockBalance == nil {
+		return errors.New("nil lockBalance after sync")
 	}
-	totalNew, err := util.Add(totalWithInputNew, responseFeeReservation)
-	if err != nil {
-		return err
+
+	newLockBalance, ok := new(big.Int).SetString(*newAccount.LockBalance, 10)
+	if !ok {
+		return errors.New("invalid lock balance after sync")
 	}
-	cmp2, err := util.Compare(totalNew, newAccount.LockBalance)
-	if err != nil {
-		return err
-	}
-	if cmp2 <= 0 {
+
+	if balanceSufficient(newLockBalance, feeBI, unsettledFeeNew, responseFeeReservation) {
 		return nil
 	}
 	ctx.Set("ignoreError", true)
@@ -427,6 +419,9 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return new(big.Float).Quo(new(big.Float).SetInt(v), new(big.Float).SetInt(divisor)).Text('f', 6)
 	}
 
+	totalNew := new(big.Int).Add(feeBI, unsettledFeeNew)
+	totalNew.Add(totalNew, responseFeeReservation)
+
 	balanceZG := toZG(*newAccount.LockBalance)
 	unsettledZG := toZG(unsettledFeeNew.String())
 	currentFeeZG := toZG(fee)
@@ -436,6 +431,15 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		"(breakdown: minimum reserve %s 0G + unsettled fees %s 0G + current request fee %s 0G). "+
 		"Please add more funds with: 0g-compute-cli transfer-fund --provider %s --amount <amount>",
 		balanceZG, toZG(totalNew.String()), minLockedZG, unsettledZG, currentFeeZG, c.contract.ProviderAddress)
+}
+
+// balanceSufficient reports whether lockBalance is sufficient to cover
+// inputFee + unsettledFee + minReserve. All values are in neuron units.
+// Returns true when lockBalance >= inputFee + unsettledFee + minReserve.
+func balanceSufficient(lockBalance, inputFee, unsettledFee, minReserve *big.Int) bool {
+	total := new(big.Int).Add(inputFee, unsettledFee)
+	total.Add(total, minReserve)
+	return lockBalance.Cmp(total) >= 0
 }
 
 // GetUnsettledFee returns the total unsettled fee for a given user address.

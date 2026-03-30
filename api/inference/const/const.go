@@ -50,12 +50,6 @@ var (
 	// Should align with the topUpTriggerThreshold in the client sdk
 	SettleTriggerThreshold = int64(1000000)
 
-	// Response fee reservation factor for balance adequacy validation:  chatbot, speech-to-text,
-	ResponseFeeReservationFactor = int64(1000000)
-
-	// Response fee reservation factor for balance adequacy validation: text-to-image
-	ResponseFeeReservationFactorForImage = int64(100)
-
 	// MinimumLockedBalance is the fixed minimum locked balance required for all service types (5 0G in neuron).
 	// This replaces the dynamic per-service-type calculation in balance adequacy validation.
 	MinimumLockedBalance = "5000000000000000000"
