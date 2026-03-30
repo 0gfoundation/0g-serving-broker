@@ -63,7 +63,7 @@ var (
 	// TEE settlement batch size to avoid gas limit issues
 	TEESettlementBatchSize = 50
 
-	SkipUntilDuration = 8 * time.Hour
+	SkipUntilDuration = 1 * time.Hour
 
 	// EIP-712 constants matching the contract
 	// DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")

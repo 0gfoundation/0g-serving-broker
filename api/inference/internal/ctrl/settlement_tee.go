@@ -134,7 +134,25 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 	return errors.Wrap(c.SettleFeesWithTEE(ctx), "settle fees with TEE")
 }
 
-// SettleFeesWithTEE implements the optimized settlement logic
+// ResetSettlementState clears settling flags and skip_until for all
+// pending requests and users. Call this on startup to allow all
+// pending requests to be retried immediately.
+func (c *Ctrl) ResetSettlementState() error {
+	return c.db.ResetSettlementState()
+}
+
+// IsTeeSignerAcknowledged checks whether the TEE signer is acknowledged
+// on-chain for this provider's service.
+func (c *Ctrl) IsTeeSignerAcknowledged(ctx context.Context) bool {
+	svc, err := c.contract.GetService(ctx)
+	if err != nil {
+		c.logger.Warnf("Failed to check TEE signer status: %v", err)
+		return false
+	}
+	return svc.TeeSignerAcknowledged
+}
+
+// SettleFeesWithTEE implements the optimized settlement logic.
 func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 	// Clear expired skipUntil flags for both requests and users
 	if err := c.db.ClearExpiredSkipUntil(); err != nil {
@@ -188,6 +206,27 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 
 		// Process outcomes (delete/skip requests) — runs even if execution had partial errors
 		c.processOutcomes(batch.Outcomes)
+
+		// Sync user balances from contract AFTER settlement execution.
+		// Settlement deducts fees on-chain, so the DB lockBalance is now stale
+		// (it was synced before settlement). Without this sync, the balance check
+		// in ValidateRequestWithEstimatedFee uses the pre-settlement balance,
+		// allowing users to accumulate more unsettled fees than their actual balance.
+		if len(batch.ExecutableItems) > 0 {
+			settledUsers := make([]string, 0)
+			for _, outcome := range batch.Outcomes {
+				if outcome.Status == SettlementSuccess || outcome.Status == SettlementPartial {
+					settledUsers = append(settledUsers, outcome.User.Hex())
+				}
+			}
+			if len(settledUsers) > 0 {
+				if err := c.SyncUserAccountsByAddresses(ctx, settledUsers); err != nil {
+					c.logger.Warnf("Failed to sync user balances after settlement: %v", err)
+				} else {
+					c.logger.Infof("Synced %d user balances after settlement", len(settledUsers))
+				}
+			}
+		}
 
 		if execErr != nil {
 			return errors.Wrap(execErr, "execute settlement batch")
