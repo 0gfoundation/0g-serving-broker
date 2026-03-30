@@ -60,6 +60,26 @@ func (d *DB) UpdatePendingSettlementStatus(id uint64, status string) error {
 		}).Error
 }
 
+// ResetSettlementState clears settling flags and skip_until for all unprocessed requests
+// and all user-level skip_until flags.
+// This should be called on startup to recover from incomplete settlements
+// and allow all pending requests to be retried immediately.
+func (d *DB) ResetSettlementState() error {
+	if err := d.db.Model(&model.Request{}).
+		Where("processed = ?", false).
+		Where("settling = ? OR skip_until IS NOT NULL", true).
+		Updates(map[string]interface{}{
+			"settling":   false,
+			"skip_until": nil,
+		}).Error; err != nil {
+		return err
+	}
+
+	return d.db.Model(&model.User{}).
+		Where("skip_until IS NOT NULL").
+		Update("skip_until", nil).Error
+}
+
 // MarkRequestsSettling sets or clears the settling flag for requests
 func (d *DB) MarkRequestsSettling(requestHashes []string, settling bool) error {
 	if len(requestHashes) == 0 {
