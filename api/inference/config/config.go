@@ -166,10 +166,10 @@ type Config struct {
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
 	Interval    struct {
-		AutoSettleBufferTime         int `yaml:"autoSettleBufferTime"`
-		ForceSettlementProcessor     int `yaml:"forceSettlementProcessor"`
-		SettlementProcessor          int `yaml:"settlementProcessor"`
-		ReconciliationProcessor      int `yaml:"reconciliationProcessor"`
+		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
+		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
+		SettlementProcessor      int `yaml:"settlementProcessor"`
+		ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
 	} `yaml:"interval"`
 	RevenueTransfer struct {
 		TargetAddress string `yaml:"targetAddress"` // Target address to transfer revenue to
@@ -194,6 +194,7 @@ type Config struct {
 	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
+	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 }
 
@@ -204,7 +205,7 @@ type ConcurrencyLimitConfig struct {
 	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent"`  // Max total concurrent requests to backend (default: 20)
 	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent"` // Max concurrent requests per user (default: 5, whitelisted users are exempt)
 	PerUserRPM           int `yaml:"perUserRPM"`           // Max requests per minute per user (default: 40, 0 = disabled)
-	PerUserBurst         int `yaml:"perUserBurst"`          // Max burst size for per-user rate limit (default: 10)
+	PerUserBurst         int `yaml:"perUserBurst"`         // Max burst size for per-user rate limit (default: 10)
 }
 
 // AsyncConfig defines configuration for async job processing.
@@ -214,7 +215,14 @@ type AsyncConfig struct {
 	MaxQueueSize           int  `yaml:"maxQueueSize"`           // Max pending jobs waiting for a worker (default: 100)
 	ResultTTLMinutes       int  `yaml:"resultTTLMinutes"`       // How long to keep completed results (default: 30)
 	CleanupIntervalSeconds int  `yaml:"cleanupIntervalSeconds"` // Interval for expired job cleanup (default: 60)
-	JobTimeoutMinutes      int  `yaml:"jobTimeoutMinutes"`      // Per-job HTTP request timeout (default: 10)
+	JobTimeoutMinutes      int  `yaml:"jobTimeoutMinutes"`      // Per-job HTTP request timeout (default: 15)
+}
+
+// ProviderHttpConfig defines HTTP client timeouts for broker→provider communication.
+// Providers can tune these values based on their GPU capacity and model complexity.
+type ProviderHttpConfig struct {
+	TotalTimeoutMinutes          int `yaml:"totalTimeoutMinutes"`          // Overall HTTP request timeout (default: 15)
+	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes"` // Max time to wait for provider to start responding (default: 15)
 }
 
 type LogPathsConfig struct {
@@ -314,15 +322,15 @@ func GetConfig() *Config {
 			GasPrice:    "",
 			MaxGasPrice: "",
 			Interval: struct {
-				AutoSettleBufferTime         int `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor     int `yaml:"forceSettlementProcessor"`
-				SettlementProcessor          int `yaml:"settlementProcessor"`
-				ReconciliationProcessor      int `yaml:"reconciliationProcessor"`
+				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
+				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
+				SettlementProcessor      int `yaml:"settlementProcessor"`
+				ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
 			}{
-				AutoSettleBufferTime:         60,
-				ForceSettlementProcessor:     600,
-				SettlementProcessor:          300,
-				ReconciliationProcessor:      60,
+				AutoSettleBufferTime:     60,
+				ForceSettlementProcessor: 600,
+				SettlementProcessor:      300,
+				ReconciliationProcessor:  60,
 			},
 			RevenueTransfer: struct {
 				TargetAddress string `yaml:"targetAddress"`
@@ -403,7 +411,11 @@ func GetConfig() *Config {
 				MaxQueueSize:           100,
 				ResultTTLMinutes:       30,
 				CleanupIntervalSeconds: 60,
-				JobTimeoutMinutes:      10,
+				JobTimeoutMinutes:      15,
+			},
+			ProviderHttp: ProviderHttpConfig{
+				TotalTimeoutMinutes:          15,
+				ResponseHeaderTimeoutMinutes: 15,
 			},
 		}
 

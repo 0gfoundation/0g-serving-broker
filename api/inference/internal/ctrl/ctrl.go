@@ -40,8 +40,8 @@ type Ctrl struct {
 
 	autoSettleBufferTime time.Duration
 
-	Service            config.Service
-	cacheTokenBilling  config.CacheTokenBillingConfig
+	Service           config.Service
+	cacheTokenBilling config.CacheTokenBillingConfig
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
@@ -50,8 +50,8 @@ type Ctrl struct {
 	sessionCache *cache.Cache
 
 	// Contract data caches to avoid frequent contract calls
-	contractAccountCache *cache.Cache  // Cache for user account data from contract
-	serviceCache         *cache.Cache  // Cache for service data from contract
+	contractAccountCache *cache.Cache // Cache for user account data from contract
+	serviceCache         *cache.Cache // Cache for service data from contract
 
 	// Service sync flag to ensure SyncService is only called once
 	serviceSynced bool
@@ -68,7 +68,7 @@ type Ctrl struct {
 	whitelistUsers map[string]struct{}
 
 	// Async processing
-	asyncMu         sync.RWMutex       // protects asyncEnabled + asyncJobQueue against send-on-closed-channel during shutdown
+	asyncMu         sync.RWMutex // protects asyncEnabled + asyncJobQueue against send-on-closed-channel during shutdown
 	asyncJobQueue   chan asyncJobParams
 	asyncResultTTL  time.Duration
 	asyncJobTimeout time.Duration
@@ -113,29 +113,30 @@ func New(
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
 		logger:               logger,
 		// Initialize session cache with 5 minute expiration and cleanup every 10 minutes
-		sessionCache:         cache.New(5*time.Minute, 10*time.Minute),
+		sessionCache: cache.New(5*time.Minute, 10*time.Minute),
 		// Initialize contract data caches with appropriate expiration times
-		contractAccountCache: cache.New(10*time.Minute, 20*time.Minute),  // Cache user accounts for 10 minutes
+		contractAccountCache: cache.New(10*time.Minute, 20*time.Minute), // Cache user accounts for 10 minutes
 		serviceCache:         cache.New(15*time.Minute, 20*time.Minute), // Cache service data for 15 minutes
 		logPath:              logPath,
 		brokerLogDir:         brokerLogDir,
 		eventLogDir:          eventLogDir,
 		// Initialize shared HTTP client with connection pooling
 		// Optimized for single backend container with many concurrent users
+		// Timeouts are configurable via providerHttp config for different GPU/model requirements
 		httpClient: &http.Client{
-			Timeout: 10 * time.Minute, // Increased for long-running image generation tasks
+			Timeout: time.Duration(cfg.ProviderHttp.TotalTimeoutMinutes) * time.Minute, // Overall request timeout
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
-				MaxIdleConns:          200,               // Increased total idle connections to handle more concurrent users
-				MaxIdleConnsPerHost:   200,               // Idle connections per host (critical for single backend)
-				MaxConnsPerHost:       500,               // Limit max active connections to prevent resource exhaustion
-				IdleConnTimeout:       90 * time.Second,  // How long idle connections stay open
-				TLSHandshakeTimeout:   10 * time.Second,  // TLS handshake timeout
-				ResponseHeaderTimeout: 5 * time.Minute,   // Increased for complex LLM processing before response starts
-				ExpectContinueTimeout: 1 * time.Second,   // Time to wait for 100-continue response
-				DisableKeepAlives:     false,             // Enable connection reuse (critical)
-				DisableCompression:    false,             // Allow gzip compression
-				ForceAttemptHTTP2:     false,             // Use HTTP/1.1 for stability
+				MaxIdleConns:          200,                                                                        // Increased total idle connections to handle more concurrent users
+				MaxIdleConnsPerHost:   200,                                                                        // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       500,                                                                        // Limit max active connections to prevent resource exhaustion
+				IdleConnTimeout:       90 * time.Second,                                                           // How long idle connections stay open
+				TLSHandshakeTimeout:   10 * time.Second,                                                           // TLS handshake timeout
+				ResponseHeaderTimeout: time.Duration(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes) * time.Minute, // Time to wait for response headers
+				ExpectContinueTimeout: 1 * time.Second,                                                            // Time to wait for 100-continue response
+				DisableKeepAlives:     false,                                                                      // Enable connection reuse (critical)
+				DisableCompression:    false,                                                                      // Allow gzip compression
+				ForceAttemptHTTP2:     false,                                                                      // Use HTTP/1.1 for stability
 			},
 		},
 		// Initialize whitelist users map
