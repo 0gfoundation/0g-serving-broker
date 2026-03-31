@@ -143,6 +143,13 @@ This downloads the encrypted model and confirms receipt on-chain. Wait about 60 
 Once the task is **Finished**, deploy the adapter to the GPU:
 
 ```bash
+# Option A: Use adapter name directly (recommended — get it from acknowledge output)
+0g-compute-cli fine-tuning deploy-adapter \
+  --provider <PROVIDER> \
+  --adapter-name <ADAPTER_NAME> \
+  --wait
+
+# Option B: Use model + task-id (resolves the adapter name automatically)
 0g-compute-cli fine-tuning deploy-adapter \
   --provider <PROVIDER> \
   --model "Qwen2.5-0.5B-Instruct" \
@@ -170,6 +177,13 @@ This acknowledges the model and immediately waits for the broker to deploy it.
 ## Step 7 — Chat with Your Model
 
 ```bash
+# Option A: Use adapter name directly
+0g-compute-cli fine-tuning chat \
+  --provider <PROVIDER> \
+  --adapter-name <ADAPTER_NAME> \
+  --message "Hello! What can you do?"
+
+# Option B: Use model + task-id
 0g-compute-cli fine-tuning chat \
   --provider <PROVIDER> \
   --model "Qwen2.5-0.5B-Instruct" \
@@ -233,9 +247,11 @@ ls ./my-adapter/
 | Check status | `0g-compute-cli fine-tuning get-task --provider <ADDR> --task <ID>` |
 | View training logs | `0g-compute-cli fine-tuning get-log --provider <ADDR> --task <ID>` |
 | Acknowledge model | `0g-compute-cli fine-tuning acknowledge-model --provider <ADDR> --task-id <ID> --data-path ./model` |
-| Deploy adapter | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --model <MODEL> --task-id <ID> --wait` |
+| Deploy adapter | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --adapter-name <NAME> --wait` |
+| Deploy (alt) | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --model <MODEL> --task-id <ID> --wait` |
 | Ack + Deploy | `0g-compute-cli fine-tuning acknowledge-model --provider <ADDR> --task-id <ID> --data-path ./model --model <MODEL> --deploy` |
-| Chat | `0g-compute-cli fine-tuning chat --provider <ADDR> --model <MODEL> --task-id <ID> --message "Hi"` |
+| Chat | `0g-compute-cli fine-tuning chat --provider <ADDR> --adapter-name <NAME> --message "Hi"` |
+| Chat (alt) | `0g-compute-cli fine-tuning chat --provider <ADDR> --model <MODEL> --task-id <ID> --message "Hi"` |
 | Get API key | `0g-compute-cli inference get-secret --provider <ADDR> --duration 0` |
 | Get adapter name | `0g-compute-cli fine-tuning get-adapter-name --model <MODEL> --task-id <ID>` |
 
@@ -261,7 +277,7 @@ acknowledge (on-chain event)
 | Model names have no prefix | `Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B-Instruct` |
 | Learning rate format | `0.0002` | `2e-4` |
 | Provider flag name | `--provider` | `--provider-address` |
-| Deploy needs `--model` | `deploy-adapter --model Qwen2.5-0.5B-Instruct` | Forgetting `--model` |
+| Deploy/chat: use `--adapter-name` or `--model` + `--task-id` | `deploy-adapter --adapter-name ft-...` | Providing neither |
 
 ---
 
@@ -301,7 +317,7 @@ The adapter needs to be explicitly deployed. Run:
 
 ```bash
 0g-compute-cli fine-tuning deploy-adapter \
-  --provider <ADDR> --model <MODEL> --task-id <ID> --wait
+  --provider <ADDR> --adapter-name <NAME> --wait
 ```
 
 ### Deploy times out
