@@ -157,9 +157,10 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 			TargetSeparated: true,
 		},
 		Interval: struct {
-			AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
+			AutoSettleBufferTime    int `yaml:"autoSettleBufferTime"`
 			ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 			SettlementProcessor      int `yaml:"settlementProcessor"`
+			ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
 		}{
 			AutoSettleBufferTime: 60,
 		},
