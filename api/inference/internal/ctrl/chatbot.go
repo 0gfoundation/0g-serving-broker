@@ -343,10 +343,12 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		*output += choice.Message.Content
 	}
 
-	// Skip billing for whitelisted users
+	// Skip billing for whitelisted users, but still record token metrics
 	if isWhitelisted {
 		if chunk.Usage != nil {
 			*usage = chunk.Usage
+			monitor.RecordTokens("chatbot", int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
+			monitor.RecordTPSFromContext(ctx, "chatbot", int64(chunk.Usage.CompletionTokens))
 		}
 		return nil
 	}
@@ -600,8 +602,12 @@ func (c *Ctrl) isClientDisconnectError(err error) bool {
 func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string, isWhitelisted bool) error {
 	for _, line := range lines {
 		if isStreamDone(line) {
-			// Skip billing for whitelisted users
+			// Skip billing for whitelisted users, but still record token metrics
 			if isWhitelisted {
+				if *usage != nil {
+					monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+					monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
+				}
 				break
 			}
 
