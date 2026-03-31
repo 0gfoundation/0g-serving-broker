@@ -140,12 +140,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	c.addNoCacheHeaders(ctx)
 
 	if resp.StatusCode != http.StatusOK {
-		// 4xx errors are client errors, should be ignored in error tracking
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			ctx.Set("ignoreError", true)
-		}
-		ctx.Writer.WriteHeader(resp.StatusCode)
-		c.handleServiceError(ctx, resp.Body)
+		c.handleServiceError(ctx, resp.StatusCode, resp.Body)
 		return err
 	}
 
@@ -263,23 +258,58 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 	errors.Response(ctx, errors.Wrap(err, info))
 }
 
-func (c *Ctrl) handleServiceError(ctx *gin.Context, body io.ReadCloser) {
-
+func (c *Ctrl) handleServiceError(ctx *gin.Context, statusCode int, body io.ReadCloser) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		c.logger.Errorf("Failed to read service error response body: %v", err)
+		ctx.Writer.WriteHeader(statusCode)
 		return
+	}
+
+	bodyStr := string(respBody)
+
+	// Correct misclassified status codes: litellm sometimes wraps client errors
+	// (e.g., token limit exceeded) as 503 ServiceUnavailableError via MidStreamFallbackError.
+	// These are deterministic client errors that should not be retried.
+	if statusCode >= 500 && isClientError(bodyStr) {
+		statusCode = http.StatusBadRequest
+	}
+
+	// 4xx errors are client-caused, skip error tracking
+	if statusCode >= 400 && statusCode < 500 {
+		ctx.Set("ignoreError", true)
 	}
 
 	// Log the actual service error content for debugging
 	// Skip logging for telemetry endpoints to reduce noise
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
-		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", string(respBody), ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
+		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", bodyStr, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
+
+	ctx.Writer.WriteHeader(statusCode)
 
 	if _, err := ctx.Writer.Write(respBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
 	}
+}
+
+// isClientError checks if a 5xx error response body actually contains a client error
+// that was misclassified by the upstream service (e.g., litellm wrapping BadRequestError as 503).
+func isClientError(body string) bool {
+	clientErrorIndicators := []string{
+		"token count exceeds",
+		"maximum context length",
+		"BadRequestError",
+		"invalid_request_error",
+		"context_length_exceeded",
+	}
+	lowerBody := strings.ToLower(body)
+	for _, indicator := range clientErrorIndicators {
+		if strings.Contains(lowerBody, strings.ToLower(indicator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureStreamOptions ensures that stream requests include stream_options with include_usage: true
