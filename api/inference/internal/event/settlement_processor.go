@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,7 +19,10 @@ type SettlementProcessor struct {
 	checkSettleInterval int
 	forceSettleInterval int
 
-	enableMonitor bool
+	enableMonitor      bool
+	settleMu           sync.Mutex
+	teeSignerReady     bool
+	teeSignerReadyOnce sync.Once
 }
 
 func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, enableMonitor bool, logger log.Logger) *SettlementProcessor {
@@ -33,7 +37,13 @@ func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInt
 }
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
-func (s SettlementProcessor) Start(ctx context.Context) error {
+func (s *SettlementProcessor) Start(ctx context.Context) error {
+	// Reset settlement state (settling flags + skip_until) so all pending
+	// requests are eligible for immediate settlement after restart
+	if err := s.ctrl.ResetSettlementState(); err != nil {
+		s.logger.Errorf("Failed to reset settlement state on startup: %s", err.Error())
+	}
+
 	checkSettleTicker := time.NewTicker(time.Duration(s.checkSettleInterval) * time.Second)
 	forceSettleTicker := time.NewTicker(time.Duration(s.forceSettleInterval) * time.Second)
 	defer checkSettleTicker.Stop()
@@ -51,7 +61,31 @@ func (s SettlementProcessor) Start(ctx context.Context) error {
 	}
 }
 
+// ensureTeeSignerReady checks if the TEE signer is acknowledged on-chain.
+// Returns false if not ready, skipping settlement to prevent NO_TEE_SIGNER
+// permanent failures that would delete all pending requests.
+func (s *SettlementProcessor) ensureTeeSignerReady(ctx context.Context) bool {
+	if s.teeSignerReady {
+		return true
+	}
+	if s.ctrl.IsTeeSignerAcknowledged(ctx) {
+		s.teeSignerReadyOnce.Do(func() {
+			s.logger.Info("TEE signer acknowledged, settlement enabled")
+		})
+		s.teeSignerReady = true
+		return true
+	}
+	s.logger.Debug("TEE signer not yet acknowledged, skipping settlement")
+	return false
+}
+
 func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+
+	if !s.ensureTeeSignerReady(ctx) {
+		return
+	}
 	if err := s.ctrl.ProcessSettlement(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventSettleErrorCount, "Process settlement: %s", err)
 	} else {
@@ -60,6 +94,12 @@ func (s *SettlementProcessor) handleCheckSettle(ctx context.Context) {
 }
 
 func (s *SettlementProcessor) handleForceSettle(ctx context.Context) {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+
+	if !s.ensureTeeSignerReady(ctx) {
+		return
+	}
 	s.logger.Info("Force Settlement")
 	if err := s.ctrl.SettleFeesWithTEE(ctx); err != nil {
 		s.incrementMonitorCounter(monitor.EventForceSettleErrorCount, "Process settlement: %s", err)

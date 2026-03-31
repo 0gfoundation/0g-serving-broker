@@ -331,6 +331,19 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 		return err
 	}
 
+	// Cross-check DB lockBalance against the contract account balance we already fetched.
+	// The DB lockBalance can become stale (e.g., after settlement deducts fees on-chain
+	// but DB isn't synced yet). Use the lesser of the two to prevent over-spending.
+	contractLockBalance := new(big.Int).Sub(contractAccount.Balance, contractAccount.PendingRefund)
+	if account.LockBalance != nil {
+		dbBalance, ok := new(big.Int).SetString(*account.LockBalance, 10)
+		if ok && dbBalance.Cmp(contractLockBalance) > 0 {
+			// DB balance is higher than contract balance — DB is stale, use contract value
+			corrected := contractLockBalance.String()
+			account.LockBalance = &corrected
+		}
+	}
+
 	// Use estimated fee for validation
 	err = c.validateBalanceAdequacy(ctx, account, estimatedFee)
 	if err != nil {
