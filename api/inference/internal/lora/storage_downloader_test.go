@@ -177,6 +177,77 @@ func TestStorageHashPrefixNormalization(t *testing.T) {
 	}
 }
 
+func TestNewStorageDownloader_PreservesKey(t *testing.T) {
+	cfg := config.LoRAConfig{StorageIndexerUrl: "http://localhost:12345"}
+	key := "0xdeadbeef1234567890abcdef"
+	d, err := NewStorageDownloader(cfg, key, getTestLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.providerKey != key {
+		t.Errorf("providerKey = %q, want %q", d.providerKey, key)
+	}
+}
+
+func TestNewStorageDownloader_HasIndexerClient(t *testing.T) {
+	cfg := config.LoRAConfig{StorageIndexerUrl: "http://localhost:12345"}
+	d, err := NewStorageDownloader(cfg, "key", getTestLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.indexerClient == nil {
+		t.Fatal("expected non-nil indexerClient")
+	}
+}
+
+func TestDownloadAndDecrypt_EmptyProviderEncKey(t *testing.T) {
+	cfg := config.LoRAConfig{StorageIndexerUrl: "http://localhost:12345"}
+	d, err := NewStorageDownloader(cfg, "invalid-key", getTestLogger())
+	if err != nil {
+		t.Fatalf("NewStorageDownloader: %v", err)
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "output")
+	_, err = d.DownloadAndDecrypt(context.Background(), "0xhash", []byte{}, outputDir)
+	if err == nil {
+		t.Fatal("expected error for empty encrypted key")
+	}
+}
+
+func TestDownloadAndDecrypt_LongProviderKey(t *testing.T) {
+	privKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	privKeyHexRaw := fmt.Sprintf("%x", crypto.FromECDSA(privKey))
+
+	aesKey, err := util.GenerateAESKey(32)
+	if err != nil {
+		t.Fatalf("generate AES key: %v", err)
+	}
+
+	encryptedAESKey, err := util.ProviderECIESEncrypt(privKeyHexRaw, aesKey)
+	if err != nil {
+		t.Fatalf("ECIES encrypt: %v", err)
+	}
+
+	cfg := config.LoRAConfig{StorageIndexerUrl: "http://localhost:12345"}
+	d, err := NewStorageDownloader(cfg, privKeyHexRaw, getTestLogger())
+	if err != nil {
+		t.Fatalf("NewStorageDownloader: %v", err)
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "output")
+	// ECIES decryption succeeds but 0G Storage download fails (no server)
+	_, err = d.DownloadAndDecrypt(context.Background(), "deadbeef", encryptedAESKey, outputDir)
+	if err == nil {
+		t.Fatal("expected error (no 0G Storage server)")
+	}
+	if contains(err.Error(), "ECIES") {
+		t.Errorf("should not fail at ECIES step, got: %v", err)
+	}
+}
+
 func TestDownloaderTempFilePaths(t *testing.T) {
 	tests := []struct {
 		name           string

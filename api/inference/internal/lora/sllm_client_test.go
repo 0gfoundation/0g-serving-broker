@@ -167,6 +167,137 @@ func TestSLLMClient_HealthCheck_Down(t *testing.T) {
 	}
 }
 
+func TestSLLMClient_DeployAdapter_Created(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	client := NewSLLMClient(srv.URL, testLogger())
+	err := client.DeployAdapter(context.Background(), "base", "adapter", "/path")
+	if err != nil {
+		t.Fatalf("expected success for 201, got: %v", err)
+	}
+}
+
+func TestSLLMClient_DeleteAdapter_NoContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client := NewSLLMClient(srv.URL, testLogger())
+	err := client.DeleteAdapter(context.Background(), "ft-test")
+	if err != nil {
+		t.Fatalf("expected success for 204, got: %v", err)
+	}
+}
+
+func TestSLLMClient_DeleteAdapter_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("gpu error"))
+	}))
+	defer srv.Close()
+
+	client := NewSLLMClient(srv.URL, testLogger())
+	err := client.DeleteAdapter(context.Background(), "ft-test")
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	if !contains(err.Error(), "500") {
+		t.Errorf("error should contain status code: %v", err)
+	}
+}
+
+func TestSLLMClient_ListModels_BadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not-valid-json"))
+	}))
+	defer srv.Close()
+
+	client := NewSLLMClient(srv.URL, testLogger())
+	_, err := client.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestSLLMClient_ListModels_EmptyData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []interface{}{},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewSLLMClient(srv.URL, testLogger())
+	models, err := client.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(models) != 0 {
+		t.Errorf("expected 0 models, got %d", len(models))
+	}
+}
+
+func TestSLLMClient_DeployAdapter_ConnectionRefused(t *testing.T) {
+	client := NewSLLMClient("http://127.0.0.1:1", testLogger())
+	err := client.DeployAdapter(context.Background(), "base", "adapter", "/path")
+	if err == nil {
+		t.Fatal("expected error for unreachable server")
+	}
+}
+
+func TestSLLMClient_DeleteAdapter_ConnectionRefused(t *testing.T) {
+	client := NewSLLMClient("http://127.0.0.1:1", testLogger())
+	err := client.DeleteAdapter(context.Background(), "ft-test")
+	if err == nil {
+		t.Fatal("expected error for unreachable server")
+	}
+}
+
+func TestSLLMClient_ListModels_ConnectionRefused(t *testing.T) {
+	client := NewSLLMClient("http://127.0.0.1:1", testLogger())
+	_, err := client.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unreachable server")
+	}
+}
+
+func TestNewSLLMClient_Fields(t *testing.T) {
+	client := NewSLLMClient("http://sllm:8343", testLogger())
+	if client.baseURL != "http://sllm:8343" {
+		t.Errorf("baseURL = %q", client.baseURL)
+	}
+	if client.httpClient == nil {
+		t.Fatal("expected non-nil httpClient")
+	}
+	if client.httpClient.Timeout == 0 {
+		t.Error("expected non-zero timeout")
+	}
+}
+
+func TestSLLMClient_DeployAdapter_ContextCancelled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Delay to allow context cancellation to take effect
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client := NewSLLMClient(srv.URL, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := client.DeployAdapter(ctx, "base", "adapter", "/path")
+	if err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

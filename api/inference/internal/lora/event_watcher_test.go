@@ -389,6 +389,92 @@ func TestEventWatcher_ProcessAcknowledgedEvents_NoEvents(t *testing.T) {
 	}
 }
 
+func TestNewEventWatcher_SetsFields(t *testing.T) {
+	srv := newFakeRPCServer(100)
+	defer srv.Close()
+
+	m := &Manager{
+		adapters: make(map[string]*AdapterInfo),
+		logger:   getTestLogger(),
+	}
+
+	cfg := config.LoRAConfig{
+		ChainRpcUrl:              srv.URL,
+		FineTuningContractAddr:   "0xdeadbeef",
+		PollBlockIntervalSeconds: 10,
+	}
+	providerAddr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+
+	w, err := NewEventWatcher(m, nil, cfg, providerAddr, getTestLogger())
+	if err != nil {
+		t.Fatalf("NewEventWatcher: %v", err)
+	}
+	if w.manager != m {
+		t.Error("manager not set")
+	}
+	if w.providerAddress != providerAddr {
+		t.Error("providerAddress not set")
+	}
+	if w.config.FineTuningContractAddr != "0xdeadbeef" {
+		t.Errorf("config.FineTuningContractAddr = %q", w.config.FineTuningContractAddr)
+	}
+	if w.client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestEventWatcher_PollEvents_MultipleCalls(t *testing.T) {
+	currentBlock := uint64(3000)
+	srv := newFakeRPCServer(currentBlock)
+	defer srv.Close()
+
+	client, err := ethclient.Dial(srv.URL)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	w := &EventWatcher{
+		manager: &Manager{
+			adapters: make(map[string]*AdapterInfo),
+			logger:   getTestLogger(),
+		},
+		client:          client,
+		config:          config.LoRAConfig{FineTuningContractAddr: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+		providerAddress: common.HexToAddress("0x1234"),
+		logger:          getTestLogger(),
+	}
+
+	var fromBlock uint64 = 2500
+	w.pollEvents(context.Background(), &fromBlock)
+	if fromBlock != currentBlock+1 {
+		t.Errorf("after 1st poll: fromBlock = %d, want %d", fromBlock, currentBlock+1)
+	}
+
+	// Second call: fromBlock > currentBlock, should be a no-op
+	w.pollEvents(context.Background(), &fromBlock)
+	if fromBlock != currentBlock+1 {
+		t.Errorf("after 2nd poll: fromBlock = %d, should remain %d", fromBlock, currentBlock+1)
+	}
+}
+
+func TestEventWatcher_Stop_MultipleCallsSafe(t *testing.T) {
+	srv := newFakeRPCServer(100)
+	defer srv.Close()
+
+	client, err := ethclient.Dial(srv.URL)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	w := &EventWatcher{
+		client: client,
+		logger: getTestLogger(),
+	}
+	w.Stop()
+	// Second call should not panic
+	w.Stop()
+}
+
 func TestNewEventWatcher_InvalidRPC(t *testing.T) {
 	m := &Manager{
 		adapters: make(map[string]*AdapterInfo),
