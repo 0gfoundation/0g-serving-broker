@@ -106,6 +106,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
+// GetBaseModel returns the base model path configured for this LoRA manager.
+func (m *Manager) GetBaseModel() string {
+	return m.config.BaseModel
+}
+
 // GetAdapter returns a snapshot copy of adapter info by name (thread-safe).
 func (m *Manager) GetAdapter(adapterName string) *AdapterInfo {
 	m.mu.RLock()
@@ -533,6 +538,7 @@ func (m *Manager) offloadIdleAdapters(ctx context.Context) {
 // MakeAdapterName builds a deterministic adapter name from base model and task ID.
 func MakeAdapterName(baseModel, taskID string) string {
 	sanitized := strings.NewReplacer("/", "-", ".", "-", " ", "-").Replace(baseModel)
+	sanitized = strings.Trim(sanitized, "-")
 	short := taskID
 	if len(taskID) > 12 {
 		short = taskID[:12]

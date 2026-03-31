@@ -53,17 +53,17 @@ func TestDeployAdapterRequest_Validation(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name:       "missing required fields",
+			name:       "empty body requires adapterName or taskId+baseModel",
 			body:       map[string]string{},
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "missing taskId",
+			name:       "only baseModel without taskId",
 			body:       map[string]string{"baseModel": "Qwen2.5-7B"},
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "missing baseModel",
+			name:       "only taskId without baseModel",
 			body:       map[string]string{"taskId": "task-001"},
 			wantStatus: http.StatusBadRequest,
 		},
@@ -85,6 +85,22 @@ func TestDeployAdapterRequest_Validation(t *testing.T) {
 				t.Errorf("status = %d, want %d; body = %s", w.Code, tt.wantStatus, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestDeployAdapter_ByAdapterName(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	body, _ := json.Marshal(map[string]string{"adapterName": "ft-test-adapter"})
+	c.Request = httptest.NewRequest("POST", "/v1/lora/adapters/deploy", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h := newHandlerNoLoRA(t)
+	h.DeployAdapter(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (no LoRA manager); body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
 }
 

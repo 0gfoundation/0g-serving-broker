@@ -9,8 +9,9 @@ import (
 )
 
 type deployAdapterRequest struct {
-	TaskID    string `json:"taskId" binding:"required"`
-	BaseModel string `json:"baseModel" binding:"required"`
+	AdapterName string `json:"adapterName"`
+	TaskID      string `json:"taskId"`
+	BaseModel   string `json:"baseModel"`
 }
 
 type adapterStatusResponse struct {
@@ -34,10 +35,16 @@ func toAdapterResponse(a *lora.AdapterInfo) adapterStatusResponse {
 }
 
 // DeployAdapter triggers deployment of a "ready" adapter to vLLM.
+// Accepts either {adapterName} directly, or {taskId, baseModel} to resolve the name.
 func (h *Handler) DeployAdapter(c *gin.Context) {
 	var req deployAdapterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.AdapterName == "" && (req.TaskID == "" || req.BaseModel == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provide either adapterName, or both taskId and baseModel"})
 		return
 	}
 
@@ -47,14 +54,17 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 		return
 	}
 
-	adapterName := lora.MakeAdapterName(req.BaseModel, req.TaskID)
+	adapterName := req.AdapterName
+	if adapterName == "" {
+		adapterName = lora.MakeAdapterName(req.BaseModel, req.TaskID)
 
-	// The CLI may pass a different baseModel string than what the broker
-	// uses internally (e.g. "Qwen2.5-0.5B-Instruct" vs "/models/Qwen2.5-0.5B-Instruct"),
-	// so fall back to a taskID-based lookup when the computed name misses.
-	if mgr.GetAdapter(adapterName) == nil {
-		if found := mgr.FindAdapterByTaskID(req.TaskID); found != nil {
-			adapterName = found.AdapterName
+		// The CLI may pass a different baseModel string than what the broker
+		// uses internally (e.g. "Qwen2.5-0.5B-Instruct" vs "/models/Qwen2.5-0.5B-Instruct"),
+		// so fall back to a taskID-based lookup when the computed name misses.
+		if mgr.GetAdapter(adapterName) == nil {
+			if found := mgr.FindAdapterByTaskID(req.TaskID); found != nil {
+				adapterName = found.AdapterName
+			}
 		}
 	}
 

@@ -294,6 +294,22 @@ func TestRewriteResponseModel_LoRA(t *testing.T) {
 	}
 }
 
+func TestRewriteResponseModel_SpacedJSON(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+	ctx := newTestGinContext()
+	ctx.Set("loraOriginalModel", "ft-Qwen2-5-7B-abc123")
+
+	// vLLM-style JSON with spaces after colons
+	body := []byte(`{"id": "chatcmpl-1", "model": "Qwen2.5-7B", "choices": []}`)
+	result := c.rewriteResponseModel(ctx, body)
+
+	var parsed map[string]interface{}
+	json.Unmarshal(result, &parsed)
+	if parsed["model"] != "ft-Qwen2-5-7B-abc123" {
+		t.Errorf("model = %q, want %q", parsed["model"], "ft-Qwen2-5-7B-abc123")
+	}
+}
+
 func TestRewriteResponseModel_NonLoRA(t *testing.T) {
 	c := newTestCtrlWithLoRA(t)
 	ctx := newTestGinContext()
@@ -301,8 +317,10 @@ func TestRewriteResponseModel_NonLoRA(t *testing.T) {
 	body := []byte(`{"id":"chatcmpl-1","model":"Qwen2.5-7B","choices":[]}`)
 	result := c.rewriteResponseModel(ctx, body)
 
-	if string(result) != string(body) {
-		t.Errorf("expected no change for non-LoRA response")
+	var parsed map[string]interface{}
+	json.Unmarshal(result, &parsed)
+	if parsed["model"] != "Qwen2.5-7B" {
+		t.Errorf("model should not change for non-LoRA response, got %q", parsed["model"])
 	}
 }
 
@@ -314,9 +332,22 @@ func TestRewriteResponseModelLine_Streaming(t *testing.T) {
 	line := `data: {"id":"chatcmpl-1","model":"Qwen2.5-7B","choices":[{"delta":{"content":"hi"}}]}`
 	result := c.rewriteResponseModelLine(ctx, line)
 
-	expected := `data: {"id":"chatcmpl-1","model":"ft-Qwen2-5-7B-abc123","choices":[{"delta":{"content":"hi"}}]}`
-	if result != expected {
-		t.Errorf("got %q, want %q", result, expected)
+	if !strings.Contains(result, `"model": "ft-Qwen2-5-7B-abc123"`) && !strings.Contains(result, `"model":"ft-Qwen2-5-7B-abc123"`) {
+		t.Errorf("expected model to be rewritten, got %q", result)
+	}
+}
+
+func TestRewriteResponseModelLine_SpacedJSON(t *testing.T) {
+	c := newTestCtrlWithLoRA(t)
+	ctx := newTestGinContext()
+	ctx.Set("loraOriginalModel", "ft-Qwen2-5-7B-abc123")
+
+	// vLLM-style with space after colon
+	line := `data: {"id": "chatcmpl-1", "model": "Qwen2.5-7B", "choices": []}`
+	result := c.rewriteResponseModelLine(ctx, line)
+
+	if !strings.Contains(result, `"model": "ft-Qwen2-5-7B-abc123"`) {
+		t.Errorf("expected model to be rewritten in spaced JSON, got %q", result)
 	}
 }
 
@@ -329,6 +360,100 @@ func TestRewriteResponseModelLine_NoLoRA(t *testing.T) {
 
 	if result != line {
 		t.Errorf("expected no change for non-LoRA line")
+	}
+}
+
+func TestRewriteResponseModel_VLLMPathModel(t *testing.T) {
+	c := &Ctrl{
+		Service: config.Service{
+			ModelType: "Qwen2.5-7B",
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	cfg := config.LoRAConfig{
+		Enable:    false,
+		BaseModel: "/models/Qwen2.5-7B",
+	}
+	m, _ := lora.NewManager(cfg, nil, nil, testLogger())
+	c.loraManager = m
+
+	ctx := newTestGinContext()
+	ctx.Set("loraOriginalModel", "ft-Qwen2-5-7B-abc123")
+
+	// vLLM returns spaced JSON with full path model name
+	body := []byte(`{"id": "chatcmpl-1", "model": "/models/Qwen2.5-7B", "choices": [{"message": {"content": "hi"}}]}`)
+	result := c.rewriteResponseModel(ctx, body)
+
+	var parsed map[string]interface{}
+	json.Unmarshal(result, &parsed)
+	if parsed["model"] != "ft-Qwen2-5-7B-abc123" {
+		t.Errorf("model = %q, want %q", parsed["model"], "ft-Qwen2-5-7B-abc123")
+	}
+}
+
+func TestRewriteResponseModelLine_VLLMPathModel(t *testing.T) {
+	c := &Ctrl{
+		Service: config.Service{
+			ModelType: "Qwen2.5-7B",
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	cfg := config.LoRAConfig{
+		Enable:    false,
+		BaseModel: "/models/Qwen2.5-7B",
+	}
+	m, _ := lora.NewManager(cfg, nil, nil, testLogger())
+	c.loraManager = m
+
+	ctx := newTestGinContext()
+	ctx.Set("loraOriginalModel", "ft-Qwen2-5-7B-abc123")
+
+	// vLLM-style spaced JSON with full model path
+	line := `data: {"id": "chatcmpl-1", "model": "/models/Qwen2.5-7B", "choices": [{"delta": {"content": "hi"}}]}`
+	result := c.rewriteResponseModelLine(ctx, line)
+
+	if !strings.Contains(result, `"model": "ft-Qwen2-5-7B-abc123"`) {
+		t.Errorf("expected model rewrite, got %q", result)
+	}
+}
+
+func TestVllmModelNames(t *testing.T) {
+	c := &Ctrl{
+		Service: config.Service{ModelType: "Qwen2.5-7B"},
+		logger:  testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	cfg := config.LoRAConfig{BaseModel: "/models/Qwen2.5-7B"}
+	m, _ := lora.NewManager(cfg, nil, nil, testLogger())
+	c.loraManager = m
+
+	names := c.vllmModelNames()
+	if len(names) != 2 {
+		t.Fatalf("expected 2 candidates, got %d: %v", len(names), names)
+	}
+	if names[0] != "/models/Qwen2.5-7B" {
+		t.Errorf("first candidate should be baseModel path, got %q", names[0])
+	}
+	if names[1] != "Qwen2.5-7B" {
+		t.Errorf("second candidate should be service model, got %q", names[1])
+	}
+}
+
+func TestVllmModelNames_SameBaseAndService(t *testing.T) {
+	c := &Ctrl{
+		Service: config.Service{ModelType: "Qwen2.5-7B"},
+		logger:  testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	cfg := config.LoRAConfig{BaseModel: "Qwen2.5-7B"}
+	m, _ := lora.NewManager(cfg, nil, nil, testLogger())
+	c.loraManager = m
+
+	names := c.vllmModelNames()
+	if len(names) != 1 {
+		t.Fatalf("expected 1 candidate when base == service, got %d: %v", len(names), names)
 	}
 }
 

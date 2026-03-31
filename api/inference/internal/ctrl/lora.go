@@ -1,7 +1,6 @@
 package ctrl
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -124,23 +123,75 @@ func ExtractModelName(body []byte) string {
 
 // rewriteResponseModel patches the "model" field in a non-streaming JSON response
 // to return the original ft-* model name instead of the base model name that vLLM returns.
+// Uses JSON unmarshal/marshal to handle any JSON whitespace formatting.
 func (c *Ctrl) rewriteResponseModel(ctx *gin.Context, body []byte) []byte {
 	originalModel, exists := ctx.Get("loraOriginalModel")
 	if !exists {
 		return body
 	}
-	old := fmt.Sprintf(`"model":"%s"`, c.Service.ModelType)
-	new := fmt.Sprintf(`"model":"%s"`, originalModel.(string))
-	return bytes.Replace(body, []byte(old), []byte(new), 1)
+
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return body
+	}
+
+	modelRaw, ok := resp["model"]
+	if !ok {
+		return body
+	}
+
+	var modelVal string
+	if err := json.Unmarshal(modelRaw, &modelVal); err != nil {
+		return body
+	}
+
+	target := originalModel.(string)
+	for _, candidate := range c.vllmModelNames() {
+		if modelVal == candidate {
+			quoted, _ := json.Marshal(target)
+			resp["model"] = quoted
+			out, err := json.Marshal(resp)
+			if err != nil {
+				return body
+			}
+			return out
+		}
+	}
+	return body
 }
 
 // rewriteResponseModelLine patches the "model" field in a single SSE streaming line.
+// Handles both compact ("model":"...") and spaced ("model": "...") JSON formatting.
 func (c *Ctrl) rewriteResponseModelLine(ctx *gin.Context, line string) string {
 	originalModel, exists := ctx.Get("loraOriginalModel")
 	if !exists {
 		return line
 	}
-	old := fmt.Sprintf(`"model":"%s"`, c.Service.ModelType)
-	new := fmt.Sprintf(`"model":"%s"`, originalModel.(string))
-	return strings.Replace(line, old, new, 1)
+	target := originalModel.(string)
+	for _, candidate := range c.vllmModelNames() {
+		// Try both compact and spaced JSON formats
+		for _, pattern := range []string{
+			fmt.Sprintf(`"model":"%s"`, candidate),
+			fmt.Sprintf(`"model": "%s"`, candidate),
+		} {
+			if strings.Contains(line, pattern) {
+				return strings.Replace(line, pattern, fmt.Sprintf(`"model": "%s"`, target), 1)
+			}
+		}
+	}
+	return line
+}
+
+// vllmModelNames returns candidate model names that vLLM may use in responses.
+// vLLM returns the model path it was started with (e.g., "/models/Qwen2.5-0.5B-Instruct"),
+// which may differ from service.model config. We try both the lora baseModel and service model.
+func (c *Ctrl) vllmModelNames() []string {
+	candidates := []string{c.Service.ModelType}
+	if c.loraManager != nil {
+		base := c.loraManager.GetBaseModel()
+		if base != "" && base != c.Service.ModelType {
+			candidates = append([]string{base}, candidates...)
+		}
+	}
+	return candidates
 }

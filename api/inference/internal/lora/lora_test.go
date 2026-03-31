@@ -21,6 +21,7 @@ func TestMakeAdapterName(t *testing.T) {
 		{"Qwen2.5-7B", "abc123456789xyz", "ft-Qwen2-5-7B-abc123456789"},
 		{"meta/Llama-3", "task-001", "ft-meta-Llama-3-task-001"},
 		{"simple", "id", "ft-simple-id"},
+		{"/models/Qwen2.5-0.5B-Instruct", "af7eee40-7fd", "ft-models-Qwen2-5-0-5B-Instruct-af7eee40-7fd"},
 	}
 
 	for _, tt := range tests {

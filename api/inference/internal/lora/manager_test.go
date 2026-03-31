@@ -343,6 +343,8 @@ func TestMakeAdapterName_EdgeCases(t *testing.T) {
 		{"base", "", "ft-base-"},
 		{"base", "exactly12ch", "ft-base-exactly12ch"},
 		{"base", "exactly12chars", "ft-base-exactly12cha"},
+		{"/models/Qwen2.5-7B", "task-001", "ft-models-Qwen2-5-7B-task-001"},
+		{"///leading-slashes", "id", "ft-leading-slashes-id"},
 	}
 
 	for _, tt := range tests {
