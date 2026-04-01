@@ -138,7 +138,7 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 
 	// Step 4: Push adapter key to inference broker via HTTP (before addDeliverable)
 	if providerEncKey != nil && f.config.Service.InferenceServiceUrl != "" {
-		if pushErr := f.pushAdapterKey(task.ID.String(), hexutil.Encode(settlementMetadata.ModelRootHash), hexutil.Encode(providerEncKey)); pushErr != nil {
+		if pushErr := f.pushAdapterKey(ctx, task.ID.String(), hexutil.Encode(settlementMetadata.ModelRootHash), hexutil.Encode(providerEncKey)); pushErr != nil {
 			f.logger.Warnf("Failed to push adapter key to inference broker: %v", pushErr)
 		}
 	}
@@ -174,7 +174,7 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 // with its provider private key, and the inference broker verifies the signature.
 var adapterKeyHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) error {
+func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHash, providerEncKey string) error {
 	url := fmt.Sprintf("%s/internal/v1/adapter-keys", f.config.Service.InferenceServiceUrl)
 	payload := map[string]string{
 		"taskId":         taskID,
@@ -186,7 +186,7 @@ func (f *Finalizer) pushAdapterKey(taskID, storageHash, providerEncKey string) e
 		return errors.Wrap(err, "marshal adapter key payload")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -252,12 +252,14 @@ func (f *Finalizer) addWalletSignature(req *http.Request, body []byte, taskID st
 		return errors.Wrap(err, "marshal provider token")
 	}
 
-	// Sign the token
+	// Sign the token with EIP-191 personal message prefix (must match ValidateProviderAuth)
 	tokenHash := crypto.Keccak256Hash(tokenJSON)
-	signature, err := crypto.Sign(tokenHash.Bytes(), privateKey)
+	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), tokenHash.Bytes())
+	signature, err := crypto.Sign(prefixedMsg.Bytes(), privateKey)
 	if err != nil {
 		return errors.Wrap(err, "sign provider token")
 	}
+	signature[64] += 27 // Convert V from 0/1 to 27/28 for Ethereum ecrecover
 
 	// Add authentication headers
 	req.Header.Set("Address", providerAddress)

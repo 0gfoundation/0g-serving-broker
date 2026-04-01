@@ -153,35 +153,35 @@ const tagSigSize = 65
 func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 	inFile, err := os.Open(inputFile)
 	if err != nil {
-		return fmt.Errorf("failed to open encrypted file: %v", err)
+		return fmt.Errorf("failed to open encrypted file: %w", err)
 	}
 	defer inFile.Close()
 
 	outFile, err := os.Create(outputFile)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %v", err)
+		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outFile.Close()
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return fmt.Errorf("failed to create AES cipher: %v", err)
+		return fmt.Errorf("failed to create AES cipher: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return fmt.Errorf("failed to create GCM cipher: %v", err)
+		return fmt.Errorf("failed to create GCM cipher: %w", err)
 	}
 
 	// Skip 65-byte tagSig
 	if _, err := io.ReadFull(inFile, make([]byte, tagSigSize)); err != nil {
-		return fmt.Errorf("failed to read tag signature: %v", err)
+		return fmt.Errorf("failed to read tag signature: %w", err)
 	}
 
 	// Read nonce
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(inFile, nonce); err != nil {
-		return fmt.Errorf("failed to read nonce: %v", err)
+		return fmt.Errorf("failed to read nonce: %w", err)
 	}
 
 	incrementNonce := func(counter []byte) {
@@ -204,11 +204,11 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 
 		plaintext, decErr := gcm.Open(nil, nonce, buf[:n], nil)
 		if decErr != nil {
-			return fmt.Errorf("failed to decrypt chunk: %v", decErr)
+			return fmt.Errorf("failed to decrypt chunk: %w", decErr)
 		}
 
 		if _, err := outFile.Write(plaintext); err != nil {
-			return fmt.Errorf("failed to write plaintext: %v", err)
+			return fmt.Errorf("failed to write plaintext: %w", err)
 		}
 
 		incrementNonce(nonce)
