@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -37,6 +38,7 @@ type SettlementConfig struct {
 	SettlementBatchSize     uint
 	DeliveredTaskAckTimeout uint
 	DataRetentionDays       uint
+	FileRetentionHours      int
 }
 
 func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, config *config.Config, teeService *tee.TeeService, logger log.Logger) (*Settlement, error) {
@@ -51,6 +53,7 @@ func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, confi
 			SettlementBatchSize:     config.SettlementBatchSize,
 			DeliveredTaskAckTimeout: config.DeliveredTaskAckTimeoutSecs,
 			DataRetentionDays:       config.DataRetentionDays,
+			FileRetentionHours:      config.Service.FileRetentionHours,
 		},
 		logger: logger,
 	}, nil
@@ -322,6 +325,7 @@ func (s *Settlement) createEIP712Digest(ctx context.Context, input contract.Veri
 
 func (s *Settlement) startDiskCleanupRoutine(ctx context.Context) {
 	s.runDiskCleanup()
+	s.runDatasetCleanup()
 
 	ticker := time.NewTicker(12 * time.Hour)
 	defer ticker.Stop()
@@ -332,6 +336,7 @@ func (s *Settlement) startDiskCleanupRoutine(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.runDiskCleanup()
+			s.runDatasetCleanup()
 		}
 	}
 }
@@ -384,6 +389,125 @@ func (s *Settlement) CleanUp(paths *utils.TaskPaths) {
 	// Remove .data files (encrypted files)
 	if err = removeAllDataFiles(paths.BasePath); err != nil {
 		s.logger.Errorf("error removing data files: %v", err)
+	}
+}
+
+// runDatasetCleanup removes uploaded dataset files that exceed the configured retention period
+// and are not referenced by any active (non-terminal) tasks by the same user.
+// Dataset files are stored at {dataDir}/datasets/{userAddress}/{datasetHash}.
+// File age is determined by filesystem modification time (ModTime).
+//
+// Note: There is a small TOCTOU window between the DB check and file removal.
+// If a new task is created with the same dataset hash in that window, the setup
+// service will re-download the dataset from 0G Storage, so data is not lost.
+func (s *Settlement) runDatasetCleanup() {
+	retentionHours := s.config.FileRetentionHours
+	if retentionHours <= 0 {
+		return
+	}
+
+	datasetBaseDir := utils.GetDatasetBaseDir()
+	if _, err := os.Stat(datasetBaseDir); os.IsNotExist(err) {
+		return
+	}
+
+	cutoff := time.Now().Add(-time.Duration(retentionHours) * time.Hour)
+	s.logger.Infof("dataset cleanup: removing files older than %v (retention: %d hours)", cutoff.Format(time.RFC3339), retentionHours)
+
+	userDirs, err := os.ReadDir(datasetBaseDir)
+	if err != nil {
+		s.logger.Errorf("dataset cleanup: failed to read dataset base dir: %v", err)
+		return
+	}
+
+	var removedCount, skippedActiveCount int
+	for _, userDir := range userDirs {
+		if !userDir.IsDir() {
+			continue
+		}
+		userAddress := userDir.Name()
+		userPath := filepath.Join(datasetBaseDir, userAddress)
+		entries, err := os.ReadDir(userPath)
+		if err != nil {
+			s.logger.Errorf("dataset cleanup: failed to read user dir %s: %v", userAddress, err)
+			continue
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				s.cleanOrphanHFDir(userPath, entry, cutoff)
+				continue
+			}
+
+			info, err := entry.Info()
+			if err != nil {
+				s.logger.Errorf("dataset cleanup: failed to stat %s: %v", entry.Name(), err)
+				continue
+			}
+
+			if info.ModTime().After(cutoff) {
+				continue
+			}
+
+			datasetHash := entry.Name()
+			hasActive, err := s.db.HasActiveTasksWithDatasetHash(userAddress, datasetHash)
+			if err != nil {
+				s.logger.Errorf("dataset cleanup: failed to check active tasks for %s: %v", datasetHash, err)
+				continue
+			}
+			if hasActive {
+				skippedActiveCount++
+				continue
+			}
+
+			filePath := filepath.Join(userPath, datasetHash)
+			if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+				s.logger.Errorf("dataset cleanup: failed to remove %s: %v", filePath, err)
+				continue
+			}
+
+			hfPath := filePath + "_hf"
+			if err := os.RemoveAll(hfPath); err != nil {
+				s.logger.Errorf("dataset cleanup: failed to remove HF dir %s: %v", hfPath, err)
+			}
+
+			removedCount++
+		}
+
+		remaining, err := os.ReadDir(userPath)
+		if err == nil && len(remaining) == 0 {
+			if err := os.Remove(userPath); err != nil && !os.IsNotExist(err) {
+				s.logger.Errorf("dataset cleanup: failed to remove empty user dir %s: %v", userPath, err)
+			}
+		}
+	}
+
+	s.logger.Infof("dataset cleanup: removed %d files, skipped %d (active tasks)", removedCount, skippedActiveCount)
+}
+
+// cleanOrphanHFDir removes a standalone _hf directory whose source JSONL file no longer exists,
+// provided the directory is older than the cutoff time.
+func (s *Settlement) cleanOrphanHFDir(userPath string, entry os.DirEntry, cutoff time.Time) {
+	name := entry.Name()
+	if !strings.HasSuffix(name, "_hf") {
+		return
+	}
+
+	info, err := entry.Info()
+	if err != nil || info.ModTime().After(cutoff) {
+		return
+	}
+
+	baseFile := filepath.Join(userPath, strings.TrimSuffix(name, "_hf"))
+	if _, err := os.Stat(baseFile); err == nil {
+		return
+	}
+
+	hfPath := filepath.Join(userPath, name)
+	if err := os.RemoveAll(hfPath); err != nil {
+		s.logger.Errorf("dataset cleanup: failed to remove orphan HF dir %s: %v", hfPath, err)
+	} else {
+		s.logger.Infof("dataset cleanup: removed orphan HF dir %s", hfPath)
 	}
 }
 
