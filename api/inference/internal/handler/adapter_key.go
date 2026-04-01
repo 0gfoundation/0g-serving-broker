@@ -21,6 +21,11 @@ func (h *Handler) ReceiveAdapterKey(c *gin.Context) {
 		return
 	}
 
+	if len(req.TaskID) > 128 || len(req.StorageHash) > 128 || len(req.ProviderEncKey) > 4096 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field value exceeds maximum allowed length"})
+		return
+	}
+
 	key := &model.AdapterKey{
 		TaskID:         req.TaskID,
 		StorageHash:    req.StorageHash,

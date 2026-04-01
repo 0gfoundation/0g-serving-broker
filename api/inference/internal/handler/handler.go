@@ -2,12 +2,14 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -38,15 +40,17 @@ type Handler struct {
 	modelsCtrl  modelsCtrl
 	proxy       *proxy.Proxy
 	rateLimiter *middleware.RateLimiter
+	logger      log.Logger
 }
 
-func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
+func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy, logger log.Logger) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
 		asyncCtrl:   ctrl,
 		modelsCtrl:  ctrl,
 		proxy:       proxy,
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
+		logger:      logger,
 	}
 	return h
 }
@@ -136,11 +140,17 @@ func (h *Handler) internalApiAuth() gin.HandlerFunc {
 			if err := h.ctrl.ValidateProviderAuth(c); err == nil {
 				c.Next()
 				return
+			} else {
+				h.logger.Warnf("internal API auth failed from %s: %v", c.ClientIP(), err)
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": fmt.Sprintf("unauthorized: %v", err),
+				})
+				return
 			}
 		}
 
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": "unauthorized: wallet signature required (Address, Session-Token, Session-Signature headers)",
+			"error": "unauthorized: controller not initialized",
 		})
 	}
 }

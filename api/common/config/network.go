@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"sort"
 	"strings"
 )
 
@@ -45,7 +46,14 @@ func (l *PrivateKeyStore) Fetch() ([]string, error) {
 // Both fine-tuning and inference brokers use this to access the provider wallet key
 // for ECIES encryption/decryption of LoRA adapter secrets.
 func GetProviderPrivateKey(networks Networks) (string, error) {
-	for _, nc := range networks {
+	names := make([]string, 0, len(networks))
+	for name := range networks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		nc := networks[name]
 		if nc.PrivateKeyStore != nil {
 			keys, err := nc.PrivateKeyStore.Fetch()
 			if err != nil || len(keys) == 0 {

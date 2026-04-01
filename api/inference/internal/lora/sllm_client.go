@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -79,7 +80,7 @@ func (c *SLLMClient) DeployAdapter(ctx context.Context, baseModel, adapterName, 
 
 // DeleteAdapter removes a LoRA adapter from ServerlessLLM.
 func (c *SLLMClient) DeleteAdapter(ctx context.Context, adapterName string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/models/"+adapterName, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/models/"+url.PathEscape(adapterName), nil)
 	if err != nil {
 		return errors.Wrap(err, "create delete request")
 	}

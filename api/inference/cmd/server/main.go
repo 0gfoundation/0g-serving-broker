@@ -154,7 +154,7 @@ func Main() {
 		}
 	}
 
-	h := handler.New(ctrl, proxy)
+	h := handler.New(ctrl, proxy, logger)
 	h.Register(engine)
 
 	// Listen and Serve with graceful shutdown
@@ -167,16 +167,16 @@ func Main() {
 		Handler: engine,
 	}
 
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("Server error: %v", err)
-			panic(err)
+			quit <- syscall.SIGTERM
 		}
 	}()
 
-	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Info("Shutting down server...")
 

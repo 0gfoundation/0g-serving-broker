@@ -113,7 +113,7 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 			// Keep the local hash (keccak256 of encrypted file) as the root hash
 		} else {
 			// Upload succeeded - use the storage root hash instead
-			f.logger.Infof("Successfully uploaded to 0G Storage for task %s, root hash: %s", task.ID, string(storageRootHash))
+			f.logger.Infof("Successfully uploaded to 0G Storage for task %s, root hash: %s", task.ID, hexutil.Encode(storageRootHash))
 			settlementMetadata.ModelRootHash = storageRootHash
 		}
 	} else {
@@ -206,7 +206,8 @@ func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHas
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("inference broker returned status %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("inference broker returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	f.logger.Infof("Pushed adapter key to inference broker for task %s", taskID)
@@ -350,12 +351,7 @@ func (f *Finalizer) uploadModel(ctx context.Context, encryptFile string) ([]byte
 		return modelRootHashes[0].Bytes(), nil
 	}
 
-	// Multi-fragment: concatenate raw bytes of all hashes
-	var data []byte
-	for _, hash := range modelRootHashes {
-		data = append(data, hash.Bytes()...)
-	}
-	return data, nil
+	return nil, fmt.Errorf("expected single storage root hash, got %d fragments", len(modelRootHashes))
 }
 
 func (f *Finalizer) uploadModelWithTimeout(ctx context.Context, encryptFile string) ([]common.Hash, error) {

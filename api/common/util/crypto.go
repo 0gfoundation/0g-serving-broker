@@ -28,7 +28,7 @@ func GenerateAESKey(keySize int) ([]byte, error) {
 	key := make([]byte, keySize)
 	_, err := io.ReadFull(rand.Reader, key)
 	if err != nil {
-		return nil, fmt.Errorf("error generating random key: %v", err)
+		return nil, fmt.Errorf("error generating random key: %w", err)
 	}
 
 	return key, nil
@@ -59,29 +59,36 @@ func AesEncrypt(key []byte, plaintext []byte) ([]byte, []byte, error) {
 func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, error) {
 	inFile, err := os.Open(inputFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open input file: %v", err)
+		return nil, fmt.Errorf("failed to open input file: %w", err)
 	}
 	defer inFile.Close()
 
 	outFile, err := os.Create(outputFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create output file: %v", err)
+		return nil, fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+
+	success := false
+	defer func() {
+		outFile.Close()
+		if !success {
+			os.Remove(outputFile)
+		}
+	}()
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
+		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM cipher: %v", err)
+		return nil, fmt.Errorf("failed to create GCM cipher: %w", err)
 	}
 
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("failed to generate nonce: %v", err)
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
 	incrementNonce := func(counter []byte) {
@@ -95,7 +102,7 @@ func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, erro
 
 	signature := make([]byte, 65)
 	if _, err := outFile.Write(append(signature, nonce...)); err != nil {
-		return nil, fmt.Errorf("failed to write nonce to output file: %v", err)
+		return nil, fmt.Errorf("failed to write nonce to output file: %w", err)
 	}
 
 	buf := make([]byte, defaultBufferSize)
@@ -107,19 +114,20 @@ func AesEncryptLargeFile(key []byte, inputFile, outputFile string) ([]byte, erro
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to read input file: %v", err)
+			return nil, fmt.Errorf("failed to read input file: %w", err)
 		}
 
 		ciphertext := gcm.Seal(nil, nonce, buf[:n], nil)
 		tagBuf.Write(ciphertext[len(ciphertext)-gcm.Overhead():])
 
 		if _, err := outFile.Write(ciphertext); err != nil {
-			return nil, fmt.Errorf("failed to write ciphertext to output file: %v", err)
+			return nil, fmt.Errorf("failed to write ciphertext to output file: %w", err)
 		}
 
 		incrementNonce(nonce)
 	}
 
+	success = true
 	return tagBuf.Bytes(), nil
 }
 
@@ -135,6 +143,9 @@ func AesDecrypt(key, ciphertext []byte) ([]byte, error) {
 	}
 
 	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short: %d bytes, need at least %d", len(ciphertext), nonceSize)
+	}
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
@@ -161,7 +172,14 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+
+	success := false
+	defer func() {
+		outFile.Close()
+		if !success {
+			os.Remove(outputFile)
+		}
+	}()
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -218,6 +236,7 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 		}
 	}
 
+	success = true
 	return nil
 }
 
@@ -226,12 +245,12 @@ func AesDecryptLargeFile(key []byte, inputFile, outputFile string) error {
 func ProviderECIESEncrypt(providerPrivKeyHex string, plaintext []byte) ([]byte, error) {
 	privKey, err := crypto.HexToECDSA(strings.TrimPrefix(providerPrivKeyHex, "0x"))
 	if err != nil {
-		return nil, fmt.Errorf("parse provider private key: %v", err)
+		return nil, fmt.Errorf("parse provider private key: %w", err)
 	}
 	pubKeyBytes := crypto.FromECDSAPub(&privKey.PublicKey)
 	eciesPubKey, err := ecies.NewPublicKeyFromBytes(pubKeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("create ECIES public key: %v", err)
+		return nil, fmt.Errorf("create ECIES public key: %w", err)
 	}
 	return ecies.Encrypt(eciesPubKey, plaintext)
 }
@@ -240,7 +259,7 @@ func ProviderECIESEncrypt(providerPrivKeyHex string, plaintext []byte) ([]byte, 
 func ProviderECIESDecrypt(providerPrivKeyHex string, ciphertext []byte) ([]byte, error) {
 	privKey, err := crypto.HexToECDSA(strings.TrimPrefix(providerPrivKeyHex, "0x"))
 	if err != nil {
-		return nil, fmt.Errorf("parse provider private key: %v", err)
+		return nil, fmt.Errorf("parse provider private key: %w", err)
 	}
 	eciesPrivKey := ecies.NewPrivateKeyFromBytes(crypto.FromECDSA(privKey))
 	return ecies.Decrypt(eciesPrivKey, ciphertext)
@@ -249,12 +268,12 @@ func ProviderECIESDecrypt(providerPrivKeyHex string, ciphertext []byte) ([]byte,
 func UnmarshalPubkey(pub string) (*ecdsa.PublicKey, error) {
 	bytes, err := hexutil.Decode(pub)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode public key: %v", err)
+		return nil, fmt.Errorf("failed to decode public key: %w", err)
 	}
 
 	ecdsaPub, err := crypto.UnmarshalPubkey(bytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse encoded public key: %v", err)
+		return nil, fmt.Errorf("failed to parse encoded public key: %w", err)
 	}
 
 	return ecdsaPub, nil

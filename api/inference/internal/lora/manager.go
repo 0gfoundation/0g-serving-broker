@@ -100,9 +100,13 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.logger.Errorf("failed to redeploy adapters: %v", err)
 	}
 
+	m.mu.RLock()
+	adapterCount := len(m.adapters)
+	m.mu.RUnlock()
+
 	go m.offloadLoop(ctx)
 
-	m.logger.Infof("LoRA Manager started: %d adapters loaded", len(m.adapters))
+	m.logger.Infof("LoRA Manager started: %d adapters loaded", adapterCount)
 	return nil
 }
 
@@ -230,9 +234,10 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 		return nil
 	}
 	m.adapters[adapterName] = info
+	infoCopy := *info
 	m.mu.Unlock()
 
-	go m.downloadAdapter(ctx, info)
+	go m.downloadAdapter(context.Background(), &infoCopy)
 	return nil
 }
 
@@ -245,6 +250,7 @@ func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
 		if err := m.downloadFromStorage(ctx, info); err != nil {
 			m.logger.Errorf("failed to download adapter %s from 0G Storage: %v", info.AdapterName, err)
+			os.RemoveAll(info.AdapterPath)
 			m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
 			return
 		}
@@ -406,7 +412,13 @@ func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error 
 		}
 
 		m.mu.RLock()
-		currentState := m.adapters[infoCopy.AdapterName].State
+		a, ok := m.adapters[infoCopy.AdapterName]
+		if !ok {
+			m.mu.RUnlock()
+			m.logger.Warnf("restore: adapter %s removed from map during download, aborting", infoCopy.AdapterName)
+			return
+		}
+		currentState := a.State
 		m.mu.RUnlock()
 
 		if currentState == model.AdapterStateFailed {
@@ -463,14 +475,14 @@ func (m *Manager) loadFromDB() error {
 
 func (m *Manager) redeployExistingAdapters(ctx context.Context) error {
 	m.mu.RLock()
-	var toRedeploy []*AdapterInfo
+	var toRedeploy []AdapterInfo
 	for _, a := range m.adapters {
 		switch a.State {
 		case model.AdapterStateActive, model.AdapterStateLoading:
-			toRedeploy = append(toRedeploy, a)
+			toRedeploy = append(toRedeploy, *a)
 		case model.AdapterStateReady:
 			if m.config.AutoDeploy {
-				toRedeploy = append(toRedeploy, a)
+				toRedeploy = append(toRedeploy, *a)
 			}
 		}
 	}
@@ -503,6 +515,8 @@ func (m *Manager) offloadLoop(ctx context.Context) {
 	if interval <= 0 {
 		interval = 60 * time.Minute
 	}
+	// Check at half the offload interval so an idle adapter is detected
+	// within [interval/2, interval] of its last access.
 	ticker := time.NewTicker(interval / 2)
 	defer ticker.Stop()
 
@@ -548,10 +562,10 @@ func MakeAdapterName(baseModel, taskID string) string {
 
 // InjectTestAdapter adds an adapter directly to the in-memory map (for testing only).
 func (m *Manager) InjectTestAdapter(name string, info *AdapterInfo) {
+	m.mu.Lock()
 	if m.adapters == nil {
 		m.adapters = make(map[string]*AdapterInfo)
 	}
-	m.mu.Lock()
 	m.adapters[name] = info
 	m.mu.Unlock()
 }

@@ -145,7 +145,10 @@ func (c *Ctrl) rewriteResponseModel(ctx *gin.Context, body []byte) []byte {
 		return body
 	}
 
-	target := originalModel.(string)
+	target, ok := originalModel.(string)
+	if !ok {
+		return body
+	}
 	for _, candidate := range c.vllmModelNames() {
 		if modelVal == candidate {
 			quoted, _ := json.Marshal(target)
@@ -167,7 +170,10 @@ func (c *Ctrl) rewriteResponseModelLine(ctx *gin.Context, line string) string {
 	if !exists {
 		return line
 	}
-	target := originalModel.(string)
+	target, ok := originalModel.(string)
+	if !ok {
+		return line
+	}
 	for _, candidate := range c.vllmModelNames() {
 		// Try both compact and spaced JSON formats
 		for _, pattern := range []string{

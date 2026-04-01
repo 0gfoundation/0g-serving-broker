@@ -188,5 +188,5 @@ func (w *EventWatcher) getDeliverableRootHash(
 		return "", fmt.Errorf("fetch deliverable %s from contract: %w", deliverableId, err)
 	}
 
-	return common.Bytes2Hex(deliverable.ModelRootHash), nil
+	return "0x" + common.Bytes2Hex(deliverable.ModelRootHash), nil
 }
