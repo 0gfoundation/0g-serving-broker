@@ -332,3 +332,50 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 		"message":     "Dataset uploaded successfully. Use this hash when creating a fine-tuning task.",
 	})
 }
+
+// DeleteDataset godoc
+//
+//	@Description  Delete a user-uploaded dataset. Requires signature authentication.
+//	@ID			deleteDataset
+//	@Tags		dataset
+//	@Router		/user/{userAddress}/dataset/{datasetHash} [delete]
+//	@Param		userAddress	path	string	true	"user address"
+//	@Param		datasetHash	path	string	true	"dataset hash (0x-prefixed)"
+//	@Param		signature	query	string	true	"EIP-191 personal_sign of keccak256(datasetHash + timestamp)"
+//	@Param		timestamp	query	string	true	"unix timestamp in seconds"
+//	@Success	200		{object}	object{message=string}	"Dataset deleted"
+func (h *Handler) DeleteDataset(ctx *gin.Context) {
+	userAddress := ctx.Param("userAddress")
+	datasetHash := ctx.Param("datasetHash")
+
+	signature := ctx.Query("signature")
+	if signature == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "signature is required"})
+		return
+	}
+
+	timestampStr := ctx.Query("timestamp")
+	if timestampStr == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "timestamp is required"})
+		return
+	}
+
+	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid timestamp format"})
+		return
+	}
+
+	if err := h.ctrl.VerifyDeleteDatasetSignature(datasetHash, userAddress, signature, timestamp); err != nil {
+		h.logger.Warnf("delete dataset signature verification failed for %s: %v", userAddress, err)
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
+		return
+	}
+
+	if err := h.ctrl.DeleteDataset(userAddress, datasetHash); err != nil {
+		handleBrokerError(ctx, err, "delete dataset")
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "Dataset deleted successfully"})
+}
