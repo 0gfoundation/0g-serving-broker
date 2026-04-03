@@ -338,12 +338,12 @@ func TestMakeAdapterName_EdgeCases(t *testing.T) {
 		expected  string
 	}{
 		{"model with spaces", "task-001", "ft-model-with-spaces-task-001"},
-		{"a/b.c d", "short", "ft-a-b-c-d-short"},
+		{"a/b.c d", "short", "ft-b-c-d-short"},
 		{"", "task-123", "ft--task-123"},
 		{"base", "", "ft-base-"},
 		{"base", "exactly12ch", "ft-base-exactly12ch"},
 		{"base", "exactly12chars", "ft-base-exactly12cha"},
-		{"/models/Qwen2.5-7B", "task-001", "ft-models-Qwen2-5-7B-task-001"},
+		{"/models/Qwen2.5-7B", "task-001", "ft-Qwen2-5-7B-task-001"},
 		{"///leading-slashes", "id", "ft-leading-slashes-id"},
 	}
 

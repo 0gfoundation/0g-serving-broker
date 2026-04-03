@@ -104,6 +104,13 @@ func (h *Handler) GetAdapterStatus(c *gin.Context) {
 
 	adapter := mgr.GetAdapter(name)
 	if adapter == nil {
+		// Fall back to taskID-based lookup: the URL path may contain a taskID
+		// or a name built from a different baseModel string than the broker used.
+		if found := mgr.FindAdapterByTaskID(name); found != nil {
+			adapter = found
+		}
+	}
+	if adapter == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "adapter not found: " + name})
 		return
 	}

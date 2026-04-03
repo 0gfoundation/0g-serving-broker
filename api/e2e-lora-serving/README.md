@@ -140,16 +140,9 @@ This downloads the encrypted model and confirms receipt on-chain. Wait about 60 
 
 ## Step 6 — Deploy the Adapter
 
-Once the task is **Finished**, deploy the adapter to the GPU:
+Once the task reaches **Delivered** (or later), deploy the adapter to the GPU:
 
 ```bash
-# Option A: Use adapter name directly (recommended — get it from acknowledge output)
-0g-compute-cli fine-tuning deploy-adapter \
-  --provider <PROVIDER> \
-  --adapter-name <ADAPTER_NAME> \
-  --wait
-
-# Option B: Use model + task-id (resolves the adapter name automatically)
 0g-compute-cli fine-tuning deploy-adapter \
   --provider <PROVIDER> \
   --model "Qwen2.5-0.5B-Instruct" \
@@ -157,7 +150,7 @@ Once the task is **Finished**, deploy the adapter to the GPU:
   --wait
 ```
 
-The `--wait` flag polls until the adapter is fully loaded. Without it, the command returns immediately after sending the deploy request.
+The `--wait` flag polls until the adapter is fully loaded (default timeout: 120s). Without it, the command returns immediately after sending the deploy request.
 
 ### Shortcut: Acknowledge + Deploy in one step
 
@@ -173,6 +166,8 @@ If you want to skip the separate deploy step, add `--deploy` to acknowledge:
 ```
 
 This acknowledges the model and immediately waits for the broker to deploy it.
+
+> **Note**: `--deploy` works best when the fine-tuning and inference brokers share the same endpoint. In a two-CVM setup (separate FT and inference brokers), use the explicit `deploy-adapter` command instead so you can target the correct provider URL.
 
 ## Step 7 — Chat with Your Model
 
@@ -247,8 +242,7 @@ ls ./my-adapter/
 | Check status | `0g-compute-cli fine-tuning get-task --provider <ADDR> --task <ID>` |
 | View training logs | `0g-compute-cli fine-tuning get-log --provider <ADDR> --task <ID>` |
 | Acknowledge model | `0g-compute-cli fine-tuning acknowledge-model --provider <ADDR> --task-id <ID> --data-path ./model` |
-| Deploy adapter | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --adapter-name <NAME> --wait` |
-| Deploy (alt) | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --model <MODEL> --task-id <ID> --wait` |
+| Deploy adapter | `0g-compute-cli fine-tuning deploy-adapter --provider <ADDR> --model <MODEL> --task-id <ID> --wait` |
 | Ack + Deploy | `0g-compute-cli fine-tuning acknowledge-model --provider <ADDR> --task-id <ID> --data-path ./model --model <MODEL> --deploy` |
 | Chat | `0g-compute-cli fine-tuning chat --provider <ADDR> --adapter-name <NAME> --message "Hi"` |
 | Chat (alt) | `0g-compute-cli fine-tuning chat --provider <ADDR> --model <MODEL> --task-id <ID> --message "Hi"` |
@@ -277,7 +271,7 @@ acknowledge (on-chain event)
 | Model names have no prefix | `Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B-Instruct` |
 | Learning rate format | `0.0002` | `2e-4` |
 | Provider flag name | `--provider` | `--provider-address` |
-| Deploy/chat: use `--adapter-name` or `--model` + `--task-id` | `deploy-adapter --adapter-name ft-...` | Providing neither |
+| Deploy uses `--model` + `--task-id`; chat also accepts `--adapter-name` | `deploy-adapter --model X --task-id Y` | Omitting required flags |
 
 ---
 
@@ -325,10 +319,15 @@ The adapter needs to be explicitly deployed. Run:
 The broker may still be downloading the adapter from 0G Storage. Check the adapter status:
 
 ```bash
+0g-compute-cli fine-tuning get-adapter-name \
+  --model "Qwen2.5-0.5B-Instruct" --task-id <TASK_ID>
+
 curl <BROKER_URL>/v1/lora/adapters/<ADAPTER_NAME>
 ```
 
 If state is `loading`, wait longer. If `failed`, check broker logs.
+
+If the status shows `not found`, ensure your CLI is built from the latest source — older CLI versions may compute a different adapter name than the broker expects.
 
 ### Provider config: auto-deploy mode
 

@@ -553,8 +553,11 @@ func (m *Manager) offloadIdleAdapters(ctx context.Context) {
 }
 
 // MakeAdapterName builds a deterministic adapter name from base model and task ID.
+// It strips any directory path from baseModel so that "/models/Qwen2.5-0.5B-Instruct"
+// and "Qwen2.5-0.5B-Instruct" produce the same name.
 func MakeAdapterName(baseModel, taskID string) string {
-	sanitized := strings.NewReplacer("/", "-", ".", "-", " ", "-").Replace(baseModel)
+	base := filepath.Base(baseModel)
+	sanitized := strings.NewReplacer("/", "-", ".", "-", " ", "-").Replace(base)
 	sanitized = strings.Trim(sanitized, "-")
 	short := taskID
 	if len(taskID) > 12 {
