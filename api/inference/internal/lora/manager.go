@@ -291,6 +291,16 @@ func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 
 // deployToVLLM loads the adapter into ServerlessLLM/vLLM.
 func (m *Manager) deployToVLLM(ctx context.Context, info *AdapterInfo) {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			m.logger.Warnf("context cancelled before deploying adapter %s", info.AdapterName)
+			m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+			return
+		default:
+		}
+	}
+
 	m.setAdapterState(info.AdapterName, model.AdapterStateLoading)
 
 	if err := m.sllmClient.DeployAdapter(ctx, info.BaseModel, info.AdapterName, info.AdapterPath); err != nil {
