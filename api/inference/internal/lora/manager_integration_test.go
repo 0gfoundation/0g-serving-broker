@@ -461,7 +461,8 @@ func TestRestoreAdapter_LoadingIsNoop(t *testing.T) {
 		logger: getTestLogger(),
 	}
 
-	err := m.RestoreAdapter(context.Background(), "ft-loading")
+	m.ctx = context.Background()
+	err := m.RestoreAdapter("ft-loading")
 	if err != nil {
 		t.Fatalf("RestoreAdapter on loading: %v", err)
 	}
