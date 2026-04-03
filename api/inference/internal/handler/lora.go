@@ -37,7 +37,8 @@ func toAdapterResponse(a *lora.AdapterInfo) adapterStatusResponse {
 // DeployAdapter triggers deployment of a "ready" adapter to vLLM.
 // Accepts either {adapterName} directly, or {taskId, baseModel} to resolve the name.
 func (h *Handler) DeployAdapter(c *gin.Context) {
-	if _, err := h.ctrl.ValidateSession(c); err != nil {
+	userAddr, err := h.ctrl.ValidateSession(c)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required: " + err.Error()})
 		return
 	}
@@ -71,6 +72,11 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 				adapterName = found.AdapterName
 			}
 		}
+	}
+
+	if !mgr.IsModelOwner(adapterName, userAddr) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "you do not own adapter " + adapterName})
+		return
 	}
 
 	if err := mgr.UserDeployAdapter(c.Request.Context(), adapterName); err != nil {
@@ -116,9 +122,10 @@ func (h *Handler) GetAdapterStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, toAdapterResponse(adapter))
 }
 
-// ListAdapters returns all known adapters.
+// ListAdapters returns adapters owned by the authenticated user.
 func (h *Handler) ListAdapters(c *gin.Context) {
-	if _, err := h.ctrl.ValidateSession(c); err != nil {
+	userAddr, err := h.ctrl.ValidateSession(c)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required: " + err.Error()})
 		return
 	}
@@ -129,7 +136,7 @@ func (h *Handler) ListAdapters(c *gin.Context) {
 		return
 	}
 
-	adapters := mgr.ListAdapters()
+	adapters := mgr.GetAdaptersByUser(userAddr)
 	result := make([]adapterStatusResponse, 0, len(adapters))
 	for _, a := range adapters {
 		result = append(result, toAdapterResponse(a))
