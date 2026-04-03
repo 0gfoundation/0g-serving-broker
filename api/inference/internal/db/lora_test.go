@@ -228,8 +228,8 @@ func TestListIdleAdapters(t *testing.T) {
 	if !names["idle1"] {
 		t.Error("expected idle1 (old access, active state) to be idle")
 	}
-	if !names["nil-access"] {
-		t.Error("expected nil-access (null last_access_at, active state) to be idle")
+	if names["nil-access"] {
+		t.Error("nil-access (null last_access_at) should NOT be idle — newly deployed, never accessed")
 	}
 	if names["active1"] {
 		t.Error("active1 (recent access) should NOT be idle")

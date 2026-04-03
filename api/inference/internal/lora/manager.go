@@ -249,11 +249,13 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 	infoCopy := *info
 	m.mu.Unlock()
 
-	select {
-	case <-m.ctx.Done():
-		m.setAdapterState(adapterName, model.AdapterStateFailed)
-		return fmt.Errorf("manager context cancelled, cannot start download for %s", adapterName)
-	default:
+	if m.ctx != nil {
+		select {
+		case <-m.ctx.Done():
+			m.setAdapterState(adapterName, model.AdapterStateFailed)
+			return fmt.Errorf("manager context cancelled, cannot start download for %s", adapterName)
+		default:
+		}
 	}
 
 	go m.downloadAdapter(m.ctx, &infoCopy)
