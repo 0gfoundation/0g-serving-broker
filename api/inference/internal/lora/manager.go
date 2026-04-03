@@ -35,6 +35,7 @@ type AdapterInfo struct {
 type Manager struct {
 	mu       sync.RWMutex
 	adapters map[string]*AdapterInfo // adapterName → info
+	ctx      context.Context         // application-scoped context for graceful shutdown
 
 	config             config.LoRAConfig
 	db                 *db.DB
@@ -92,6 +93,8 @@ func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database 
 
 // Start loads known adapters from DB and begins background loops.
 func (m *Manager) Start(ctx context.Context) error {
+	m.ctx = ctx
+
 	if err := m.loadFromDB(); err != nil {
 		m.logger.Errorf("failed to load adapters from DB: %v", err)
 	}
@@ -237,7 +240,7 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 	infoCopy := *info
 	m.mu.Unlock()
 
-	go m.downloadAdapter(context.Background(), &infoCopy)
+	go m.downloadAdapter(m.ctx, &infoCopy)
 	return nil
 }
 
@@ -310,7 +313,7 @@ func (m *Manager) UserDeployAdapter(ctx context.Context, adapterName string) err
 		info.State = model.AdapterStateLoading
 		infoCopy := *info
 		m.mu.Unlock()
-		go m.deployToVLLM(context.Background(), &infoCopy)
+		go m.deployToVLLM(m.ctx, &infoCopy)
 		return nil
 	case model.AdapterStateActive:
 		m.mu.Unlock()
@@ -371,7 +374,7 @@ func (m *Manager) downloadFromStorage(ctx context.Context, info *AdapterInfo) er
 // RestoreAdapter downloads and redeploys an offloaded/archived adapter.
 // When triggered by chat request, always deploy to make adapter immediately usable.
 // Uses CAS pattern: atomically checks and transitions state under write lock.
-func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error {
+func (m *Manager) RestoreAdapter(adapterName string) error {
 	m.mu.Lock()
 	info, ok := m.adapters[adapterName]
 	if !ok {
@@ -398,7 +401,7 @@ func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error 
 		m.logger.Infof("restore: downloading adapter %s from 0G Storage", infoCopy.AdapterName)
 
 		if _, err := os.Stat(infoCopy.AdapterPath); os.IsNotExist(err) {
-			if dlErr := m.downloadFromStorage(ctx, &infoCopy); dlErr != nil {
+			if dlErr := m.downloadFromStorage(m.ctx, &infoCopy); dlErr != nil {
 				m.logger.Errorf("restore: failed to download adapter %s from 0G Storage: %v", infoCopy.AdapterName, dlErr)
 				m.setAdapterState(infoCopy.AdapterName, model.AdapterStateFailed)
 				return
@@ -426,7 +429,7 @@ func (m *Manager) RestoreAdapter(ctx context.Context, adapterName string) error 
 		}
 
 		m.logger.Infof("restore: auto-deploying adapter %s to ServerlessLLM", infoCopy.AdapterName)
-		m.deployToVLLM(ctx, &infoCopy)
+		m.deployToVLLM(m.ctx, &infoCopy)
 	}()
 
 	return nil

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -225,7 +226,7 @@ func (f *Finalizer) addWalletSignature(req *http.Request, body []byte, taskID st
 	}
 
 	// Create provider address from private key
-	privateKey, err := crypto.HexToECDSA(providerKey)
+	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(providerKey, "0x"))
 	if err != nil {
 		return errors.Wrap(err, "parse provider private key")
 	}

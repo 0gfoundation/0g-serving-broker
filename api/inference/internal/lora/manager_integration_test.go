@@ -439,7 +439,8 @@ func TestRestoreAdapter_ActiveIsNoop(t *testing.T) {
 		logger: getTestLogger(),
 	}
 
-	err := m.RestoreAdapter(context.Background(), "ft-active")
+	m.ctx = context.Background()
+	err := m.RestoreAdapter("ft-active")
 	if err != nil {
 		t.Fatalf("RestoreAdapter on active: %v", err)
 	}
@@ -479,7 +480,8 @@ func TestRestoreAdapter_NotFoundReturnsError(t *testing.T) {
 		logger:   getTestLogger(),
 	}
 
-	err := m.RestoreAdapter(context.Background(), "nonexistent")
+	m.ctx = context.Background()
+	err := m.RestoreAdapter("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent adapter")
 	}
@@ -509,7 +511,8 @@ func TestRestoreAdapter_OffloadedTransitionsToLoading(t *testing.T) {
 		logger:     getTestLogger(),
 	}
 
-	err := m.RestoreAdapter(context.Background(), "ft-offloaded")
+	m.ctx = context.Background()
+	err := m.RestoreAdapter("ft-offloaded")
 	if err != nil {
 		t.Fatalf("RestoreAdapter: %v", err)
 	}

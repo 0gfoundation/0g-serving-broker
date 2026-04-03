@@ -1,7 +1,6 @@
 package ctrl
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -53,8 +52,7 @@ func (c *Ctrl) CheckLoRAOwnership(modelName, userAddress string) error {
 	case model.AdapterStateLoading:
 		return fmt.Errorf("model %s is still loading, please retry later", modelName)
 	case model.AdapterStateOffloaded, model.AdapterStateArchived:
-		// Trigger async restore and inform client to retry
-		go c.loraManager.RestoreAdapter(context.Background(), modelName)
+		go c.loraManager.RestoreAdapter(modelName)
 		return fmt.Errorf("model %s is restoring, please retry in 30 seconds", modelName)
 	case model.AdapterStateFailed:
 		return fmt.Errorf("model %s failed to deploy", modelName)
