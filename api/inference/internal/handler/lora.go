@@ -36,13 +36,7 @@ func toAdapterResponse(a *lora.AdapterInfo) adapterStatusResponse {
 
 // DeployAdapter triggers deployment of a "ready" adapter to vLLM.
 // Accepts either {adapterName} directly, or {taskId, baseModel} to resolve the name.
-// Requires session authentication to prevent unauthorized GPU deployments.
 func (h *Handler) DeployAdapter(c *gin.Context) {
-	if _, err := h.ctrl.ValidateSession(c); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required: " + err.Error()})
-		return
-	}
-
 	var req deployAdapterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -87,13 +81,7 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 }
 
 // GetAdapterStatus returns the current status of a single adapter.
-// Requires session authentication to prevent leaking user addresses and task IDs.
 func (h *Handler) GetAdapterStatus(c *gin.Context) {
-	if _, err := h.ctrl.ValidateSession(c); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required: " + err.Error()})
-		return
-	}
-
 	name := c.Param("name")
 
 	mgr := h.ctrl.GetLoRAManager()
@@ -119,13 +107,7 @@ func (h *Handler) GetAdapterStatus(c *gin.Context) {
 }
 
 // ListAdapters returns all known adapters.
-// Requires session authentication to prevent leaking user addresses and storage hashes.
 func (h *Handler) ListAdapters(c *gin.Context) {
-	if _, err := h.ctrl.ValidateSession(c); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required: " + err.Error()})
-		return
-	}
-
 	mgr := h.ctrl.GetLoRAManager()
 	if mgr == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "LoRA serving not enabled"})

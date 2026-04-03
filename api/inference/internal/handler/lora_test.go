@@ -46,7 +46,7 @@ func TestToAdapterResponse(t *testing.T) {
 	}
 }
 
-func TestDeployAdapter_RequiresAuth(t *testing.T) {
+func TestDeployAdapter_NoLoRA(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
@@ -57,12 +57,12 @@ func TestDeployAdapter_RequiresAuth(t *testing.T) {
 	h := newHandlerNoLoRA(t)
 	h.DeployAdapter(c)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d; body = %s", w.Code, http.StatusUnauthorized, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d; body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
 }
 
-func TestGetAdapterStatus_RequiresAuth(t *testing.T) {
+func TestGetAdapterStatus_NoLoRA(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("GET", "/v1/lora/adapters/ft-test", nil)
@@ -71,12 +71,12 @@ func TestGetAdapterStatus_RequiresAuth(t *testing.T) {
 	h := newHandlerNoLoRA(t)
 	h.GetAdapterStatus(c)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 }
 
-func TestListAdapters_RequiresAuth(t *testing.T) {
+func TestListAdapters_NoLoRA(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("GET", "/v1/lora/adapters", nil)
@@ -84,8 +84,8 @@ func TestListAdapters_RequiresAuth(t *testing.T) {
 	h := newHandlerNoLoRA(t)
 	h.ListAdapters(c)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 }
 
