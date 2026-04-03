@@ -355,14 +355,36 @@ func TestMakeAdapterName_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestIsModelOwner_NonexistentAdapter(t *testing.T) {
+func TestIsModelOwner(t *testing.T) {
 	m := &Manager{
 		adapters: make(map[string]*AdapterInfo),
 		logger:   getTestLogger(),
 	}
+	m.InjectTestAdapter("ft-alice-task1", &AdapterInfo{
+		AdapterName: "ft-alice-task1",
+		UserAddress: "0xAlice",
+	})
 
-	if m.IsModelOwner("nonexistent", "0xAnyone") {
-		t.Error("expected false for nonexistent adapter")
+	tests := []struct {
+		name        string
+		adapterName string
+		userAddr    string
+		want        bool
+	}{
+		{"owner matches", "ft-alice-task1", "0xAlice", true},
+		{"owner matches case-insensitive", "ft-alice-task1", "0xalice", true},
+		{"wrong owner", "ft-alice-task1", "0xBob", false},
+		{"nonexistent adapter", "nonexistent", "0xAlice", false},
+		{"empty user", "ft-alice-task1", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.IsModelOwner(tt.adapterName, tt.userAddr)
+			if got != tt.want {
+				t.Errorf("IsModelOwner(%q, %q) = %v, want %v", tt.adapterName, tt.userAddr, got, tt.want)
+			}
+		})
 	}
 }
 
