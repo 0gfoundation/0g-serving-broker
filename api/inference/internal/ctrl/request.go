@@ -205,7 +205,8 @@ func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
 	}
 
 	// Check token expiration (convert milliseconds to seconds)
-	if time.Now().Unix() > token.ExpiresAt/1000 {
+	// ExpiresAt == 0 means never expires (same semantics as ValidateSession)
+	if token.ExpiresAt > 0 && time.Now().Unix() > token.ExpiresAt/1000 {
 		return errors.New("provider token expired")
 	}
 

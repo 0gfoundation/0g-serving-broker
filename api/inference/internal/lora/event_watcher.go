@@ -28,6 +28,8 @@ type EventWatcher struct {
 	client          *ethclient.Client
 }
 
+// NewEventWatcher creates a watcher that polls the FineTuningServing contract for
+// DeliverableAcknowledged events and triggers adapter registration in the Manager.
 func NewEventWatcher(
 	manager *Manager,
 	database *db.DB,

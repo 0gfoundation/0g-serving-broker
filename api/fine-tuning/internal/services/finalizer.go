@@ -406,13 +406,13 @@ func (f *Finalizer) encryptAESKey(aesKey []byte, userPublicKey string) ([]byte, 
 func keccak256File(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open file %s: %w", path, err)
 	}
 	defer f.Close()
 
 	h := sha3.NewLegacyKeccak256()
 	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hash file %s: %w", path, err)
 	}
 	return h.Sum(nil), nil
 }

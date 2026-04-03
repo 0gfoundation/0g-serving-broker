@@ -32,6 +32,7 @@ type SLLMModelInfo struct {
 	Status string `json:"status"`
 }
 
+// NewSLLMClient creates an HTTP client for the ServerlessLLM adapter management API.
 func NewSLLMClient(baseURL string, logger log.Logger) *SLLMClient {
 	return &SLLMClient{
 		baseURL: baseURL,

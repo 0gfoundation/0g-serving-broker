@@ -180,10 +180,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		targetPath = strings.TrimRight(targetPath, "/")
 	}
 
-	p.logger.Debugf("Proxy debug: method=%s, url=%s, Content-Length=%s, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header)
+	p.logger.Debugf("Proxy: method=%s, url=%s, Content-Type=%s, Content-Length=%s", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Type"), ctx.Request.Header.Get("Content-Length"))
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
-		p.logger.Errorf("Proxy debug: ReadAll error: %v, method=%s, url=%s, Content-Length=%s, headers=%v", err, ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header)
+		p.logger.Errorf("Proxy: ReadAll error: %v, method=%s, url=%s, Content-Length=%s", err, ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"))
 		// Check if the error is due to request body size limit
 		if err.Error() == "http: request body too large" {
 			// Mark this as an expected client error, not a server error
@@ -197,7 +197,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "read request body")
 		return
 	}
-	p.logger.Debugf("Proxy debug: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d, headers=%v", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody), ctx.Request.Header)
+	p.logger.Debugf("Proxy: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody))
 
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetPath]; !ok {

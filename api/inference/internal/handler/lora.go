@@ -69,7 +69,12 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 		// so fall back to a taskID-based lookup when the computed name misses.
 		if mgr.GetAdapter(adapterName) == nil {
 			if found := mgr.FindAdapterByTaskID(req.TaskID); found != nil {
+				h.logger.Infof("DeployAdapter: name %s not found, resolved via taskID %s → %s",
+					adapterName, req.TaskID, found.AdapterName)
 				adapterName = found.AdapterName
+			} else {
+				c.JSON(http.StatusNotFound, gin.H{"error": "adapter not found for taskId " + req.TaskID})
+				return
 			}
 		}
 	}
@@ -92,8 +97,10 @@ func (h *Handler) DeployAdapter(c *gin.Context) {
 }
 
 // GetAdapterStatus returns the current status of a single adapter.
+// Only the adapter owner can query its status.
 func (h *Handler) GetAdapterStatus(c *gin.Context) {
-	if _, err := h.ctrl.ValidateSession(c); err != nil {
+	userAddr, err := h.ctrl.ValidateSession(c)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required: " + err.Error()})
 		return
 	}
@@ -108,14 +115,18 @@ func (h *Handler) GetAdapterStatus(c *gin.Context) {
 
 	adapter := mgr.GetAdapter(name)
 	if adapter == nil {
-		// Fall back to taskID-based lookup: the URL path may contain a taskID
-		// or a name built from a different baseModel string than the broker used.
 		if found := mgr.FindAdapterByTaskID(name); found != nil {
+			h.logger.Infof("GetAdapterStatus: name %s not found, resolved via taskID → %s", name, found.AdapterName)
 			adapter = found
 		}
 	}
 	if adapter == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "adapter not found: " + name})
+		return
+	}
+
+	if !mgr.IsModelOwner(adapter.AdapterName, userAddr) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "you do not own adapter " + name})
 		return
 	}
 

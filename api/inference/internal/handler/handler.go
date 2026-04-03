@@ -113,6 +113,7 @@ func (h *Handler) Register(r *gin.Engine) {
 	// LoRA adapter management API (called by user CLI)
 	loraGroup := group.Group("/lora")
 	loraGroup.Use(corsMiddleware())
+	loraGroup.Use(middleware.RateLimitMiddleware(h.rateLimiter))
 	loraGroup.POST("/adapters/deploy", h.DeployAdapter)
 	loraGroup.GET("/adapters", h.ListAdapters)
 	loraGroup.GET("/adapters/:name", h.GetAdapterStatus)

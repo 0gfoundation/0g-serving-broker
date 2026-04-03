@@ -156,6 +156,8 @@ func AesDecrypt(key, ciphertext []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+// tagSigSize is the 65-byte ECDSA signature (R=32 + S=32 + V=1) prepended to
+// encrypted files by AesEncryptLargeFile for integrity verification.
 const tagSigSize = 65
 
 // AesDecryptLargeFile decrypts a file produced by AesEncryptLargeFile.

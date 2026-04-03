@@ -149,7 +149,10 @@ func (c *Ctrl) rewriteResponseModel(ctx *gin.Context, body []byte) []byte {
 	}
 	for _, candidate := range c.vllmModelNames() {
 		if modelVal == candidate {
-			quoted, _ := json.Marshal(target)
+			quoted, err := json.Marshal(target)
+			if err != nil {
+				return body
+			}
 			resp["model"] = quoted
 			out, err := json.Marshal(resp)
 			if err != nil {

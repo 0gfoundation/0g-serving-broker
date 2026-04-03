@@ -23,6 +23,8 @@ type StorageDownloader struct {
 	logger        log.Logger
 }
 
+// NewStorageDownloader creates a downloader that fetches encrypted adapters from 0G Storage
+// and decrypts them using the provider's ECIES/AES keys.
 func NewStorageDownloader(cfg config.LoRAConfig, providerKey string, logger log.Logger) (*StorageDownloader, error) {
 	if cfg.StorageIndexerUrl == "" {
 		return nil, errors.New("storageIndexerUrl not configured")

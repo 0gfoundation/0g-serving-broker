@@ -44,6 +44,8 @@ type Manager struct {
 	logger             log.Logger
 }
 
+// NewManager creates a LoRA adapter manager with the given config, 0G Storage downloader,
+// and ServerlessLLM client. Call Start() to begin background event processing.
 func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database *db.DB, logger log.Logger) (*Manager, error) {
 	if cfg.LoraModulesDir != "" {
 		if err := os.MkdirAll(cfg.LoraModulesDir, 0755); err != nil {
@@ -59,6 +61,10 @@ func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database 
 
 	var downloader *StorageDownloader
 	eciesKey := cfg.EciesPrivateKey
+	if envKey := os.Getenv("LORA_ECIES_PRIVATE_KEY"); envKey != "" {
+		eciesKey = envKey
+		logger.Infof("using ECIES private key from LORA_ECIES_PRIVATE_KEY environment variable")
+	}
 	if eciesKey == "" {
 		k, err := commonconfig.GetProviderPrivateKey(networks)
 		if err != nil {
@@ -170,9 +176,12 @@ func (m *Manager) IsModelOwner(adapterName, userAddress string) bool {
 	return strings.EqualFold(a.UserAddress, userAddress)
 }
 
+// LoRAAdapterPrefix is the naming prefix for fine-tuned LoRA adapter models.
+const LoRAAdapterPrefix = "ft-"
+
 // IsLoRAModel returns true if the model name represents a fine-tuned LoRA adapter.
 func IsLoRAModel(modelName string) bool {
-	return strings.HasPrefix(modelName, "ft-")
+	return strings.HasPrefix(modelName, LoRAAdapterPrefix)
 }
 
 // RecordAccess updates last access time for an adapter.
@@ -239,6 +248,13 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 	m.adapters[adapterName] = info
 	infoCopy := *info
 	m.mu.Unlock()
+
+	select {
+	case <-m.ctx.Done():
+		m.setAdapterState(adapterName, model.AdapterStateFailed)
+		return fmt.Errorf("manager context cancelled, cannot start download for %s", adapterName)
+	default:
+	}
 
 	go m.downloadAdapter(m.ctx, &infoCopy)
 	return nil
@@ -414,19 +430,20 @@ func (m *Manager) RestoreAdapter(adapterName string) error {
 			}
 		}
 
-		m.mu.RLock()
+		m.mu.Lock()
 		a, ok := m.adapters[infoCopy.AdapterName]
 		if !ok {
-			m.mu.RUnlock()
+			m.mu.Unlock()
 			m.logger.Warnf("restore: adapter %s removed from map during download, aborting", infoCopy.AdapterName)
 			return
 		}
-		currentState := a.State
-		m.mu.RUnlock()
-
-		if currentState == model.AdapterStateFailed {
+		if a.State == model.AdapterStateFailed {
+			m.mu.Unlock()
 			return
 		}
+		a.State = model.AdapterStateLoading
+		infoCopy.State = model.AdapterStateLoading
+		m.mu.Unlock()
 
 		m.logger.Infof("restore: auto-deploying adapter %s to ServerlessLLM", infoCopy.AdapterName)
 		m.deployToVLLM(m.ctx, &infoCopy)
@@ -563,7 +580,7 @@ func MakeAdapterName(baseModel, taskID string) string {
 	if len(taskID) > 12 {
 		short = taskID[:12]
 	}
-	return fmt.Sprintf("ft-%s-%s", sanitized, short)
+	return fmt.Sprintf("%s%s-%s", LoRAAdapterPrefix, sanitized, short)
 }
 
 // InjectTestAdapter adds an adapter directly to the in-memory map (for testing only).
