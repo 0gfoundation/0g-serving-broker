@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -115,7 +116,7 @@ func Main() {
 		loraCtx, loraCancel = context.WithCancel(ctx)
 
 		if err := loraManager.Start(loraCtx); err != nil {
-			logger.Errorf("failed to start LoRA manager: %v", err)
+			panic(fmt.Sprintf("failed to start LoRA manager: %v", err))
 		}
 
 		ftProviderAddr := config.LoRA.FineTuningProviderAddr

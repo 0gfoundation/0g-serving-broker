@@ -172,7 +172,7 @@ type LoRAConfig struct {
 	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
 	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
 	FineTuningProviderAddr   string `yaml:"fineTuningProviderAddr"`   // Override FT provider address for event filtering (default: inference provider address)
-	EciesPrivateKey          string `yaml:"eciesPrivateKey"` // Override ECIES private key for adapter decryption (2-CVM setup). Prefer setting via env var LORA_ECIES_PRIVATE_KEY to avoid storing in config file.
+	EciesPrivateKey string `yaml:"-"` // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
 type Config struct {

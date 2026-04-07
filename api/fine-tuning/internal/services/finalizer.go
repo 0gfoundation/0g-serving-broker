@@ -137,10 +137,12 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 		}
 	}
 
-	// Step 4: Push adapter key to inference broker via HTTP (before addDeliverable)
+	// Step 4: Push adapter key to inference broker via HTTP (before addDeliverable).
+	// This MUST succeed before proceeding — if the key is not stored in the inference
+	// broker, downloadFromStorage will fail permanently after the user acknowledges.
 	if providerEncKey != nil && f.config.Service.InferenceServiceUrl != "" {
 		if pushErr := f.pushAdapterKey(ctx, task.ID.String(), hexutil.Encode(settlementMetadata.ModelRootHash), hexutil.Encode(providerEncKey)); pushErr != nil {
-			f.logger.Warnf("Failed to push adapter key to inference broker: %v", pushErr)
+			return fmt.Errorf("push adapter key to inference broker: %w", pushErr)
 		}
 	}
 
@@ -175,6 +177,8 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 // with its provider private key, and the inference broker verifies the signature.
 var adapterKeyHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
+const pushAdapterKeyMaxRetries = 3
+
 func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHash, providerEncKey string) error {
 	url := fmt.Sprintf("%s/internal/v1/adapter-keys", f.config.Service.InferenceServiceUrl)
 	payload := map[string]string{
@@ -187,6 +191,31 @@ func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHas
 		return errors.Wrap(err, "marshal adapter key payload")
 	}
 
+	var lastErr error
+	for attempt := 0; attempt < pushAdapterKeyMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			f.logger.Infof("Retrying pushAdapterKey for task %s (attempt %d/%d) after %v",
+				taskID, attempt+1, pushAdapterKeyMaxRetries, backoff)
+			select {
+			case <-parentCtx.Done():
+				return fmt.Errorf("context cancelled during retry backoff: %w", parentCtx.Err())
+			case <-time.After(backoff):
+			}
+		}
+
+		lastErr = f.doPushAdapterKey(parentCtx, url, body, taskID)
+		if lastErr == nil {
+			f.logger.Infof("Pushed adapter key to inference broker for task %s", taskID)
+			return nil
+		}
+		f.logger.Warnf("pushAdapterKey attempt %d/%d failed for task %s: %v",
+			attempt+1, pushAdapterKeyMaxRetries, taskID, lastErr)
+	}
+	return fmt.Errorf("pushAdapterKey failed after %d attempts: %w", pushAdapterKeyMaxRetries, lastErr)
+}
+
+func (f *Finalizer) doPushAdapterKey(parentCtx context.Context, url string, body []byte, taskID string) error {
 	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
@@ -211,7 +240,6 @@ func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHas
 		return fmt.Errorf("inference broker returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	f.logger.Infof("Pushed adapter key to inference broker for task %s", taskID)
 	return nil
 }
 

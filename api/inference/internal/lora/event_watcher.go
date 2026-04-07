@@ -120,17 +120,24 @@ func (w *EventWatcher) pollEvents(ctx context.Context, fromBlock *uint64) {
 		return
 	}
 
-	w.processAcknowledgedEvents(ctx, filterer, contractAddr, *fromBlock, currentBlock)
+	lowestFailed := w.processAcknowledgedEvents(ctx, filterer, contractAddr, *fromBlock, currentBlock)
 
-	*fromBlock = currentBlock + 1
+	if lowestFailed > 0 {
+		*fromBlock = lowestFailed
+	} else {
+		*fromBlock = currentBlock + 1
+	}
 }
 
+// processAcknowledgedEvents handles DeliverableAcknowledged events in the block range.
+// Returns the block number of the earliest failed event (so the watcher can retry it),
+// or 0 if all events were processed successfully.
 func (w *EventWatcher) processAcknowledgedEvents(
 	ctx context.Context,
 	filterer *ftcontract.FineTuningServingFilterer,
 	contractAddr common.Address,
 	startBlock, endBlock uint64,
-) {
+) uint64 {
 	opts := &bind.FilterOpts{
 		Start:   startBlock,
 		End:     &endBlock,
@@ -143,19 +150,22 @@ func (w *EventWatcher) processAcknowledgedEvents(
 	iter, err := filterer.FilterDeliverableAcknowledged(opts, nil, providerAddrs)
 	if err != nil {
 		w.logger.Errorf("failed to filter DeliverableAcknowledged events: %v", err)
-		return
+		return startBlock
 	}
 	defer iter.Close()
 
+	var lowestFailed uint64
 	for iter.Next() {
 		event := iter.Event
 		w.logger.Infof("DeliverableAcknowledged event: user=%s, deliverableId=%s, block=%d",
 			event.User.Hex(), event.DeliverableId, event.Raw.BlockNumber)
 
-		// Fetch the deliverable details to get the ModelRootHash
 		rootHash, err := w.getDeliverableRootHash(ctx, contractAddr, event.User, event.DeliverableId)
 		if err != nil {
 			w.logger.Errorf("failed to get deliverable root hash for %s: %v", event.DeliverableId, err)
+			if lowestFailed == 0 || event.Raw.BlockNumber < lowestFailed {
+				lowestFailed = event.Raw.BlockNumber
+			}
 			continue
 		}
 
@@ -168,8 +178,12 @@ func (w *EventWatcher) processAcknowledgedEvents(
 			event.Raw.BlockNumber,
 		); err != nil {
 			w.logger.Errorf("failed to register adapter for task %s: %v", event.DeliverableId, err)
+			if lowestFailed == 0 || event.Raw.BlockNumber < lowestFailed {
+				lowestFailed = event.Raw.BlockNumber
+			}
 		}
 	}
+	return lowestFailed
 }
 
 // getDeliverableRootHash fetches the on-chain modelRootHash for a deliverable.
