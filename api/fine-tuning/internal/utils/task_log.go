@@ -65,6 +65,11 @@ func NewTaskPaths(basePath string) *TaskPaths {
 	}
 }
 
+// GetDatasetBaseDir returns the base directory for user-uploaded datasets
+func GetDatasetBaseDir() string {
+	return filepath.Join(GetDataDir(), "datasets")
+}
+
 func GetTaskLogDir(id *uuid.UUID) string {
 	return filepath.Join(GetDataDir(), id.String())
 }

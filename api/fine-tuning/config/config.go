@@ -51,9 +51,11 @@ type Service struct {
 	// The fine-tuning broker pushes adapter keys here via POST /internal/v1/adapter-keys
 	// so the inference broker can decrypt adapters from 0G Storage.
 	InferenceServiceUrl string `yaml:"inferenceServiceUrl"`
-	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
-	// After this period, files will be automatically cleaned up
-	// Default: 72 hours (3 days)
+	// FileRetentionHours specifies how long to keep user-uploaded dataset files
+	// under {dataDir}/datasets/. Files older than this period that are not referenced
+	// by any active task will be automatically cleaned up.
+	// Per-task artifacts (model, output) are governed by DataRetentionDays instead.
+	// Default: 72 hours (3 days). Set to 0 to disable dataset cleanup.
 	FileRetentionHours int `yaml:"fileRetentionHours"`
 	// DataDir specifies the root directory for storing task data (datasets, models, outputs)
 	// Default: /tmp (uses os.TempDir())
@@ -242,6 +244,9 @@ func GetConfig() *Config {
 			MaxTaskQueueSize:            5,
 			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations
 			RateLimitBurst:              2,   // Default: burst of 2 requests - allows retry on failure
+			Service: Service{
+				FileRetentionHours: 72, // Default: 72 hours (3 days) for uploaded dataset files
+			},
 		}
 
 		if err := loadConfig(instance); err != nil {
