@@ -545,7 +545,20 @@ func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (stri
 		return "", errors.Wrap(err, "create dataset directory")
 	}
 
-	// 5. Open uploaded file
+	// 5. Pre-flight per-user storage quota check (best-effort; verified again after write)
+	quota := c.config.Service.DatasetQuotaPerUser
+	if quota > 0 && file.Size > 0 {
+		currentSize, err := c.GetUserDatasetStorageSize(userAddress)
+		if err != nil {
+			return "", errors.Wrap(err, "check storage quota")
+		}
+		if currentSize+file.Size > quota {
+			return "", fmt.Errorf("storage quota exceeded: used %d bytes, limit %d bytes, upload size %d bytes",
+				currentSize, quota, file.Size)
+		}
+	}
+
+	// 6. Open uploaded file
 	src, err := file.Open()
 	if err != nil {
 		return "", errors.Wrap(err, "open uploaded file")
@@ -571,6 +584,18 @@ func (c *Ctrl) SaveDataset(userAddress string, file *multipart.FileHeader) (stri
 	bytesWritten, err := io.Copy(multiWriter, src)
 	if err != nil {
 		return "", errors.Wrap(err, "process file content")
+	}
+
+	// 7b. Post-write quota verification using actual bytes written
+	if quota > 0 {
+		currentSize, err := c.GetUserDatasetStorageSize(userAddress)
+		if err != nil {
+			return "", errors.Wrap(err, "check storage quota after write")
+		}
+		if currentSize+bytesWritten > quota {
+			return "", fmt.Errorf("storage quota exceeded: used %d bytes + %d written > limit %d bytes",
+				currentSize, bytesWritten, quota)
+		}
 	}
 
 	// 8. Finalize hash
@@ -746,5 +771,159 @@ func validateJSONLFormat(content []byte) error {
 	}
 
 	return nil
+}
+
+// GetUserDatasetStorageSize calculates the total disk space consumed by a user's
+// uploaded datasets under {dataDir}/datasets/{userAddress}/.
+// Temporary upload files (temp_*) are excluded; all other files and directories
+// (dataset files, _hf companions, and any other artifacts) are counted.
+func (c *Ctrl) GetUserDatasetStorageSize(userAddress string) (int64, error) {
+	datasetDir := filepath.Join(utils.GetDataDir(), "datasets", userAddress)
+
+	var totalSize int64
+	err := filepath.Walk(datasetDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, "temp_") {
+			return nil
+		}
+		totalSize += info.Size()
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return 0, fmt.Errorf("walk dataset directory: %w", err)
+	}
+
+	return totalSize, nil
+}
+
+// DeleteDataset removes a user's uploaded dataset file and its HF-converted companion directory.
+// Deletion is blocked if any active (non-terminal) task references the dataset hash.
+//
+// Note: There is a small TOCTOU window between the active-task check and file removal.
+// If a new task is created with the same hash in that window, the setup service will
+// re-download the dataset from 0G Storage.
+func (c *Ctrl) DeleteDataset(userAddress, datasetHash string) error {
+	if !common.IsHexAddress(userAddress) {
+		return errors.New("invalid user address format")
+	}
+
+	if !isValidDatasetHash(datasetHash) {
+		return errors.New("invalid dataset hash format: expected 0x-prefixed 64-char hex string")
+	}
+
+	datasetHash = strings.ToLower(datasetHash)
+
+	baseDir := filepath.Join(utils.GetDataDir(), "datasets")
+	filePath := filepath.Join(baseDir, userAddress, datasetHash)
+
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return errors.Wrap(err, "resolve file path")
+	}
+	absBaseDir, err := filepath.Abs(baseDir)
+	if err != nil {
+		return errors.Wrap(err, "resolve base directory")
+	}
+	if !strings.HasPrefix(absFilePath, absBaseDir+string(filepath.Separator)) {
+		return errors.New("path traversal detected")
+	}
+
+	hasActive, err := c.db.HasActiveTasksWithDatasetHash(userAddress, datasetHash)
+	if err != nil {
+		return errors.Wrap(err, "check dataset usage")
+	}
+	if hasActive {
+		return errors.New("cannot delete dataset: referenced by an active task")
+	}
+
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "delete dataset file")
+	}
+
+	hfPath := filePath + "_hf"
+	if err := os.RemoveAll(hfPath); err != nil {
+		c.logger.Warnf("failed to remove HF companion dir %s: %v", hfPath, err)
+	}
+
+	c.logger.Infof("Dataset deleted: %s (user: %s)", datasetHash, userAddress)
+	return nil
+}
+
+// VerifyDeleteDatasetSignature verifies that the signature is valid for dataset deletion.
+// Uses the message format: TextHash(keccak256(datasetHash + timestamp))
+// Validates that the timestamp is within an acceptable time window (5 minutes).
+func (c *Ctrl) VerifyDeleteDatasetSignature(datasetHash, userAddress, signature string, timestamp int64) error {
+	if !common.IsHexAddress(userAddress) {
+		return errors.New("invalid user address format")
+	}
+
+	if !isValidDatasetHash(datasetHash) {
+		return errors.New("invalid dataset hash format")
+	}
+
+	datasetHash = strings.ToLower(datasetHash)
+
+	currentTime := time.Now().Unix()
+	timeDiff := currentTime - timestamp
+
+	if timeDiff < -60 {
+		return fmt.Errorf("timestamp is too far in the future: %d seconds ahead", -timeDiff)
+	}
+	if timeDiff > 300 {
+		return fmt.Errorf("timestamp is too old: %d seconds ago (max 300 seconds)", timeDiff)
+	}
+
+	message := fmt.Sprintf("%s%d", datasetHash, timestamp)
+	hash := accounts.TextHash(crypto.Keccak256([]byte(message)))
+
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return errors.Wrap(err, "decode signature")
+	}
+
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length %d, expected 65", len(sigBytes))
+	}
+
+	if sigBytes[64] != 27 && sigBytes[64] != 28 {
+		return fmt.Errorf("invalid recovery ID (V): got %d", sigBytes[64])
+	}
+
+	sigBytes[64] -= 27
+	pubKey, err := crypto.SigToPub(hash, sigBytes)
+	if err != nil {
+		return errors.Wrap(err, "recover public key from signature")
+	}
+
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	expectedAddr := common.HexToAddress(userAddress)
+
+	if recoveredAddr != expectedAddr {
+		return fmt.Errorf("signature verification failed: expected %s, got %s", expectedAddr.Hex(), recoveredAddr.Hex())
+	}
+
+	return nil
+}
+
+// isValidDatasetHash checks that a dataset hash is a 0x-prefixed 64-character hex string.
+func isValidDatasetHash(hash string) bool {
+	if len(hash) != 66 || !strings.HasPrefix(hash, "0x") {
+		return false
+	}
+	for _, c := range hash[2:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 

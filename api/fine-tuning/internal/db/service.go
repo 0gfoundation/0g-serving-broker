@@ -134,6 +134,25 @@ func (d *DB) GetUserAcknowledgedTasks() ([]Task, error) {
 	return filteredTasks, nil
 }
 
+// HasActiveTasksWithDatasetHash checks whether any non-terminal tasks by the given user
+// reference the given dataset hash. A task is considered active if its progress is not
+// Finished or Failed. The comparison uses LOWER() to handle potential casing differences
+// between client-submitted hashes and on-disk canonical lowercase form.
+func (d *DB) HasActiveTasksWithDatasetHash(userAddress, datasetHash string) (bool, error) {
+	var count int64
+	terminalStates := []string{
+		ProgressStateFinished.String(),
+		ProgressStateFailed.String(),
+	}
+	ret := d.db.Model(&Task{}).
+		Where("LOWER(dataset_hash) = LOWER(?) AND user_address = ? AND progress NOT IN ?", datasetHash, userAddress, terminalStates).
+		Count(&count)
+	if ret.Error != nil {
+		return false, ret.Error
+	}
+	return count > 0, nil
+}
+
 func (d *DB) UpdateTask(id *uuid.UUID, new Task) error {
 	ret := d.db.Where(&Task{ID: id}).Where("progress <> ?", ProgressStateFailed.String()).Updates(new)
 	return ret.Error

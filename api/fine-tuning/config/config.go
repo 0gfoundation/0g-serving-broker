@@ -59,6 +59,11 @@ type Service struct {
 	// Default: /tmp (uses os.TempDir())
 	// Recommended: /dstack/persistent for large models to avoid memory pressure
 	DataDir string `yaml:"dataDir"`
+	// DatasetQuotaPerUser is the maximum total storage (in bytes) each user may consume
+	// for uploaded datasets under {dataDir}/datasets/{userAddress}/.
+	// 0 means unlimited (no quota enforcement).
+	// Default: 10 GB (10737418240 bytes).
+	DatasetQuotaPerUser int64 `yaml:"datasetQuotaPerUser"`
 }
 
 func (s *Service) GetCustomizedModels() map[ethcommon.Hash]CustomizedModel {
@@ -242,6 +247,9 @@ func GetConfig() *Config {
 			MaxTaskQueueSize:            5,
 			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations
 			RateLimitBurst:              2,   // Default: burst of 2 requests - allows retry on failure
+			Service: Service{
+				DatasetQuotaPerUser: 10 * 1024 * 1024 * 1024, // 10 GB
+			},
 		}
 
 		if err := loadConfig(instance); err != nil {
