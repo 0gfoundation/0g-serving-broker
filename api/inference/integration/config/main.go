@@ -14,6 +14,100 @@ import (
 )
 
 // Configuration structures
+
+// ModelArchitecture describes the model's input/output modalities.
+type ModelArchitecture struct {
+	Modality         string   `yaml:"modality,omitempty"`
+	InputModalities  []string `yaml:"inputModalities,omitempty"`
+	OutputModalities []string `yaml:"outputModalities,omitempty"`
+	InstructType     string   `yaml:"instructType,omitempty"`
+	Tokenizer        string   `yaml:"tokenizer,omitempty"`
+}
+
+// MarshalYAML renders short slice fields in flow style (e.g., ["text"]).
+func (a ModelArchitecture) MarshalYAML() (interface{}, error) {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+
+	addScalar := func(key, value string) {
+		if value == "" {
+			return
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: value},
+		)
+	}
+	addFlowSeq := func(key string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		seq := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
+		for _, v := range values {
+			seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: v})
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+			seq,
+		)
+	}
+
+	addScalar("modality", a.Modality)
+	addFlowSeq("inputModalities", a.InputModalities)
+	addFlowSeq("outputModalities", a.OutputModalities)
+	addScalar("instructType", a.InstructType)
+	addScalar("tokenizer", a.Tokenizer)
+
+	return node, nil
+}
+
+// ModelInfo holds optional metadata for the /v1/models endpoint.
+type ModelInfo struct {
+	Name                string                 `yaml:"name,omitempty"`
+	Description         string                 `yaml:"description,omitempty"`
+	ContextLength       int                    `yaml:"contextLength,omitempty"`
+	MaxCompletionTokens int                    `yaml:"maxCompletionTokens,omitempty"`
+	Architecture        *ModelArchitecture     `yaml:"architecture,omitempty"`
+	SupportedParameters []string               `yaml:"supportedParameters,omitempty"`
+	SupportedFormats    []string               `yaml:"supportedFormats,omitempty"`
+	DefaultParameters   map[string]interface{} `yaml:"defaultParameters,omitempty"`
+	TeeType             string                 `yaml:"teeType,omitempty"`
+	ExpirationDate      string                 `yaml:"expirationDate,omitempty"`
+	VideoSizeRatios     map[string]float64     `yaml:"videoSizeRatios,omitempty"`
+}
+
+// MarshalYAML renders supportedFormats in flow style to match the actual config format.
+func (m ModelInfo) MarshalYAML() (interface{}, error) {
+	// Marshal via yaml.Node so we can control per-field style.
+	var node yaml.Node
+	if err := node.Encode(struct {
+		Name                string                 `yaml:"name,omitempty"`
+		Description         string                 `yaml:"description,omitempty"`
+		ContextLength       int                    `yaml:"contextLength,omitempty"`
+		MaxCompletionTokens int                    `yaml:"maxCompletionTokens,omitempty"`
+		Architecture        *ModelArchitecture     `yaml:"architecture,omitempty"`
+		SupportedParameters []string               `yaml:"supportedParameters,omitempty"`
+		SupportedFormats    []string               `yaml:"supportedFormats,omitempty"`
+		DefaultParameters   map[string]interface{} `yaml:"defaultParameters,omitempty"`
+		TeeType             string                 `yaml:"teeType,omitempty"`
+		ExpirationDate      string                 `yaml:"expirationDate,omitempty"`
+		VideoSizeRatios     map[string]float64     `yaml:"videoSizeRatios,omitempty"`
+	}(m)); err != nil {
+		return nil, err
+	}
+
+	// Walk the mapping node and set flow style on supportedFormats sequence.
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i].Value
+			if key == "supportedFormats" && node.Content[i+1].Kind == yaml.SequenceNode {
+				node.Content[i+1].Style = yaml.FlowStyle
+			}
+		}
+	}
+
+	return &node, nil
+}
+
 type Service struct {
 	ServingURL       string                 `yaml:"servingUrl,omitempty"`
 	TargetURL        string                 `yaml:"targetUrl,omitempty"`
@@ -26,6 +120,9 @@ type Service struct {
 	TargetSeparated  bool                   `yaml:"targetSeparated"`
 	VerifierUrl      string                 `yaml:"verifierUrl,omitempty"`
 	AdditionalSecret map[string]interface{} `yaml:"additionalSecret,omitempty"`
+	ProviderStake    string                 `yaml:"providerStake,omitempty"`
+	OwnedBy          string                 `yaml:"ownedBy,omitempty"`
+	ModelInfo        *ModelInfo             `yaml:"modelInfo,omitempty"`
 }
 
 type NetworkConfig struct {
@@ -59,6 +156,7 @@ type Config struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime,omitempty"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor,omitempty"`
 		SettlementProcessor      int `yaml:"settlementProcessor,omitempty"`
+		ReconciliationProcessor  int `yaml:"reconciliationProcessor,omitempty"`
 	} `yaml:"interval,omitempty"`
 	RevenueTransfer struct {
 		TargetAddress string `yaml:"targetAddress,omitempty"`
@@ -83,7 +181,29 @@ type Config struct {
 		BrokerLogDir string `yaml:"brokerLogDir,omitempty"`
 		EventLogDir  string `yaml:"eventLogDir,omitempty"`
 	} `yaml:"logPaths,omitempty"`
-	Controller ControllerConfig `yaml:"controller,omitempty"`
+	Controller        ControllerConfig `yaml:"controller,omitempty"`
+	CacheTokenBilling struct {
+		Enabled bool  `yaml:"enabled,omitempty"`
+		Divisor int64 `yaml:"divisor,omitempty"`
+	} `yaml:"cacheTokenBilling,omitempty"`
+	Whitelist struct {
+		Enabled       bool     `yaml:"enabled,omitempty"`
+		UserAddresses []string `yaml:"userAddresses,omitempty"`
+	} `yaml:"whitelist,omitempty"`
+	Async struct {
+		Enabled                bool `yaml:"enabled,omitempty"`
+		MaxConcurrentJobs      int  `yaml:"maxConcurrentJobs,omitempty"`
+		MaxQueueSize           int  `yaml:"maxQueueSize,omitempty"`
+		ResultTTLMinutes       int  `yaml:"resultTTLMinutes,omitempty"`
+		CleanupIntervalSeconds int  `yaml:"cleanupIntervalSeconds,omitempty"`
+		JobTimeoutMinutes      int  `yaml:"jobTimeoutMinutes,omitempty"`
+	} `yaml:"async,omitempty"`
+	ConcurrencyLimit struct {
+		MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent,omitempty"`
+		MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent,omitempty"`
+		PerUserRPM           int `yaml:"perUserRPM,omitempty"`
+		PerUserBurst         int `yaml:"perUserBurst,omitempty"`
+	} `yaml:"concurrencyLimit,omitempty"`
 }
 
 // Required fields definition
@@ -886,9 +1006,225 @@ func main() {
 		fmt.Println("   ✓ Controller service will not be deployed")
 	}
 
+	// Ask about model info configuration
+	var modelInfoConfig *ModelInfo
+	fmt.Print("\n📋 Do you want to configure model metadata for the /v1/models endpoint? [y/N]: ")
+	modelInfoResponse, _ := reader.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(modelInfoResponse)) == "y" {
+		modelInfoConfig = &ModelInfo{}
+
+		// Name (required)
+		for {
+			fmt.Print("\n📝 Enter model display name (e.g., Meta: Llama 3.1 8B Instruct): ")
+			input, _ := reader.ReadString('\n')
+			modelInfoConfig.Name = strings.TrimSpace(input)
+			if modelInfoConfig.Name == "" {
+				fmt.Println("   ❌ Model name is required!")
+				continue
+			}
+			break
+		}
+		fmt.Printf("   ✓ Model name: %s\n", modelInfoConfig.Name)
+
+		// Description (required)
+		for {
+			fmt.Print("📝 Enter model description: ")
+			input, _ := reader.ReadString('\n')
+			modelInfoConfig.Description = strings.TrimSpace(input)
+			if modelInfoConfig.Description == "" {
+				fmt.Println("   ❌ Model description is required!")
+				continue
+			}
+			break
+		}
+		fmt.Printf("   ✓ Description: %s\n", modelInfoConfig.Description)
+
+		// Context length (required, unless video-generation)
+		fmt.Print("📝 Enter max context window size in tokens (e.g., 131072, press Enter to skip for video models): ")
+		ctxInput, _ := reader.ReadString('\n')
+		ctxInput = strings.TrimSpace(ctxInput)
+		if ctxInput != "" {
+			if val, err := strconv.Atoi(ctxInput); err == nil && val > 0 {
+				modelInfoConfig.ContextLength = val
+				fmt.Printf("   ✓ Context length: %d\n", val)
+			} else {
+				fmt.Println("   ⚠️  Invalid value, skipping context length")
+			}
+		}
+
+		// Max completion tokens (optional)
+		fmt.Print("📝 Enter max output tokens (press Enter to skip): ")
+		maxInput, _ := reader.ReadString('\n')
+		maxInput = strings.TrimSpace(maxInput)
+		if maxInput != "" {
+			if val, err := strconv.Atoi(maxInput); err == nil && val > 0 {
+				modelInfoConfig.MaxCompletionTokens = val
+				fmt.Printf("   ✓ Max completion tokens: %d\n", val)
+			} else {
+				fmt.Println("   ⚠️  Invalid value, skipping")
+			}
+		}
+
+		// Architecture (required)
+		fmt.Println("\n🏗️  Model Architecture:")
+		arch := &ModelArchitecture{}
+
+		for {
+			fmt.Print("   Modality (e.g., text->text, text+image->text): ")
+			input, _ := reader.ReadString('\n')
+			arch.Modality = strings.TrimSpace(input)
+			if arch.Modality == "" {
+				fmt.Println("   ❌ Modality is required!")
+				continue
+			}
+			break
+		}
+
+		for {
+			fmt.Print("   Input modalities (comma-separated, e.g., text,image): ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+			if input == "" {
+				fmt.Println("   ❌ Input modalities are required!")
+				continue
+			}
+			for _, m := range strings.Split(input, ",") {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					arch.InputModalities = append(arch.InputModalities, m)
+				}
+			}
+			break
+		}
+
+		for {
+			fmt.Print("   Output modalities (comma-separated, e.g., text): ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+			if input == "" {
+				fmt.Println("   ❌ Output modalities are required!")
+				continue
+			}
+			for _, m := range strings.Split(input, ",") {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					arch.OutputModalities = append(arch.OutputModalities, m)
+				}
+			}
+			break
+		}
+
+		fmt.Print("   Instruct type (e.g., chatml, alpaca, press Enter to skip): ")
+		input, _ := reader.ReadString('\n')
+		arch.InstructType = strings.TrimSpace(input)
+
+		fmt.Print("   Tokenizer (e.g., llama3, cl100k_base, press Enter to skip): ")
+		input, _ = reader.ReadString('\n')
+		arch.Tokenizer = strings.TrimSpace(input)
+
+		modelInfoConfig.Architecture = arch
+		fmt.Printf("   ✓ Architecture: %s\n", arch.Modality)
+
+		// Supported parameters (required)
+		for {
+			fmt.Print("\n📝 Supported parameters (comma-separated, e.g., temperature,top_p,top_k,max_tokens): ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+			if input == "" {
+				fmt.Println("   ❌ Supported parameters are required!")
+				continue
+			}
+			for _, p := range strings.Split(input, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					modelInfoConfig.SupportedParameters = append(modelInfoConfig.SupportedParameters, p)
+				}
+			}
+			break
+		}
+		fmt.Printf("   ✓ Supported parameters: %v\n", modelInfoConfig.SupportedParameters)
+
+		// Supported formats (optional)
+		fmt.Print("📝 Supported API formats (comma-separated, e.g., openai,anthropic, press Enter for default [openai]): ")
+		input, _ = reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input != "" {
+			for _, f := range strings.Split(input, ",") {
+				f = strings.TrimSpace(f)
+				if f != "" {
+					modelInfoConfig.SupportedFormats = append(modelInfoConfig.SupportedFormats, f)
+				}
+			}
+			fmt.Printf("   ✓ Supported formats: %v\n", modelInfoConfig.SupportedFormats)
+		}
+
+		// Default parameters (optional)
+		fmt.Print("\n📝 Do you want to configure default parameters? [y/N]: ")
+		dpResponse, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(dpResponse)) == "y" {
+			modelInfoConfig.DefaultParameters = make(map[string]interface{})
+			fmt.Println("   Enter parameters in format 'key: value' (one per line)")
+			fmt.Println("   Example: temperature: 0.7")
+			fmt.Println("   Press Enter to finish:")
+			for {
+				fmt.Print("   > ")
+				dpInput, _ := reader.ReadString('\n')
+				dpInput = strings.TrimSpace(dpInput)
+				if dpInput == "" {
+					break
+				}
+				parts := strings.SplitN(dpInput, ":", 2)
+				if len(parts) != 2 {
+					fmt.Println("   ❌ Invalid format. Use 'key: value'")
+					continue
+				}
+				key := strings.TrimSpace(parts[0])
+				valueStr := strings.TrimSpace(parts[1])
+				// Try to parse as number
+				if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
+					modelInfoConfig.DefaultParameters[key] = floatVal
+				} else {
+					modelInfoConfig.DefaultParameters[key] = valueStr
+				}
+				fmt.Printf("   ✓ %s = %s\n", key, valueStr)
+			}
+			if len(modelInfoConfig.DefaultParameters) > 0 {
+				fmt.Printf("   ✓ %d default parameters configured\n", len(modelInfoConfig.DefaultParameters))
+			}
+		}
+
+		// TEE type (optional)
+		fmt.Print("📝 TEE hardware type (e.g., TDX, press Enter to skip): ")
+		input, _ = reader.ReadString('\n')
+		modelInfoConfig.TeeType = strings.TrimSpace(input)
+		if modelInfoConfig.TeeType != "" {
+			fmt.Printf("   ✓ TEE type: %s\n", modelInfoConfig.TeeType)
+		}
+
+		// Expiration date (optional)
+		fmt.Print("📝 Model expiration date in RFC3339 format (e.g., 2026-12-31T00:00:00Z, press Enter to skip): ")
+		input, _ = reader.ReadString('\n')
+		modelInfoConfig.ExpirationDate = strings.TrimSpace(input)
+		if modelInfoConfig.ExpirationDate != "" {
+			fmt.Printf("   ✓ Expiration date: %s\n", modelInfoConfig.ExpirationDate)
+		}
+
+		fmt.Println("   ✓ Model info configured")
+	} else {
+		fmt.Println("   ✓ Model info skipped (can be added later in config file)")
+	}
+
+	// Ask about owned by
+	fmt.Print("\n🏢 Enter organization name for owned_by in /v1/models (press Enter to skip): ")
+	ownedByResponse, _ := reader.ReadString('\n')
+	ownedBy := strings.TrimSpace(ownedByResponse)
+	if ownedBy != "" {
+		fmt.Printf("   ✓ Owned by: %s\n", ownedBy)
+	}
+
 	// Step 2: Load and configure YAML config (with monitoring setting)
 	fmt.Println("\n📋 Step 2: Configuration File Setup")
-	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress)
+	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress, modelInfoConfig, ownedBy)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -977,7 +1313,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int, controllerEnable bool, controllerAdminAddress string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -1085,6 +1421,16 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	}{
 		BrokerLogDir: "/var/log/inference",
 		EventLogDir:  "/var/log/event",
+	}
+
+	// Set model info if provided
+	if modelInfo != nil {
+		config.Service.ModelInfo = modelInfo
+	}
+
+	// Set owned by if provided
+	if ownedBy != "" {
+		config.Service.OwnedBy = ownedBy
 	}
 
 	// Set controller configuration if enabled

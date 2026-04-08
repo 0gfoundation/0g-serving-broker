@@ -62,6 +62,32 @@ service:
   # Additional secrets/credentials for service authentication
   additionalSecret: {}
 
+  # (Optional) Provider stake amount for first-time service registration
+  # providerStake: "100000000000000000000"
+
+  # (Optional) Organization name for owned_by field in /v1/models
+  # ownedBy: "0G Foundation"
+
+  # (Optional) Model metadata for /v1/models endpoint enrichment
+  # modelInfo:
+  #   name: "Meta: Llama 3.1 8B Instruct"
+  #   description: "Meta's Llama 3.1 8B Instruct model"
+  #   contextLength: 131072
+  #   maxCompletionTokens: 4096
+  #   architecture:
+  #     modality: "text->text"
+  #     inputModalities: ["text"]
+  #     outputModalities: ["text"]
+  #     instructType: "chatml"
+  #     tokenizer: "llama3"
+  #   supportedParameters: ["temperature", "top_p", "top_k", "max_tokens"]
+  #   supportedFormats: ["openai"]
+  #   defaultParameters:
+  #     temperature: 0.7
+  #     top_p: 0.9
+  #   teeType: "TDX"
+  #   expirationDate: "2026-12-31T00:00:00Z"
+
 # Network configurations for blockchain connections
 networks:
   # Example network configuration - 0G testnet
