@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"gopkg.in/yaml.v2"
 )
@@ -106,7 +107,7 @@ type Service struct {
 
 // IsCentralized returns true if this service routes to a centralized API provider.
 func (s *Service) IsCentralized() bool {
-	return s.ProviderType == "centralized"
+	return s.ProviderType == constant.ProviderTypeCentralized
 }
 
 // DefaultVideoSizeRatios provides default cost multipliers based on pixel count
@@ -307,12 +308,12 @@ func loadConfig(config *Config) error {
 
 	// Normalize and validate provider type
 	if config.Service.ProviderType == "" {
-		config.Service.ProviderType = "decentralized"
+		config.Service.ProviderType = constant.ProviderTypeDecentralized
 	}
-	if config.Service.ProviderType != "decentralized" && config.Service.ProviderType != "centralized" {
-		return fmt.Errorf("invalid config: service.providerType must be 'decentralized' or 'centralized', got '%s'", config.Service.ProviderType)
+	if config.Service.ProviderType != constant.ProviderTypeDecentralized && config.Service.ProviderType != constant.ProviderTypeCentralized {
+		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, config.Service.ProviderType)
 	}
-	if config.Service.ProviderType == "centralized" {
+	if config.Service.ProviderType == constant.ProviderTypeCentralized {
 		if config.Service.ProviderIdentity == "" {
 			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
 		}
