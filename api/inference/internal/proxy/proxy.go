@@ -180,10 +180,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		targetPath = strings.TrimRight(targetPath, "/")
 	}
 
-	p.logger.Debugf("Proxy debug: method=%s, url=%s, Content-Length=%s, Content-Type=%s", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), ctx.Request.Header.Get("Content-Type"))
+	p.logger.Debugf("Proxy: method=%s, url=%s, Content-Type=%s, Content-Length=%s", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Type"), ctx.Request.Header.Get("Content-Length"))
 	reqBody, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
-		p.logger.Errorf("Proxy debug: ReadAll error: %v, method=%s, url=%s, Content-Length=%s", err, ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"))
+		p.logger.Errorf("Proxy: ReadAll error: %v, method=%s, url=%s, Content-Length=%s", err, ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"))
 		// Check if the error is due to request body size limit
 		if err.Error() == "http: request body too large" {
 			// Mark this as an expected client error, not a server error
@@ -197,7 +197,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		p.handleBrokerError(ctx, err, "read request body")
 		return
 	}
-	p.logger.Debugf("Proxy debug: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody))
+	p.logger.Debugf("Proxy: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody))
 
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetPath]; !ok {
@@ -323,6 +323,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	// Record unique user for DAU tracking
 	monitor.RecordUniqueUser(userAddress)
+
+	// LoRA owner check: for ft-* models, verify requester is the task owner
+	reqModelName := ctrl.ExtractModelName(reqBody)
+	if err := p.ctrl.CheckLoRAOwnership(reqModelName, userAddress); err != nil {
+		ctx.Set("ignoreError", true)
+		p.handleBrokerError(ctx, err, "LoRA owner check")
+		return
+	}
 
 	// Whitelisted users bypass billing but still need normal response processing
 	if isWhitelisted {

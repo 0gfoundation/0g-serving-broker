@@ -58,3 +58,4 @@ coverage.html
 *.key
 *.crt
 *.p12api/broker
+.playwright-mcp/

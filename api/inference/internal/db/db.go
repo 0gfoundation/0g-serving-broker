@@ -11,6 +11,11 @@ type DB struct {
 	db *gorm.DB
 }
 
+// NewTestDB wraps an existing gorm.DB for testing.
+func NewTestDB(gdb *gorm.DB) *DB {
+	return &DB{db: gdb}
+}
+
 func NewDB(conf *config.Config) (*DB, error) {
 	db, err := gorm.Open(mysql.Open(conf.Database.Provider), &gorm.Config{
 		NamingStrategy: schema.NamingStrategy{

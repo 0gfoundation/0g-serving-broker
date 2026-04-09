@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,11 +16,14 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	cfg "github.com/0glabs/0g-serving-broker/inference/config"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
+	lorapkg "github.com/0glabs/0g-serving-broker/inference/internal/lora"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 )
 
@@ -97,6 +101,39 @@ func Main() {
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
 	}
+
+	// Initialize LoRA Manager if enabled
+	var loraCancel context.CancelFunc
+	var eventWatcher *lorapkg.EventWatcher
+	if config.LoRA.Enable {
+		loraManager, err := lorapkg.NewManager(config.LoRA, config.Networks, db, logger)
+		if err != nil {
+			panic(err)
+		}
+		ctrl.SetLoRAManager(loraManager)
+
+		var loraCtx context.Context
+		loraCtx, loraCancel = context.WithCancel(ctx)
+
+		if err := loraManager.Start(loraCtx); err != nil {
+			panic(fmt.Sprintf("failed to start LoRA manager: %v", err))
+		}
+
+		ftProviderAddr := config.LoRA.FineTuningProviderAddr
+		if ftProviderAddr == "" {
+			ftProviderAddr = contract.ProviderAddress
+		}
+		providerAddr := common.HexToAddress(ftProviderAddr)
+		eventWatcher, err = lorapkg.NewEventWatcher(loraManager, db, config.LoRA, providerAddr, logger)
+		if err != nil {
+			logger.Errorf("failed to create event watcher: %v", err)
+		} else {
+			go eventWatcher.Start(loraCtx)
+		}
+
+		logger.Info("LoRA serving enabled: manager and event watcher started")
+	}
+
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)
@@ -118,7 +155,7 @@ func Main() {
 		}
 	}
 
-	h := handler.New(ctrl, proxy)
+	h := handler.New(ctrl, proxy, logger)
 	h.Register(engine)
 
 	// Listen and Serve with graceful shutdown
@@ -131,16 +168,16 @@ func Main() {
 		Handler: engine,
 	}
 
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("Server error: %v", err)
-			panic(err)
+			quit <- syscall.SIGTERM
 		}
 	}()
 
-	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Info("Shutting down server...")
 
@@ -149,6 +186,14 @@ func Main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Errorf("Server forced to shutdown: %v", err)
+	}
+
+	// Shutdown LoRA event watcher and manager
+	if loraCancel != nil {
+		loraCancel()
+	}
+	if eventWatcher != nil {
+		eventWatcher.Stop()
 	}
 
 	// Shutdown async processing (drain queue, wait for workers)

@@ -127,10 +127,12 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		return err
 	}
 
+	clientBody := c.rewriteResponseModel(ctx, respBody)
+
 	// Attempt to write the response to the client. If the client has already
 	// disconnected (broken pipe, connection reset), log a warning but continue
 	// to billing so GPU work is not wasted without payment.
-	if _, writeErr := ctx.Writer.Write(respBody); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during non-streaming response, billing for completed response (%d bytes)", len(respBody))
@@ -188,7 +190,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 			// Only write to client if still connected
 			if !clientDisconnected {
-				_, streamErr = w.Write([]byte(line))
+				clientLine := c.rewriteResponseModelLine(ctx, line)
+				_, streamErr = w.Write([]byte(clientLine))
 				if streamErr != nil {
 					// Check if this is a client disconnection error
 					if c.isClientDisconnectError(streamErr) {
@@ -448,12 +451,6 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		return c.updateAccountWithUsage(ctx, chunk.Usage, service.OutputPrice, requestHash, service.InputPrice)
 	}
 
-	// Fallback to old logic if no usage info
-	// This check is defensive - whitelisted users should have already returned at L326-331
-	// but we add this for code clarity and future-proofing
-	if isWhitelisted {
-		return nil
-	}
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
 

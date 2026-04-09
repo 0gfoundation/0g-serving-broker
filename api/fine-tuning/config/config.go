@@ -47,6 +47,10 @@ type Service struct {
 	// Users can still download LoRA directly from TEE via /v1/user/:address/task/:id/lora
 	// Useful for testing or when 0G Storage is not available
 	SkipStorageUpload bool `yaml:"skipStorageUpload"`
+	// InferenceServiceUrl is the HTTP endpoint of the inference broker.
+	// The fine-tuning broker pushes adapter keys here via POST /internal/v1/adapter-keys
+	// so the inference broker can decrypt adapters from 0G Storage.
+	InferenceServiceUrl string `yaml:"inferenceServiceUrl"`
 	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
 	// After this period, files will be automatically cleaned up
 	// Default: 72 hours (3 days)

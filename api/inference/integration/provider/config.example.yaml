@@ -50,3 +50,8 @@ service:
   #   supportedFormats:
   #     - openai
   #     - anthropic
+# Optional: HTTP client timeouts for broker→provider communication.
+# Tune based on GPU speed and model complexity (e.g., image generation may need longer timeouts).
+# providerHttp:
+#   totalTimeoutMinutes: 15          # Overall HTTP request timeout (default: 15)
+#   responseHeaderTimeoutMinutes: 15 # Max time to wait for provider to start responding (default: 15)

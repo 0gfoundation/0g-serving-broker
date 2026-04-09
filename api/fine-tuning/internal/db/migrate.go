@@ -46,6 +46,15 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Task{})
 			},
 		},
+		{
+			ID: "add-provider-encrypted-secret",
+			Migrate: func(tx *gorm.DB) error {
+				type Task struct {
+					ProviderEncryptedSecret string `gorm:"type:text"`
+				}
+				return tx.AutoMigrate(&Task{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
