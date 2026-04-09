@@ -25,6 +25,7 @@ import (
 
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	brokerlog "github.com/0glabs/0g-serving-broker/common/log"
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -200,7 +201,21 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 	}
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
 
-	c := ctrl.New(database, provContract, cfg, svcCache, nil, logger)
+	// Create TeeService with a real signing key for centralized providers
+	// (decentralized tests with TargetSeparated=true skip signing, so nil is fine)
+	var teeService *teeutil.TeeService
+	if cfg.Service.IsCentralized() {
+		teeKey, err := crypto.GenerateKey()
+		if err != nil {
+			t.Fatalf("generate TEE key: %v", err)
+		}
+		teeService = &teeutil.TeeService{
+			ProviderSigner: teeKey,
+			Address:        crypto.PubkeyToAddress(teeKey.PublicKey),
+		}
+	}
+
+	c := ctrl.New(database, provContract, cfg, svcCache, teeService, logger)
 
 	// Pre-seed caches to avoid contract calls
 	c.SeedContractAccountCache(userAddr.Hex(), &contract.Account{

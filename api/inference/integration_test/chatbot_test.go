@@ -10,7 +10,10 @@ import (
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
 // ==========================================================================
@@ -207,6 +210,200 @@ func TestChatbotEndpoints_RequireAuth(t *testing.T) {
 			t.Errorf("expected non-200 for invalid auth, got %d", w.Code)
 		}
 	})
+}
+
+// ==========================================================================
+// Centralized provider: non-streaming flow with routing proof
+// ==========================================================================
+
+func TestCentralizedProvider_NonStream(t *testing.T) {
+	mockProvider := newMockChatbotProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "chatbot"
+		cfg.Service.ModelType = "gpt-4o"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hi"}],"stream":false}`
+	req := httptest.NewRequest("POST", "/v1/proxy/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Centralized providers should set ZG-Res-Key for routing proof retrieval
+	chatID := w.Header().Get("ZG-Res-Key")
+	if chatID == "" {
+		t.Fatal("expected ZG-Res-Key header to be set for centralized provider")
+	}
+
+	// Verify the response body is proxied correctly
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp["id"] != "chatcmpl-001" {
+		t.Errorf("expected id=chatcmpl-001, got %v", resp["id"])
+	}
+
+	// Verify routing proof is retrievable via /signature/{chatID}
+	sigReq := httptest.NewRequest("GET", "/v1/proxy/signature/"+chatID, nil)
+	sigW := httptest.NewRecorder()
+	env.engine.ServeHTTP(sigW, sigReq)
+
+	if sigW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for signature endpoint, got %d: %s", sigW.Code, sigW.Body.String())
+	}
+
+	var sig ctrl.ChatSignature
+	if err := json.Unmarshal(sigW.Body.Bytes(), &sig); err != nil {
+		t.Fatalf("parse signature: %v", err)
+	}
+
+	if sig.ProviderType != constant.ProviderTypeCentralized {
+		t.Errorf("ProviderType = %q, want %q", sig.ProviderType, constant.ProviderTypeCentralized)
+	}
+	if sig.ProviderIdentity != constant.CentralizedProviderOpenAI {
+		t.Errorf("ProviderIdentity = %q, want %q", sig.ProviderIdentity, constant.CentralizedProviderOpenAI)
+	}
+	if sig.SignatureEcdsa == "" {
+		t.Error("expected non-empty signature")
+	}
+	if sig.Text == "" {
+		t.Error("expected non-empty routing proof text")
+	}
+	if sig.SigningAlgo != "ecdsa" {
+		t.Errorf("SigningAlgo = %q, want %q", sig.SigningAlgo, "ecdsa")
+	}
+
+	// Verify billing record was created
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) == 0 {
+		t.Fatal("expected at least 1 billing record")
+	}
+	latestReq := userRequests[len(userRequests)-1]
+	if latestReq.Fee == "" || latestReq.Fee == "0" {
+		t.Errorf("expected non-zero fee, got %s", latestReq.Fee)
+	}
+}
+
+// ==========================================================================
+// Centralized provider: streaming flow with routing proof
+// ==========================================================================
+
+func TestCentralizedProvider_Stream(t *testing.T) {
+	mockProvider := newMockChatbotProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "chatbot"
+		cfg.Service.ModelType = "gpt-4o"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hi"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/proxy/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := newCloseNotifierRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify ZG-Res-Key is set for streaming too
+	chatID := w.Header().Get("ZG-Res-Key")
+	if chatID == "" {
+		t.Fatal("expected ZG-Res-Key header to be set for centralized streaming")
+	}
+
+	// Verify streaming response
+	body := w.Body.String()
+	if !strings.Contains(body, "data: ") {
+		t.Error("expected SSE data in streaming response")
+	}
+	if !strings.Contains(body, "[DONE]") {
+		t.Error("expected [DONE] marker in streaming response")
+	}
+
+	// Verify routing proof is retrievable
+	sigReq := httptest.NewRequest("GET", "/v1/proxy/signature/"+chatID, nil)
+	sigW := httptest.NewRecorder()
+	env.engine.ServeHTTP(sigW, sigReq)
+
+	if sigW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for signature endpoint, got %d: %s", sigW.Code, sigW.Body.String())
+	}
+
+	var sig ctrl.ChatSignature
+	if err := json.Unmarshal(sigW.Body.Bytes(), &sig); err != nil {
+		t.Fatalf("parse signature: %v", err)
+	}
+
+	if sig.ProviderType != constant.ProviderTypeCentralized {
+		t.Errorf("ProviderType = %q, want %q", sig.ProviderType, constant.ProviderTypeCentralized)
+	}
+	if sig.ProviderIdentity != constant.CentralizedProviderOpenAI {
+		t.Errorf("ProviderIdentity = %q, want %q", sig.ProviderIdentity, constant.CentralizedProviderOpenAI)
+	}
+	if sig.SignatureEcdsa == "" {
+		t.Error("expected non-empty signature")
+	}
+
+	// Verify billing
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) == 0 {
+		t.Fatal("expected at least 1 billing record")
+	}
+}
+
+// ==========================================================================
+// Centralized provider: signature endpoint returns 404 for unknown chatID
+// ==========================================================================
+
+func TestCentralizedProvider_SignatureNotFound(t *testing.T) {
+	mockProvider := newMockChatbotProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "chatbot"
+		cfg.Service.ModelType = "gpt-4o"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+
+	sigReq := httptest.NewRequest("GET", "/v1/proxy/signature/nonexistent-chat-id", nil)
+	sigW := httptest.NewRecorder()
+	env.engine.ServeHTTP(sigW, sigReq)
+
+	if sigW.Code == http.StatusOK {
+		t.Errorf("expected non-200 for unknown chatID, got %d", sigW.Code)
+	}
 }
 
 // ==========================================================================
