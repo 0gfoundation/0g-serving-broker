@@ -1,0 +1,104 @@
+package lora
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
+	zgcommon "github.com/0gfoundation/0g-storage-client/common"
+	"github.com/0gfoundation/0g-storage-client/indexer"
+	"github.com/sirupsen/logrus"
+)
+
+// StorageDownloader handles downloading encrypted adapter files from 0G Storage
+// and decrypting them using the provider wallet's ECIES/AES keys.
+type StorageDownloader struct {
+	indexerClient *indexer.Client
+	providerKey   string
+	logger        log.Logger
+}
+
+// NewStorageDownloader creates a downloader that fetches encrypted adapters from 0G Storage
+// and decrypts them using the provider's ECIES/AES keys.
+func NewStorageDownloader(cfg config.LoRAConfig, providerKey string, logger log.Logger) (*StorageDownloader, error) {
+	if cfg.StorageIndexerUrl == "" {
+		return nil, errors.New("storageIndexerUrl not configured")
+	}
+
+	indexerClient, err := indexer.NewClient(cfg.StorageIndexerUrl, indexer.IndexerClientOption{
+		LogOption: zgcommon.LogOption{LogLevel: logrus.InfoLevel},
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "create indexer client")
+	}
+
+	return &StorageDownloader{
+		indexerClient: indexerClient,
+		providerKey:   providerKey,
+		logger:        logger,
+	}, nil
+}
+
+// DownloadAndDecrypt downloads the encrypted adapter from 0G Storage,
+// decrypts the AES key using the provider's ECIES private key,
+// then decrypts the adapter file with AES-GCM, and unzips it.
+//
+// Returns the actual directory path containing the adapter files (may differ from
+// outputDir if the zip archive contains a top-level directory wrapper).
+func (d *StorageDownloader) DownloadAndDecrypt(ctx context.Context, storageHashHex string, providerEncKey []byte, outputDir string) (string, error) {
+	// Step 1: Decrypt AES key
+	d.logger.Infof("decrypting AES key with provider ECIES private key (%d encrypted bytes)", len(providerEncKey))
+	aesKey, err := util.ProviderECIESDecrypt(d.providerKey, providerEncKey)
+	if err != nil {
+		return "", errors.Wrap(err, "ECIES decrypt AES key")
+	}
+	d.logger.Infof("AES key decrypted successfully (%d bytes)", len(aesKey))
+
+	// Step 2: Download encrypted file from 0G Storage
+	encryptedFile := outputDir + "_encrypted.download"
+	if err := os.MkdirAll(filepath.Dir(encryptedFile), 0755); err != nil {
+		return "", errors.Wrapf(err, "create parent directory for download: %s", filepath.Dir(encryptedFile))
+	}
+	defer func() {
+		_ = os.Remove(encryptedFile)
+	}()
+
+	rootWithPrefix := storageHashHex
+	if !strings.HasPrefix(rootWithPrefix, "0x") {
+		rootWithPrefix = "0x" + rootWithPrefix
+	}
+	d.logger.Infof("downloading encrypted adapter from 0G Storage (hash: %s)", rootWithPrefix)
+	if err := d.indexerClient.Download(ctx, rootWithPrefix, encryptedFile, true); err != nil {
+		return "", errors.Wrapf(err, "download from 0G Storage (hash: %s)", rootWithPrefix)
+	}
+
+	if fi, err := os.Stat(encryptedFile); err == nil {
+		d.logger.Infof("downloaded %d bytes from 0G Storage", fi.Size())
+	}
+
+	// Step 3: Decrypt with AES-GCM
+	decryptedZip := outputDir + "_decrypted.zip"
+	defer func() {
+		_ = os.Remove(decryptedZip)
+	}()
+
+	d.logger.Infof("decrypting adapter with AES-GCM")
+	if err := util.AesDecryptLargeFile(aesKey, encryptedFile, decryptedZip); err != nil {
+		return "", errors.Wrap(err, "AES decrypt adapter file")
+	}
+
+	// Step 4: Unzip to output directory
+	d.logger.Infof("unzipping adapter to %s", outputDir)
+	unzippedDir, err := util.Unzip(decryptedZip, outputDir)
+	if err != nil {
+		return "", errors.Wrap(err, "unzip adapter")
+	}
+
+	d.logger.Infof("adapter extracted to %s", unzippedDir)
+	return unzippedDir, nil
+}

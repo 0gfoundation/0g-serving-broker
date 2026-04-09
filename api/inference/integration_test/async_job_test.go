@@ -86,7 +86,7 @@ func TestAsyncTextToImageFlow(t *testing.T) {
 	t.Cleanup(func() { env.ctrl.ShutdownAsync() })
 
 	// Register handler routes for async endpoints
-	h := handler.New(env.ctrl, env.proxy)
+	h := handler.New(env.ctrl, env.proxy, newTestLogger())
 	h.Register(env.engine)
 
 	var jobID string
@@ -241,7 +241,7 @@ func TestAsyncImageEditingFlow(t *testing.T) {
 	}
 	t.Cleanup(func() { env.ctrl.ShutdownAsync() })
 
-	h := handler.New(env.ctrl, env.proxy)
+	h := handler.New(env.ctrl, env.proxy, newTestLogger())
 	h.Register(env.engine)
 
 	// Submit image edit (multipart/form-data with image field)
@@ -323,7 +323,7 @@ func TestAsyncEndpoints_RequireAuth(t *testing.T) {
 	}
 	t.Cleanup(func() { env.ctrl.ShutdownAsync() })
 
-	h := handler.New(env.ctrl, env.proxy)
+	h := handler.New(env.ctrl, env.proxy, newTestLogger())
 	h.Register(env.engine)
 
 	endpoints := []struct {
@@ -382,7 +382,7 @@ func TestAsyncJob_OwnershipCheck(t *testing.T) {
 	}
 	t.Cleanup(func() { env.ctrl.ShutdownAsync() })
 
-	h := handler.New(env.ctrl, env.proxy)
+	h := handler.New(env.ctrl, env.proxy, newTestLogger())
 	h.Register(env.engine)
 
 	// Submit a job as the env user
@@ -451,7 +451,7 @@ func TestAsyncJob_WhitelistUser(t *testing.T) {
 	}
 	t.Cleanup(func() { env.ctrl.ShutdownAsync() })
 
-	h := handler.New(env.ctrl, env.proxy)
+	h := handler.New(env.ctrl, env.proxy, newTestLogger())
 	h.Register(env.engine)
 
 	// Seed whitelist user

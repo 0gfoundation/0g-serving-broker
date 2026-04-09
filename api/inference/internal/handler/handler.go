@@ -2,11 +2,14 @@ package handler
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -37,15 +40,17 @@ type Handler struct {
 	modelsCtrl  modelsCtrl
 	proxy       *proxy.Proxy
 	rateLimiter *middleware.RateLimiter
+	logger      log.Logger
 }
 
-func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy) *Handler {
+func New(ctrl *ctrl.Ctrl, proxy *proxy.Proxy, logger log.Logger) *Handler {
 	h := &Handler{
 		ctrl:        ctrl,
 		asyncCtrl:   ctrl,
 		modelsCtrl:  ctrl,
 		proxy:       proxy,
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(10), 20),
+		logger:      logger,
 	}
 	return h
 }
@@ -105,12 +110,50 @@ func (h *Handler) Register(r *gin.Engine) {
 	asyncGroup.POST("/images/edits", h.SubmitAsyncImageEdit)
 	asyncGroup.GET("/jobs/:jobID", h.GetAsyncJob)
 
+	// LoRA adapter management API (called by user CLI)
+	loraGroup := group.Group("/lora")
+	loraGroup.Use(corsMiddleware())
+	loraGroup.Use(middleware.RateLimitMiddleware(h.rateLimiter))
+	loraGroup.POST("/adapters/deploy", h.DeployAdapter)
+	loraGroup.GET("/adapters", h.ListAdapters)
+	loraGroup.GET("/adapters/:name", h.GetAdapterStatus)
+
+	// Internal API: fine-tuning broker pushes adapter keys here
+	internal := r.Group("/internal/v1")
+	internal.Use(h.internalApiAuth())
+	internal.POST("/adapter-keys", h.ReceiveAdapterKey)
+
 	// TODO: should be verified by client
 	// //nvidia TEE verification
 	// group.POST("/quote/verify/gpu", corsMiddleware(), h.VerifyGPU)
 	// group.OPTIONS("/quote/verify/gpu", corsMiddleware(), func(c *gin.Context) {
 	// 	c.Status(204)
 	// })
+}
+
+// internalApiAuth returns middleware that validates internal API requests
+// using wallet signature verification. The fine-tuning broker signs the request
+// with its provider private key, and the inference broker recovers the signer
+// address to validate that it matches the expected provider.
+func (h *Handler) internalApiAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.ctrl != nil {
+			if err := h.ctrl.ValidateProviderAuth(c); err == nil {
+				c.Next()
+				return
+			} else {
+				h.logger.Warnf("internal API auth failed from %s: %v", c.ClientIP(), err)
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": fmt.Sprintf("unauthorized: %v", err),
+				})
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized: controller not initialized",
+		})
+	}
 }
 
 func handleBrokerError(ctx *gin.Context, err error, context string) {

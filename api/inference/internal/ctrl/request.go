@@ -205,7 +205,8 @@ func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
 	}
 
 	// Check token expiration (convert milliseconds to seconds)
-	if time.Now().Unix() > token.ExpiresAt/1000 {
+	// ExpiresAt == 0 means never expires (same semantics as ValidateSession)
+	if token.ExpiresAt > 0 && time.Now().Unix() > token.ExpiresAt/1000 {
 		return errors.New("provider token expired")
 	}
 
@@ -322,7 +323,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 		c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
 	}
 
-	if service.TeeSignerAcknowledged == false {
+	if !service.TeeSignerAcknowledged {
 		return errors.New("service not acknowledge the tee signer")
 	}
 

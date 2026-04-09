@@ -23,10 +23,13 @@ require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.19.1
+	github.com/prometheus/client_model v0.6.1
 	github.com/rifflock/lfshook v0.0.0-20180920164130-b9218ef580f5
 	github.com/sirupsen/logrus v1.9.3
 	github.com/swaggo/swag v1.16.3
-	github.com/testcontainers/testcontainers-go v0.35.0
+	github.com/testcontainers/testcontainers-go v0.34.0
+	github.com/testcontainers/testcontainers-go/modules/mysql v0.34.0
+	golang.org/x/crypto v0.37.0
 	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.68.1
 	google.golang.org/protobuf v1.35.2
@@ -42,7 +45,7 @@ require (
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
-	filippo.io/edwards25519 v1.1.0 // indirect
+	filippo.io/edwards25519 v1.1.1 // indirect
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/DataDog/zstd v1.4.5 // indirect
@@ -145,6 +148,7 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.13 // indirect
+	github.com/mattn/go-sqlite3 v1.14.22 // indirect
 	github.com/mcuadros/go-defaults v1.2.0 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -172,7 +176,6 @@ require (
 	github.com/pion/transport/v3 v3.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
-	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/prysmaticlabs/gohashtree v0.0.5-beta // indirect
@@ -206,7 +209,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.40.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/oauth2 v0.23.0 // indirect
@@ -220,7 +222,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce // indirect
-	gorm.io/driver/sqlite v1.5.6 // indirect
 	gotest.tools v2.2.0+incompatible // indirect
 	k8s.io/api v0.30.1 // indirect
 	k8s.io/apiextensions-apiserver v0.30.1 // indirect
