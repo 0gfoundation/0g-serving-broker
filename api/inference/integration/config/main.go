@@ -839,7 +839,6 @@ func main() {
 			fmt.Println("   2. Anthropic (api.anthropic.com)")
 			fmt.Println("   3. Other (custom URL)")
 
-			var providerIdentity string
 			for {
 				fmt.Print("\n   Select provider [1/2/3]: ")
 				providerChoice, _ := reader.ReadString('\n')
