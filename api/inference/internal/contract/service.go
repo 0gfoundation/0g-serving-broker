@@ -48,6 +48,12 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string) 
 		additionalInfo["TargetTeeAddress"] = service.TargetTeeAddress
 	}
 
+	// Include provider type info for centralized providers
+	if service.IsCentralized() {
+		additionalInfo["ProviderType"] = service.ProviderType
+		additionalInfo["ProviderIdentity"] = service.ProviderIdentity
+	}
+
 	additionalInfoJSON, err := json.Marshal(additionalInfo)
 	if err != nil {
 		return "", errors.Wrap(err, "marshal additional info")

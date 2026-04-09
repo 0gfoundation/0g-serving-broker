@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -106,6 +108,144 @@ func TestModelInfo_Validate_MissingRequired(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("expected error containing %q, got %q", tt.wantErr, err.Error())
+			}
+		})
+	}
+}
+
+func writeTestConfig(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
+}
+
+func TestLoadConfig_ProviderTypeDefaults(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+
+	if cfg.Service.ProviderType != "decentralized" {
+		t.Errorf("expected providerType 'decentralized', got %q", cfg.Service.ProviderType)
+	}
+}
+
+func TestLoadConfig_ProviderTypeCentralized(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://api.openai.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  additionalSecret:
+    Authorization: "Bearer sk-test"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+
+	if cfg.Service.ProviderType != "centralized" {
+		t.Errorf("expected providerType 'centralized', got %q", cfg.Service.ProviderType)
+	}
+	if cfg.Service.ProviderIdentity != "openai" {
+		t.Errorf("expected providerIdentity 'openai', got %q", cfg.Service.ProviderIdentity)
+	}
+	if !cfg.Service.TargetSeparated {
+		t.Error("expected TargetSeparated=true for centralized provider")
+	}
+	if !cfg.Service.IsCentralized() {
+		t.Error("IsCentralized() should return true")
+	}
+}
+
+func TestLoadConfig_CentralizedMissingIdentity(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://api.openai.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  providerType: "centralized"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for centralized without providerIdentity")
+	}
+	if !strings.Contains(err.Error(), "providerIdentity is required") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestLoadConfig_InvalidProviderType(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "test"
+  verifiability: "TeeML"
+  providerType: "invalid"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid providerType")
+	}
+	if !strings.Contains(err.Error(), "must be 'decentralized' or 'centralized'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestService_IsCentralized(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerType string
+		want         bool
+	}{
+		{"empty defaults to decentralized", "", false},
+		{"decentralized", "decentralized", false},
+		{"centralized", "centralized", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Service{ProviderType: tt.providerType}
+			if got := s.IsCentralized(); got != tt.want {
+				t.Errorf("IsCentralized() = %v, want %v", got, tt.want)
 			}
 		})
 	}

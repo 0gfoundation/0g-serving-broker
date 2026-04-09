@@ -95,6 +95,18 @@ type Service struct {
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 	OwnedBy          string            `yaml:"ownedBy"`       // Optional. Organization name for the owned_by field in /v1/models (e.g., "0G Foundation")
 	ModelInfo        *ModelInfo        `yaml:"modelInfo"`
+
+	// ProviderType distinguishes between "decentralized" (GPU providers) and "centralized" (OpenAI, Anthropic).
+	// Defaults to "decentralized" if not set.
+	ProviderType string `yaml:"providerType"`
+	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
+	// Only used when ProviderType is "centralized".
+	ProviderIdentity string `yaml:"providerIdentity"`
+}
+
+// IsCentralized returns true if this service routes to a centralized API provider.
+func (s *Service) IsCentralized() bool {
+	return s.ProviderType == "centralized"
 }
 
 // DefaultVideoSizeRatios provides default cost multipliers based on pixel count
@@ -291,6 +303,21 @@ func loadConfig(config *Config) error {
 		if err := config.Service.ModelInfo.Validate(config.Service.Type); err != nil {
 			return fmt.Errorf("invalid config: %w", err)
 		}
+	}
+
+	// Normalize and validate provider type
+	if config.Service.ProviderType == "" {
+		config.Service.ProviderType = "decentralized"
+	}
+	if config.Service.ProviderType != "decentralized" && config.Service.ProviderType != "centralized" {
+		return fmt.Errorf("invalid config: service.providerType must be 'decentralized' or 'centralized', got '%s'", config.Service.ProviderType)
+	}
+	if config.Service.ProviderType == "centralized" {
+		if config.Service.ProviderIdentity == "" {
+			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
+		}
+		// Centralized providers always behave as TargetSeparated (shared external backend)
+		config.Service.TargetSeparated = true
 	}
 
 	return nil

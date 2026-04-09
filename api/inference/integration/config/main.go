@@ -123,6 +123,8 @@ type Service struct {
 	ProviderStake    string                 `yaml:"providerStake,omitempty"`
 	OwnedBy          string                 `yaml:"ownedBy,omitempty"`
 	ModelInfo        *ModelInfo             `yaml:"modelInfo,omitempty"`
+	ProviderType     string                 `yaml:"providerType,omitempty"`
+	ProviderIdentity string                 `yaml:"providerIdentity,omitempty"`
 }
 
 type NetworkConfig struct {
@@ -795,6 +797,8 @@ func main() {
 	var targetTeeAddress string
 	var targetSeparated bool
 	var additionalHeaders map[string]string
+	var providerType string     // "decentralized" (default) or "centralized"
+	var providerIdentity string // e.g., "openai", "anthropic"
 
 	fmt.Print("\n🤖 Do you want to deploy an LLM service container in the same environment? [y/N]: ")
 	response, _ = reader.ReadString('\n')
@@ -823,61 +827,120 @@ func main() {
 		}
 		fmt.Printf("   ✓ Model set to: %s\n", llmModel)
 	} else {
-		// User chose not to deploy LLM in same environment
-		fmt.Println("\n⚠️  Please note: The separate LLM service should also be deployed in a TEE environment")
-		fmt.Printf("   and should use the same TEE node type (%s)\n", teeNodeType)
-		fmt.Println("   and use a private key within the TEE to sign the response.")
-
-		// Ask for LLM server's signing public key address
-		for {
-			fmt.Print("\n🔑 Enter the LLM server's signing public key address: ")
-			addressInput, _ := reader.ReadString('\n')
-			targetTeeAddress = strings.TrimSpace(addressInput)
-			if targetTeeAddress == "" {
-				fmt.Println("   ❌ Address is required!")
-				continue
-			}
-			break
-		}
-		targetSeparated = true
-		fmt.Printf("   ✓ Target TEE address set to: %s\n", targetTeeAddress)
-
-		// Ask about additional headers
-		fmt.Print("\n🔐 Does the separate LLM server require additional request headers for authentication? [y/N]: ")
+		// Ask if this is a centralized API provider
+		fmt.Print("\n🌐 Are you connecting to a centralized API provider (OpenAI, Anthropic)? [y/N]: ")
 		response, _ = reader.ReadString('\n')
-		if strings.ToLower(strings.TrimSpace(response)) == "y" {
-			fmt.Println("   Enter headers in format 'Key: Value' (one per line)")
-			fmt.Println("   Example: Authorization: sk-xxxx")
-			fmt.Println("   Press Enter twice to finish:")
+		isCentralized := strings.ToLower(strings.TrimSpace(response)) == "y"
 
-			additionalHeaders = make(map[string]string)
+		if isCentralized {
+			// Centralized provider flow
+			fmt.Println("\n   Supported centralized providers:")
+			fmt.Println("   1. OpenAI  (api.openai.com)")
+			fmt.Println("   2. Anthropic (api.anthropic.com)")
+			fmt.Println("   3. Other (custom URL)")
+
+			var providerIdentity string
 			for {
-				fmt.Print("> ")
-				headerInput, _ := reader.ReadString('\n')
-				headerInput = strings.TrimSpace(headerInput)
-
-				if headerInput == "" {
-					break // Empty line means done
-				}
-
-				// Parse header
-				parts := strings.SplitN(headerInput, ":", 2)
-				if len(parts) != 2 {
-					fmt.Println("   ❌ Invalid format. Use 'Key: Value'")
+				fmt.Print("\n   Select provider [1/2/3]: ")
+				providerChoice, _ := reader.ReadString('\n')
+				providerChoice = strings.TrimSpace(providerChoice)
+				switch providerChoice {
+				case "1":
+					providerIdentity = "openai"
+				case "2":
+					providerIdentity = "anthropic"
+				case "3":
+					fmt.Print("   Enter provider identity name: ")
+					nameInput, _ := reader.ReadString('\n')
+					providerIdentity = strings.TrimSpace(nameInput)
+				default:
+					fmt.Println("   ❌ Invalid choice, please enter 1, 2, or 3")
 					continue
 				}
+				if providerIdentity != "" {
+					break
+				}
+			}
+			fmt.Printf("   ✓ Provider: %s\n", providerIdentity)
 
-				key := strings.TrimSpace(parts[0])
-				value := strings.TrimSpace(parts[1])
-				additionalHeaders[key] = value
-				fmt.Printf("   ✓ Added header: %s\n", key)
+			// Set centralized provider config variables (used later in generateYAMLConfig)
+			targetSeparated = true
+
+			// Ask for API key
+			for {
+				fmt.Print("\n🔑 Enter your API key for " + providerIdentity + ": ")
+				apiKeyInput, _ := reader.ReadString('\n')
+				apiKey := strings.TrimSpace(apiKeyInput)
+				if apiKey == "" {
+					fmt.Println("   ❌ API key is required!")
+					continue
+				}
+				additionalHeaders = map[string]string{
+					"Authorization": "Bearer " + apiKey,
+				}
+				fmt.Println("   ✓ API key configured")
+				break
 			}
 
-			if len(additionalHeaders) > 0 {
-				fmt.Printf("   ✓ %d headers configured\n", len(additionalHeaders))
-			}
+			// Store centralized provider info for generateYAMLConfig
+			providerType = "centralized"
 		} else {
-			fmt.Println("   ✓ No additional headers required")
+			// Decentralized separate LLM flow (existing behavior)
+			fmt.Println("\n⚠️  Please note: The separate LLM service should also be deployed in a TEE environment")
+			fmt.Printf("   and should use the same TEE node type (%s)\n", teeNodeType)
+			fmt.Println("   and use a private key within the TEE to sign the response.")
+
+			// Ask for LLM server's signing public key address
+			for {
+				fmt.Print("\n🔑 Enter the LLM server's signing public key address: ")
+				addressInput, _ := reader.ReadString('\n')
+				targetTeeAddress = strings.TrimSpace(addressInput)
+				if targetTeeAddress == "" {
+					fmt.Println("   ❌ Address is required!")
+					continue
+				}
+				break
+			}
+			targetSeparated = true
+			fmt.Printf("   ✓ Target TEE address set to: %s\n", targetTeeAddress)
+
+			// Ask about additional headers
+			fmt.Print("\n🔐 Does the separate LLM server require additional request headers for authentication? [y/N]: ")
+			response, _ = reader.ReadString('\n')
+			if strings.ToLower(strings.TrimSpace(response)) == "y" {
+				fmt.Println("   Enter headers in format 'Key: Value' (one per line)")
+				fmt.Println("   Example: Authorization: sk-xxxx")
+				fmt.Println("   Press Enter twice to finish:")
+
+				additionalHeaders = make(map[string]string)
+				for {
+					fmt.Print("> ")
+					headerInput, _ := reader.ReadString('\n')
+					headerInput = strings.TrimSpace(headerInput)
+
+					if headerInput == "" {
+						break // Empty line means done
+					}
+
+					// Parse header
+					parts := strings.SplitN(headerInput, ":", 2)
+					if len(parts) != 2 {
+						fmt.Println("   ❌ Invalid format. Use 'Key: Value'")
+						continue
+					}
+
+					key := strings.TrimSpace(parts[0])
+					value := strings.TrimSpace(parts[1])
+					additionalHeaders[key] = value
+					fmt.Printf("   ✓ Added header: %s\n", key)
+				}
+
+				if len(additionalHeaders) > 0 {
+					fmt.Printf("   ✓ %d headers configured\n", len(additionalHeaders))
+				}
+			} else {
+				fmt.Println("   ✓ No additional headers required")
+			}
 		}
 	}
 
@@ -1224,7 +1287,7 @@ func main() {
 
 	// Step 2: Load and configure YAML config (with monitoring setting)
 	fmt.Println("\n📋 Step 2: Configuration File Setup")
-	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress, modelInfoConfig, ownedBy)
+	configFile, configPath, _, err := generateYAMLConfig(originalDir, deployLLM, targetTeeAddress, targetSeparated, verifierUrl, additionalHeaders, useMonitoring, networkType, revenueTransferConfig.TargetAddress, revenueTransferConfig.ReserveAmount, revenueTransferConfig.Interval, controllerConfig.Enable, controllerConfig.AdminAddress, modelInfoConfig, ownedBy, providerType, providerIdentity)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating YAML config: %v\n", err)
 		os.Exit(1)
@@ -1313,7 +1376,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -1372,6 +1435,12 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 	config.Service.TargetTeeAddress = targetTeeAddress
 	config.Service.TargetSeparated = targetSeparated
 	config.Service.VerifierUrl = verifierUrl
+
+	// Set centralized provider fields if applicable
+	if providerType == "centralized" {
+		config.Service.ProviderType = providerType
+		config.Service.ProviderIdentity = providerIdentity
+	}
 
 	// Set additionalSecret if headers were provided
 	if len(additionalHeaders) > 0 {
@@ -2016,6 +2085,12 @@ func mergeConfigs(base, user *Config) {
 		for k, v := range user.Service.AdditionalSecret {
 			base.Service.AdditionalSecret[k] = v
 		}
+	}
+	if user.Service.ProviderType != "" {
+		base.Service.ProviderType = user.Service.ProviderType
+	}
+	if user.Service.ProviderIdentity != "" {
+		base.Service.ProviderIdentity = user.Service.ProviderIdentity
 	}
 
 	// Merge networks
