@@ -1,10 +1,20 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"golang.org/x/crypto/sha3"
+
+	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
@@ -24,9 +34,10 @@ import (
 )
 
 type SettlementMetadata struct {
-	ModelRootHash   []byte
-	Secret          []byte
-	EncryptedSecret []byte
+	ModelRootHash           []byte
+	Secret                  []byte
+	EncryptedSecret         []byte
+	ProviderEncryptedSecret []byte
 }
 
 type uploadResult struct {
@@ -103,30 +114,187 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 			// Keep the local hash (keccak256 of encrypted file) as the root hash
 		} else {
 			// Upload succeeded - use the storage root hash instead
-			f.logger.Infof("Successfully uploaded to 0G Storage for task %s, root hash: %s", task.ID, string(storageRootHash))
+			f.logger.Infof("Successfully uploaded to 0G Storage for task %s, root hash: %s", task.ID, hexutil.Encode(storageRootHash))
 			settlementMetadata.ModelRootHash = storageRootHash
 		}
 	} else {
 		f.logger.Infof("Skipping 0G Storage upload (skipStorageUpload=true) for task %s", task.ID)
 	}
 
-	// Step 3: Update task in DB and contract
-	if err = f.db.UpdateTask(task.ID,
-		db.Task{
-			OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
-			Secret:          hexutil.Encode(settlementMetadata.Secret),
-			EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
-			DeliverIndex:    0, // Deprecated: now using task ID instead of index
-			DeliverTime:     time.Now().Unix(),
-		}); err != nil {
+	// Step 3: Encrypt AES key with provider wallet's ECIES public key
+	// and push to the inference broker via HTTP.
+	var providerEncKey []byte
+	providerPrivKey, privKeyErr := commonconfig.GetProviderPrivateKey(f.config.Networks)
+	if privKeyErr != nil {
+		f.logger.Warnf("Could not get provider private key for ECIES encryption: %v", privKeyErr)
+	} else {
+		providerEncKey, err = util.ProviderECIESEncrypt(providerPrivKey, settlementMetadata.Secret)
+		if err != nil {
+			f.logger.Warnf("Failed to ECIES-encrypt AES key for provider: %v", err)
+			providerEncKey = nil
+		} else {
+			f.logger.Infof("AES key encrypted with provider wallet ECIES public key (%d bytes)", len(providerEncKey))
+		}
+	}
+
+	// Step 4: Push adapter key to inference broker via HTTP (before addDeliverable).
+	// This MUST succeed before proceeding — if the key is not stored in the inference
+	// broker, downloadFromStorage will fail permanently after the user acknowledges.
+	if providerEncKey != nil && f.config.Service.InferenceServiceUrl != "" {
+		if pushErr := f.pushAdapterKey(ctx, task.ID.String(), hexutil.Encode(settlementMetadata.ModelRootHash), hexutil.Encode(providerEncKey)); pushErr != nil {
+			return fmt.Errorf("push adapter key to inference broker: %w", pushErr)
+		}
+	}
+
+	// Step 5: Update task in DB
+	dbTask := db.Task{
+		OutputRootHash:  hexutil.Encode(settlementMetadata.ModelRootHash),
+		Secret:          hexutil.Encode(settlementMetadata.Secret),
+		EncryptedSecret: hexutil.Encode(settlementMetadata.EncryptedSecret),
+		DeliverIndex:    0,
+		DeliverTime:     time.Now().Unix(),
+	}
+	if providerEncKey != nil {
+		dbTask.ProviderEncryptedSecret = hexutil.Encode(providerEncKey)
+	}
+	if err = f.db.UpdateTask(task.ID, dbTask); err != nil {
 		f.logger.Errorf("Failed to update task: %v", err)
 		return err
 	}
 
-	// Add deliverable to contract (required for settlement and key exchange)
+	// Step 6: Add deliverable to contract — pure 32-byte storage hash (backward compatible)
 	if err = f.contract.AddDeliverable(ctx, userAddr, task.ID.String(), settlementMetadata.ModelRootHash); err != nil {
-		return errors.Wrapf(err, "add deliverable failed: %v", settlementMetadata.ModelRootHash)
+		return errors.Wrapf(err, "add deliverable failed")
 	}
+
+	return nil
+}
+
+// pushAdapterKey sends the provider-encrypted AES key to the inference broker
+// via POST /internal/v1/adapter-keys, so it can later decrypt the adapter from 0G Storage.
+//
+// Authentication uses wallet signature: the fine-tuning broker signs the payload
+// with its provider private key, and the inference broker verifies the signature.
+var adapterKeyHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+const pushAdapterKeyMaxRetries = 3
+
+func (f *Finalizer) pushAdapterKey(parentCtx context.Context, taskID, storageHash, providerEncKey string) error {
+	url := fmt.Sprintf("%s/internal/v1/adapter-keys", f.config.Service.InferenceServiceUrl)
+	payload := map[string]string{
+		"taskId":         taskID,
+		"storageHash":    storageHash,
+		"providerEncKey": providerEncKey,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return errors.Wrap(err, "marshal adapter key payload")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < pushAdapterKeyMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			f.logger.Infof("Retrying pushAdapterKey for task %s (attempt %d/%d) after %v",
+				taskID, attempt+1, pushAdapterKeyMaxRetries, backoff)
+			select {
+			case <-parentCtx.Done():
+				return fmt.Errorf("context cancelled during retry backoff: %w", parentCtx.Err())
+			case <-time.After(backoff):
+			}
+		}
+
+		lastErr = f.doPushAdapterKey(parentCtx, url, body, taskID)
+		if lastErr == nil {
+			f.logger.Infof("Pushed adapter key to inference broker for task %s", taskID)
+			return nil
+		}
+		f.logger.Warnf("pushAdapterKey attempt %d/%d failed for task %s: %v",
+			attempt+1, pushAdapterKeyMaxRetries, taskID, lastErr)
+	}
+	return fmt.Errorf("pushAdapterKey failed after %d attempts: %w", pushAdapterKeyMaxRetries, lastErr)
+}
+
+func (f *Finalizer) doPushAdapterKey(parentCtx context.Context, url string, body []byte, taskID string) error {
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return errors.Wrapf(err, "build request for %s", url)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if err := f.addWalletSignature(req, body, taskID); err != nil {
+		return errors.Wrap(err, "add wallet signature to adapter key request")
+	}
+
+	resp, err := adapterKeyHTTPClient.Do(req)
+	if err != nil {
+		return errors.Wrapf(err, "POST %s", url)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("inference broker returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// addWalletSignature signs the request body with the provider's private key
+// and adds the necessary headers for wallet-based authentication.
+// This follows the same pattern as user session authentication.
+func (f *Finalizer) addWalletSignature(req *http.Request, body []byte, taskID string) error {
+	// Get provider private key
+	providerKey, err := commonconfig.GetProviderPrivateKey(f.config.Networks)
+	if err != nil {
+		return errors.Wrap(err, "get provider private key for signing")
+	}
+
+	// Create provider address from private key
+	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(providerKey, "0x"))
+	if err != nil {
+		return errors.Wrap(err, "parse provider private key")
+	}
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return errors.New("invalid public key type")
+	}
+	providerAddress := crypto.PubkeyToAddress(*publicKeyECDSA).Hex()
+
+	// Create token with provider identity (similar to user session token)
+	token := map[string]interface{}{
+		"appId":      "fine-tuning-broker",
+		"tokenId":    255, // Ephemeral token
+		"generation": 1,
+		"timestamp":  time.Now().UnixMilli(),
+		"expiresAt":  time.Now().Add(5 * time.Minute).UnixMilli(), // Short expiry for single request
+		"nonce":      fmt.Sprintf("%d-%s", time.Now().Unix(), taskID),
+		"address":    providerAddress,
+		"provider":   providerAddress, // Self-referential for provider auth
+	}
+
+	tokenJSON, err := json.Marshal(token)
+	if err != nil {
+		return errors.Wrap(err, "marshal provider token")
+	}
+
+	// Sign the token with EIP-191 personal message prefix (must match ValidateProviderAuth)
+	tokenHash := crypto.Keccak256Hash(tokenJSON)
+	prefixedMsg := crypto.Keccak256Hash([]byte("\x19Ethereum Signed Message:\n32"), tokenHash.Bytes())
+	signature, err := crypto.Sign(prefixedMsg.Bytes(), privateKey)
+	if err != nil {
+		return errors.Wrap(err, "sign provider token")
+	}
+	signature[64] += 27 // Convert V from 0/1 to 27/28 for Ethereum ecrecover
+
+	// Add authentication headers
+	req.Header.Set("Address", providerAddress)
+	req.Header.Set("Session-Token", string(tokenJSON))
+	req.Header.Set("Session-Signature", hexutil.Encode(signature))
 
 	return nil
 }
@@ -177,12 +345,12 @@ func (f *Finalizer) encryptModelLocal(sourceDir string, task *db.Task) (*Settlem
 
 	f.logger.Infof("Encrypted LoRA saved locally: %s", encryptFile)
 
-	// Generate a local root hash (hash of the encrypted file) for contract
-	encryptedData, err := os.ReadFile(encryptFile)
+	// Generate a local root hash (Keccak-256 of the encrypted file) for contract.
+	// Uses streaming hash to avoid loading the entire file into memory.
+	localRootHash, err := keccak256File(encryptFile)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read encrypted file")
+		return nil, errors.Wrap(err, "hash encrypted file")
 	}
-	localRootHash := crypto.Keccak256(encryptedData)
 
 	encryptKey, err := f.encryptAESKey(aesKey, task.UserPublicKey)
 	if err != nil {
@@ -212,12 +380,7 @@ func (f *Finalizer) uploadModel(ctx context.Context, encryptFile string) ([]byte
 		return modelRootHashes[0].Bytes(), nil
 	}
 
-	// Multi-fragment: concatenate raw bytes of all hashes
-	var data []byte
-	for _, hash := range modelRootHashes {
-		data = append(data, hash.Bytes()...)
-	}
-	return data, nil
+	return nil, fmt.Errorf("expected single storage root hash, got %d fragments", len(modelRootHashes))
 }
 
 func (f *Finalizer) uploadModelWithTimeout(ctx context.Context, encryptFile string) ([]common.Hash, error) {
@@ -264,4 +427,20 @@ func (f *Finalizer) encryptAESKey(aesKey []byte, userPublicKey string) ([]byte, 
 	}
 
 	return encryptedSecret, nil
+}
+
+// keccak256File computes the Keccak-256 hash of a file using streaming I/O
+// to avoid loading the entire file into memory.
+func keccak256File(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open file %s: %w", path, err)
+	}
+	defer f.Close()
+
+	h := sha3.NewLegacyKeccak256()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, fmt.Errorf("hash file %s: %w", path, err)
+	}
+	return h.Sum(nil), nil
 }
