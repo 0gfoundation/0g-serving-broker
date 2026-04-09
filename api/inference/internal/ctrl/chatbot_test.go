@@ -2,8 +2,15 @@ package ctrl
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +23,34 @@ import (
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
+
+// generateTestCert creates a self-signed certificate for testing TLS state.
+func generateTestCert(t *testing.T, cn string) *x509.Certificate {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("failed to parse certificate: %v", err)
+	}
+	return cert
+}
 
 // newChatbotTestCtrl creates a minimal Ctrl with a real signing key for chatbot signing tests.
 func newChatbotTestCtrl(t *testing.T, svc config.Service) *Ctrl {
@@ -115,6 +150,73 @@ func TestSignCentralizedRoutingProof(t *testing.T) {
 	}
 
 	// Verify signature recovers to the correct address
+	recovered := recoverSignerAddress(t, cs)
+	if recovered != ctrl.teeService.Address {
+		t.Errorf("recovered address %s != signer address %s", recovered.Hex(), ctrl.teeService.Address.Hex())
+	}
+}
+
+func TestSignCentralizedRoutingProof_WithTLSState(t *testing.T) {
+	reqBody := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`)
+	respData := []byte(`{"id":"chatcmpl-123","choices":[{"message":{"content":"hi"}}]}`)
+	chatKey := "tls-test-key"
+
+	svc := config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "openai",
+	}
+	ctrl := newChatbotTestCtrl(t, svc)
+
+	// Create a TLS connection state with a real certificate
+	cert := generateTestCert(t, "api.openai.com")
+	tlsState := &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{cert},
+		ServerName:       "api.openai.com",
+	}
+
+	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, tlsState)
+	if err != nil {
+		t.Fatalf("signCentralizedRoutingProof returned error: %v", err)
+	}
+
+	val, found := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
+	if !found {
+		t.Fatal("chat signature not found in cache")
+	}
+	cs := val.(ChatSignature)
+
+	// TLS fingerprint should be non-empty and match the cert
+	expectedFingerprint := teeutil.CertFingerprintFromX509(cert)
+	if cs.TLSCertFingerprint != expectedFingerprint {
+		t.Errorf("TLSCertFingerprint = %q, want %q", cs.TLSCertFingerprint, expectedFingerprint)
+	}
+	if len(cs.TLSCertFingerprint) != 64 {
+		t.Errorf("TLSCertFingerprint length = %d, want 64 hex chars", len(cs.TLSCertFingerprint))
+	}
+
+	// Verify the fingerprint is included in the routing proof text
+	hashAndEncode := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	expectedText := teeutil.FormatRoutingProofText(
+		hashAndEncode(reqBody), hashAndEncode(respData),
+		"centralized", "openai", expectedFingerprint,
+	)
+	if cs.Text != expectedText {
+		t.Errorf("Text = %q, want %q", cs.Text, expectedText)
+	}
+
+	// Verify the proof text contains the fingerprint (not empty trailing colon)
+	parts := strings.Split(cs.Text, ":")
+	if len(parts) != 5 {
+		t.Fatalf("expected 5 colon-separated parts, got %d", len(parts))
+	}
+	if parts[4] != expectedFingerprint {
+		t.Errorf("proof text fingerprint part = %q, want %q", parts[4], expectedFingerprint)
+	}
+
+	// Verify signature is valid
 	recovered := recoverSignerAddress(t, cs)
 	if recovered != ctrl.teeService.Address {
 		t.Errorf("recovered address %s != signer address %s", recovered.Hex(), ctrl.teeService.Address.Hex())

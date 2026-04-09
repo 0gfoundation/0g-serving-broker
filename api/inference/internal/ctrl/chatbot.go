@@ -300,12 +300,20 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		var tlsState *tls.ConnectionState
 		if ginCtx, ok := ctx.(*gin.Context); ok {
 			if val, exists := ginCtx.Get("tlsState"); exists {
-				tlsState, _ = val.(*tls.ConnectionState)
+				if ts, ok := val.(*tls.ConnectionState); ok {
+					tlsState = ts
+				} else {
+					c.logger.Warn("tlsState context value has unexpected type, routing proof will lack TLS fingerprint")
+				}
+			} else {
+				c.logger.Warn("tlsState not found in context, routing proof will lack TLS fingerprint")
 			}
+		} else {
+			c.logger.Warn("context is not *gin.Context, cannot retrieve TLS state for routing proof")
 		}
 		c.logger.Debug("Centralized provider, signing routing proof")
 		if err := c.signCentralizedRoutingProof(reqBody, data, chatKey, tlsState); err != nil {
-			return err
+			return fmt.Errorf("sign centralized routing proof: %w", err)
 		}
 	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
@@ -381,7 +389,7 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey str
 
 	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to sign routing proof: %w", err)
 	}
 
 	if sig[64] == 0 || sig[64] == 1 {

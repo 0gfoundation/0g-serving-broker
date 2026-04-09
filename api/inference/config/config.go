@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +12,10 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"gopkg.in/yaml.v2"
 )
+
+// validProviderIdentity matches lowercase alphanumeric identifiers with optional hyphens.
+// This prevents issues with the colon-delimited routing proof text format.
+var validProviderIdentity = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // ModelArchitecture describes the model's input/output modalities.
 type ModelArchitecture struct {
@@ -316,6 +322,10 @@ func loadConfig(config *Config) error {
 	if config.Service.ProviderType == constant.ProviderTypeCentralized {
 		if config.Service.ProviderIdentity == "" {
 			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
+		}
+		config.Service.ProviderIdentity = strings.ToLower(config.Service.ProviderIdentity)
+		if !validProviderIdentity.MatchString(config.Service.ProviderIdentity) {
+			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", config.Service.ProviderIdentity)
 		}
 		// Centralized providers always behave as TargetSeparated (shared external backend)
 		config.Service.TargetSeparated = true
