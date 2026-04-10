@@ -39,6 +39,7 @@ htmlcov/
 *.bin
 0g-fine-tuning-server
 0g-inference-server
+api/inference/integration/config/config
 
 # Environment-specific configs (keep only *example*.yaml)
 api/**/config.yaml

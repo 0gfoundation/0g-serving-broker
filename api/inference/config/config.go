@@ -3,12 +3,19 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/common/config"
 	"gopkg.in/yaml.v2"
 )
+
+// validProviderIdentity matches lowercase alphanumeric identifiers with optional hyphens.
+// This prevents issues with the colon-delimited routing proof text format.
+var validProviderIdentity = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // ModelArchitecture describes the model's input/output modalities.
 type ModelArchitecture struct {
@@ -95,6 +102,18 @@ type Service struct {
 	ProviderStake    string            `yaml:"providerStake"` // Stake amount for first-time service registration (default: 100000000000000000000 = 100 0G)
 	OwnedBy          string            `yaml:"ownedBy"`       // Optional. Organization name for the owned_by field in /v1/models (e.g., "0G Foundation")
 	ModelInfo        *ModelInfo        `yaml:"modelInfo"`
+
+	// ProviderType distinguishes between "decentralized" (GPU providers) and "centralized" (OpenAI, Anthropic).
+	// Defaults to "decentralized" if not set.
+	ProviderType string `yaml:"providerType"`
+	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
+	// Only used when ProviderType is "centralized".
+	ProviderIdentity string `yaml:"providerIdentity"`
+}
+
+// IsCentralized returns true if this service routes to a centralized API provider.
+func (s *Service) IsCentralized() bool {
+	return s.ProviderType == constant.ProviderTypeCentralized
 }
 
 // DefaultVideoSizeRatios provides default cost multipliers based on pixel count
@@ -320,6 +339,30 @@ func loadConfig(config *Config) error {
 	if config.Service.ModelInfo != nil {
 		if err := config.Service.ModelInfo.Validate(config.Service.Type); err != nil {
 			return fmt.Errorf("invalid config: %w", err)
+		}
+	}
+
+	// Normalize and validate provider type
+	if config.Service.ProviderType == "" {
+		config.Service.ProviderType = constant.ProviderTypeDecentralized
+	}
+	if config.Service.ProviderType != constant.ProviderTypeDecentralized && config.Service.ProviderType != constant.ProviderTypeCentralized {
+		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, config.Service.ProviderType)
+	}
+	if config.Service.ProviderType == constant.ProviderTypeCentralized {
+		if config.Service.ProviderIdentity == "" {
+			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
+		}
+		config.Service.ProviderIdentity = strings.ToLower(config.Service.ProviderIdentity)
+		if !validProviderIdentity.MatchString(config.Service.ProviderIdentity) {
+			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", config.Service.ProviderIdentity)
+		}
+		// Centralized providers always behave as TargetSeparated (shared external backend)
+		config.Service.TargetSeparated = true
+		// Require HTTPS for centralized providers — routing proof relies on
+		// resp.TLS which is only populated for HTTPS connections.
+		if config.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(config.Service.TargetURL), "https://") {
+			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", config.Service.TargetURL)
 		}
 	}
 

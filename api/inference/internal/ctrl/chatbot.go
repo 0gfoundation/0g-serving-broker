@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -48,6 +50,10 @@ type ChatSignature struct {
 	SignatureEcdsa      string         `json:"signature"`
 	SigningAddressEcdsa common.Address `json:"signing_address"`
 	SigningAlgo         string         `json:"signing_algo"`
+	// Centralized provider routing proof fields (omitted for decentralized providers)
+	ProviderType       string `json:"provider_type,omitempty"`
+	ProviderIdentity   string `json:"provider_identity,omitempty"`
+	TLSCertFingerprint string `json:"tls_cert_fingerprint,omitempty"`
 }
 
 type RequestBody struct {
@@ -105,8 +111,11 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	chatKey := uuid.NewString()
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header")
+	// Set ZG-Res-Key for broker-signed responses:
+	// - Decentralized: when LLM is in same network (!TargetSeparated)
+	// - Centralized: always (broker TEE signs routing proof)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+		c.logger.Debug("Setting ZG-Res-Key header for broker-signed response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -147,8 +156,9 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	chatKey := uuid.NewString()
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header for streaming response")
+	// Set ZG-Res-Key for broker-signed responses (see handleChargingResponse for details)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+		c.logger.Debug("Setting ZG-Res-Key header for broker-signed streaming response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -288,7 +298,31 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	}
 
-	if !c.Service.TargetSeparated {
+	if c.Service.IsCentralized() {
+		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
+		var tlsState *tls.ConnectionState
+		if ginCtx, ok := ctx.(*gin.Context); ok {
+			if val, exists := ginCtx.Get("tlsState"); exists {
+				if ts, ok := val.(*tls.ConnectionState); ok {
+					tlsState = ts
+				} else {
+					c.logger.Warn("tlsState context value has unexpected type")
+				}
+			} else {
+				c.logger.Warn("tlsState not found in context")
+			}
+		} else {
+			c.logger.Warn("context is not *gin.Context, cannot retrieve TLS state")
+		}
+		c.logger.Debug("Centralized provider, signing routing proof")
+		// Signing failure is non-fatal: the response and billing are already
+		// complete at this point.  Without a cached signature the SDK will get
+		// a 404 on /v1/proxy/signature/{chatID}, which is more honest than a
+		// TEE-signed proof that lacks TLS evidence.
+		if err := c.signCentralizedRoutingProof(reqBody, data, chatKey, tlsState); err != nil {
+			c.logger.Errorf("routing proof not created: %v", err)
+		}
+	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
 		if err := c.signChatWithKey(reqBody, data, chatKey); err != nil {
 			return err
@@ -327,6 +361,61 @@ func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 
 	key := c.chatCacheKey(chatKey)
 	c.logger.Debugf("key: %v, chat signature: %v", key, chatSignature)
+	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
+	return nil
+}
+
+// signCentralizedRoutingProof creates a TEE-signed routing proof for centralized
+// provider requests. The proof includes request/response hashes, provider identity,
+// and the TLS certificate fingerprint proving the connection target.
+func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey string, tlsState *tls.ConnectionState) error {
+	hashAndEncode := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+
+	requestSha256 := hashAndEncode(reqBody)
+	responseSha256 := hashAndEncode(respData)
+
+	// Extract TLS certificate fingerprint — refuse to sign without it.
+	// A routing proof with an empty fingerprint carries a TEE signature but
+	// provides no TLS evidence, giving verifiers a false sense of security.
+	certInfo := teeutil.ExtractTLSInfo(tlsState)
+	if certInfo == nil || certInfo.PeerCertFingerprint == "" {
+		return fmt.Errorf("TLS certificate not available for centralized provider routing proof (response and billing are unaffected)")
+	}
+	tlsFingerprint := certInfo.PeerCertFingerprint
+	c.logger.Debugf("TLS cert fingerprint captured: %s (server: %s)", tlsFingerprint, certInfo.ServerName)
+
+	text := teeutil.FormatRoutingProofText(
+		requestSha256, responseSha256,
+		c.Service.ProviderType, c.Service.ProviderIdentity,
+		tlsFingerprint,
+	)
+
+	c.logger.Debugf("Routing proof text: %s, signer address: %s", text, c.teeService.Address.Hex())
+
+	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	if err != nil {
+		return fmt.Errorf("failed to sign routing proof: %w", err)
+	}
+
+	if sig[64] == 0 || sig[64] == 1 {
+		sig[64] += 27
+	}
+
+	chatSignature := ChatSignature{
+		Text:                text,
+		SignatureEcdsa:      hexutil.Encode(sig),
+		SigningAddressEcdsa: c.teeService.Address,
+		SigningAlgo:         ECDSA.String(),
+		ProviderType:        c.Service.ProviderType,
+		ProviderIdentity:    c.Service.ProviderIdentity,
+		TLSCertFingerprint:  tlsFingerprint,
+	}
+
+	key := c.chatCacheKey(chatKey)
+	c.logger.Debugf("key: %v, centralized chat signature: %v", key, chatSignature)
 	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
 	return nil
 }

@@ -140,6 +140,12 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 	defer resp.Body.Close()
 
+	// Capture TLS connection state for centralized provider routing proof.
+	// resp.TLS is populated by net/http when the connection uses HTTPS.
+	if c.Service.IsCentralized() && resp.TLS != nil {
+		ctx.Set("tlsState", resp.TLS)
+	}
+
 	for k, v := range resp.Header {
 		if k == "Content-Length" {
 			continue

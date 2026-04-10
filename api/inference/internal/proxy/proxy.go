@@ -218,6 +218,24 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		}
 
 		if isFree {
+			// Centralized providers don't host an LLM TEE, so attestation
+			// report requests would be proxied to e.g. OpenAI which has no
+			// such endpoint.  Intercept early and return a clear error.
+			// Old SDK versions set TargetSeparated=true → call
+			// /attestation/report?model=… and cannot parse the body, but
+			// the 501 status is still more informative than a 404 from OpenAI.
+			if p.ctrl.Service.IsCentralized() && strings.HasPrefix(strings.ToLower(targetPath), "/attestation") {
+				p.logger.Warnf("Blocked LLM attestation request on centralized provider: path=%s, remote=%s",
+					targetPath, ctx.Request.RemoteAddr)
+				ctx.Set("ignoreError", true)
+				ctx.JSON(http.StatusNotImplemented, gin.H{
+					"error": "LLM attestation report is not available for centralized providers. " +
+						"This service routes to a centralized API (e.g., OpenAI). " +
+						"Please upgrade your SDK to a version that supports centralized provider verification.",
+				})
+				return
+			}
+
 			// Log free endpoint access for audit purposes
 			p.logger.Infof("Free endpoint access: path=%s, method=%s, remote=%s, user_agent=%s",
 				targetPath, ctx.Request.Method, ctx.Request.RemoteAddr, ctx.Request.UserAgent())
@@ -455,7 +473,7 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	relativePath := strings.ToLower(ctx.Param("any"))
 	chatID := strings.TrimPrefix(relativePath, "/signature/")
 
-	if !p.ctrl.Service.TargetSeparated {
+	if !p.ctrl.Service.TargetSeparated || p.ctrl.Service.IsCentralized() {
 		sig, err := p.ctrl.GetChatSignature(chatID)
 		if err != nil {
 			p.handleBrokerError(ctx, err, "prepare HTTP request")

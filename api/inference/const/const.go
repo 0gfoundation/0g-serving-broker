@@ -15,6 +15,25 @@ const (
 	ServiceTypeVideoGeneration = "video-generation"
 )
 
+// Provider type constants for distinguishing between decentralized GPU providers
+// and centralized API providers (e.g., OpenAI, Anthropic).
+const (
+	ProviderTypeDecentralized = "decentralized"
+	ProviderTypeCentralized   = "centralized"
+)
+
+// Known centralized provider identities.
+const (
+	CentralizedProviderOpenAI    = "openai"
+	CentralizedProviderAnthropic = "anthropic"
+)
+
+// KnownCentralizedProviderURLs maps provider identity to their default API base URLs.
+var KnownCentralizedProviderURLs = map[string]string{
+	CentralizedProviderOpenAI:    "https://api.openai.com",
+	CentralizedProviderAnthropic: "https://api.anthropic.com",
+}
+
 var (
 	ServicePrefix = "/v1/proxy"
 
