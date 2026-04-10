@@ -1,6 +1,8 @@
 package ctrl
 
 import (
+	"net/http"
+
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/inference/contract"
@@ -18,4 +20,10 @@ func (c *Ctrl) SeedContractAccountCache(address string, account *contract.Accoun
 // This avoids contract calls when fetching service pricing.
 func (c *Ctrl) SeedServiceCache(service model.Service) {
 	c.serviceCache.Set("current_service", service, cache.DefaultExpiration)
+}
+
+// SetHTTPClient replaces the internal HTTP client for integration testing.
+// Use this to inject a client that trusts httptest.NewTLSServer certificates.
+func (c *Ctrl) SetHTTPClient(client *http.Client) {
+	c.httpClient = client
 }

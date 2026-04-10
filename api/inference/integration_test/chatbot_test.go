@@ -63,6 +63,50 @@ func newMockChatbotProvider(t *testing.T) *httptest.Server {
 	}))
 }
 
+// newMockChatbotProviderTLS is identical to newMockChatbotProvider but serves
+// over HTTPS so that resp.TLS is populated — required for centralized provider
+// routing proof tests.
+func newMockChatbotProviderTLS(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		switch {
+		case r.Method == "POST" && path == "/chat/completions":
+			var reqBody map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&reqBody)
+
+			isStream := false
+			if s, ok := reqBody["stream"].(bool); ok {
+				isStream = s
+			}
+
+			if isStream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("data: {\"id\":\"chatcmpl-001\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"))
+				w.Write([]byte("data: {\"id\":\"chatcmpl-001\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n"))
+				w.Write([]byte("data: {\"id\":\"chatcmpl-001\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n"))
+				w.Write([]byte("data: [DONE]\n\n"))
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":      "chatcmpl-001",
+					"object":  "chat.completion",
+					"model":   "gpt-4o",
+					"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "Hello world"}, "finish_reason": "stop"}},
+					"usage":   map[string]interface{}{"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+				})
+			}
+
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
 // ==========================================================================
 // Chatbot non-streaming flow
 // ==========================================================================
@@ -217,7 +261,8 @@ func TestChatbotEndpoints_RequireAuth(t *testing.T) {
 // ==========================================================================
 
 func TestCentralizedProvider_NonStream(t *testing.T) {
-	mockProvider := newMockChatbotProvider(t)
+	// Use TLS server so resp.TLS is populated for routing proof signing
+	mockProvider := newMockChatbotProviderTLS(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	env := setupTestEnv(t, func(cfg *config.Config) {
@@ -228,6 +273,8 @@ func TestCentralizedProvider_NonStream(t *testing.T) {
 		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
 		cfg.Service.TargetSeparated = true
 	})
+	// Inject HTTP client that trusts the test server's self-signed certificate
+	env.ctrl.SetHTTPClient(mockProvider.Client())
 
 	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hi"}],"stream":false}`
 	req := httptest.NewRequest("POST", "/v1/proxy/chat/completions", strings.NewReader(reqBody))
@@ -306,7 +353,8 @@ func TestCentralizedProvider_NonStream(t *testing.T) {
 // ==========================================================================
 
 func TestCentralizedProvider_Stream(t *testing.T) {
-	mockProvider := newMockChatbotProvider(t)
+	// Use TLS server so resp.TLS is populated for routing proof signing
+	mockProvider := newMockChatbotProviderTLS(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	env := setupTestEnv(t, func(cfg *config.Config) {
@@ -317,6 +365,8 @@ func TestCentralizedProvider_Stream(t *testing.T) {
 		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
 		cfg.Service.TargetSeparated = true
 	})
+	// Inject HTTP client that trusts the test server's self-signed certificate
+	env.ctrl.SetHTTPClient(mockProvider.Client())
 
 	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hi"}],"stream":true}`
 	req := httptest.NewRequest("POST", "/v1/proxy/chat/completions", strings.NewReader(reqBody))
