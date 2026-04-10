@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -585,7 +586,7 @@ func (m *Manager) offloadIdleAdapters(ctx context.Context) {
 // It strips any directory path from baseModel so that "/models/Qwen2.5-0.5B-Instruct"
 // and "Qwen2.5-0.5B-Instruct" produce the same name.
 func MakeAdapterName(baseModel, taskID string) string {
-	base := filepath.Base(baseModel)
+	base := path.Base(baseModel) // Use path (not filepath) — model names use forward slashes regardless of OS
 	sanitized := strings.NewReplacer("/", "-", ".", "-", " ", "-").Replace(base)
 	sanitized = strings.Trim(sanitized, "-")
 	short := taskID
