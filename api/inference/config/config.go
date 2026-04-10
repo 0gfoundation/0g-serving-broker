@@ -359,6 +359,11 @@ func loadConfig(config *Config) error {
 		}
 		// Centralized providers always behave as TargetSeparated (shared external backend)
 		config.Service.TargetSeparated = true
+		// Require HTTPS for centralized providers — routing proof relies on
+		// resp.TLS which is only populated for HTTPS connections.
+		if config.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(config.Service.TargetURL), "https://") {
+			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", config.Service.TargetURL)
+		}
 	}
 
 	return nil

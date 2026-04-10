@@ -376,6 +376,91 @@ func TestGetModels_ServiceError(t *testing.T) {
 	}
 }
 
+func TestGetModels_CentralizedProviderInfo(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "gpt-4o",
+			Type:        "chatbot",
+			InputPrice:  "100",
+			OutputPrice: "200",
+		},
+		serviceConfig: config.Service{
+			OwnedBy:          "0G Foundation",
+			ProviderType:     "centralized",
+			ProviderIdentity: "openai",
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	m := resp.Data[0]
+	if m.ProviderType != "centralized" {
+		t.Errorf("expected provider_type=centralized, got %q", m.ProviderType)
+	}
+	if m.ProviderIdentity != "openai" {
+		t.Errorf("expected provider_identity=openai, got %q", m.ProviderIdentity)
+	}
+}
+
+func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "llama-3.1-8b",
+			Type:        "chatbot",
+			InputPrice:  "100",
+			OutputPrice: "200",
+		},
+		serviceConfig: config.Service{
+			ProviderType: "decentralized",
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	m := resp.Data[0]
+	if m.ProviderType != "" {
+		t.Errorf("expected empty provider_type for decentralized, got %q", m.ProviderType)
+	}
+	if m.ProviderIdentity != "" {
+		t.Errorf("expected empty provider_identity for decentralized, got %q", m.ProviderIdentity)
+	}
+
+	// Also verify the fields are omitted from JSON output
+	raw := w.Body.Bytes()
+	var rawMap map[string]interface{}
+	if err := json.Unmarshal(raw, &rawMap); err != nil {
+		t.Fatalf("failed to parse raw response: %v", err)
+	}
+	dataArr := rawMap["data"].([]interface{})
+	modelMap := dataArr[0].(map[string]interface{})
+	if _, exists := modelMap["provider_type"]; exists {
+		t.Error("provider_type should be omitted from JSON for decentralized providers")
+	}
+	if _, exists := modelMap["provider_identity"]; exists {
+		t.Error("provider_identity should be omitted from JSON for decentralized providers")
+	}
+}
+
 func TestParseTeeVerifier(t *testing.T) {
 	tests := []struct {
 		name           string

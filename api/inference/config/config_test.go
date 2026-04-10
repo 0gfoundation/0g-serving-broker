@@ -206,6 +206,31 @@ service:
 	}
 }
 
+func TestLoadConfig_CentralizedRejectsHTTP(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://api.openai.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "openai"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for centralized provider with HTTP targetUrl")
+	}
+	if !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
 func TestLoadConfig_InvalidProviderType(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

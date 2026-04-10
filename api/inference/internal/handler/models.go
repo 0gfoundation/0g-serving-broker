@@ -31,6 +31,8 @@ type ModelObject struct {
 	TeeType             string                    `json:"tee_type,omitempty"`
 	TeeVerifier         string                    `json:"tee_verifier,omitempty"`
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
+	ProviderType        string                    `json:"provider_type,omitempty"`
+	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
 }
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
@@ -107,6 +109,12 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	// Extract TEE verifier from on-chain additionalInfo JSON
 	obj.TeeVerifier = parseTeeVerifier(svc.AdditionalInfo)
+
+	// Expose centralized proxy info so SDK can choose the correct verification path
+	if cfg.IsCentralized() {
+		obj.ProviderType = cfg.ProviderType
+		obj.ProviderIdentity = cfg.ProviderIdentity
+	}
 
 	ctx.JSON(http.StatusOK, ModelListResponse{
 		Object: "list",
