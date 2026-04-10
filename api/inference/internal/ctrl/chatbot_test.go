@@ -99,7 +99,7 @@ func recoverSignerAddress(t *testing.T, cs ChatSignature) common.Address {
 // signCentralizedRoutingProof
 // ==========================================================================
 
-func TestSignCentralizedRoutingProof(t *testing.T) {
+func TestSignCentralizedRoutingProof_NilTLSState(t *testing.T) {
 	reqBody := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`)
 	respData := []byte(`{"id":"chatcmpl-123","choices":[{"message":{"content":"hi"}}]}`)
 	chatKey := "test-chat-key"
@@ -110,49 +110,19 @@ func TestSignCentralizedRoutingProof(t *testing.T) {
 	}
 	ctrl := newChatbotTestCtrl(t, svc)
 
+	// Without TLS state, signing must refuse — a proof with an empty
+	// fingerprint would give verifiers false security.
 	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, nil)
-	if err != nil {
-		t.Fatalf("signCentralizedRoutingProof returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when TLS state is nil")
+	}
+	if !strings.Contains(err.Error(), "TLS certificate not available") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 
-	// Retrieve from cache
-	val, found := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
-	if !found {
-		t.Fatal("chat signature not found in cache")
-	}
-	cs := val.(ChatSignature)
-
-	// Verify fields
-	if cs.ProviderType != "centralized" {
-		t.Errorf("ProviderType = %q, want %q", cs.ProviderType, "centralized")
-	}
-	if cs.ProviderIdentity != "openai" {
-		t.Errorf("ProviderIdentity = %q, want %q", cs.ProviderIdentity, "openai")
-	}
-	if cs.SigningAlgo != "ecdsa" {
-		t.Errorf("SigningAlgo = %q, want %q", cs.SigningAlgo, "ecdsa")
-	}
-	if cs.TLSCertFingerprint != "" {
-		t.Errorf("TLSCertFingerprint = %q, want empty (nil TLS state)", cs.TLSCertFingerprint)
-	}
-
-	// Verify the proof text format
-	hashAndEncode := func(b []byte) string {
-		h := sha256.Sum256(b)
-		return hex.EncodeToString(h[:])
-	}
-	expectedText := teeutil.FormatRoutingProofText(
-		hashAndEncode(reqBody), hashAndEncode(respData),
-		"centralized", "openai", "",
-	)
-	if cs.Text != expectedText {
-		t.Errorf("Text = %q, want %q", cs.Text, expectedText)
-	}
-
-	// Verify signature recovers to the correct address
-	recovered := recoverSignerAddress(t, cs)
-	if recovered != ctrl.teeService.Address {
-		t.Errorf("recovered address %s != signer address %s", recovered.Hex(), ctrl.teeService.Address.Hex())
+	// Nothing should be cached
+	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey)); found {
+		t.Error("signature should not be cached when TLS state is missing")
 	}
 }
 
@@ -230,9 +200,10 @@ func TestSignCentralizedRoutingProof_DifferentProviders(t *testing.T) {
 	tests := []struct {
 		name             string
 		providerIdentity string
+		certCN           string
 	}{
-		{"openai", "openai"},
-		{"anthropic", "anthropic"},
+		{"openai", "openai", "api.openai.com"},
+		{"anthropic", "anthropic", "api.anthropic.com"},
 	}
 
 	for _, tt := range tests {
@@ -243,7 +214,13 @@ func TestSignCentralizedRoutingProof_DifferentProviders(t *testing.T) {
 			}
 			ctrl := newChatbotTestCtrl(t, svc)
 
-			err := ctrl.signCentralizedRoutingProof(reqBody, respData, "key-"+tt.name, nil)
+			cert := generateTestCert(t, tt.certCN)
+			tlsState := &tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{cert},
+				ServerName:       tt.certCN,
+			}
+
+			err := ctrl.signCentralizedRoutingProof(reqBody, respData, "key-"+tt.name, tlsState)
 			if err != nil {
 				t.Fatalf("error: %v", err)
 			}
@@ -329,12 +306,18 @@ func TestSignatureVValueAdjustment(t *testing.T) {
 	}
 	ctrl := newChatbotTestCtrl(t, svc)
 
+	cert := generateTestCert(t, "api.openai.com")
+	tlsState := &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{cert},
+		ServerName:       "api.openai.com",
+	}
+
 	for i := 0; i < 10; i++ {
 		chatKey := "v-test-" + hex.EncodeToString([]byte{byte(i)})
 		reqBody := []byte(`{"i":` + hex.EncodeToString([]byte{byte(i)}) + `}`)
 		respData := []byte(`{"r":` + hex.EncodeToString([]byte{byte(i)}) + `}`)
 
-		err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, nil)
+		err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, tlsState)
 		if err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}

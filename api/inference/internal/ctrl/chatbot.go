@@ -306,17 +306,21 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 				if ts, ok := val.(*tls.ConnectionState); ok {
 					tlsState = ts
 				} else {
-					c.logger.Warn("tlsState context value has unexpected type, routing proof will lack TLS fingerprint")
+					c.logger.Warn("tlsState context value has unexpected type")
 				}
 			} else {
-				c.logger.Warn("tlsState not found in context, routing proof will lack TLS fingerprint")
+				c.logger.Warn("tlsState not found in context")
 			}
 		} else {
-			c.logger.Warn("context is not *gin.Context, cannot retrieve TLS state for routing proof")
+			c.logger.Warn("context is not *gin.Context, cannot retrieve TLS state")
 		}
 		c.logger.Debug("Centralized provider, signing routing proof")
+		// Signing failure is non-fatal: the response and billing are already
+		// complete at this point.  Without a cached signature the SDK will get
+		// a 404 on /v1/proxy/signature/{chatID}, which is more honest than a
+		// TEE-signed proof that lacks TLS evidence.
 		if err := c.signCentralizedRoutingProof(reqBody, data, chatKey, tlsState); err != nil {
-			return fmt.Errorf("sign centralized routing proof: %w", err)
+			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
@@ -373,14 +377,15 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey str
 	requestSha256 := hashAndEncode(reqBody)
 	responseSha256 := hashAndEncode(respData)
 
-	// Extract TLS certificate fingerprint
-	var tlsFingerprint string
-	if certInfo := teeutil.ExtractTLSInfo(tlsState); certInfo != nil {
-		tlsFingerprint = certInfo.PeerCertFingerprint
-		c.logger.Debugf("TLS cert fingerprint captured: %s (server: %s)", tlsFingerprint, certInfo.ServerName)
-	} else {
-		c.logger.Warn("No TLS certificate captured for centralized provider routing proof")
+	// Extract TLS certificate fingerprint — refuse to sign without it.
+	// A routing proof with an empty fingerprint carries a TEE signature but
+	// provides no TLS evidence, giving verifiers a false sense of security.
+	certInfo := teeutil.ExtractTLSInfo(tlsState)
+	if certInfo == nil || certInfo.PeerCertFingerprint == "" {
+		return fmt.Errorf("TLS certificate not available for centralized provider routing proof (response and billing are unaffected)")
 	}
+	tlsFingerprint := certInfo.PeerCertFingerprint
+	c.logger.Debugf("TLS cert fingerprint captured: %s (server: %s)", tlsFingerprint, certInfo.ServerName)
 
 	text := teeutil.FormatRoutingProofText(
 		requestSha256, responseSha256,
