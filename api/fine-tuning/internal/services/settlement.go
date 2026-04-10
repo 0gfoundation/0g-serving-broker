@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,10 +23,24 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// settlementContract abstracts the contract operations needed by the settlement service.
+type settlementContract interface {
+	GetDeliverable(ctx context.Context, user common.Address, id string) (contract.Deliverable, error)
+	SettleFees(ctx context.Context, verifierInput contract.VerifierInput) error
+	GetLockTime(ctx context.Context) (int64, error)
+	ChainID(ctx context.Context) (*big.Int, error)
+	ContractAddr() string
+}
+
+// teeSigner abstracts the TEE signing operations needed by the settlement service.
+type teeSigner interface {
+	SignEIP712(digest []byte) ([]byte, error)
+}
+
 type Settlement struct {
 	db         *db.DB
-	contract   *providercontract.ProviderContract
-	teeService *tee.TeeService
+	contract   settlementContract
+	teeService teeSigner
 	config     SettlementConfig
 	logger     log.Logger
 }
@@ -120,7 +135,11 @@ func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool
 			s.logger.Errorf("Write into task log failed: %v", err)
 		}
 
-		_, err := s.db.HandleSettlementFailure(&task, s.config.MaxNumRetriesPerTask)
+		currentProgress := db.ProgressStateUserAcknowledged
+		if !userAcked {
+			currentProgress = db.ProgressStateDelivered
+		}
+		_, err := s.db.HandleSettlementFailure(&task, s.config.MaxNumRetriesPerTask, currentProgress)
 		if err != nil {
 			s.logger.Errorf("error handling failure task: %v", err)
 			return err
@@ -205,6 +224,21 @@ func (s *Settlement) getPendingSettlementTask(batchSize int) []db.Task {
 }
 
 func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked bool) error {
+	userAddress := common.HexToAddress(task.UserAddress)
+
+	// Idempotency check: if settlement already completed on-chain (e.g. previous
+	// SettleFees succeeded but DB update failed), skip the contract call and just
+	// update the local DB to avoid a permanent stuck state.
+	deliverable, err := s.contract.GetDeliverable(ctx, userAddress, task.ID.String())
+	if err != nil {
+		s.logger.Warnf("failed to check on-chain settlement status for task %s: %v", task.ID, err)
+	} else if deliverable.Settled {
+		s.logger.Infof("task %s already settled on-chain, syncing local DB", task.ID)
+		return s.db.UpdateTask(task.ID, db.Task{
+			Progress: db.ProgressStateFinished.String(),
+		})
+	}
+
 	modelRootHash, err := hexutil.Decode(task.OutputRootHash)
 	if err != nil {
 		return err
@@ -227,8 +261,6 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 			return err
 		}
 	}
-
-	userAddress := common.HexToAddress(task.UserAddress)
 
 	// Create EIP-712 signature
 	input := contract.VerifierInput{
@@ -272,7 +304,7 @@ func (s *Settlement) doSettlement(ctx context.Context, task *db.Task, useAcked b
 // domainSeparator calculates the EIP-712 domain separator for fine-tuning
 // Must match the domain separator calculation in FineTuningVerifier.sol
 func (s *Settlement) domainSeparator(ctx context.Context) (common.Hash, error) {
-	chainID, err := s.contract.Contract.Client.Client.ChainID(ctx)
+	chainID, err := s.contract.ChainID(ctx)
 	if err != nil {
 		return common.Hash{}, errors.Wrap(err, "get chain ID")
 	}
@@ -283,7 +315,7 @@ func (s *Settlement) domainSeparator(ctx context.Context) (common.Hash, error) {
 		crypto.Keccak256([]byte(constant.DomainName)),
 		crypto.Keccak256([]byte(constant.DomainVersion)),
 		common.LeftPadBytes(chainID.Bytes(), 32),
-		common.LeftPadBytes(common.HexToAddress(s.contract.ContractAddress).Bytes(), 32),
+		common.LeftPadBytes(common.HexToAddress(s.contract.ContractAddr()).Bytes(), 32),
 	)
 
 	return domainSep, nil
