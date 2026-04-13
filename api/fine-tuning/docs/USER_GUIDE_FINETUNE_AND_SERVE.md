@@ -21,7 +21,7 @@ Full workflow: fine-tune a model → download result → send inference requests
      ↓
   monitor (get-task / get-log)
      ↓
-  acknowledge-model  ──── on-chain event ────→  adapter auto-deployed
+  acknowledge-model (--deploy) ── deploys ──→  adapter ready on GPU
      ↓
   decrypt-model (optional, for self-hosting)
 ```
@@ -135,32 +135,49 @@ Wait for **Delivered** before proceeding.
 0g-compute-cli fine-tuning acknowledge-model \
   --provider <PROVIDER> \
   --task-id <TASK_ID> \
-  --data-path ./output/
+  --data-path ./output/ \
+  --model "Qwen2.5-0.5B-Instruct" \
+  --deploy
 ```
 
-Downloads encrypted model from 0G Storage and acknowledges on-chain.
+This command:
+1. Downloads the encrypted model from 0G Storage
+2. Acknowledges on-chain (triggers settlement)
+3. With `--deploy`: automatically deploys the LoRA adapter to the inference GPU
+
+> Without `--deploy`, you must manually run `fine-tuning deploy-adapter` before using the model for inference.
 
 ---
 
 ## Step 6: Decrypt Model (Optional)
 
-For local self-hosting:
+For local self-hosting. Wait for task status to reach **Finished** before decrypting (the decryption key is uploaded on-chain during settlement).
 
 ```bash
 0g-compute-cli fine-tuning decrypt-model \
   --provider <PROVIDER> \
   --task-id <TASK_ID> \
   --encrypted-model ./output/model_<TASK_ID>.bin \
-  --output ./decrypted_model/
+  --output ./decrypted_model/model.zip
 ```
 
-Output: ZIP with LoRA adapter files (`adapter_model.safetensors`, `adapter_config.json`).
+> `--output` must be a **file path** (not a directory).
+
+Output: ZIP containing LoRA adapter files (`adapter_model.safetensors`, `adapter_config.json`).
 
 ---
 
 ## Step 7: Use Fine-Tuned Model for Inference
 
-After acknowledging (Step 5), the provider's inference broker auto-deploys your LoRA adapter.
+If you used `--deploy` in Step 5, the LoRA adapter is already deployed. Otherwise, deploy it manually:
+
+```bash
+0g-compute-cli fine-tuning deploy-adapter \
+  --provider <PROVIDER> \
+  --model "Qwen2.5-0.5B-Instruct" \
+  --task-id <TASK_ID> \
+  --wait
+```
 
 ### 7.1 Prepare Inference Account
 
@@ -254,8 +271,9 @@ curl $PROVIDER_URL/v1/proxy/chat/completions \
 | `fine-tuning get-task --provider <addr> [--task <id>]` | Check task status |
 | `fine-tuning get-log --provider <addr> [--task <id>]` | View training logs |
 | `fine-tuning list-tasks --provider <addr>` | List all tasks |
-| `fine-tuning acknowledge-model` | Download and acknowledge model |
-| `fine-tuning decrypt-model` | Decrypt model for local use |
+| `fine-tuning acknowledge-model` | Download and acknowledge model (`--deploy` to auto-deploy adapter) |
+| `fine-tuning decrypt-model` | Decrypt model for local use (requires Finished status) |
+| `fine-tuning deploy-adapter` | Deploy LoRA adapter to inference GPU |
 | `fine-tuning cancel-task` | Cancel a running task |
 | `fine-tuning get-adapter-name` | Get LoRA adapter name for inference |
 | `fine-tuning chat` | Chat with fine-tuned model |
@@ -300,9 +318,11 @@ The provider is downloading the dataset and model. Large models (e.g., Qwen3-32B
 0g-compute-cli fine-tuning get-log --provider <PROVIDER> --task <TASK_ID>
 ```
 
-### "Model not found" when using chat
+### "Model not found" or 400 error when using chat
 
-The inference broker may not have deployed the adapter yet. This happens automatically after `acknowledge-model`, but may take up to 30 seconds. Wait and retry.
+The adapter has not been deployed to the inference GPU yet. Either:
+- Re-run `acknowledge-model` with `--deploy --model <MODEL>`, or
+- Run `fine-tuning deploy-adapter --provider <PROVIDER> --model <MODEL> --task-id <TASK_ID> --wait`
 
 ### "Service not acknowledge the tee signer"
 
@@ -345,10 +365,11 @@ Or revoke all and regenerate:
   --config-path ./config.json
 # => Task ID: abc123-def456
 
-# 3. Wait for completion, then download
+# 3. Wait for Delivered, then download + deploy
 0g-compute-cli fine-tuning get-task --provider 0x87a1...8ed4 --task abc123-def456
 0g-compute-cli fine-tuning acknowledge-model \
-  --provider 0x87a1...8ed4 --task-id abc123-def456 --data-path ./output/
+  --provider 0x87a1...8ed4 --task-id abc123-def456 --data-path ./output/ \
+  --model "Qwen2.5-0.5B-Instruct" --deploy
 
 # 4. Use for inference
 0g-compute-cli inference acknowledge-provider --provider 0x87a1...8ed4
