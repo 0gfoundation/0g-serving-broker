@@ -397,6 +397,103 @@ func TestChatCacheKey(t *testing.T) {
 }
 
 // ==========================================================================
+// extractUsageFromLine — guards against empty usage from attestation chunks
+// ==========================================================================
+
+func TestExtractUsageFromLine(t *testing.T) {
+	ctrl := &Ctrl{}
+
+	tests := []struct {
+		name           string
+		line           string
+		wantNil        bool
+		wantPrompt     int
+		wantCompletion int
+	}{
+		{
+			name:           "valid usage",
+			line:           `data: {"id":"test","choices":[],"usage":{"prompt_tokens":18,"completion_tokens":12,"total_tokens":30}}`,
+			wantNil:        false,
+			wantPrompt:     18,
+			wantCompletion: 12,
+		},
+		{
+			name:    "empty usage object from attestation chunk",
+			line:    `data: {"id":"test","choices":[],"usage":{},"attestation":{"foo":"bar"}}`,
+			wantNil: true,
+		},
+		{
+			name:    "no usage field",
+			line:    `data: {"id":"test","choices":[{"index":0,"delta":{"content":"hello"}}]}`,
+			wantNil: true,
+		},
+		{
+			name:    "invalid JSON",
+			line:    `data: {invalid`,
+			wantNil: true,
+		},
+		{
+			name:    "done marker",
+			line:    `data: [DONE]`,
+			wantNil: true,
+		},
+		{
+			name:    "all zero usage",
+			line:    `data: {"id":"test","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ctrl.extractUsageFromLine([]byte(tt.line))
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("expected nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("expected non-nil usage")
+			}
+			if got.PromptTokens != tt.wantPrompt {
+				t.Errorf("PromptTokens = %d, want %d", got.PromptTokens, tt.wantPrompt)
+			}
+			if got.CompletionTokens != tt.wantCompletion {
+				t.Errorf("CompletionTokens = %d, want %d", got.CompletionTokens, tt.wantCompletion)
+			}
+		})
+	}
+}
+
+// TestExtractUsageOverwritePrevention verifies that a stream with an
+// attestation chunk carrying "usage":{} does not overwrite real usage data.
+func TestExtractUsageOverwritePrevention(t *testing.T) {
+	ctrl := &Ctrl{}
+
+	// Simulate the actual stream chunk order from the provider
+	lines := []string{
+		`data: {"id":"test","choices":[],"usage":{"prompt_tokens":18,"completion_tokens":12,"total_tokens":30}}`,
+		`data: {"id":"test","choices":[],"usage":{},"attestation":{"recipient":"0x0"}}`,
+	}
+
+	var usage *Usage
+	for _, line := range lines {
+		if extracted := ctrl.extractUsageFromLine([]byte(line)); extracted != nil {
+			usage = extracted
+		}
+	}
+
+	if usage == nil {
+		t.Fatal("usage should not be nil")
+	}
+	if usage.PromptTokens != 18 || usage.CompletionTokens != 12 {
+		t.Errorf("usage was overwritten: got prompt=%d completion=%d, want 18 and 12",
+			usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
+// ==========================================================================
 // TeeService signing round-trip
 // ==========================================================================
 
