@@ -94,6 +94,11 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		}
 	}
 
+	// Flag multi-model providers so SDK/CLI can detect from on-chain data
+	if service.HasMultiModelPricing() {
+		additionalInfo["MultiModel"] = true
+	}
+
 	additionalInfoJSON, err := json.Marshal(additionalInfo)
 	if err != nil {
 		return "", errors.Wrap(err, "marshal additional info")
@@ -221,6 +226,10 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) error {
+	if new.HasMultiModelPricing() {
+		c.logger.Infof("[SyncService] Multi-model pricing configured (%d models), on-chain prices set to max(inputPrice=%s, outputPrice=%s)",
+			len(new.ModelPricing), new.InputPrice, new.OutputPrice)
+	}
 	c.logger.Infof("[SyncService] Starting to sync service - provider=%s, newURL=%s, newModel=%s, newType=%s, inputPrice=%s, outputPrice=%s",
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 

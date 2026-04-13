@@ -454,12 +454,12 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	// For non-stream responses, usage info is in the same response
 	if chunk.Usage != nil {
 		*usage = chunk.Usage
-		// Get service price from cache/contract instead of config
-		service, err := c.GetCachedService(ctx)
+		// Get billing prices (model-specific for multi-model, on-chain for single-model)
+		prices, err := c.GetBillingPrices(ctx)
 		if err != nil {
-			return errors.Wrap(err, "get cached service for single response billing")
+			return errors.Wrap(err, "get billing prices for single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, chunk.Usage, service.OutputPrice, requestHash, service.InputPrice)
+		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice)
 	}
 
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
@@ -788,12 +788,12 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 
 			// For stream responses, usage info comes before [DONE]
 			if *usage != nil {
-				// Get service price from cache/contract instead of config
-				service, err := c.GetCachedService(ctx)
+				// Get billing prices (model-specific for multi-model, on-chain for single-model)
+				prices, err := c.GetBillingPrices(ctx)
 				if err != nil {
-					return errors.Wrap(err, "get cached service for stream response billing")
+					return errors.Wrap(err, "get billing prices for stream response billing")
 				}
-				c.finalizeResponseWithUsage(ctx, *usage, service.OutputPrice, requestHash, service.InputPrice)
+				c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice)
 				break
 			}
 			c.finalizeResponse(ctx, *output, outputPrice, requestHash)

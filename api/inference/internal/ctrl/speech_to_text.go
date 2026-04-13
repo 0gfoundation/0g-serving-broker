@@ -379,15 +379,16 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 // discriminator, mixing whisper and gpt-4o-transcribe traffic on the same
 // service_type silently corrupts requests.input_count aggregates.
 func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
-	service, err := c.GetCachedService(ctx)
+	// Get billing prices (model-specific for multi-model, on-chain for single-model)
+	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {
-		return errors.Wrap(err, "get cached service for speech-to-text billing")
+		return errors.Wrap(err, "get billing prices for speech-to-text billing")
 	}
 
 	if isDurationUsage(usage) {
-		return c.billSpeechToTextByDuration(ctx, usage, service.InputPrice, requestHash)
+		return c.billSpeechToTextByDuration(ctx, usage, prices.InputPrice, requestHash)
 	}
-	return c.billSpeechToTextByTokens(ctx, usage, service.InputPrice, service.OutputPrice, requestHash)
+	return c.billSpeechToTextByTokens(ctx, usage, prices.InputPrice, prices.OutputPrice, requestHash)
 }
 
 // billSpeechToTextByDuration handles whisper-style usage carrying a seconds
@@ -614,10 +615,10 @@ If text is provided, billing is based on the number of words in the text.
 Otherwise, falls back to a default estimation.
 */
 func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Request, text string) error {
-	// Get service price from cache/contract instead of config
-	service, err := c.GetCachedService(ctx)
+	// Get billing prices (model-specific for multi-model, on-chain for single-model)
+	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {
-		return errors.Wrap(err, "get cached service for speech-to-text fallback billing")
+		return errors.Wrap(err, "get billing prices for speech-to-text fallback billing")
 	}
 
 	var estimatedOutputTokens int64 = 100 // default estimation
@@ -639,7 +640,7 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 		}
 	}
 
-	outputFee, err := util.Multiply(service.OutputPrice, estimatedOutputTokens)
+	outputFee, err := util.Multiply(prices.OutputPrice, estimatedOutputTokens)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee")
 	}

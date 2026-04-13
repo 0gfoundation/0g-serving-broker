@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -319,6 +320,43 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	c.logger.Infof("SyncServicePrices: on-chain prices updated to inputPriceWei=%s outputPriceWei=%s",
 		inputWei.String(), outputWei.String())
 	return new(big.Int).Set(inputWei), new(big.Int).Set(outputWei), nil
+}
+
+// BillingPrices holds the resolved input and output prices for a request.
+type BillingPrices struct {
+	InputPrice  string
+	OutputPrice string
+}
+
+// GetBillingPrices resolves the correct input and output prices for billing.
+// For centralized multi-model providers, reads "resolvedModel" from gin.Context
+// and returns model-specific prices. Otherwise falls back to on-chain service prices.
+func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
+	if c.Service.HasMultiModelPricing() {
+		if ginCtx, ok := ctx.(*gin.Context); ok {
+			if modelVal, exists := ginCtx.Get("resolvedModel"); exists {
+				modelStr, ok := modelVal.(string)
+				if ok {
+					if entry := c.Service.GetModelPricing(modelStr); entry != nil {
+						return BillingPrices{
+							InputPrice:  entry.InputPrice,
+							OutputPrice: entry.OutputPrice,
+						}, nil
+					}
+				}
+			}
+		}
+		// Multi-model pricing configured but resolvedModel not in context.
+		// This means the request path did not set it (e.g., non-chatbot service type).
+		// Fall through to on-chain max prices which is safe (overcharges, not undercharges).
+		c.logger.Warn("Multi-model pricing configured but resolvedModel not found in context, falling back to on-chain max prices")
+	}
+	// Fallback: on-chain prices (decentralized or single-model centralized)
+	svc, err := c.GetCachedService(ctx)
+	if err != nil {
+		return BillingPrices{}, errors.Wrap(err, "get billing prices")
+	}
+	return BillingPrices{InputPrice: svc.InputPrice, OutputPrice: svc.OutputPrice}, nil
 }
 
 func parseService(svc contract.Service) model.Service {
