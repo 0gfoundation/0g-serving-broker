@@ -484,6 +484,13 @@ func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
 	if err := json.Unmarshal(line, &chunk); err != nil {
 		return nil
 	}
+	// Guard against empty usage objects (e.g. "usage":{}) from upstream
+	// chunks like attestation data. An empty usage unmarshals to a non-nil
+	// pointer with all zero fields, which would overwrite a previously
+	// captured valid usage and cause settlement to skip the request.
+	if chunk.Usage != nil && chunk.Usage.PromptTokens == 0 && chunk.Usage.CompletionTokens == 0 && chunk.Usage.TotalTokens == 0 {
+		return nil
+	}
 	return chunk.Usage
 }
 
