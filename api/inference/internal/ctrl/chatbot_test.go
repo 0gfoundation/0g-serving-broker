@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"strings"
 	"testing"
@@ -430,5 +431,185 @@ func TestTeeServiceSigningRoundTrip(t *testing.T) {
 
 	if _, ok := interface{}(ts.ProviderSigner).(*ecdsa.PrivateKey); !ok {
 		t.Error("ProviderSigner is not *ecdsa.PrivateKey")
+	}
+}
+
+// ==========================================================================
+// MessageContent JSON marshaling/unmarshaling
+// ==========================================================================
+
+func TestMessageContent_UnmarshalString(t *testing.T) {
+	input := `"Hello, world!"`
+	var mc MessageContent
+	if err := json.Unmarshal([]byte(input), &mc); err != nil {
+		t.Fatalf("UnmarshalJSON error: %v", err)
+	}
+	if mc.Text != "Hello, world!" {
+		t.Errorf("Text = %q, want %q", mc.Text, "Hello, world!")
+	}
+	if mc.Parts != nil {
+		t.Error("Parts should be nil for string content")
+	}
+}
+
+func TestMessageContent_UnmarshalMultimodal(t *testing.T) {
+	input := `[{"type":"text","text":"Describe this image"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR","detail":"high"}}]`
+	var mc MessageContent
+	if err := json.Unmarshal([]byte(input), &mc); err != nil {
+		t.Fatalf("UnmarshalJSON error: %v", err)
+	}
+	if len(mc.Parts) != 2 {
+		t.Fatalf("Parts length = %d, want 2", len(mc.Parts))
+	}
+	if mc.Parts[0].Type != "text" || mc.Parts[0].Text != "Describe this image" {
+		t.Errorf("Parts[0] = %+v, want text part", mc.Parts[0])
+	}
+	if mc.Parts[1].Type != "image_url" {
+		t.Errorf("Parts[1].Type = %q, want %q", mc.Parts[1].Type, "image_url")
+	}
+	if mc.Parts[1].ImageURL == nil {
+		t.Fatal("Parts[1].ImageURL is nil")
+	}
+	if mc.Parts[1].ImageURL.URL != "data:image/png;base64,iVBOR" {
+		t.Errorf("ImageURL.URL = %q, want data URI", mc.Parts[1].ImageURL.URL)
+	}
+	if mc.Parts[1].ImageURL.Detail != "high" {
+		t.Errorf("ImageURL.Detail = %q, want %q", mc.Parts[1].ImageURL.Detail, "high")
+	}
+	// Text should be populated from text parts
+	if mc.Text != "Describe this image" {
+		t.Errorf("Text = %q, want %q", mc.Text, "Describe this image")
+	}
+}
+
+func TestMessageContent_UnmarshalNull(t *testing.T) {
+	input := `null`
+	var mc MessageContent
+	if err := json.Unmarshal([]byte(input), &mc); err != nil {
+		t.Fatalf("UnmarshalJSON error: %v", err)
+	}
+	if mc.Text != "" {
+		t.Errorf("Text = %q, want empty", mc.Text)
+	}
+	if mc.Parts != nil {
+		t.Error("Parts should be nil")
+	}
+}
+
+func TestMessageContent_MarshalString(t *testing.T) {
+	mc := MessageContent{Text: "Hello"}
+	data, err := mc.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON error: %v", err)
+	}
+	if string(data) != `"Hello"` {
+		t.Errorf("MarshalJSON = %s, want %q", data, `"Hello"`)
+	}
+}
+
+func TestMessageContent_MarshalMultimodal(t *testing.T) {
+	mc := MessageContent{
+		Parts: []ContentPart{
+			{Type: "text", Text: "Describe"},
+			{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/png;base64,abc"}},
+		},
+	}
+	data, err := mc.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON error: %v", err)
+	}
+	// Should marshal as array, not string
+	if data[0] != '[' {
+		t.Errorf("expected array JSON, got: %s", data)
+	}
+
+	// Round-trip: unmarshal back
+	var mc2 MessageContent
+	if err := json.Unmarshal(data, &mc2); err != nil {
+		t.Fatalf("round-trip unmarshal error: %v", err)
+	}
+	if len(mc2.Parts) != 2 {
+		t.Errorf("round-trip Parts length = %d, want 2", len(mc2.Parts))
+	}
+}
+
+func TestRequestBody_MultimodalRoundTrip(t *testing.T) {
+	// Simulate a full OpenAI vision request body
+	input := `{
+		"messages": [
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": [
+				{"type": "text", "text": "What is in this image?"},
+				{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ"}}
+			]}
+		]
+	}`
+
+	var body RequestBody
+	if err := json.Unmarshal([]byte(input), &body); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(body.Messages) != 2 {
+		t.Fatalf("Messages length = %d, want 2", len(body.Messages))
+	}
+
+	// First message: plain string content
+	if body.Messages[0].Role != "system" {
+		t.Errorf("Messages[0].Role = %q, want %q", body.Messages[0].Role, "system")
+	}
+	if body.Messages[0].Content.Text != "You are a helpful assistant." {
+		t.Errorf("Messages[0].Content.Text = %q", body.Messages[0].Content.Text)
+	}
+	if body.Messages[0].Content.Parts != nil {
+		t.Error("Messages[0].Content.Parts should be nil for string content")
+	}
+
+	// Second message: multimodal content
+	if body.Messages[1].Role != "user" {
+		t.Errorf("Messages[1].Role = %q, want %q", body.Messages[1].Role, "user")
+	}
+	if len(body.Messages[1].Content.Parts) != 2 {
+		t.Fatalf("Messages[1].Content.Parts length = %d, want 2", len(body.Messages[1].Content.Parts))
+	}
+	if body.Messages[1].Content.Parts[1].ImageURL == nil {
+		t.Fatal("image_url part should have ImageURL")
+	}
+	if body.Messages[1].Content.Parts[1].ImageURL.URL != "data:image/jpeg;base64,/9j/4AAQ" {
+		t.Errorf("ImageURL.URL = %q", body.Messages[1].Content.Parts[1].ImageURL.URL)
+	}
+	// Text should be populated from text parts only
+	if body.Messages[1].Content.Text != "What is in this image?" {
+		t.Errorf("Messages[1].Content.Text = %q, want %q", body.Messages[1].Content.Text, "What is in this image?")
+	}
+
+	// Round-trip: marshal back and ensure it can be re-parsed
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	var body2 RequestBody
+	if err := json.Unmarshal(data, &body2); err != nil {
+		t.Fatalf("round-trip unmarshal error: %v", err)
+	}
+	if len(body2.Messages) != 2 {
+		t.Errorf("round-trip Messages length = %d, want 2", len(body2.Messages))
+	}
+	if len(body2.Messages[1].Content.Parts) != 2 {
+		t.Errorf("round-trip Parts length = %d, want 2", len(body2.Messages[1].Content.Parts))
+	}
+}
+
+func TestResponseMessage_UnmarshalStringContent(t *testing.T) {
+	// LLM responses always have string content — ensure ResponseMessage still works
+	input := `{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"The image shows a cat."},"delta":{"content":""},"finish_reason":"stop"}]}`
+	var chunk CompletionChunk
+	if err := json.Unmarshal([]byte(input), &chunk); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(chunk.Choices) != 1 {
+		t.Fatalf("Choices length = %d, want 1", len(chunk.Choices))
+	}
+	if chunk.Choices[0].Message.Content != "The image shows a cat." {
+		t.Errorf("Message.Content = %q", chunk.Choices[0].Message.Content)
 	}
 }
