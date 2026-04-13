@@ -102,11 +102,11 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 			return nil
 		}
 
-		service, err := c.GetCachedService(ctx)
+		prices, err := c.GetBillingPrices(ctx)
 		if err != nil {
-			return errors.Wrap(err, "get cached service for LiteLLM single response billing")
+			return errors.Wrap(err, "get billing prices for LiteLLM single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, *usage, service.OutputPrice, requestHash, service.InputPrice)
+		return c.updateAccountWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice)
 	}
 
 	// Skip billing for whitelisted users
@@ -179,11 +179,11 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 
 					// Stream finished
 					if *usage != nil {
-						service, err := c.GetCachedService(ctx)
+						prices, err := c.GetBillingPrices(ctx)
 						if err != nil {
-							return errors.Wrap(err, "get cached service for LiteLLM stream response billing")
+							return errors.Wrap(err, "get billing prices for LiteLLM stream response billing")
 						}
-						return c.finalizeResponseWithUsage(ctx, *usage, service.OutputPrice, requestHash, service.InputPrice)
+						return c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice)
 					}
 					return c.finalizeResponse(ctx, *output, outputPrice, requestHash)
 				}

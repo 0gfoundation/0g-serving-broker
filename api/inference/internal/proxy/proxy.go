@@ -366,8 +366,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			UserAddress:   userAddress,
 			IsWhitelisted: true,
 			Nonce:         uuid.New().String(),
+			ServiceName:   svcType,
 		}
 		whitelistReq.RequestHash = whitelistReq.Nonce
+		whitelistReq.ModelName = ctrl.ExtractModelName(reqBody)
+		if whitelistReq.ModelName == "" {
+			whitelistReq.ModelName = p.ctrl.Service.ModelType
+		}
 
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {
@@ -375,16 +380,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			return
 		}
 
-		// Get service for output price (won't be used for billing, but needed for processing)
-		service, err := p.ctrl.GetCachedService(ctx)
+		// Get billing prices (won't be used for billing, but needed for processing)
+		prices, err := p.ctrl.GetBillingPrices(ctx)
 		if err != nil {
-			p.handleBrokerError(ctx, err, "get cached service for whitelist request")
+			p.handleBrokerError(ctx, err, "get billing prices for whitelist request")
 			return
 		}
 
 		// Pass charging=true to enable full response processing (stream handling, TEE signing, chat verification)
 		// IsWhitelisted=true will skip only the billing/settlement operations
-		if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, whitelistReq, service.OutputPrice, true); err != nil {
+		if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, whitelistReq, prices.OutputPrice, true); err != nil {
 			p.logger.Errorf("process whitelist http request failed: %v", err)
 		}
 		return
@@ -436,6 +441,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.Fee = "0"      // Will be set with actual value from LLM response
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
+	req.ServiceName = svcType
+	req.ModelName = ctrl.ExtractModelName(reqBody)
+	if req.ModelName == "" {
+		req.ModelName = p.ctrl.Service.ModelType
+	}
 
 	p.logger.Debugf("request saved: %v", req)
 	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {
@@ -453,14 +463,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	// Get service price from cache/contract instead of config
-	service, err := p.ctrl.GetCachedService(ctx)
+	// Get billing prices (model-specific for multi-model, on-chain for single-model)
+	prices, err := p.ctrl.GetBillingPrices(ctx)
 	if err != nil {
-		p.handleBrokerError(ctx, err, "get cached service for request processing")
+		p.handleBrokerError(ctx, err, "get billing prices for request processing")
 		return
 	}
 
-	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, service.OutputPrice, true); err != nil {
+	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, prices.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
 	}
 }

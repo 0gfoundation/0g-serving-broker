@@ -41,16 +41,27 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			}
 		}
 
-		// Enforce configured model only when TargetSeparated is true.
-		if c.Service.TargetSeparated {
-			userAddr, _ := ctx.Get("userAddress")
-			userAddrStr, _ := userAddr.(string)
+		// Model validation: multi-model allowlist or single-model enforcement.
+		userAddr, _ := ctx.Get("userAddress")
+		userAddrStr, _ := userAddr.(string)
+		if c.Service.HasMultiModelPricing() {
+			// Multi-model: validate against allowlist, keep user's requested model
+			modifiedBody, err = c.ValidateModelAllowlist(ctx, reqBody, userAddrStr)
+			if err != nil {
+				ctx.Set("ignoreError", true)
+				return nil, errors.Wrap(err, "validate model allowlist")
+			}
+			reqBody = modifiedBody
+		} else if c.Service.TargetSeparated {
+			// Single-model: enforce configured model (existing behavior)
 			modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
 			if err != nil {
 				ctx.Set("ignoreError", true)
 				return nil, errors.Wrap(err, "enforce configured model")
 			}
 			reqBody = modifiedBody
+			// Set resolvedModel for unified billing
+			ctx.Set("resolvedModel", c.Service.ModelType)
 		}
 	}
 
@@ -468,5 +479,51 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	}
 
 	return modifiedBody, nil
+}
+
+// ValidateModelAllowlist checks that the requested model is in the configured allowlist
+// for centralized multi-model providers. Unlike EnforceConfiguredModel which overwrites
+// the model field, this validates and passes through the user's requested model.
+// Stores the resolved model name in the gin.Context as "resolvedModel".
+func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
+	if len(body) == 0 {
+		return body, nil
+	}
+
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(body, &bodyMap); err != nil {
+		return nil, fmt.Errorf("invalid request body: %w", err)
+	}
+
+	requestModel, _ := bodyMap["model"].(string)
+	if requestModel == "" {
+		// No model specified — use the configured ModelType as default
+		requestModel = c.Service.ModelType
+		bodyMap["model"] = requestModel
+		modifiedBody, err := json.Marshal(bodyMap)
+		if err != nil {
+			return body, errors.Wrap(err, "failed to marshal modified JSON body")
+		}
+		body = modifiedBody
+	}
+
+	if !c.Service.IsModelAllowed(requestModel) {
+		c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
+
+		if userAddr != "" {
+			rateLimiter := GetRateLimiter()
+			shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr)
+			if shouldBlock {
+				c.logger.Warnf("User will be blocked due to excessive invalid model requests: user=%s, blocked_until=%s",
+					userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
+			}
+		}
+
+		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
+	}
+
+	ctx.Set("resolvedModel", requestModel)
+	c.logger.Debugf("Model allowlist passed: requested=%s", requestModel)
+	return body, nil
 }
 

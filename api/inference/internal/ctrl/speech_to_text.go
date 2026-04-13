@@ -238,19 +238,19 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 // updateSpeechToTextWithUsage updates the request with accurate token counts from the API response
 func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
-	// Get service price from cache/contract instead of config
-	service, err := c.GetCachedService(ctx)
+	// Get billing prices (model-specific for multi-model, on-chain for single-model)
+	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {
-		return errors.Wrap(err, "get cached service for speech-to-text billing")
+		return errors.Wrap(err, "get billing prices for speech-to-text billing")
 	}
 
 	// Calculate actual fees based on API-provided token counts
-	inputFee, err := util.Multiply(service.InputPrice, int64(usage.InputTokens))
+	inputFee, err := util.Multiply(prices.InputPrice, int64(usage.InputTokens))
 	if err != nil {
 		return errors.Wrap(err, "calculate input fee from actual tokens")
 	}
 
-	outputFee, err := util.Multiply(service.OutputPrice, int64(usage.OutputTokens))
+	outputFee, err := util.Multiply(prices.OutputPrice, int64(usage.OutputTokens))
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee from actual tokens")
 	}
@@ -279,10 +279,10 @@ If text is provided, billing is based on the number of words in the text.
 Otherwise, falls back to a default estimation.
 */
 func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Request, text string) error {
-	// Get service price from cache/contract instead of config
-	service, err := c.GetCachedService(ctx)
+	// Get billing prices (model-specific for multi-model, on-chain for single-model)
+	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {
-		return errors.Wrap(err, "get cached service for speech-to-text fallback billing")
+		return errors.Wrap(err, "get billing prices for speech-to-text fallback billing")
 	}
 
 	var estimatedOutputTokens int64 = 100 // default estimation
@@ -304,7 +304,7 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 		}
 	}
 
-	outputFee, err := util.Multiply(service.OutputPrice, estimatedOutputTokens)
+	outputFee, err := util.Multiply(prices.OutputPrice, estimatedOutputTokens)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee")
 	}

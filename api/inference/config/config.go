@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"regexp"
 	"strings"
@@ -87,6 +88,14 @@ func (m *ModelInfo) Validate(serviceType string) error {
 	return nil
 }
 
+// ModelPricingEntry defines per-model pricing for centralized multi-model providers.
+// Each entry represents a model that the broker can serve with its own pricing.
+type ModelPricingEntry struct {
+	Model       string `yaml:"model"`       // Model identifier (e.g., "qwen3-max", "gpt-4o")
+	InputPrice  string `yaml:"inputPrice"`  // Per-token input price in neuron
+	OutputPrice string `yaml:"outputPrice"` // Per-token output price in neuron
+}
+
 type Service struct {
 	ServingURL       string            `yaml:"servingUrl"`
 	TargetURL        string            `yaml:"targetUrl"`
@@ -109,11 +118,59 @@ type Service struct {
 	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
 	// Only used when ProviderType is "centralized".
 	ProviderIdentity string `yaml:"providerIdentity"`
+
+	// ModelPricing defines per-model pricing for centralized providers that serve multiple models.
+	// When configured, the broker validates requested models against this allowlist
+	// and bills at model-specific rates instead of the single on-chain price.
+	// On-chain registration uses max(model prices) as InputPrice/OutputPrice.
+	// Only used when ProviderType is "centralized".
+	ModelPricing []ModelPricingEntry `yaml:"modelPricing"`
+
+	// modelPricingMap is a derived lookup map built during config validation.
+	modelPricingMap map[string]*ModelPricingEntry `yaml:"-"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
 func (s *Service) IsCentralized() bool {
 	return s.ProviderType == constant.ProviderTypeCentralized
+}
+
+// HasMultiModelPricing returns true if this service has per-model pricing configured.
+func (s *Service) HasMultiModelPricing() bool {
+	return len(s.ModelPricing) > 0
+}
+
+// GetModelPricing returns the pricing entry for a specific model, or nil if not found.
+func (s *Service) GetModelPricing(model string) *ModelPricingEntry {
+	if s.modelPricingMap == nil {
+		return nil
+	}
+	return s.modelPricingMap[model]
+}
+
+// IsModelAllowed returns true if the model is in the pricing allowlist.
+// Always returns true if multi-model pricing is not configured.
+func (s *Service) IsModelAllowed(model string) bool {
+	if !s.HasMultiModelPricing() {
+		return true
+	}
+	_, ok := s.modelPricingMap[model]
+	return ok
+}
+
+// MaxModelPrices returns the maximum InputPrice and OutputPrice across all model pricing entries.
+func (s *Service) MaxModelPrices() (maxInput, maxOutput string) {
+	maxIn := big.NewInt(0)
+	maxOut := big.NewInt(0)
+	for _, entry := range s.ModelPricing {
+		if v, ok := new(big.Int).SetString(entry.InputPrice, 10); ok && v.Cmp(maxIn) > 0 {
+			maxIn = v
+		}
+		if v, ok := new(big.Int).SetString(entry.OutputPrice, 10); ok && v.Cmp(maxOut) > 0 {
+			maxOut = v
+		}
+	}
+	return maxIn.String(), maxOut.String()
 }
 
 // DefaultVideoSizeRatios provides default cost multipliers based on pixel count
@@ -364,6 +421,43 @@ func loadConfig(config *Config) error {
 		if config.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(config.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", config.Service.TargetURL)
 		}
+	}
+
+	// Validate and build model pricing map
+	if len(config.Service.ModelPricing) > 0 {
+		if config.Service.ProviderType != constant.ProviderTypeCentralized {
+			return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized'")
+		}
+
+		pricingMap := make(map[string]*ModelPricingEntry, len(config.Service.ModelPricing))
+		for i := range config.Service.ModelPricing {
+			entry := &config.Service.ModelPricing[i]
+			if entry.Model == "" {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].model is required", i)
+			}
+			if entry.InputPrice == "" {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice is required for model '%s'", i, entry.Model)
+			}
+			if entry.OutputPrice == "" {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice is required for model '%s'", i, entry.Model)
+			}
+			if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for model '%s'", i, entry.Model)
+			}
+			if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for model '%s'", i, entry.Model)
+			}
+			if _, exists := pricingMap[entry.Model]; exists {
+				return fmt.Errorf("invalid config: duplicate model '%s' in service.modelPricing", entry.Model)
+			}
+			pricingMap[entry.Model] = entry
+		}
+		config.Service.modelPricingMap = pricingMap
+
+		// Auto-set on-chain InputPrice/OutputPrice to max(model prices)
+		maxInput, maxOutput := config.Service.MaxModelPrices()
+		config.Service.InputPrice = maxInput
+		config.Service.OutputPrice = maxOutput
 	}
 
 	return nil

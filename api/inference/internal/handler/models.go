@@ -66,6 +66,43 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	cfg := h.modelsCtrl.GetServiceConfig()
 
+	// Multi-model: return one ModelObject per configured model
+	if cfg.HasMultiModelPricing() {
+		models := make([]ModelObject, 0, len(cfg.ModelPricing))
+		teeVerifier := parseTeeVerifier(svc.AdditionalInfo)
+		var created int64
+		if svc.CreatedAt != nil {
+			created = svc.CreatedAt.Unix()
+		}
+
+		for _, mp := range cfg.ModelPricing {
+			obj := ModelObject{
+				ID:            mp.Model,
+				Object:        "model",
+				Created:       created,
+				OwnedBy:       cfg.OwnedBy,
+				Type:          svc.Type,
+				Verifiability: svc.Verifiability,
+				TeeAttested:   svc.TeeSignerAcknowledged,
+				TeeVerifier:   teeVerifier,
+				Pricing: &ModelPricing{
+					Prompt:     mp.InputPrice,
+					Completion: mp.OutputPrice,
+				},
+				ProviderType:     cfg.ProviderType,
+				ProviderIdentity: cfg.ProviderIdentity,
+			}
+			models = append(models, obj)
+		}
+
+		ctx.JSON(http.StatusOK, ModelListResponse{
+			Object: "list",
+			Data:   models,
+		})
+		return
+	}
+
+	// Single-model: existing behavior
 	obj := ModelObject{
 		ID:            svc.ModelType,
 		Object:        "model",
