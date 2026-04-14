@@ -43,6 +43,7 @@ type Ctrl struct {
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
+	tieredPricing     config.TieredPricingConfig
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
@@ -112,6 +113,7 @@ func New(
 		contract:             contract,
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
+		tieredPricing:        cfg.TieredPricing,
 		svcCache:             svcCache,
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
@@ -187,6 +189,16 @@ func (c *Ctrl) ProviderAddress() string {
 // GetServiceConfig returns the service configuration from the YAML config.
 func (c *Ctrl) GetServiceConfig() config.Service {
 	return c.Service
+}
+
+// GetTieredPricingConfig returns the tiered pricing configuration.
+func (c *Ctrl) GetTieredPricingConfig() config.TieredPricingConfig {
+	return c.tieredPricing
+}
+
+// GetCacheTokenBillingConfig returns the cache token billing configuration.
+func (c *Ctrl) GetCacheTokenBillingConfig() config.CacheTokenBillingConfig {
+	return c.cacheTokenBilling
 }
 
 // IsWhitelistedUser checks if the user address is in the whitelist.

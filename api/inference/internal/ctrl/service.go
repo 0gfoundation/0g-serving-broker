@@ -53,7 +53,7 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 	c.serviceSynced = true
 	c.mu.Unlock()
 
-	if err := c.contract.SyncService(ctx, c.Service); err != nil {
+	if err := c.contract.SyncService(ctx, c.Service, c.tieredPricing, c.cacheTokenBilling); err != nil {
 		// Reset the flag if sync failed so it can be retried
 		c.mu.Lock()
 		c.serviceSynced = false

@@ -499,8 +499,49 @@ func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outp
 	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice)
 }
 
+// getTierMultipliers returns the input and output price multipliers for the given prompt token count.
+// Tiers are matched in order; the first tier whose MaxInputTokens >= promptTokens (or MaxInputTokens == 0
+// for unbounded) is selected. If promptTokens exceeds all bounded tiers, the last tier is used as a
+// fallback (e.g., if the final tier has MaxInputTokens == 0, it always matches as the catch-all).
+// This function should only be called when len(c.tieredPricing.Tiers) > 0; config validation ensures
+// that enabled tiered pricing always has at least one tier with valid multipliers (>= 1).
+func (c *Ctrl) getTierMultipliers(promptTokens int) (int64, int64) {
+	for _, tier := range c.tieredPricing.Tiers {
+		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
+			return tier.InputMultiplier, tier.OutputMultiplier
+		}
+	}
+	// Fallback: promptTokens exceeds all bounded tiers, use the last tier
+	last := c.tieredPricing.Tiers[len(c.tieredPricing.Tiers)-1]
+	return last.InputMultiplier, last.OutputMultiplier
+}
+
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response
 func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
+	// Apply tiered pricing: adjust base prices by tier multiplier before any fee calculation.
+	// This ensures cache token billing and all other modifiers use the correct tiered price.
+	if c.tieredPricing.Enabled && len(c.tieredPricing.Tiers) > 0 {
+		inputMul, outputMul := c.getTierMultipliers(usage.PromptTokens)
+		if inputMul > 1 {
+			base, ok := new(big.Int).SetString(inputPrice, 10)
+			if !ok {
+				return fmt.Errorf("tiered pricing: failed to parse inputPrice %q as big.Int", inputPrice)
+			}
+			inputPrice = new(big.Int).Mul(base, big.NewInt(inputMul)).String()
+		}
+		if outputMul > 1 {
+			base, ok := new(big.Int).SetString(outputPrice, 10)
+			if !ok {
+				return fmt.Errorf("tiered pricing: failed to parse outputPrice %q as big.Int", outputPrice)
+			}
+			outputPrice = new(big.Int).Mul(base, big.NewInt(outputMul)).String()
+		}
+		if inputMul > 1 || outputMul > 1 {
+			c.logger.Infof("Tiered pricing: prompt_tokens=%d, inputMultiplier=%d, outputMultiplier=%d, effectiveInputPrice=%s, effectiveOutputPrice=%s",
+				usage.PromptTokens, inputMul, outputMul, inputPrice, outputPrice)
+		}
+	}
+
 	// Calculate actual fees based on LLM-provided token counts.
 	// When cacheTokenBilling is enabled and cached tokens are reported,
 	// apply discounted pricing for cached input tokens.

@@ -35,12 +35,26 @@ type ModelObject struct {
 	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
 }
 
+// ModelPricingTier represents a single tier in tiered pricing.
+type ModelPricingTier struct {
+	MaxInputTokens   int   `json:"max_input_tokens"`
+	InputMultiplier  int64 `json:"input_multiplier"`
+	OutputMultiplier int64 `json:"output_multiplier"`
+}
+
+// ModelCacheTokenBilling holds cache token billing info for display.
+type ModelCacheTokenBilling struct {
+	Divisor int64 `json:"divisor"`
+}
+
 // ModelPricing holds per-token pricing in the smallest unit (wei).
 type ModelPricing struct {
-	Prompt     string `json:"prompt"`
-	Completion string `json:"completion"`
-	Image      string `json:"image,omitempty"`
-	Video      string `json:"video,omitempty"`
+	Prompt            string                  `json:"prompt"`
+	Completion        string                  `json:"completion"`
+	Image             string                  `json:"image,omitempty"`
+	Video             string                  `json:"video,omitempty"`
+	TieredPricing     []ModelPricingTier      `json:"tiered_pricing,omitempty"`
+	CacheTokenBilling *ModelCacheTokenBilling `json:"cache_token_billing,omitempty"`
 }
 
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
@@ -105,6 +119,28 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// Set video pricing from output price for video service type
 	if svc.Type == constant.ServiceTypeVideoGeneration {
 		obj.Pricing.Video = svc.OutputPrice
+	}
+
+	// Populate tiered pricing from config
+	tieredCfg := h.modelsCtrl.GetTieredPricingConfig()
+	if tieredCfg.Enabled && len(tieredCfg.Tiers) > 0 {
+		tiers := make([]ModelPricingTier, len(tieredCfg.Tiers))
+		for i, t := range tieredCfg.Tiers {
+			tiers[i] = ModelPricingTier{
+				MaxInputTokens:   t.MaxInputTokens,
+				InputMultiplier:  t.InputMultiplier,
+				OutputMultiplier: t.OutputMultiplier,
+			}
+		}
+		obj.Pricing.TieredPricing = tiers
+	}
+
+	// Populate cache token billing from config
+	cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
+	if cacheCfg.Enabled && cacheCfg.Divisor > 0 {
+		obj.Pricing.CacheTokenBilling = &ModelCacheTokenBilling{
+			Divisor: cacheCfg.Divisor,
+		}
 	}
 
 	// Extract TEE verifier from on-chain additionalInfo JSON

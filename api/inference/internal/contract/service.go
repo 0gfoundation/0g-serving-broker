@@ -23,7 +23,7 @@ var ErrServiceNotFound = errors.New("service not found")
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
-func buildAdditionalInfo(service config.Service, imageName, imageDigest string) (string, error) {
+func buildAdditionalInfo(service config.Service, imageName, imageDigest string, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (string, error) {
 	// Determine TEE verifier based on NETWORK environment variable
 	var teeVerifier string
 	switch os.Getenv("NETWORK") {
@@ -52,6 +52,28 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string) 
 	if service.IsCentralized() {
 		additionalInfo["ProviderType"] = service.ProviderType
 		additionalInfo["ProviderIdentity"] = service.ProviderIdentity
+	}
+
+	// Include tiered pricing info so user-broker can display tier prices
+	if tieredPricing.Enabled && len(tieredPricing.Tiers) > 0 {
+		tiers := make([]map[string]interface{}, len(tieredPricing.Tiers))
+		for i, t := range tieredPricing.Tiers {
+			tiers[i] = map[string]interface{}{
+				"maxInputTokens":   t.MaxInputTokens,
+				"inputMultiplier":  t.InputMultiplier,
+				"outputMultiplier": t.OutputMultiplier,
+			}
+		}
+		additionalInfo["tieredPricing"] = map[string]interface{}{
+			"tiers": tiers,
+		}
+	}
+
+	// Include cache token billing info so user-broker can display cache hit prices
+	if cacheTokenBilling.Enabled && cacheTokenBilling.Divisor > 0 {
+		additionalInfo["cacheTokenBilling"] = map[string]interface{}{
+			"divisor": cacheTokenBilling.Divisor,
+		}
 	}
 
 	additionalInfoJSON, err := json.Marshal(additionalInfo)
@@ -169,7 +191,7 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 	return &service, nil
 }
 
-func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) error {
+func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) error {
 	c.logger.Infof("[SyncService] Starting to sync service - provider=%s, newURL=%s, newModel=%s, newType=%s, inputPrice=%s, outputPrice=%s",
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 
@@ -194,7 +216,7 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 	imageName, imageDigest := c.GetImageInfo(ctx)
 
 	// Build additionalInfo for comparison
-	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling)
 	if err != nil {
 		c.logger.Errorf("[SyncService] Failed to build additional info - error=%v", err)
 		return err
