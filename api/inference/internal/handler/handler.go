@@ -32,6 +32,8 @@ type asyncCtrl interface {
 type modelsCtrl interface {
 	GetCachedService(ctx context.Context) (model.Service, error)
 	GetServiceConfig() config.Service
+	GetTieredPricingConfig() config.TieredPricingConfig
+	GetCacheTokenBillingConfig() config.CacheTokenBillingConfig
 }
 
 type Handler struct {

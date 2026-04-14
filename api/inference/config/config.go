@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/common/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"gopkg.in/yaml.v2"
 )
 
@@ -160,6 +160,27 @@ type CacheTokenBillingConfig struct {
 	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
 }
 
+// TieredPricingConfig defines input-length-based tiered pricing.
+// Some models (e.g., Qwen) charge different rates based on input token count.
+// The service is registered on-chain at the base (lowest tier) price.
+// When actual input tokens fall into a higher tier, the base price is multiplied
+// by the tier's multiplier BEFORE any other billing logic (e.g., cache token billing),
+// so all downstream fee calculations use the correct tiered price.
+type TieredPricingConfig struct {
+	Enabled bool          `yaml:"enabled"` // Enable tiered pricing (default: false)
+	Tiers   []PricingTier `yaml:"tiers"`   // Ordered list of pricing tiers (by maxInputTokens ascending)
+}
+
+// PricingTier defines a single pricing tier.
+// Tiers must be ordered by MaxInputTokens ascending.
+// The first tier whose MaxInputTokens >= promptTokens is selected.
+// Use MaxInputTokens: 0 to represent an unbounded upper tier.
+type PricingTier struct {
+	MaxInputTokens   int   `yaml:"maxInputTokens"`   // Upper bound of input tokens for this tier (0 = unlimited)
+	InputMultiplier  int64 `yaml:"inputMultiplier"`  // Multiplier for input price in this tier
+	OutputMultiplier int64 `yaml:"outputMultiplier"` // Multiplier for output price in this tier
+}
+
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
 // and contract verification. Whitelist users are intended for internal services
 // (e.g., health checks, monitoring) that require free access without account setup.
@@ -179,11 +200,11 @@ type WhitelistConfig struct {
 // lifecycle management driven by on-chain events.
 type LoRAConfig struct {
 	Enable                   bool   `yaml:"enable"`
-	BaseModel                string `yaml:"baseModel"`                // Base model name (e.g., "Qwen2.5-7B")
-	LoraModulesDir           string `yaml:"loraModulesDir"`           // Local directory for LoRA adapter files
-	SllmUrl                  string `yaml:"sllmUrl"`                  // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
-	OffloadAfterMinutes      int    `yaml:"offloadAfterMinutes"`      // Idle time before offloading adapter from ServerlessLLM
-	EnableColdStorage        bool   `yaml:"enableColdStorage"`        // Enable offload to 0G Storage
+	BaseModel                string `yaml:"baseModel"`           // Base model name (e.g., "Qwen2.5-7B")
+	LoraModulesDir           string `yaml:"loraModulesDir"`      // Local directory for LoRA adapter files
+	SllmUrl                  string `yaml:"sllmUrl"`             // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
+	OffloadAfterMinutes      int    `yaml:"offloadAfterMinutes"` // Idle time before offloading adapter from ServerlessLLM
+	EnableColdStorage        bool   `yaml:"enableColdStorage"`   // Enable offload to 0G Storage
 	FineTuningContractAddr   string `yaml:"fineTuningContractAddress"`
 	ChainRpcUrl              string `yaml:"chainRpcUrl"`
 	PollBlockIntervalSeconds int    `yaml:"pollBlockIntervalSeconds"` // How often to poll for new on-chain events
@@ -191,7 +212,7 @@ type LoRAConfig struct {
 	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
 	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
 	FineTuningProviderAddr   string `yaml:"fineTuningProviderAddr"`   // Override FT provider address for event filtering (default: inference provider address)
-	EciesPrivateKey string `yaml:"-"` // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
+	EciesPrivateKey          string `yaml:"-"`                        // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
 type Config struct {
@@ -233,6 +254,7 @@ type Config struct {
 	LogPaths            LogPathsConfig          `yaml:"logPaths"`
 	Controller          ControllerConfig        `yaml:"controller"`
 	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
+	TieredPricing       TieredPricingConfig     `yaml:"tieredPricing"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
@@ -366,6 +388,36 @@ func loadConfig(config *Config) error {
 		}
 	}
 
+	// Validate tiered pricing configuration
+	if config.TieredPricing.Enabled {
+		if len(config.TieredPricing.Tiers) == 0 {
+			return fmt.Errorf("invalid config: tieredPricing.tiers must not be empty when tieredPricing is enabled")
+		}
+		for i, tier := range config.TieredPricing.Tiers {
+			if tier.InputMultiplier < 1 {
+				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %d", i, tier.InputMultiplier)
+			}
+			if tier.OutputMultiplier < 1 {
+				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].outputMultiplier must be >= 1, got %d", i, tier.OutputMultiplier)
+			}
+			if tier.MaxInputTokens < 0 {
+				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens must be >= 0, got %d", i, tier.MaxInputTokens)
+			}
+			// MaxInputTokens == 0 (unbounded) must be the last tier
+			if tier.MaxInputTokens == 0 && i != len(config.TieredPricing.Tiers)-1 {
+				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens=0 (unbounded) must be the last tier", i)
+			}
+			// Ensure ascending order
+			if i > 0 && tier.MaxInputTokens != 0 {
+				prev := config.TieredPricing.Tiers[i-1]
+				if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
+					return fmt.Errorf("invalid config: tieredPricing.tiers must be ordered by maxInputTokens ascending, tiers[%d]=%d <= tiers[%d]=%d",
+						i, tier.MaxInputTokens, i-1, prev.MaxInputTokens)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -420,16 +472,16 @@ func GetConfig() *Config {
 				Provider:      "nginx:3001",
 				RequestLength: 40,
 			},
-		LoRA: LoRAConfig{
-		Enable:                   false,
-		LoraModulesDir:           "/data/lora-modules",
-		SllmUrl:                  "http://sllm:8343",
-		OffloadAfterMinutes:      60,
-		EnableColdStorage:        false,
-		PollBlockIntervalSeconds: 5,
-		StorageTurbo:             false,
-	},
-		ChatCacheExpiration: time.Minute * 20,
+			LoRA: LoRAConfig{
+				Enable:                   false,
+				LoraModulesDir:           "/data/lora-modules",
+				SllmUrl:                  "http://sllm:8343",
+				OffloadAfterMinutes:      60,
+				EnableColdStorage:        false,
+				PollBlockIntervalSeconds: 5,
+				StorageTurbo:             false,
+			},
+			ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
 			Logger: &config.LoggerConfig{
 				Format:        "text",
@@ -468,6 +520,10 @@ func GetConfig() *Config {
 			CacheTokenBilling: CacheTokenBillingConfig{
 				Enabled: false,
 				Divisor: 4,
+			},
+			TieredPricing: TieredPricingConfig{
+				Enabled: false,
+				Tiers:   nil,
 			},
 			Whitelist: WhitelistConfig{
 				Enabled:       false,
