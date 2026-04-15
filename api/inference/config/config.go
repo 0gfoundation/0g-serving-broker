@@ -226,12 +226,20 @@ type Config struct {
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval    struct {
+	Interval struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
 		ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
 	} `yaml:"interval"`
+	Settlement struct {
+		// MinSettlementFee is the minimum accumulated fee (in neuron) per user
+		// before including them in a settlement batch. Users below this threshold
+		// are deferred to accumulate more fees. Default "4000000000000000"
+		// (0.004 A0GI) covers gas cost (~0.0006 A0GI) with ~7× margin.
+		// Set to "0" to disable per-user filtering.
+		MinSettlementFee string `yaml:"minSettlementFee"`
+	} `yaml:"settlement"`
 	RevenueTransfer struct {
 		TargetAddress string `yaml:"targetAddress"`
 		ReserveAmount string `yaml:"reserveAmount"`
@@ -436,7 +444,7 @@ func GetConfig() *Config {
 			}{
 				ProviderAddr: ":8088",
 			},
-			GasPrice:    "",
+			GasPrice:    "2000000007",
 			MaxGasPrice: "",
 			Interval: struct {
 				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
@@ -448,6 +456,11 @@ func GetConfig() *Config {
 				ForceSettlementProcessor: 600,
 				SettlementProcessor:      300,
 				ReconciliationProcessor:  60,
+			},
+			Settlement: struct {
+				MinSettlementFee string `yaml:"minSettlementFee"`
+			}{
+				MinSettlementFee: "4000000000000000",
 			},
 			RevenueTransfer: struct {
 				TargetAddress string `yaml:"targetAddress"`

@@ -5,9 +5,10 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 type TEESettlementData struct {
@@ -78,3 +79,4 @@ func (c *ProviderContract) SettleFeesWithTEE(ctx context.Context, settlements []
 
 	return tx.Hash(), results, nil
 }
+

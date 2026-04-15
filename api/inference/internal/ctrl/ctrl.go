@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ type Ctrl struct {
 	logger   log.Logger
 
 	autoSettleBufferTime time.Duration
+	minSettlementFee    *big.Int
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
@@ -106,8 +108,16 @@ func New(
 		eventLogDir = "/var/log/event"
 	}
 
+	minSettlementFee := new(big.Int)
+	if cfg.Settlement.MinSettlementFee != "" {
+		if _, ok := minSettlementFee.SetString(cfg.Settlement.MinSettlementFee, 10); !ok {
+			logger.Errorf("Invalid minSettlementFee value: %q, per-user filter disabled", cfg.Settlement.MinSettlementFee)
+		}
+	}
+
 	p := &Ctrl{
 		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
+		minSettlementFee:     minSettlementFee,
 		db:                   db,
 		asyncDB:              db,
 		contract:             contract,

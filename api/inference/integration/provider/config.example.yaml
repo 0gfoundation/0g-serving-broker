@@ -2,6 +2,11 @@ interval:
   autoSettleBufferTime: 60
   forceSettlementProcessor: 600
   settlementProcessor: 300
+# Settlement profitability: defer users whose fees don't cover gas costs.
+# minSettlementFee is the minimum accumulated fee (in neuron) per user.
+# Default "4000000000000000" (0.004 A0GI). Set to "0" to disable.
+# settlement:
+#   minSettlementFee: "4000000000000000"
 networks:
   ethereum0g:
     url: "https://evmrpc-testnet.0g.ai"
