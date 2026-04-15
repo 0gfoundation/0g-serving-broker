@@ -215,7 +215,7 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		if len(batch.ExecutableItems) > 0 {
 			settledUsers := make([]string, 0)
 			for _, outcome := range batch.Outcomes {
-				if outcome.Status == SettlementSuccess || outcome.Status == SettlementPartial {
+				if outcome.AdjustedRequest != nil && (outcome.Status == SettlementSuccess || outcome.Status == SettlementPartial) {
 					settledUsers = append(settledUsers, outcome.User.Hex())
 				}
 			}
@@ -443,6 +443,11 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 		return nil
 	}
 
+	// Pre-flight: filter out users whose accumulated fee is below minSettlementFee.
+	if c.filterByGasProfitability(batch) {
+		return nil // All users filtered — requests stay unprocessed for next round
+	}
+
 	// Record pending settlements and mark requests as settling BEFORE sending tx
 	pendingIDs := c.recordPendingSettlements(ctx, batch)
 
@@ -451,6 +456,28 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 
 	// Update pending_settlement records with tx hashes
 	c.updatePendingTxHashes(pendingIDs, execResult.TxHashes)
+
+	// If no tx was submitted at all (e.g., gas price error), the requests are
+	// stuck with settling=true until reconciliation expires them. Clear immediately
+	// so they're available for the next settlement round.
+	if len(execResult.TxHashes) == 0 && execErr != nil {
+		c.logger.Warnf("No transactions submitted, clearing settling state for immediate retry")
+		for _, outcome := range batch.Outcomes {
+			if outcome.AdjustedRequest == nil {
+				continue
+			}
+			hashes := c.getRequestHashes(outcome.SettledRequests)
+			if err := c.db.MarkRequestsSettling(hashes, false); err != nil {
+				c.logger.Warnf("Failed to clear settling flag for user %s: %v", outcome.User.Hex(), err)
+			}
+		}
+		// Also mark pending settlement records as expired since no tx exists
+		for _, rec := range pendingIDs {
+			if err := c.db.UpdatePendingSettlementStatus(rec.ID, "expired"); err != nil {
+				c.logger.Warnf("Failed to expire pending settlement %d: %v", rec.ID, err)
+			}
+		}
+	}
 
 	// Update outcomes with execution results
 	for _, outcome := range batch.Outcomes {
@@ -486,6 +513,50 @@ func (c *Ctrl) executeAndProcessResults(ctx context.Context, batch *SettlementBa
 	}
 
 	return execErr
+}
+
+// filterByGasProfitability removes users whose accumulated fee is below
+// minSettlementFee from the batch. Returns true if all users were filtered
+// (entire batch deferred, requests stay for next round).
+func (c *Ctrl) filterByGasProfitability(batch *SettlementBatch) bool {
+	if len(batch.ExecutableItems) == 0 || c.minSettlementFee.Sign() <= 0 {
+		return len(batch.ExecutableItems) == 0
+	}
+
+	c.logger.Infof("Per-user filter: minSettlementFee=%s, users=%d",
+		c.minSettlementFee.String(), len(batch.ExecutableItems))
+
+	filteredOutUsers := make(map[common.Address]bool)
+	var keptItems []contract.TEESettlementData
+	for _, item := range batch.ExecutableItems {
+		if item.TotalFee.Cmp(c.minSettlementFee) < 0 {
+			filteredOutUsers[item.User] = true
+			c.logger.Infof("Deferred user %s: fee=%s < minSettlementFee=%s",
+				item.User.Hex(), item.TotalFee.String(), c.minSettlementFee.String())
+		} else {
+			keptItems = append(keptItems, item)
+		}
+	}
+
+	if len(filteredOutUsers) > 0 {
+		c.logger.Infof("Deferred %d users below fee threshold, %d remaining", len(filteredOutUsers), len(keptItems))
+		// Clear outcomes for filtered users so processOutcomes won't delete their requests
+		for _, outcome := range batch.Outcomes {
+			if filteredOutUsers[outcome.User] {
+				outcome.AdjustedRequest = nil
+				outcome.SettledRequests = nil
+			}
+		}
+		batch.ExecutableItems = keptItems
+	}
+
+	if len(batch.ExecutableItems) == 0 {
+		c.logger.Warnf("All %d users deferred (minSettlementFee=%s)", len(filteredOutUsers), c.minSettlementFee.String())
+		batch.Outcomes = nil
+		return true
+	}
+
+	return false
 }
 
 // pendingSettlementRecord tracks a pending settlement ID and which batch index it belongs to

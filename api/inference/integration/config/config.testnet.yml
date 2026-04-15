@@ -36,6 +36,14 @@ interval:
   # Interval for regular settlement processor (in seconds)
   settlementProcessor: 300
 
+# Settlement profitability configuration
+settlement:
+  # Minimum accumulated fee (in neuron) per user before including them in settlement.
+  # Users below this threshold are deferred to accumulate more fees.
+  # Default "4000000000000000" (0.004 A0GI) covers gas cost (~0.0006 A0GI) with ~7× margin.
+  # Set to "0" to disable per-user filtering.
+  minSettlementFee: "4000000000000000"
+
 # Service configuration for the inference provider
 service:
   # URL where the serving broker exposes its API (required)

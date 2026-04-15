@@ -98,6 +98,15 @@ func (s *ServingContract) TransactWithValue(ctx context.Context, retryOpts *Retr
 	if err != nil {
 		return nil, err
 	}
+	// Let go-ethereum estimate gas dynamically via eth_estimateGas
+	// instead of using the fixed TransactionLimit from network config.
+	// When GasLimit is 0, bind.BoundContract.createLegacyTx() calls
+	// eth_estimateGas automatically, resulting in tighter gas limits
+	// that reflect actual transaction complexity.
+	// Note: the "Gas Limit: ..." debug log from TransactionCallMessage
+	// shows the config value before this override — it is not the actual
+	// gas limit used by the transaction.
+	opts.GasLimit = 0
 
 	nRetries := 0
 	for {
