@@ -82,7 +82,7 @@ type ImageURL struct {
 }
 
 func (mc MessageContent) MarshalJSON() ([]byte, error) {
-	if mc.Parts != nil {
+	if len(mc.Parts) > 0 {
 		return json.Marshal(mc.Parts)
 	}
 	return json.Marshal(mc.Text)
