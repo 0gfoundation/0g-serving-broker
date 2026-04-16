@@ -108,8 +108,36 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"path"},
 	)
 
+	WhitelistRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_requests_total",
+			Help:        "Total whitelist requests.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	WhitelistInputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_input_tokens_total",
+			Help:        "Whitelist input tokens.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_output_tokens_total",
+			Help:        "Whitelist output tokens.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
 	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
-		RequestCount, ErrorCount, RequestDuration)
+		RequestCount, ErrorCount, RequestDuration,
+		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal)
 
 	return registry
 }
@@ -427,7 +455,10 @@ func TestStartDAUUpdater(t *testing.T) {
 			return 42, nil
 		}
 
-		StartDAUUpdater(queryFunc, 1*time.Hour, testLogger{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		StartDAUUpdater(ctx, queryFunc, 1*time.Hour, testLogger{})
 
 		// Give the goroutine time to run the initial query
 		time.Sleep(50 * time.Millisecond)
@@ -550,4 +581,126 @@ func TestTrackMetricsIgnoreError(t *testing.T) {
 	if afterCount != beforeCount {
 		t.Errorf("error count delta = %v, want 0 (ignoreError was set)", afterCount-beforeCount)
 	}
+}
+
+// TestRecordWhitelistRequest verifies the whitelist request counter.
+func TestRecordWhitelistRequest(t *testing.T) {
+	setupTestMetrics(t)
+
+	tests := []struct {
+		name        string
+		serviceType string
+		calls       int
+		wantDelta   float64
+	}{
+		{
+			name:        "single chatbot request",
+			serviceType: "chatbot",
+			calls:       1,
+			wantDelta:   1,
+		},
+		{
+			name:        "multiple text-to-image requests",
+			serviceType: "text-to-image",
+			calls:       3,
+			wantDelta:   3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := getCounterValue(WhitelistRequestsTotal, tt.serviceType)
+			for i := 0; i < tt.calls; i++ {
+				RecordWhitelistRequest(tt.serviceType)
+			}
+			after := getCounterValue(WhitelistRequestsTotal, tt.serviceType)
+			if delta := after - before; delta != tt.wantDelta {
+				t.Errorf("whitelist requests delta = %v, want %v", delta, tt.wantDelta)
+			}
+		})
+	}
+}
+
+// TestRecordWhitelistRequestNilMetrics verifies no panic when metrics are nil.
+func TestRecordWhitelistRequestNilMetrics(t *testing.T) {
+	saved := WhitelistRequestsTotal
+	WhitelistRequestsTotal = nil
+	defer func() { WhitelistRequestsTotal = saved }()
+
+	RecordWhitelistRequest("chatbot") // should not panic
+}
+
+// TestRecordWhitelistTokens verifies the whitelist token counters.
+func TestRecordWhitelistTokens(t *testing.T) {
+	setupTestMetrics(t)
+
+	tests := []struct {
+		name                string
+		serviceType         string
+		inputTokens         int64
+		outputTokens        int64
+		wantInputIncrement  float64
+		wantOutputIncrement float64
+	}{
+		{
+			name:                "both input and output tokens",
+			serviceType:         "chatbot",
+			inputTokens:         100,
+			outputTokens:        50,
+			wantInputIncrement:  100,
+			wantOutputIncrement: 50,
+		},
+		{
+			name:                "only input tokens",
+			serviceType:         "chatbot",
+			inputTokens:         200,
+			outputTokens:        0,
+			wantInputIncrement:  200,
+			wantOutputIncrement: 0,
+		},
+		{
+			name:                "only output tokens",
+			serviceType:         "text-to-image",
+			inputTokens:         0,
+			outputTokens:        75,
+			wantInputIncrement:  0,
+			wantOutputIncrement: 75,
+		},
+		{
+			name:                "negative tokens ignored",
+			serviceType:         "chatbot",
+			inputTokens:         -10,
+			outputTokens:        -5,
+			wantInputIncrement:  0,
+			wantOutputIncrement: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType)
+			beforeOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType)
+
+			RecordWhitelistTokens(tt.serviceType, tt.inputTokens, tt.outputTokens)
+
+			afterInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType)
+			afterOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType)
+
+			if delta := afterInput - beforeInput; delta != tt.wantInputIncrement {
+				t.Errorf("whitelist input tokens delta = %v, want %v", delta, tt.wantInputIncrement)
+			}
+			if delta := afterOutput - beforeOutput; delta != tt.wantOutputIncrement {
+				t.Errorf("whitelist output tokens delta = %v, want %v", delta, tt.wantOutputIncrement)
+			}
+		})
+	}
+}
+
+// TestRecordWhitelistTokensNilMetrics verifies no panic when metrics are nil.
+func TestRecordWhitelistTokensNilMetrics(t *testing.T) {
+	saved := WhitelistInputTokensTotal
+	WhitelistInputTokensTotal = nil
+	defer func() { WhitelistInputTokensTotal = saved }()
+
+	RecordWhitelistTokens("chatbot", 100, 50) // should not panic
 }

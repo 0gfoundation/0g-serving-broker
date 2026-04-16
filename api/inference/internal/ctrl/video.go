@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // parseMultipartField extracts a named field value from multipart/form-data body.
@@ -83,6 +84,20 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	}
 
 	if reqModel.IsWhitelisted {
+		// Parse seconds from response for whitelist traffic metrics
+		var wlFields videoResponseFields
+		if err := json.Unmarshal(body, &wlFields); err != nil {
+			c.logger.Warnf("whitelist video: failed to parse response for metrics: %v", err)
+		} else if sec, err := wlFields.Seconds.Int64(); err != nil {
+			c.logger.Warnf("whitelist video: failed to parse seconds field: %v", err)
+		} else if sec <= 0 {
+			c.logger.Warnf("whitelist video: invalid seconds value: %d", sec)
+		} else {
+			sizeRatio := c.Service.GetVideoSizeRatio(wlFields.Size)
+			outputCount := int64(math.Ceil(float64(sec) * sizeRatio))
+			monitor.RecordTokens("video-generation", 0, outputCount)
+			monitor.RecordWhitelistTokens("video-generation", 0, outputCount)
+		}
 		return nil
 	}
 
@@ -115,6 +130,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
+	monitor.RecordTokens("video-generation", 0, outputCount)
 	return nil
 }
 

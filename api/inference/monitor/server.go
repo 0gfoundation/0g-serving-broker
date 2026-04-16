@@ -30,6 +30,13 @@ var (
 	AllTimeInputTokens prometheus.Gauge
 	AllTimeOutputTokens prometheus.Gauge
 	AllTimeUniqueUsers prometheus.Gauge
+
+	// Whitelist traffic metrics — track requests and tokens from whitelisted
+	// (internal/exempt) users so operators can gauge their share of total traffic
+	// and set appropriate RPM/TPM limits for the provider.
+	WhitelistRequestsTotal  *prometheus.CounterVec
+	WhitelistInputTokensTotal  *prometheus.CounterVec
+	WhitelistOutputTokensTotal *prometheus.CounterVec
 )
 
 func PrometheusInit(serverName string) {
@@ -125,6 +132,33 @@ func PrometheusInit(serverName string) {
 		ConstLabels: prometheus.Labels{"server": serverName},
 	})
 
+	WhitelistRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_requests_total",
+			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	WhitelistInputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_input_tokens_total",
+			Help:        "Cumulative input token count from whitelisted (internal) users.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_output_tokens_total",
+			Help:        "Cumulative output token count from whitelisted (internal) users.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
 	prometheus.MustRegister(RequestCount)
 	prometheus.MustRegister(ErrorCount)
 	prometheus.MustRegister(RequestDuration)
@@ -136,12 +170,16 @@ func PrometheusInit(serverName string) {
 	prometheus.MustRegister(AllTimeInputTokens)
 	prometheus.MustRegister(AllTimeOutputTokens)
 	prometheus.MustRegister(AllTimeUniqueUsers)
+	prometheus.MustRegister(WhitelistRequestsTotal)
+	prometheus.MustRegister(WhitelistInputTokensTotal)
+	prometheus.MustRegister(WhitelistOutputTokensTotal)
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database
 // to count unique users in the last 24 hours and updates the Prometheus gauge.
 // This ensures the DAU metric survives process restarts.
-func StartDAUUpdater(queryFunc func() (int64, error), interval time.Duration, logger log.Logger) {
+// The goroutine exits when ctx is cancelled.
+func StartDAUUpdater(ctx context.Context, queryFunc func() (int64, error), interval time.Duration, logger log.Logger) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -153,11 +191,16 @@ func StartDAUUpdater(queryFunc func() (int64, error), interval time.Duration, lo
 			UniqueUsersTotal.Set(float64(count))
 		}
 
-		for range ticker.C {
-			if count, err := queryFunc(); err != nil {
-				logger.Errorf("DAU updater: failed to query unique users: %v", err)
-			} else {
-				UniqueUsersTotal.Set(float64(count))
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if count, err := queryFunc(); err != nil {
+					logger.Errorf("DAU updater: failed to query unique users: %v", err)
+				} else {
+					UniqueUsersTotal.Set(float64(count))
+				}
 			}
 		}
 	}()
@@ -173,7 +216,8 @@ type TotalStatsResult struct {
 
 // StartAllTimeStatsUpdater starts a background goroutine that periodically queries
 // the database for all-time cumulative stats and updates the Prometheus gauges.
-func StartAllTimeStatsUpdater(queryFunc func() (TotalStatsResult, error), interval time.Duration, logger log.Logger) {
+// The goroutine exits when ctx is cancelled.
+func StartAllTimeStatsUpdater(ctx context.Context, queryFunc func() (TotalStatsResult, error), interval time.Duration, logger log.Logger) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -191,8 +235,13 @@ func StartAllTimeStatsUpdater(queryFunc func() (TotalStatsResult, error), interv
 		}
 
 		update()
-		for range ticker.C {
-			update()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				update()
+			}
 		}
 	}()
 }
@@ -234,6 +283,27 @@ func RecordTokens(serviceType string, inputTokens, outputTokens int64) {
 	}
 	if outputTokens > 0 {
 		OutputTokensTotal.WithLabelValues(serviceType).Add(float64(outputTokens))
+	}
+}
+
+// RecordWhitelistRequest increments the whitelist request counter for the given service type.
+func RecordWhitelistRequest(serviceType string) {
+	if WhitelistRequestsTotal == nil {
+		return
+	}
+	WhitelistRequestsTotal.WithLabelValues(serviceType).Inc()
+}
+
+// RecordWhitelistTokens increments the whitelist input and output token counters.
+func RecordWhitelistTokens(serviceType string, inputTokens, outputTokens int64) {
+	if WhitelistInputTokensTotal == nil || WhitelistOutputTokensTotal == nil {
+		return
+	}
+	if inputTokens > 0 {
+		WhitelistInputTokensTotal.WithLabelValues(serviceType).Add(float64(inputTokens))
+	}
+	if outputTokens > 0 {
+		WhitelistOutputTokensTotal.WithLabelValues(serviceType).Add(float64(outputTokens))
 	}
 }
 

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -253,7 +254,9 @@ func (d *DB) Migrate() error {
 			ID: "add-created-at-index-to-request",
 			Migrate: func(tx *gorm.DB) error {
 				var count int64
-				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'idx_request_created_at'").Scan(&count)
+				if err := tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'idx_request_created_at'").Scan(&count).Error; err != nil {
+					return fmt.Errorf("check for existing index idx_request_created_at: %w", err)
+				}
 				if count == 0 {
 					return tx.Exec("CREATE INDEX `idx_request_created_at` ON `request`(`created_at`);").Error
 				}

@@ -11,6 +11,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // GetTextToImageInputFeeAndImageNum gets input fee and imageNum for text-to-image generation
@@ -64,8 +65,10 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
-	// Skip billing for whitelisted users
+	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
+		monitor.RecordTokens("text-to-image", 0, reqModel.OutputCount)
+		monitor.RecordWhitelistTokens("text-to-image", 0, reqModel.OutputCount)
 		return nil
 	}
 
@@ -82,5 +85,6 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
+	monitor.RecordTokens("text-to-image", 0, imageNum)
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // submitAsyncJob is the shared logic for all async submit endpoints.
@@ -43,6 +44,9 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 
 	// Check whitelist
 	isWhitelisted := h.asyncCtrl.IsWhitelistedUser(userAddress)
+	if isWhitelisted {
+		monitor.RecordWhitelistRequest(svcType)
+	}
 
 	// Store only necessary request headers (Content-Type is critical for multipart boundary)
 	headerMap := map[string][]string{}

@@ -54,10 +54,12 @@ func Main() {
 
 	engine := gin.New()
 
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+
 	if config.Monitor.Enable {
 		monitor.PrometheusInit(config.Service.ServingURL)
-		monitor.StartDAUUpdater(db.CountUniqueUsersLast24h, 1*time.Minute, logger)
-		monitor.StartAllTimeStatsUpdater(func() (monitor.TotalStatsResult, error) {
+		monitor.StartDAUUpdater(monitorCtx, db.CountUniqueUsersLast24h, 1*time.Minute, logger)
+		monitor.StartAllTimeStatsUpdater(monitorCtx, func() (monitor.TotalStatsResult, error) {
 			s, err := db.GetCombinedTotalStats()
 			if err != nil {
 				return monitor.TotalStatsResult{}, err
@@ -200,6 +202,9 @@ func Main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Errorf("Server forced to shutdown: %v", err)
 	}
+
+	// Shutdown monitor background goroutines
+	monitorCancel()
 
 	// Shutdown LoRA event watcher and manager
 	if loraCancel != nil {

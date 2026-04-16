@@ -125,8 +125,12 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
-	// Skip billing for whitelisted users
+	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
+		if transcriptionResp.Usage != nil {
+			monitor.RecordTokens("speech_to_text", int64(transcriptionResp.Usage.InputTokens), int64(transcriptionResp.Usage.OutputTokens))
+			monitor.RecordWhitelistTokens("speech_to_text", int64(transcriptionResp.Usage.InputTokens), int64(transcriptionResp.Usage.OutputTokens))
+		}
 		return nil
 	}
 
@@ -222,8 +226,12 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 		_ = c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey)
 	}
 
-	// Skip billing for whitelisted users
+	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
+		if usage != nil {
+			monitor.RecordTokens("speech_to_text", int64(usage.InputTokens), int64(usage.OutputTokens))
+			monitor.RecordWhitelistTokens("speech_to_text", int64(usage.InputTokens), int64(usage.OutputTokens))
+		}
 		return nil
 	}
 
