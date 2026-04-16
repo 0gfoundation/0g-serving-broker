@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // ImageEditingRequest defines the structure of an image editing request
@@ -196,8 +197,10 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
-	// Skip billing for whitelisted users
+	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
+		monitor.RecordTokens("image-editing", 0, reqModel.OutputCount)
+		monitor.RecordWhitelistTokens("image-editing", 0, reqModel.OutputCount)
 		return nil
 	}
 
@@ -221,6 +224,7 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
+	monitor.RecordTokens("image-editing", 0, imageNum)
 	return nil
 }
 

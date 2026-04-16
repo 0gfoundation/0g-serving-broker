@@ -144,6 +144,8 @@ func (d *DB) CreateRequest(req model.Request) error {
 
 	// Update user's last_active_at for DAU tracking.
 	// Uses a raw update to avoid triggering full model callbacks.
+	// Non-fatal: request creation already succeeded, so don't fail the request.
+	// Errors are logged by GORM's built-in logger at the SQL level.
 	now := time.Now()
 	d.db.Model(&model.User{}).
 		Where("user = ?", req.UserAddress).

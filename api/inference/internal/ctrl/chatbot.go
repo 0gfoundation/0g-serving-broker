@@ -440,6 +440,7 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		if chunk.Usage != nil {
 			*usage = chunk.Usage
 			monitor.RecordTokens("chatbot", int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
+			monitor.RecordWhitelistTokens("chatbot", int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", int64(chunk.Usage.CompletionTokens))
 		}
 		return nil
@@ -740,6 +741,7 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 			if isWhitelisted {
 				if *usage != nil {
 					monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+					monitor.RecordWhitelistTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
 					monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
 				}
 				break

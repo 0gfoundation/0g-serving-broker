@@ -98,6 +98,7 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 		// Skip billing for whitelisted users, but still record token metrics
 		if isWhitelisted {
 			monitor.RecordTokens("chatbot", int64(response.Usage.InputTokens), int64(response.Usage.OutputTokens))
+			monitor.RecordWhitelistTokens("chatbot", int64(response.Usage.InputTokens), int64(response.Usage.OutputTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", int64(response.Usage.OutputTokens))
 			return nil
 		}
@@ -172,6 +173,7 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 					if isWhitelisted {
 						if *usage != nil {
 							monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+							monitor.RecordWhitelistTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
 							monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
 						}
 						return nil
