@@ -339,9 +339,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
-	// Record unique user for DAU tracking
-	monitor.RecordUniqueUser(userAddress)
-
 	// LoRA owner check: for ft-* models, verify requester is the task owner
 	reqModelName := ctrl.ExtractModelName(reqBody)
 	if err := p.ctrl.CheckLoRAOwnership(reqModelName, userAddress); err != nil {

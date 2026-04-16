@@ -777,9 +777,10 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 		return nil
 	}
 
-	requestHashes := c.getRequestHashes(requests)
-	if err := c.db.DeleteRequestsByHashes(requestHashes); err != nil {
-		c.logger.Errorf("CRITICAL: failed to delete settled requests: %v, hashes: %v", err, requestHashes)
+	// Atomically accumulate stats and delete requests in a single transaction
+	// to prevent double-counting if deletion fails after accumulation
+	if err := c.db.AccumulateAndDeleteRequests(requests); err != nil {
+		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err
 	}
 	return nil

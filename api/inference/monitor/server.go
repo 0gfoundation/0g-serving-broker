@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -24,8 +25,11 @@ var (
 	// TokensPerSecond records per-request output token generation rate as a histogram, labeled by service_type.
 	TokensPerSecond *prometheus.HistogramVec
 
-	// uniqueUsersChan is a buffered channel for async user recording (non-blocking)
-	uniqueUsersChan chan string
+	// All-time cumulative gauges (queried from database, survive restarts)
+	AllTimeRequests    prometheus.Gauge
+	AllTimeInputTokens prometheus.Gauge
+	AllTimeOutputTokens prometheus.Gauge
+	AllTimeUniqueUsers prometheus.Gauge
 )
 
 func PrometheusInit(serverName string) {
@@ -64,7 +68,7 @@ func PrometheusInit(serverName string) {
 	UniqueUsersTotal = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name:        "broker_unique_users_total",
-			Help:        "Number of unique users for the current day (resets daily at UTC midnight).",
+			Help:        "Number of unique users in the last 24 hours (queried from database).",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
 	)
@@ -97,6 +101,30 @@ func PrometheusInit(serverName string) {
 		[]string{"service_type"},
 	)
 
+	AllTimeRequests = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_alltime_requests_total",
+		Help:        "All-time total number of requests (from database).",
+		ConstLabels: prometheus.Labels{"server": serverName},
+	})
+
+	AllTimeInputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_alltime_input_tokens_total",
+		Help:        "All-time total input token count (from database).",
+		ConstLabels: prometheus.Labels{"server": serverName},
+	})
+
+	AllTimeOutputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_alltime_output_tokens_total",
+		Help:        "All-time total output token count (from database).",
+		ConstLabels: prometheus.Labels{"server": serverName},
+	})
+
+	AllTimeUniqueUsers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_alltime_unique_users_total",
+		Help:        "All-time total unique users (from database).",
+		ConstLabels: prometheus.Labels{"server": serverName},
+	})
+
 	prometheus.MustRegister(RequestCount)
 	prometheus.MustRegister(ErrorCount)
 	prometheus.MustRegister(RequestDuration)
@@ -104,32 +132,69 @@ func PrometheusInit(serverName string) {
 	prometheus.MustRegister(InputTokensTotal)
 	prometheus.MustRegister(OutputTokensTotal)
 	prometheus.MustRegister(TokensPerSecond)
-
-	// Initialize buffered channel and start background processor
-	uniqueUsersChan = make(chan string, 10000)
-	go processUniqueUsers()
+	prometheus.MustRegister(AllTimeRequests)
+	prometheus.MustRegister(AllTimeInputTokens)
+	prometheus.MustRegister(AllTimeOutputTokens)
+	prometheus.MustRegister(AllTimeUniqueUsers)
 }
 
-// processUniqueUsers runs in background and processes user addresses without blocking requests
-func processUniqueUsers() {
-	uniqueUsers := make(map[string]struct{})
-	lastResetDay := time.Now().UTC().YearDay()
+// StartDAUUpdater starts a background goroutine that periodically queries the database
+// to count unique users in the last 24 hours and updates the Prometheus gauge.
+// This ensures the DAU metric survives process restarts.
+func StartDAUUpdater(queryFunc func() (int64, error), interval time.Duration, logger log.Logger) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
 
-	for userAddress := range uniqueUsersChan {
-		// Check if we need to reset (new day)
-		currentDay := time.Now().UTC().YearDay()
-		if currentDay != lastResetDay {
-			uniqueUsers = make(map[string]struct{})
-			lastResetDay = currentDay
-			UniqueUsersTotal.Set(0)
+		// Run immediately on startup
+		if count, err := queryFunc(); err != nil {
+			logger.Errorf("DAU updater: failed to query unique users: %v", err)
+		} else {
+			UniqueUsersTotal.Set(float64(count))
 		}
 
-		// Add user if not already present
-		if _, exists := uniqueUsers[userAddress]; !exists {
-			uniqueUsers[userAddress] = struct{}{}
-			UniqueUsersTotal.Set(float64(len(uniqueUsers)))
+		for range ticker.C {
+			if count, err := queryFunc(); err != nil {
+				logger.Errorf("DAU updater: failed to query unique users: %v", err)
+			} else {
+				UniqueUsersTotal.Set(float64(count))
+			}
 		}
-	}
+	}()
+}
+
+// TotalStatsResult holds the combined stats for the all-time gauges.
+type TotalStatsResult struct {
+	TotalRequests     int64
+	TotalInputTokens  int64
+	TotalOutputTokens int64
+	TotalUniqueUsers  int64
+}
+
+// StartAllTimeStatsUpdater starts a background goroutine that periodically queries
+// the database for all-time cumulative stats and updates the Prometheus gauges.
+func StartAllTimeStatsUpdater(queryFunc func() (TotalStatsResult, error), interval time.Duration, logger log.Logger) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		update := func() {
+			stats, err := queryFunc()
+			if err != nil {
+				logger.Errorf("All-time stats updater: failed to query: %v", err)
+				return
+			}
+			AllTimeRequests.Set(float64(stats.TotalRequests))
+			AllTimeInputTokens.Set(float64(stats.TotalInputTokens))
+			AllTimeOutputTokens.Set(float64(stats.TotalOutputTokens))
+			AllTimeUniqueUsers.Set(float64(stats.TotalUniqueUsers))
+		}
+
+		update()
+		for range ticker.C {
+			update()
+		}
+	}()
 }
 
 // RequestStartTimeKey is the gin context key for the request start time.
@@ -156,21 +221,6 @@ func TrackMetrics() gin.HandlerFunc {
 		if !ignoreError && status >= 400 {
 			ErrorCount.WithLabelValues(path, http.StatusText(status)).Inc()
 		}
-	}
-}
-
-// RecordUniqueUser records a unique user for the current day (non-blocking).
-// It sends the user address to a buffered channel for async processing.
-func RecordUniqueUser(userAddress string) {
-	if userAddress == "" || uniqueUsersChan == nil {
-		return
-	}
-
-	// Non-blocking send: if channel is full, skip this record
-	select {
-	case uniqueUsersChan <- userAddress:
-	default:
-		// Channel full, skip to avoid blocking request
 	}
 }
 

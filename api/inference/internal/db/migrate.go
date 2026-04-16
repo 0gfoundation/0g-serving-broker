@@ -228,6 +228,38 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&AdapterKey{})
 			},
 		},
+		{
+			ID: "create-daily-stat",
+			Migrate: func(tx *gorm.DB) error {
+				type DailyStat struct {
+					Date          string `gorm:"type:date;primaryKey"`
+					TotalRequests int64  `gorm:"type:bigint;not null;default:0"`
+					InputTokens   int64  `gorm:"type:bigint;not null;default:0"`
+					OutputTokens  int64  `gorm:"type:bigint;not null;default:0"`
+				}
+				return tx.AutoMigrate(&DailyStat{})
+			},
+		},
+		{
+			ID: "add-last-active-at-to-user",
+			Migrate: func(tx *gorm.DB) error {
+				type User struct {
+					LastActiveAt *time.Time `gorm:"type:datetime;index:idx_user_last_active"`
+				}
+				return tx.AutoMigrate(&User{})
+			},
+		},
+		{
+			ID: "add-created-at-index-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				var count int64
+				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'idx_request_created_at'").Scan(&count)
+				if count == 0 {
+					return tx.Exec("CREATE INDEX `idx_request_created_at` ON `request`(`created_at`);").Error
+				}
+				return nil
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

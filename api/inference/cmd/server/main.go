@@ -56,6 +56,19 @@ func Main() {
 
 	if config.Monitor.Enable {
 		monitor.PrometheusInit(config.Service.ServingURL)
+		monitor.StartDAUUpdater(db.CountUniqueUsersLast24h, 1*time.Minute, logger)
+		monitor.StartAllTimeStatsUpdater(func() (monitor.TotalStatsResult, error) {
+			s, err := db.GetCombinedTotalStats()
+			if err != nil {
+				return monitor.TotalStatsResult{}, err
+			}
+			return monitor.TotalStatsResult{
+				TotalRequests:     s.TotalRequests,
+				TotalInputTokens:  s.TotalInputTokens,
+				TotalOutputTokens: s.TotalOutputTokens,
+				TotalUniqueUsers:  s.TotalUniqueUsers,
+			}, nil
+		}, 1*time.Minute, logger)
 		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	}
 

@@ -13,6 +13,7 @@ type User struct {
 	LastBalanceCheckTime *time.Time            `json:"lastBalanceCheckTime"`
 	Signer               StringSlice           `gorm:"type:json;not null;default:('[]')" json:"signer"`
 	SkipUntil            *time.Time            `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
+	LastActiveAt         *time.Time            `gorm:"type:datetime;index:idx_user_last_active" json:"lastActiveAt,omitempty"`
 	DeletedAt            soft_delete.DeletedAt `gorm:"softDelete:nano;not null;default:0;index:deleted_user_provider" json:"-" readonly:"true"`
 }
 
