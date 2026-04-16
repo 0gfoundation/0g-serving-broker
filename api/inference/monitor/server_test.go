@@ -7,10 +7,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	logrus "github.com/sirupsen/logrus"
 )
+
+// testLogger is a no-op logger for testing.
+type testLogger struct{}
+
+func (testLogger) Debugf(string, ...interface{})   {}
+func (testLogger) Infof(string, ...interface{})     {}
+func (testLogger) Printf(string, ...interface{})    {}
+func (testLogger) Warnf(string, ...interface{})     {}
+func (testLogger) Warningf(string, ...interface{})  {}
+func (testLogger) Errorf(string, ...interface{})    {}
+func (testLogger) Fatalf(string, ...interface{})    {}
+func (testLogger) Panicf(string, ...interface{})    {}
+func (testLogger) Debug(...interface{})             {}
+func (testLogger) Info(...interface{})              {}
+func (testLogger) Print(...interface{})             {}
+func (testLogger) Warn(...interface{})              {}
+func (testLogger) Warning(...interface{})           {}
+func (testLogger) Error(...interface{})             {}
+func (testLogger) Fatal(...interface{})             {}
+func (testLogger) Panic(...interface{})             {}
+func (testLogger) Debugln(...interface{})           {}
+func (testLogger) Infoln(...interface{})            {}
+func (testLogger) Println(...interface{})           {}
+func (testLogger) Warnln(...interface{})            {}
+func (testLogger) Warningln(...interface{})         {}
+func (testLogger) Errorln(...interface{})           {}
+func (testLogger) Fatalln(...interface{})           {}
+func (testLogger) Panicln(...interface{})           {}
+func (testLogger) WithFields(logrus.Fields) log.Logger { return testLogger{} }
+func (testLogger) InnerLogger() *logrus.Logger         { return logrus.New() }
 
 // setupTestMetrics creates fresh metrics with a unique server name to avoid
 // registration conflicts between tests. Each test gets its own registry.
@@ -379,54 +411,33 @@ func TestRecordTPSFromContextCalculation(t *testing.T) {
 	}
 }
 
-// TestRecordUniqueUser verifies non-blocking user recording behavior.
-func TestRecordUniqueUser(t *testing.T) {
-	// Initialize channel for testing
-	uniqueUsersChan = make(chan string, 10)
+// TestStartDAUUpdater verifies the DB-backed DAU updater sets the gauge correctly.
+func TestStartDAUUpdater(t *testing.T) {
+	setupTestMetrics(t)
 
-	t.Run("records non-empty address", func(t *testing.T) {
-		RecordUniqueUser("0xabc123")
-		select {
-		case addr := <-uniqueUsersChan:
-			if addr != "0xabc123" {
-				t.Errorf("got %q, want %q", addr, "0xabc123")
-			}
-		default:
-			t.Error("expected address in channel, but channel was empty")
+	// Create a fresh gauge for testing
+	UniqueUsersTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "broker_unique_users_total_test",
+		Help:        "Test gauge",
+		ConstLabels: prometheus.Labels{"server": t.Name()},
+	})
+
+	t.Run("sets gauge from query function on startup", func(t *testing.T) {
+		queryFunc := func() (int64, error) {
+			return 42, nil
 		}
-	})
 
-	t.Run("skips empty address", func(t *testing.T) {
-		RecordUniqueUser("")
-		select {
-		case addr := <-uniqueUsersChan:
-			t.Errorf("expected no address in channel, got %q", addr)
-		default:
-			// expected
+		StartDAUUpdater(queryFunc, 1*time.Hour, testLogger{})
+
+		// Give the goroutine time to run the initial query
+		time.Sleep(50 * time.Millisecond)
+
+		m := &dto.Metric{}
+		if err := UniqueUsersTotal.Write(m); err != nil {
+			t.Fatalf("failed to read gauge: %v", err)
 		}
-	})
-
-	t.Run("skips when channel is nil", func(t *testing.T) {
-		saved := uniqueUsersChan
-		uniqueUsersChan = nil
-		defer func() { uniqueUsersChan = saved }()
-
-		// Should not panic
-		RecordUniqueUser("0xabc123")
-	})
-
-	t.Run("non-blocking when channel is full", func(t *testing.T) {
-		fullChan := make(chan string, 1)
-		fullChan <- "existing"
-		uniqueUsersChan = fullChan
-
-		// Should not block
-		RecordUniqueUser("0xnew")
-
-		// Channel should still contain only the original item
-		addr := <-fullChan
-		if addr != "existing" {
-			t.Errorf("got %q, want %q", addr, "existing")
+		if got := m.GetGauge().GetValue(); got != 42 {
+			t.Errorf("UniqueUsersTotal = %v, want 42", got)
 		}
 	})
 }

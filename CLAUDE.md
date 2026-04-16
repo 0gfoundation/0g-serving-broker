@@ -2,6 +2,39 @@
 
 This document defines code review standards and architectural guidelines for the 0G Serving Broker project. Claude will follow these standards when reviewing code.
 
+## Quick Reference (Must Read)
+
+### Build & Test Commands
+- Build: `cd api && go build ./...`
+- Unit tests: `cd api && go test ./...`
+- Integration tests: `cd api && go test -tags integration ./inference/... -timeout 600s`
+- Lint: `cd api && make lint`
+- Format: `cd api && go fmt ./...`
+
+### Review Guardrails (Prohibited Actions)
+- **Do NOT review or modify** abigen-generated Go bindings under `contract/`
+- **Do NOT adjust** code formatting, indentation, or import ordering — for format issues, just say "please run `go fmt`"
+- **Do NOT suggest** abstracting fewer than three similar lines of code
+- **Do NOT add** defensive nil checks or redundant error wrapping "just in case"
+- **Do NOT suggest** variable naming style changes (unless the name is clearly misleading)
+- **Do NOT split** GORM chained calls into multiple lines (this is the project's code style)
+- **Do NOT suggest** modifications to code in `libs/` or `token-counter/` submodules
+
+### Review Priority (Enforced Order)
+1. 🔴 Private key leaks / signature bypass / smart contract interaction safety
+2. 🔴 TEE verification gaps or bypasses
+3. 🟡 Goroutine leaks / unclosed resources / concurrency races
+4. 🟡 Missing state machine transitions (fine-tuning task lifecycle)
+5. 🟢 Database N+1 queries / performance regressions
+6. ⚪ Other
+
+### Output Requirements
+- All issues must be tagged `[CRITICAL]` / `[HIGH]` / `[MEDIUM]` / `[NIT]`
+- Tag code highlights with `[PRAISE]`
+- Write review reports in English
+
+---
+
 ## Project Overview
 
 **0G Serving Broker** is the core infrastructure component of the 0G Compute Network, a decentralized GPU marketplace that connects AI service users with compute providers. The broker acts as a trusted intermediary, handling authentication, request routing, settlement, and verification.

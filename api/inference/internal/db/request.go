@@ -138,8 +138,18 @@ func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, t
 }
 
 func (d *DB) CreateRequest(req model.Request) error {
-	ret := d.db.Create(&req)
-	return ret.Error
+	if err := d.db.Create(&req).Error; err != nil {
+		return err
+	}
+
+	// Update user's last_active_at for DAU tracking.
+	// Uses a raw update to avoid triggering full model callbacks.
+	now := time.Now()
+	d.db.Model(&model.User{}).
+		Where("user = ?", req.UserAddress).
+		Update("last_active_at", now)
+
+	return nil
 }
 
 func (d *DB) PruneRequest(pruneThreshold time.Duration) error {
@@ -190,6 +200,19 @@ func (d *DB) ClearExpiredSkipUntil() error {
 	return d.db.Model(&model.Request{}).
 		Where("skip_until IS NOT NULL AND skip_until <= ?", now).
 		Update("skip_until", nil).Error
+}
+
+// CountUniqueUsersLast24h returns the number of unique users active in the last 24 hours.
+// Queries the user table's last_active_at field, which is only updated when a user
+// makes an actual request (not during contract sync or other system operations).
+func (d *DB) CountUniqueUsersLast24h() (int64, error) {
+	var count int64
+	cutoff := time.Now().Add(-24 * time.Hour)
+	err := d.db.Model(&model.User{}).
+		Where("deleted_at = 0").
+		Where("last_active_at >= ?", cutoff).
+		Count(&count).Error
+	return count, err
 }
 
 // DeleteRequestsByHashes deletes specific requests by their hashes
