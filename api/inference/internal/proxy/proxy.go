@@ -86,6 +86,13 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 				tpmBurst = 1
 			}
 		}
+		// Ensure burst >= context_length so a single max-context request doesn't
+		// drive the bucket deeply negative and cause excessive lockout.
+		if ctrl.Service.ModelInfo != nil && ctrl.Service.ModelInfo.ContextLength > tpmBurst {
+			logger.Infof("TPM burst %d < context_length %d, raising burst to context_length",
+				tpmBurst, ctrl.Service.ModelInfo.ContextLength)
+			tpmBurst = ctrl.Service.ModelInfo.ContextLength
+		}
 		p.perUserTPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserTPM, tpmBurst)
 		logger.Infof("Per-user token limit: %d TPM, burst=%d", concurrencyConfig.PerUserTPM, tpmBurst)
 	}

@@ -46,6 +46,7 @@ type Ctrl struct {
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
 	tieredPricing     config.TieredPricingConfig
+	concurrencyLimit  config.ConcurrencyLimitConfig
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
@@ -124,6 +125,7 @@ func New(
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
 		tieredPricing:        cfg.TieredPricing,
+		concurrencyLimit:     cfg.ConcurrencyLimit,
 		svcCache:             svcCache,
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
@@ -199,6 +201,11 @@ func (c *Ctrl) ProviderAddress() string {
 // GetServiceConfig returns the service configuration from the YAML config.
 func (c *Ctrl) GetServiceConfig() config.Service {
 	return c.Service
+}
+
+// GetConcurrencyLimitConfig returns the concurrency/rate limit configuration.
+func (c *Ctrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig {
+	return c.concurrencyLimit
 }
 
 // GetTieredPricingConfig returns the tiered pricing configuration.
