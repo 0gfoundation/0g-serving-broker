@@ -123,7 +123,11 @@ func (s *ServingContract) TransactWithValue(ctx context.Context, retryOpts *Retr
 
 		errStr := strings.ToLower(err.Error())
 
-		if strings.Contains(errStr, "mempool") || strings.Contains(errStr, "timeout") {
+		if strings.Contains(errStr, "gas price below minimum") {
+			newGasPrice := bumpGasPriceFromError(errStr, opts.GasPrice)
+			s.logger.Infof("Gas price below chain minimum, bumping from %v to %v", opts.GasPrice, newGasPrice)
+			opts.GasPrice = newGasPrice
+		} else if strings.Contains(errStr, "mempool") || strings.Contains(errStr, "timeout") {
 			if retryOpts.MaxGasPrice == nil {
 				return nil, fmt.Errorf("mempool full and no max gas price is set, failed to send transaction: %w", err)
 			} else {
@@ -341,4 +345,23 @@ func (c *Contract) GetBalance(ctx context.Context, account common.Address, block
 
 func (c *Contract) Close() {
 	c.Client.Client.Close()
+}
+
+// bumpGasPriceFromError parses the required minimum from a "gas price below
+// minimum" error and returns minimum * 1.1. Falls back to current * 2 if
+// parsing fails.
+func bumpGasPriceFromError(errStr string, current *big.Int) *big.Int {
+	const prefix = "minimum needed "
+	if idx := strings.Index(errStr, prefix); idx != -1 {
+		minStr := errStr[idx+len(prefix):]
+		if spaceIdx := strings.IndexAny(minStr, " ,\t\n"); spaceIdx != -1 {
+			minStr = minStr[:spaceIdx]
+		}
+		if minPrice, ok := new(big.Int).SetString(minStr, 10); ok {
+			bumped := new(big.Int).Mul(minPrice, big.NewInt(11))
+			bumped.Div(bumped, big.NewInt(10))
+			return bumped
+		}
+	}
+	return new(big.Int).Mul(current, big.NewInt(2))
 }

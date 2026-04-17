@@ -213,7 +213,7 @@ func GetConfig() *Config {
 			}{
 				FineTune: "root:123456@tcp(mysql:3306)/fineTune?parseTime=true",
 			},
-			GasPrice: "",
+			GasPrice: "3000000000",
 			Images: Images{
 				ExecutionMockImageName: "mock-fine-tuning:latest",
 				ExecutionImageName:     "execution-test-pytorch:v1",

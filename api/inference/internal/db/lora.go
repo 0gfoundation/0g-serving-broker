@@ -98,8 +98,17 @@ func (d *DB) ListIdleAdapters(idleThreshold time.Duration) ([]model.LoRAAdapter,
 }
 
 // CreateAdapterKey stores a provider-encrypted AES key pushed by the fine-tuning broker.
+// Uses upsert semantics: if a key for the same task already exists (e.g. from a
+// previous delivery attempt that partially succeeded), the storage hash and
+// encrypted key are updated rather than returning a duplicate-key error.
 func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
-	return d.db.Create(key).Error
+	return d.db.
+		Where("task_id = ?", key.TaskID).
+		Assign(model.AdapterKey{
+			StorageHash:    key.StorageHash,
+			ProviderEncKey: key.ProviderEncKey,
+		}).
+		FirstOrCreate(key).Error
 }
 
 // GetAdapterKeyByTaskID retrieves a pre-pushed adapter key by its task ID.

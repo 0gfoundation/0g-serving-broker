@@ -264,4 +264,26 @@ func TestAdapterKeyCRUD(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent key")
 	}
+
+	// Upsert: calling CreateAdapterKey again with the same TaskID should update,
+	// not fail with a duplicate-key error.
+	updatedKey := &model.AdapterKey{
+		TaskID:         "task-key-001",
+		StorageHash:    "0xnewdeadbeef",
+		ProviderEncKey: "0xnewencryptedkey456",
+	}
+	if err := d.CreateAdapterKey(updatedKey); err != nil {
+		t.Fatalf("CreateAdapterKey (upsert): %v", err)
+	}
+
+	got2, err := d.GetAdapterKeyByTaskID("task-key-001")
+	if err != nil {
+		t.Fatalf("GetAdapterKeyByTaskID after upsert: %v", err)
+	}
+	if got2.StorageHash != "0xnewdeadbeef" {
+		t.Errorf("expected updated StorageHash=0xnewdeadbeef, got %s", got2.StorageHash)
+	}
+	if got2.ProviderEncKey != "0xnewencryptedkey456" {
+		t.Errorf("expected updated ProviderEncKey=0xnewencryptedkey456, got %s", got2.ProviderEncKey)
+	}
 }

@@ -16,10 +16,10 @@ This guide covers how to fine-tune models, deploy LoRA adapters, and run inferen
 ### 1. Login
 
 ```bash
-0g-compute-cli login --private-key <YOUR_PRIVATE_KEY>
+0g-compute-cli login
 ```
 
-Verify your login status:
+The CLI will interactively prompt for your private key. Verify your login status:
 
 ```bash
 0g-compute-cli status
@@ -104,6 +104,7 @@ Create a JSON file with training hyperparameters:
 
 ```json
 {
+  "neftune_noise_alpha": 5,
   "num_train_epochs": 1,
   "per_device_train_batch_size": 2,
   "learning_rate": 0.0002,
@@ -119,7 +120,7 @@ Common parameters:
 | `per_device_train_batch_size` | Batch size per device | 2 |
 | `learning_rate` | Learning rate | 0.0002 |
 | `max_steps` | Max training steps (overrides epochs if set) | - |
-| `neftune_noise_alpha` | NEFTune noise for regularization | - |
+| `neftune_noise_alpha` | NEFTune noise for regularization (required) | 5 |
 
 > **Note**: Use decimal notation for learning_rate (e.g., `0.0002`), not scientific notation (`2e-4`).
 
@@ -327,12 +328,15 @@ For production use with automatic failover across multiple providers:
 
 ### Retrieve Funds from Sub-Account
 
+Request to return all funds from a provider sub-account back to your main account:
+
 ```bash
 0g-compute-cli retrieve-fund \
   --provider <PROVIDER_ADDRESS> \
-  --service fine-tuning \
-  --amount 1
+  --service fine-tuning
 ```
+
+> **Note**: This requests the return of all funds in the sub-account. There is a lock period before the funds become available in the main account. Use `get-sub-account` to check the remaining lock time.
 
 ### Refund from Main Account
 

@@ -13,6 +13,11 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
+// DefaultMinGasPrice is the floor for suggested gas prices (2 Gwei).
+// When eth_gasPrice returns a value below this, the floor is used instead
+// to avoid "gas price below minimum" rejections from the chain.
+var DefaultMinGasPrice = big.NewInt(2_000_000_000)
+
 // EthereumClient wraps the client and the BlockChain network to interact with an EVM based Blockchain
 type EthereumClient struct {
 	Client   *ethclient.Client
@@ -50,13 +55,19 @@ func (e *EthereumClient) TransactionCallMessage(
 		return nil, err
 	}
 	e.logger.Infof("Suggested Gas Price: %s", gasPrice.String())
+
+	if gasPrice.Cmp(DefaultMinGasPrice) < 0 {
+		e.logger.Infof("Suggested gas price below floor %s, using floor", DefaultMinGasPrice.String())
+		gasPrice = new(big.Int).Set(DefaultMinGasPrice)
+	}
+
 	if e.GasPrice != "" {
 		GasPriceConfig, ok := new(big.Int).SetString(e.GasPrice, 10)
 		if !ok {
 			return nil, fmt.Errorf("invalid gas price: %s", e.GasPrice)
 		}
 		e.logger.Infof("Config Gas Price: %s", GasPriceConfig.String())
-		if gasPrice != nil && GasPriceConfig.Cmp(gasPrice) == 1 {
+		if GasPriceConfig.Cmp(gasPrice) > 0 {
 			gasPrice = GasPriceConfig
 		}
 	}

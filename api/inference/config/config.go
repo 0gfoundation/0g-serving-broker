@@ -341,8 +341,8 @@ func GetConfig() *Config {
 			}{
 				ProviderAddr: ":8088",
 			},
-			GasPrice:    "",
-			MaxGasPrice: "",
+			GasPrice:    "3000000000",
+			MaxGasPrice: "10000000000",
 			Interval: struct {
 				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
 				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
