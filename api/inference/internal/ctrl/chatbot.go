@@ -365,6 +365,43 @@ func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 	return nil
 }
 
+// signImageResponse creates a TEE signature for image generation / editing responses.
+// The signed text is: sha256(originalClientReqBody):sha256(img0),sha256(img1),...
+// This binds the signature to actual image bytes rather than provider response JSON,
+// which may contain inaccessible LAN URLs.
+func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string) error {
+	hashAndEncode := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+
+	imgHashes := make([]string, len(images))
+	for i, img := range images {
+		imgHashes[i] = hashAndEncode(img)
+	}
+	text := hashAndEncode(reqBody) + ":" + strings.Join(imgHashes, ",")
+
+	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	if err != nil {
+		return err
+	}
+	if sig[64] == 0 || sig[64] == 1 {
+		sig[64] += 27
+	}
+
+	chatSignature := ChatSignature{
+		Text:                text,
+		SignatureEcdsa:      hexutil.Encode(sig),
+		SigningAddressEcdsa: c.teeService.Address,
+		SigningAlgo:         ECDSA.String(),
+	}
+
+	key := c.chatCacheKey(chatKey)
+	c.logger.Debugf("image signature key: %v, sig: %v", key, chatSignature)
+	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
+	return nil
+}
+
 // signCentralizedRoutingProof creates a TEE-signed routing proof for centralized
 // provider requests. The proof includes request/response hashes, provider identity,
 // and the TLS certificate fingerprint proving the connection target.

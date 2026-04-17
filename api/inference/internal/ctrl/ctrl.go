@@ -82,6 +82,9 @@ type Ctrl struct {
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
+
+	// imageStore persists generated/edited image bytes locally for URL-format responses.
+	imageStore *imageStore
 }
 
 func New(
@@ -106,6 +109,17 @@ func New(
 	}
 	if eventLogDir == "" {
 		eventLogDir = "/var/log/event"
+	}
+
+	imageCacheDir := cfg.LogPaths.BrokerLogDir
+	if imageCacheDir == "" {
+		imageCacheDir = "/var/log/inference"
+	}
+	imageCacheDir += "/image_cache"
+	imgStore, err := newImageStore(imageCacheDir, cfg.ChatCacheExpiration)
+	if err != nil {
+		logger.Warnf("Failed to initialize image store at %q, image URL serving disabled: %v", imageCacheDir, err)
+		imgStore = nil
 	}
 
 	minSettlementFee := new(big.Int)
@@ -157,6 +171,7 @@ func New(
 		},
 		// Initialize whitelist users map
 		whitelistUsers: make(map[string]struct{}),
+		imageStore:     imgStore,
 	}
 
 	// Initialize whitelist from config

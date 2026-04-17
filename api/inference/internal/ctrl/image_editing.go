@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -150,51 +149,69 @@ func findSubstring(s, substr string) int {
 	return -1
 }
 
-// handleImageEditingResponse handles the image editing response
-// This function:
-// 1. Reads and returns the edited image data
-// 2. Signs the response (if TEE is in the same network)
-// 3. Calculates fees based on output image count
-// 4. Updates the database with fee records
+// handleImageEditingResponse handles the image editing response.
+// Mirrors handleTextToImageResponse: extracts b64 image bytes, signs per-image
+// hashes, and optionally rewrites the response with broker-served URLs.
 func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
-	// Generate unique response key for signature verification
 	chatKey := uuid.NewString()
 	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 
-	// Read image response data
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read image editing response body")
 		return err
 	}
 
-	// Log response size for monitoring and debugging
 	responseSizeMB := float64(len(body)) / (1024 * 1024)
 	c.logger.Infof("Image editing response: size=%.2f MB, user=%s, imageCount=%d",
 		responseSizeMB, reqModel.UserAddress, reqModel.OutputCount)
 
-	// Return image data to client
-	if _, err := ctx.Writer.Write(body); err != nil {
-		// Check if error is due to client disconnection (broken pipe, connection reset)
-		// These are expected errors when client times out or cancels request
-		errMsg := err.Error()
-		if isClientDisconnectError(errMsg) {
-			c.logger.Warnf("Client disconnected before receiving full response: %v", err)
-			// Don't return error - continue with billing since response was generated
-		} else {
-			// Other write errors are unexpected
-			c.handleBrokerError(ctx, err, "write image editing response")
-			return err
+	// Resolve the original client request body (pre-b64 rewrite) for signing.
+	sigReqBody := reqBody
+	if v, ok := ctx.Get("clientReqBody"); ok {
+		if orig, ok := v.([]byte); ok {
+			sigReqBody = orig
 		}
 	}
 
-	// Sign response if LLM server is in the same network
-	// This allows clients to verify the response is from an authorized provider
+	images, extractErr := extractB64Images(body)
+
+	originalFormat, _ := ctx.Get("clientResponseFormat")
+	wantURL := originalFormat == "url"
+
+	clientBody := body
+	if wantURL && extractErr == nil && len(images) > 0 && c.imageStore != nil {
+		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
+			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
+		} else {
+			rewritten, buildErr := buildURLResponse(body, chatKey, len(images), ctx.Request)
+			if buildErr != nil {
+				c.logger.Warnf("Failed to build URL response, sending b64: %v", buildErr)
+			} else {
+				clientBody = rewritten
+			}
+		}
+	}
+
+	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
+		if c.isClientDisconnectError(writeErr) {
+			c.logger.Warnf("Client disconnected before receiving full response: %v", writeErr)
+		} else {
+			c.handleBrokerError(ctx, writeErr, "write image editing response")
+			return writeErr
+		}
+	}
+
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing image-editing response")
-		_ = c.signChatWithKey(reqBody, body, chatKey)
+		if extractErr == nil && len(images) > 0 {
+			_ = c.signImageResponse(sigReqBody, images, chatKey)
+		} else {
+			c.logger.Warnf("No b64 images extracted, falling back to full-body signature: %v", extractErr)
+			_ = c.signChatWithKey(sigReqBody, body, chatKey)
+		}
 	}
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
@@ -226,29 +243,6 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 
 	monitor.RecordTokens("image-editing", 0, imageNum)
 	return nil
-}
-
-// isClientDisconnectError checks if an error is due to client disconnection
-// Returns true for errors like "broken pipe", "connection reset by peer", etc.
-func isClientDisconnectError(errMsg string) bool {
-	// Common client disconnect error patterns
-	disconnectPatterns := []string{
-		"broken pipe",
-		"connection reset by peer",
-		"write: connection reset",
-		"write: broken pipe",
-		"EOF",
-		"client disconnected",
-	}
-
-	// Convert to lowercase for case-insensitive matching
-	errMsgLower := strings.ToLower(errMsg)
-	for _, pattern := range disconnectPatterns {
-		if strings.Contains(errMsgLower, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 /*

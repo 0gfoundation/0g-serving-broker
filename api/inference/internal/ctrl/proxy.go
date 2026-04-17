@@ -54,6 +54,18 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
+	// For text-to-image and image-editing: store the original client body (used for
+	// signing) and rewrite response_format to b64_json so the broker always receives
+	// raw image bytes from the provider rather than LAN-inaccessible URLs.
+	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
+		ctx.Set("clientReqBody", reqBody)
+		originalFormat, rewritten, err := forceB64ResponseFormat(reqBody)
+		if err == nil {
+			ctx.Set("clientResponseFormat", originalFormat)
+			reqBody = rewritten
+		}
+	}
+
 	// For text-to-image requests, ensure wait=true query parameter is set
 	if svcType == "text-to-image" {
 		parsedURL, err := url.Parse(targetURL)
@@ -470,3 +482,35 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	return modifiedBody, nil
 }
 
+// forceB64ResponseFormat rewrites the response_format field in a JSON request body
+// to "b64_json", returning the original format value and the modified body.
+// Returns an error (and the unmodified body) if the body is not valid JSON.
+func forceB64ResponseFormat(body []byte) (originalFormat string, modified []byte, err error) {
+	var m map[string]interface{}
+	if err = json.Unmarshal(body, &m); err != nil {
+		return "", body, err
+	}
+	if v, ok := m["response_format"].(string); ok {
+		originalFormat = v
+	}
+	m["response_format"] = "b64_json"
+	modified, err = json.Marshal(m)
+	if err != nil {
+		return originalFormat, body, err
+	}
+	return originalFormat, modified, nil
+}
+
+// GetImage returns the stored image bytes for chatKey/index, or an error if
+// the entry has expired or the index is out of range.
+func (c *Ctrl) GetImage(chatKey string, index int) ([]byte, error) {
+	if c.imageStore == nil {
+		return nil, errors.New("image store not available")
+	}
+	return c.imageStore.get(chatKey, index)
+}
+
+// DetectImageContentType sniffs the MIME type of image bytes.
+func (c *Ctrl) DetectImageContentType(data []byte) string {
+	return detectContentType(data)
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -205,6 +206,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// handleSignatureRoute returns true if it handled the request from broker cache
 		// returns false if it should be forwarded to backend (targetSeparated=true)
 		if p.handleSignatureRoute(ctx, targetPath) {
+			return
+		}
+
+		if p.handleImageServeRoute(ctx, targetPath) {
 			return
 		}
 
@@ -461,6 +466,39 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, service.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
 	}
+}
+
+// handleImageServeRoute serves broker-stored image bytes at
+// /images/{chatKey}/{index}.  The chatKey is a UUID issued in ZG-Res-Key, so
+// only the requester who received it can derive the URL.  No session auth is
+// required (the UUID itself is the access token), matching OpenAI's CDN URL
+// behaviour.  Returns true if the request was handled (including error cases).
+func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool {
+	if !strings.HasPrefix(strings.ToLower(targetPath), "/images/") {
+		return false
+	}
+	// Parse /images/{chatKey}/{index}; must have exactly two path segments.
+	rest := strings.TrimPrefix(targetPath, "/images/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	chatKey := parts[0]
+	index, err := strconv.Atoi(parts[1])
+	if err != nil || index < 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid image index"})
+		return true
+	}
+
+	img, err := p.ctrl.GetImage(chatKey, index)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "image not found or expired"})
+		return true
+	}
+
+	ct := p.ctrl.DetectImageContentType(img)
+	ctx.Data(http.StatusOK, ct, img)
+	return true
 }
 
 func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool {
