@@ -37,6 +37,8 @@ type Proxy struct {
 	concurrencyLimiter        *middleware.ConcurrencyLimiter
 	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
 	perUserRateLimiter        *middleware.PerUserRateLimiter
+	perUserTPMLimiter         *middleware.PerUserTPMLimiter
+	perUserIPMLimiter         *middleware.PerUserTPMLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -73,6 +75,32 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		}
 		p.perUserRateLimiter = middleware.NewPerUserRateLimiter(concurrencyConfig.PerUserRPM, burst)
 		logger.Infof("Per-user rate limit: %d RPM, burst=%d", concurrencyConfig.PerUserRPM, burst)
+	}
+
+	// Initialize per-user TPM (tokens-per-minute) limiter if configured
+	if concurrencyConfig.PerUserTPM > 0 {
+		tpmBurst := concurrencyConfig.PerUserTPMBurst
+		if tpmBurst <= 0 {
+			tpmBurst = concurrencyConfig.PerUserTPM / 6 // default burst = 10 seconds worth of tokens
+			if tpmBurst <= 0 {
+				tpmBurst = 1
+			}
+		}
+		p.perUserTPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserTPM, tpmBurst)
+		logger.Infof("Per-user token limit: %d TPM, burst=%d", concurrencyConfig.PerUserTPM, tpmBurst)
+	}
+
+	// Initialize per-user IPM (images-per-minute) limiter if configured
+	if concurrencyConfig.PerUserIPM > 0 {
+		ipmBurst := concurrencyConfig.PerUserIPMBurst
+		if ipmBurst <= 0 {
+			ipmBurst = concurrencyConfig.PerUserIPM / 6 // default burst = 10 seconds worth of images
+			if ipmBurst <= 0 {
+				ipmBurst = 1
+			}
+		}
+		p.perUserIPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserIPM, ipmBurst)
+		logger.Infof("Per-user image limit: %d IPM, burst=%d", concurrencyConfig.PerUserIPM, ipmBurst)
 	}
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
@@ -127,6 +155,17 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	}
 
 	return p
+}
+
+// Close releases resources held by the Proxy (e.g., background goroutines).
+// Should be called during graceful server shutdown.
+func (p *Proxy) Close() {
+	if p.perUserTPMLimiter != nil {
+		p.perUserTPMLimiter.Stop()
+	}
+	if p.perUserIPMLimiter != nil {
+		p.perUserIPMLimiter.Stop()
+	}
 }
 
 func (p *Proxy) Start() error {
@@ -316,12 +355,76 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			p.logger.Warnf("Per-user rate limit exceeded: user=%s", userAddress)
 			return
 		}
+		if !middleware.CheckPerUserTPMLimit(p.perUserTPMLimiter, ctx, userAddress, svcType) {
+			p.logger.Warnf("Per-user TPM limit exceeded: user=%s", userAddress)
+			return
+		}
+		if !middleware.CheckPerUserIPMLimit(p.perUserIPMLimiter, ctx, userAddress, svcType) {
+			p.logger.Warnf("Per-user IPM limit exceeded: user=%s", userAddress)
+			return
+		}
 		if !middleware.CheckPerUserConcurrency(p.perUserConcurrencyLimiter, ctx, userAddress) {
 			p.logger.Warnf("Per-user concurrency limit reached: user=%s, active=%d",
 				userAddress, p.perUserConcurrencyLimiter.GetActiveForUser(userAddress))
 			return
 		}
 		defer p.perUserConcurrencyLimiter.Release(userAddress)
+
+		// Store the relevant limiter in context for post-response consumption.
+		// Only inject the limiter that applies to this service type to prevent
+		// accidental cross-type consumption in service handlers.
+		switch svcType {
+		case "chatbot", "speech-to-text":
+			if p.perUserTPMLimiter != nil {
+				ctx.Set("tpmLimiter", p.perUserTPMLimiter)
+			}
+		case "text-to-image", "image-editing":
+			if p.perUserIPMLimiter != nil {
+				ctx.Set("ipmLimiter", p.perUserIPMLimiter)
+			}
+		}
+	}
+
+	// Set rate limit response headers BEFORE forwarding to backend.
+	// Headers must be set before the response body is written, so we use
+	// current remaining values (pre-request). The actual consumption from
+	// this request will be reflected in the NEXT response's headers.
+	if !isWhitelisted {
+		var rpmInfo *middleware.RateLimitInfo
+		if p.perUserRateLimiter != nil {
+			remaining, resetSecs := p.perUserRateLimiter.GetRemainingWithReset(userAddress)
+			rpmInfo = &middleware.RateLimitInfo{
+				Limit:     p.perUserRateLimiter.RPM(),
+				Remaining: remaining,
+				ResetSecs: resetSecs,
+			}
+		}
+		// Use TPM or IPM based on service type
+		var resourceInfo *middleware.RateLimitInfo
+		var resourceType string
+		switch svcType {
+		case "chatbot", "speech-to-text":
+			if p.perUserTPMLimiter != nil {
+				remaining, resetSecs := p.perUserTPMLimiter.GetRemaining(userAddress)
+				resourceInfo = &middleware.RateLimitInfo{
+					Limit:     p.perUserTPMLimiter.TPM(),
+					Remaining: remaining,
+					ResetSecs: resetSecs,
+				}
+				resourceType = "tokens"
+			}
+		case "text-to-image", "image-editing":
+			if p.perUserIPMLimiter != nil {
+				remaining, resetSecs := p.perUserIPMLimiter.GetRemaining(userAddress)
+				resourceInfo = &middleware.RateLimitInfo{
+					Limit:     p.perUserIPMLimiter.TPM(),
+					Remaining: remaining,
+					ResetSecs: resetSecs,
+				}
+				resourceType = "images"
+			}
+		}
+		middleware.SetRateLimitHeaders(ctx, ctx.Request.URL.Path, rpmInfo, resourceInfo, resourceType)
 	}
 
 	// Check if user is rate-limited due to excessive model mismatch attempts

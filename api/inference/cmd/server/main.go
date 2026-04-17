@@ -217,5 +217,8 @@ func Main() {
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
 
+	// Stop rate limiter cleanup goroutines
+	proxy.Close()
+
 	logger.Info("Server exited")
 }

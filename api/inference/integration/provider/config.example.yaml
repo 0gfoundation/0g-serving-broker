@@ -55,6 +55,16 @@ service:
   #   supportedFormats:
   #     - openai
   #     - anthropic
+# Optional: rate limiting and concurrency configuration.
+# concurrencyLimit:
+#   maxGlobalConcurrent: 20    # Max total concurrent requests to backend (default: 20)
+#   maxPerUserConcurrent: 5    # Max concurrent requests per user (default: 5)
+#   perUserRPM: 30             # Max requests per minute per user (default: 30, 0 = disabled)
+#   perUserBurst: 5            # Max burst size for RPM (default: 5)
+#   perUserTPM: 60000          # Max tokens per minute per user (default: 0 = disabled, chatbot/speech-to-text)
+#   perUserTPMBurst: 10000     # Max burst size for TPM (default: 0)
+#   perUserIPM: 10             # Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
+#   perUserIPMBurst: 5         # Max burst size for IPM (default: 0)
 # Optional: HTTP client timeouts for broker→provider communication.
 # Tune based on GPU speed and model complexity (e.g., image generation may need longer timeouts).
 # providerHttp:

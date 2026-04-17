@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -278,6 +279,18 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 	monitor.RecordTokens("speech_to_text", int64(usage.InputTokens), int64(usage.OutputTokens))
 	monitor.RecordTPSFromContext(ctx, "speech_to_text", int64(usage.OutputTokens))
 
+	// Update TPM limiter with actual token consumption
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		totalTokens := usage.InputTokens + usage.OutputTokens
+		userAddr, _ := ginCtx.Get("userAddress")
+		userStr, userOk := userAddr.(string)
+		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
+			if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
+				limiter.ConsumeTokens(userStr, totalTokens)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -329,6 +342,17 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	// Record token metrics (estimated output tokens only, no input token data in fallback path)
 	monitor.RecordTokens("speech_to_text", 0, estimatedOutputTokens)
 	monitor.RecordTPSFromContext(ctx, "speech_to_text", estimatedOutputTokens)
+
+	// Update TPM limiter with estimated token consumption (fallback path)
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		userAddr, _ := ginCtx.Get("userAddress")
+		userStr, userOk := userAddr.(string)
+		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
+			if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
+				limiter.ConsumeTokens(userStr, int(estimatedOutputTokens))
+			}
+		}
+	}
 
 	return nil
 }

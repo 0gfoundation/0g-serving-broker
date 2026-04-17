@@ -275,8 +275,12 @@ type Config struct {
 type ConcurrencyLimitConfig struct {
 	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent"`  // Max total concurrent requests to backend (default: 20)
 	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent"` // Max concurrent requests per user (default: 5, whitelisted users are exempt)
-	PerUserRPM           int `yaml:"perUserRPM"`           // Max requests per minute per user (default: 40, 0 = disabled)
-	PerUserBurst         int `yaml:"perUserBurst"`         // Max burst size for per-user rate limit (default: 10)
+	PerUserRPM           int `yaml:"perUserRPM"`           // Max requests per minute per user (default: 30, 0 = disabled)
+	PerUserBurst         int `yaml:"perUserBurst"`         // Max burst size for per-user rate limit (default: 5)
+	PerUserTPM           int `yaml:"perUserTPM"`           // Max tokens per minute per user (default: 0 = disabled, chatbot/speech-to-text)
+	PerUserTPMBurst      int `yaml:"perUserTPMBurst"`      // Max burst size for per-user TPM limit (default: 0)
+	PerUserIPM           int `yaml:"perUserIPM"`           // Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
+	PerUserIPMBurst      int `yaml:"perUserIPMBurst"`      // Max burst size for per-user IPM limit (default: 0)
 }
 
 // AsyncConfig defines configuration for async job processing.
@@ -547,6 +551,10 @@ func GetConfig() *Config {
 				MaxPerUserConcurrent: 5,
 				PerUserRPM:           30,
 				PerUserBurst:         5,
+				PerUserTPM:           0, // disabled by default
+				PerUserTPMBurst:      0,
+				PerUserIPM:           0, // disabled by default
+				PerUserIPMBurst:      0,
 			},
 			Async: AsyncConfig{
 				Enabled:                true,
