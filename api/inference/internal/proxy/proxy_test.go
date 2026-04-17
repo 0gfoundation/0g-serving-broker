@@ -16,6 +16,23 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
 
+// newTestProxy builds the minimal Proxy needed for handleImageServeRoute tests.
+func newTestProxy(t *testing.T, c *ctrl.Ctrl) *Proxy {
+	t.Helper()
+	return &Proxy{ctrl: c, logger: noopLogger{}}
+}
+
+// newGinCtxForPath builds a gin.Context whose RequestURI matches path under ServicePrefix.
+func newGinCtxForPath(t *testing.T, path string) (*gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+path, nil)
+	// Populate the wildcard "any" param the same way gin does in production.
+	ctx.Params = gin.Params{{Key: "any", Value: path}}
+	return ctx, w
+}
+
 // ==========================================================================
 // Video route registration in TargetRoute
 // ==========================================================================
@@ -228,5 +245,119 @@ func TestCentralizedAttestationGuard_Logic(t *testing.T) {
 				t.Errorf("expected shouldBlock=%v, got %v", tt.shouldBlock, blocked)
 			}
 		})
+	}
+}
+
+// ==========================================================================
+// handleImageServeRoute
+// ==========================================================================
+
+func TestHandleImageServeRoute_NoMatch_ShortPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, _ := newGinCtxForPath(t, "/images/only-one-segment")
+	handled := p.handleImageServeRoute(ctx, "/images/only-one-segment")
+	if handled {
+		t.Error("path with no index segment should not be handled")
+	}
+}
+
+func TestHandleImageServeRoute_NoMatch_NonImagePath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, _ := newGinCtxForPath(t, "/signature/some-key")
+	handled := p.handleImageServeRoute(ctx, "/signature/some-key")
+	if handled {
+		t.Error("non-image path should not be handled")
+	}
+}
+
+func TestHandleImageServeRoute_InvalidIndex_Returns400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, w := newGinCtxForPath(t, "/images/some-chat-key/notanumber")
+	handled := p.handleImageServeRoute(ctx, "/images/some-chat-key/notanumber")
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleImageServeRoute_NotFound_Returns404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, w := newGinCtxForPath(t, "/images/unknown-uuid/0")
+	handled := p.handleImageServeRoute(ctx, "/images/unknown-uuid/0")
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleImageServeRoute_ServesImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+
+	chatKey := "serve-test-uuid"
+	// PNG-like bytes so content-type detection works.
+	pngImg := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}
+	if err := c.StoreTestImage(chatKey, [][]byte{pngImg}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+	ctx, w := newGinCtxForPath(t, path)
+
+	handled := p.handleImageServeRoute(ctx, path)
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		t.Errorf("content-type = %q, want image/*", ct)
+	}
+	if w.Body.Bytes() == nil || len(w.Body.Bytes()) == 0 {
+		t.Error("expected non-empty image body")
+	}
+}
+
+func TestHandleImageServeRoute_IndexOutOfRange_Returns404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "range-test"
+	if err := c.StoreTestImage(chatKey, [][]byte{[]byte("img")}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/5" // only index 0 exists
+	ctx, w := newGinCtxForPath(t, path)
+
+	handled := p.handleImageServeRoute(ctx, path)
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
 	}
 }

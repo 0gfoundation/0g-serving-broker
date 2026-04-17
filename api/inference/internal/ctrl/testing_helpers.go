@@ -1,7 +1,9 @@
 package ctrl
 
 import (
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/patrickmn/go-cache"
 
@@ -26,4 +28,23 @@ func (c *Ctrl) SeedServiceCache(service model.Service) {
 // Use this to inject a client that trusts httptest.NewTLSServer certificates.
 func (c *Ctrl) SetHTTPClient(client *http.Client) {
 	c.httpClient = client
+}
+
+// SetupImageStoreForTest initialises a local image store at dir for proxy-level
+// tests that exercise handleImageServeRoute without a full request flow.
+func (c *Ctrl) SetupImageStoreForTest(dir string) error {
+	store, err := newImageStore(dir, time.Minute)
+	if err != nil {
+		return fmt.Errorf("setup image store: %w", err)
+	}
+	c.imageStore = store
+	return nil
+}
+
+// StoreTestImage saves image bytes into the image store. Call SetupImageStoreForTest first.
+func (c *Ctrl) StoreTestImage(chatKey string, images [][]byte) error {
+	if c.imageStore == nil {
+		return fmt.Errorf("image store not initialised, call SetupImageStoreForTest first")
+	}
+	return c.imageStore.store(chatKey, images)
 }
