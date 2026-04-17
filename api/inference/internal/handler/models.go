@@ -33,6 +33,15 @@ type ModelObject struct {
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
 	ProviderType        string                    `json:"provider_type,omitempty"`
 	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
+	RateLimits          *ModelRateLimits           `json:"rate_limits,omitempty"`
+}
+
+// ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
+// can perform client-side throttling before hitting server-side 429s.
+type ModelRateLimits struct {
+	RequestsPerMinute int `json:"requests_per_minute,omitempty"`
+	TokensPerMinute   int `json:"tokens_per_minute,omitempty"`
+	ImagesPerMinute   int `json:"images_per_minute,omitempty"`
 }
 
 // ModelPricingTier represents a single tier in tiered pricing.
@@ -145,6 +154,30 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	// Extract TEE verifier from on-chain additionalInfo JSON
 	obj.TeeVerifier = parseTeeVerifier(svc.AdditionalInfo)
+
+	// Populate per-user rate limits from concurrency config
+	concurrencyLimits := h.modelsCtrl.GetConcurrencyLimitConfig()
+	rl := &ModelRateLimits{}
+	hasLimits := false
+	if concurrencyLimits.PerUserRPM > 0 {
+		rl.RequestsPerMinute = concurrencyLimits.PerUserRPM
+		hasLimits = true
+	}
+	switch svc.Type {
+	case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText:
+		if concurrencyLimits.PerUserTPM > 0 {
+			rl.TokensPerMinute = concurrencyLimits.PerUserTPM
+			hasLimits = true
+		}
+	case constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing:
+		if concurrencyLimits.PerUserIPM > 0 {
+			rl.ImagesPerMinute = concurrencyLimits.PerUserIPM
+			hasLimits = true
+		}
+	}
+	if hasLimits {
+		obj.RateLimits = rl
+	}
 
 	// Expose centralized proxy info so SDK can choose the correct verification path
 	if cfg.IsCentralized() {
