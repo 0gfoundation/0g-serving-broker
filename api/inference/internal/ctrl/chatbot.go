@@ -27,6 +27,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -604,6 +605,19 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	monitor.RecordTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
 	monitor.RecordTPSFromContext(ctx, "chatbot", int64(usage.CompletionTokens))
 
+	// Update TPM limiter with actual token consumption
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		totalTokens := usage.PromptTokens + usage.CompletionTokens
+		userAddr, _ := ginCtx.Get("userAddress")
+		userStr, userOk := userAddr.(string)
+
+		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
+			if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
+				limiter.ConsumeTokens(userStr, totalTokens)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -637,6 +651,18 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 	// Record token metrics (estimated output tokens only, no input token data in fallback path)
 	monitor.RecordTokens("chatbot", 0, outputCount)
 	monitor.RecordTPSFromContext(ctx, "chatbot", outputCount)
+
+	// Update TPM limiter with estimated token consumption (fallback path)
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		userAddr, _ := ginCtx.Get("userAddress")
+		userStr, userOk := userAddr.(string)
+		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
+			if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
+				estimatedTotal := int(outputCount + request.InputCount)
+				limiter.ConsumeTokens(userStr, estimatedTotal)
+			}
+		}
+	}
 
 	return nil
 }

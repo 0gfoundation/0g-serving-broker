@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -68,6 +69,27 @@ func (rl *PerUserRateLimiter) Allow(userID string) bool {
 	return limiter.Allow()
 }
 
+// RPM returns the configured requests-per-minute value.
+func (rl *PerUserRateLimiter) RPM() int {
+	return int(math.Round(float64(rl.rate) * 60))
+}
+
+// GetRemainingWithReset returns the remaining request budget and reset time for a user.
+func (rl *PerUserRateLimiter) GetRemainingWithReset(userID string) (remaining int, resetSeconds float64) {
+	rl.mu.Lock()
+	limiter, exists := rl.limiters[userID]
+	rl.mu.Unlock()
+	if !exists {
+		return rl.burst, 0
+	}
+	tokens := limiter.Tokens()
+	if tokens < 0 {
+		resetSeconds = math.Abs(tokens) / float64(rl.rate)
+		return 0, resetSeconds
+	}
+	return int(tokens), 0
+}
+
 // CheckPerUserRateLimit checks per-user rate limit after user address is known.
 // Returns true if allowed, false if rate limited (response already written).
 func CheckPerUserRateLimit(limiter *PerUserRateLimiter, c *gin.Context, userAddress string) bool {
@@ -78,12 +100,28 @@ func CheckPerUserRateLimit(limiter *PerUserRateLimiter, c *gin.Context, userAddr
 	if !limiter.Allow(userAddress) {
 		// Mark as expected so metrics don't count rate limiting as a service error
 		c.Set("ignoreError", true)
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error": fmt.Sprintf(
-				"Rate limit exceeded. Please slow down your request rate (limit: %.0f requests/min).",
-				float64(limiter.rate)*60,
-			),
-		})
+
+		msg := fmt.Sprintf(
+			"Rate limit exceeded. Please slow down your request rate (limit: %.0f requests/min).",
+			float64(limiter.rate)*60,
+		)
+		path := c.Request.URL.Path
+		if IsAnthropicEndpoint(path) {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"type": "error",
+				"error": gin.H{
+					"type":    "rate_limit_error",
+					"message": msg,
+				},
+			})
+		} else {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": gin.H{
+					"type":    "rate_limit_error",
+					"message": msg,
+				},
+			})
+		}
 		c.Abort()
 		return false
 	}
