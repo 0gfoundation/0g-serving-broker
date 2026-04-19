@@ -94,6 +94,13 @@ type Service struct {
 	OutputPrice      string            `yaml:"outputPrice"`
 	Type             string            `yaml:"type"`
 	ModelType        string            `yaml:"model"`
+	// UpstreamModel, when set, is the model identifier sent to the upstream targetUrl.
+	// ModelType remains the identifier advertised on-chain and enforced on incoming
+	// requests. Used to bridge a provider that wants to expose a stable public model
+	// name while routing to an upstream that uses a different id (e.g. a
+	// fallback where the public name is "zai-org/GLM-5-FP8" but expects
+	// "z-ai/glm-5"). Empty means "send ModelType upstream as-is".
+	UpstreamModel    string            `yaml:"upstreamModel"`
 	Verifiability    string            `yaml:"verifiability"`
 	AdditionalSecret map[string]string `yaml:"additionalSecret"`
 	VerifierURL      string            `yaml:"verifierUrl"`
