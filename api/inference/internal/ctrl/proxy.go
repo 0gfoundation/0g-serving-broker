@@ -399,7 +399,12 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 //   2. Users getting access to premium models at cheaper prices
 //
 // This function forcibly overwrites any "model" field in the request body with the
-// configured model from c.Service.ModelType.
+// configured model from c.Service.ModelType, or c.Service.UpstreamModel if set.
+//
+// Incoming requests are validated against ModelType (the advertised/on-chain name).
+// The outgoing body uses UpstreamModel when non-empty, otherwise ModelType. This
+// lets a provider advertise a stable public model id while forwarding to an
+// upstream that uses a different id.
 func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, error) {
 	// Return original body if empty (e.g., GET requests)
 	if len(body) == 0 {
@@ -412,9 +417,15 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		return body, nil
 	}
 
+	// The model id sent to the upstream service.
+	upstreamModel := c.Service.ModelType
+	if c.Service.UpstreamModel != "" {
+		upstreamModel = c.Service.UpstreamModel
+	}
+
 	// Debug log to verify configuration
-	c.logger.Debugf("EnforceConfiguredModel: Service.Type=%s, Service.ModelType=%s",
-		c.Service.Type, c.Service.ModelType)
+	c.logger.Debugf("EnforceConfiguredModel: Service.Type=%s, Service.ModelType=%s, upstream=%s",
+		c.Service.Type, c.Service.ModelType, upstreamModel)
 
 	var bodyMap map[string]interface{}
 
@@ -427,9 +438,9 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	// Check if request contains a model field
 	requestModel, hasModel := bodyMap["model"]
 	if !hasModel {
-		// No model specified, add the configured model
-		c.logger.Infof("No model specified in request, adding configured model: %s", c.Service.ModelType)
-		bodyMap["model"] = c.Service.ModelType
+		// No model specified, add the configured upstream model
+		c.logger.Infof("No model specified in request, adding upstream model: %s", upstreamModel)
+		bodyMap["model"] = upstreamModel
 	} else {
 		// Model specified in request, check if it matches configured model
 		requestModelStr, ok := requestModel.(string)
@@ -457,8 +468,10 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 				requestModelStr, c.Service.ModelType))
 		}
 
-		// Model matches - log for audit
-		c.logger.Debugf("Model validation passed: requested=%s matches configured=%s", requestModelStr, c.Service.ModelType)
+		// Match — rewrite to the upstream id (no-op when UpstreamModel is empty).
+		bodyMap["model"] = upstreamModel
+		c.logger.Debugf("Model validation passed: requested=%s matches configured=%s, forwarding as=%s",
+			requestModelStr, c.Service.ModelType, upstreamModel)
 	}
 
 	// Marshal back to JSON
