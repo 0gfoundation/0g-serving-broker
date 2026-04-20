@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -621,10 +622,18 @@ func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool 
 	}
 	// Per-IP rate limit. The route has no session auth — without a throttle a
 	// single caller with one UUID could hammer the endpoint to amplify
-	// bandwidth. ClientIP honours X-Forwarded-For only when gin's trusted
-	// proxies list accepts the direct peer; otherwise it falls back to the
-	// socket's remote address, which is the right thing for a direct client.
-	if p.imageServeLimiter != nil && !p.imageServeLimiter.Allow(ctx.ClientIP()) {
+	// bandwidth. Key off the socket's RemoteAddr, NOT ctx.ClientIP(): gin's
+	// default trusted-proxy list is permissive, so ClientIP honours a
+	// spoofed X-Forwarded-For from any direct client unless the deployment
+	// explicitly narrows TrustedProxies. RemoteAddr is the direct TCP peer
+	// and cannot be spoofed at the HTTP layer. If the broker runs behind a
+	// TLS-terminating ingress, all traffic appears to come from the ingress
+	// IP — acceptable (the ingress is the abuse-control point anyway).
+	peer := ctx.Request.RemoteAddr
+	if host, _, splitErr := net.SplitHostPort(peer); splitErr == nil {
+		peer = host
+	}
+	if p.imageServeLimiter != nil && !p.imageServeLimiter.Allow(peer) {
 		ctx.Header("Retry-After", "1")
 		ctx.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded on image serve endpoint"})
 		return true

@@ -37,7 +37,8 @@ func validateChatKey(k string) error {
 type imageStore struct {
 	dir           string
 	cache         *cache.Cache
-	purgedAtStart int // count of leftover directories removed during newImageStore; surfaced in logs at ctrl init
+	purgedAtStart int   // count of leftover directories removed during newImageStore; surfaced in logs at ctrl init
+	purgeErr      error // non-nil if ReadDir failed at startup; operators must see this to diagnose silent accumulation
 }
 
 func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
@@ -59,7 +60,8 @@ func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
 	// lock; enforce in the deployment manifest instead (use an emptyDir/local
 	// volume per replica).
 	removed := 0
-	if entries, err := os.ReadDir(dir); err == nil {
+	entries, readErr := os.ReadDir(dir)
+	if readErr == nil {
 		for _, e := range entries {
 			if e.IsDir() {
 				if rmErr := os.RemoveAll(filepath.Join(dir, e.Name())); rmErr == nil {
@@ -69,7 +71,7 @@ func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
 		}
 	}
 
-	s := &imageStore{dir: dir, purgedAtStart: removed}
+	s := &imageStore{dir: dir, purgedAtStart: removed, purgeErr: readErr}
 	s.cache = cache.New(ttl, ttl/2)
 	s.cache.OnEvicted(func(key string, _ interface{}) {
 		_ = os.RemoveAll(filepath.Join(dir, key))

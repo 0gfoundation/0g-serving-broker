@@ -13,6 +13,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
@@ -128,14 +129,35 @@ func New(
 	if err != nil {
 		logger.Warnf("Failed to initialize image store at %q, image URL serving disabled: %v", imageCacheDir, err)
 		imgStore = nil
-	} else if imgStore.purgedAtStart > 0 {
-		// Loud on purpose: if this number is non-zero on a shared-volume deployment
-		// (not supported but configurable at the k8s layer), it means we just
-		// deleted another broker replica's live image files.
-		logger.Infof("image store: purged %d leftover directory(ies) at %q from previous run. "+
-			"If this broker shares %q with another replica, live files have been destroyed — "+
-			"image_cache must be per-process (use a local volume, not ReadWriteMany).",
-			imgStore.purgedAtStart, imageCacheDir, imageCacheDir)
+	} else {
+		if imgStore.purgeErr != nil {
+			// ReadDir failed (permissions, stale NFS handle, etc.). Without this
+			// log, leftover per-key directories would accumulate forever without
+			// any signal to operators — files expire in memory but never on disk.
+			logger.Warnf("image store: could not scan %q for leftover directories at startup: %v. "+
+				"Disk usage will grow unbounded until the dir is readable again.",
+				imageCacheDir, imgStore.purgeErr)
+		}
+		if imgStore.purgedAtStart > 0 {
+			// Loud on purpose: if this number is non-zero on a shared-volume deployment
+			// (not supported but configurable at the k8s layer), it means we just
+			// deleted another broker replica's live image files.
+			logger.Infof("image store: purged %d leftover directory(ies) at %q from previous run. "+
+				"If this broker shares %q with another replica, live files have been destroyed — "+
+				"image_cache must be per-process (use a local volume, not ReadWriteMany).",
+				imgStore.purgedAtStart, imageCacheDir, imageCacheDir)
+		}
+	}
+
+	// Sanity-check service.servingUrl — buildURLResponse concatenates it with
+	// ServicePrefix, so a value that already contains ServicePrefix would
+	// produce a doubled path (e.g. https://host/v1/proxy/v1/proxy/images/...).
+	// Not dangerous but an unreachable URL, and easy to miss in logs. Check
+	// once at startup rather than on every request.
+	if cfg.Service.ServingURL != "" && strings.Contains(cfg.Service.ServingURL, constant.ServicePrefix) {
+		logger.Warnf("service.servingUrl %q already contains %q; URLs emitted for response_format=url will have a doubled path prefix. "+
+			"Set servingUrl to the scheme+host only (e.g. https://example.com).",
+			cfg.Service.ServingURL, constant.ServicePrefix)
 	}
 
 	minSettlementFee := new(big.Int)

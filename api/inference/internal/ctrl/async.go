@@ -283,7 +283,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// below. reqBody (forwarded to provider) is mutated; params.RequestBody stays
 	// untouched so TEE signing binds the client's original bytes.
 	var clientResponseFormat string
-	if svcType == "text-to-image" || svcType == "image-editing" {
+	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
 		contentType := extractContentType(params.RequestHeaders)
 		var (
 			orig      string
@@ -295,10 +295,17 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		} else {
 			orig, rewritten, rwErr = forceB64ResponseFormat(reqBody)
 		}
-		if rwErr == nil {
-			clientResponseFormat = orig
-			reqBody = rewritten
+		// Matches the sync path's terminal-on-failure behaviour (proxy.go:82-86):
+		// swallowing rwErr would forward the un-normalised body with
+		// response_format=url intact, the provider would return LAN-private URLs,
+		// and because clientResponseFormat stays "" the downstream refuse-guard
+		// never fires — the exact leak the rewrite exists to prevent.
+		if rwErr != nil {
+			c.markAsyncJobFailed(jobID, "normalise image request body: "+rwErr.Error())
+			return
 		}
+		clientResponseFormat = orig
+		reqBody = rewritten
 	}
 
 	// Build target URL

@@ -664,6 +664,8 @@ func TestProcessAsyncJob_RestoresRequestHeaders(t *testing.T) {
 	var receivedContentType string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedContentType = r.Header.Get("Content-Type")
+		// Boundary string can be rewritten by multipart.Writer — compare the
+		// parsed media type prefix instead of expecting the original string.
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"data":[]}`))
 	}))
@@ -677,18 +679,24 @@ func TestProcessAsyncJob_RestoresRequestHeaders(t *testing.T) {
 	headers, _ := json.Marshal(map[string][]string{
 		"Content-Type": {"multipart/form-data; boundary=abc123"},
 	})
+	// Valid multipart body so the rewrite succeeds — empty or malformed bodies
+	// would now be rejected upstream (see TestProcessAsyncJob_MalformedJSON…).
+	body := []byte(
+		"--abc123\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhi\r\n" +
+			"--abc123--\r\n",
+	)
 
 	ctrl := newTestCtrl(store, provider.URL)
 	ctrl.processAsyncJob(asyncJobParams{
 		JobID:          "job-headers",
 		ServiceType:    "text-to-image",
 		RequestHeaders: headers,
-		RequestBody:    []byte(`data`),
+		RequestBody:    body,
 		IsWhitelisted:  true,
 	})
 
-	if receivedContentType != "multipart/form-data; boundary=abc123" {
-		t.Errorf("expected multipart content type, got %s", receivedContentType)
+	if !strings.HasPrefix(receivedContentType, "multipart/form-data;") {
+		t.Errorf("expected multipart content type, got %q", receivedContentType)
 	}
 }
 
@@ -1596,6 +1604,57 @@ func TestProcessAsyncJob_Centralized_SignsRoutingProof(t *testing.T) {
 	// which emits the 5-segment routing-proof text (req:resp:type:identity:fp).
 	if parts := strings.Split(sig.Text, ":"); len(parts) != 5 {
 		t.Errorf("expected 5-part routing-proof text, got %d parts: %s", len(parts), sig.Text)
+	}
+}
+
+// TestProcessAsyncJob_MalformedJSON_JobFailedBeforeForwarding pins the async
+// rewrite-failure leak fix: when forceB64ResponseFormat errors (e.g. malformed
+// JSON), the OLD code silently forwarded the un-normalised body and the
+// provider's URL-form response flowed back to the client. Must mark the job
+// failed without ever hitting the provider.
+func TestProcessAsyncJob_MalformedJSON_JobFailedBeforeForwarding(t *testing.T) {
+	providerHit := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerHit = true
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"url":"http://10.0.0.9/leak.png"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "malformed-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "http://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	// Malformed JSON body — forceB64ResponseFormat returns err.
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "malformed-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":`),
+		IsWhitelisted:  true,
+	})
+
+	if providerHit {
+		t.Error("provider must not be called when request-body normalisation fails (old code forwarded it silently)")
+	}
+	job, _ := store.GetAsyncJob("malformed-job")
+	if job.Status != model.AsyncJobStatusFailed {
+		t.Errorf("expected failed status on normalisation error, got %s", job.Status)
+	}
+	if !strings.Contains(job.ErrorMessage, "normalise image request body") {
+		t.Errorf("error message should identify the failure stage, got: %s", job.ErrorMessage)
+	}
+	// Guard against any leaked LAN bytes in the stored record.
+	if bytes.Contains(job.ResponseBody, []byte("10.0.0.9")) {
+		t.Errorf("no bytes from provider should exist: %s", job.ResponseBody)
 	}
 }
 

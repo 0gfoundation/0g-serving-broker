@@ -78,7 +78,16 @@ func (c *Ctrl) GetImageEditingInputFeeAndImageNum(reqBody []byte) (string, int64
 	return expectedInputFee, imageNum, nil
 }
 
-// parseMultipartImageNum extracts the "n" parameter from multipart/form-data
+// parseMultipartImageNum extracts the "n" parameter from multipart/form-data.
+//
+// FIXME: this is a hand-rolled byte scanner with the same adversarial-content
+// risk that bit rewriteMultipartResponseFormat — a file part whose bytes happen
+// to contain name="n"\r\n\r\n would be parsed as the "n" field, producing a
+// wrong billing count. Because billing is derived from this value, the impact
+// is worse than the rewriter bug (which was a silent correctness miss). Should
+// be migrated to mime/multipart.Reader — the same infra proxy.go now uses for
+// response_format. The fix was deferred from the response_format PR to keep
+// scope focused; billing-path changes deserve their own review surface.
 func (c *Ctrl) parseMultipartImageNum(bodyStr string) int64 {
 	// Look for name="n" in the multipart body
 	nFieldStart := findSubstring(bodyStr, `name="n"`)
