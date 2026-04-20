@@ -1,11 +1,16 @@
 package ctrl
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -42,107 +47,76 @@ type ImageEditingExtras struct {
 	Seed      *int64   `json:"seed,omitempty"`       // Random seed for reproducibility
 }
 
-// GetImageEditingInputFeeAndImageNum extracts input fee and output image count from request body
-// Supports both JSON and multipart/form-data formats
-// Parameters:
-//   - reqBody: Raw request body bytes
+// GetImageEditingInputFeeAndImageNum extracts input fee and output image count
+// from the request body. Supports JSON and multipart/form-data.
 //
-// Returns:
-//   - string: Expected input fee (as big integer string)
-//   - int64: Number of output images
-//   - error: Parse error
-func (c *Ctrl) GetImageEditingInputFeeAndImageNum(reqBody []byte) (string, int64, error) {
-	// Get output image count (default to 1)
-	imageNum := int64(1)
+// The contentType arg is used to parse the multipart boundary. Without it, a
+// byte-level scan of the body would misread a file part whose bytes happen to
+// contain `name="n"\r\n\r\n<digits>` as the form's "n" field — producing the
+// wrong billing count. Using mime/multipart.Reader respects the real boundary
+// so adversarial file content cannot influence billing.
+func (c *Ctrl) GetImageEditingInputFeeAndImageNum(reqBody []byte, contentType string) (string, int64, error) {
+	imageNum := int64(1) // default
 
-	// Try JSON format first
-	var request ImageEditingRequest
-	if err := json.Unmarshal(reqBody, &request); err == nil {
-		// Successfully parsed as JSON
-		if request.N != nil && *request.N > 0 {
-			imageNum = int64(*request.N)
+	if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {
+		if n, err := parseMultipartN(reqBody, contentType); err == nil && n > 0 {
+			imageNum = n
 		}
+		// Parse failure is non-fatal: imageNum stays at the default of 1. The
+		// upstream provider will surface any real structural issue.
 	} else {
-		// Not JSON, try to parse as multipart/form-data
-		bodyStr := string(reqBody)
-
-		// Look for "n" parameter in multipart data
-		// Pattern: name="n"\r\n\r\n<value>
-		imageNum = c.parseMultipartImageNum(bodyStr)
+		// JSON path (or unknown content-type, assumed JSON).
+		var request ImageEditingRequest
+		if err := json.Unmarshal(reqBody, &request); err == nil {
+			if request.N != nil && *request.N > 0 {
+				imageNum = int64(*request.N)
+			}
+		}
 	}
 
-	// Input fee calculation
-	// Current design: fixed at 0 (similar to text-to-image)
-	expectedInputFee := "0"
-
-	return expectedInputFee, imageNum, nil
+	return "0", imageNum, nil
 }
 
-// parseMultipartImageNum extracts the "n" parameter from multipart/form-data.
-//
-// FIXME: this is a hand-rolled byte scanner with the same adversarial-content
-// risk that bit rewriteMultipartResponseFormat — a file part whose bytes happen
-// to contain name="n"\r\n\r\n would be parsed as the "n" field, producing a
-// wrong billing count. Because billing is derived from this value, the impact
-// is worse than the rewriter bug (which was a silent correctness miss). Should
-// be migrated to mime/multipart.Reader — the same infra proxy.go now uses for
-// response_format. The fix was deferred from the response_format PR to keep
-// scope focused; billing-path changes deserve their own review surface.
-func (c *Ctrl) parseMultipartImageNum(bodyStr string) int64 {
-	// Look for name="n" in the multipart body
-	nFieldStart := findSubstring(bodyStr, `name="n"`)
-	if nFieldStart == -1 {
-		// Try without quotes
-		nFieldStart = findSubstring(bodyStr, `name=n`)
+// parseMultipartN walks the multipart body with mime/multipart.Reader and
+// returns the integer value of the "n" form field, or an error if the body
+// cannot be parsed or the field is absent / non-numeric.
+func parseMultipartN(body []byte, contentType string) (int64, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return 0, fmt.Errorf("parse content-type %q: %w", contentType, err)
+	}
+	boundary, ok := params["boundary"]
+	if !ok || boundary == "" {
+		return 0, fmt.Errorf("content-type %q has no boundary", contentType)
 	}
 
-	if nFieldStart == -1 {
-		return 1 // Default value if not found
-	}
-
-	// Find the value after the field declaration
-	// Multipart format: name="n"\r\n\r\n<value>
-	valueStart := findSubstring(bodyStr[nFieldStart:], "\r\n\r\n")
-	if valueStart == -1 {
-		valueStart = findSubstring(bodyStr[nFieldStart:], "\n\n")
-	}
-
-	if valueStart == -1 {
-		return 1
-	}
-
-	valueStart += nFieldStart
-	if bodyStr[valueStart] == '\r' {
-		valueStart += 4 // Skip \r\n\r\n
-	} else {
-		valueStart += 2 // Skip \n\n
-	}
-
-	// Extract digits until we hit a non-digit or boundary
-	var numStr string
-	for i := valueStart; i < len(bodyStr); i++ {
-		if bodyStr[i] >= '0' && bodyStr[i] <= '9' {
-			numStr += string(bodyStr[i])
-		} else {
-			break
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, pErr := reader.NextPart()
+		if pErr == io.EOF {
+			return 0, fmt.Errorf("n field not found")
 		}
+		if pErr != nil {
+			return 0, fmt.Errorf("read part: %w", pErr)
+		}
+		if part.FormName() != "n" {
+			_ = part.Close()
+			continue
+		}
+		// Cap the read — n is a small integer, not a file. 32 bytes is more
+		// than enough for any legitimate int and prevents a malicious upload
+		// that labels itself name="n" from streaming gigabytes into memory.
+		raw, rErr := io.ReadAll(io.LimitReader(part, 32))
+		_ = part.Close()
+		if rErr != nil {
+			return 0, fmt.Errorf("read n value: %w", rErr)
+		}
+		n, parseErr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parse n value %q: %w", raw, parseErr)
+		}
+		return n, nil
 	}
-
-	if numStr == "" {
-		return 1
-	}
-
-	// Parse the number
-	var result int64 = 0
-	for _, digit := range numStr {
-		result = result*10 + int64(digit-'0')
-	}
-
-	if result <= 0 {
-		return 1
-	}
-
-	return result
 }
 
 // findSubstring returns the index of substr in s, or -1 if not found
@@ -203,10 +177,19 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		return err
 	}
 
-	// Build the body to send to the client. For wantURL, store + rewrite; any
-	// failure here downgrades to b64 (safe — body is confirmed b64 above).
+	// URL requested but store disabled — fail-closed, see handleTextToImageResponse.
+	if wantURL && c.imageStore == nil {
+		ctx.Set("ignoreError", true)
+		err := fmt.Errorf("response_format=url requested but image store is disabled (check startup logs for newImageStore error)")
+		c.logger.Errorf("image-editing URL request while imageStore is nil")
+		c.handleBrokerError(ctx, err, "image-editing response for response_format=url")
+		return err
+	}
+
+	// Build the body to send to the client. store + rewrite; any failure here
+	// downgrades to b64 (safe — body is confirmed b64 above).
 	clientBody := body
-	if wantURL && c.imageStore != nil {
+	if wantURL {
 		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
 			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
 		} else {

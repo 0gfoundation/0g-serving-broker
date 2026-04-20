@@ -539,7 +539,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = "0"
 	case "image-editing":
-		inputFee, imageNum, err := p.ctrl.GetImageEditingInputFeeAndImageNum(reqBody)
+		inputFee, imageNum, err := p.ctrl.GetImageEditingInputFeeAndImageNum(reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
 			// Invalid request body is a user-caused error
 			ctx.Set("ignoreError", true)

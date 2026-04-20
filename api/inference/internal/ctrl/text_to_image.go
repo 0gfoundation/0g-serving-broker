@@ -102,10 +102,24 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		return err
 	}
 
-	// Build the body to send to the client. For wantURL, store + rewrite; any
-	// failure here downgrades to b64 (safe — body is confirmed b64 above).
+	// If the client asked for url but we have no image store, the URL contract
+	// can't be honoured. Silently serving b64 instead would violate the
+	// explicitly-requested format without any per-request signal — fail-closed
+	// so operators correlate with the "image store disabled" startup warning.
+	if wantURL && c.imageStore == nil {
+		ctx.Set("ignoreError", true)
+		err := fmt.Errorf("response_format=url requested but image store is disabled (check startup logs for newImageStore error)")
+		c.logger.Errorf("text-to-image URL request while imageStore is nil")
+		c.handleBrokerError(ctx, err, "image response for response_format=url")
+		return err
+	}
+
+	// Build the body to send to the client. store + rewrite; any failure here
+	// downgrades to b64 (safe — body is confirmed b64 above, and the client
+	// gets a legitimate response just in the wrong format). Log at warn so
+	// the degradation is visible in operator logs.
 	clientBody := body
-	if wantURL && c.imageStore != nil {
+	if wantURL {
 		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
 			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
 		} else {
@@ -233,10 +247,16 @@ func buildURLResponse(body []byte, chatKey string, count int, servingURL string)
 	}
 	base := strings.TrimRight(servingURL, "/") + constant.ServicePrefix + "/images/" + chatKey + "/"
 
+	// Callers pass count == len(extractB64Images(body)). If that diverges from
+	// the envelope length (provider envelope and our decoded image list came
+	// from the same body, so this should be impossible), refuse rather than
+	// emit a mixed b64/url response that neither the client nor the signature
+	// machinery would handle sensibly.
+	if len(envelope.Data) != count {
+		return nil, fmt.Errorf("envelope has %d data entries but %d images were stored", len(envelope.Data), count)
+	}
+
 	for i := range envelope.Data {
-		if i >= count {
-			break
-		}
 		envelope.Data[i] = imageResponseData{
 			URL:           base + strconv.Itoa(i),
 			RevisedPrompt: envelope.Data[i].RevisedPrompt,

@@ -165,7 +165,7 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		}
 		expectedInputFee = "0"
 	case "image-editing":
-		expectedInputFee, outputCount, err = c.GetImageEditingInputFeeAndImageNum(reqBody)
+		expectedInputFee, outputCount, err = c.GetImageEditingInputFeeAndImageNum(reqBody, extractContentType(reqHeaders))
 		if err != nil {
 			return "", errors.Wrap(err, "parse image-editing request")
 		}
@@ -414,7 +414,14 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// and rewrite data[].b64_json → data[].url. jobID doubles as the chatKey —
 	// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. Store / build
 	// failures fall back to b64 (safe — body is confirmed b64 above).
-	if clientResponseFormat == "url" && extractOK && c.imageStore != nil {
+	if clientResponseFormat == "url" && extractOK {
+		// Fail-closed when store is nil: silently storing b64 violates the
+		// client's explicit contract. See handleTextToImageResponse.
+		if c.imageStore == nil {
+			c.logger.Errorf("Async job %s: URL requested but imageStore is nil (check newImageStore startup warning)", jobID)
+			c.markAsyncJobFailed(jobID, "response_format=url requested but image store is disabled")
+			return
+		}
 		if stErr := c.imageStore.store(jobID, images); stErr != nil {
 			c.logger.Warnf("Async job %s: store images failed, returning b64: %v", jobID, stErr)
 		} else if rewritten, bErr := buildURLResponse(providerRespBody, jobID, len(images), c.Service.ServingURL); bErr != nil {

@@ -393,11 +393,12 @@ func TestImageEditingFlow_ResponseFormatURL_Multipart(t *testing.T) {
 }
 
 // TestImageEditingFlow_MultipartOmitsResponseFormat_InjectsB64 closes the
-// absent-field leak: OpenAI's default for /v1/images/edits is "url", so a
-// client that does NOT send response_format would have caused the provider
-// to return LAN-private URLs. The broker must inject response_format=b64_json
-// into the forwarded multipart body AND still run the URL-rewrite path so
-// the client gets broker-served URLs, not the omitted-default leak.
+// absent-field leak AND pins the broker's chosen default. OpenAI's per-
+// endpoint default for /v1/images/edits is "url", but the broker cannot
+// safely forward provider LAN URLs, so the broker uniformly defaults to
+// b64_json when the field is omitted — same behaviour as the JSON path.
+// Clients wanting broker-served URLs must opt in explicitly with
+// response_format=url.
 func TestImageEditingFlow_MultipartOmitsResponseFormat_InjectsB64(t *testing.T) {
 	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
 	b64 := base64.StdEncoding.EncodeToString(pngBytes)
@@ -452,8 +453,8 @@ func TestImageEditingFlow_MultipartOmitsResponseFormat_InjectsB64(t *testing.T) 
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Since the client's documented default is "url", the client should get
-	// a broker-served URL back, not b64_json.
+	// Broker default is b64_json across JSON + multipart: client sees b64,
+	// not a broker-served URL. Opting into URLs requires response_format=url.
 	var resp map[string]interface{}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("parse response: %v", err)
@@ -463,10 +464,10 @@ func TestImageEditingFlow_MultipartOmitsResponseFormat_InjectsB64(t *testing.T) 
 		t.Fatalf("expected 1 edited image, got %d", len(data))
 	}
 	item := data[0].(map[string]interface{})
-	if _, has := item["b64_json"]; has {
-		t.Error("b64_json should be absent: omitted response_format defaults to url, so broker returns broker URLs")
+	if gotB64, _ := item["b64_json"].(string); gotB64 != b64 {
+		t.Errorf("expected b64_json pass-through when field is omitted, got: %+v", item)
 	}
-	if gotURL, _ := item["url"].(string); gotURL == "" {
-		t.Error("expected broker-served url in response when response_format is omitted")
+	if _, has := item["url"]; has {
+		t.Error("url must NOT be injected when client omits response_format — broker default is b64")
 	}
 }

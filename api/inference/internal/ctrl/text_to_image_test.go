@@ -215,10 +215,12 @@ func TestRewriteMultipartResponseFormat_RewritesURLToB64(t *testing.T) {
 }
 
 // TestRewriteMultipartResponseFormat_FieldAbsent_InjectsB64 pins the absent-
-// field leak fix: OpenAI's default for /v1/images/edits is "url", so a client
-// that omits response_format would cause the provider to return LAN-private
-// URLs. The rewriter must inject response_format=b64_json and report the
-// original format as "url" so the handler still runs the URL-rewrite path.
+// field leak fix and the broker's chosen default: when the client omits the
+// field, the broker MUST force b64_json upstream (otherwise the provider
+// returns LAN-private URLs), AND it reports originalFormat="" so the handler
+// passes the b64 body through. Diverges from OpenAI's per-endpoint default
+// (which is "url" for /v1/images/edits), by design — matches the JSON path's
+// behaviour so clients see consistent defaults regardless of transport.
 func TestRewriteMultipartResponseFormat_FieldAbsent_InjectsB64(t *testing.T) {
 	body := []byte(
 		"--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhello\r\n" +
@@ -229,8 +231,8 @@ func TestRewriteMultipartResponseFormat_FieldAbsent_InjectsB64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteMultipartResponseFormat: %v", err)
 	}
-	if orig != "url" {
-		t.Errorf("original format = %q, want url (OpenAI default for absent field)", orig)
+	if orig != "" {
+		t.Errorf("original format = %q, want \"\" (broker default is b64 across JSON + multipart)", orig)
 	}
 	if !strings.Contains(string(modified), "name=\"response_format\"\r\n\r\nb64_json") {
 		t.Errorf("injected response_format part missing:\n%s", modified)
@@ -419,6 +421,26 @@ func TestBuildURLResponse_PreservesMetadataFields(t *testing.T) {
 func TestBuildURLResponse_InvalidJSON(t *testing.T) {
 	if _, err := buildURLResponse([]byte("{bad}"), "key", 1, "https://broker.example.com"); err == nil {
 		t.Error("expected error for invalid JSON, got nil")
+	}
+}
+
+// TestBuildURLResponse_RejectsEnvelopeCountMismatch pins the guard against
+// emitting a mixed b64/url envelope: if the provider's data array has more
+// (or fewer) entries than the images we actually stored, the function MUST
+// refuse rather than leave tail entries in b64 form. Caller downgrades on
+// error, which is the safer failure mode.
+func TestBuildURLResponse_RejectsEnvelopeCountMismatch(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("px"))
+	// Envelope advertises THREE images but the caller only stored TWO.
+	body, _ := json.Marshal(imageResponseEnvelope{
+		Data: []imageResponseData{
+			{B64JSON: b64},
+			{B64JSON: b64},
+			{B64JSON: b64},
+		},
+	})
+	if _, err := buildURLResponse(body, "k", 2, "https://broker.example.com"); err == nil {
+		t.Error("expected error when envelope length != stored image count, got nil")
 	}
 }
 

@@ -592,11 +592,16 @@ func rewriteMultipartResponseFormat(body []byte, contentType string) (originalFo
 		if _, wErr := w.Write([]byte("b64_json")); wErr != nil {
 			return "", body, fmt.Errorf("multipart: write response_format part: %w", wErr)
 		}
-		// Client omitted the field → OpenAI default for /v1/images/edits is
-		// "url". Reporting "url" here routes us through the URL-rewrite path
-		// so the caller gets broker-served URLs, matching what direct-to-
-		// OpenAI behaviour would have produced.
-		originalFormat = "url"
+		// Broker default is b64_json for both JSON and multipart when the
+		// client omits the field — diverges from OpenAI's per-endpoint
+		// defaults (which are "url" for /v1/images/edits) but is the only
+		// value we can safely return: forwarding the provider's default
+		// would leak LAN-private URLs. Clients wanting broker-served URLs
+		// must opt in explicitly with response_format=url. Keeping
+		// originalFormat = "" (not "url") skips the handler's URL-rewrite
+		// path so the client receives b64_json straight through, matching
+		// the JSON-body branch in forceB64ResponseFormat.
+		originalFormat = ""
 	}
 	if err := writer.Close(); err != nil {
 		return "", body, fmt.Errorf("multipart: close writer: %w", err)

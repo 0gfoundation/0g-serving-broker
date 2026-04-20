@@ -1658,6 +1658,50 @@ func TestProcessAsyncJob_MalformedJSON_JobFailedBeforeForwarding(t *testing.T) {
 	}
 }
 
+// TestProcessAsyncJob_URLFormat_NilImageStore_JobFailed pins the fail-closed
+// behaviour when the client asks for URL format but imageStore is nil (e.g.
+// the broker couldn't create its cache dir at startup). Silently returning
+// b64 would violate the client's explicit contract with no per-request signal;
+// the job is marked failed instead so the caller sees what happened.
+func TestProcessAsyncJob_URLFormat_NilImageStore_JobFailed(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x4E, 0x47})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, b64)
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "nil-store-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "http://broker.test"
+	// Deliberately skip SetupImageStoreForTest — imageStore stays nil.
+	if ctrl.imageStore != nil {
+		t.Fatal("imageStore should be nil for this test")
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "nil-store-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"x","response_format":"url"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("nil-store-job")
+	if job.Status != model.AsyncJobStatusFailed {
+		t.Fatalf("expected failed, got %s (body=%q)", job.Status, job.ResponseBody)
+	}
+	if !strings.Contains(job.ErrorMessage, "image store") {
+		t.Errorf("error message should mention the disabled store; got: %s", job.ErrorMessage)
+	}
+}
+
 // TestProcessAsyncJob_URLFormat_ProviderReturnsURLForm_JobFailed pins the
 // response-side fallback-leak guard on the async path. A non-compliant provider
 // ignores response_format=b64_json and returns LAN-private URLs; the broker
