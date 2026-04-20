@@ -17,6 +17,7 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/fine-tuning/internal/contract"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/db"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/internal/utils"
+	"github.com/0glabs/0g-serving-broker/fine-tuning/monitor"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -114,6 +115,7 @@ func (s *Settlement) processFinishedTasks(ctx context.Context) error {
 func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool) error {
 	s.logger.Infof("settle for task %v, ack %v", task.ID.String(), userAcked)
 	if err := s.doSettlement(ctx, &task, userAcked); err != nil {
+		monitor.RecordSettlement(err)
 		err = errors.Wrapf(err, "error during do settlement for tasks failed once")
 		s.logger.Errorf("%v", err)
 		if err := utils.WriteToLogFile(task.ID, fmt.Sprintf("Settle task %v failed: %v\n", task.ID, err)); err != nil {
@@ -127,10 +129,12 @@ func (s *Settlement) trySettle(ctx context.Context, task db.Task, userAcked bool
 		}
 
 		return err
-	} else {
-		if err := utils.WriteToLogFile(task.ID, fmt.Sprintf("Settle task %s successfully\n", task.ID)); err != nil {
-			s.logger.Errorf("Write into task log failed: %v", err)
-		}
+	}
+
+	monitor.RecordSettlement(nil)
+	monitor.RecordTaskCompleted()
+	if err := utils.WriteToLogFile(task.ID, fmt.Sprintf("Settle task %s successfully\n", task.ID)); err != nil {
+		s.logger.Errorf("Write into task log failed: %v", err)
 	}
 
 	return nil
