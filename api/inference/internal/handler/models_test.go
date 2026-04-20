@@ -20,6 +20,7 @@ type mockModelsCtrl struct {
 	serviceConfig           config.Service
 	tieredPricingConfig     config.TieredPricingConfig
 	cacheTokenBillingConfig config.CacheTokenBillingConfig
+	concurrencyLimitConfig  config.ConcurrencyLimitConfig
 }
 
 func (m *mockModelsCtrl) GetCachedService(_ context.Context) (model.Service, error) {
@@ -36,6 +37,10 @@ func (m *mockModelsCtrl) GetTieredPricingConfig() config.TieredPricingConfig {
 
 func (m *mockModelsCtrl) GetCacheTokenBillingConfig() config.CacheTokenBillingConfig {
 	return m.cacheTokenBillingConfig
+}
+
+func (m *mockModelsCtrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig {
+	return m.concurrencyLimitConfig
 }
 
 func newModelsTestHandler(mock *mockModelsCtrl) *Handler {

@@ -172,6 +172,16 @@ Delivering → Delivered → UserAcknowledged → Finished
    - Additional tasks enter waiting queue
    - FIFO processing of queued tasks
 
+## Rate Limiting Architecture
+
+Per-user rate limiting uses three dimensions: **RPM** (all services), **TPM** (chatbot/speech-to-text),
+and **IPM** (text-to-image/image-editing). All use token bucket algorithm with `golang.org/x/time/rate`.
+TPM/IPM use a **post-consume model** — admission check is read-only (`Tokens() > 0`), actual consumption
+happens after the response completes via `ConsumeTokens()`. Burst controls instantaneous peak, rate
+controls sustained throughput. TPM burst is automatically floored to `context_length` so a single
+max-context request doesn't cause excessive lockout. See [docs/design/rate-limiting.md](docs/design/rate-limiting.md)
+for full design rationale, token bucket mechanics, burst/context_length trade-offs, and configuration guide.
+
 ## Code Review Focus Areas
 
 ### 1. Go Code Standards

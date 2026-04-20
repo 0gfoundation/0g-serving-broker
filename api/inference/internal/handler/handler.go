@@ -34,6 +34,7 @@ type modelsCtrl interface {
 	GetServiceConfig() config.Service
 	GetTieredPricingConfig() config.TieredPricingConfig
 	GetCacheTokenBillingConfig() config.CacheTokenBillingConfig
+	GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig
 }
 
 type Handler struct {

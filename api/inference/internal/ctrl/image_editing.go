@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -255,6 +256,13 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	}
 
 	monitor.RecordTokens("image-editing", 0, imageNum)
+
+	// Update IPM limiter with actual image consumption
+	if ipmLimiter, exists := ctx.Get("ipmLimiter"); exists {
+		if limiter, ok := ipmLimiter.(*middleware.PerUserTPMLimiter); ok {
+			limiter.ConsumeTokens(reqModel.UserAddress, int(imageNum))
+		}
+	}
 	return nil
 }
 
