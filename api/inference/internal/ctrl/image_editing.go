@@ -162,7 +162,7 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		}
 	}
 
-	images, extractErr := extractB64Images(body)
+	images, extractErr := extractB64Images(body, int(reqModel.OutputCount))
 
 	originalFormat, _ := ctx.Get("clientResponseFormat")
 	wantURL := originalFormat == "url"

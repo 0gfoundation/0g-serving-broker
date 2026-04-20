@@ -86,7 +86,9 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 
 	// Extract decoded image bytes; fall back to signing the full response body
 	// if the provider did not return b64_json (e.g. multipart provider quirks).
-	images, extractErr := extractB64Images(body)
+	// Cap at the request's declared output count so a compromised provider
+	// cannot OOM the broker by returning a giant data array.
+	images, extractErr := extractB64Images(body, int(reqModel.OutputCount))
 
 	// Determine what the client originally asked for.
 	originalFormat, _ := ctx.Get("clientResponseFormat")
@@ -202,15 +204,24 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 }
 
 // extractB64Images parses an OpenAI-style image response envelope and decodes
-// each data[i].b64_json into raw bytes.  Returns an error if parsing fails or
-// no b64 images are present.
-func extractB64Images(body []byte) ([][]byte, error) {
+// each data[i].b64_json into raw bytes.
+//
+// maxImages is the cap on envelope length (typically the request's "n" field,
+// which billing has already been committed against). Reject when the provider
+// returns more entries than requested — always a bug, and decoding everything
+// blindly lets a compromised provider OOM the broker via a giant data array
+// of tiny b64 strings. Pass <= 0 to disable the cap (tests only; production
+// callers should always supply one).
+func extractB64Images(body []byte, maxImages int) ([][]byte, error) {
 	var envelope imageResponseEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, fmt.Errorf("unmarshal image response: %w", err)
 	}
 	if len(envelope.Data) == 0 {
 		return nil, fmt.Errorf("image response has empty data array")
+	}
+	if maxImages > 0 && len(envelope.Data) > maxImages {
+		return nil, fmt.Errorf("image response has %d entries, exceeds declared output count %d", len(envelope.Data), maxImages)
 	}
 	images := make([][]byte, 0, len(envelope.Data))
 	for i, d := range envelope.Data {

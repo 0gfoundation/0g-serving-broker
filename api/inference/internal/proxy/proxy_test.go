@@ -11,6 +11,7 @@ import (
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
@@ -260,6 +261,58 @@ func TestHandleImageServeRoute_NoMatch_ShortPath(t *testing.T) {
 	handled := p.handleImageServeRoute(ctx, "/images/only-one-segment")
 	if handled {
 		t.Error("path with no index segment should not be handled")
+	}
+}
+
+// TestHandleImageServeRoute_ShapeFailDoesNotConsumeRateLimit pins the
+// ordering fix: malformed paths under /images/ (e.g. missing the index
+// segment) must NOT consume a rate-limit token. Otherwise a caller looping
+// on GET /images/xyz could drain the per-IP bucket without ever reaching the
+// store, then fall through to the next matcher at zero cost to themselves.
+func TestHandleImageServeRoute_ShapeFailDoesNotConsumeRateLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	// Seed one valid image so the well-formed probe at the end succeeds.
+	if err := c.StoreTestImage("ordered", [][]byte{[]byte{0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 1}}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	// Budget of 1 per "minute" at 60 RPM, burst 1 — simulates a drained bucket
+	// if the shape-fail path consumed a token. Using PerUserRateLimiter so we
+	// depend on the production primitive, not a test fake.
+	p.imageServeLimiter = middleware.NewPerUserRateLimiter(60, 1)
+
+	// 3 shape-fail requests with the same RemoteAddr. Each SHOULD return false
+	// (unhandled) without touching the limiter.
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+"/images/only-one-segment", nil)
+		ctx.Request.RemoteAddr = "10.0.0.1:55555"
+		ctx.Params = gin.Params{{Key: "any", Value: "/images/only-one-segment"}}
+
+		if handled := p.handleImageServeRoute(ctx, "/images/only-one-segment"); handled {
+			t.Fatalf("iter %d: shape-fail should return false (unhandled), not consume a token", i)
+		}
+	}
+
+	// A well-formed request from the same IP should still have its burst.
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+"/images/ordered/0", nil)
+	ctx.Request.RemoteAddr = "10.0.0.1:55555"
+	ctx.Params = gin.Params{{Key: "any", Value: "/images/ordered/0"}}
+
+	if !p.handleImageServeRoute(ctx, "/images/ordered/0") {
+		t.Fatal("well-formed request after shape-fails should be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("well-formed after shape-fails: status = %d, want 200 (burst exhausted by shape-fails?)", w.Code)
 	}
 }
 

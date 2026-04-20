@@ -612,6 +612,16 @@ func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool 
 	if !strings.HasPrefix(strings.ToLower(targetPath), "/images/") {
 		return false
 	}
+	// Parse /images/{chatKey}/{index}; must have exactly two path segments.
+	// Validate BEFORE consuming a rate-limit token: otherwise a caller looping
+	// on GET /images/xyz (no index) would drain the per-IP bucket without ever
+	// reaching the store, then fall through to the next handler. Shape-fail
+	// means "this wasn't for me" → return false so the next matcher tries.
+	rest := strings.TrimPrefix(targetPath, "/images/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
 	// GET (and HEAD for byte-range probes) only. A POST/PUT/DELETE here would
 	// have been silently 200-and-served before; reject it explicitly so that a
 	// future route collision at the same path doesn't mask a real handler.
@@ -637,12 +647,6 @@ func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool 
 		ctx.Header("Retry-After", "1")
 		ctx.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded on image serve endpoint"})
 		return true
-	}
-	// Parse /images/{chatKey}/{index}; must have exactly two path segments.
-	rest := strings.TrimPrefix(targetPath, "/images/")
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return false
 	}
 	chatKey := parts[0]
 	index, err := strconv.Atoi(parts[1])

@@ -398,7 +398,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		extractOK bool
 	)
 	if svcType == "text-to-image" || svcType == "image-editing" {
-		decoded, exErr := extractB64Images(providerRespBody)
+		decoded, exErr := extractB64Images(providerRespBody, int(params.BillingReq.OutputCount))
 		if exErr == nil {
 			images = decoded
 			extractOK = true

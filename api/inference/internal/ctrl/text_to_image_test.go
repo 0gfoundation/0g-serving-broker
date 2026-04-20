@@ -27,7 +27,7 @@ func TestExtractB64Images_HappyPath(t *testing.T) {
 	}
 	body, _ := json.Marshal(envelope)
 
-	images, err := extractB64Images(body)
+	images, err := extractB64Images(body, 2)
 	if err != nil {
 		t.Fatalf("extractB64Images: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestExtractB64Images_SingleImage(t *testing.T) {
 	body, _ := json.Marshal(imageResponseEnvelope{
 		Data: []imageResponseData{{B64JSON: base64.StdEncoding.EncodeToString(img)}},
 	})
-	images, err := extractB64Images(body)
+	images, err := extractB64Images(body, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,27 +60,53 @@ func TestExtractB64Images_URLOnly_ReturnsError(t *testing.T) {
 	body, _ := json.Marshal(imageResponseEnvelope{
 		Data: []imageResponseData{{URL: "http://provider/img.png"}},
 	})
-	if _, err := extractB64Images(body); err == nil {
+	if _, err := extractB64Images(body, 1); err == nil {
 		t.Error("expected error for URL-only response, got nil")
 	}
 }
 
 func TestExtractB64Images_EmptyData(t *testing.T) {
-	if _, err := extractB64Images([]byte(`{"created":1,"data":[]}`)); err == nil {
+	if _, err := extractB64Images([]byte(`{"created":1,"data":[]}`), 1); err == nil {
 		t.Error("expected error for empty data array")
 	}
 }
 
 func TestExtractB64Images_BadBase64(t *testing.T) {
 	body := []byte(`{"created":1,"data":[{"b64_json":"!!!not-valid-base64!!!"}]}`)
-	if _, err := extractB64Images(body); err == nil {
+	if _, err := extractB64Images(body, 1); err == nil {
 		t.Error("expected error for invalid base64")
 	}
 }
 
 func TestExtractB64Images_InvalidJSON(t *testing.T) {
-	if _, err := extractB64Images([]byte("{not json}")); err == nil {
+	if _, err := extractB64Images([]byte("{not json}"), 1); err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+// TestExtractB64Images_RejectsMoreThanRequested pins the provider-OOM guard:
+// a compromised provider returning 50 images when the client asked for 1 is
+// a billing bug AND a memory risk (all 50 b64 blobs would be decoded). The
+// extractor must refuse before decoding anything past the cap.
+func TestExtractB64Images_RejectsMoreThanRequested(t *testing.T) {
+	img := base64.StdEncoding.EncodeToString([]byte("px"))
+	many := make([]imageResponseData, 50)
+	for i := range many {
+		many[i] = imageResponseData{B64JSON: img}
+	}
+	body, _ := json.Marshal(imageResponseEnvelope{Data: many})
+
+	// Client asked for 1 (maxImages=1); provider returned 50 → error.
+	if _, err := extractB64Images(body, 1); err == nil {
+		t.Error("expected error when envelope exceeds maxImages, got nil")
+	}
+	// Same body with a permissive cap (test-only usage) decodes fine.
+	if _, err := extractB64Images(body, 100); err != nil {
+		t.Errorf("permissive cap must not reject: %v", err)
+	}
+	// maxImages <= 0 disables the cap (tests only).
+	if _, err := extractB64Images(body, 0); err != nil {
+		t.Errorf("maxImages=0 should disable the cap, got: %v", err)
 	}
 }
 
