@@ -3,6 +3,7 @@ package ctrl
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,6 +113,46 @@ func TestImageStore_DiskFilesRemovedAfterEviction(t *testing.T) {
 	}
 }
 
+// TestImageStore_PurgesOrphansOnInit verifies the disk-growth fix: after a
+// broker restart the in-memory TTL table is empty, so leftover per-key
+// directories on disk are unreachable via get() and will never fire OnEvicted.
+// Without an init-time purge, image_cache/ would grow without bound across
+// restarts. The purge is opinionated — any sibling file that's not a directory
+// is preserved (so an operator's README or config alongside the store root
+// survives).
+func TestImageStore_PurgesOrphansOnInit(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate leftover state from a previous process run.
+	for _, key := range []string{"orphan-1", "orphan-2"} {
+		keyDir := filepath.Join(dir, key)
+		if err := os.MkdirAll(keyDir, 0o755); err != nil {
+			t.Fatalf("setup orphan dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(keyDir, "0.bin"), []byte("stale"), 0o644); err != nil {
+			t.Fatalf("setup orphan file: %v", err)
+		}
+	}
+	// Non-directory sibling that must NOT be deleted.
+	sibling := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(sibling, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("setup sibling file: %v", err)
+	}
+
+	// Opening the store purges the orphan directories.
+	if _, err := newImageStore(dir, time.Minute); err != nil {
+		t.Fatalf("newImageStore: %v", err)
+	}
+
+	for _, key := range []string{"orphan-1", "orphan-2"} {
+		if _, err := os.Stat(filepath.Join(dir, key)); !os.IsNotExist(err) {
+			t.Errorf("orphan %s should have been removed; stat err: %v", key, err)
+		}
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("non-directory sibling %s should be preserved, got: %v", sibling, err)
+	}
+}
+
 // TestImageStore_UUIDIsTheCapability documents the authz model: the chatKey is
 // the ONLY secret needed to retrieve an image (handleImageServeRoute does not
 // check session auth — see proxy.go). This mirrors how OpenAI's image URLs
@@ -145,26 +186,92 @@ func TestImageStore_UUIDIsTheCapability(t *testing.T) {
 	}
 }
 
-// TestImageStore_RejectsTraversalKeys pins the defence-in-depth key validator.
-// Callers today only pass UUIDs, but enforcement must live at the filesystem
-// boundary so a future caller can't walk out of the store directory.
-func TestImageStore_RejectsTraversalKeys(t *testing.T) {
+// TestImageStore_KeyAllowlist pins the allowlist (^[A-Za-z0-9_-]{1,64}$).
+// UUIDs from all current callers match; anything else is rejected — leading
+// dots, single ".", colons, control chars, and non-ASCII all surface here
+// instead of becoming silent filesystem quirks on some future platform.
+func TestImageStore_KeyAllowlist(t *testing.T) {
 	store, err := newImageStore(t.TempDir(), time.Minute)
 	if err != nil {
 		t.Fatalf("newImageStore: %v", err)
 	}
 
-	for _, k := range []string{"", "../escape", "foo/bar", `foo\bar`, "nul\x00byte", "a/../b", ".."} {
-		t.Run("store:"+k, func(t *testing.T) {
+	reject := []string{
+		"",                       // empty
+		"..",                     // traversal
+		"../escape",              // traversal
+		"a/../b",                 // traversal
+		"foo/bar",                // slash
+		`foo\bar`,                // backslash (Windows path sep)
+		"nul\x00byte",            // NUL
+		".",                      // current-dir alias
+		".hidden",                // leading dot (Unix hidden file)
+		"trailing.",              // trailing dot (Windows eats this)
+		"has:colon",              // reserved on Windows + NTFS ADS
+		"with space",             // space
+		"tab\there",              // control char
+		"新",                     // non-ASCII
+		strings.Repeat("a", 65),  // over length cap
+	}
+	for _, k := range reject {
+		k := k
+		t.Run("reject:store/"+k, func(t *testing.T) {
 			if err := store.store(k, [][]byte{[]byte("x")}); err == nil {
-				t.Errorf("store(%q) should reject forbidden key, got nil", k)
+				t.Errorf("store(%q) should reject, got nil", k)
 			}
 		})
-		t.Run("get:"+k, func(t *testing.T) {
+		t.Run("reject:get/"+k, func(t *testing.T) {
 			if _, err := store.get(k, 0); err == nil {
-				t.Errorf("get(%q) should reject forbidden key, got nil", k)
+				t.Errorf("get(%q) should reject, got nil", k)
 			}
 		})
+	}
+
+	accept := []string{
+		"a",                             // single char at lower bound
+		"abcDEF-123_xyz",                // mixed charset
+		"f47ac10b-58cc-4372-a567-0e02b2c3d479", // canonical UUID
+		strings.Repeat("a", 64),         // exactly at length cap
+	}
+	for _, k := range accept {
+		k := k
+		t.Run("accept:"+k, func(t *testing.T) {
+			if err := store.store(k, [][]byte{[]byte("ok")}); err != nil {
+				t.Errorf("store(%q) should succeed, got %v", k, err)
+			}
+		})
+	}
+}
+
+// TestImageStore_PartialWriteCleanup pins the leak fix in store(): if any
+// os.WriteFile fails mid-batch, SetDefault is never called so OnEvicted would
+// never reclaim the half-written keyDir. store() must remove it explicitly.
+func TestImageStore_PartialWriteCleanup(t *testing.T) {
+	dir := t.TempDir()
+	store, err := newImageStore(dir, time.Minute)
+	if err != nil {
+		t.Fatalf("newImageStore: %v", err)
+	}
+
+	// Pre-create the target of image index 1 AS A DIRECTORY so the write of
+	// "1.bin" fails with EISDIR after "0.bin" is already on disk.
+	chatKey := "partial-write-test"
+	keyDir := filepath.Join(dir, chatKey)
+	if err := os.MkdirAll(filepath.Join(keyDir, "1.bin"), 0o755); err != nil {
+		t.Fatalf("seed partial-write obstacle: %v", err)
+	}
+
+	err = store.store(chatKey, [][]byte{[]byte("zero"), []byte("one")})
+	if err == nil {
+		t.Fatal("expected store to fail on obstructed index 1")
+	}
+
+	if _, statErr := os.Stat(keyDir); !os.IsNotExist(statErr) {
+		t.Errorf("keyDir %s must be cleaned up after partial write; stat err: %v", keyDir, statErr)
+	}
+	// Cache entry must also be absent — get() should fail.
+	if _, err := store.get(chatKey, 0); err == nil {
+		t.Errorf("cache entry must not be registered after partial write")
 	}
 }
 

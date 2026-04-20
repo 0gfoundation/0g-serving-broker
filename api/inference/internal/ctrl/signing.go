@@ -82,11 +82,26 @@ func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 	return nil
 }
 
-// signImageResponse creates a TEE signature for image generation / editing responses.
-// The signed text is: sha256(originalClientReqBody):sha256(img0),sha256(img1),...
-// This binds the signature to actual image bytes rather than provider response JSON,
-// which may contain inaccessible LAN URLs.
+// signImageResponse creates a TEE signature for image generation / editing
+// responses from a DECENTRALIZED provider. The signed text is:
+//
+//	sha256(originalClientReqBody):sha256(img0),sha256(img1),...
+//
+// This binds the signature to actual image bytes rather than the provider
+// response JSON (which may contain inaccessible LAN URLs).
+//
+// Parity note: this is the image-flow counterpart of signChatWithKey, NOT of
+// signCentralizedRoutingProof. If image-editing is ever enabled for a
+// centralized provider, a sibling function (signImageResponseRoutingProof)
+// must be added that also takes *tls.ConnectionState and emits the TLS
+// fingerprint / ProviderType / ProviderIdentity fields — otherwise a verifier
+// would see a TEE-signed envelope with no evidence of which upstream served
+// the image. The guard below fails loud so the gap cannot be reached silently
+// by toggling providerType=centralized with targetSeparated=false in config.
 func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string) error {
+	if c.Service.IsCentralized() {
+		return fmt.Errorf("signImageResponse does not cover centralized providers; add a routing-proof variant that binds the TLS fingerprint before enabling this path")
+	}
 	imgHashes := make([]string, len(images))
 	for i, img := range images {
 		imgHashes[i] = sha256Hex(img)

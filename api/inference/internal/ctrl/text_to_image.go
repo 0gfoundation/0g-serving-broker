@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -127,8 +128,26 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		}
 	}
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing text-to-image response")
+	// TEE signing is a function of the trust model, not the response shape:
+	//   - Centralized: broker cannot attest to OpenAI's content; it can only
+	//     attest to the TLS path it took. Use routing proof (binds TLS cert
+	//     fingerprint + provider identity + req/resp hashes).
+	//   - Decentralized, LLM in broker TEE network (!TargetSeparated): broker
+	//     CAN vouch for content, so sign the decoded image bytes directly.
+	//   - Decentralized, TargetSeparated: the remote TEE signs its own output;
+	//     the broker does not duplicate.
+	switch {
+	case c.Service.IsCentralized():
+		var tlsState *tls.ConnectionState
+		if v, exists := ctx.Get("tlsState"); exists {
+			tlsState, _ = v.(*tls.ConnectionState)
+		}
+		c.logger.Debug("Centralized provider, signing text-to-image routing proof")
+		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, tlsState); err != nil {
+			c.logger.Errorf("routing proof not created: %v", err)
+		}
+	case !c.Service.TargetSeparated:
+		c.logger.Debug("LLM server in the same network, signing text-to-image content")
 		if extractErr == nil && len(images) > 0 {
 			_ = c.signImageResponse(sigReqBody, images, chatKey)
 		} else {

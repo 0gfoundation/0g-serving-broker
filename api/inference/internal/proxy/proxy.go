@@ -579,13 +579,31 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 }
 
 // handleImageServeRoute serves broker-stored image bytes at
-// /images/{chatKey}/{index}.  The chatKey is a UUID issued in ZG-Res-Key, so
-// only the requester who received it can derive the URL.  No session auth is
+// /images/{chatKey}/{index}. The chatKey is a UUID issued in ZG-Res-Key, so
+// only the requester who received it can derive the URL. No session auth is
 // required (the UUID itself is the access token), matching OpenAI's CDN URL
-// behaviour.  Returns true if the request was handled (including error cases).
+// behaviour.
+//
+// This path runs BEFORE FreePrefixes evaluation and has no billing or rate-
+// limit middleware attached — by design, a browser must be able to GET these
+// URLs without bearer auth. The security argument is that the chatKey is an
+// unguessable UUID; anyone with it can refetch repeatedly. If abuse becomes a
+// concern (repeated fetches of the same chatKey amplifying bandwidth), add a
+// per-IP or per-chatKey rate limiter at this callsite — don't rely on the
+// upstream RPM/TPM limiter, which runs on a different path.
+//
+// Returns true if the request was handled (including error cases).
 func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool {
 	if !strings.HasPrefix(strings.ToLower(targetPath), "/images/") {
 		return false
+	}
+	// GET (and HEAD for byte-range probes) only. A POST/PUT/DELETE here would
+	// have been silently 200-and-served before; reject it explicitly so that a
+	// future route collision at the same path doesn't mask a real handler.
+	if ctx.Request.Method != http.MethodGet && ctx.Request.Method != http.MethodHead {
+		ctx.Header("Allow", "GET, HEAD")
+		ctx.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+		return true
 	}
 	// Parse /images/{chatKey}/{index}; must have exactly two path segments.
 	rest := strings.TrimPrefix(targetPath, "/images/")

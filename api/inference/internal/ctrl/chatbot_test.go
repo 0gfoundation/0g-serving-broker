@@ -627,3 +627,29 @@ func TestSignImageResponse_DifferentImagesProduceDifferentText(t *testing.T) {
 		t.Error("different images should produce different signed text")
 	}
 }
+
+// TestSignImageResponse_RefusesCentralized pins the parity guard: the
+// decentralized signer must never run for a centralized provider, because its
+// signature envelope omits the TLS fingerprint / ProviderType / ProviderIdentity
+// fields that signCentralizedRoutingProof carries. Without this guard, a dev
+// who flips providerType=centralized while targetSeparated=false would get a
+// silently weaker TEE proof — a routing-proof envelope without the TLS
+// evidence, giving verifiers a false sense of security.
+func TestSignImageResponse_RefusesCentralized(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "openai",
+	})
+
+	err := ctrl.signImageResponse([]byte(`{"prompt":"x"}`), [][]byte{[]byte("img")}, "centralized-key")
+	if err == nil {
+		t.Fatal("signImageResponse must refuse when the service is centralized")
+	}
+	if !strings.Contains(err.Error(), "routing-proof") {
+		t.Errorf("error should point to the missing routing-proof variant; got: %v", err)
+	}
+	// Nothing should be cached.
+	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("centralized-key")); found {
+		t.Error("no signature must be cached when the centralized guard trips")
+	}
+}

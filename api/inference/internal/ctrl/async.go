@@ -415,12 +415,23 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	}
 
 	// TEE response signing — mirrors the sync path in text_to_image.go /
-	// image_editing.go. For image services we sign the decoded image bytes via
-	// signImageResponse so the signature binds the served content, not the URL
-	// envelope the client receives. Falls back to signChatWithKey over the
-	// original provider body (never the rewritten URL JSON).
+	// image_editing.go. Dispatch on the trust model:
+	//   - Centralized: routing proof binds the TLS fingerprint to req/resp
+	//     hashes. Content cannot be attested because the provider is a black box.
+	//   - Decentralized !TargetSeparated: sign decoded image bytes directly
+	//     (image services) or full response (others).
+	//   - Decentralized TargetSeparated: no signing; the remote TEE signs.
+	// The signed body for image services is providerRespBody (original bytes),
+	// never the rewritten URL envelope.
 	var chatKey string
-	if !c.Service.TargetSeparated {
+	switch {
+	case c.Service.IsCentralized():
+		chatKey = uuid.NewString()
+		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, resp.TLS); err != nil {
+			c.logger.Warnf("Async job %s: routing proof not created (TEE verification unavailable): %v", jobID, err)
+			chatKey = ""
+		}
+	case !c.Service.TargetSeparated:
 		chatKey = uuid.NewString()
 		var signErr error
 		if extractOK && len(images) > 0 {

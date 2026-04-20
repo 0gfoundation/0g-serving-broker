@@ -274,6 +274,60 @@ func TestHandleImageServeRoute_NoMatch_NonImagePath(t *testing.T) {
 	}
 }
 
+// TestHandleImageServeRoute_RejectsNonGET pins the method guard. Before the
+// fix, any HTTP method (POST, PUT, DELETE, OPTIONS) at the same path would have
+// been silently served or silently handled as "not matched" depending on path
+// shape. Now anything other than GET/HEAD must return 405 so a future route
+// collision doesn't mask a real handler.
+func TestHandleImageServeRoute_RejectsNonGET(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "method-test"
+	if err := c.StoreTestImage(chatKey, [][]byte{[]byte("img")}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+
+	for _, method := range []string{"POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
+		t.Run(method, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest(method, constant.ServicePrefix+path, nil)
+			ctx.Params = gin.Params{{Key: "any", Value: path}}
+
+			if !p.handleImageServeRoute(ctx, path) {
+				t.Fatal("expected route to be handled (handler must reject the method, not return false)")
+			}
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("status = %d, want 405", w.Code)
+			}
+			if allow := w.Header().Get("Allow"); allow == "" {
+				t.Error("expected Allow header on 405 response")
+			}
+		})
+	}
+
+	t.Run("HEAD-allowed", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest("HEAD", constant.ServicePrefix+path, nil)
+		ctx.Params = gin.Params{{Key: "any", Value: path}}
+
+		if !p.handleImageServeRoute(ctx, path) {
+			t.Fatal("HEAD should be handled")
+		}
+		if w.Code != http.StatusOK {
+			t.Errorf("HEAD status = %d, want 200", w.Code)
+		}
+	})
+}
+
 func TestHandleImageServeRoute_InvalidIndex_Returns400(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	p := newTestProxy(t, &ctrl.Ctrl{})

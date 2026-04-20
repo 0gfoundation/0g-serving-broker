@@ -548,9 +548,19 @@ func rewriteMultipartResponseFormat(body []byte) (originalFormat string, modifie
 // forceB64ResponseFormat rewrites the response_format field in a JSON request body
 // to "b64_json", returning the original format value and the modified body.
 // Returns an error (and the unmodified body) if the body is not valid JSON.
+//
+// Caveat: this round-trips through map[string]interface{}, so top-level field
+// order is not preserved on output. Numeric values are decoded with UseNumber
+// to preserve integer precision — e.g. a seed value of 2^53+1 survives the
+// rewrite. The signed body used for TEE proofs is the original pre-rewrite
+// bytes (captured as clientReqBody), so this reshaping is provider-visible
+// only. If a future provider starts to care about byte-for-byte equality of
+// the forwarded body, replace this with a targeted byte-level rewrite.
 func forceB64ResponseFormat(body []byte) (originalFormat string, modified []byte, err error) {
 	var m map[string]interface{}
-	if err = json.Unmarshal(body, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err = dec.Decode(&m); err != nil {
 		return "", body, err
 	}
 	if v, ok := m["response_format"].(string); ok {

@@ -154,6 +154,28 @@ func TestForceB64ResponseFormat_NonJSON_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestForceB64ResponseFormat_PreservesLargeIntegers pins the UseNumber fix: a
+// seed > 2^53 would be silently coerced to float64 and emitted in exponential
+// notation if we decoded without json.Number. The signed body is pre-rewrite
+// so this doesn't affect TEE proofs today, but a provider that echoes numeric
+// parameters would see corrupted seeds.
+func TestForceB64ResponseFormat_PreservesLargeIntegers(t *testing.T) {
+	// 2^53 + 1 is the smallest positive integer that float64 cannot represent exactly.
+	const bigSeed = `9007199254740993`
+	body := []byte(`{"prompt":"cat","seed":` + bigSeed + `,"response_format":"url"}`)
+
+	_, modified, err := forceB64ResponseFormat(body)
+	if err != nil {
+		t.Fatalf("forceB64ResponseFormat: %v", err)
+	}
+	if !strings.Contains(string(modified), bigSeed) {
+		t.Errorf("large integer seed not preserved; got body: %s", modified)
+	}
+	if strings.Contains(string(modified), "9.007") || strings.Contains(string(modified), "e+") {
+		t.Errorf("seed was coerced to float64 exponential form: %s", modified)
+	}
+}
+
 // ==========================================================================
 // rewriteMultipartResponseFormat
 // ==========================================================================

@@ -5,23 +5,27 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/patrickmn/go-cache"
 )
 
-// validateChatKey rejects keys that could escape the store directory or confuse
-// the filesystem. Current callers only pass uuid.New().String(), so the check is
-// defence in depth: enforcement lives at the filesystem boundary rather than
-// relying on every future caller to sanitise first.
+// validChatKey matches the charset all current callers produce (UUIDs via
+// uuid.New().String()) and nothing else. An allowlist is safer than a blocklist
+// at the filesystem boundary: reject single ".", leading/trailing dots, colons,
+// control chars, and every other byte sequence that could cause trouble on
+// Windows, NFS, or future code paths. Length cap guards against absurdly long
+// paths.
+var validChatKey = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// validateChatKey enforces the allowlist. Callers outside this package must
+// continue to produce UUIDs (or compatible IDs) — anything else is a bug we'd
+// rather surface here than silently mis-store.
 func validateChatKey(k string) error {
-	if k == "" {
-		return fmt.Errorf("chatKey is empty")
-	}
-	if strings.ContainsAny(k, "/\\\x00") || strings.Contains(k, "..") {
-		return fmt.Errorf("chatKey contains forbidden characters")
+	if !validChatKey.MatchString(k) {
+		return fmt.Errorf("chatKey %q is not a valid identifier (expected ^[A-Za-z0-9_-]{1,64}$)", k)
 	}
 	return nil
 }
@@ -39,6 +43,24 @@ func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create image store dir %q: %w", dir, err)
 	}
+
+	// Purge leftover per-key directories from any previous process run.
+	// The in-memory TTL table is empty at startup, so those chatKeys are
+	// already unreachable via get() — without this sweep the files would
+	// accumulate forever across restarts (no OnEvicted ever fires for them).
+	// Only remove directories under the store root; leave unexpected loose
+	// files alone so an operator doesn't silently lose, e.g., a README.
+	// Assumes a single broker process per image_cache directory; sharing
+	// the directory between processes would cause one's startup to delete
+	// the other's live files.
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+
 	s := &imageStore{dir: dir}
 	s.cache = cache.New(ttl, ttl/2)
 	s.cache.OnEvicted(func(key string, _ interface{}) {
@@ -48,6 +70,9 @@ func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
 }
 
 // store writes each image to {dir}/{chatKey}/{index}.bin and registers the entry.
+// On any write failure the whole keyDir is removed so a partial-write doesn't
+// leave orphan files: SetDefault is never called on error, so OnEvicted would
+// never clean them up on its own.
 func (s *imageStore) store(chatKey string, images [][]byte) error {
 	if err := validateChatKey(chatKey); err != nil {
 		return err
@@ -59,6 +84,7 @@ func (s *imageStore) store(chatKey string, images [][]byte) error {
 	for i, img := range images {
 		path := filepath.Join(keyDir, strconv.Itoa(i)+".bin")
 		if err := os.WriteFile(path, img, 0o644); err != nil {
+			_ = os.RemoveAll(keyDir)
 			return fmt.Errorf("write image %d: %w", i, err)
 		}
 	}

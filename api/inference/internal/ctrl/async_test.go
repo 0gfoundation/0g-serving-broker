@@ -1519,6 +1519,86 @@ func TestProcessAsyncJob_URLFormat_SignatureBindsImageBytes(t *testing.T) {
 	}
 }
 
+// TestProcessAsyncJob_Centralized_SignsRoutingProof pins the centralized
+// trust-model dispatch: for a centralized provider (where broker can't vouch
+// for content), the async worker must sign a routing proof — binding the TLS
+// cert fingerprint + provider identity + req/resp hashes — instead of signing
+// image bytes as if the broker were the source of truth. Regressing this would
+// produce a TEE-signed envelope that LOOKS valid to naive verifiers but omits
+// the only attestation that actually matters for a centralized path.
+func TestProcessAsyncJob_Centralized_SignsRoutingProof(t *testing.T) {
+	// HTTPS provider so resp.TLS is populated — routing proof needs the cert.
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"b64_json":"aW1n"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "centralized-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ProviderType = "centralized"
+	ctrl.Service.ProviderIdentity = "openai"
+	ctrl.Service.TargetSeparated = true // canonical centralized config
+	ctrl.httpClient = provider.Client() // trust the self-signed test cert
+	priv, _ := crypto.GenerateKey()
+	ctrl.teeService = &teeutil.TeeService{
+		ProviderSigner: priv,
+		Address:        crypto.PubkeyToAddress(priv.PublicKey),
+	}
+	if ctrl.svcCache == nil {
+		ctrl.svcCache = cache.New(5*time.Minute, 10*time.Minute)
+	}
+	ctrl.chatCacheExpiration = 5 * time.Minute
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "centralized-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"x"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("centralized-job")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+
+	var respHeaders map[string][]string
+	if err := json.Unmarshal(job.ResponseHeaders, &respHeaders); err != nil {
+		t.Fatalf("decode response headers: %v", err)
+	}
+	keys := respHeaders["ZG-Res-Key"]
+	if len(keys) == 0 {
+		t.Fatal("ZG-Res-Key missing — routing proof did not run")
+	}
+
+	cached, ok := ctrl.svcCache.Get(ctrl.chatCacheKey(keys[0]))
+	if !ok {
+		t.Fatal("no ChatSignature cached under chatKey")
+	}
+	sig := cached.(ChatSignature)
+	if sig.TLSCertFingerprint == "" {
+		t.Error("routing proof must bind the TLS cert fingerprint")
+	}
+	if sig.ProviderIdentity != "openai" {
+		t.Errorf("ProviderIdentity = %q, want openai", sig.ProviderIdentity)
+	}
+	if sig.ProviderType != "centralized" {
+		t.Errorf("ProviderType = %q, want centralized", sig.ProviderType)
+	}
+	// Guard against regression to signImageResponse / signChatWithKey, neither of
+	// which emits the 5-segment routing-proof text (req:resp:type:identity:fp).
+	if parts := strings.Split(sig.Text, ":"); len(parts) != 5 {
+		t.Errorf("expected 5-part routing-proof text, got %d parts: %s", len(parts), sig.Text)
+	}
+}
+
 // TestProcessAsyncJob_URLFormat_ProviderReturnsURLForm_JobFailed pins the
 // response-side fallback-leak guard on the async path. A non-compliant provider
 // ignores response_format=b64_json and returns LAN-private URLs; the broker
