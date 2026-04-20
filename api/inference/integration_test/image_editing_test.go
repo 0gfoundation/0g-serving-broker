@@ -391,3 +391,82 @@ func TestImageEditingFlow_ResponseFormatURL_Multipart(t *testing.T) {
 		t.Errorf("expected fee=100, got %s", latestReq.Fee)
 	}
 }
+
+// TestImageEditingFlow_MultipartOmitsResponseFormat_InjectsB64 closes the
+// absent-field leak: OpenAI's default for /v1/images/edits is "url", so a
+// client that does NOT send response_format would have caused the provider
+// to return LAN-private URLs. The broker must inject response_format=b64_json
+// into the forwarded multipart body AND still run the URL-rewrite path so
+// the client gets broker-served URLs, not the omitted-default leak.
+func TestImageEditingFlow_MultipartOmitsResponseFormat_InjectsB64(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
+
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			t.Errorf("provider: parse multipart: %v", err)
+		}
+		// This is THE assertion: the provider must see b64_json even though
+		// the client omitted the field entirely. Old code forwarded the body
+		// unchanged and this would be "".
+		if got := r.FormValue("response_format"); got != "b64_json" {
+			t.Errorf("provider: response_format = %q, want b64_json (broker must inject when field is absent)", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": 1,
+			"data":    []map[string]interface{}{{"b64_json": b64}},
+		})
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.ServingURL = "http://broker.test"
+		cfg.Service.Type = "image-editing"
+		cfg.Service.ModelType = "dall-e-2"
+		cfg.Service.TargetSeparated = true
+	})
+	if err := env.ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	boundary := "----OmitFormatBoundary"
+	// Body deliberately omits any response_format field.
+	body := fmt.Sprintf(
+		"--%s\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it red\r\n"+
+			"--%s\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n1\r\n"+
+			"--%s\r\nContent-Disposition: form-data; name=\"image\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\nfake-png\r\n"+
+			"--%s--\r\n",
+		boundary, boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/images/edits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Since the client's documented default is "url", the client should get
+	// a broker-served URL back, not b64_json.
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	data, _ := resp["data"].([]interface{})
+	if len(data) != 1 {
+		t.Fatalf("expected 1 edited image, got %d", len(data))
+	}
+	item := data[0].(map[string]interface{})
+	if _, has := item["b64_json"]; has {
+		t.Error("b64_json should be absent: omitted response_format defaults to url, so broker returns broker URLs")
+	}
+	if gotURL, _ := item["url"].(string); gotURL == "" {
+		t.Error("expected broker-served url in response when response_format is omitted")
+	}
+}

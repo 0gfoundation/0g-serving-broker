@@ -51,11 +51,14 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 		return errors.Wrap(err, "mark stale processing jobs as failed")
 	}
 
-	// Start fixed worker pool — exactly maxConcurrent goroutines, never more
+	// Start fixed worker pool — exactly maxConcurrent goroutines, never more.
+	// Workers drain via close(c.asyncJobQueue) in ShutdownAsync, not the ctx —
+	// ctx only cancels the cleanup goroutine below.
 	for i := 0; i < maxConcurrent; i++ {
 		c.asyncWg.Add(1)
-		go c.asyncWorker(ctx, i)
+		go c.asyncWorker()
 	}
+	_ = ctx // retained for the cleanup goroutine; workers do not observe it
 
 	// Start periodic cleanup of expired jobs
 	c.asyncWg.Add(1)
@@ -85,7 +88,7 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 // It blocks until a job is available, processes it, and repeats. When the channel is closed
 // (by ShutdownAsync), range drains all remaining buffered jobs before exiting — ensuring
 // no accepted jobs are silently dropped.
-func (c *Ctrl) asyncWorker(_ context.Context, workerID int) {
+func (c *Ctrl) asyncWorker() {
 	defer c.asyncWg.Done()
 	for job := range c.asyncJobQueue {
 		c.processAsyncJob(job)
@@ -288,7 +291,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 			rwErr     error
 		)
 		if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {
-			orig, rewritten, rwErr = rewriteMultipartResponseFormat(reqBody)
+			orig, rewritten, rwErr = rewriteMultipartResponseFormat(reqBody, contentType)
 		} else {
 			orig, rewritten, rwErr = forceB64ResponseFormat(reqBody)
 		}

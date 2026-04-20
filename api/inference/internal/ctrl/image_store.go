@@ -35,8 +35,9 @@ func validateChatKey(k string) error {
 // the directory name, so only the requester who received ZG-Res-Key can derive
 // the serving URL.
 type imageStore struct {
-	dir   string
-	cache *cache.Cache
+	dir           string
+	cache         *cache.Cache
+	purgedAtStart int // count of leftover directories removed during newImageStore; surfaced in logs at ctrl init
 }
 
 func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
@@ -44,24 +45,31 @@ func newImageStore(dir string, ttl time.Duration) (*imageStore, error) {
 		return nil, fmt.Errorf("create image store dir %q: %w", dir, err)
 	}
 
-	// Purge leftover per-key directories from any previous process run.
-	// The in-memory TTL table is empty at startup, so those chatKeys are
-	// already unreachable via get() — without this sweep the files would
-	// accumulate forever across restarts (no OnEvicted ever fires for them).
-	// Only remove directories under the store root; leave unexpected loose
-	// files alone so an operator doesn't silently lose, e.g., a README.
-	// Assumes a single broker process per image_cache directory; sharing
-	// the directory between processes would cause one's startup to delete
-	// the other's live files.
+	// Purge leftover per-key directories from any previous process run. The
+	// in-memory TTL table is empty at startup so their chatKeys are unreachable
+	// via get(); without this sweep the files would accumulate across restarts
+	// (OnEvicted never fires for them). Non-directory siblings are preserved
+	// (README, config, etc.).
+	//
+	// DEPLOYMENT INVARIANT: the image_cache directory must be owned by exactly
+	// one broker process. Sharing across replicas (e.g. a ReadWriteMany PV in
+	// Kubernetes) is unsupported — the startup purge from replica A will
+	// silently delete replica B's live files. This is not enforced by code
+	// (no pidfile/lock) because the TTL machinery would fight a cross-process
+	// lock; enforce in the deployment manifest instead (use an emptyDir/local
+	// volume per replica).
+	removed := 0
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
-				_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+				if rmErr := os.RemoveAll(filepath.Join(dir, e.Name())); rmErr == nil {
+					removed++
+				}
 			}
 		}
 	}
 
-	s := &imageStore{dir: dir}
+	s := &imageStore{dir: dir, purgedAtStart: removed}
 	s.cache = cache.New(ttl, ttl/2)
 	s.cache.OnEvicted(func(key string, _ interface{}) {
 		_ = os.RemoveAll(filepath.Join(dir, key))

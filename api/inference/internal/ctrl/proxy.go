@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 
@@ -63,14 +66,17 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// broker-side URL rewriting.
 	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
 		ctx.Set("clientReqBody", reqBody)
-		contentType := strings.ToLower(ctx.Request.Header.Get("Content-Type"))
+		// Keep the original-case Content-Type: mime.ParseMediaType lowercases
+		// only the media-type and parameter names, but the boundary VALUE is
+		// case-sensitive when matched against the body.
+		rawContentType := ctx.Request.Header.Get("Content-Type")
 		var (
 			originalFormat string
 			rewritten      []byte
 			err            error
 		)
-		if strings.HasPrefix(contentType, "multipart/") {
-			originalFormat, rewritten, err = rewriteMultipartResponseFormat(reqBody)
+		if strings.HasPrefix(strings.ToLower(rawContentType), "multipart/") {
+			originalFormat, rewritten, err = rewriteMultipartResponseFormat(reqBody, rawContentType)
 		} else {
 			originalFormat, rewritten, err = forceB64ResponseFormat(reqBody)
 		}
@@ -79,7 +85,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// back verbatim — the exact leak the rewrite exists to prevent.
 		if err != nil {
 			ctx.Set("ignoreError", true)
-			return nil, errors.Wrapf(err, "image request body could not be normalised (content-type=%q)", contentType)
+			return nil, errors.Wrapf(err, "image request body could not be normalised (content-type=%q)", rawContentType)
 		}
 		ctx.Set("clientResponseFormat", originalFormat)
 		reqBody = rewritten
@@ -501,48 +507,101 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	return modifiedBody, nil
 }
 
-// rewriteMultipartResponseFormat scans a multipart/form-data body for the
-// response_format form field and rewrites its value to "b64_json". Returns the
-// original field value (empty string if the field was absent) and the modified
-// body. The boundary is not altered — only the value bytes of the form field
-// are replaced, so binary file parts (e.g. the uploaded image) are preserved
-// byte-for-byte.
+// rewriteMultipartResponseFormat ensures the forwarded multipart body carries
+// response_format=b64_json, returning what the CLIENT originally asked for so
+// the response handler knows whether to rewrite provider output to broker URLs.
 //
-// Limitation: if the client did not include a response_format field at all,
-// this function leaves the body unchanged. Adding a new multipart part would
-// require parsing the boundary from the Content-Type header, which is out of
-// scope here — the URL-rewrite flow only activates when the client explicitly
-// asked for "url".
-func rewriteMultipartResponseFormat(body []byte) (originalFormat string, modified []byte, err error) {
-	marker := []byte(`name="response_format"`)
-	idx := bytes.Index(body, marker)
-	if idx == -1 {
-		return "", body, nil
+// Two cases:
+//  1. response_format field present — replace its body with "b64_json".
+//  2. response_format field absent — append a new part. OpenAI's documented
+//     default for /v1/images/edits is "url", so originalFormat is reported as
+//     "url" and the handler runs URL rewrite so the caller sees broker URLs.
+//
+// Uses mime/multipart.Reader so that adversarial file content (e.g. an image
+// byte sequence that happens to contain the literal string
+// `name="response_format"`) cannot corrupt the rewrite — the parser respects
+// MIME boundaries, the previous byte scanner did not. The writer uses
+// SetBoundary so the outgoing boundary string matches the original header;
+// part headers are preserved byte-for-byte as the reader saw them.
+func rewriteMultipartResponseFormat(body []byte, contentType string) (originalFormat string, modified []byte, err error) {
+	_, params, parseErr := mime.ParseMediaType(contentType)
+	if parseErr != nil {
+		return "", body, fmt.Errorf("multipart: parse content-type %q: %w", contentType, parseErr)
+	}
+	boundary, ok := params["boundary"]
+	if !ok || boundary == "" {
+		return "", body, fmt.Errorf("multipart: content-type %q has no boundary", contentType)
 	}
 
-	headerSep := []byte("\r\n\r\n")
-	sepIdx := bytes.Index(body[idx:], headerSep)
-	if sepIdx == -1 {
-		return "", body, fmt.Errorf("multipart: malformed response_format part (missing header terminator)")
+	type preservedPart struct {
+		header textproto.MIMEHeader
+		body   []byte
 	}
-	valueStart := idx + sepIdx + len(headerSep)
+	var parts []preservedPart
+	foundResponseFormat := false
+	originalFormat = ""
 
-	endIdx := bytes.Index(body[valueStart:], []byte("\r\n--"))
-	if endIdx == -1 {
-		return "", body, fmt.Errorf("multipart: malformed response_format part (missing boundary terminator)")
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, pErr := reader.NextPart()
+		if pErr == io.EOF {
+			break
+		}
+		if pErr != nil {
+			return "", body, fmt.Errorf("multipart: read part: %w", pErr)
+		}
+		partBody, rErr := io.ReadAll(part)
+		_ = part.Close()
+		if rErr != nil {
+			return "", body, fmt.Errorf("multipart: read part body: %w", rErr)
+		}
+		if part.FormName() == "response_format" {
+			foundResponseFormat = true
+			originalFormat = string(partBody)
+			partBody = []byte("b64_json")
+		}
+		parts = append(parts, preservedPart{header: part.Header, body: partBody})
 	}
-	valueEnd := valueStart + endIdx
 
-	originalFormat = string(body[valueStart:valueEnd])
-	if originalFormat == "b64_json" {
+	// Fast path: already b64_json — no writer needed, forward unchanged.
+	if foundResponseFormat && originalFormat == "b64_json" {
 		return originalFormat, body, nil
 	}
 
-	newBody := make([]byte, 0, len(body)+len("b64_json"))
-	newBody = append(newBody, body[:valueStart]...)
-	newBody = append(newBody, []byte("b64_json")...)
-	newBody = append(newBody, body[valueEnd:]...)
-	return originalFormat, newBody, nil
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return "", body, fmt.Errorf("multipart: set boundary: %w", err)
+	}
+	for _, p := range parts {
+		w, cErr := writer.CreatePart(p.header)
+		if cErr != nil {
+			return "", body, fmt.Errorf("multipart: create part: %w", cErr)
+		}
+		if _, wErr := w.Write(p.body); wErr != nil {
+			return "", body, fmt.Errorf("multipart: write part body: %w", wErr)
+		}
+	}
+	if !foundResponseFormat {
+		hdr := textproto.MIMEHeader{}
+		hdr.Set("Content-Disposition", `form-data; name="response_format"`)
+		w, cErr := writer.CreatePart(hdr)
+		if cErr != nil {
+			return "", body, fmt.Errorf("multipart: create response_format part: %w", cErr)
+		}
+		if _, wErr := w.Write([]byte("b64_json")); wErr != nil {
+			return "", body, fmt.Errorf("multipart: write response_format part: %w", wErr)
+		}
+		// Client omitted the field → OpenAI default for /v1/images/edits is
+		// "url". Reporting "url" here routes us through the URL-rewrite path
+		// so the caller gets broker-served URLs, matching what direct-to-
+		// OpenAI behaviour would have produced.
+		originalFormat = "url"
+	}
+	if err := writer.Close(); err != nil {
+		return "", body, fmt.Errorf("multipart: close writer: %w", err)
+	}
+	return originalFormat, buf.Bytes(), nil
 }
 
 // forceB64ResponseFormat rewrites the response_format field in a JSON request body
@@ -565,6 +624,11 @@ func forceB64ResponseFormat(body []byte) (originalFormat string, modified []byte
 	}
 	if v, ok := m["response_format"].(string); ok {
 		originalFormat = v
+	}
+	// Fast path: already b64_json, forward original bytes byte-for-byte. Matches
+	// the multipart variant and avoids reshaping the body on every request.
+	if originalFormat == "b64_json" {
+		return originalFormat, body, nil
 	}
 	m["response_format"] = "b64_json"
 	modified, err = json.Marshal(m)

@@ -40,6 +40,12 @@ type Proxy struct {
 	perUserRateLimiter        *middleware.PerUserRateLimiter
 	perUserTPMLimiter         *middleware.PerUserTPMLimiter
 	perUserIPMLimiter         *middleware.PerUserTPMLimiter
+	// imageServeLimiter throttles the unauthenticated /v1/proxy/images/{key}/{i}
+	// endpoint per-client-IP. The endpoint bypasses session auth (UUID-as-token
+	// model), so a bandwidth-amplification bound is the only defence against a
+	// caller hammering a single chatKey. Reuses PerUserRateLimiter with IP as
+	// the key — see handleImageServeRoute.
+	imageServeLimiter *middleware.PerUserRateLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -110,6 +116,14 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		p.perUserIPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserIPM, ipmBurst)
 		logger.Infof("Per-user image limit: %d IPM, burst=%d", concurrencyConfig.PerUserIPM, ipmBurst)
 	}
+
+	// Per-IP limit for the unauthenticated image-serve route. Chosen loose so
+	// legitimate browser tabs re-fetching a few images do not trip: 120 RPM
+	// with a 30-request burst. Bandwidth-amplification is bounded at roughly
+	// 120 * image_size per IP per minute; tighten via config if ever needed.
+	// Keyed by client IP; the IP field lives outside the per-user keyspace so
+	// it never starves user-scoped limits.
+	p.imageServeLimiter = middleware.NewPerUserRateLimiter(120, 30)
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
 		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
@@ -603,6 +617,16 @@ func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool 
 	if ctx.Request.Method != http.MethodGet && ctx.Request.Method != http.MethodHead {
 		ctx.Header("Allow", "GET, HEAD")
 		ctx.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+		return true
+	}
+	// Per-IP rate limit. The route has no session auth — without a throttle a
+	// single caller with one UUID could hammer the endpoint to amplify
+	// bandwidth. ClientIP honours X-Forwarded-For only when gin's trusted
+	// proxies list accepts the direct peer; otherwise it falls back to the
+	// socket's remote address, which is the right thing for a direct client.
+	if p.imageServeLimiter != nil && !p.imageServeLimiter.Allow(ctx.ClientIP()) {
+		ctx.Header("Retry-After", "1")
+		ctx.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded on image serve endpoint"})
 		return true
 	}
 	// Parse /images/{chatKey}/{index}; must have exactly two path segments.

@@ -1,8 +1,12 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strings"
 	"testing"
 )
@@ -127,7 +131,10 @@ func TestForceB64ResponseFormat_AddsFieldWhenAbsent(t *testing.T) {
 }
 
 func TestForceB64ResponseFormat_AlreadyB64_NoChange(t *testing.T) {
-	body := []byte(`{"prompt":"x","response_format":"b64_json"}`)
+	// Use a key-ordering the Go map remarshaller would definitely change
+	// (`z_last` after `a_first`, with response_format deliberately in the
+	// middle) so if the fast path regresses we'd see a different byte order.
+	body := []byte(`{"a_first":1,"response_format":"b64_json","z_last":"tail"}`)
 	orig, modified, err := forceB64ResponseFormat(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -135,10 +142,9 @@ func TestForceB64ResponseFormat_AlreadyB64_NoChange(t *testing.T) {
 	if orig != "b64_json" {
 		t.Errorf("orig = %q, want b64_json", orig)
 	}
-	var m map[string]interface{}
-	json.Unmarshal(modified, &m)
-	if m["response_format"] != "b64_json" {
-		t.Errorf("response_format = %v, want b64_json", m["response_format"])
+	// Fast path must return the input bytes verbatim (no remarshal).
+	if string(modified) != string(body) {
+		t.Errorf("fast path must return body byte-for-byte.\n got:  %s\nwant: %s", modified, body)
 	}
 }
 
@@ -180,6 +186,8 @@ func TestForceB64ResponseFormat_PreservesLargeIntegers(t *testing.T) {
 // rewriteMultipartResponseFormat
 // ==========================================================================
 
+const multipartCT = `multipart/form-data; boundary=b`
+
 func TestRewriteMultipartResponseFormat_RewritesURLToB64(t *testing.T) {
 	body := []byte(
 		"--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhello\r\n" +
@@ -187,7 +195,7 @@ func TestRewriteMultipartResponseFormat_RewritesURLToB64(t *testing.T) {
 			"--b--\r\n",
 	)
 
-	orig, modified, err := rewriteMultipartResponseFormat(body)
+	orig, modified, err := rewriteMultipartResponseFormat(body, multipartCT)
 	if err != nil {
 		t.Fatalf("rewriteMultipartResponseFormat: %v", err)
 	}
@@ -206,21 +214,47 @@ func TestRewriteMultipartResponseFormat_RewritesURLToB64(t *testing.T) {
 	}
 }
 
-func TestRewriteMultipartResponseFormat_FieldAbsent_NoOp(t *testing.T) {
+// TestRewriteMultipartResponseFormat_FieldAbsent_InjectsB64 pins the absent-
+// field leak fix: OpenAI's default for /v1/images/edits is "url", so a client
+// that omits response_format would cause the provider to return LAN-private
+// URLs. The rewriter must inject response_format=b64_json and report the
+// original format as "url" so the handler still runs the URL-rewrite path.
+func TestRewriteMultipartResponseFormat_FieldAbsent_InjectsB64(t *testing.T) {
 	body := []byte(
 		"--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhello\r\n" +
 			"--b--\r\n",
 	)
 
-	orig, modified, err := rewriteMultipartResponseFormat(body)
+	orig, modified, err := rewriteMultipartResponseFormat(body, multipartCT)
 	if err != nil {
 		t.Fatalf("rewriteMultipartResponseFormat: %v", err)
 	}
-	if orig != "" {
-		t.Errorf("original format = %q, want empty", orig)
+	if orig != "url" {
+		t.Errorf("original format = %q, want url (OpenAI default for absent field)", orig)
 	}
-	if string(modified) != string(body) {
-		t.Error("body should be unchanged when response_format is absent")
+	if !strings.Contains(string(modified), "name=\"response_format\"\r\n\r\nb64_json") {
+		t.Errorf("injected response_format part missing:\n%s", modified)
+	}
+	// Prompt part must still be present.
+	if !strings.Contains(string(modified), "name=\"prompt\"\r\n\r\nhello") {
+		t.Error("modified body should preserve the prompt part")
+	}
+	// Closing boundary must still terminate the body.
+	if !strings.HasSuffix(string(modified), "--b--\r\n") {
+		t.Errorf("modified body must end with closing boundary, got suffix: %q", string(modified)[len(modified)-20:])
+	}
+	// The new part must be placed BEFORE the closing delimiter (not after).
+	closeIdx := strings.Index(string(modified), "\r\n--b--\r\n")
+	injectIdx := strings.Index(string(modified), "name=\"response_format\"")
+	if injectIdx < 0 || injectIdx >= closeIdx {
+		t.Errorf("injected part must sit before closing boundary: injectIdx=%d closeIdx=%d", injectIdx, closeIdx)
+	}
+}
+
+func TestRewriteMultipartResponseFormat_FieldAbsent_RejectsMissingBoundary(t *testing.T) {
+	body := []byte("--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhi\r\n--b--\r\n")
+	if _, _, err := rewriteMultipartResponseFormat(body, "multipart/form-data"); err == nil {
+		t.Error("expected error when content-type has no boundary")
 	}
 }
 
@@ -229,7 +263,7 @@ func TestRewriteMultipartResponseFormat_AlreadyB64_NoChange(t *testing.T) {
 		"--b\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nb64_json\r\n" +
 			"--b--\r\n",
 	)
-	orig, modified, err := rewriteMultipartResponseFormat(body)
+	orig, modified, err := rewriteMultipartResponseFormat(body, multipartCT)
 	if err != nil {
 		t.Fatalf("rewriteMultipartResponseFormat: %v", err)
 	}
@@ -241,6 +275,73 @@ func TestRewriteMultipartResponseFormat_AlreadyB64_NoChange(t *testing.T) {
 	}
 }
 
+// TestRewriteMultipartResponseFormat_AdversarialFilePayload pins the fix to
+// the byte-scanner vulnerability: a file part whose body contains the literal
+// string `name="response_format"` plus a fake boundary terminator used to
+// anchor the old bytes.Index scanner on the wrong location, corrupting the
+// uploaded file bytes. The mime/multipart.Reader respects boundaries, so the
+// adversarial substring inside a file part is ignored entirely.
+func TestRewriteMultipartResponseFormat_AdversarialFilePayload(t *testing.T) {
+	// File body deliberately contains the marker the old byte scanner searched
+	// for AND a \r\n-- sequence it used as the value-end anchor. The suffix
+	// "--XYZ" is NOT the real boundary "b", so a real multipart reader keeps
+	// these bytes inside the file part; the old byte scanner would treat them
+	// as a form-field terminator and splice "adversarial" as the value.
+	adversarial := []byte(
+		"PNG-HEADER" +
+			"name=\"response_format\"\r\n\r\nadversarial\r\n--XYZ " +
+			"more-bytes-after",
+	)
+	// File FIRST so its adversarial bytes come before the legitimate
+	// response_format field. The old byte scanner did bytes.Index over the
+	// whole body and would match the name="response_format" substring INSIDE
+	// this file part, then splice "adversarial" as the value — corrupting
+	// the file on readback.
+	var body []byte
+	body = append(body, []byte("--b\r\nContent-Disposition: form-data; name=\"image\"; filename=\"x.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n")...)
+	body = append(body, adversarial...)
+	body = append(body, []byte("\r\n--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhello\r\n")...)
+	body = append(body, []byte("--b\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nurl\r\n")...)
+	body = append(body, []byte("--b--\r\n")...)
+
+	orig, modified, err := rewriteMultipartResponseFormat(body, multipartCT)
+	if err != nil {
+		t.Fatalf("rewriteMultipartResponseFormat: %v", err)
+	}
+	if orig != "url" {
+		t.Errorf("original format = %q, want url", orig)
+	}
+
+	// Decode the output and confirm: the response_format part was rewritten to
+	// b64_json, AND the adversarial file bytes survived verbatim.
+	_, params, _ := mime.ParseMediaType(multipartCT)
+	reader := multipart.NewReader(bytes.NewReader(modified), params["boundary"])
+	seenResponseFormat := false
+	seenImageVerbatim := false
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			break
+		}
+		partBody, _ := io.ReadAll(part)
+		switch part.FormName() {
+		case "response_format":
+			seenResponseFormat = true
+			if string(partBody) != "b64_json" {
+				t.Errorf("response_format part = %q, want b64_json", partBody)
+			}
+		case "image":
+			seenImageVerbatim = bytes.Equal(partBody, adversarial)
+		}
+	}
+	if !seenResponseFormat {
+		t.Error("response_format part missing from rewritten body")
+	}
+	if !seenImageVerbatim {
+		t.Error("adversarial file bytes were corrupted — the byte scanner bug regressed")
+	}
+}
+
 func TestRewriteMultipartResponseFormat_PreservesBinaryBytes(t *testing.T) {
 	binary := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0x00, 0xFF}
 	var body []byte
@@ -249,7 +350,7 @@ func TestRewriteMultipartResponseFormat_PreservesBinaryBytes(t *testing.T) {
 	body = append(body, binary...)
 	body = append(body, []byte("\r\n--b--\r\n")...)
 
-	_, modified, err := rewriteMultipartResponseFormat(body)
+	_, modified, err := rewriteMultipartResponseFormat(body, multipartCT)
 	if err != nil {
 		t.Fatalf("rewriteMultipartResponseFormat: %v", err)
 	}

@@ -128,6 +128,14 @@ func New(
 	if err != nil {
 		logger.Warnf("Failed to initialize image store at %q, image URL serving disabled: %v", imageCacheDir, err)
 		imgStore = nil
+	} else if imgStore.purgedAtStart > 0 {
+		// Loud on purpose: if this number is non-zero on a shared-volume deployment
+		// (not supported but configurable at the k8s layer), it means we just
+		// deleted another broker replica's live image files.
+		logger.Infof("image store: purged %d leftover directory(ies) at %q from previous run. "+
+			"If this broker shares %q with another replica, live files have been destroyed — "+
+			"image_cache must be per-process (use a local volume, not ReadWriteMany).",
+			imgStore.purgedAtStart, imageCacheDir, imageCacheDir)
 	}
 
 	minSettlementFee := new(big.Int)
