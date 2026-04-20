@@ -451,3 +451,88 @@ func TestTextToImageFlow_ResponseFormatB64PassThrough(t *testing.T) {
 		t.Errorf("b64_json mismatch: got len=%d, want len=%d", len(gotB64), len(b64))
 	}
 }
+
+// ==========================================================================
+// Leak guards: rewrite failures must not silently fall through to the provider
+// body, because the body may contain LAN-private URLs the client can't reach.
+// ==========================================================================
+
+// TestTextToImage_MalformedJSON_RejectedBeforeForwarding pins the request-side
+// guard in PrepareHTTPRequest. An earlier version swallowed rewrite errors and
+// forwarded the original body with response_format=url, letting the provider
+// return LAN URLs to the client.
+func TestTextToImage_MalformedJSON_RejectedBeforeForwarding(t *testing.T) {
+	providerHit := false
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerHit = true
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"url":"http://internal-gpu:9090/tmp/x.png"}]}`))
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.ServingURL = "http://broker.test"
+		cfg.Service.Type = "text-to-image"
+		cfg.Service.ModelType = "dall-e-3"
+		cfg.Service.TargetSeparated = true
+	})
+	if err := env.ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	// Malformed JSON: broker's forceB64ResponseFormat can't parse, so rewriting fails.
+	req := httptest.NewRequest("POST", "/v1/proxy/images/generations", strings.NewReader(`{"prompt":`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		t.Errorf("malformed body must not succeed, got 200; body=%s", w.Body.String())
+	}
+	if providerHit {
+		t.Error("provider must not be called when request-body normalisation fails (would have forwarded response_format=url)")
+	}
+}
+
+// TestTextToImage_URLFormat_ProviderNonCompliant_Refused pins the response-side
+// guard. When the client asked for response_format=url but the provider
+// returned data[].url instead of b64, the broker must NOT forward the body —
+// those URLs are the provider's LAN endpoints, useless to the client.
+func TestTextToImage_URLFormat_ProviderNonCompliant_Refused(t *testing.T) {
+	// Provider ignores response_format=b64_json and returns URL form anyway.
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"created":1,"data":[{"url":"http://10.0.0.5:9090/tmp/leaked.png"}]}`))
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.ServingURL = "http://broker.test"
+		cfg.Service.Type = "text-to-image"
+		cfg.Service.ModelType = "dall-e-3"
+		cfg.Service.TargetSeparated = true
+	})
+	if err := env.ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/proxy/images/generations",
+		strings.NewReader(`{"prompt":"cat","response_format":"url"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		t.Errorf("expected non-200 when provider returns URL form under response_format=url; got 200 body=%s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "10.0.0.5") {
+		t.Errorf("client response must not contain provider LAN URL, got: %s", w.Body.String())
+	}
+}

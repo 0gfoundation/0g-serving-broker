@@ -74,10 +74,15 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		} else {
 			originalFormat, rewritten, err = forceB64ResponseFormat(reqBody)
 		}
-		if err == nil {
-			ctx.Set("clientResponseFormat", originalFormat)
-			reqBody = rewritten
+		// Do NOT forward a body we could not normalise. If we did, a client that
+		// sent response_format=url would get the provider's LAN-private URL
+		// back verbatim — the exact leak the rewrite exists to prevent.
+		if err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, errors.Wrapf(err, "image request body could not be normalised (content-type=%q)", contentType)
 		}
+		ctx.Set("clientResponseFormat", originalFormat)
+		reqBody = rewritten
 	}
 
 	// For text-to-image requests, ensure wait=true query parameter is set

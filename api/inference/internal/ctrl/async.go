@@ -372,40 +372,64 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		return
 	}
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
+	// Read response body (original provider bytes, before any URL rewrite).
+	providerRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.markAsyncJobFailed(jobID, "failed to read provider response: "+err.Error())
 		return
 	}
+	respBody := providerRespBody
+
+	// For image services, try to extract b64 images once — used for both URL
+	// rewriting and TEE signing (image-byte binding). extractOK stays false for
+	// non-image services or when the provider did not return a b64 envelope.
+	var (
+		images    [][]byte
+		extractOK bool
+	)
+	if svcType == "text-to-image" || svcType == "image-editing" {
+		decoded, exErr := extractB64Images(providerRespBody)
+		if exErr == nil {
+			images = decoded
+			extractOK = true
+		} else if clientResponseFormat == "url" {
+			// Refuse rather than pass through: provider bytes may carry LAN URLs
+			// the client can't reach, which is exactly what rewriting prevents.
+			c.markAsyncJobFailed(jobID, "provider returned non-b64 image response, refusing to forward: "+exErr.Error())
+			return
+		}
+	}
 
 	// If the caller asked for response_format=url, persist decoded images locally
 	// and rewrite data[].b64_json → data[].url. jobID doubles as the chatKey —
-	// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. On any error we
-	// fall back to the provider's b64 body (the user at worst gets the wrong
-	// format, never a broken URL).
-	if clientResponseFormat == "url" && c.imageStore != nil &&
-		(svcType == "text-to-image" || svcType == "image-editing") {
-		if images, exErr := extractB64Images(respBody); exErr != nil {
-			c.logger.Warnf("Async job %s: extract b64 images failed, returning b64: %v", jobID, exErr)
-		} else if stErr := c.imageStore.store(jobID, images); stErr != nil {
+	// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. Store / build
+	// failures fall back to b64 (safe — body is confirmed b64 above).
+	if clientResponseFormat == "url" && extractOK && c.imageStore != nil {
+		if stErr := c.imageStore.store(jobID, images); stErr != nil {
 			c.logger.Warnf("Async job %s: store images failed, returning b64: %v", jobID, stErr)
-		} else if rewritten, bErr := buildURLResponse(respBody, jobID, len(images), c.Service.ServingURL); bErr != nil {
+		} else if rewritten, bErr := buildURLResponse(providerRespBody, jobID, len(images), c.Service.ServingURL); bErr != nil {
 			c.logger.Warnf("Async job %s: build URL response failed, returning b64: %v", jobID, bErr)
 		} else {
 			respBody = rewritten
 		}
 	}
 
-	// TEE response signing — same as sync path (text_to_image.go, image_editing.go).
-	// When TargetSeparated is false, the broker signs the request+response pair and
-	// caches the signature under a chatKey. The client retrieves the chatKey via the
-	// ZG-Res-Key header on the poll response to verify TEE integrity.
+	// TEE response signing — mirrors the sync path in text_to_image.go /
+	// image_editing.go. For image services we sign the decoded image bytes via
+	// signImageResponse so the signature binds the served content, not the URL
+	// envelope the client receives. Falls back to signChatWithKey over the
+	// original provider body (never the rewritten URL JSON).
 	var chatKey string
 	if !c.Service.TargetSeparated {
 		chatKey = uuid.NewString()
-		if err := c.signChatWithKey(params.RequestBody, respBody, chatKey); err != nil {
-			c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, err)
+		var signErr error
+		if extractOK && len(images) > 0 {
+			signErr = c.signImageResponse(params.RequestBody, images, chatKey)
+		} else {
+			signErr = c.signChatWithKey(params.RequestBody, providerRespBody, chatKey)
+		}
+		if signErr != nil {
+			c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, signErr)
 			chatKey = "" // don't store an unusable key
 		}
 	}

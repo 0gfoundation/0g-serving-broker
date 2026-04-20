@@ -2,7 +2,9 @@ package ctrl
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,11 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -1410,6 +1414,100 @@ func TestProcessAsyncJob_URLFormat_PassThrough(t *testing.T) {
 	}
 	if _, err := ctrl.GetImage("b64-job", 0); err == nil {
 		t.Error("imageStore should be empty when url rewrite was not requested")
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_SignatureBindsImageBytes is the regression
+// guard for the async TEE-signing bug: when clientResponseFormat=url, the
+// broker rewrites respBody to the URL envelope before signing. An earlier
+// version of processAsyncJob passed the rewritten envelope to signChatWithKey,
+// so the signature covered URL strings — images at /v1/proxy/images/{jobID}/{i}
+// were bound by nothing. The fix routes image responses through
+// signImageResponse(reqBody, images, chatKey), producing a signature text of
+// sha256(reqBody):sha256(img0),sha256(img1),... This test asserts the cached
+// signature matches that form — not the URL-envelope form — and would fail
+// against the old code.
+func TestProcessAsyncJob_URLFormat_SignatureBindsImageBytes(t *testing.T) {
+	img0 := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF}
+	img1 := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xCA, 0xFE, 0xBA, 0xBE}
+
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q},{"b64_json":%q}]}`,
+			base64.StdEncoding.EncodeToString(img0),
+			base64.StdEncoding.EncodeToString(img1))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "sig-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	// Enable TEE signing (newTestCtrl defaults TargetSeparated=true which skips it).
+	ctrl.Service.TargetSeparated = false
+	ctrl.Service.ServingURL = "https://broker.test"
+	priv, _ := crypto.GenerateKey()
+	ctrl.teeService = &teeutil.TeeService{
+		ProviderSigner: priv,
+		Address:        crypto.PubkeyToAddress(priv.PublicKey),
+	}
+	if ctrl.svcCache == nil {
+		ctrl.svcCache = cache.New(5*time.Minute, 10*time.Minute)
+	}
+	ctrl.chatCacheExpiration = 5 * time.Minute
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	reqBody := []byte(`{"prompt":"cat","n":2,"response_format":"url"}`)
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "sig-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    reqBody,
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("sig-job")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+
+	// Recover chatKey from stored ZG-Res-Key header.
+	var respHeaders map[string][]string
+	if err := json.Unmarshal(job.ResponseHeaders, &respHeaders); err != nil {
+		t.Fatalf("decode headers: %v", err)
+	}
+	keys := respHeaders["ZG-Res-Key"]
+	if len(keys) == 0 {
+		t.Fatal("expected ZG-Res-Key header to be stored after signing")
+	}
+	chatKey := keys[0]
+
+	sum := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	wantText := sum(reqBody) + ":" + sum(img0) + "," + sum(img1)
+
+	cached, ok := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
+	if !ok {
+		t.Fatal("no signature cached under chatKey — signing step did not run")
+	}
+	sig, ok := cached.(ChatSignature)
+	if !ok {
+		t.Fatalf("cached value is not ChatSignature: %T", cached)
+	}
+	if sig.Text != wantText {
+		t.Errorf("\nsignature text binds the WRONG content.\n got: %s\nwant: %s\n(old buggy path signed the URL envelope, not image bytes)", sig.Text, wantText)
+	}
+	// Extra guard: must not be sha256(req):sha256(rewrittenURLJSON).
+	if strings.Contains(sig.Text, "broker.test") {
+		t.Errorf("signature text contains URL host; must cover image bytes, got: %s", sig.Text)
 	}
 }
 

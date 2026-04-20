@@ -105,6 +105,57 @@ func TestImageStore_DiskFilesRemovedAfterEviction(t *testing.T) {
 	}
 }
 
+// TestImageStore_RejectsTraversalKeys pins the defence-in-depth key validator.
+// Callers today only pass UUIDs, but enforcement must live at the filesystem
+// boundary so a future caller can't walk out of the store directory.
+func TestImageStore_RejectsTraversalKeys(t *testing.T) {
+	store, err := newImageStore(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("newImageStore: %v", err)
+	}
+
+	for _, k := range []string{"", "../escape", "foo/bar", `foo\bar`, "nul\x00byte", "a/../b", ".."} {
+		t.Run("store:"+k, func(t *testing.T) {
+			if err := store.store(k, [][]byte{[]byte("x")}); err == nil {
+				t.Errorf("store(%q) should reject forbidden key, got nil", k)
+			}
+		})
+		t.Run("get:"+k, func(t *testing.T) {
+			if _, err := store.get(k, 0); err == nil {
+				t.Errorf("get(%q) should reject forbidden key, got nil", k)
+			}
+		})
+	}
+}
+
+// TestImageStore_CloseRemovesDiskFiles verifies Close fires OnEvicted for every
+// live entry, removing the per-key directory on disk rather than just dropping
+// the in-memory TTL table.
+func TestImageStore_CloseRemovesDiskFiles(t *testing.T) {
+	dir := t.TempDir()
+	store, err := newImageStore(dir, time.Minute)
+	if err != nil {
+		t.Fatalf("newImageStore: %v", err)
+	}
+	if err := store.store("k1", [][]byte{[]byte("a")}); err != nil {
+		t.Fatalf("store k1: %v", err)
+	}
+	if err := store.store("k2", [][]byte{[]byte("b"), []byte("c")}); err != nil {
+		t.Fatalf("store k2: %v", err)
+	}
+
+	store.Close()
+
+	for _, k := range []string{"k1", "k2"} {
+		if _, err := os.Stat(dir + "/" + k); !os.IsNotExist(err) {
+			t.Errorf("Close did not remove %s (stat err: %v)", k, err)
+		}
+		if _, err := store.get(k, 0); err == nil {
+			t.Errorf("get(%s) after Close should fail, got nil error", k)
+		}
+	}
+}
+
 func TestDetectContentType_PNG(t *testing.T) {
 	// Minimal valid PNG header (8 bytes signature).
 	pngSig := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}

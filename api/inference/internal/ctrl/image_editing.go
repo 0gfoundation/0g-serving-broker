@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -181,8 +182,20 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	originalFormat, _ := ctx.Get("clientResponseFormat")
 	wantURL := originalFormat == "url"
 
+	// If the client asked for url but the provider returned something we can't
+	// decode (non-b64 envelope, empty array), refuse the response rather than
+	// passing provider bytes through — they may contain LAN-private URLs.
+	if wantURL && (extractErr != nil || len(images) == 0) {
+		ctx.Set("ignoreError", true)
+		err := fmt.Errorf("provider returned non-b64 image response, refusing to forward (may contain LAN-private URLs): %w", extractErr)
+		c.handleBrokerError(ctx, err, "image-editing response for response_format=url")
+		return err
+	}
+
+	// Build the body to send to the client. For wantURL, store + rewrite; any
+	// failure here downgrades to b64 (safe — body is confirmed b64 above).
 	clientBody := body
-	if wantURL && extractErr == nil && len(images) > 0 && c.imageStore != nil {
+	if wantURL && c.imageStore != nil {
 		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
 			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
 		} else {
