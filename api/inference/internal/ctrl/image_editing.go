@@ -204,7 +204,12 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 
 	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
-			c.logger.Warnf("Client disconnected before receiving full response: %v", writeErr)
+			// Matches handleTextToImageResponse: downstream middleware keys off
+			// ignoreError to suppress noisy error logs / metrics for expected
+			// client-disconnect cases. Without this, image-editing disconnects
+			// would surface as errors while text-to-image disconnects wouldn't.
+			ctx.Set("ignoreError", true)
+			c.logger.Warnf("Client disconnected during image-editing response, billing for completed response (%d bytes)", len(body))
 		} else {
 			c.handleBrokerError(ctx, writeErr, "write image editing response")
 			return writeErr

@@ -513,9 +513,13 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 //
 // Two cases:
 //  1. response_format field present — replace its body with "b64_json".
-//  2. response_format field absent — append a new part. OpenAI's documented
-//     default for /v1/images/edits is "url", so originalFormat is reported as
-//     "url" and the handler runs URL rewrite so the caller sees broker URLs.
+//     originalFormat returns the value the client sent (e.g. "url" or "b64_json").
+//  2. response_format field absent — append a new part set to "b64_json", and
+//     report originalFormat as "" (NOT "url"). We diverge from OpenAI's
+//     per-endpoint default here because forwarding the provider's fallback
+//     would leak LAN-private URLs; clients wanting broker-served URLs must
+//     opt in with response_format=url. This keeps JSON and multipart paths
+//     consistent: an absent field means b64 pass-through in both.
 //
 // Uses mime/multipart.Reader so that adversarial file content (e.g. an image
 // byte sequence that happens to contain the literal string
