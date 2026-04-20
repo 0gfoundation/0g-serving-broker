@@ -57,9 +57,23 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// For text-to-image and image-editing: store the original client body (used for
 	// signing) and rewrite response_format to b64_json so the broker always receives
 	// raw image bytes from the provider rather than LAN-inaccessible URLs.
+	// Dispatches by Content-Type: JSON bodies go through forceB64ResponseFormat;
+	// multipart/form-data bodies go through rewriteMultipartResponseFormat so that
+	// image-editing clients posting multipart with response_format=url still trigger
+	// broker-side URL rewriting.
 	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
 		ctx.Set("clientReqBody", reqBody)
-		originalFormat, rewritten, err := forceB64ResponseFormat(reqBody)
+		contentType := strings.ToLower(ctx.Request.Header.Get("Content-Type"))
+		var (
+			originalFormat string
+			rewritten      []byte
+			err            error
+		)
+		if strings.HasPrefix(contentType, "multipart/") {
+			originalFormat, rewritten, err = rewriteMultipartResponseFormat(reqBody)
+		} else {
+			originalFormat, rewritten, err = forceB64ResponseFormat(reqBody)
+		}
 		if err == nil {
 			ctx.Set("clientResponseFormat", originalFormat)
 			reqBody = rewritten
@@ -480,6 +494,50 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	}
 
 	return modifiedBody, nil
+}
+
+// rewriteMultipartResponseFormat scans a multipart/form-data body for the
+// response_format form field and rewrites its value to "b64_json". Returns the
+// original field value (empty string if the field was absent) and the modified
+// body. The boundary is not altered — only the value bytes of the form field
+// are replaced, so binary file parts (e.g. the uploaded image) are preserved
+// byte-for-byte.
+//
+// Limitation: if the client did not include a response_format field at all,
+// this function leaves the body unchanged. Adding a new multipart part would
+// require parsing the boundary from the Content-Type header, which is out of
+// scope here — the URL-rewrite flow only activates when the client explicitly
+// asked for "url".
+func rewriteMultipartResponseFormat(body []byte) (originalFormat string, modified []byte, err error) {
+	marker := []byte(`name="response_format"`)
+	idx := bytes.Index(body, marker)
+	if idx == -1 {
+		return "", body, nil
+	}
+
+	headerSep := []byte("\r\n\r\n")
+	sepIdx := bytes.Index(body[idx:], headerSep)
+	if sepIdx == -1 {
+		return "", body, fmt.Errorf("multipart: malformed response_format part (missing header terminator)")
+	}
+	valueStart := idx + sepIdx + len(headerSep)
+
+	endIdx := bytes.Index(body[valueStart:], []byte("\r\n--"))
+	if endIdx == -1 {
+		return "", body, fmt.Errorf("multipart: malformed response_format part (missing boundary terminator)")
+	}
+	valueEnd := valueStart + endIdx
+
+	originalFormat = string(body[valueStart:valueEnd])
+	if originalFormat == "b64_json" {
+		return originalFormat, body, nil
+	}
+
+	newBody := make([]byte, 0, len(body)+len("b64_json"))
+	newBody = append(newBody, body[:valueStart]...)
+	newBody = append(newBody, []byte("b64_json")...)
+	newBody = append(newBody, body[valueEnd:]...)
+	return originalFormat, newBody, nil
 }
 
 // forceB64ResponseFormat rewrites the response_format field in a JSON request body

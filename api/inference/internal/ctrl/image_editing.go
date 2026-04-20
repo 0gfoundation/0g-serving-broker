@@ -186,7 +186,7 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
 			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
 		} else {
-			rewritten, buildErr := buildURLResponse(body, chatKey, len(images), ctx.Request)
+			rewritten, buildErr := buildURLResponse(body, chatKey, len(images), c.Service.ServingURL)
 			if buildErr != nil {
 				c.logger.Warnf("Failed to build URL response, sending b64: %v", buildErr)
 			} else {

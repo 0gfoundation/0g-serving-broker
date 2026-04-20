@@ -1,10 +1,14 @@
 package ctrl
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1201,6 +1205,211 @@ func TestProcessAsyncJob_NonWhitelisted_BillingDBFails(t *testing.T) {
 	}
 	if !strings.Contains(job.ErrorMessage, "failed to store result") {
 		t.Errorf("expected 'failed to store result' error, got: %s", job.ErrorMessage)
+	}
+}
+
+// ==========================================================================
+// processAsyncJob — response_format="url" rewrite
+// ==========================================================================
+
+// TestProcessAsyncJob_URLFormat_JSON covers the async equivalent of the sync
+// text-to-image URL flow: the upstream request is forced to b64_json, the
+// provider's b64 response is stored locally, and the stored async result
+// carries broker-served URLs keyed off jobID.
+func TestProcessAsyncJob_URLFormat_JSON(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
+
+	var providerSawFormat string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]interface{}
+		_ = json.Unmarshal(body, &req)
+		providerSawFormat, _ = req["response_format"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"created":1,"data":[{"b64_json":"` + b64 + `"},{"b64_json":"` + b64 + `"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "url-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "https://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "url-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"cat","n":2,"response_format":"url"}`),
+		IsWhitelisted:  true,
+	})
+
+	if providerSawFormat != "b64_json" {
+		t.Errorf("provider response_format = %q, want b64_json (broker must rewrite url→b64 upstream)", providerSawFormat)
+	}
+
+	job, _ := store.GetAsyncJob("url-job")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(job.ResponseBody, &resp); err != nil {
+		t.Fatalf("unmarshal stored response: %v", err)
+	}
+	data, _ := resp["data"].([]interface{})
+	if len(data) != 2 {
+		t.Fatalf("expected 2 data entries in stored response, got %d", len(data))
+	}
+	for i, raw := range data {
+		item := raw.(map[string]interface{})
+		if _, has := item["b64_json"]; has {
+			t.Errorf("data[%d].b64_json should be absent when url format requested", i)
+		}
+		gotURL, _ := item["url"].(string)
+		want := "https://broker.test/v1/proxy/images/url-job/" + strconv.Itoa(i)
+		if gotURL != want {
+			t.Errorf("data[%d].url = %q, want %q", i, gotURL, want)
+		}
+
+		img, err := ctrl.GetImage("url-job", i)
+		if err != nil {
+			t.Errorf("GetImage(url-job, %d): %v", i, err)
+			continue
+		}
+		if !bytes.Equal(img, pngBytes) {
+			t.Errorf("stored image %d does not match provider bytes", i)
+		}
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_Multipart pins the multipart image-editing
+// variant: the stored request body has a response_format form field set to
+// "url", the worker must rewrite it to b64_json before dispatching, and the
+// stored response must carry broker URLs.
+func TestProcessAsyncJob_URLFormat_Multipart(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
+
+	var providerSawFormat string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(32 << 20)
+		providerSawFormat = r.FormValue("response_format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"created":1,"data":[{"b64_json":"` + b64 + `"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "url-edit", Status: model.AsyncJobStatusPending, ServiceType: "image-editing",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "https://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	boundary := "----AsyncUrlBoundary"
+	body := "--" + boundary + "\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it red\r\n" +
+		"--" + boundary + "\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n1\r\n" +
+		"--" + boundary + "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nurl\r\n" +
+		"--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\nfake-png\r\n" +
+		"--" + boundary + "--"
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "url-edit",
+		ServiceType:    "image-editing",
+		RequestHeaders: headers,
+		RequestBody:    []byte(body),
+		IsWhitelisted:  true,
+	})
+
+	if providerSawFormat != "b64_json" {
+		t.Errorf("provider response_format = %q, want b64_json", providerSawFormat)
+	}
+
+	job, _ := store.GetAsyncJob("url-edit")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(job.ResponseBody, &resp); err != nil {
+		t.Fatalf("unmarshal stored response: %v", err)
+	}
+	item := resp["data"].([]interface{})[0].(map[string]interface{})
+	gotURL, _ := item["url"].(string)
+	want := "https://broker.test/v1/proxy/images/url-edit/0"
+	if gotURL != want {
+		t.Errorf("url = %q, want %q", gotURL, want)
+	}
+	if _, has := item["b64_json"]; has {
+		t.Error("b64_json should be absent when url format requested")
+	}
+	img, err := ctrl.GetImage("url-edit", 0)
+	if err != nil || !bytes.Equal(img, pngBytes) {
+		t.Errorf("stored image mismatch: err=%v", err)
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_PassThrough ensures b64_json requests are not
+// rewritten — the stored response still carries b64_json and no image-store
+// entries are created.
+func TestProcessAsyncJob_URLFormat_PassThrough(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("px"))
+
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"b64_json":"` + b64 + `"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "b64-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "https://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "b64-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"cat","response_format":"b64_json"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("b64-job")
+	var resp map[string]interface{}
+	if err := json.Unmarshal(job.ResponseBody, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	item := resp["data"].([]interface{})[0].(map[string]interface{})
+	if gotB64, _ := item["b64_json"].(string); gotB64 != b64 {
+		t.Errorf("b64_json lost in pass-through: got len=%d, want len=%d", len(gotB64), len(b64))
+	}
+	if _, has := item["url"]; has {
+		t.Error("url should not be injected when b64_json requested")
+	}
+	if _, err := ctrl.GetImage("b64-job", 0); err == nil {
+		t.Error("imageStore should be empty when url rewrite was not requested")
 	}
 }
 

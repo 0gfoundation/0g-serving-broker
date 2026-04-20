@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -272,6 +273,31 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		return
 	}
 
+	// response_format=url handling, mirroring the sync path in PrepareHTTPRequest:
+	// rewrite the upstream body to b64_json so the broker receives raw image bytes
+	// (provider-hosted URLs are not LAN-reachable from the client). clientResponseFormat
+	// captures what the caller originally asked for so we can re-rewrite the response
+	// below. reqBody (forwarded to provider) is mutated; params.RequestBody stays
+	// untouched so TEE signing binds the client's original bytes.
+	var clientResponseFormat string
+	if svcType == "text-to-image" || svcType == "image-editing" {
+		contentType := extractContentType(params.RequestHeaders)
+		var (
+			orig      string
+			rewritten []byte
+			rwErr     error
+		)
+		if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {
+			orig, rewritten, rwErr = rewriteMultipartResponseFormat(reqBody)
+		} else {
+			orig, rewritten, rwErr = forceB64ResponseFormat(reqBody)
+		}
+		if rwErr == nil {
+			clientResponseFormat = orig
+			reqBody = rewritten
+		}
+	}
+
 	// Build target URL
 	targetURL := c.Service.TargetURL
 	switch svcType {
@@ -351,6 +377,24 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	if err != nil {
 		c.markAsyncJobFailed(jobID, "failed to read provider response: "+err.Error())
 		return
+	}
+
+	// If the caller asked for response_format=url, persist decoded images locally
+	// and rewrite data[].b64_json → data[].url. jobID doubles as the chatKey —
+	// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. On any error we
+	// fall back to the provider's b64 body (the user at worst gets the wrong
+	// format, never a broken URL).
+	if clientResponseFormat == "url" && c.imageStore != nil &&
+		(svcType == "text-to-image" || svcType == "image-editing") {
+		if images, exErr := extractB64Images(respBody); exErr != nil {
+			c.logger.Warnf("Async job %s: extract b64 images failed, returning b64: %v", jobID, exErr)
+		} else if stErr := c.imageStore.store(jobID, images); stErr != nil {
+			c.logger.Warnf("Async job %s: store images failed, returning b64: %v", jobID, stErr)
+		} else if rewritten, bErr := buildURLResponse(respBody, jobID, len(images), c.Service.ServingURL); bErr != nil {
+			c.logger.Warnf("Async job %s: build URL response failed, returning b64: %v", jobID, bErr)
+		} else {
+			respBody = rewritten
+		}
 	}
 
 	// TEE response signing — same as sync path (text_to_image.go, image_editing.go).
@@ -447,4 +491,23 @@ func (c *Ctrl) markAsyncJobFailed(jobID, errMsg string) {
 	if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusFailed, nil, nil, errMsg); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as failed: %v", jobID, err)
 	}
+}
+
+// extractContentType pulls Content-Type out of the JSON-serialised request headers
+// stored on an async job. Returns "" when the header is absent or the blob is
+// unparseable — callers must handle both.
+func extractContentType(reqHeaders []byte) string {
+	if len(reqHeaders) == 0 {
+		return ""
+	}
+	var saved map[string][]string
+	if err := json.Unmarshal(reqHeaders, &saved); err != nil {
+		return ""
+	}
+	for k, vals := range saved {
+		if strings.EqualFold(k, "Content-Type") && len(vals) > 0 {
+			return vals[0]
+		}
+	}
+	return ""
 }

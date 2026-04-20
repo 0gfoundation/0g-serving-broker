@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -94,7 +96,7 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
 			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
 		} else {
-			rewritten, buildErr := buildURLResponse(body, chatKey, len(images), ctx.Request)
+			rewritten, buildErr := buildURLResponse(body, chatKey, len(images), c.Service.ServingURL)
 			if buildErr != nil {
 				c.logger.Warnf("Failed to build URL response, sending b64: %v", buildErr)
 			} else {
@@ -174,17 +176,24 @@ func extractB64Images(body []byte) ([][]byte, error) {
 
 // buildURLResponse replaces each data[i].b64_json with a broker-served URL while
 // preserving all other fields (e.g. revised_prompt, created).
-func buildURLResponse(body []byte, chatKey string, count int, r *http.Request) ([]byte, error) {
+//
+// The URL base is derived from the operator-configured service.servingUrl so it
+// matches the public URL the provider registered on-chain. Returns an error if
+// servingUrl is missing or malformed; the caller falls back to b64 on error.
+func buildURLResponse(body []byte, chatKey string, count int, servingURL string) ([]byte, error) {
 	var envelope imageResponseEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, fmt.Errorf("unmarshal image response: %w", err)
 	}
 
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
+	if servingURL == "" {
+		return nil, fmt.Errorf("service.servingUrl is not configured")
 	}
-	base := scheme + "://" + r.Host + constant.ServicePrefix + "/images/" + chatKey + "/"
+	u, err := url.Parse(servingURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("service.servingUrl %q is not a valid absolute URL", servingURL)
+	}
+	base := strings.TrimRight(servingURL, "/") + constant.ServicePrefix + "/images/" + chatKey + "/"
 
 	for i := range envelope.Data {
 		if i >= count {

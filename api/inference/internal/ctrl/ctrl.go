@@ -116,7 +116,14 @@ func New(
 		imageCacheDir = "/var/log/inference"
 	}
 	imageCacheDir += "/image_cache"
-	imgStore, err := newImageStore(imageCacheDir, cfg.ChatCacheExpiration)
+	// Keep images alive at least as long as the async result that references them.
+	// Otherwise a completed async job can return broker URLs whose backing files
+	// have already been evicted, producing a 404 before the job row itself expires.
+	imageTTL := cfg.ChatCacheExpiration
+	if asyncTTL := time.Duration(cfg.Async.ResultTTLMinutes) * time.Minute; asyncTTL > imageTTL {
+		imageTTL = asyncTTL
+	}
+	imgStore, err := newImageStore(imageCacheDir, imageTTL)
 	if err != nil {
 		logger.Warnf("Failed to initialize image store at %q, image URL serving disabled: %v", imageCacheDir, err)
 		imgStore = nil
