@@ -1509,6 +1509,62 @@ func TestProcessAsyncJob_URLFormat_SignatureBindsImageBytes(t *testing.T) {
 	if strings.Contains(sig.Text, "broker.test") {
 		t.Errorf("signature text contains URL host; must cover image bytes, got: %s", sig.Text)
 	}
+
+	// Full round-trip: recover the signer address from the signature and compare
+	// to the broker's TEE signing key. This is what external verifiers actually
+	// run, and it's the only check that catches a malformed signature byte.
+	recovered := recoverSignerAddress(t, sig)
+	if recovered != ctrl.teeService.Address {
+		t.Errorf("recovered signer %s != broker TEE address %s", recovered.Hex(), ctrl.teeService.Address.Hex())
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_ProviderReturnsURLForm_JobFailed pins the
+// response-side fallback-leak guard on the async path. A non-compliant provider
+// ignores response_format=b64_json and returns LAN-private URLs; the broker
+// must mark the job failed rather than storing/forwarding that body. Absence
+// of this test would let the earlier pass-through behaviour regress silently:
+// job completes, ResponseBody contains "http://10.0.0.7/leaked.png", client
+// gets a URL it cannot reach (and the broker has signed it).
+func TestProcessAsyncJob_URLFormat_ProviderReturnsURLForm_JobFailed(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"url":"http://10.0.0.7/leaked.png"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "leak-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "http://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "leak-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"x","response_format":"url"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("leak-job")
+	if job.Status != model.AsyncJobStatusFailed {
+		t.Fatalf("expected failed status when provider returns URL form under response_format=url; got %s (body=%q)", job.Status, job.ResponseBody)
+	}
+	// The LAN URL must not survive anywhere the client could read it.
+	if bytes.Contains(job.ResponseBody, []byte("10.0.0.7")) || bytes.Contains(job.ResponseBody, []byte("leaked.png")) {
+		t.Errorf("provider LAN URL leaked into stored ResponseBody: %s", job.ResponseBody)
+	}
+	if strings.Contains(job.ErrorMessage, "10.0.0.7") || strings.Contains(job.ErrorMessage, "leaked.png") {
+		t.Errorf("provider LAN URL leaked into ErrorMessage: %s", job.ErrorMessage)
+	}
 }
 
 // ==========================================================================

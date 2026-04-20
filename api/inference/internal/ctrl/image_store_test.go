@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -77,8 +78,13 @@ func TestImageStore_GetExpired(t *testing.T) {
 	}
 }
 
+// TestImageStore_DiskFilesRemovedAfterEviction verifies that when an entry
+// expires the backing per-key directory is removed by OnEvicted. We force the
+// eviction deterministically by sleeping past TTL and then calling
+// DeleteExpired ourselves — relying on the go-cache janitor's ttl/2 tick would
+// leave the test racing against scheduler noise.
 func TestImageStore_DiskFilesRemovedAfterEviction(t *testing.T) {
-	const ttl = 80 * time.Millisecond
+	const ttl = 10 * time.Millisecond
 	dir := t.TempDir()
 	store, err := newImageStore(dir, ttl)
 	if err != nil {
@@ -90,18 +96,52 @@ func TestImageStore_DiskFilesRemovedAfterEviction(t *testing.T) {
 		t.Fatalf("store: %v", err)
 	}
 
-	imgPath := dir + "/" + chatKey + "/0.bin"
+	imgPath := filepath.Join(dir, chatKey, "0.bin")
 	if _, err := os.Stat(imgPath); err != nil {
 		t.Fatalf("image file should exist before TTL: %v", err)
 	}
 
-	// Wait for TTL + cleanup goroutine (runs at ttl/2 intervals).
-	time.Sleep(ttl * 5)
-	// on-eviction fires synchronously inside the cache cleanup goroutine.
-	time.Sleep(20 * time.Millisecond)
+	// Let the entry expire, then fire eviction explicitly — DeleteExpired walks
+	// the cache, removes expired items, and calls OnEvicted for each (which
+	// runs RemoveAll on the disk directory).
+	time.Sleep(ttl * 2)
+	store.cache.DeleteExpired()
 
 	if _, err := os.Stat(imgPath); !os.IsNotExist(err) {
-		t.Logf("image file cleanup is timing-dependent; skipping hard assert (stat err: %v)", err)
+		t.Errorf("OnEvicted should have removed %s after TTL; stat err: %v", imgPath, err)
+	}
+}
+
+// TestImageStore_UUIDIsTheCapability documents the authz model: the chatKey is
+// the ONLY secret needed to retrieve an image (handleImageServeRoute does not
+// check session auth — see proxy.go). This mirrors how OpenAI's image URLs
+// work: the unguessable token in the path IS the access token. Security
+// therefore hinges on callers passing a crypto-random UUID; never a value
+// derived from user input or a monotonic counter.
+func TestImageStore_UUIDIsTheCapability(t *testing.T) {
+	store, err := newImageStore(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatalf("newImageStore: %v", err)
+	}
+
+	if err := store.store("real-secret-uuid", [][]byte{[]byte("private")}); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	// An attacker guessing a different key — no matter how close — cannot read.
+	for _, guess := range []string{"real-secret-uui", "real-secret-uuid2", "other-uuid"} {
+		if _, err := store.get(guess, 0); err == nil {
+			t.Errorf("get(%q) must fail without exact chatKey, got nil", guess)
+		}
+	}
+
+	// The exact key retrieves the bytes.
+	got, err := store.get("real-secret-uuid", 0)
+	if err != nil {
+		t.Fatalf("get with correct key: %v", err)
+	}
+	if string(got) != "private" {
+		t.Errorf("get returned wrong bytes: %q", got)
 	}
 }
 
