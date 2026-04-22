@@ -81,6 +81,14 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 			sanitized5xx:     true,
 		},
 		{
+			// 503 is retry-friendly and must keep the actionable message so
+			// SDKs can distinguish "retry shortly" from a generic broker bug.
+			name:             "NewServiceUnavailable -> 503 (actionable body)",
+			err:              errors.NewServiceUnavailable("encrypted LoRA not yet available; retry shortly"),
+			wantStatus:       http.StatusServiceUnavailable,
+			wantBodyContains: "retry shortly",
+		},
+		{
 			name:             "chain-preserving wrap -> 401",
 			err:              errors.Unauthorized(errors.New("invalid sig v")),
 			wantStatus:       http.StatusUnauthorized,

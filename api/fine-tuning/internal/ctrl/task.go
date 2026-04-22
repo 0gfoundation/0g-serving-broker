@@ -529,11 +529,14 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 
 	// Return encrypted file path (created by finalizer).
 	// If progress is Delivered/UserAcknowledged/Finished (checked above) the
-	// finalizer should have written this file; its absence is a broker-side
-	// inconsistency, not a missing resource from the user's perspective.
+	// finalizer should have written this file. A missing file here is almost
+	// always transient — filesystem remount, cleanup race, cold distributed
+	// cache — and is safe for the client to retry, so surface it as 503
+	// Service Unavailable rather than 500 (which signals a broker bug and is
+	// treated as non-retriable by most SDKs).
 	encryptedFilePath := paths.Output + "_encrypted.data"
 	if _, err := os.Stat(encryptedFilePath); os.IsNotExist(err) {
-		return "", errors.NewInternal("encrypted LoRA file missing for task %s in state %s", id.String(), progress)
+		return "", errors.NewServiceUnavailable("encrypted LoRA not yet available for task %s (state %s); retry shortly", id.String(), progress)
 	}
 
 	return encryptedFilePath, nil

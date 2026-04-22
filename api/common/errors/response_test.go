@@ -32,6 +32,8 @@ func TestResponse_StatusMapping(t *testing.T) {
 		{"conflict", NewConflict("busy"), http.StatusConflict, "busy"},
 		{"internal is sanitized", NewInternal("driver oops"), http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError)},
 		{"internal wrap is sanitized", Internal(New("schema column not found")), http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError)},
+		{"service unavailable is actionable", NewServiceUnavailable("retry shortly"), http.StatusServiceUnavailable, "retry shortly"},
+		{"service unavailable wrap preserves message", ServiceUnavailable(New("upstream warming up")), http.StatusServiceUnavailable, "upstream warming up"},
 		{"wrapped unauthorized", Wrap(NewUnauthorized("bad sig"), "provider"), http.StatusUnauthorized, "provider: bad sig"},
 		{"wrap helper preserves chain status", Unauthorized(New("bad sig")), http.StatusUnauthorized, "bad sig"},
 		{"wrap helper through Wrap", Wrap(Unauthorized(New("bad sig")), "provider"), http.StatusUnauthorized, "provider: bad sig"},

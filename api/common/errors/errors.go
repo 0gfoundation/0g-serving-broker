@@ -73,8 +73,19 @@ func NewConflict(format string, args ...interface{}) error {
 }
 
 // NewInternal returns an error that maps to HTTP 500 Internal Server Error.
+// The message will be sanitized to the generic status text before it reaches
+// the client — use NewServiceUnavailable / NewConflict / etc. when you want
+// an actionable message to be delivered.
 func NewInternal(format string, args ...interface{}) error {
 	return &HTTPError{status: http.StatusInternalServerError, err: fmt.Errorf(format, args...)}
+}
+
+// NewServiceUnavailable returns an error that maps to HTTP 503 Service
+// Unavailable — use for conditions that are expected to resolve on retry
+// (transient filesystem unavailability, upstream backpressure, warm-up).
+// The message is delivered to the client verbatim.
+func NewServiceUnavailable(format string, args ...interface{}) error {
+	return &HTTPError{status: http.StatusServiceUnavailable, err: fmt.Errorf(format, args...)}
 }
 
 // The wrappers below attach an HTTP status to an existing error while
@@ -96,4 +107,10 @@ func NotFound(err error) error { return NewHTTPError(http.StatusNotFound, err) }
 func Conflict(err error) error { return NewHTTPError(http.StatusConflict, err) }
 
 // Internal wraps err with HTTP 500 Internal Server Error.
+// The response body is sanitized before reaching the client (see Response).
 func Internal(err error) error { return NewHTTPError(http.StatusInternalServerError, err) }
+
+// ServiceUnavailable wraps err with HTTP 503 Service Unavailable.
+func ServiceUnavailable(err error) error {
+	return NewHTTPError(http.StatusServiceUnavailable, err)
+}
