@@ -255,6 +255,150 @@ service:
 	}
 }
 
+func TestLoadConfig_USDPriceDenomination(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+priceFeed:
+  sources: ["coingecko", "binance"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if !cfg.Service.IsUSDDenominated() {
+		t.Error("expected IsUSDDenominated()=true")
+	}
+	if cfg.PriceFeed.MinQuorum != 2 {
+		t.Errorf("MinQuorum default = %d, want 2 (two sources)", cfg.PriceFeed.MinQuorum)
+	}
+	if cfg.PriceFeed.MinOnChainUpdateBps != 500 {
+		t.Errorf("MinOnChainUpdateBps default = %d, want 500", cfg.PriceFeed.MinOnChainUpdateBps)
+	}
+	if cfg.PriceFeed.Symbol != "0g-usdt" {
+		t.Errorf("Symbol default = %q, want 0g-usdt", cfg.PriceFeed.Symbol)
+	}
+}
+
+func TestLoadConfig_USDMissingPrices(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSD") {
+		t.Errorf("expected error about missing inputPriceUSD, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDRejectsNativePrice(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPrice: "1000"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "must be empty") {
+		t.Errorf("expected error about native price fields, got %v", err)
+	}
+}
+
+func TestLoadConfig_NativeRejectsUSDPrice(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  inputPriceUSD: "0.50"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "must be empty") {
+		t.Errorf("expected error about USD price fields, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDInvalidDenomination(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "eur"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "priceDenomination") {
+		t.Errorf("expected error about invalid priceDenomination, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDEmptySources(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "sources") {
+		t.Errorf("expected error about empty priceFeed.sources, got %v", err)
+	}
+}
+
 func TestService_IsCentralized(t *testing.T) {
 	tests := []struct {
 		name         string

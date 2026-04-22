@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -21,23 +22,43 @@ func (c *Ctrl) GetService(ctx context.Context) (model.Service, error) {
 
 // GetCachedService returns the service from cache or fetches from contract if not cached.
 // This should be used for getting price information instead of using config.Service directly.
+//
+// When the provider is USD-denominated, the on-chain input/output prices are
+// overlaid with the latest wei prices from the in-memory price cache (the
+// on-chain values only refresh when drift exceeds MinOnChainUpdateBps, so
+// they lag the live rate).  If the cache is stale beyond the configured
+// StalenessThreshold, an error is returned so callers fail-closed on new
+// requests rather than billing at an arbitrarily out-of-date rate.
 func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
 	serviceCacheKey := "current_service"
 
+	var service model.Service
+	var fromCache bool
 	if cachedService, found := c.serviceCache.Get(serviceCacheKey); found {
 		if svc, ok := cachedService.(model.Service); ok {
-			return svc, nil
+			service = svc
+			fromCache = true
 		}
 	}
-
-	// Not in cache or invalid, fetch from contract
-	service, err := c.GetService(ctx)
-	if err != nil {
-		return model.Service{}, errors.Wrap(err, "get service from contract")
+	if !fromCache {
+		fetched, err := c.GetService(ctx)
+		if err != nil {
+			return model.Service{}, errors.Wrap(err, "get service from contract")
+		}
+		c.serviceCache.Set(serviceCacheKey, fetched, cache.DefaultExpiration)
+		service = fetched
 	}
 
-	// Cache the service data
-	c.serviceCache.Set(serviceCacheKey, service, cache.DefaultExpiration)
+	// Overlay USD-derived wei prices when USD denomination is configured.
+	if c.Service.IsUSDDenominated() && c.priceCache != nil {
+		snap := c.priceCache.Get()
+		if snap.IsStale(c.priceFeed.StalenessThreshold, time.Now()) {
+			return model.Service{}, fmt.Errorf("PRICING_UNAVAILABLE: USD price cache is stale (last update %s ago, threshold %s)",
+				time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
+		}
+		service.InputPrice = snap.InputPriceWei.String()
+		service.OutputPrice = snap.OutputPriceWei.String()
+	}
 	return service, nil
 }
 

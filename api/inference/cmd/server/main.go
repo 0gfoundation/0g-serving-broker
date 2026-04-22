@@ -22,8 +22,10 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/internal/event"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 	lorapkg "github.com/0glabs/0g-serving-broker/inference/internal/lora"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 )
 
@@ -104,7 +106,49 @@ func Main() {
 	}
 	defer contract.Close()
 
-	ctrl := ctrl.New(db, contract, config, svcCache, teeService, logger)
+	// Build the USD price-feed stack (cache + aggregator + processor) when the
+	// provider is USD-denominated.  The cache is constructed early so Ctrl
+	// can hold a reference; bootstrap (which mutates config.Service prices to
+	// their wei equivalents) runs before SyncService so first-time on-chain
+	// registration uses the correct price.
+	var priceCache *pricefeed.Cache
+	var priceProcessor *event.PriceUpdateProcessor
+	if config.Service.IsUSDDenominated() {
+		priceCache = pricefeed.NewCache()
+		sources, err := pricefeed.BuildSources(config.PriceFeed)
+		if err != nil {
+			panic(err)
+		}
+		aggregator := pricefeed.NewAggregator(
+			sources,
+			config.PriceFeed.MinQuorum,
+			config.PriceFeed.MaxRateDeviationBps,
+			config.PriceFeed.HTTPTimeout,
+			logger,
+		)
+		priceProcessor = event.NewPriceUpdateProcessor(
+			priceCache, aggregator, contract,
+			config.Service, config.TieredPricing, config.CacheTokenBilling, config.PriceFeed,
+			nil, // invalidateServiceCache is wired after ctrl is constructed
+			logger,
+		)
+		inputWei, outputWei, err := priceProcessor.Bootstrap(ctx)
+		if err != nil {
+			panic(fmt.Errorf("usd price bootstrap failed: %w", err))
+		}
+		// Overlay initial wei prices onto the config so SyncService
+		// registers the correct price at startup.
+		config.Service.InputPrice = inputWei.String()
+		config.Service.OutputPrice = outputWei.String()
+	}
+
+	ctrl := ctrl.New(db, contract, config, svcCache, teeService, priceCache, logger)
+
+	// Now that ctrl exists, wire its cache-invalidation hook so the
+	// processor clears the on-chain-service cache after pushing new prices.
+	if priceProcessor != nil {
+		priceProcessor.SetInvalidateServiceCache(ctrl.InvalidateServiceCache)
+	}
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
@@ -115,6 +159,19 @@ func Main() {
 	}
 	if err := ctrl.SyncService(ctx); err != nil {
 		panic(err)
+	}
+
+	// Start the PriceUpdateProcessor goroutine (USD mode only).  It ticks
+	// until the server shuts down and ctx is cancelled.
+	var priceProcessorCancel context.CancelFunc
+	if priceProcessor != nil {
+		var priceCtx context.Context
+		priceCtx, priceProcessorCancel = context.WithCancel(ctx)
+		go func() {
+			if err := priceProcessor.Start(priceCtx); err != nil && err != context.Canceled {
+				logger.Errorf("price update processor exited: %v", err)
+			}
+		}()
 	}
 
 	// Initialize LoRA Manager if enabled
@@ -216,6 +273,11 @@ func Main() {
 
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
+
+	// Stop the price update processor if running
+	if priceProcessorCancel != nil {
+		priceProcessorCancel()
+	}
 
 	// Stop rate limiter cleanup goroutines
 	proxy.Close()
