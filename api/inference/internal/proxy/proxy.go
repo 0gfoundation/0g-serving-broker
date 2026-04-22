@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/google/uuid"
-	"golang.org/x/time/rate"
 
 	"github.com/gin-gonic/gin"
 
@@ -33,7 +32,6 @@ type Proxy struct {
 	serviceTarget             string
 	serviceType               string
 	serviceGroup              *gin.RouterGroup
-	rateLimiter               *middleware.RateLimiter
 	concurrencyLimiter        *middleware.ConcurrencyLimiter
 	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
 	perUserRateLimiter        *middleware.PerUserRateLimiter
@@ -60,8 +58,6 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		ctrl:         ctrl,
 		logger:       logger,
 		serviceGroup: engine.Group(constant.ServicePrefix),
-		// Configure rate limiter: 15 requests per second with burst of 20
-		rateLimiter: middleware.NewRateLimiter(rate.Limit(15), 20),
 		// Configure concurrency limiter to match backend GPU capacity
 		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
 		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent),
@@ -145,9 +141,6 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	}
 
 	p.serviceGroup.Use(cors.New(corsConfig))
-
-	// Apply rate limiting middleware
-	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
 
 	// Apply global concurrency limiting to all service types.
 	// This caps total in-flight requests to match backend GPU capacity,
