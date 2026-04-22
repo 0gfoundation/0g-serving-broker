@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func (d *DB) AddTask(task *Task) error {
@@ -172,13 +173,15 @@ func (d *DB) CancelTask(id *uuid.UUID, userAddress string) error {
 		ProgressStateSetUp.String(),
 	}
 
-	ret := d.db.Model(&Task{}).Where("progress IN ? AND user_address = ?", validStates, userAddress).Update("progress", ProgressStateFailed.String())
+	ret := d.db.Model(&Task{}).Where("id = ? AND user_address = ? AND progress IN ?", id, userAddress, validStates).Update("progress", ProgressStateFailed.String())
 	if ret.Error != nil {
 		return ret.Error
 	}
 
 	if ret.RowsAffected == 0 {
-		return errors.New(fmt.Sprintf("Failed to cancel task: record not found."))
+		// Whether the row is truly absent or just in a non-cancellable state
+		// is resolved by the caller via a follow-up lookup (see ctrl.CancelTask).
+		return gorm.ErrRecordNotFound
 	}
 
 	return nil

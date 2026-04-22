@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/schema"
 )
 
@@ -245,12 +246,6 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 		return
 	}
 
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Encrypted LoRA not found. Task may not have completed encryption yet."})
-		return
-	}
-
 	ctx.Header("Content-Description", "File Transfer")
 	ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=lora_encrypted_%s.data", id.String()))
 	ctx.Header("Content-Type", "application/octet-stream")
@@ -277,47 +272,50 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 	// Get and validate signature
 	signature := ctx.PostForm("signature")
 	if signature == "" {
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Signature is required"})
+		errors.Response(ctx, errors.NewUnauthorized("Signature is required"))
 		return
 	}
 
 	// Get and validate timestamp
 	timestampStr := ctx.PostForm("timestamp")
 	if timestampStr == "" {
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Timestamp is required"})
+		errors.Response(ctx, errors.NewUnauthorized("Timestamp is required"))
 		return
 	}
 
+	// Malformed timestamp is a client-side parse error, not an auth failure —
+	// the caller hasn't presented bad credentials, it sent a syntactically
+	// invalid field that feeds into the signature flow.
 	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
 	if err != nil {
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid timestamp format"})
+		errors.Response(ctx, errors.NewBadRequest("Invalid timestamp format"))
 		return
 	}
 
 	// Verify signature with timestamp (prevents replay attacks)
 	if err := h.ctrl.VerifyUploadSignature(userAddress, signature, timestamp); err != nil {
 		h.logger.Warnf("signature verification failed for %s: %v", userAddress, err)
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("Authentication failed: %v", err)})
+		errors.Response(ctx, errors.Unauthorized(fmt.Errorf("Authentication failed: %w", err)))
 		return
 	}
 
 	file, err := ctx.FormFile("file")
 	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
+		errors.Response(ctx, errors.NewBadRequest("No file provided"))
 		return
 	}
 
 	// Check file size (max 100MB)
 	maxSize := int64(100 * 1024 * 1024)
 	if file.Size > maxSize {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 100MB"})
+		errors.Response(ctx, errors.NewBadRequest("File too large. Maximum size is 100MB"))
 		return
 	}
 
 	// Validate file extension
 	filename := strings.ToLower(file.Filename)
 	if !strings.HasSuffix(filename, ".jsonl") && !strings.HasSuffix(filename, ".json") {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Only JSONL/JSON files are allowed"})
+		errors.Response(ctx, errors.NewBadRequest("Invalid file type. Only JSONL/JSON files are allowed"))
 		return
 	}
 

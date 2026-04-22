@@ -81,13 +81,30 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 	if err := c.validateSignature(task); err != nil {
-		return errors.NewUnauthorized("%s", err.Error())
+		return errors.Unauthorized(err)
+	}
+
+	// Resolve the task up front so we can distinguish "does not exist" (404)
+	// from "exists but cannot be cancelled in its current state" (409). Both
+	// surface as RowsAffected==0 from db.CancelTask, which is ambiguous.
+	existing, err := c.db.GetTask(task.ID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.NewNotFound("task %s not found", task.ID.String())
+		}
+		return errors.Internal(errors.Wrap(err, "load task"))
+	}
+	if existing.UserAddress != task.UserAddress {
+		return errors.NewForbidden("task does not belong to this user")
 	}
 
 	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
-		// Cancellation only succeeds from Init/SettingUp/SetUp; any other state
-		// (or missing task) is a conflict from the client's perspective.
-		return errors.NewConflict("%s", err.Error())
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Task exists and owner matches, so a missing row on UPDATE means
+			// the task is in a terminal/non-cancellable state.
+			return errors.NewConflict("task cannot be cancelled in its current state (%s)", existing.Progress)
+		}
+		return errors.Internal(errors.Wrap(err, "cancel task"))
 	}
 	return nil
 }
@@ -503,10 +520,13 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	// Build paths
 	paths := utils.NewTaskPaths(filepath.Join(utils.GetDataDir(), id.String()))
 
-	// Return encrypted file path (created by finalizer)
+	// Return encrypted file path (created by finalizer).
+	// If progress is Delivered/UserAcknowledged/Finished (checked above) the
+	// finalizer should have written this file; its absence is a broker-side
+	// inconsistency, not a missing resource from the user's perspective.
 	encryptedFilePath := paths.Output + "_encrypted.data"
 	if _, err := os.Stat(encryptedFilePath); os.IsNotExist(err) {
-		return "", errors.NewNotFound("encrypted LoRA file not found. The task may not have completed encryption yet")
+		return "", errors.NewInternal("encrypted LoRA file missing for task %s in state %s", id.String(), progress)
 	}
 
 	return encryptedFilePath, nil

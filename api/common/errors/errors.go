@@ -76,3 +76,24 @@ func NewConflict(format string, args ...interface{}) error {
 func NewInternal(format string, args ...interface{}) error {
 	return &HTTPError{status: http.StatusInternalServerError, err: fmt.Errorf(format, args...)}
 }
+
+// The wrappers below attach an HTTP status to an existing error while
+// preserving the error chain (so errors.Is / errors.As continue to traverse
+// into the original cause). Prefer these over NewXxx("%s", err.Error()) when
+// you already have an error value — the format-string constructors flatten
+// the chain by design.
+
+// Unauthorized wraps err with HTTP 401 Unauthorized.
+func Unauthorized(err error) error { return NewHTTPError(http.StatusUnauthorized, err) }
+
+// Forbidden wraps err with HTTP 403 Forbidden.
+func Forbidden(err error) error { return NewHTTPError(http.StatusForbidden, err) }
+
+// NotFound wraps err with HTTP 404 Not Found.
+func NotFound(err error) error { return NewHTTPError(http.StatusNotFound, err) }
+
+// Conflict wraps err with HTTP 409 Conflict.
+func Conflict(err error) error { return NewHTTPError(http.StatusConflict, err) }
+
+// Internal wraps err with HTTP 500 Internal Server Error.
+func Internal(err error) error { return NewHTTPError(http.StatusInternalServerError, err) }

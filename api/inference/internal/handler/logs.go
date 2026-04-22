@@ -28,7 +28,7 @@ import (
 func (h *Handler) ListLogs(ctx *gin.Context) {
 	// Validate provider authentication
 	if err := h.ctrl.ValidateProviderAuth(ctx); err != nil {
-		handleBrokerError(ctx, errors.NewUnauthorized("%s", err.Error()), "authentication failed")
+		handleBrokerError(ctx, errors.Unauthorized(err), "authentication failed")
 		return
 	}
 
@@ -130,7 +130,7 @@ func (h *Handler) getComponentLogs(component string) []map[string]interface{} {
 func (h *Handler) GetLogFile(ctx *gin.Context) {
 	// Validate provider authentication
 	if err := h.ctrl.ValidateProviderAuth(ctx); err != nil {
-		handleBrokerError(ctx, errors.NewUnauthorized("%s", err.Error()), "authentication failed")
+		handleBrokerError(ctx, errors.Unauthorized(err), "authentication failed")
 		return
 	}
 

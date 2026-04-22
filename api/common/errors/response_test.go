@@ -25,6 +25,8 @@ func TestResponse_StatusMapping(t *testing.T) {
 		{"conflict", NewConflict("busy"), http.StatusConflict},
 		{"internal", NewInternal("oops"), http.StatusInternalServerError},
 		{"wrapped unauthorized", Wrap(NewUnauthorized("bad sig"), "provider"), http.StatusUnauthorized},
+		{"wrap helper preserves chain status", Unauthorized(New("bad sig")), http.StatusUnauthorized},
+		{"wrap helper through Wrap", Wrap(Unauthorized(New("bad sig")), "provider"), http.StatusUnauthorized},
 	}
 
 	for _, tt := range tests {
@@ -44,5 +46,22 @@ func TestResponse_StatusMapping(t *testing.T) {
 				t.Fatalf("body error = %q, want %q", body["error"], tt.err.Error())
 			}
 		})
+	}
+}
+
+func TestWrapHelpersPreserveChain(t *testing.T) {
+	sentinel := New("sentinel")
+	cases := []error{
+		Unauthorized(sentinel),
+		Forbidden(sentinel),
+		NotFound(sentinel),
+		Conflict(sentinel),
+		Internal(sentinel),
+		Wrap(Unauthorized(sentinel), "provider"),
+	}
+	for _, err := range cases {
+		if !Is(err, sentinel) {
+			t.Fatalf("wrap helper broke error chain for %v", err)
+		}
 	}
 }
