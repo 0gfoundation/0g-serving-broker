@@ -602,9 +602,8 @@ func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {
 	if !exists || !ok || !ignoreError {
 		p.logger.Errorf("Proxy broker error: %v, context: %s", err, context)
 	}
-	info := "Provider proxy: handle proxied service"
 	if context != "" {
-		info += (", " + context)
+		err = errors.Wrap(err, context)
 	}
-	errors.Response(ctx, errors.Wrap(err, info))
+	errors.Response(ctx, err)
 }

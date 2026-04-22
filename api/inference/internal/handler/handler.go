@@ -159,11 +159,14 @@ func (h *Handler) internalApiAuth() gin.HandlerFunc {
 	}
 }
 
+// handleBrokerError routes err to errors.Response, optionally prefixing it
+// with a short context string for server-side debuggability. Client body
+// semantics come from the error's HTTP status code, not from a synthetic
+// "Provider" prefix — bodies are uniform across all handlers.
 func handleBrokerError(ctx *gin.Context, err error, context string) {
-	info := "Provider"
 	if context != "" {
-		info += (": " + context)
+		err = errors.Wrap(err, context)
 	}
-	errors.Response(ctx, errors.Wrap(err, info))
+	errors.Response(ctx, err)
 }
 

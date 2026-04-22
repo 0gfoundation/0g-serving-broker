@@ -267,11 +267,10 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 	if ignoreError, exists := ctx.Get("ignoreError"); !exists || !ignoreError.(bool) {
 		c.logger.Errorf("Proxy broker error in ctrl: %v, context: %s", err, context)
 	}
-	info := "Provider proxy: handle proxied service response"
 	if context != "" {
-		info += (", " + context)
+		err = errors.Wrap(err, context)
 	}
-	errors.Response(ctx, errors.Wrap(err, info))
+	errors.Response(ctx, err)
 }
 
 func (c *Ctrl) handleServiceError(ctx *gin.Context, statusCode int, body io.ReadCloser) {

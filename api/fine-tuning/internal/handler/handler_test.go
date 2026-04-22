@@ -22,17 +22,19 @@ import (
 func TestHandleBrokerError_StatusCodes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	const routeContext = "test route"
+
 	tests := []struct {
 		name       string
 		err        error
 		wantStatus int
 		// wantBodyContains is a substring that must appear in the JSON error
-		// field after the handler wraps with the "Provider: <context>" prefix.
-		// For 5xx the body is sanitized, so the field holds the generic text.
+		// field. For 5xx the body is sanitized, so the field holds the
+		// generic status-text rather than the underlying error message.
 		wantBodyContains string
-		// sanitized5xx indicates the response body is not expected to include
-		// the "Provider" prefix or the underlying error text — the handler
-		// swaps it for a generic status message and logs details server-side.
+		// sanitized5xx marks cases where the body must not include the
+		// underlying error text — the handler swaps it for a generic status
+		// message and logs details server-side.
 		sanitized5xx bool
 	}{
 		{
@@ -85,6 +87,9 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 			wantBodyContains: "invalid sig v",
 		},
 		{
+			// Sends a typed error through handleBrokerError's errors.Wrap and
+			// asserts the HTTPError status + underlying message both survive
+			// the wrap — this is the effective chain-preservation guarantee.
 			name:             "typed error survives errors.Wrap inside handleBrokerError",
 			err:              errors.NotFound(gorm.ErrRecordNotFound),
 			wantStatus:       http.StatusNotFound,
@@ -96,7 +101,7 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := gin.New()
 			r.GET("/boom", func(c *gin.Context) {
-				handleBrokerError(c, tt.err, "test route")
+				handleBrokerError(c, tt.err, routeContext)
 			})
 
 			req := httptest.NewRequest(http.MethodGet, "/boom", nil)
@@ -114,48 +119,23 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 			if !strings.Contains(body["error"], tt.wantBodyContains) {
 				t.Fatalf("body error %q does not contain %q", body["error"], tt.wantBodyContains)
 			}
+			// No handler should synthesise a "Provider" prefix — bodies must
+			// be uniform across direct errors.Response calls and handleBrokerError.
+			if strings.HasPrefix(body["error"], "Provider") {
+				t.Fatalf("body error %q contains legacy Provider prefix", body["error"])
+			}
 			if tt.sanitized5xx {
 				// 5xx responses must not leak the underlying error text.
 				if strings.Contains(body["error"], "broker inconsistency") {
 					t.Fatalf("5xx body leaked internal detail: %q", body["error"])
 				}
-				if strings.HasPrefix(body["error"], "Provider") {
-					t.Fatalf("5xx body should be generic, got %q", body["error"])
-				}
 			} else {
-				// handleBrokerError prefixes with "Provider" for continuity
-				// with how client-facing errors are currently labelled.
-				if !strings.HasPrefix(body["error"], "Provider") {
-					t.Fatalf("body error %q missing Provider prefix", body["error"])
+				// Non-5xx bodies should carry the handleBrokerError context
+				// so the caller can identify which handler failed.
+				if !strings.Contains(body["error"], routeContext) {
+					t.Fatalf("body error %q missing route context %q", body["error"], routeContext)
 				}
 			}
 		})
-	}
-}
-
-// TestHandleBrokerError_PreservesChain verifies that when a typed error is
-// wrapped by handleBrokerError (which calls errors.Wrap), the original error
-// is still reachable via errors.Is. This matters for the review finding that
-// NewXxx("%s", err.Error()) flattens the chain — the wrap helpers must not.
-func TestHandleBrokerError_PreservesChain(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	sentinel := errors.New("sentinel cause")
-	wrapped := errors.Unauthorized(sentinel)
-
-	var captured error
-	r := gin.New()
-	r.GET("/boom", func(c *gin.Context) {
-		// Replicate what handleBrokerError does so we can capture the final
-		// error value that reaches errors.Response.
-		captured = errors.Wrap(wrapped, "Provider: test")
-		handleBrokerError(c, wrapped, "test")
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
-	r.ServeHTTP(httptest.NewRecorder(), req)
-
-	if !errors.Is(captured, sentinel) {
-		t.Fatalf("sentinel cause lost through handler wrap chain")
 	}
 }
