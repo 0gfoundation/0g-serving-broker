@@ -200,6 +200,18 @@ Once status is `Delivered`, download the model and acknowledge on-chain:
 
 The `--deploy` flag also deploys the LoRA adapter to the inference GPU. The CLI will wait until the adapter is ready.
 
+If the inference provider is different from the fine-tuning provider, specify it separately:
+
+```bash
+0g-compute-cli fine-tuning acknowledge-model \
+  --provider <FT_PROVIDER_ADDRESS> \
+  --inference-provider <INF_PROVIDER_ADDRESS> \
+  --task-id <TASK_ID> \
+  --data-path ./output \
+  --deploy \
+  --model "Qwen2.5-0.5B-Instruct"
+```
+
 ### Step 8: Decrypt Model (Optional)
 
 If you want to keep a local copy of the LoRA adapter:
