@@ -37,6 +37,14 @@ Select testnet or mainnet. You can check the current network with:
 0g-compute-cli show-network
 ```
 
+If you are using the **dev testnet** environment, enable dev mode so the CLI connects to the correct contracts:
+
+```bash
+export ZG_DEV_MODE=true
+```
+
+When dev mode is active, the CLI prints `[DEV MODE]` in its output to confirm.
+
 ### 3. Deposit Funds
 
 Deposit A0GI into your main account:
