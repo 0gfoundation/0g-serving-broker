@@ -277,20 +277,20 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 	// Get and validate signature
 	signature := ctx.PostForm("signature")
 	if signature == "" {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Signature is required"})
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Signature is required"})
 		return
 	}
 
 	// Get and validate timestamp
 	timestampStr := ctx.PostForm("timestamp")
 	if timestampStr == "" {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Timestamp is required"})
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Timestamp is required"})
 		return
 	}
 
 	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
 	if err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid timestamp format"})
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid timestamp format"})
 		return
 	}
 

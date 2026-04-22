@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
@@ -51,10 +52,10 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, err
 	}
 	if count > int64(c.config.MaxTaskQueueSize) {
-		return nil, errors.New("task queue is full")
+		return nil, errors.NewConflict("task queue is full")
 	}
 	if count != 0 && !task.Wait {
-		return nil, errors.New("cannot create a new task while there are in-progress tasks")
+		return nil, errors.NewConflict("cannot create a new task while there are in-progress tasks")
 	}
 
 	dbTask := task.GenerateDBTask()
@@ -80,10 +81,15 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 	if err := c.validateSignature(task); err != nil {
-		return err
+		return errors.NewUnauthorized("%s", err.Error())
 	}
 
-	return c.db.CancelTask(task.ID, task.UserAddress)
+	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
+		// Cancellation only succeeds from Init/SettingUp/SetUp; any other state
+		// (or missing task) is a conflict from the client's perspective.
+		return errors.NewConflict("%s", err.Error())
+	}
+	return nil
 }
 
 func (*Ctrl) validateSignature(task *schema.Task) error {
@@ -124,6 +130,9 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	task, err := c.db.GetTask(id)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return schema.Task{}, errors.NewNotFound("task %s not found", id.String())
+		}
 		return schema.Task{}, errors.Wrap(err, "get service from db")
 	}
 
@@ -146,12 +155,15 @@ func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest, desc bo
 func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
 	task, err := c.db.GetTask(id)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errors.NewNotFound("task %s not found", id.String())
+		}
 		return "", err
 	}
 
 	// Verify user owns this task
 	if task.UserAddress != userAddress {
-		return "", errors.New("unauthorized: task does not belong to this user")
+		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
 	return filepath.Join(utils.GetDataDir(), id.String(), utils.TaskLogFileName), nil
@@ -464,17 +476,20 @@ func (c *Ctrl) VerifyUploadSignature(userAddress string, signature string, times
 // The file is encrypted with AES and the key is available through contract settlement
 func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	if id == nil {
-		return "", errors.New("task ID cannot be nil")
+		return "", errors.NewBadRequest("task ID cannot be nil")
 	}
 
 	task, err := c.db.GetTask(id)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errors.NewNotFound("task %s not found", id.String())
+		}
 		return "", errors.Wrap(err, "get task from db")
 	}
 
 	// Verify user owns this task
 	if task.UserAddress != userAddress {
-		return "", errors.New("unauthorized: task does not belong to this user")
+		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
 	// Check if task is delivered (encryption completed)
@@ -482,7 +497,7 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	if progress != db.ProgressStateDelivered.String() &&
 		progress != db.ProgressStateUserAcknowledged.String() &&
 		progress != db.ProgressStateFinished.String() {
-		return "", errors.New("task is not ready for download. Please wait for 'Delivered' status")
+		return "", errors.NewConflict("task is not ready for download. Please wait for 'Delivered' status")
 	}
 
 	// Build paths
@@ -491,7 +506,7 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	// Return encrypted file path (created by finalizer)
 	encryptedFilePath := paths.Output + "_encrypted.data"
 	if _, err := os.Stat(encryptedFilePath); os.IsNotExist(err) {
-		return "", errors.New("encrypted LoRA file not found. The task may not have completed encryption yet")
+		return "", errors.NewNotFound("encrypted LoRA file not found. The task may not have completed encryption yet")
 	}
 
 	return encryptedFilePath, nil

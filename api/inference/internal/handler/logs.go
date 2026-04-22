@@ -28,7 +28,7 @@ import (
 func (h *Handler) ListLogs(ctx *gin.Context) {
 	// Validate provider authentication
 	if err := h.ctrl.ValidateProviderAuth(ctx); err != nil {
-		handleBrokerError(ctx, err, "authentication failed")
+		handleBrokerError(ctx, errors.NewUnauthorized("%s", err.Error()), "authentication failed")
 		return
 	}
 
@@ -130,7 +130,7 @@ func (h *Handler) getComponentLogs(component string) []map[string]interface{} {
 func (h *Handler) GetLogFile(ctx *gin.Context) {
 	// Validate provider authentication
 	if err := h.ctrl.ValidateProviderAuth(ctx); err != nil {
-		handleBrokerError(ctx, err, "authentication failed")
+		handleBrokerError(ctx, errors.NewUnauthorized("%s", err.Error()), "authentication failed")
 		return
 	}
 
@@ -163,7 +163,7 @@ func (h *Handler) GetLogFile(ctx *gin.Context) {
 	// Get log directory for the component
 	logDir := h.ctrl.GetComponentLogDir(component)
 	if logDir == "" {
-		handleBrokerError(ctx, errors.New("log directory not configured for component"), "")
+		handleBrokerError(ctx, errors.NewInternal("log directory not configured for component"), "")
 		return
 	}
 
@@ -181,7 +181,7 @@ func (h *Handler) GetLogFile(ctx *gin.Context) {
 
 	// Check if file exists
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		handleBrokerError(ctx, errors.New("log file not found"), "")
+		handleBrokerError(ctx, errors.NewNotFound("log file not found"), "")
 		return
 	}
 
