@@ -28,7 +28,12 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 		wantStatus int
 		// wantBodyContains is a substring that must appear in the JSON error
 		// field after the handler wraps with the "Provider: <context>" prefix.
+		// For 5xx the body is sanitized, so the field holds the generic text.
 		wantBodyContains string
+		// sanitized5xx indicates the response body is not expected to include
+		// the "Provider" prefix or the underlying error text — the handler
+		// swaps it for a generic status message and logs details server-side.
+		sanitized5xx bool
 	}{
 		{
 			name:             "plain error defaults to 400",
@@ -67,10 +72,11 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 			wantBodyContains: "Trained",
 		},
 		{
-			name:             "NewInternal -> 500",
+			name:             "NewInternal -> 500 (body sanitized)",
 			err:              errors.NewInternal("broker inconsistency"),
 			wantStatus:       http.StatusInternalServerError,
-			wantBodyContains: "broker inconsistency",
+			wantBodyContains: http.StatusText(http.StatusInternalServerError),
+			sanitized5xx:     true,
 		},
 		{
 			name:             "chain-preserving wrap -> 401",
@@ -108,10 +114,20 @@ func TestHandleBrokerError_StatusCodes(t *testing.T) {
 			if !strings.Contains(body["error"], tt.wantBodyContains) {
 				t.Fatalf("body error %q does not contain %q", body["error"], tt.wantBodyContains)
 			}
-			// handleBrokerError always prefixes with "Provider" for context
-			// continuity with how client-facing errors are currently labelled.
-			if !strings.HasPrefix(body["error"], "Provider") {
-				t.Fatalf("body error %q missing Provider prefix", body["error"])
+			if tt.sanitized5xx {
+				// 5xx responses must not leak the underlying error text.
+				if strings.Contains(body["error"], "broker inconsistency") {
+					t.Fatalf("5xx body leaked internal detail: %q", body["error"])
+				}
+				if strings.HasPrefix(body["error"], "Provider") {
+					t.Fatalf("5xx body should be generic, got %q", body["error"])
+				}
+			} else {
+				// handleBrokerError prefixes with "Provider" for continuity
+				// with how client-facing errors are currently labelled.
+				if !strings.HasPrefix(body["error"], "Provider") {
+					t.Fatalf("body error %q missing Provider prefix", body["error"])
+				}
 			}
 		})
 	}
