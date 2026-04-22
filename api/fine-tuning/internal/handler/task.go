@@ -236,7 +236,7 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 
 	if err := h.ctrl.VerifyDownloadSignature(&id, userAddress, jsonData.Signature, jsonData.Timestamp); err != nil {
 		h.logger.Warnf("download signature verification failed for %s task %s: %v", userAddress, id.String(), err)
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("authentication failed: %v", err)})
+		errors.Response(ctx, errors.Unauthorized(fmt.Errorf("authentication failed: %w", err)))
 		return
 	}
 
