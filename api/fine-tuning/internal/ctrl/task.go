@@ -101,8 +101,15 @@ func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Task exists and owner matches, so a missing row on UPDATE means
-			// the task is in a terminal/non-cancellable state.
-			return errors.NewConflict("task cannot be cancelled in its current state (%s)", existing.Progress)
+			// the task is in a terminal/non-cancellable state. Re-read once so
+			// the message reflects the current progress rather than the value
+			// we read before the UPDATE (a concurrent writer may have advanced
+			// the state in between).
+			current := existing.Progress
+			if refreshed, rerr := c.db.GetTask(task.ID); rerr == nil {
+				current = refreshed.Progress
+			}
+			return errors.NewConflict("task cannot be cancelled in its current state (%s)", current)
 		}
 		return errors.Internal(errors.Wrap(err, "cancel task"))
 	}
@@ -150,7 +157,7 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return schema.Task{}, errors.NewNotFound("task %s not found", id.String())
 		}
-		return schema.Task{}, errors.Wrap(err, "get service from db")
+		return schema.Task{}, errors.Internal(errors.Wrap(err, "get service from db"))
 	}
 
 	return *schema.GenerateSchemaTask(&task), nil
@@ -159,7 +166,7 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest, desc bool) ([]schema.Task, error) {
 	tasks, err := c.db.ListTask(userAddress, latest, desc)
 	if err != nil {
-		return nil, errors.Wrap(err, "get delivered tasks")
+		return nil, errors.Internal(errors.Wrap(err, "get delivered tasks"))
 	}
 	taskRes := make([]schema.Task, len(tasks))
 	for i := range tasks {
@@ -175,7 +182,7 @@ func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", errors.NewNotFound("task %s not found", id.String())
 		}
-		return "", err
+		return "", errors.Internal(errors.Wrap(err, "get task"))
 	}
 
 	// Verify user owns this task
@@ -501,7 +508,7 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", errors.NewNotFound("task %s not found", id.String())
 		}
-		return "", errors.Wrap(err, "get task from db")
+		return "", errors.Internal(errors.Wrap(err, "get task from db"))
 	}
 
 	// Verify user owns this task

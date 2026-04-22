@@ -269,23 +269,22 @@ func (h *Handler) DownloadLoRA(ctx *gin.Context) {
 func (h *Handler) UploadDataset(ctx *gin.Context) {
 	userAddress := ctx.Param("userAddress")
 
-	// Get and validate signature
+	// Absent/malformed signature and timestamp are request-shape problems —
+	// no credentials were presented at all, so 400 Bad Request is the correct
+	// classification (RFC 7235's 401 is for rejected credentials). 401 is
+	// reserved for the VerifyUploadSignature branch below.
 	signature := ctx.PostForm("signature")
 	if signature == "" {
-		errors.Response(ctx, errors.NewUnauthorized("Signature is required"))
+		errors.Response(ctx, errors.NewBadRequest("Signature is required"))
 		return
 	}
 
-	// Get and validate timestamp
 	timestampStr := ctx.PostForm("timestamp")
 	if timestampStr == "" {
-		errors.Response(ctx, errors.NewUnauthorized("Timestamp is required"))
+		errors.Response(ctx, errors.NewBadRequest("Timestamp is required"))
 		return
 	}
 
-	// Malformed timestamp is a client-side parse error, not an auth failure —
-	// the caller hasn't presented bad credentials, it sent a syntactically
-	// invalid field that feeds into the signature flow.
 	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
 	if err != nil {
 		errors.Response(ctx, errors.NewBadRequest("Invalid timestamp format"))
