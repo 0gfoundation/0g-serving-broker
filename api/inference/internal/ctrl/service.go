@@ -10,16 +10,10 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
+	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
-
-// serviceNotFoundMsg is the literal error text the contract RPC layer returns
-// when the provider has not yet registered a service.  Matches the detection
-// used in contract.SyncService — the sentinel ErrServiceNotFound is declared
-// but errors returned through the RPC layer come back as wrapped plain errors
-// whose Error() string is exactly this.
-const serviceNotFoundMsg = "service not found"
 
 func (c *Ctrl) GetService(ctx context.Context) (model.Service, error) {
 	svc, err := c.contract.GetService(ctx)
@@ -152,7 +146,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 
 	// (2) On-chain baseline — handles first-tick-after-boot and admin edits.
 	onChain, getErr := c.contract.GetService(ctx)
-	firstTime := getErr != nil && getErr.Error() == serviceNotFoundMsg
+	firstTime := getErr != nil && errors.Is(getErr, providercontract.ErrServiceNotFound)
 	if getErr != nil && !firstTime {
 		return errors.Wrap(getErr, "get on-chain service for drift check")
 	}
@@ -186,6 +180,19 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 
 	c.lastPushedInputPrice = new(big.Int).Set(inputWei)
 	c.lastPushedOutputPrice = new(big.Int).Set(outputWei)
+
+	// Flip the once-guard so a later SyncService call (e.g. from a future
+	// admin endpoint or a refactor of the startup path) is a no-op instead
+	// of attempting to re-register a service that already exists on-chain.
+	c.mu.Lock()
+	c.serviceSynced = true
+	c.mu.Unlock()
+
+	// Invalidate the on-chain service cache so the next GetCachedService
+	// re-reads fresh fields (URL, model type, TEE signer acknowledgement,
+	// additionalInfo).  The USD overlay then re-applies the fresher wei
+	// prices on top, so this delete doesn't affect billing — it only
+	// keeps the non-price fields in sync with chain state.
 	c.serviceCache.Delete("current_service")
 	c.logger.Infof("SyncServicePrices: on-chain prices updated to inputPriceWei=%s outputPriceWei=%s",
 		inputWei.String(), outputWei.String())

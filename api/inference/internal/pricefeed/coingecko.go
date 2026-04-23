@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/url"
 )
+
+// maxResponseBytes caps each source's HTTP response to 1 MiB.  The actual
+// payloads are <1 KiB; the limit is a defence-in-depth guard against a
+// compromised or misbehaving upstream returning an unbounded stream.
+const maxResponseBytes = 1 << 20
 
 // CoinGeckoSource queries the CoinGecko /simple/price endpoint.
 // Symbol is the CoinGecko coin id (e.g. "0g"), quote is the fiat / stablecoin
@@ -79,7 +85,7 @@ func (s *CoinGeckoSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 
 	// Response shape: { "<coinID>": { "<quoteID>": <number> } }
 	var body map[string]map[string]json.Number
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&body); err != nil {
 		return nil, fmt.Errorf("coingecko: decode: %w", err)
 	}
 	inner, ok := body[s.coinID]

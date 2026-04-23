@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -172,6 +173,7 @@ func Main() {
 	// flow through ctrl.SyncServicePrices, which serialises with SyncService
 	// via the same contract-write mutex.
 	var priceProcessorCancel context.CancelFunc
+	var priceProcessorWG sync.WaitGroup
 	if config.Service.IsUSDDenominated() {
 		priceProcessor, err := event.NewPriceUpdateProcessor(priceCache, aggregator, ctrl, config.Service, config.PriceFeed, logger)
 		if err != nil {
@@ -179,7 +181,9 @@ func Main() {
 		}
 		var priceCtx context.Context
 		priceCtx, priceProcessorCancel = context.WithCancel(ctx)
+		priceProcessorWG.Add(1)
 		go func() {
+			defer priceProcessorWG.Done()
 			if err := priceProcessor.Start(priceCtx); err != nil && err != context.Canceled {
 				logger.Errorf("price update processor exited: %v", err)
 			}
@@ -286,9 +290,13 @@ func Main() {
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
 
-	// Stop the price update processor if running
+	// Stop the price update processor and wait for it to finish.  An
+	// in-flight SyncServicePrices tx holds contractWriteMu, and we want
+	// that to settle before the process exits so the nonce isn't left
+	// dangling.
 	if priceProcessorCancel != nil {
 		priceProcessorCancel()
+		priceProcessorWG.Wait()
 	}
 
 	// Stop rate limiter cleanup goroutines

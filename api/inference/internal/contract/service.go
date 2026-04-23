@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -182,6 +183,14 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 		// Wrap error to extract details from rpc.jsonError Data field
 		wrappedErr := WrapContractError(err)
 		c.logger.Errorf("[GetService] Contract error - provider=%s: %v", c.ProviderAddress, wrappedErr)
+		// Callers use errors.Is(err, ErrServiceNotFound) to detect the
+		// "service not registered yet" case.  The underlying RPC returns
+		// the literal text "service not found"; we wrap here so future
+		// refactors adding %w around the wrapped error won't silently
+		// break first-time-registration detection.
+		if strings.Contains(wrappedErr.Error(), ErrServiceNotFound.Error()) {
+			return nil, fmt.Errorf("%w: %v", ErrServiceNotFound, wrappedErr)
+		}
 		return nil, wrappedErr
 	}
 
@@ -196,7 +205,7 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, 
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 
 	old, err := c.GetService(ctx)
-	if err != nil && err.Error() == "service not found" {
+	if err != nil && errors.Is(err, ErrServiceNotFound) {
 		c.logger.Info("[SyncService] No existing service found in contract")
 	} else if old != nil {
 		c.logger.Infof("[SyncService] Found existing service - url=%s, model=%s, type=%s, inputPrice=%s, outputPrice=%s",

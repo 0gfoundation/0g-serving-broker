@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,13 +14,29 @@ import (
 //	@Description  outputPrice are overlaid with the latest wei values derived
 //	@Description  from the live 0G/USD rate (and may differ from the on-chain
 //	@Description  values until the next drift-gated SyncService refresh).
+//	@Description
+//	@Description  Returns 503 PRICING_UNAVAILABLE when USD mode is configured
+//	@Description  but the broker's in-memory rate cache has not been
+//	@Description  populated or has gone stale — callers should retry.
 //	@ID			 getService
 //	@Tags		 service
 //	@Router		 /service [get]
 //	@Success	 200	{object}	model.ServiceList
+//	@Failure	 503	{object}	errors.Error
 func (h *Handler) GetService(ctx *gin.Context) {
 	service, err := h.ctrl.GetCachedService(ctx)
 	if err != nil {
+		// The USD overlay returns a structured "PRICING_UNAVAILABLE:"
+		// error when the rate cache can't satisfy the request.  Surface
+		// that to callers as 503 so SDK / monitoring code can retry
+		// (and so a stale rate feed doesn't show up as a 500 in
+		// dashboards alongside genuine internal errors).
+		if strings.Contains(err.Error(), "PRICING_UNAVAILABLE") {
+			ctx.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
 		handleBrokerError(ctx, err, "get service")
 		return
 	}

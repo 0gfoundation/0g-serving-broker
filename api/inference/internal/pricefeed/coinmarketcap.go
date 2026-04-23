@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -83,7 +84,7 @@ func (s *CoinMarketCapSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 			} `json:"quote"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&body); err != nil {
 		return nil, fmt.Errorf("coinmarketcap: decode: %w", err)
 	}
 	entries, ok := body.Data[s.symbol]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"strings"
@@ -65,7 +66,7 @@ func (s *BinanceSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 		Symbol string `json:"symbol"`
 		Price  string `json:"price"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&body); err != nil {
 		return nil, fmt.Errorf("binance: decode: %w", err)
 	}
 	if body.Price == "" {
