@@ -9,27 +9,41 @@ import (
 	"net/url"
 )
 
-// CoinGeckoSource queries the free CoinGecko /simple/price endpoint.
+// CoinGeckoSource queries the CoinGecko /simple/price endpoint.
 // Symbol is the CoinGecko coin id (e.g. "0g"), quote is the fiat / stablecoin
 // id (e.g. "usd"); these differ from the exchange-pair style used by Binance.
+//
+// When apiKey is set, the request is routed to pro-api.coingecko.com with
+// the x-cg-pro-api-key header — the free anonymous tier rate-limits
+// aggressively enough in production to cause regular quorum failures, so a
+// pro key is strongly recommended.
 type CoinGeckoSource struct {
 	httpClient *http.Client
 	baseURL    string // overridable for tests
 	coinID     string
 	quoteID    string
+	apiKey     string
+	userAgent  string
 }
 
-// NewCoinGeckoSource constructs a source.  baseURL may be empty to use the
-// public endpoint; tests inject a stub server's URL.
-func NewCoinGeckoSource(client *http.Client, baseURL, coinID, quoteID string) *CoinGeckoSource {
+// NewCoinGeckoSource constructs a source.  baseURL may be empty: if apiKey
+// is set the pro-api endpoint is used, otherwise the public endpoint.  Tests
+// inject a stub server's URL.
+func NewCoinGeckoSource(client *http.Client, baseURL, coinID, quoteID, apiKey, userAgent string) *CoinGeckoSource {
 	if baseURL == "" {
-		baseURL = "https://api.coingecko.com/api/v3"
+		if apiKey != "" {
+			baseURL = "https://pro-api.coingecko.com/api/v3"
+		} else {
+			baseURL = "https://api.coingecko.com/api/v3"
+		}
 	}
 	return &CoinGeckoSource{
 		httpClient: client,
 		baseURL:    baseURL,
 		coinID:     coinID,
 		quoteID:    quoteID,
+		apiKey:     apiKey,
+		userAgent:  userAgent,
 	}
 }
 
@@ -46,6 +60,12 @@ func (s *CoinGeckoSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 		return nil, fmt.Errorf("coingecko: build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if s.userAgent != "" {
+		req.Header.Set("User-Agent", s.userAgent)
+	}
+	if s.apiKey != "" {
+		req.Header.Set("x-cg-pro-api-key", s.apiKey)
+	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

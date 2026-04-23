@@ -20,7 +20,7 @@ func TestCoinGeckoSource_ParsesRate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd")
+	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "", "test-ua")
 	got, err := s.FetchRate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func TestCoinGeckoSource_MissingCoin(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd")
+	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "", "test-ua")
 	_, err := s.FetchRate(context.Background())
 	if err == nil {
 		t.Error("expected error for missing coin in response")
@@ -54,7 +54,7 @@ func TestBinanceSource_ParsesPrice(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewBinanceSource(&http.Client{Timeout: time.Second}, srv.URL, "ZGUSDT")
+	s := NewBinanceSource(&http.Client{Timeout: time.Second}, srv.URL, "ZGUSDT", "test-ua")
 	got, err := s.FetchRate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestBinanceSource_RejectsNonPositive(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewBinanceSource(&http.Client{Timeout: time.Second}, srv.URL, "ZGUSDT")
+	s := NewBinanceSource(&http.Client{Timeout: time.Second}, srv.URL, "ZGUSDT", "test-ua")
 	if _, err := s.FetchRate(context.Background()); err == nil {
 		t.Error("expected error for zero price")
 	}
@@ -86,7 +86,7 @@ func TestCoinMarketCapSource_ParsesRate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewCoinMarketCapSource(&http.Client{Timeout: time.Second}, srv.URL, "test-key", "0G", "USD")
+	s := NewCoinMarketCapSource(&http.Client{Timeout: time.Second}, srv.URL, "test-key", "0G", "USD", "test-ua")
 	got, err := s.FetchRate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestCoinMarketCapSource_ParsesRate(t *testing.T) {
 }
 
 func TestCoinMarketCapSource_MissingAPIKey(t *testing.T) {
-	s := NewCoinMarketCapSource(&http.Client{Timeout: time.Second}, "http://example", "", "0G", "USD")
+	s := NewCoinMarketCapSource(&http.Client{Timeout: time.Second}, "http://example", "", "0G", "USD", "")
 	if _, err := s.FetchRate(context.Background()); err == nil {
 		t.Error("expected error when API key is not configured")
 	}

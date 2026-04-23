@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -106,49 +107,40 @@ func Main() {
 	}
 	defer contract.Close()
 
-	// Build the USD price-feed stack (cache + aggregator + processor) when the
-	// provider is USD-denominated.  The cache is constructed early so Ctrl
-	// can hold a reference; bootstrap (which mutates config.Service prices to
-	// their wei equivalents) runs before SyncService so first-time on-chain
-	// registration uses the correct price.
+	// Build the USD price-feed stack (cache + aggregator) when the provider
+	// is USD-denominated.  The cache is constructed early so Ctrl can hold a
+	// reference; the aggregator is reused across boot-time bootstrap and
+	// steady-state processor ticks.  The processor itself is instantiated
+	// after Ctrl exists because it dispatches on-chain writes through
+	// ctrl.SyncServicePrices (which owns the contract-write mutex).
 	var priceCache *pricefeed.Cache
-	var priceProcessor *event.PriceUpdateProcessor
+	var aggregator *pricefeed.Aggregator
+	var bootstrapInputWei, bootstrapOutputWei *big.Int
 	if config.Service.IsUSDDenominated() {
 		priceCache = pricefeed.NewCache()
 		sources, err := pricefeed.BuildSources(config.PriceFeed)
 		if err != nil {
 			panic(err)
 		}
-		aggregator := pricefeed.NewAggregator(
+		aggregator = pricefeed.NewAggregator(
 			sources,
 			config.PriceFeed.MinQuorum,
 			config.PriceFeed.MaxRateDeviationBps,
 			config.PriceFeed.HTTPTimeout,
 			logger,
 		)
-		priceProcessor = event.NewPriceUpdateProcessor(
-			priceCache, aggregator, contract,
-			config.Service, config.TieredPricing, config.CacheTokenBilling, config.PriceFeed,
-			nil, // invalidateServiceCache is wired after ctrl is constructed
-			logger,
-		)
-		inputWei, outputWei, err := priceProcessor.Bootstrap(ctx)
+		// Bootstrap uses a temporary processor that isn't wired to a
+		// syncer — we only need the rate-fetch + conversion + cache-seed
+		// logic here.  The startup-time on-chain write is driven through
+		// ctrl.SyncServicePrices below, which reuses the drift gate.
+		bootProc := event.NewPriceUpdateProcessor(priceCache, aggregator, nil, config.Service, config.PriceFeed, logger)
+		bootstrapInputWei, bootstrapOutputWei, err = bootProc.Bootstrap(ctx)
 		if err != nil {
 			panic(fmt.Errorf("usd price bootstrap failed: %w", err))
 		}
-		// Overlay initial wei prices onto the config so SyncService
-		// registers the correct price at startup.
-		config.Service.InputPrice = inputWei.String()
-		config.Service.OutputPrice = outputWei.String()
 	}
 
 	ctrl := ctrl.New(db, contract, config, svcCache, teeService, priceCache, logger)
-
-	// Now that ctrl exists, wire its cache-invalidation hook so the
-	// processor clears the on-chain-service cache after pushing new prices.
-	if priceProcessor != nil {
-		priceProcessor.SetInvalidateServiceCache(ctrl.InvalidateServiceCache)
-	}
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
@@ -157,14 +149,28 @@ func Main() {
 	if settleFeesErr != nil {
 		logger.Errorf("error settling fees: %v", settleFeesErr)
 	}
-	if err := ctrl.SyncService(ctx); err != nil {
-		panic(err)
+	// USD providers register (or refresh) prices via SyncServicePrices,
+	// which gates writes by MinOnChainUpdateBps so a restart with sub-
+	// threshold rate drift doesn't pay gas.  NATIVE providers still call
+	// SyncService, which writes prices verbatim from config on every new
+	// provider deployment.
+	if config.Service.IsUSDDenominated() {
+		if err := ctrl.SyncServicePrices(ctx, bootstrapInputWei, bootstrapOutputWei); err != nil {
+			panic(fmt.Errorf("usd initial sync-service-prices failed: %w", err))
+		}
+	} else {
+		if err := ctrl.SyncService(ctx); err != nil {
+			panic(err)
+		}
 	}
 
 	// Start the PriceUpdateProcessor goroutine (USD mode only).  It ticks
-	// until the server shuts down and ctx is cancelled.
+	// until the server shuts down and ctx is cancelled.  On-chain writes
+	// flow through ctrl.SyncServicePrices, which serialises with SyncService
+	// via the same contract-write mutex.
 	var priceProcessorCancel context.CancelFunc
-	if priceProcessor != nil {
+	if config.Service.IsUSDDenominated() {
+		priceProcessor := event.NewPriceUpdateProcessor(priceCache, aggregator, ctrl, config.Service, config.PriceFeed, logger)
 		var priceCtx context.Context
 		priceCtx, priceProcessorCancel = context.WithCancel(ctx)
 		go func() {

@@ -165,6 +165,16 @@ type PriceFeedConfig struct {
 	// CoinMarketCapAPIKey is the optional API key for CoinMarketCap. Required
 	// only if "coinmarketcap" is in Sources.
 	CoinMarketCapAPIKey string `yaml:"coinMarketCapApiKey"`
+	// CoinGeckoAPIKey, when set, is sent in the x-cg-pro-api-key header to
+	// CoinGecko, activating Pro-tier rate limits.  The anonymous free tier
+	// is strict enough in production that quorum failures become common
+	// without a key; setting one is strongly recommended.
+	CoinGeckoAPIKey string `yaml:"coinGeckoApiKey"`
+	// UserAgent is the User-Agent header sent to every source.  Providers
+	// using private rate-feed deployments or whitelisted plans can set a
+	// stable identifier here so upstream operators can grant them higher
+	// limits.  Defaults to "0g-serving-broker/pricefeed".
+	UserAgent string `yaml:"userAgent"`
 	// HTTPTimeout bounds per-request HTTP timeout for each source.
 	HTTPTimeout time.Duration `yaml:"httpTimeout"`
 }
@@ -456,6 +466,9 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 	}
 	if pf.HTTPTimeout <= 0 {
 		pf.HTTPTimeout = 10 * time.Second
+	}
+	if pf.UserAgent == "" {
+		pf.UserAgent = "0g-serving-broker/pricefeed"
 	}
 	return nil
 }

@@ -8,9 +8,15 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
-	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 )
+
+// priceSyncer is the subset of Ctrl used by PriceUpdateProcessor for on-chain
+// updates.  Narrowing to an interface lets tests inject a stub without
+// dragging in the full ctrl / contract stack.
+type priceSyncer interface {
+	SyncServicePrices(ctx context.Context, inputWei, outputWei *big.Int) error
+}
 
 // PriceUpdateProcessor refreshes the in-memory wei-price cache used by USD-
 // denominated billing and, when the derived on-chain price drifts beyond a
@@ -21,65 +27,62 @@ import (
 // processor because it never recomputes fees — it only aggregates DB rows
 // whose fees were locked at request time.
 type PriceUpdateProcessor struct {
-	cache       *pricefeed.Cache
-	aggregator  *pricefeed.Aggregator
-	contract    *providercontract.ProviderContract
-	serviceCfg  config.Service
-	tiered      config.TieredPricingConfig
-	cacheToken  config.CacheTokenBillingConfig
-	pfCfg       config.PriceFeedConfig
-	logger      log.Logger
-
-	// invalidateServiceCache clears the ctrl.serviceCache entry so
-	// consumers that read on-chain service data (/v1/models, settlement
-	// threshold) pick up the refreshed price on next access.  May be nil
-	// in tests.
-	invalidateServiceCache func()
+	cache      *pricefeed.Cache
+	aggregator *pricefeed.Aggregator
+	syncer     priceSyncer
+	serviceCfg config.Service
+	pfCfg      config.PriceFeedConfig
+	logger     log.Logger
 }
 
 // NewPriceUpdateProcessor constructs a processor.  cache and aggregator must
-// be non-nil; contract is required for on-chain sync.  invalidate is optional.
+// be non-nil.  syncer may be nil — in that case on-chain sync is disabled
+// (e.g. for tests that only exercise the cache-refresh path).
 func NewPriceUpdateProcessor(
 	cache *pricefeed.Cache,
 	aggregator *pricefeed.Aggregator,
-	contract *providercontract.ProviderContract,
+	syncer priceSyncer,
 	serviceCfg config.Service,
-	tiered config.TieredPricingConfig,
-	cacheToken config.CacheTokenBillingConfig,
 	pfCfg config.PriceFeedConfig,
-	invalidateServiceCache func(),
 	logger log.Logger,
 ) *PriceUpdateProcessor {
 	return &PriceUpdateProcessor{
-		cache:                  cache,
-		aggregator:             aggregator,
-		contract:               contract,
-		serviceCfg:             serviceCfg,
-		tiered:                 tiered,
-		cacheToken:             cacheToken,
-		pfCfg:                  pfCfg,
-		invalidateServiceCache: invalidateServiceCache,
-		logger:                 logger,
+		cache:      cache,
+		aggregator: aggregator,
+		syncer:     syncer,
+		serviceCfg: serviceCfg,
+		pfCfg:      pfCfg,
+		logger:     logger,
 	}
 }
 
-// SetInvalidateServiceCache registers a hook invoked after each successful
-// on-chain price update, so ctrl's cached contract.Service record is
-// refreshed.  May be called once after construction; subsequent calls
-// replace the hook.
-func (p *PriceUpdateProcessor) SetInvalidateServiceCache(fn func()) {
-	p.invalidateServiceCache = fn
-}
+// Bootstrap retry knobs — declared as package vars rather than consts so
+// tests can shrink them to avoid minute-long sleeps.  Under Kubernetes, a
+// transient public-API outage (CoinGecko 429, regional 451, intermittent
+// 5xx) coinciding with a broker restart would otherwise CrashLoopBackoff
+// the pod; we prefer to absorb short outages and only fail once the outage
+// looks sustained.
+var (
+	// bootstrapMaxAttempts bounds the boot-time rate-fetch retry loop.
+	bootstrapMaxAttempts = 6
+	// bootstrapBaseBackoff is the initial sleep between Bootstrap retries.
+	// Subsequent sleeps grow exponentially, capped at bootstrapMaxBackoff.
+	bootstrapBaseBackoff = 2 * time.Second
+	// bootstrapMaxBackoff caps the per-retry sleep so a long outage fails
+	// in bounded wall time rather than ballooning indefinitely.
+	bootstrapMaxBackoff = 30 * time.Second
+)
 
-// Bootstrap performs a single synchronous rate fetch and cache update.  This
-// must be called once at startup BEFORE any request billing and BEFORE the
-// initial SyncService call, so both the wei price cache and the config's
-// InputPrice/OutputPrice fields are populated.
+// Bootstrap performs a synchronous rate fetch and cache update with bounded
+// retries.  Called once at startup BEFORE any request billing, so both the
+// wei price cache and the caller's downstream service registration have
+// authoritative values.
 //
-// Returns the computed wei prices so the caller can overlay them on the
-// Service config before calling SyncService for first-time on-chain
-// registration.  Fails loudly — if the rate feed is unavailable at boot we
-// prefer not to start over running with silently-zero prices.
+// Retries the underlying rate aggregation up to bootstrapMaxAttempts with
+// exponential backoff (capped at bootstrapMaxBackoff) before surfacing the
+// last error.  This contains the common case — CoinGecko rate-limit, Binance
+// regional block, transient 5xx — without making a sustained outage look
+// like a healthy start.
 func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputWei *big.Int, err error) {
 	inputUSD, err := pricefeed.ParseUSDPerMillion(p.serviceCfg.InputPriceUSD)
 	if err != nil {
@@ -90,9 +93,29 @@ func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputW
 		return nil, nil, fmt.Errorf("bootstrap: parse outputPriceUSD: %w", err)
 	}
 
-	rate, _, err := p.aggregator.Aggregate(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: aggregate initial rate: %w", err)
+	var rate *big.Rat
+	var lastErr error
+	backoff := bootstrapBaseBackoff
+	for attempt := 1; attempt <= bootstrapMaxAttempts; attempt++ {
+		rate, _, lastErr = p.aggregator.Aggregate(ctx)
+		if lastErr == nil {
+			break
+		}
+		p.logger.Warnf("pricefeed bootstrap: attempt %d/%d failed: %v", attempt, bootstrapMaxAttempts, lastErr)
+		if attempt == bootstrapMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("bootstrap: context cancelled during retry: %w", ctx.Err())
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > bootstrapMaxBackoff {
+			backoff = bootstrapMaxBackoff
+		}
+	}
+	if lastErr != nil {
+		return nil, nil, fmt.Errorf("bootstrap: aggregate initial rate (after %d attempts): %w", bootstrapMaxAttempts, lastErr)
 	}
 
 	inputWei, err = pricefeed.USDPerMillionToWeiPerToken(inputUSD, rate)
@@ -129,8 +152,10 @@ func (p *PriceUpdateProcessor) Start(ctx context.Context) error {
 }
 
 // tick runs one update cycle: aggregate → convert → update cache → maybe
-// push on-chain.  Any error is logged and the cache from the previous tick
-// is retained (readers enforce StalenessThreshold independently).
+// push on-chain (via ctrl.SyncServicePrices, which performs drift gating
+// and mutex-guarded serialisation).  Any error is logged and the cache
+// from the previous tick is retained (readers enforce StalenessThreshold
+// independently).
 func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 	inputUSD, err := pricefeed.ParseUSDPerMillion(p.serviceCfg.InputPriceUSD)
 	if err != nil {
@@ -160,64 +185,14 @@ func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 		return
 	}
 
-	now := time.Now()
-	prev := p.cache.Get()
-	p.cache.Set(inputWei, outputWei, now)
+	p.cache.Set(inputWei, outputWei, time.Now())
 	p.logger.Infof("pricefeed tick: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
 		rate.FloatString(8), inputWei.String(), outputWei.String())
 
-	// If prices didn't change at all, no point checking on-chain drift.
-	if prev.Populated &&
-		prev.InputPriceWei.Cmp(inputWei) == 0 &&
-		prev.OutputPriceWei.Cmp(outputWei) == 0 {
+	if p.syncer == nil {
 		return
 	}
-
-	p.maybeSyncOnChain(ctx, inputWei, outputWei)
-}
-
-// maybeSyncOnChain compares the freshly-derived wei prices to whatever is
-// currently registered on-chain and triggers a SyncService if drift exceeds
-// MinOnChainUpdateBps on either side.
-//
-// Executed inline rather than in its own goroutine: SyncService waits for tx
-// inclusion which can take a couple of blocks.  The next tick will only fire
-// after UpdateInterval, so we have budget; and serializing avoids concurrent
-// on-chain writes.
-func (p *PriceUpdateProcessor) maybeSyncOnChain(ctx context.Context, inputWei, outputWei *big.Int) {
-	onChain, err := p.contract.GetService(ctx)
-	if err != nil {
-		p.logger.Warnf("pricefeed tick: read on-chain service for drift check failed: %v", err)
-		return
+	if err := p.syncer.SyncServicePrices(ctx, inputWei, outputWei); err != nil {
+		p.logger.Errorf("pricefeed tick: SyncServicePrices failed: %v", err)
 	}
-
-	inputDriftBps := pricefeed.DriftBps(inputWei, onChain.InputPrice)
-	outputDriftBps := pricefeed.DriftBps(outputWei, onChain.OutputPrice)
-
-	if inputDriftBps < p.pfCfg.MinOnChainUpdateBps && outputDriftBps < p.pfCfg.MinOnChainUpdateBps {
-		p.logger.Debugf("pricefeed tick: on-chain drift below threshold (input=%dbps, output=%dbps, threshold=%dbps) — skipping tx",
-			inputDriftBps, outputDriftBps, p.pfCfg.MinOnChainUpdateBps)
-		return
-	}
-
-	p.logger.Infof("pricefeed tick: on-chain drift above threshold (input=%dbps, output=%dbps, threshold=%dbps) — syncing",
-		inputDriftBps, outputDriftBps, p.pfCfg.MinOnChainUpdateBps)
-
-	// Build a Service copy with the freshly-derived wei prices so
-	// SyncService writes the correct values.  The config fields
-	// InputPriceUSD / OutputPriceUSD are left intact but unused by the
-	// contract path.
-	updated := p.serviceCfg
-	updated.InputPrice = inputWei.String()
-	updated.OutputPrice = outputWei.String()
-
-	if err := p.contract.SyncService(ctx, updated, p.tiered, p.cacheToken); err != nil {
-		p.logger.Errorf("pricefeed tick: SyncService failed: %v", err)
-		return
-	}
-	if p.invalidateServiceCache != nil {
-		p.invalidateServiceCache()
-	}
-	p.logger.Infof("pricefeed tick: on-chain prices updated to inputPriceWei=%s, outputPriceWei=%s",
-		inputWei.String(), outputWei.String())
 }

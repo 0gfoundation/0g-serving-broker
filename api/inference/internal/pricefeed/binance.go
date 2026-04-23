@@ -12,15 +12,20 @@ import (
 // BinanceSource queries Binance's public spot ticker endpoint.
 // Symbol is the exchange pair (e.g. "ZGUSDT") — differs from CoinGecko's
 // coin-id convention.
+//
+// Note: Binance's public API returns HTTP 451 in sanctioned regions.  If
+// Binance is the only viable source for an operator's region, either drop
+// it from priceFeed.sources or point at a Binance-compatible mirror.
 type BinanceSource struct {
 	httpClient *http.Client
 	baseURL    string
 	pair       string
+	userAgent  string
 }
 
 // NewBinanceSource constructs a source.  pair is the exchange symbol
 // (e.g. "ZGUSDT"); callers should uppercase it to match Binance's API.
-func NewBinanceSource(client *http.Client, baseURL, pair string) *BinanceSource {
+func NewBinanceSource(client *http.Client, baseURL, pair, userAgent string) *BinanceSource {
 	if baseURL == "" {
 		baseURL = "https://api.binance.com"
 	}
@@ -28,6 +33,7 @@ func NewBinanceSource(client *http.Client, baseURL, pair string) *BinanceSource 
 		httpClient: client,
 		baseURL:    baseURL,
 		pair:       strings.ToUpper(pair),
+		userAgent:  userAgent,
 	}
 }
 
@@ -40,6 +46,9 @@ func (s *BinanceSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 		return nil, fmt.Errorf("binance: build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if s.userAgent != "" {
+		req.Header.Set("User-Agent", s.userAgent)
+	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

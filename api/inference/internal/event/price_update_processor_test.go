@@ -50,19 +50,14 @@ func mustRat(s string) *big.Rat {
 }
 
 // newTestProcessor constructs a processor with an aggregator wrapping the
-// supplied mock sources.  Contract is nil: Bootstrap doesn't touch it, and
-// tick-level on-chain sync isn't exercised here (covered separately by
-// DriftBps / SyncService tests).
+// supplied mock sources.  syncer is nil: Bootstrap doesn't touch it, and
+// tick-level on-chain sync isn't exercised here (covered by DriftBps and
+// ctrl.SyncServicePrices tests).
 func newTestProcessor(t *testing.T, sources []pricefeed.Source, svcCfg config.Service, pfCfg config.PriceFeedConfig) (*PriceUpdateProcessor, *pricefeed.Cache) {
 	t.Helper()
 	cache := pricefeed.NewCache()
 	agg := pricefeed.NewAggregator(sources, pfCfg.MinQuorum, pfCfg.MaxRateDeviationBps, pfCfg.HTTPTimeout, nopLogger{})
-	p := NewPriceUpdateProcessor(
-		cache, agg, nil,
-		svcCfg, config.TieredPricingConfig{}, config.CacheTokenBillingConfig{},
-		pfCfg,
-		nil, nopLogger{},
-	)
+	p := NewPriceUpdateProcessor(cache, agg, nil, svcCfg, pfCfg, nopLogger{})
 	return p, cache
 }
 
@@ -114,6 +109,16 @@ func TestProcessor_Bootstrap_Success(t *testing.T) {
 }
 
 func TestProcessor_Bootstrap_AggregatorFails(t *testing.T) {
+	// Shrink the retry schedule so a failing-aggregator test returns
+	// fast; restore on teardown so concurrent packages are unaffected.
+	oldAttempts, oldBase, oldMax := bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff
+	bootstrapMaxAttempts = 3
+	bootstrapBaseBackoff = time.Millisecond
+	bootstrapMaxBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff = oldAttempts, oldBase, oldMax
+	})
+
 	failing := pricefeed.NewMockSource("mock", nil)
 	failing.SetError(errors.New("boom"))
 	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
@@ -127,6 +132,42 @@ func TestProcessor_Bootstrap_AggregatorFails(t *testing.T) {
 	}
 	if cache.Get().Populated {
 		t.Error("cache should not be populated after failed bootstrap")
+	}
+	// The aggregator should have been retried bootstrapMaxAttempts times.
+	if got := failing.Calls(); got != 3 {
+		t.Errorf("expected 3 retries, got %d calls", got)
+	}
+}
+
+func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
+	// Sources that fail on the first call and succeed on subsequent ones
+	// model the common CoinGecko 429 / transient 5xx case.
+	oldAttempts, oldBase, oldMax := bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff
+	bootstrapMaxAttempts = 3
+	bootstrapBaseBackoff = time.Millisecond
+	bootstrapMaxBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff = oldAttempts, oldBase, oldMax
+	})
+
+	flaky := pricefeed.NewMockSource("mock", nil)
+	flaky.SetError(errors.New("first-failure"))
+	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
+		InputPriceUSD:  "0.50",
+		OutputPriceUSD: "1.50",
+	}, defaultPFCfg())
+
+	// Flip the source to healthy after a short delay so retry #2 succeeds.
+	go func() {
+		time.Sleep(2 * time.Millisecond)
+		flaky.SetRate(mustRat("0.003"))
+	}()
+
+	if _, _, err := p.Bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap should have recovered on retry: %v", err)
+	}
+	if !cache.Get().Populated {
+		t.Error("expected cache populated after recovered bootstrap")
 	}
 }
 

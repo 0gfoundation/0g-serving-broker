@@ -18,10 +18,11 @@ type CoinMarketCapSource struct {
 	apiKey     string
 	symbol     string // e.g. "0G"
 	quote      string // e.g. "USD"
+	userAgent  string
 }
 
 // NewCoinMarketCapSource constructs a source.  apiKey must be non-empty.
-func NewCoinMarketCapSource(client *http.Client, baseURL, apiKey, symbol, quote string) *CoinMarketCapSource {
+func NewCoinMarketCapSource(client *http.Client, baseURL, apiKey, symbol, quote, userAgent string) *CoinMarketCapSource {
 	if baseURL == "" {
 		baseURL = "https://pro-api.coinmarketcap.com"
 	}
@@ -34,6 +35,7 @@ func NewCoinMarketCapSource(client *http.Client, baseURL, apiKey, symbol, quote 
 		apiKey:     apiKey,
 		symbol:     strings.ToUpper(symbol),
 		quote:      strings.ToUpper(quote),
+		userAgent:  userAgent,
 	}
 }
 
@@ -54,6 +56,9 @@ func (s *CoinMarketCapSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-CMC_PRO_API_KEY", s.apiKey)
+	if s.userAgent != "" {
+		req.Header.Set("User-Agent", s.userAgent)
+	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

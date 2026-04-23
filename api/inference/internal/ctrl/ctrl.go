@@ -56,6 +56,19 @@ type Ctrl struct {
 	// USD-derived prices onto the otherwise-stale on-chain service record.
 	priceCache *pricefeed.Cache
 
+	// contractWriteMu serialises all on-chain service writes (SyncService
+	// and SyncServicePrices).  Prevents racing nonces when the
+	// PriceUpdateProcessor and a SyncService caller run concurrently.
+	contractWriteMu sync.Mutex
+
+	// lastPushedInputPrice / lastPushedOutputPrice cache the wei values the
+	// broker most recently wrote to chain, so subsequent drift checks can
+	// short-circuit without an eth_call.  Reset to nil on process restart,
+	// in which case SyncServicePrices falls back to reading on-chain.
+	// Guarded by contractWriteMu.
+	lastPushedInputPrice  *big.Int
+	lastPushedOutputPrice *big.Int
+
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
 

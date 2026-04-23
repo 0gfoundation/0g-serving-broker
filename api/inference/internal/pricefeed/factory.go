@@ -35,18 +35,18 @@ func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
 		name = strings.ToLower(strings.TrimSpace(name))
 		switch name {
 		case "coingecko":
-			sources = append(sources, NewCoinGeckoSource(httpClient, "", base, quote))
+			sources = append(sources, NewCoinGeckoSource(httpClient, "", base, quote, cfg.CoinGeckoAPIKey, cfg.UserAgent))
 		case "binance":
 			// Binance uses combined pair (e.g. "ZGUSDT").  0G's Binance ticker
 			// symbol uses the prefix "ZG"; we special-case that mapping here so
 			// operators keep the same "0g-usdt" symbol string across sources.
 			pair := strings.ToUpper(binancePairBase(base) + quote)
-			sources = append(sources, NewBinanceSource(httpClient, "", pair))
+			sources = append(sources, NewBinanceSource(httpClient, "", pair, cfg.UserAgent))
 		case "coinmarketcap":
 			if cfg.CoinMarketCapAPIKey == "" {
 				return nil, fmt.Errorf("pricefeed: coinmarketcap source requires priceFeed.coinMarketCapApiKey")
 			}
-			sources = append(sources, NewCoinMarketCapSource(httpClient, "", cfg.CoinMarketCapAPIKey, strings.ToUpper(base), strings.ToUpper(quote)))
+			sources = append(sources, NewCoinMarketCapSource(httpClient, "", cfg.CoinMarketCapAPIKey, strings.ToUpper(base), strings.ToUpper(quote), cfg.UserAgent))
 		default:
 			return nil, fmt.Errorf("pricefeed: unknown source %q", name)
 		}
