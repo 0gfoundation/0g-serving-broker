@@ -101,6 +101,11 @@ type Service struct {
 	// fallback where the public name is "zai-org/GLM-5-FP8" but expects
 	// "z-ai/glm-5"). Empty means "send ModelType upstream as-is".
 	UpstreamModel    string            `yaml:"upstreamModel"`
+	// ModelAliases are legacy model identifiers accepted on incoming requests in
+	// addition to ModelType. Allows changing the advertised model name without
+	// breaking clients that still send the old name. Out-of-set requests are
+	// still rejected.
+	ModelAliases     []string          `yaml:"modelAliases"`
 	Verifiability    string            `yaml:"verifiability"`
 	AdditionalSecret map[string]string `yaml:"additionalSecret"`
 	VerifierURL      string            `yaml:"verifierUrl"`
