@@ -133,7 +133,10 @@ func Main() {
 		// syncer — we only need the rate-fetch + conversion + cache-seed
 		// logic here.  The startup-time on-chain write is driven through
 		// ctrl.SyncServicePrices below, which reuses the drift gate.
-		bootProc := event.NewPriceUpdateProcessor(priceCache, aggregator, nil, config.Service, config.PriceFeed, logger)
+		bootProc, err := event.NewPriceUpdateProcessor(priceCache, aggregator, nil, config.Service, config.PriceFeed, logger)
+		if err != nil {
+			panic(fmt.Errorf("build bootstrap price processor: %w", err))
+		}
 		bootstrapInputWei, bootstrapOutputWei, err = bootProc.Bootstrap(ctx)
 		if err != nil {
 			panic(fmt.Errorf("usd price bootstrap failed: %w", err))
@@ -170,7 +173,10 @@ func Main() {
 	// via the same contract-write mutex.
 	var priceProcessorCancel context.CancelFunc
 	if config.Service.IsUSDDenominated() {
-		priceProcessor := event.NewPriceUpdateProcessor(priceCache, aggregator, ctrl, config.Service, config.PriceFeed, logger)
+		priceProcessor, err := event.NewPriceUpdateProcessor(priceCache, aggregator, ctrl, config.Service, config.PriceFeed, logger)
+		if err != nil {
+			panic(fmt.Errorf("build price update processor: %w", err))
+		}
 		var priceCtx context.Context
 		priceCtx, priceProcessorCancel = context.WithCancel(ctx)
 		go func() {

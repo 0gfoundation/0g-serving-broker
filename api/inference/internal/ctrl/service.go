@@ -61,6 +61,12 @@ func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
 	// Overlay USD-derived wei prices when USD denomination is configured.
 	if c.Service.IsUSDDenominated() && c.priceCache != nil {
 		snap := c.priceCache.Get()
+		if !snap.Populated {
+			// Pre-bootstrap: the first Bootstrap call panics the server
+			// on failure, so in production we should never reach this
+			// path.  Keep a distinct error for tests / future refactors.
+			return model.Service{}, fmt.Errorf("PRICING_UNAVAILABLE: USD price cache not yet populated")
+		}
 		if snap.IsStale(c.priceFeed.StalenessThreshold, time.Now()) {
 			return model.Service{}, fmt.Errorf("PRICING_UNAVAILABLE: USD price cache is stale (last update %s ago, threshold %s)",
 				time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
@@ -112,6 +118,10 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // differ from the last-known on-chain values by more than MinOnChainUpdateBps.
 // The first-time case (no service registered yet) always writes.
 //
+// Boundary semantics: drift <= threshold ⇒ skip; drift > threshold ⇒ push.
+// So MinOnChainUpdateBps = 0 means "push on any non-zero change", and the
+// typical default of 500 (5%) means "push once 5% drift is exceeded".
+//
 // Three layers of drift check:
 //  1. Local fast path: if we remember what we last pushed and the new prices
 //     are within threshold, skip with no eth_call.
@@ -133,8 +143,8 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	if c.lastPushedInputPrice != nil && c.lastPushedOutputPrice != nil {
 		inDrift := pricefeed.DriftBps(inputWei, c.lastPushedInputPrice)
 		outDrift := pricefeed.DriftBps(outputWei, c.lastPushedOutputPrice)
-		if inDrift < threshold && outDrift < threshold {
-			c.logger.Debugf("SyncServicePrices: drift below threshold (local cache, input=%d output=%d bps, threshold=%d) — skip",
+		if inDrift <= threshold && outDrift <= threshold {
+			c.logger.Debugf("SyncServicePrices: drift within threshold (local cache, input=%d output=%d bps, threshold=%d) — skip",
 				inDrift, outDrift, threshold)
 			return nil
 		}
@@ -150,16 +160,16 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	if !firstTime {
 		inDrift := pricefeed.DriftBps(inputWei, onChain.InputPrice)
 		outDrift := pricefeed.DriftBps(outputWei, onChain.OutputPrice)
-		if inDrift < threshold && outDrift < threshold {
+		if inDrift <= threshold && outDrift <= threshold {
 			// Adopt whatever the chain reports as our local baseline so the
 			// fast path kicks in next time (even after process restart).
 			c.lastPushedInputPrice = new(big.Int).Set(onChain.InputPrice)
 			c.lastPushedOutputPrice = new(big.Int).Set(onChain.OutputPrice)
-			c.logger.Debugf("SyncServicePrices: drift below threshold (on-chain baseline, input=%d output=%d bps, threshold=%d) — skip",
+			c.logger.Debugf("SyncServicePrices: drift within threshold (on-chain baseline, input=%d output=%d bps, threshold=%d) — skip",
 				inDrift, outDrift, threshold)
 			return nil
 		}
-		c.logger.Infof("SyncServicePrices: drift above threshold (input=%d output=%d bps, threshold=%d) — syncing",
+		c.logger.Infof("SyncServicePrices: drift exceeds threshold (input=%d output=%d bps, threshold=%d) — syncing",
 			inDrift, outDrift, threshold)
 	} else {
 		c.logger.Infof("SyncServicePrices: service not yet registered on-chain — first-time registration")

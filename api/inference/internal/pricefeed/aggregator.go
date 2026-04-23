@@ -53,13 +53,21 @@ func NewAggregator(sources []Source, minQuorum, maxDeviationBp int, httpTimeout 
 func (a *Aggregator) Aggregate(ctx context.Context) (*big.Rat, []SourceQuote, error) {
 	quotes := a.fanOut(ctx)
 
-	healthy := make([]*big.Rat, 0, len(quotes))
+	// Single pass to collect healthy quotes together with their source
+	// identities — we need the identity for outlier logging below.
+	type healthyQuote struct {
+		source string
+		rate   *big.Rat
+	}
+	healthy := make([]healthyQuote, 0, len(quotes))
+	rates := make([]*big.Rat, 0, len(quotes))
 	for i := range quotes {
 		q := quotes[i]
 		if q.Err != nil || q.Rate == nil || q.Rate.Sign() <= 0 {
 			continue
 		}
-		healthy = append(healthy, q.Rate)
+		healthy = append(healthy, healthyQuote{source: q.Source, rate: q.Rate})
+		rates = append(rates, q.Rate)
 	}
 	if len(healthy) == 0 {
 		return nil, quotes, fmt.Errorf("no healthy price-feed sources (queried %d)", len(quotes))
@@ -67,23 +75,20 @@ func (a *Aggregator) Aggregate(ctx context.Context) (*big.Rat, []SourceQuote, er
 
 	// Working median, used only to identify outliers.  We rebuild the
 	// final median from the post-outlier set.
-	working := medianRat(healthy)
+	working := medianRat(rates)
 
 	kept := make([]*big.Rat, 0, len(healthy))
-	for i := range quotes {
-		q := quotes[i]
-		if q.Err != nil || q.Rate == nil || q.Rate.Sign() <= 0 {
-			continue
-		}
-		if deviationBps(q.Rate, working) > a.maxDeviationBp {
+	for _, hq := range healthy {
+		dev := deviationBps(hq.rate, working)
+		if dev > a.maxDeviationBp {
 			if a.logger != nil {
 				a.logger.Warnf("pricefeed: dropping outlier source=%s rate=%s median=%s deviationBps=%d threshold=%d",
-					q.Source, q.Rate.FloatString(8), working.FloatString(8),
-					deviationBps(q.Rate, working), a.maxDeviationBp)
+					hq.source, hq.rate.FloatString(8), working.FloatString(8),
+					dev, a.maxDeviationBp)
 			}
 			continue
 		}
-		kept = append(kept, q.Rate)
+		kept = append(kept, hq.rate)
 	}
 	if len(kept) < a.minQuorum {
 		return nil, quotes, fmt.Errorf("pricefeed quorum not met: %d healthy sources after outlier rejection, need %d", len(kept), a.minQuorum)

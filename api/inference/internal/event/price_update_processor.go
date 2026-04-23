@@ -30,14 +30,23 @@ type PriceUpdateProcessor struct {
 	cache      *pricefeed.Cache
 	aggregator *pricefeed.Aggregator
 	syncer     priceSyncer
-	serviceCfg config.Service
-	pfCfg      config.PriceFeedConfig
-	logger     log.Logger
+	// inputUSD / outputUSD are the USD-per-1M-token prices parsed once at
+	// construction from config.Service.  The config validator rejects
+	// un-parseable strings, so NewPriceUpdateProcessor is defensive but
+	// never sees a live process through a bad value.
+	inputUSD  *big.Rat
+	outputUSD *big.Rat
+	pfCfg     config.PriceFeedConfig
+	logger    log.Logger
 }
 
 // NewPriceUpdateProcessor constructs a processor.  cache and aggregator must
 // be non-nil.  syncer may be nil — in that case on-chain sync is disabled
 // (e.g. for tests that only exercise the cache-refresh path).
+//
+// Returns an error if the configured USD price strings are malformed.  In
+// practice the config validator catches this at load; the check here is a
+// defensive second layer for tests that build a Service struct directly.
 func NewPriceUpdateProcessor(
 	cache *pricefeed.Cache,
 	aggregator *pricefeed.Aggregator,
@@ -45,15 +54,24 @@ func NewPriceUpdateProcessor(
 	serviceCfg config.Service,
 	pfCfg config.PriceFeedConfig,
 	logger log.Logger,
-) *PriceUpdateProcessor {
+) (*PriceUpdateProcessor, error) {
+	inputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.InputPriceUSD)
+	if err != nil {
+		return nil, fmt.Errorf("processor: parse inputPriceUSD: %w", err)
+	}
+	outputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.OutputPriceUSD)
+	if err != nil {
+		return nil, fmt.Errorf("processor: parse outputPriceUSD: %w", err)
+	}
 	return &PriceUpdateProcessor{
 		cache:      cache,
 		aggregator: aggregator,
 		syncer:     syncer,
-		serviceCfg: serviceCfg,
+		inputUSD:   inputUSD,
+		outputUSD:  outputUSD,
 		pfCfg:      pfCfg,
 		logger:     logger,
-	}
+	}, nil
 }
 
 // Bootstrap retry knobs — declared as package vars rather than consts so
@@ -84,15 +102,6 @@ var (
 // regional block, transient 5xx — without making a sustained outage look
 // like a healthy start.
 func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputWei *big.Int, err error) {
-	inputUSD, err := pricefeed.ParseUSDPerMillion(p.serviceCfg.InputPriceUSD)
-	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: parse inputPriceUSD: %w", err)
-	}
-	outputUSD, err := pricefeed.ParseUSDPerMillion(p.serviceCfg.OutputPriceUSD)
-	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: parse outputPriceUSD: %w", err)
-	}
-
 	var rate *big.Rat
 	var lastErr error
 	backoff := bootstrapBaseBackoff
@@ -105,10 +114,16 @@ func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputW
 		if attempt == bootstrapMaxAttempts {
 			break
 		}
+		// Use time.NewTimer + Stop so a ctx cancellation doesn't leak
+		// a timer for up to bootstrapMaxBackoff.
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return nil, nil, fmt.Errorf("bootstrap: context cancelled during retry: %w", ctx.Err())
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 		if backoff *= 2; backoff > bootstrapMaxBackoff {
 			backoff = bootstrapMaxBackoff
@@ -118,11 +133,11 @@ func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputW
 		return nil, nil, fmt.Errorf("bootstrap: aggregate initial rate (after %d attempts): %w", bootstrapMaxAttempts, lastErr)
 	}
 
-	inputWei, err = pricefeed.USDPerMillionToWeiPerToken(inputUSD, rate)
+	inputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
 		return nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSD: %w", err)
 	}
-	outputWei, err = pricefeed.USDPerMillionToWeiPerToken(outputUSD, rate)
+	outputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
 		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSD: %w", err)
 	}
@@ -157,29 +172,18 @@ func (p *PriceUpdateProcessor) Start(ctx context.Context) error {
 // from the previous tick is retained (readers enforce StalenessThreshold
 // independently).
 func (p *PriceUpdateProcessor) tick(ctx context.Context) {
-	inputUSD, err := pricefeed.ParseUSDPerMillion(p.serviceCfg.InputPriceUSD)
-	if err != nil {
-		p.logger.Errorf("pricefeed tick: parse inputPriceUSD: %v", err)
-		return
-	}
-	outputUSD, err := pricefeed.ParseUSDPerMillion(p.serviceCfg.OutputPriceUSD)
-	if err != nil {
-		p.logger.Errorf("pricefeed tick: parse outputPriceUSD: %v", err)
-		return
-	}
-
 	rate, _, err := p.aggregator.Aggregate(ctx)
 	if err != nil {
 		p.logger.Warnf("pricefeed tick: aggregate failed (keeping last good cache): %v", err)
 		return
 	}
 
-	inputWei, err := pricefeed.USDPerMillionToWeiPerToken(inputUSD, rate)
+	inputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
 		p.logger.Errorf("pricefeed tick: convert inputPriceUSD: %v", err)
 		return
 	}
-	outputWei, err := pricefeed.USDPerMillionToWeiPerToken(outputUSD, rate)
+	outputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
 		p.logger.Errorf("pricefeed tick: convert outputPriceUSD: %v", err)
 		return

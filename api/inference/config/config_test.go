@@ -378,6 +378,52 @@ service:
 	}
 }
 
+func TestLoadConfig_USDMalformedPrice(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0,50"
+  outputPriceUSD: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSD") {
+		t.Errorf("expected error about malformed inputPriceUSD, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDNegativePrice(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "-1.50"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("expected error about negative outputPriceUSD, got %v", err)
+	}
+}
+
 func TestLoadConfig_USDEmptySources(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

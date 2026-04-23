@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"regexp"
 	"strings"
@@ -151,9 +152,14 @@ type PriceFeedConfig struct {
 	// StalenessThreshold rejects new requests (fail-closed) if the last successful
 	// cache refresh is older than this. Must be >= UpdateInterval.
 	StalenessThreshold time.Duration `yaml:"stalenessThreshold"`
-	// MinOnChainUpdateBps is the minimum drift (in basis points, 1/10000) between
-	// the newly-derived wei price and the currently-registered on-chain price that
-	// will trigger an on-chain tx. Below this threshold the tx is skipped.
+	// MinOnChainUpdateBps is the drift threshold (in basis points, 1/10000)
+	// between the newly-derived wei price and the currently-registered
+	// on-chain price.  Drift <= threshold skips the on-chain tx; drift >
+	// threshold triggers it.
+	//
+	// Unset / zero value is treated as "not configured" and resolves to the
+	// default of 500 bps (5%).  Operators wanting "push on every change"
+	// should set 1 (0.01%).
 	MinOnChainUpdateBps int `yaml:"minOnChainUpdateBps"`
 	// MaxRateDeviationBps is the max deviation (in bps) from the aggregated median
 	// a single source may report before it's dropped as an outlier.
@@ -408,6 +414,25 @@ var IngressAllowedEnvKeys = []string{
 	"PORT",
 }
 
+// validateUSDPriceString rejects a USD-denominated price string that isn't a
+// non-negative decimal.  Duplicates the minimal subset of
+// pricefeed.ParseUSDPerMillion needed at config-load time; kept in-package
+// to avoid a config → pricefeed import cycle (factory.go imports config).
+func validateUSDPriceString(field, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("invalid config: %s is empty", field)
+	}
+	r, ok := new(big.Rat).SetString(trimmed)
+	if !ok {
+		return fmt.Errorf("invalid config: %s=%q is not a valid decimal", field, value)
+	}
+	if r.Sign() < 0 {
+		return fmt.Errorf("invalid config: %s=%q must be non-negative", field, value)
+	}
+	return nil
+}
+
 // validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
 // configuration. Only invoked when service.priceDenomination == "USD".
 func validatePriceFeedConfig(pf *PriceFeedConfig) error {
@@ -542,6 +567,12 @@ func loadConfig(config *Config) error {
 	case constant.PriceDenominationUSD:
 		if config.Service.InputPriceUSD == "" || config.Service.OutputPriceUSD == "" {
 			return fmt.Errorf("invalid config: service.inputPriceUSD and service.outputPriceUSD are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
+		}
+		if err := validateUSDPriceString("service.inputPriceUSD", config.Service.InputPriceUSD); err != nil {
+			return err
+		}
+		if err := validateUSDPriceString("service.outputPriceUSD", config.Service.OutputPriceUSD); err != nil {
+			return err
 		}
 		if config.Service.InputPrice != "" || config.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)

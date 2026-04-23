@@ -52,12 +52,16 @@ func mustRat(s string) *big.Rat {
 // newTestProcessor constructs a processor with an aggregator wrapping the
 // supplied mock sources.  syncer is nil: Bootstrap doesn't touch it, and
 // tick-level on-chain sync isn't exercised here (covered by DriftBps and
-// ctrl.SyncServicePrices tests).
+// ctrl.SyncServicePrices tests).  Fails the test on constructor error so
+// callers don't need to plumb it through every assertion.
 func newTestProcessor(t *testing.T, sources []pricefeed.Source, svcCfg config.Service, pfCfg config.PriceFeedConfig) (*PriceUpdateProcessor, *pricefeed.Cache) {
 	t.Helper()
 	cache := pricefeed.NewCache()
 	agg := pricefeed.NewAggregator(sources, pfCfg.MinQuorum, pfCfg.MaxRateDeviationBps, pfCfg.HTTPTimeout, nopLogger{})
-	p := NewPriceUpdateProcessor(cache, agg, nil, svcCfg, pfCfg, nopLogger{})
+	p, err := NewPriceUpdateProcessor(cache, agg, nil, svcCfg, pfCfg, nopLogger{})
+	if err != nil {
+		t.Fatalf("NewPriceUpdateProcessor: %v", err)
+	}
 	return p, cache
 }
 
@@ -171,14 +175,17 @@ func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
 	}
 }
 
-func TestProcessor_Bootstrap_InvalidUSDPrice(t *testing.T) {
-	srcs := []pricefeed.Source{pricefeed.NewMockSource("mock", mustRat("0.003"))}
-	p, _ := newTestProcessor(t, srcs, config.Service{
+func TestNewPriceUpdateProcessor_InvalidUSDPrice(t *testing.T) {
+	// Parse-once moves the USD validation up to the constructor, so a bad
+	// price is caught before the server even starts ticking — no "error
+	// at every tick" silent failure mode.
+	cache := pricefeed.NewCache()
+	agg := pricefeed.NewAggregator(nil, 1, 500, time.Second, nopLogger{})
+	_, err := NewPriceUpdateProcessor(cache, agg, nil, config.Service{
 		InputPriceUSD:  "not-a-number",
 		OutputPriceUSD: "1.50",
-	}, defaultPFCfg())
-
-	if _, _, err := p.Bootstrap(context.Background()); err == nil {
-		t.Error("expected bootstrap to fail with invalid inputPriceUSD")
+	}, defaultPFCfg(), nopLogger{})
+	if err == nil {
+		t.Error("expected constructor to reject invalid inputPriceUSD")
 	}
 }
