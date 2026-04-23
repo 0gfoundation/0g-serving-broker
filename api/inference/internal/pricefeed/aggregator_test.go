@@ -1,4 +1,4 @@
-package pricefeed
+package pricefeed_test
 
 import (
 	"context"
@@ -6,6 +6,9 @@ import (
 	"math/big"
 	"testing"
 	"time"
+
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed/pricefeedtest"
 )
 
 func rat(s string) *big.Rat {
@@ -14,12 +17,12 @@ func rat(s string) *big.Rat {
 }
 
 func TestAggregator_MedianThreeHealthy(t *testing.T) {
-	srcs := []Source{
-		NewMockSource("a", rat("0.0030")),
-		NewMockSource("b", rat("0.0031")),
-		NewMockSource("c", rat("0.0032")),
+	srcs := []pricefeed.Source{
+		pricefeedtest.NewMockSource("a", rat("0.0030")),
+		pricefeedtest.NewMockSource("b", rat("0.0031")),
+		pricefeedtest.NewMockSource("c", rat("0.0032")),
 	}
-	agg := NewAggregator(srcs, 2, 500, time.Second, nil)
+	agg := pricefeed.NewAggregator(srcs, 2, 500, time.Second, nil)
 	got, _, err := agg.Aggregate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -30,11 +33,11 @@ func TestAggregator_MedianThreeHealthy(t *testing.T) {
 }
 
 func TestAggregator_EvenNumberTakesMean(t *testing.T) {
-	srcs := []Source{
-		NewMockSource("a", rat("0.0030")),
-		NewMockSource("b", rat("0.0032")),
+	srcs := []pricefeed.Source{
+		pricefeedtest.NewMockSource("a", rat("0.0030")),
+		pricefeedtest.NewMockSource("b", rat("0.0032")),
 	}
-	agg := NewAggregator(srcs, 2, 500, time.Second, nil)
+	agg := pricefeed.NewAggregator(srcs, 2, 500, time.Second, nil)
 	got, _, err := agg.Aggregate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -48,12 +51,12 @@ func TestAggregator_EvenNumberTakesMean(t *testing.T) {
 func TestAggregator_DropsOutlier(t *testing.T) {
 	// Two clustered sources around 0.003 plus one outlier at 0.01 (~233% deviation).
 	// With maxDeviationBps=500 (5%), the outlier must be dropped.
-	srcs := []Source{
-		NewMockSource("a", rat("0.0030")),
-		NewMockSource("b", rat("0.0031")),
-		NewMockSource("c", rat("0.01")),
+	srcs := []pricefeed.Source{
+		pricefeedtest.NewMockSource("a", rat("0.0030")),
+		pricefeedtest.NewMockSource("b", rat("0.0031")),
+		pricefeedtest.NewMockSource("c", rat("0.01")),
 	}
-	agg := NewAggregator(srcs, 2, 500, time.Second, nil)
+	agg := pricefeed.NewAggregator(srcs, 2, 500, time.Second, nil)
 	got, quotes, err := agg.Aggregate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -68,13 +71,13 @@ func TestAggregator_DropsOutlier(t *testing.T) {
 }
 
 func TestAggregator_QuorumNotMet(t *testing.T) {
-	failing := NewMockSource("a", nil)
+	failing := pricefeedtest.NewMockSource("a", nil)
 	failing.SetError(errors.New("boom"))
-	srcs := []Source{
+	srcs := []pricefeed.Source{
 		failing,
-		NewMockSource("b", rat("0.0031")),
+		pricefeedtest.NewMockSource("b", rat("0.0031")),
 	}
-	agg := NewAggregator(srcs, 2, 500, time.Second, nil)
+	agg := pricefeed.NewAggregator(srcs, 2, 500, time.Second, nil)
 	_, _, err := agg.Aggregate(context.Background())
 	if err == nil {
 		t.Error("expected quorum-not-met error with only 1 healthy source and minQuorum=2")
@@ -82,12 +85,12 @@ func TestAggregator_QuorumNotMet(t *testing.T) {
 }
 
 func TestAggregator_AllSourcesFail(t *testing.T) {
-	a := NewMockSource("a", nil)
+	a := pricefeedtest.NewMockSource("a", nil)
 	a.SetError(errors.New("x"))
-	b := NewMockSource("b", nil)
+	b := pricefeedtest.NewMockSource("b", nil)
 	b.SetError(errors.New("y"))
-	srcs := []Source{a, b}
-	agg := NewAggregator(srcs, 1, 500, time.Second, nil)
+	srcs := []pricefeed.Source{a, b}
+	agg := pricefeed.NewAggregator(srcs, 1, 500, time.Second, nil)
 	_, quotes, err := agg.Aggregate(context.Background())
 	if err == nil {
 		t.Error("expected error when all sources fail")
@@ -98,12 +101,12 @@ func TestAggregator_AllSourcesFail(t *testing.T) {
 }
 
 func TestAggregator_NonPositiveRateTreatedAsUnhealthy(t *testing.T) {
-	srcs := []Source{
-		NewMockSource("a", rat("0")), // non-positive — must be filtered
-		NewMockSource("b", rat("0.0031")),
-		NewMockSource("c", rat("0.0030")),
+	srcs := []pricefeed.Source{
+		pricefeedtest.NewMockSource("a", rat("0")), // non-positive — must be filtered
+		pricefeedtest.NewMockSource("b", rat("0.0031")),
+		pricefeedtest.NewMockSource("c", rat("0.0030")),
 	}
-	agg := NewAggregator(srcs, 2, 500, time.Second, nil)
+	agg := pricefeed.NewAggregator(srcs, 2, 500, time.Second, nil)
 	got, _, err := agg.Aggregate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -115,8 +118,8 @@ func TestAggregator_NonPositiveRateTreatedAsUnhealthy(t *testing.T) {
 }
 
 func TestAggregator_RespectsTimeout(t *testing.T) {
-	srcs := []Source{NewMockSource("a", rat("0.0030"))}
-	agg := NewAggregator(srcs, 1, 500, 50*time.Millisecond, nil)
+	srcs := []pricefeed.Source{pricefeedtest.NewMockSource("a", rat("0.0030"))}
+	agg := pricefeed.NewAggregator(srcs, 1, 500, 50*time.Millisecond, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 	_, _, err := agg.Aggregate(ctx)
