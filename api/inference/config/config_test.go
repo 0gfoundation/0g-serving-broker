@@ -331,8 +331,19 @@ priceFeed:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "must be empty") {
-		t.Errorf("expected error about native price fields, got %v", err)
+	// Must specifically call out the NATIVE fields (inputPrice /
+	// outputPrice) as the offender — the sibling check has the same
+	// "must be empty" wording, so a loose substring match wouldn't
+	// catch a regression that swaps the two checks.
+	if err == nil {
+		t.Fatal("expected error for native inputPrice with USD denomination")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "service.inputPrice") && !strings.Contains(msg, "service.outputPrice") {
+		t.Errorf("expected error naming service.inputPrice / service.outputPrice, got %q", msg)
+	}
+	if !strings.Contains(msg, "USD") {
+		t.Errorf("expected error to reference USD denomination, got %q", msg)
 	}
 }
 
@@ -352,8 +363,15 @@ service:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "must be empty") {
-		t.Errorf("expected error about USD price fields, got %v", err)
+	if err == nil {
+		t.Fatal("expected error for USD inputPriceUSD under NATIVE denomination")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "service.inputPriceUSD") && !strings.Contains(msg, "service.outputPriceUSD") {
+		t.Errorf("expected error naming service.inputPriceUSD / service.outputPriceUSD, got %q", msg)
+	}
+	if !strings.Contains(msg, "NATIVE") {
+		t.Errorf("expected error to reference NATIVE denomination, got %q", msg)
 	}
 }
 

@@ -262,16 +262,26 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, 
 }
 
 func identicalService(old contract.Service, new config.Service, teeSignerAddress common.Address, newAdditionalInfo string) bool {
-	if old.Model != new.ModelType {
-		return false
-	}
-	if old.Verifiability != new.Verifiability {
+	if !identicalServiceExceptPrice(old, new, teeSignerAddress, newAdditionalInfo) {
 		return false
 	}
 	if old.InputPrice.String() != new.InputPrice {
 		return false
 	}
 	if old.OutputPrice.String() != new.OutputPrice {
+		return false
+	}
+	return true
+}
+
+// identicalServiceExceptPrice mirrors identicalService but ignores the
+// InputPrice / OutputPrice fields.  Used by the USD-startup drift gate to
+// decide whether a pure-rate-drift restart can skip the on-chain push.
+func identicalServiceExceptPrice(old contract.Service, new config.Service, teeSignerAddress common.Address, newAdditionalInfo string) bool {
+	if old.Model != new.ModelType {
+		return false
+	}
+	if old.Verifiability != new.Verifiability {
 		return false
 	}
 	if old.ServiceType != new.Type {
@@ -287,4 +297,25 @@ func identicalService(old contract.Service, new config.Service, teeSignerAddress
 		return false
 	}
 	return true
+}
+
+// CompareServiceExceptPrice reports whether the on-chain service matches the
+// supplied config across all fields EXCEPT InputPrice / OutputPrice.  It
+// returns the current on-chain service so callers can compare prices
+// themselves (typically via pricefeed.DriftBps).
+//
+// If the service is not yet registered on-chain, returns (false, nil,
+// ErrServiceNotFound) — callers that want "not equal, no error" should
+// check errors.Is(err, ErrServiceNotFound) and translate.
+func (c *ProviderContract) CompareServiceExceptPrice(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (bool, *contract.Service, error) {
+	old, err := c.GetService(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	imageName, imageDigest := c.GetImageInfo(ctx)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling)
+	if err != nil {
+		return false, old, errors.Wrap(err, "build additional info")
+	}
+	return identicalServiceExceptPrice(*old, new, c.TeeSignerAddress, newAdditionalInfo), old, nil
 }

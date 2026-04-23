@@ -101,6 +101,18 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // tieredPricing, additionalInfo, etc.) propagate on chain — something
 // SyncServicePrices does not check.
 //
+// To avoid paying gas on every restart where only the rate has drifted, the
+// startup path runs a two-step equality check:
+//
+//  1. If the on-chain service matches every non-price field (URL, model,
+//     TEE signer, tieredPricing, cacheTokenBilling, additionalInfo), then
+//  2. Compare price drift against MinOnChainUpdateBps; skip the on-chain
+//     write if within threshold and adopt the on-chain prices as our
+//     local baseline.
+//
+// Any non-price mismatch falls through to syncServiceOnce, which writes
+// verbatim (same behaviour as NATIVE mode's SyncService).
+//
 // Called at most once per process, ahead of the PriceUpdateProcessor
 // goroutine, which handles subsequent price-only updates via
 // SyncServicePrices.
@@ -108,6 +120,34 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 	overlaid := c.Service
 	overlaid.InputPrice = inputWei.String()
 	overlaid.OutputPrice = outputWei.String()
+
+	// Attempt the pure-rate-drift skip before spending a transaction.
+	nonPriceMatches, onChain, err := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling)
+	notFound := err != nil && errors.Is(err, providercontract.ErrServiceNotFound)
+	if err != nil && !notFound {
+		c.logger.Warnf("SyncServiceWithPrices: non-price comparison failed, proceeding with full sync: %v", err)
+	}
+	if !notFound && err == nil && nonPriceMatches && onChain != nil {
+		threshold := c.priceFeed.MinOnChainUpdateBps
+		inDrift := pricefeed.DriftBps(inputWei, onChain.InputPrice)
+		outDrift := pricefeed.DriftBps(outputWei, onChain.OutputPrice)
+		if inDrift <= threshold && outDrift <= threshold {
+			// Non-price fields match and price is within threshold:
+			// no reason to pay gas.  Adopt on-chain as baseline, flip
+			// the once-guard to match the happy-path semantics.
+			c.logger.Infof("SyncServiceWithPrices: non-price fields match, price drift within threshold (input=%d output=%d bps, threshold=%d) — skipping on-chain push",
+				inDrift, outDrift, threshold)
+			c.contractWriteMu.Lock()
+			c.lastPushedInputPrice = new(big.Int).Set(onChain.InputPrice)
+			c.lastPushedOutputPrice = new(big.Int).Set(onChain.OutputPrice)
+			c.contractWriteMu.Unlock()
+			c.mu.Lock()
+			c.serviceSynced = true
+			c.mu.Unlock()
+			return nil
+		}
+	}
+
 	if err := c.syncServiceOnce(ctx, overlaid); err != nil {
 		return err
 	}
@@ -186,43 +226,52 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 
 	threshold := c.priceFeed.MinOnChainUpdateBps
 
-	// (1) Local fast path — avoids any eth_call in the steady state.
-	if c.lastPushedInputPrice != nil && c.lastPushedOutputPrice != nil {
-		inDrift := pricefeed.DriftBps(inputWei, c.lastPushedInputPrice)
-		outDrift := pricefeed.DriftBps(outputWei, c.lastPushedOutputPrice)
-		if inDrift <= threshold && outDrift <= threshold {
-			c.logger.Debugf("SyncServicePrices: drift within threshold (local cache, input=%d output=%d bps, threshold=%d) — skip",
-				inDrift, outDrift, threshold)
-			return nil
-		}
+	// Local fast path: if last-pushed exists and drift is within threshold,
+	// PlanPriceSync returns Push=false and we're done — no eth_call.
+	decision := pricefeed.PlanPriceSync(
+		c.lastPushedInputPrice, c.lastPushedOutputPrice,
+		nil, nil, // on-chain values not yet fetched
+		inputWei, outputWei, threshold, false)
+	if !decision.Push && c.lastPushedInputPrice != nil && c.lastPushedOutputPrice != nil {
+		c.logger.Debugf("SyncServicePrices: drift within threshold (local cache) — skip")
+		return nil
 	}
 
-	// (2) On-chain baseline — handles first-tick-after-boot and admin edits.
+	// Need an on-chain read to decide — either because we have no local
+	// baseline, or the local baseline says drift is too high and we want
+	// to double-check against chain.
 	onChain, getErr := c.contract.GetService(ctx)
 	firstTime := getErr != nil && errors.Is(getErr, providercontract.ErrServiceNotFound)
 	if getErr != nil && !firstTime {
 		return errors.Wrap(getErr, "get on-chain service for drift check")
 	}
 
+	var onChainInput, onChainOutput *big.Int
 	if !firstTime {
-		inDrift := pricefeed.DriftBps(inputWei, onChain.InputPrice)
-		outDrift := pricefeed.DriftBps(outputWei, onChain.OutputPrice)
-		if inDrift <= threshold && outDrift <= threshold {
-			// Adopt whatever the chain reports as our local baseline so the
-			// fast path kicks in next time (even after process restart).
-			c.lastPushedInputPrice = new(big.Int).Set(onChain.InputPrice)
-			c.lastPushedOutputPrice = new(big.Int).Set(onChain.OutputPrice)
-			c.logger.Debugf("SyncServicePrices: drift within threshold (on-chain baseline, input=%d output=%d bps, threshold=%d) — skip",
-				inDrift, outDrift, threshold)
-			return nil
+		onChainInput = onChain.InputPrice
+		onChainOutput = onChain.OutputPrice
+	}
+	decision = pricefeed.PlanPriceSync(
+		c.lastPushedInputPrice, c.lastPushedOutputPrice,
+		onChainInput, onChainOutput,
+		inputWei, outputWei, threshold, firstTime)
+
+	if !decision.Push {
+		if decision.AdoptInputBaseline != nil {
+			c.lastPushedInputPrice = decision.AdoptInputBaseline
+			c.lastPushedOutputPrice = decision.AdoptOutputBaseline
+			c.logger.Debugf("SyncServicePrices: drift within threshold (on-chain baseline adopted) — skip")
 		}
-		c.logger.Infof("SyncServicePrices: drift exceeds threshold (input=%d output=%d bps, threshold=%d) — syncing",
-			inDrift, outDrift, threshold)
-	} else {
-		c.logger.Infof("SyncServicePrices: service not yet registered on-chain — first-time registration")
+		return nil
 	}
 
-	// (3) Push.
+	if firstTime {
+		c.logger.Infof("SyncServicePrices: service not yet registered on-chain — first-time registration")
+	} else {
+		c.logger.Infof("SyncServicePrices: drift exceeds threshold — syncing")
+	}
+
+	// Push.
 	updated := c.Service
 	updated.InputPrice = inputWei.String()
 	updated.OutputPrice = outputWei.String()
