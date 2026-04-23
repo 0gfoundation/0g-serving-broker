@@ -41,8 +41,11 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			}
 		}
 
-		// Enforce configured model only when TargetSeparated is true.
-		if c.Service.TargetSeparated {
+		// Enforce configured model when the service has asked for model
+		// validation/rewriting. TargetSeparated providers opt in for legacy
+		// reasons; UpstreamModel and ModelAliases each imply opt-in because
+		// they only make sense with this path running.
+		if c.Service.TargetSeparated || c.Service.UpstreamModel != "" || len(c.Service.ModelAliases) > 0 {
 			userAddr, _ := ctx.Get("userAddress")
 			userAddrStr, _ := userAddr.(string)
 			modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
@@ -449,7 +452,7 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 			return nil, errors.New(fmt.Sprintf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType))
 		}
 
-		if requestModelStr != c.Service.ModelType {
+		if requestModelStr != c.Service.ModelType && !isModelAlias(requestModelStr, c.Service.ModelAliases) {
 			// Model mismatch detected - record in rate limiter and REJECT
 			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, configured=%s",
 				userAddr, requestModelStr, c.Service.ModelType)
@@ -481,5 +484,14 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	}
 
 	return modifiedBody, nil
+}
+
+func isModelAlias(name string, aliases []string) bool {
+	for _, a := range aliases {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }
 
