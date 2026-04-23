@@ -9,11 +9,18 @@ import (
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// ErrPricingUnavailable is returned by GetCachedService when the provider is
+// USD-denominated but the in-memory wei-price cache is missing or stale.
+// The /service handler surfaces this as HTTP 503 so callers can distinguish
+// transient rate-feed outages from genuine internal errors.
+var ErrPricingUnavailable = errors.New("PRICING_UNAVAILABLE")
 
 func (c *Ctrl) GetService(ctx context.Context) (model.Service, error) {
 	svc, err := c.contract.GetService(ctx)
@@ -59,11 +66,11 @@ func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
 			// Pre-bootstrap: the first Bootstrap call panics the server
 			// on failure, so in production we should never reach this
 			// path.  Keep a distinct error for tests / future refactors.
-			return model.Service{}, fmt.Errorf("PRICING_UNAVAILABLE: USD price cache not yet populated")
+			return model.Service{}, fmt.Errorf("%w: USD price cache not yet populated", ErrPricingUnavailable)
 		}
 		if snap.IsStale(c.priceFeed.StalenessThreshold, time.Now()) {
-			return model.Service{}, fmt.Errorf("PRICING_UNAVAILABLE: USD price cache is stale (last update %s ago, threshold %s)",
-				time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
+			return model.Service{}, fmt.Errorf("%w: USD price cache is stale (last update %s ago, threshold %s)",
+				ErrPricingUnavailable, time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
 		}
 		service.InputPrice = snap.InputPriceWei.String()
 		service.OutputPrice = snap.OutputPriceWei.String()
@@ -75,10 +82,52 @@ func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
 // This method can only be called once. Subsequent calls will be ignored.
 //
 // In NATIVE-price mode this performs first-time registration (with stake) or
-// picks up config changes.  In USD mode, the server calls SyncServicePrices
-// instead, which adds a drift gate so every restart doesn't pay gas for a
-// sub-percent wei-price change.
+// picks up config changes (URL, model type, tiered pricing, TEE signer, etc).
+// USD-mode callers should use SyncServiceWithPrices, which runs the same full
+// identicalService comparison but first overlays the bootstrapped wei prices
+// onto the Service copy so price fields participate in the equality check.
+//
+// The steady-state processor tick uses SyncServicePrices, which only compares
+// price drift and is therefore blind to non-price metadata changes — hence
+// metadata changes require a broker restart to propagate on chain, the same
+// as in NATIVE mode.
 func (c *Ctrl) SyncService(ctx context.Context) error {
+	return c.syncServiceOnce(ctx, c.Service)
+}
+
+// SyncServiceWithPrices is the USD-mode startup equivalent of SyncService.
+// It overlays the supplied wei prices onto a Service copy and runs the full
+// identicalService comparison so non-price config changes (TEE signer,
+// tieredPricing, additionalInfo, etc.) propagate on chain — something
+// SyncServicePrices does not check.
+//
+// Called at most once per process, ahead of the PriceUpdateProcessor
+// goroutine, which handles subsequent price-only updates via
+// SyncServicePrices.
+func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *big.Int) error {
+	overlaid := c.Service
+	overlaid.InputPrice = inputWei.String()
+	overlaid.OutputPrice = outputWei.String()
+	if err := c.syncServiceOnce(ctx, overlaid); err != nil {
+		return err
+	}
+	// Record what we just registered as the local baseline so the first
+	// processor tick's drift comparison can short-circuit without an
+	// eth_call.
+	c.contractWriteMu.Lock()
+	c.lastPushedInputPrice = new(big.Int).Set(inputWei)
+	c.lastPushedOutputPrice = new(big.Int).Set(outputWei)
+	c.contractWriteMu.Unlock()
+	return nil
+}
+
+// syncServiceOnce is the shared implementation behind SyncService and
+// SyncServiceWithPrices.  It enforces the once-only guard and serialises the
+// on-chain write through contractWriteMu so a concurrent SyncServicePrices
+// can't race nonces.  svc is whatever Service snapshot the caller wants
+// registered (either c.Service as-is for NATIVE mode, or a copy with
+// overlaid wei prices for USD mode).
+func (c *Ctrl) syncServiceOnce(ctx context.Context, svc config.Service) error {
 	c.mu.Lock()
 	if c.serviceSynced {
 		c.mu.Unlock()
@@ -88,11 +137,8 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 	c.serviceSynced = true
 	c.mu.Unlock()
 
-	// Hold the contract-write mutex while talking to chain so the
-	// PriceUpdateProcessor can't interleave a concurrent SyncServicePrices
-	// transaction with racing nonces.
 	c.contractWriteMu.Lock()
-	err := c.contract.SyncService(ctx, c.Service, c.tieredPricing, c.cacheTokenBilling)
+	err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling)
 	c.contractWriteMu.Unlock()
 	if err != nil {
 		// Reset the flag if sync failed so it can be retried
@@ -111,6 +157,13 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // SyncServicePrices writes the supplied wei prices on-chain only if they
 // differ from the last-known on-chain values by more than MinOnChainUpdateBps.
 // The first-time case (no service registered yet) always writes.
+//
+// Scope: this path compares ONLY price fields.  Non-price metadata changes
+// (URL, modelType, tieredPricing, cacheTokenBilling, TEE signer,
+// additionalInfo, etc.) are invisible here — they're picked up by the
+// startup SyncService / SyncServiceWithPrices path and propagate on broker
+// restart, the same as in NATIVE mode.  Don't use this for admin-triggered
+// metadata updates without first revisiting the equality check.
 //
 // Boundary semantics: drift <= threshold ⇒ skip; drift > threshold ⇒ push.
 // So MinOnChainUpdateBps = 0 means "push on any non-zero change", and the

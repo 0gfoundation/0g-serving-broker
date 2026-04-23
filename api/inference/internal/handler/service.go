@@ -2,9 +2,11 @@ package handler
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
 
 // getService
@@ -26,12 +28,11 @@ import (
 func (h *Handler) GetService(ctx *gin.Context) {
 	service, err := h.ctrl.GetCachedService(ctx)
 	if err != nil {
-		// The USD overlay returns a structured "PRICING_UNAVAILABLE:"
-		// error when the rate cache can't satisfy the request.  Surface
-		// that to callers as 503 so SDK / monitoring code can retry
-		// (and so a stale rate feed doesn't show up as a 500 in
-		// dashboards alongside genuine internal errors).
-		if strings.Contains(err.Error(), "PRICING_UNAVAILABLE") {
+		// USD overlay returns ctrl.ErrPricingUnavailable when the rate
+		// cache can't satisfy the request.  Surface as 503 so SDKs and
+		// monitoring can distinguish transient rate-feed outages from
+		// genuine internal errors.
+		if errors.Is(err, ctrl.ErrPricingUnavailable) {
 			ctx.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": err.Error(),
 			})

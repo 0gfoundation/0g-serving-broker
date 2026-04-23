@@ -9,8 +9,9 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
-	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -48,8 +49,11 @@ func TestGetCachedService_UnpopulatedCacheDistinctError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unpopulated price cache")
 	}
+	if !errors.Is(err, ErrPricingUnavailable) {
+		t.Errorf("expected errors.Is(err, ErrPricingUnavailable), got %v", err)
+	}
 	if !strings.Contains(err.Error(), "not yet populated") {
-		t.Errorf("expected 'not yet populated' error, got %v", err)
+		t.Errorf("expected 'not yet populated' in message, got %v", err)
 	}
 }
 
@@ -62,8 +66,11 @@ func TestGetCachedService_StaleCacheDistinctError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for stale price cache")
 	}
+	if !errors.Is(err, ErrPricingUnavailable) {
+		t.Errorf("expected errors.Is(err, ErrPricingUnavailable), got %v", err)
+	}
 	if !strings.Contains(err.Error(), "stale") {
-		t.Errorf("expected 'stale' error, got %v", err)
+		t.Errorf("expected 'stale' in message, got %v", err)
 	}
 }
 

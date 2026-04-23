@@ -11,11 +11,12 @@ import (
 // each FetchRate.  Use SetRate / SetError between calls to simulate live
 // feeds.  Safe for concurrent use.
 type MockSource struct {
-	mu    sync.Mutex
-	name  string
-	rate  *big.Rat
-	err   error
-	calls int
+	mu        sync.Mutex
+	name      string
+	rate      *big.Rat
+	err       error
+	calls     int
+	failFirst int // Return err for the first failFirst calls, then rate.
 }
 
 // NewMockSource constructs a mock with the given name and initial rate.  Pass
@@ -33,6 +34,16 @@ func (m *MockSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 	m.calls++
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// Transient-failure mode: return err for the first failFirst calls.
+	// Tests use this to exercise retry paths deterministically rather
+	// than racing with real sleeps.
+	if m.failFirst > 0 {
+		m.failFirst--
+		if m.err != nil {
+			return nil, m.err
+		}
+		return nil, fmt.Errorf("mock %s: transient failure %d remaining", m.name, m.failFirst)
 	}
 	if m.err != nil {
 		return nil, m.err
@@ -66,4 +77,14 @@ func (m *MockSource) Calls() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.calls
+}
+
+// SetFailFirst makes the next n FetchRate calls return an error (using
+// whatever SetError configured, or a generic "transient failure" error)
+// before reverting to the configured rate.  Used to test retry loops
+// deterministically — no timing races, no sleeps in the test.
+func (m *MockSource) SetFailFirst(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failFirst = n
 }

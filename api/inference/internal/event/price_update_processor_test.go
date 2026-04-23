@@ -144,34 +144,34 @@ func TestProcessor_Bootstrap_AggregatorFails(t *testing.T) {
 }
 
 func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
-	// Sources that fail on the first call and succeed on subsequent ones
-	// model the common CoinGecko 429 / transient 5xx case.
+	// Deterministic equivalent of the CoinGecko 429 / transient 5xx case:
+	// the mock fails the first two calls and succeeds on the third, with
+	// no wall-clock races between a sleeping goroutine and the retry
+	// backoff schedule.
 	oldAttempts, oldBase, oldMax := bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff
-	bootstrapMaxAttempts = 3
+	bootstrapMaxAttempts = 4
 	bootstrapBaseBackoff = time.Millisecond
 	bootstrapMaxBackoff = 5 * time.Millisecond
 	t.Cleanup(func() {
 		bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff = oldAttempts, oldBase, oldMax
 	})
 
-	flaky := pricefeed.NewMockSource("mock", nil)
-	flaky.SetError(errors.New("first-failure"))
+	flaky := pricefeed.NewMockSource("mock", mustRat("0.003"))
+	flaky.SetFailFirst(2) // 1st and 2nd FetchRate fail; 3rd returns the rate.
+
 	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
 		InputPriceUSD:  "0.50",
 		OutputPriceUSD: "1.50",
 	}, defaultPFCfg())
-
-	// Flip the source to healthy after a short delay so retry #2 succeeds.
-	go func() {
-		time.Sleep(2 * time.Millisecond)
-		flaky.SetRate(mustRat("0.003"))
-	}()
 
 	if _, _, err := p.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("bootstrap should have recovered on retry: %v", err)
 	}
 	if !cache.Get().Populated {
 		t.Error("expected cache populated after recovered bootstrap")
+	}
+	if got := flaky.Calls(); got != 3 {
+		t.Errorf("expected 3 FetchRate calls (2 fail + 1 success), got %d", got)
 	}
 }
 

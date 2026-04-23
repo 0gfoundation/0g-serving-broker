@@ -153,14 +153,16 @@ func Main() {
 	if settleFeesErr != nil {
 		logger.Errorf("error settling fees: %v", settleFeesErr)
 	}
-	// USD providers register (or refresh) prices via SyncServicePrices,
-	// which gates writes by MinOnChainUpdateBps so a restart with sub-
-	// threshold rate drift doesn't pay gas.  NATIVE providers still call
-	// SyncService, which writes prices verbatim from config on every new
-	// provider deployment.
+	// At startup, USD providers use SyncServiceWithPrices — the same full
+	// identicalService comparison as NATIVE's SyncService, but with the
+	// bootstrapped wei prices overlaid on the config so price fields
+	// participate in the equality check alongside URL, model type, TEE
+	// signer, tieredPricing, and additionalInfo.  The drift gate only
+	// applies to subsequent PriceUpdateProcessor ticks via
+	// SyncServicePrices.
 	if config.Service.IsUSDDenominated() {
-		if err := ctrl.SyncServicePrices(ctx, bootstrapInputWei, bootstrapOutputWei); err != nil {
-			panic(fmt.Errorf("usd initial sync-service-prices failed: %w", err))
+		if err := ctrl.SyncServiceWithPrices(ctx, bootstrapInputWei, bootstrapOutputWei); err != nil {
+			panic(fmt.Errorf("usd startup sync-service failed: %w", err))
 		}
 	} else {
 		if err := ctrl.SyncService(ctx); err != nil {
