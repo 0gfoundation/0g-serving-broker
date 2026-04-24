@@ -81,10 +81,16 @@ type ModelPricingUSD struct {
 // PriceFeedState surfaces the live 0G/USD rate and its freshness.  Present
 // only when the provider is USD-denominated and the price cache has been
 // populated at least once.
+//
+// NextUpdateTime is a hint — it's UpdatedAt plus the configured update
+// interval, so SDK clients can schedule a refresh around that moment rather
+// than polling on a fixed cadence.  The real tick can slip behind retries,
+// so treat this as "not before", not a guarantee.
 type PriceFeedState struct {
-	RateUSDPerOG string    `json:"rateUSDPerOG"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	IsStale      bool      `json:"isStale"`
+	RateUSDPerOG   string    `json:"rateUSDPerOG"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	NextUpdateTime time.Time `json:"nextUpdateTime"`
+	IsStale        bool      `json:"isStale"`
 }
 
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
@@ -218,11 +224,12 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			}
 		}
 	}
-	if snap, threshold, isUSD := h.modelsCtrl.GetPriceFeedSnapshot(); isUSD && snap.Populated && snap.RateUSDPerOG != nil {
+	if snap, threshold, updateInterval, isUSD := h.modelsCtrl.GetPriceFeedSnapshot(); isUSD && snap.Populated && snap.RateUSDPerOG != nil {
 		priceFeedOut = &PriceFeedState{
-			RateUSDPerOG: snap.RateUSDPerOG.FloatString(8),
-			UpdatedAt:    snap.LastUpdate,
-			IsStale:      snap.IsStale(threshold, time.Now()),
+			RateUSDPerOG:   snap.RateUSDPerOG.FloatString(8),
+			UpdatedAt:      snap.LastUpdate,
+			NextUpdateTime: snap.LastUpdate.Add(updateInterval),
+			IsStale:        snap.IsStale(threshold, time.Now()),
 		}
 	}
 

@@ -121,18 +121,24 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // Called at most once per process, ahead of the PriceUpdateProcessor
 // goroutine, which handles subsequent price-only updates via
 // SyncServicePrices.
-func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *big.Int) error {
+//
+// Returns the effective wei prices — i.e. what's now on chain — so the
+// caller can seed the in-memory price cache with values that match chain
+// state.  On the drift-skip branch these are the adopted on-chain values,
+// not the supplied inputWei/outputWei; on the push branch they're the
+// supplied values verbatim.
+func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *big.Int) (effectiveInput, effectiveOutput *big.Int, err error) {
 	overlaid := c.Service
 	overlaid.InputPrice = inputWei.String()
 	overlaid.OutputPrice = outputWei.String()
 
 	// Attempt the pure-rate-drift skip before spending a transaction.
-	nonPriceMatches, onChain, err := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling)
-	notFound := err != nil && errors.Is(err, providercontract.ErrServiceNotFound)
-	if err != nil && !notFound {
-		c.logger.Warnf("SyncServiceWithPrices: non-price comparison failed, proceeding with full sync: %v", err)
+	nonPriceMatches, onChain, cmpErr := c.contract.CompareServiceExceptPrice(ctx, overlaid, c.tieredPricing, c.cacheTokenBilling)
+	notFound := cmpErr != nil && errors.Is(cmpErr, providercontract.ErrServiceNotFound)
+	if cmpErr != nil && !notFound {
+		c.logger.Warnf("SyncServiceWithPrices: non-price comparison failed, proceeding with full sync: %v", cmpErr)
 	}
-	if !notFound && err == nil && nonPriceMatches && onChain != nil {
+	if !notFound && cmpErr == nil && nonPriceMatches && onChain != nil {
 		threshold := c.priceFeed.MinOnChainUpdateBps
 		inDrift := pricefeed.DriftBps(inputWei, onChain.InputPrice)
 		outDrift := pricefeed.DriftBps(outputWei, onChain.OutputPrice)
@@ -147,12 +153,12 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 			c.lastPushedOutputPrice = new(big.Int).Set(onChain.OutputPrice)
 			c.contractWriteMu.Unlock()
 			c.serviceSynced.Store(true)
-			return nil
+			return new(big.Int).Set(onChain.InputPrice), new(big.Int).Set(onChain.OutputPrice), nil
 		}
 	}
 
 	if err := c.syncServiceOnce(ctx, overlaid); err != nil {
-		return err
+		return nil, nil, err
 	}
 	// Record what we just registered as the local baseline so the first
 	// processor tick's drift comparison can short-circuit without an
@@ -161,7 +167,7 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 	c.lastPushedInputPrice = new(big.Int).Set(inputWei)
 	c.lastPushedOutputPrice = new(big.Int).Set(outputWei)
 	c.contractWriteMu.Unlock()
-	return nil
+	return new(big.Int).Set(inputWei), new(big.Int).Set(outputWei), nil
 }
 
 // syncServiceOnce is the shared implementation behind SyncService and
@@ -215,9 +221,16 @@ func (c *Ctrl) syncServiceOnce(ctx context.Context, svc config.Service) error {
 //  3. Push: build a temporary Service copy with overlaid prices and call
 //     contract.SyncService, which handles first-time stake and metadata.
 //
+// Returns the "effective" wei prices — i.e. what's now on chain after this
+// call.  The skip branches return the existing baseline (which equals the
+// on-chain value by construction); the push branch returns the values just
+// written.  Callers seed the in-memory price cache with these so the
+// invariant cache.wei == lastPushed == on-chain is maintained, even when
+// the tick's desired prices were rejected by the drift gate.
+//
 // Serialised with SyncService via contractWriteMu.  Safe to call concurrently
 // from the processor tick and the startup path.
-func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.Int) error {
+func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.Int) (effectiveInput, effectiveOutput *big.Int, err error) {
 	c.contractWriteMu.Lock()
 	defer c.contractWriteMu.Unlock()
 
@@ -231,7 +244,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 		inputWei, outputWei, threshold, false)
 	if !decision.Push && c.lastPushedInputPrice != nil && c.lastPushedOutputPrice != nil {
 		c.logger.Debugf("SyncServicePrices: drift within threshold (local cache) — skip")
-		return nil
+		return new(big.Int).Set(c.lastPushedInputPrice), new(big.Int).Set(c.lastPushedOutputPrice), nil
 	}
 
 	// Need an on-chain read to decide — either because we have no local
@@ -240,7 +253,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	onChain, getErr := c.contract.GetService(ctx)
 	firstTime := getErr != nil && errors.Is(getErr, providercontract.ErrServiceNotFound)
 	if getErr != nil && !firstTime {
-		return errors.Wrap(getErr, "get on-chain service for drift check")
+		return nil, nil, errors.Wrap(getErr, "get on-chain service for drift check")
 	}
 
 	var onChainInput, onChainOutput *big.Int
@@ -259,7 +272,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 			c.lastPushedOutputPrice = decision.AdoptOutputBaseline
 			c.logger.Debugf("SyncServicePrices: drift within threshold (on-chain baseline adopted) — skip")
 		}
-		return nil
+		return new(big.Int).Set(c.lastPushedInputPrice), new(big.Int).Set(c.lastPushedOutputPrice), nil
 	}
 
 	if firstTime {
@@ -274,7 +287,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	updated.OutputPrice = outputWei.String()
 
 	if err := c.contract.SyncService(ctx, updated, c.tieredPricing, c.cacheTokenBilling); err != nil {
-		return errors.Wrap(err, "sync service prices on chain")
+		return nil, nil, errors.Wrap(err, "sync service prices on chain")
 	}
 
 	c.lastPushedInputPrice = new(big.Int).Set(inputWei)
@@ -293,7 +306,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	c.serviceCache.Delete("current_service")
 	c.logger.Infof("SyncServicePrices: on-chain prices updated to inputPriceWei=%s outputPriceWei=%s",
 		inputWei.String(), outputWei.String())
-	return nil
+	return new(big.Int).Set(inputWei), new(big.Int).Set(outputWei), nil
 }
 
 func parseService(svc contract.Service) model.Service {
