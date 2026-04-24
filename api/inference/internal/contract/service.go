@@ -20,6 +20,23 @@ import (
 
 var ErrServiceNotFound = errors.New("service not found")
 
+// isServiceNotFoundMessage reports whether an error message came from the
+// RPC's "service not found" response.  The RPC can surface the sentinel
+// text bare ("service not found") or prefixed by wrapping layers
+// ("execution reverted: service not found", "contract call failed: service
+// not found").  We accept both forms and reject messages where the phrase
+// is merely embedded in a longer, unrelated message — anchoring prevents
+// a sibling error like "nested service not found path" from being
+// misclassified as "not registered yet" and incorrectly triggering
+// first-time registration.
+func isServiceNotFoundMessage(msg string) bool {
+	sentinel := ErrServiceNotFound.Error()
+	if msg == sentinel {
+		return true
+	}
+	return strings.HasSuffix(msg, ": "+sentinel)
+}
+
 // DefaultProviderStake is the default stake amount for first-time service registration (100 0G)
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
@@ -185,10 +202,13 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 		c.logger.Errorf("[GetService] Contract error - provider=%s: %v", c.ProviderAddress, wrappedErr)
 		// Callers use errors.Is(err, ErrServiceNotFound) to detect the
 		// "service not registered yet" case.  The underlying RPC returns
-		// the literal text "service not found"; we wrap here so future
-		// refactors adding %w around the wrapped error won't silently
-		// break first-time-registration detection.
-		if strings.Contains(wrappedErr.Error(), ErrServiceNotFound.Error()) {
+		// the literal text "service not found" — sometimes bare, sometimes
+		// prefixed by wrapping ("execution reverted: service not found").
+		// Anchor the match so a sibling error whose message merely contains
+		// the phrase (e.g. "nested service not found path") isn't
+		// misclassified as a not-registered error and accidentally drive
+		// first-time registration.
+		if isServiceNotFoundMessage(wrappedErr.Error()) {
 			return nil, fmt.Errorf("%w: %v", ErrServiceNotFound, wrappedErr)
 		}
 		return nil, wrappedErr

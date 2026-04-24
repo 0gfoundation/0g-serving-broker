@@ -216,12 +216,26 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// USD-denominated providers: surface per-token USD pricing (derived from
 	// the configured per-1M-tokens value) plus the live rate-feed state.
 	// Both blocks are omitted entirely in NATIVE mode.
+	//
+	// Config validation already rejects malformed USD strings at load time,
+	// so a conversion error here indicates a programming bug or a future
+	// regression that slipped past validation.  We log a warning rather
+	// than fail the whole response — the caller still gets a valid model
+	// list — but the log signal prevents "PricingUSD silently missing"
+	// from going undiagnosed.
 	var priceFeedOut *PriceFeedState
 	if svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "" {
-		if prompt, err := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens); err == nil {
-			if completion, err := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens); err == nil {
-				obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
-			}
+		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)
+		completion, completionErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
+		switch {
+		case promptErr != nil:
+			h.logger.Warnf("GetModels: derive per-token USD input price from %q failed (omitting PricingUSD block): %v",
+				svc.InputPriceUSDPerMillionTokens, promptErr)
+		case completionErr != nil:
+			h.logger.Warnf("GetModels: derive per-token USD output price from %q failed (omitting PricingUSD block): %v",
+				svc.OutputPriceUSDPerMillionTokens, completionErr)
+		default:
+			obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
 		}
 	}
 	if snap, threshold, updateInterval, isUSD := h.modelsCtrl.GetPriceFeedSnapshot(); isUSD && snap.Populated && snap.RateUSDPerOG != nil {

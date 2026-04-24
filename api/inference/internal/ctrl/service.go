@@ -209,8 +209,10 @@ func (c *Ctrl) syncServiceOnce(ctx context.Context, svc config.Service) error {
 // metadata updates without first revisiting the equality check.
 //
 // Boundary semantics: drift <= threshold ⇒ skip; drift > threshold ⇒ push.
-// So MinOnChainUpdateBps = 0 means "push on any non-zero change", and the
-// typical default of 500 (5%) means "push once 5% drift is exceeded".
+// Config treats MinOnChainUpdateBps = 0 as "unset" and substitutes the default
+// of 100 bps (1%); operators who want "push on any non-zero change" must set
+// it to 1 (0.01%) explicitly.  The default of 100 bps means "push once 1%
+// drift is exceeded".
 //
 // Three layers of drift check:
 //  1. Local fast path: if we remember what we last pushed and the new prices
