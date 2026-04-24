@@ -117,6 +117,7 @@ func Main() {
 	var priceCache *pricefeed.Cache
 	var aggregator *pricefeed.Aggregator
 	var bootstrapInputWei, bootstrapOutputWei *big.Int
+	var bootstrapRate *big.Rat
 	if config.Service.IsUSDDenominated() {
 		priceCache = pricefeed.NewCache()
 		sources, err := pricefeed.BuildSources(config.PriceFeed)
@@ -131,14 +132,15 @@ func Main() {
 			logger,
 		)
 		// Bootstrap uses a temporary processor that isn't wired to a
-		// syncer — we only need the rate-fetch + conversion + cache-seed
-		// logic here.  The startup-time on-chain write is driven through
-		// ctrl.SyncServicePrices below, which reuses the drift gate.
+		// syncer — we only need the rate-fetch + conversion logic here.
+		// The cache is deliberately NOT populated by Bootstrap; we
+		// seed it below with the effective values returned from
+		// SyncServiceWithPrices so cache.wei matches what's on chain.
 		bootProc, err := event.NewPriceUpdateProcessor(priceCache, aggregator, nil, config.Service, config.PriceFeed, logger)
 		if err != nil {
 			panic(fmt.Errorf("build bootstrap price processor: %w", err))
 		}
-		bootstrapInputWei, bootstrapOutputWei, err = bootProc.Bootstrap(ctx)
+		bootstrapInputWei, bootstrapOutputWei, bootstrapRate, err = bootProc.Bootstrap(ctx)
 		if err != nil {
 			panic(fmt.Errorf("usd price bootstrap failed: %w", err))
 		}
@@ -160,10 +162,19 @@ func Main() {
 	// signer, tieredPricing, and additionalInfo.  The drift gate only
 	// applies to subsequent PriceUpdateProcessor ticks via
 	// SyncServicePrices.
+	//
+	// The returned effectiveInput/effectiveOutput are the wei prices now
+	// on chain (either the bootstrapped values we just wrote, or the
+	// pre-existing on-chain values when drift was within threshold).  We
+	// seed the cache with those so billing matches chain from the first
+	// request, not with the bootstrap-derived values which may have been
+	// rejected by the drift gate.
 	if config.Service.IsUSDDenominated() {
-		if err := ctrl.SyncServiceWithPrices(ctx, bootstrapInputWei, bootstrapOutputWei); err != nil {
+		effectiveInput, effectiveOutput, err := ctrl.SyncServiceWithPrices(ctx, bootstrapInputWei, bootstrapOutputWei)
+		if err != nil {
 			panic(fmt.Errorf("usd startup sync-service failed: %w", err))
 		}
+		priceCache.Set(effectiveInput, effectiveOutput, bootstrapRate, time.Now())
 	} else {
 		if err := ctrl.SyncService(ctx); err != nil {
 			panic(err)

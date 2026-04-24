@@ -14,8 +14,12 @@ import (
 // priceSyncer is the subset of Ctrl used by PriceUpdateProcessor for on-chain
 // updates.  Narrowing to an interface lets tests inject a stub without
 // dragging in the full ctrl / contract stack.
+//
+// SyncServicePrices returns the effective wei prices — i.e. what's on chain
+// after the call — so the processor can seed the cache with values that
+// match chain state even when the drift gate skipped the push.
 type priceSyncer interface {
-	SyncServicePrices(ctx context.Context, inputWei, outputWei *big.Int) error
+	SyncServicePrices(ctx context.Context, inputWei, outputWei *big.Int) (effectiveInput, effectiveOutput *big.Int, err error)
 }
 
 // PriceUpdateProcessor refreshes the in-memory wei-price cache used by USD-
@@ -138,35 +142,43 @@ func (p *PriceUpdateProcessor) aggregateWithRetry(ctx context.Context, label str
 	return nil, fmt.Errorf("%s: aggregate rate (after %d attempts): %w", label, maxAttempts, lastErr)
 }
 
-// Bootstrap performs a synchronous rate fetch and cache update with bounded
-// retries.  Called once at startup BEFORE any request billing, so both the
-// wei price cache and the caller's downstream service registration have
-// authoritative values.
+// Bootstrap performs a synchronous rate fetch and converts the configured
+// USD prices to wei using that rate.  Called once at startup BEFORE the
+// service is registered on-chain.
+//
+// Intentionally does NOT populate the cache — the caller immediately hands
+// the returned wei values to SyncServiceWithPrices, which can adopt on-chain
+// prices instead of the freshly-derived ones (when drift is within
+// threshold).  The caller seeds the cache with whatever SyncServiceWithPrices
+// reports as the effective chain-aligned values, so the invariant
+// cache.wei == on-chain holds from the very first tick.
+//
+// The rate is returned alongside so the caller can record it in the cache
+// together with the post-sync effective wei prices.
 //
 // Retries the underlying rate aggregation up to bootstrapMaxAttempts with
 // exponential backoff (capped at bootstrapMaxBackoff) before surfacing the
 // last error.  This contains the common case — CoinGecko rate-limit, Binance
 // regional block, transient 5xx — without making a sustained outage look
 // like a healthy start.
-func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputWei *big.Int, err error) {
-	rate, err := p.aggregateWithRetry(ctx, "bootstrap", bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff)
+func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputWei *big.Int, rate *big.Rat, err error) {
+	rate, err = p.aggregateWithRetry(ctx, "bootstrap", bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	inputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSDPerMillionTokens: %w", err)
+		return nil, nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSDPerMillionTokens: %w", err)
 	}
 	outputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSDPerMillionTokens: %w", err)
+		return nil, nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSDPerMillionTokens: %w", err)
 	}
 
-	p.cache.Set(inputWei, outputWei, rate, time.Now())
-	p.logger.Infof("pricefeed bootstrap: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
+	p.logger.Infof("pricefeed bootstrap: rate=%s USD/0G, derivedInputWei=%s, derivedOutputWei=%s (cache not yet populated — awaiting chain-sync)",
 		rate.FloatString(8), inputWei.String(), outputWei.String())
-	return inputWei, outputWei, nil
+	return inputWei, outputWei, rate, nil
 }
 
 // Start implements controller-runtime/pkg/manager.Runnable.  Blocks until ctx
@@ -187,12 +199,21 @@ func (p *PriceUpdateProcessor) Start(ctx context.Context) error {
 	}
 }
 
-// tick runs one update cycle: aggregate → convert → update cache → maybe
-// push on-chain (via ctrl.SyncServicePrices, which performs drift gating
-// and mutex-guarded serialisation).  Retries the aggregation up to
-// tickMaxAttempts to absorb transient feed failures; only on sustained
-// failure does the tick give up, log at error, and retain the last-good
-// cache (readers enforce StalenessThreshold independently).
+// tick runs one update cycle: aggregate → convert → push via syncer →
+// update cache with effective chain-aligned values.
+//
+// The cache is only refreshed on successful chain-sync, and it's populated
+// with the "effective" wei prices returned by the syncer — which equal the
+// freshly-derived values on a push, or the prior baseline on a drift-skip.
+// This maintains the invariant cache.InputPriceWei == lastPushed ==
+// on-chain value so every billing calculation matches what a future
+// settlement will charge.  Rate and LastUpdate still reflect the live
+// market so SDK clients see the true 0G/USD rate even when on-chain prices
+// haven't moved.
+//
+// Retries the aggregation up to tickMaxAttempts to absorb transient feed
+// failures.  On sustained feed failure OR a chain-sync failure, the cache
+// is NOT touched — readers enforce StalenessThreshold independently.
 func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 	rate, err := p.aggregateWithRetry(ctx, "tick", tickMaxAttempts, tickBaseBackoff, tickMaxBackoff)
 	if err != nil {
@@ -200,25 +221,45 @@ func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 		return
 	}
 
-	inputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
+	newInput, err := pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
 		p.logger.Errorf("pricefeed tick: convert inputPriceUSDPerMillionTokens: %v", err)
 		return
 	}
-	outputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
+	newOutput, err := pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
 		p.logger.Errorf("pricefeed tick: convert outputPriceUSDPerMillionTokens: %v", err)
 		return
 	}
 
-	p.cache.Set(inputWei, outputWei, rate, time.Now())
-	p.logger.Infof("pricefeed tick: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
-		rate.FloatString(8), inputWei.String(), outputWei.String())
-
+	// Tests that don't need the chain-sync round-trip leave syncer nil;
+	// in that path we mirror the newly-derived values directly.  Production
+	// always wires a real syncer.
 	if p.syncer == nil {
+		p.cache.Set(newInput, newOutput, rate, time.Now())
+		p.logger.Infof("pricefeed tick (no-syncer): rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
+			rate.FloatString(8), newInput.String(), newOutput.String())
 		return
 	}
-	if err := p.syncer.SyncServicePrices(ctx, inputWei, outputWei); err != nil {
-		p.logger.Errorf("pricefeed tick: SyncServicePrices failed: %v", err)
+
+	effectiveInput, effectiveOutput, err := p.syncer.SyncServicePrices(ctx, newInput, newOutput)
+	if err != nil {
+		// Do NOT update the cache.  The invariant cache.wei ==
+		// on-chain requires us to know the chain state, which we
+		// don't after a sync failure.  Staleness will surface the
+		// problem to readers if it persists.
+		p.logger.Errorf("pricefeed tick: SyncServicePrices failed (cache NOT updated): %v", err)
+		return
+	}
+
+	p.cache.Set(effectiveInput, effectiveOutput, rate, time.Now())
+	// Distinguish drift-skip (wei unchanged) from a real push in the log —
+	// useful when diagnosing "why didn't my price move?" questions.
+	if newInput.Cmp(effectiveInput) == 0 && newOutput.Cmp(effectiveOutput) == 0 {
+		p.logger.Infof("pricefeed tick: rate=%s USD/0G, pushed wei inputPriceWei=%s, outputPriceWei=%s",
+			rate.FloatString(8), effectiveInput.String(), effectiveOutput.String())
+	} else {
+		p.logger.Infof("pricefeed tick: drift within threshold, cache wei unchanged; rate=%s USD/0G (derivedInputWei=%s, effectiveInputWei=%s)",
+			rate.FloatString(8), newInput.String(), effectiveInput.String())
 	}
 }
