@@ -37,10 +37,10 @@ func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
 		case "coingecko":
 			sources = append(sources, NewCoinGeckoSource(httpClient, "", base, quote, cfg.CoinGeckoAPIKey, cfg.UserAgent))
 		case "binance":
-			// Binance uses combined pair (e.g. "ZGUSDT").  0G's Binance ticker
-			// symbol uses the prefix "ZG"; we special-case that mapping here so
-			// operators keep the same "0g-usdt" symbol string across sources.
-			pair := strings.ToUpper(binancePairBase(base) + quote)
+			// Binance pairs are the base + quote uppercased and concatenated
+			// (e.g. "0GUSDT").  splitSymbol guarantees base is already the
+			// correct token identifier for the exchange.
+			pair := strings.ToUpper(base + quote)
 			sources = append(sources, NewBinanceSource(httpClient, "", pair, cfg.UserAgent))
 		case "coinmarketcap":
 			if cfg.CoinMarketCapAPIKey == "" {
@@ -54,21 +54,16 @@ func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
 	return sources, nil
 }
 
-// splitSymbol parses a "<base>-<quote>" symbol into its two halves.
+// splitSymbol parses a "<base>-<quote>" symbol into its two halves, splitting
+// on the LAST hyphen.  CoinGecko coin IDs commonly contain hyphens
+// (e.g. "zero-gravity", "bitcoin-cash"), so splitting on the first hyphen
+// would mangle the base.  Assumes the quote currency never contains a hyphen
+// — true for every fiat/stablecoin ticker we care about (usd, usdt, usdc,
+// eur, btc, eth, ...).
 func splitSymbol(symbol string) (base, quote string, err error) {
-	parts := strings.SplitN(symbol, "-", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	idx := strings.LastIndex(symbol, "-")
+	if idx <= 0 || idx == len(symbol)-1 {
 		return "", "", fmt.Errorf("pricefeed: symbol %q must be in '<base>-<quote>' form", symbol)
 	}
-	return strings.ToLower(parts[0]), strings.ToLower(parts[1]), nil
-}
-
-// binancePairBase maps the generic base-symbol used in config to Binance's
-// ticker prefix.  0G trades on Binance as "ZG..."; keeping this mapping
-// localised lets operators use the canonical "0g-usdt" everywhere.
-func binancePairBase(base string) string {
-	if base == "0g" {
-		return "ZG"
-	}
-	return strings.ToUpper(base)
+	return strings.ToLower(symbol[:idx]), strings.ToLower(symbol[idx+1:]), nil
 }
