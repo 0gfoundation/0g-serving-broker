@@ -1,4 +1,7 @@
-package pricefeed
+// Package pricefeedtest provides test doubles for the pricefeed package.
+// It lives in a separate package so production code cannot accidentally
+// import the mocks.
+package pricefeedtest
 
 import (
 	"context"

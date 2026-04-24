@@ -12,6 +12,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed/pricefeedtest"
 )
 
 type nopLogger struct{}
@@ -81,7 +82,7 @@ func defaultPFCfg() config.PriceFeedConfig {
 func TestProcessor_Bootstrap_Success(t *testing.T) {
 	// Price: $0.50/1M tokens, rate: $0.003/0G.  Expected wei per token:
 	// floor((0.5 * 1e18) / (1_000_000 * 0.003)) = 166_666_666_666_666.
-	srcs := []pricefeed.Source{pricefeed.NewMockSource("mock", mustRat("0.003"))}
+	srcs := []pricefeed.Source{pricefeedtest.NewMockSource("mock", mustRat("0.003"))}
 	p, cache := newTestProcessor(t, srcs, config.Service{
 		InputPriceUSD:  "0.50",
 		OutputPriceUSD: "1.50",
@@ -123,7 +124,7 @@ func TestProcessor_Bootstrap_AggregatorFails(t *testing.T) {
 		bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff = oldAttempts, oldBase, oldMax
 	})
 
-	failing := pricefeed.NewMockSource("mock", nil)
+	failing := pricefeedtest.NewMockSource("mock", nil)
 	failing.SetError(errors.New("boom"))
 	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
 		InputPriceUSD:  "0.50",
@@ -156,7 +157,7 @@ func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
 		bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff = oldAttempts, oldBase, oldMax
 	})
 
-	flaky := pricefeed.NewMockSource("mock", mustRat("0.003"))
+	flaky := pricefeedtest.NewMockSource("mock", mustRat("0.003"))
 	flaky.SetFailFirst(2) // 1st and 2nd FetchRate fail; 3rd returns the rate.
 
 	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
