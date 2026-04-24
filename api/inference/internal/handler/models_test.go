@@ -497,8 +497,8 @@ func TestGetModels_USDPricingAndFeedState(t *testing.T) {
 			Type:           "chatbot",
 			InputPrice:     "166660000000000",
 			OutputPrice:    "500000000000000",
-			InputPriceUSD:  "0.50",
-			OutputPriceUSD: "1.50",
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
 		},
 		serviceConfig: config.Service{},
 		priceFeedIsUSD: true,
@@ -555,7 +555,7 @@ func TestGetModels_USDPricingAndFeedState(t *testing.T) {
 }
 
 func TestGetModels_NativeModeOmitsUSDBlocks(t *testing.T) {
-	// NATIVE mode: no InputPriceUSD on the service, priceFeedIsUSD=false.
+	// NATIVE mode: no InputPriceUSDPerMillionTokens on the service, priceFeedIsUSD=false.
 	// Response must have no pricingUSD on models and no priceFeed at top
 	// level — the raw JSON must not even contain those keys.
 	mock := &mockModelsCtrl{
@@ -603,8 +603,8 @@ func TestGetModels_USDModeCachePopulatedButStale(t *testing.T) {
 			Type:           "chatbot",
 			InputPrice:     "1",
 			OutputPrice:    "1",
-			InputPriceUSD:  "0.50",
-			OutputPriceUSD: "1.50",
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
 		},
 		serviceConfig: config.Service{},
 		priceFeedIsUSD: true,
@@ -642,8 +642,8 @@ func TestGetModels_USDModeUnpopulatedCacheOmitsPriceFeed(t *testing.T) {
 			Type:           "chatbot",
 			InputPrice:     "1",
 			OutputPrice:    "1",
-			InputPriceUSD:  "0.50",
-			OutputPriceUSD: "1.50",
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
 		},
 		serviceConfig:     config.Service{},
 		priceFeedIsUSD:    true,

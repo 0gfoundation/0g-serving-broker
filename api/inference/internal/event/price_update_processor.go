@@ -55,13 +55,13 @@ func NewPriceUpdateProcessor(
 	pfCfg config.PriceFeedConfig,
 	logger log.Logger,
 ) (*PriceUpdateProcessor, error) {
-	inputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.InputPriceUSD)
+	inputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.InputPriceUSDPerMillionTokens)
 	if err != nil {
-		return nil, fmt.Errorf("processor: parse inputPriceUSD: %w", err)
+		return nil, fmt.Errorf("processor: parse inputPriceUSDPerMillionTokens: %w", err)
 	}
-	outputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.OutputPriceUSD)
+	outputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.OutputPriceUSDPerMillionTokens)
 	if err != nil {
-		return nil, fmt.Errorf("processor: parse outputPriceUSD: %w", err)
+		return nil, fmt.Errorf("processor: parse outputPriceUSDPerMillionTokens: %w", err)
 	}
 	return &PriceUpdateProcessor{
 		cache:      cache,
@@ -156,11 +156,11 @@ func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputW
 
 	inputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSD: %w", err)
+		return nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSDPerMillionTokens: %w", err)
 	}
 	outputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSD: %w", err)
+		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSDPerMillionTokens: %w", err)
 	}
 
 	p.cache.Set(inputWei, outputWei, rate, time.Now())
@@ -202,12 +202,12 @@ func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 
 	inputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
-		p.logger.Errorf("pricefeed tick: convert inputPriceUSD: %v", err)
+		p.logger.Errorf("pricefeed tick: convert inputPriceUSDPerMillionTokens: %v", err)
 		return
 	}
 	outputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
-		p.logger.Errorf("pricefeed tick: convert outputPriceUSD: %v", err)
+		p.logger.Errorf("pricefeed tick: convert outputPriceUSDPerMillionTokens: %v", err)
 		return
 	}
 

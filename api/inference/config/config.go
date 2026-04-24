@@ -113,15 +113,17 @@ type Service struct {
 
 	// PriceDenomination selects how input/output prices are expressed:
 	//   "NATIVE" (default): InputPrice/OutputPrice are wei amounts, written to chain as-is.
-	//   "USD":              InputPriceUSD/OutputPriceUSD are USD decimal strings.
+	//   "USD":              InputPriceUSDPerMillionTokens/OutputPriceUSDPerMillionTokens are USD decimal strings.
 	//                       The PriceUpdateProcessor converts them to wei using a live rate.
 	PriceDenomination string `yaml:"priceDenomination"`
-	// InputPriceUSD is the input-side price in USD per token (decimal string).
+	// InputPriceUSDPerMillionTokens is the input-side price in USD per 1M
+	// tokens, as a decimal string (e.g. "0.50" = $0.50 per 1M input tokens,
+	// matching the convention used by OpenAI/Anthropic pricing tables).
 	// Required iff PriceDenomination == "USD".
-	InputPriceUSD string `yaml:"inputPriceUSD"`
-	// OutputPriceUSD is the output-side price in USD per token (decimal string).
-	// Required iff PriceDenomination == "USD".
-	OutputPriceUSD string `yaml:"outputPriceUSD"`
+	InputPriceUSDPerMillionTokens string `yaml:"inputPriceUSDPerMillionTokens"`
+	// OutputPriceUSDPerMillionTokens is the output-side price in USD per 1M
+	// tokens, decimal string.  Required iff PriceDenomination == "USD".
+	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -566,17 +568,17 @@ func loadConfig(config *Config) error {
 	config.Service.PriceDenomination = strings.ToUpper(config.Service.PriceDenomination)
 	switch config.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
-		if config.Service.InputPriceUSD != "" || config.Service.OutputPriceUSD != "" {
-			return fmt.Errorf("invalid config: service.inputPriceUSD / service.outputPriceUSD must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
+		if config.Service.InputPriceUSDPerMillionTokens != "" || config.Service.OutputPriceUSDPerMillionTokens != "" {
+			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
 	case constant.PriceDenominationUSD:
-		if config.Service.InputPriceUSD == "" || config.Service.OutputPriceUSD == "" {
-			return fmt.Errorf("invalid config: service.inputPriceUSD and service.outputPriceUSD are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
+		if config.Service.InputPriceUSDPerMillionTokens == "" || config.Service.OutputPriceUSDPerMillionTokens == "" {
+			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		if err := validateUSDPriceString("service.inputPriceUSD", config.Service.InputPriceUSD); err != nil {
+		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", config.Service.InputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
-		if err := validateUSDPriceString("service.outputPriceUSD", config.Service.OutputPriceUSD); err != nil {
+		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", config.Service.OutputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
 		if config.Service.InputPrice != "" || config.Service.OutputPrice != "" {

@@ -265,8 +265,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko", "binance"]
   updateInterval: "1h"
@@ -301,8 +301,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko"]
   updateInterval: "30m"
@@ -335,8 +335,8 @@ priceFeed:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "inputPriceUSD") {
-		t.Errorf("expected error about missing inputPriceUSD, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSDPerMillionTokens") {
+		t.Errorf("expected error about missing inputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
@@ -350,8 +350,8 @@ service:
   verifiability: "TeeML"
   priceDenomination: "USD"
   inputPrice: "1000"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko"]
 `)
@@ -385,18 +385,18 @@ service:
   type: "chatbot"
   model: "gpt-4"
   verifiability: "TeeML"
-  inputPriceUSD: "0.50"
+  inputPriceUSDPerMillionTokens: "0.50"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
 	if err == nil {
-		t.Fatal("expected error for USD inputPriceUSD under NATIVE denomination")
+		t.Fatal("expected error for USD inputPriceUSDPerMillionTokens under NATIVE denomination")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "service.inputPriceUSD") && !strings.Contains(msg, "service.outputPriceUSD") {
-		t.Errorf("expected error naming service.inputPriceUSD / service.outputPriceUSD, got %q", msg)
+	if !strings.Contains(msg, "service.inputPriceUSDPerMillionTokens") && !strings.Contains(msg, "service.outputPriceUSDPerMillionTokens") {
+		t.Errorf("expected error naming service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens, got %q", msg)
 	}
 	if !strings.Contains(msg, "NATIVE") {
 		t.Errorf("expected error to reference NATIVE denomination, got %q", msg)
@@ -412,8 +412,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "eur"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
@@ -433,8 +433,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0,50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0,50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko"]
 `)
@@ -442,8 +442,8 @@ priceFeed:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "inputPriceUSD") {
-		t.Errorf("expected error about malformed inputPriceUSD, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSDPerMillionTokens") {
+		t.Errorf("expected error about malformed inputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
@@ -456,8 +456,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "-1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "-1.50"
 priceFeed:
   sources: ["coingecko"]
 `)
@@ -466,7 +466,7 @@ priceFeed:
 	cfg := &Config{}
 	err := loadConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "non-negative") {
-		t.Errorf("expected error about negative outputPriceUSD, got %v", err)
+		t.Errorf("expected error about negative outputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
@@ -479,8 +479,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 

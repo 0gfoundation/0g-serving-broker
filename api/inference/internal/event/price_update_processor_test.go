@@ -86,8 +86,8 @@ func TestProcessor_Bootstrap_Success(t *testing.T) {
 	// exactly, already a multiple of 1e10, so unchanged by quantisation.
 	srcs := []pricefeed.Source{pricefeedtest.NewMockSource("mock", mustRat("0.003"))}
 	p, cache := newTestProcessor(t, srcs, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	inputWei, outputWei, err := p.Bootstrap(context.Background())
@@ -127,8 +127,8 @@ func TestProcessor_Bootstrap_AggregatorFails(t *testing.T) {
 	failing := pricefeedtest.NewMockSource("mock", nil)
 	failing.SetError(errors.New("boom"))
 	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	_, _, err := p.Bootstrap(context.Background())
@@ -161,8 +161,8 @@ func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
 	flaky.SetFailFirst(2) // 1st and 2nd FetchRate fail; 3rd returns the rate.
 
 	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	if _, _, err := p.Bootstrap(context.Background()); err != nil {
@@ -193,8 +193,8 @@ func TestProcessor_Tick_RetriesOnTransientFailure(t *testing.T) {
 	flaky.SetFailFirst(2) // 1st and 2nd fail; 3rd returns rate.
 
 	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	p.tick(context.Background())
@@ -222,8 +222,8 @@ func TestProcessor_Tick_KeepsLastGoodCacheOnSustainedFailure(t *testing.T) {
 	failing := pricefeedtest.NewMockSource("mock", nil)
 	failing.SetError(errors.New("boom"))
 	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	// Prime the cache with a known good value so we can verify it's
@@ -248,10 +248,10 @@ func TestNewPriceUpdateProcessor_InvalidUSDPrice(t *testing.T) {
 	cache := pricefeed.NewCache()
 	agg := pricefeed.NewAggregator(nil, 1, 500, time.Second, nopLogger{})
 	_, err := NewPriceUpdateProcessor(cache, agg, nil, config.Service{
-		InputPriceUSD:  "not-a-number",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "not-a-number",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg(), nopLogger{})
 	if err == nil {
-		t.Error("expected constructor to reject invalid inputPriceUSD")
+		t.Error("expected constructor to reject invalid inputPriceUSDPerMillionTokens")
 	}
 }

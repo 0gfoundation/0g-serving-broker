@@ -211,9 +211,9 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// the configured per-1M-tokens value) plus the live rate-feed state.
 	// Both blocks are omitted entirely in NATIVE mode.
 	var priceFeedOut *PriceFeedState
-	if svc.InputPriceUSD != "" && svc.OutputPriceUSD != "" {
-		if prompt, err := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSD); err == nil {
-			if completion, err := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSD); err == nil {
+	if svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "" {
+		if prompt, err := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens); err == nil {
+			if completion, err := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens); err == nil {
 				obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
 			}
 		}

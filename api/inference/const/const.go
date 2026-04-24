@@ -31,7 +31,7 @@ const (
 // Price denomination modes for provider-configured service prices.
 // NATIVE: inputPrice/outputPrice are configured directly in wei (0G) and written
 //         to chain as-is; existing behavior.
-// USD:    inputPriceUSD/outputPriceUSD are configured in USD and converted to
+// USD:    inputPriceUSDPerMillionTokens/outputPriceUSDPerMillionTokens are configured in USD and converted to
 //         wei by the PriceUpdateProcessor using a live 0G/USDT rate.
 const (
 	PriceDenominationNative = "NATIVE"
