@@ -10,17 +10,14 @@ import (
 )
 
 // BuildSources constructs Source implementations from a PriceFeedConfig.
-// symbol is the config.priceFeed.symbol value, expected in "<base>-<quote>"
-// form (e.g. "0g-usdt"); each source adapts it to its own API convention.
+// Each source gets its own symbol from cfg.SourceSymbols[name], expected in
+// "<base>-<quote>" form (e.g. "0g-usdt" for Binance, "zero-gravity-usd" for
+// CoinGecko); each implementation adapts the pair to its own API convention.
 //
-// Returns an error if a requested source is unknown or missing required
-// credentials (e.g. CoinMarketCap without an API key).
+// Returns an error if a requested source is unknown or missing its symbol.
+// Validation guarantees SourceSymbols covers every entry in Sources, so the
+// lookups here should not fail in practice.
 func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
-	base, quote, err := splitSymbol(cfg.Symbol)
-	if err != nil {
-		return nil, err
-	}
-
 	httpClient := &http.Client{
 		Timeout: cfg.HTTPTimeout,
 		Transport: &http.Transport{
@@ -33,20 +30,22 @@ func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
 	sources := make([]Source, 0, len(cfg.Sources))
 	for _, name := range cfg.Sources {
 		name = strings.ToLower(strings.TrimSpace(name))
+		symbol, ok := cfg.SourceSymbols[name]
+		if !ok || symbol == "" {
+			return nil, fmt.Errorf("pricefeed: no sourceSymbols entry for source %q", name)
+		}
+		base, quote, err := splitSymbol(symbol)
+		if err != nil {
+			return nil, err
+		}
+
 		switch name {
 		case "coingecko":
 			sources = append(sources, NewCoinGeckoSource(httpClient, "", base, quote, cfg.CoinGeckoAPIKey, cfg.UserAgent))
 		case "binance":
-			// Binance pairs are the base + quote uppercased and concatenated
-			// (e.g. "0GUSDT").  splitSymbol guarantees base is already the
-			// correct token identifier for the exchange.
+			// Binance pairs are base+quote uppercased and concatenated (e.g. "0GUSDT").
 			pair := strings.ToUpper(base + quote)
 			sources = append(sources, NewBinanceSource(httpClient, "", pair, cfg.UserAgent))
-		case "coinmarketcap":
-			if cfg.CoinMarketCapAPIKey == "" {
-				return nil, fmt.Errorf("pricefeed: coinmarketcap source requires priceFeed.coinMarketCapApiKey")
-			}
-			sources = append(sources, NewCoinMarketCapSource(httpClient, "", cfg.CoinMarketCapAPIKey, strings.ToUpper(base), strings.ToUpper(quote), cfg.UserAgent))
 		default:
 			return nil, fmt.Errorf("pricefeed: unknown source %q", name)
 		}

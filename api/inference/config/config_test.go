@@ -268,6 +268,9 @@ service:
   outputPriceUSD: "1.50"
 priceFeed:
   sources: ["coingecko", "binance"]
+  sourceSymbols:
+    coingecko: "zero-gravity-usd"
+    binance: "0g-usdt"
   updateInterval: "1h"
   stalenessThreshold: "2h"
 `)
@@ -286,8 +289,61 @@ priceFeed:
 	if cfg.PriceFeed.MinOnChainUpdateBps != 500 {
 		t.Errorf("MinOnChainUpdateBps default = %d, want 500", cfg.PriceFeed.MinOnChainUpdateBps)
 	}
-	if cfg.PriceFeed.Symbol != "0g-usdt" {
-		t.Errorf("Symbol default = %q, want 0g-usdt", cfg.PriceFeed.Symbol)
+	if got := cfg.PriceFeed.SourceSymbols["coingecko"]; got != "zero-gravity-usd" {
+		t.Errorf("SourceSymbols[coingecko] = %q, want zero-gravity-usd", got)
+	}
+	if got := cfg.PriceFeed.SourceSymbols["binance"]; got != "0g-usdt" {
+		t.Errorf("SourceSymbols[binance] = %q, want 0g-usdt", got)
+	}
+}
+
+func TestLoadConfig_USDMissingSourceSymbol(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+priceFeed:
+  sources: ["coingecko", "binance"]
+  sourceSymbols:
+    coingecko: "zero-gravity-usd"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), `missing an entry for source "binance"`) {
+		t.Errorf("expected error about missing sourceSymbols entry for binance, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDMalformedSourceSymbol(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+  sourceSymbols:
+    coingecko: "noseparator"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "<base>-<quote>") {
+		t.Errorf("expected error about malformed sourceSymbols entry, got %v", err)
 	}
 }
 
