@@ -22,12 +22,12 @@ func TestParseUSDPerMillion(t *testing.T) {
 	}{
 		{"0.50", "0.500000", false},
 		{"1.234567", "1.234567", false},
+		{"0", "0.000000", false},
 		{"10", "10.000000", false},
 		{"  0.3  ", "0.300000", false},
 		{"", "", true},
 		{"not-a-number", "", true},
 		{"-1", "", true},
-		{"0", "", true},
 	}
 	for _, c := range cases {
 		got, err := ParseUSDPerMillion(c.in)
@@ -144,11 +144,11 @@ func TestUSDPerMillionStringToPerToken(t *testing.T) {
 		{"0.50", "0.0000005", false},
 		{"1.5", "0.0000015", false},
 		{"10", "0.00001", false},
+		{"0", "0", false},
 		{"1", "0.000001", false},
 		{"0.000001", "0.000000000001", false},
 		{"", "", true},
 		{"-1", "", true},
-		{"0", "", true},
 		{"nope", "", true},
 	}
 	for _, c := range cases {

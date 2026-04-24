@@ -419,12 +419,9 @@ var IngressAllowedEnvKeys = []string{
 }
 
 // validateUSDPriceString rejects a USD-denominated price string that isn't a
-// positive decimal.  Duplicates the minimal subset of
+// non-negative decimal.  Duplicates the minimal subset of
 // pricefeed.ParseUSDPerMillion needed at config-load time; kept in-package
 // to avoid a config → pricefeed import cycle (factory.go imports config).
-// Zero is rejected because it's a common config-mistake shape (typo, unset
-// field defaulting to the zero value) that would silently configure a
-// free tier.
 func validateUSDPriceString(field, value string) error {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -434,8 +431,8 @@ func validateUSDPriceString(field, value string) error {
 	if !ok {
 		return fmt.Errorf("invalid config: %s=%q is not a valid decimal", field, value)
 	}
-	if r.Sign() <= 0 {
-		return fmt.Errorf("invalid config: %s=%q must be positive", field, value)
+	if r.Sign() < 0 {
+		return fmt.Errorf("invalid config: %s=%q must be non-negative", field, value)
 	}
 	return nil
 }

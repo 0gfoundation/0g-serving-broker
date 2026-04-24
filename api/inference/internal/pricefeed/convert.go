@@ -24,10 +24,7 @@ var priceQuantumWei = big.NewInt(1e10)
 
 // ParseUSDPerMillion parses a USD-per-million-tokens decimal string into a
 // big.Rat.  Accepts plain decimal notation (e.g. "0.50", "1.234567").
-// Rejects empty strings and any non-positive value — zero is a common
-// config-mistake shape (typo, unset field defaulting to the zero value)
-// and would silently configure a free tier, so we require operators to
-// supply a positive price explicitly.
+// Rejects negative numbers and empty strings.
 func ParseUSDPerMillion(s string) (*big.Rat, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -37,8 +34,8 @@ func ParseUSDPerMillion(s string) (*big.Rat, error) {
 	if !ok {
 		return nil, fmt.Errorf("usd price %q is not a valid decimal", s)
 	}
-	if r.Sign() <= 0 {
-		return nil, fmt.Errorf("usd price %q must be positive", s)
+	if r.Sign() < 0 {
+		return nil, fmt.Errorf("usd price %q must be non-negative", s)
 	}
 	return r, nil
 }

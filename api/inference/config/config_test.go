@@ -465,34 +465,8 @@ priceFeed:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "positive") {
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
 		t.Errorf("expected error about negative outputPriceUSDPerMillionTokens, got %v", err)
-	}
-}
-
-func TestLoadConfig_USDZeroPrice(t *testing.T) {
-	// Zero is a common config-mistake shape (typo, unset field defaulting
-	// to the empty/zero value) — reject it at load time so an operator
-	// can't silently configure a free tier.
-	configPath := writeTestConfig(t, `
-service:
-  servingUrl: "http://example.com"
-  targetUrl: "http://backend:8000"
-  type: "chatbot"
-  model: "gpt-4"
-  verifiability: "TeeML"
-  priceDenomination: "USD"
-  inputPriceUSDPerMillionTokens: "0"
-  outputPriceUSDPerMillionTokens: "1.50"
-priceFeed:
-  sources: ["coingecko"]
-`)
-	t.Setenv("CONFIG_FILE", configPath)
-
-	cfg := &Config{}
-	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "positive") {
-		t.Errorf("expected error about zero inputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
