@@ -59,7 +59,7 @@ func TestGetCachedService_UnpopulatedCacheDistinctError(t *testing.T) {
 
 func TestGetCachedService_StaleCacheDistinctError(t *testing.T) {
 	pc := pricefeed.NewCache()
-	pc.Set(big.NewInt(100), big.NewInt(200), time.Now().Add(-2*time.Hour))
+	pc.Set(big.NewInt(100), big.NewInt(200), nil, time.Now().Add(-2*time.Hour))
 	c := newUSDOverlayCtrl(t, pc, 30*time.Minute)
 
 	_, err := c.GetCachedService(context.Background())
@@ -76,7 +76,7 @@ func TestGetCachedService_StaleCacheDistinctError(t *testing.T) {
 
 func TestGetCachedService_FreshCacheOverlaysPrices(t *testing.T) {
 	pc := pricefeed.NewCache()
-	pc.Set(big.NewInt(100), big.NewInt(200), time.Now())
+	pc.Set(big.NewInt(100), big.NewInt(200), nil, time.Now())
 	c := newUSDOverlayCtrl(t, pc, time.Hour)
 
 	svc, err := c.GetCachedService(context.Background())

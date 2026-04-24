@@ -74,6 +74,11 @@ func (c *Ctrl) GetCachedService(ctx context.Context) (model.Service, error) {
 		}
 		service.InputPrice = snap.InputPriceWei.String()
 		service.OutputPrice = snap.OutputPriceWei.String()
+		// Also carry the configured per-1M-tokens USD value through so the
+		// /v1/models handler can surface it.  Verbatim — conversion to
+		// per-token for display happens at the JSON boundary.
+		service.InputPriceUSD = c.Service.InputPriceUSD
+		service.OutputPriceUSD = c.Service.OutputPriceUSD
 	}
 	return service, nil
 }

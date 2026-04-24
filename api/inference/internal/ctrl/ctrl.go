@@ -258,6 +258,22 @@ func (c *Ctrl) GetPriceCache() *pricefeed.Cache {
 	return c.priceCache
 }
 
+// GetPriceFeedSnapshot returns a snapshot of the in-memory wei-price +
+// rate cache together with the configured staleness threshold, plus a
+// boolean indicating whether the service is USD-denominated at all.
+//
+// Callers (e.g. the /v1/models handler) use this to surface the current
+// rate and staleness state to SDK clients without needing to reason about
+// USD-vs-NATIVE mode themselves: if isUSD=false the snapshot should be
+// ignored; if isUSD=true and snap.Populated is false the feed hasn't
+// bootstrapped yet.
+func (c *Ctrl) GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThreshold time.Duration, isUSD bool) {
+	if !c.Service.IsUSDDenominated() || c.priceCache == nil {
+		return pricefeed.Snapshot{}, 0, false
+	}
+	return c.priceCache.Get(), c.priceFeed.StalenessThreshold, true
+}
+
 // InvalidateServiceCache clears the cached on-chain service record so the
 // next GetCachedService call re-reads from the contract.  Called by the
 // PriceUpdateProcessor after pushing a new price on-chain.

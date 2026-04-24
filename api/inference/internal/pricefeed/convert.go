@@ -81,6 +81,45 @@ func USDPerMillionToWeiPerToken(priceUSDPerMillion, rateUSDPerOG *big.Rat) (*big
 	return wei, nil
 }
 
+// USDPerMillionStringToPerToken parses a USD-per-1M-tokens decimal string
+// (e.g. "0.50"), divides exactly by 1_000_000, and returns the per-token
+// price as a decimal string with trailing zeros trimmed (e.g. "0.0000005").
+// Uses big.Rat throughout so there is no float precision loss.
+//
+// The formatting precision (18 decimals before trimming) matches wei-unit
+// resolution — any sensible configured price has fewer significant digits
+// than that, so the trimmed output is the shortest exact representation.
+//
+// Empty, negative, or unparseable input returns an error; the caller is
+// expected to have already validated the config value upstream.
+func USDPerMillionStringToPerToken(s string) (string, error) {
+	perMillion, err := ParseUSDPerMillion(s)
+	if err != nil {
+		return "", err
+	}
+	perToken := new(big.Rat).Quo(perMillion, new(big.Rat).SetInt(tokensPerMillion))
+	// FloatString pads to the requested precision; strip the noise.
+	out := perToken.FloatString(18)
+	return trimTrailingZeros(out), nil
+}
+
+// trimTrailingZeros removes trailing zeros after a decimal point and, if
+// that leaves a bare decimal point, drops it too.  "0.500000" -> "0.5",
+// "1.000000" -> "1", "10" -> "10" (unchanged).
+func trimTrailingZeros(s string) string {
+	if !strings.ContainsRune(s, '.') {
+		return s
+	}
+	i := len(s)
+	for i > 0 && s[i-1] == '0' {
+		i--
+	}
+	if i > 0 && s[i-1] == '.' {
+		i--
+	}
+	return s[:i]
+}
+
 // DriftBps returns the absolute difference between `current` and `reference`,
 // expressed in basis points (1/10000) of `reference`.  When reference is zero
 // any non-zero change is treated as infinite drift (returns math.MaxInt).

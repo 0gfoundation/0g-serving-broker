@@ -142,7 +142,7 @@ func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputW
 		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSD: %w", err)
 	}
 
-	p.cache.Set(inputWei, outputWei, time.Now())
+	p.cache.Set(inputWei, outputWei, rate, time.Now())
 	p.logger.Infof("pricefeed bootstrap: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
 		rate.FloatString(8), inputWei.String(), outputWei.String())
 	return inputWei, outputWei, nil
@@ -189,7 +189,7 @@ func (p *PriceUpdateProcessor) tick(ctx context.Context) {
 		return
 	}
 
-	p.cache.Set(inputWei, outputWei, time.Now())
+	p.cache.Set(inputWei, outputWei, rate, time.Now())
 	p.logger.Infof("pricefeed tick: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
 		rate.FloatString(8), inputWei.String(), outputWei.String())
 

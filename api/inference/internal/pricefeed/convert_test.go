@@ -135,6 +135,40 @@ func TestUSDPerMillionToWeiPerToken_InvalidRate(t *testing.T) {
 	}
 }
 
+func TestUSDPerMillionStringToPerToken(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"0.50", "0.0000005", false},
+		{"1.5", "0.0000015", false},
+		{"10", "0.00001", false},
+		{"0", "0", false},
+		{"1", "0.000001", false},
+		{"0.000001", "0.000000000001", false},
+		{"", "", true},
+		{"-1", "", true},
+		{"nope", "", true},
+	}
+	for _, c := range cases {
+		got, err := USDPerMillionStringToPerToken(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("USDPerMillionStringToPerToken(%q) want error, got %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("USDPerMillionStringToPerToken(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("USDPerMillionStringToPerToken(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestDriftBps(t *testing.T) {
 	cases := []struct {
 		current, reference int64

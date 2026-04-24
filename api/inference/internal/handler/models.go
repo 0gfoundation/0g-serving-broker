@@ -3,11 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 )
 
 // ModelObject represents a single model in the OpenAI-compatible /v1/models response.
@@ -26,6 +28,7 @@ type ModelObject struct {
 	SupportedFormats    []string                  `json:"supported_formats,omitempty"`
 	DefaultParameters   map[string]interface{}    `json:"default_parameters,omitempty"`
 	Pricing             *ModelPricing             `json:"pricing,omitempty"`
+	PricingUSD          *ModelPricingUSD          `json:"pricingUSD,omitempty"`
 	Verifiability       string                    `json:"verifiability,omitempty"`
 	TeeAttested         bool                      `json:"tee_attested"`
 	TeeType             string                    `json:"tee_type,omitempty"`
@@ -66,10 +69,29 @@ type ModelPricing struct {
 	CacheTokenBilling *ModelCacheTokenBilling `json:"cache_token_billing,omitempty"`
 }
 
+// ModelPricingUSD holds per-token USD pricing as trimmed decimal strings.
+// Present only when the provider is USD-denominated; omitted in NATIVE mode.
+// Values are derived from the configured USD-per-1M-tokens by exact big.Rat
+// division — no float precision loss.
+type ModelPricingUSD struct {
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+}
+
+// PriceFeedState surfaces the live 0G/USD rate and its freshness.  Present
+// only when the provider is USD-denominated and the price cache has been
+// populated at least once.
+type PriceFeedState struct {
+	RateUSDPerOG string    `json:"rateUSDPerOG"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	IsStale      bool      `json:"isStale"`
+}
+
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
 type ModelListResponse struct {
-	Object string        `json:"object"`
-	Data   []ModelObject `json:"data"`
+	Object    string          `json:"object"`
+	Data      []ModelObject   `json:"data"`
+	PriceFeed *PriceFeedState `json:"priceFeed,omitempty"`
 }
 
 // GetModels returns the list of models served by this broker.
@@ -185,9 +207,29 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ProviderIdentity = cfg.ProviderIdentity
 	}
 
+	// USD-denominated providers: surface per-token USD pricing (derived from
+	// the configured per-1M-tokens value) plus the live rate-feed state.
+	// Both blocks are omitted entirely in NATIVE mode.
+	var priceFeedOut *PriceFeedState
+	if svc.InputPriceUSD != "" && svc.OutputPriceUSD != "" {
+		if prompt, err := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSD); err == nil {
+			if completion, err := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSD); err == nil {
+				obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
+			}
+		}
+	}
+	if snap, threshold, isUSD := h.modelsCtrl.GetPriceFeedSnapshot(); isUSD && snap.Populated && snap.RateUSDPerOG != nil {
+		priceFeedOut = &PriceFeedState{
+			RateUSDPerOG: snap.RateUSDPerOG.FloatString(8),
+			UpdatedAt:    snap.LastUpdate,
+			IsStale:      snap.IsStale(threshold, time.Now()),
+		}
+	}
+
 	ctx.JSON(http.StatusOK, ModelListResponse{
-		Object: "list",
-		Data:   []ModelObject{obj},
+		Object:    "list",
+		Data:      []ModelObject{obj},
+		PriceFeed: priceFeedOut,
 	})
 }
 

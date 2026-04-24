@@ -20,7 +20,7 @@ func TestCache_GetEmpty(t *testing.T) {
 func TestCache_SetAndGet(t *testing.T) {
 	c := NewCache()
 	at := time.Now()
-	c.Set(big.NewInt(100), big.NewInt(200), at)
+	c.Set(big.NewInt(100), big.NewInt(200), nil, at)
 
 	snap := c.Get()
 	if !snap.Populated {
@@ -39,7 +39,7 @@ func TestCache_SetAndGet(t *testing.T) {
 
 func TestCache_SnapshotIsIndependentCopy(t *testing.T) {
 	c := NewCache()
-	c.Set(big.NewInt(100), big.NewInt(200), time.Now())
+	c.Set(big.NewInt(100), big.NewInt(200), nil, time.Now())
 	s1 := c.Get()
 	s1.InputPriceWei.SetInt64(999)
 
@@ -49,10 +49,41 @@ func TestCache_SnapshotIsIndependentCopy(t *testing.T) {
 	}
 }
 
+func TestCache_RateRoundTrip(t *testing.T) {
+	c := NewCache()
+	rate, _ := new(big.Rat).SetString("0.003210")
+	c.Set(big.NewInt(100), big.NewInt(200), rate, time.Now())
+
+	snap := c.Get()
+	if snap.RateUSDPerOG == nil {
+		t.Fatal("RateUSDPerOG nil after Set with non-nil rate")
+	}
+	if snap.RateUSDPerOG.Cmp(rate) != 0 {
+		t.Errorf("rate = %s, want %s", snap.RateUSDPerOG.FloatString(6), rate.FloatString(6))
+	}
+
+	// Snapshot must be an independent copy: mutating it does not affect
+	// the next Get().
+	snap.RateUSDPerOG.SetFloat64(999)
+	again := c.Get()
+	if again.RateUSDPerOG.Cmp(rate) != 0 {
+		t.Errorf("mutating snapshot corrupted cache rate: got %s", again.RateUSDPerOG.FloatString(6))
+	}
+}
+
+func TestCache_NilRateSetsNilSnapshot(t *testing.T) {
+	c := NewCache()
+	c.Set(big.NewInt(1), big.NewInt(2), nil, time.Now())
+	snap := c.Get()
+	if snap.RateUSDPerOG != nil {
+		t.Errorf("RateUSDPerOG = %v, want nil when Set passed nil rate", snap.RateUSDPerOG)
+	}
+}
+
 func TestSnapshot_IsStale(t *testing.T) {
 	c := NewCache()
 	now := time.Now()
-	c.Set(big.NewInt(1), big.NewInt(2), now.Add(-2*time.Minute))
+	c.Set(big.NewInt(1), big.NewInt(2), nil, now.Add(-2*time.Minute))
 	snap := c.Get()
 
 	if snap.IsStale(5*time.Minute, now) {

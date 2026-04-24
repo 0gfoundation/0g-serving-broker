@@ -7,19 +7,21 @@ import (
 )
 
 // Cache holds the most recently computed wei prices for the USD-denominated
-// service.  Readers on the request-billing hot path call Get and must handle
-// the "not yet populated" and "stale" cases.  The PriceUpdateProcessor is the
-// sole writer; Set is called once per successful tick.
+// service, along with the rate they were derived from.  Readers on the
+// request-billing hot path call Get and must handle the "not yet populated"
+// and "stale" cases.  The PriceUpdateProcessor is the sole writer; Set is
+// called once per successful tick.
 //
-// The rate itself is deliberately not stored — it's a transient value
-// internal to each update tick.  Only the wei prices derived from it are
-// exposed.  Storing the rate would imply it's authoritative, when in reality
-// the authoritative billing unit is always wei.
+// The stored rate is informational only — it's surfaced in the /v1/models
+// response so SDK clients can display the rate, but the authoritative
+// billing unit is always wei.  Fee calculation never reads the rate back
+// from the cache.
 type Cache struct {
 	mu sync.RWMutex
 
 	inputPriceWei  *big.Int
 	outputPriceWei *big.Int
+	rateUSDPerOG   *big.Rat
 	lastUpdate     time.Time
 }
 
@@ -30,11 +32,13 @@ func NewCache() *Cache {
 }
 
 // Snapshot is a read-only view of the cache at a point in time.  The big.Int
-// values are fresh copies so callers may mutate them without affecting the
-// cache.  Populated is false iff the cache has never been written.
+// and big.Rat values are fresh copies so callers may mutate them without
+// affecting the cache.  Populated is false iff the cache has never been
+// written.
 type Snapshot struct {
 	InputPriceWei  *big.Int
 	OutputPriceWei *big.Int
+	RateUSDPerOG   *big.Rat
 	LastUpdate     time.Time
 	Populated      bool
 }
@@ -48,21 +52,31 @@ func (c *Cache) Get() Snapshot {
 	if c.inputPriceWei == nil || c.outputPriceWei == nil {
 		return Snapshot{}
 	}
-	return Snapshot{
+	snap := Snapshot{
 		InputPriceWei:  new(big.Int).Set(c.inputPriceWei),
 		OutputPriceWei: new(big.Int).Set(c.outputPriceWei),
 		LastUpdate:     c.lastUpdate,
 		Populated:      true,
 	}
+	if c.rateUSDPerOG != nil {
+		snap.RateUSDPerOG = new(big.Rat).Set(c.rateUSDPerOG)
+	}
+	return snap
 }
 
-// Set replaces the cached prices and stamps the update time.  Intended for the
-// processor only; fee-computation code must not call this.
-func (c *Cache) Set(inputWei, outputWei *big.Int, at time.Time) {
+// Set replaces the cached prices, rate, and update time.  Intended for the
+// processor only; fee-computation code must not call this.  rate may be nil
+// for callers that don't track it (e.g. tests); readers must handle that.
+func (c *Cache) Set(inputWei, outputWei *big.Int, rate *big.Rat, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.inputPriceWei = new(big.Int).Set(inputWei)
 	c.outputPriceWei = new(big.Int).Set(outputWei)
+	if rate != nil {
+		c.rateUSDPerOG = new(big.Rat).Set(rate)
+	} else {
+		c.rateUSDPerOG = nil
+	}
 	c.lastUpdate = at
 }
 
