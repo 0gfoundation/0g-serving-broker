@@ -290,8 +290,9 @@ priceFeed:
 }
 
 func TestLoadConfig_USDStalenessThresholdDefault(t *testing.T) {
-	// With stalenessThreshold unset, the config loader should apply the
-	// 3-hour absolute default (not a multiple of updateInterval).
+	// With stalenessThreshold unset, the config loader applies 3×
+	// UpdateInterval — so the staleness window scales naturally with
+	// whatever refresh cadence the operator chose.
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -312,9 +313,9 @@ priceFeed:
 	if err := loadConfig(cfg); err != nil {
 		t.Fatalf("loadConfig failed: %v", err)
 	}
-	want := 3 * time.Hour
+	want := 90 * time.Minute // 3 × 30m
 	if cfg.PriceFeed.StalenessThreshold != want {
-		t.Errorf("StalenessThreshold default = %s, want %s", cfg.PriceFeed.StalenessThreshold, want)
+		t.Errorf("StalenessThreshold default = %s, want %s (3× updateInterval)", cfg.PriceFeed.StalenessThreshold, want)
 	}
 }
 
