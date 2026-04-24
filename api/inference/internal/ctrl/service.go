@@ -128,6 +128,14 @@ func (c *Ctrl) SyncService(ctx context.Context) error {
 // not the supplied inputWei/outputWei; on the push branch they're the
 // supplied values verbatim.
 func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *big.Int) (effectiveInput, effectiveOutput *big.Int, err error) {
+	// Hold contractWriteMu across the full read+decide+write so a concurrent
+	// SyncServicePrices tick cannot interleave between CompareServiceExceptPrice
+	// and the baseline-adopt write of lastPushed*.  Current wiring runs this
+	// ahead of the processor goroutine, but the lock makes the guarantee
+	// concrete rather than structural.
+	c.contractWriteMu.Lock()
+	defer c.contractWriteMu.Unlock()
+
 	overlaid := c.Service
 	overlaid.InputPrice = inputWei.String()
 	overlaid.OutputPrice = outputWei.String()
@@ -148,25 +156,21 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 			// the once-guard to match the happy-path semantics.
 			c.logger.Infof("SyncServiceWithPrices: non-price fields match, price drift within threshold (input=%d output=%d bps, threshold=%d) — skipping on-chain push",
 				inDrift, outDrift, threshold)
-			c.contractWriteMu.Lock()
 			c.lastPushedInputPrice = new(big.Int).Set(onChain.InputPrice)
 			c.lastPushedOutputPrice = new(big.Int).Set(onChain.OutputPrice)
-			c.contractWriteMu.Unlock()
 			c.serviceSynced.Store(true)
 			return new(big.Int).Set(onChain.InputPrice), new(big.Int).Set(onChain.OutputPrice), nil
 		}
 	}
 
-	if err := c.syncServiceOnce(ctx, overlaid); err != nil {
+	if err := c.syncServiceOnceLocked(ctx, overlaid); err != nil {
 		return nil, nil, err
 	}
 	// Record what we just registered as the local baseline so the first
 	// processor tick's drift comparison can short-circuit without an
 	// eth_call.
-	c.contractWriteMu.Lock()
 	c.lastPushedInputPrice = new(big.Int).Set(inputWei)
 	c.lastPushedOutputPrice = new(big.Int).Set(outputWei)
-	c.contractWriteMu.Unlock()
 	return new(big.Int).Set(inputWei), new(big.Int).Set(outputWei), nil
 }
 
@@ -177,15 +181,21 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 // registered (either c.Service as-is for NATIVE mode, or a copy with
 // overlaid wei prices for USD mode).
 func (c *Ctrl) syncServiceOnce(ctx context.Context, svc config.Service) error {
+	c.contractWriteMu.Lock()
+	defer c.contractWriteMu.Unlock()
+	return c.syncServiceOnceLocked(ctx, svc)
+}
+
+// syncServiceOnceLocked is the mutex-free body of syncServiceOnce; caller
+// MUST hold contractWriteMu.  Exposed so SyncServiceWithPrices can perform
+// its read+decide+write as a single critical section.
+func (c *Ctrl) syncServiceOnceLocked(ctx context.Context, svc config.Service) error {
 	if !c.serviceSynced.CompareAndSwap(false, true) {
 		c.logger.Info("SyncService already called, skipping")
 		return nil
 	}
 
-	c.contractWriteMu.Lock()
-	err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling)
-	c.contractWriteMu.Unlock()
-	if err != nil {
+	if err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling); err != nil {
 		// Reset the flag if sync failed so it can be retried
 		c.serviceSynced.Store(false)
 		return errors.Wrap(err, "sync services")
