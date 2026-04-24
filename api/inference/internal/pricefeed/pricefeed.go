@@ -2,7 +2,7 @@
 // wei-price caching used by USD-denominated provider pricing.
 //
 // Responsibilities:
-//   - Source interface + concrete implementations (CoinGecko, Binance, CoinMarketCap).
+//   - Source interface + concrete implementations (CoinGecko, Binance).
 //   - Aggregator that combines per-source quotes into a single rate (median +
 //     outlier rejection + minimum quorum).
 //   - Cache of the most recently computed wei prices, read by the fee-computation

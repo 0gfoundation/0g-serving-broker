@@ -140,12 +140,18 @@ func (s *Service) IsUSDDenominated() bool {
 // wei prices are stored (in the in-memory cache and on-chain).
 type PriceFeedConfig struct {
 	// Sources lists the price-feed source identifiers to query in parallel.
-	// Known identifiers: "coingecko", "binance", "coinmarketcap".
+	// Known identifiers: "coingecko", "binance".
 	// The aggregator returns the median of healthy sources; at least MinQuorum
 	// sources must respond successfully for an update to proceed.
 	Sources []string `yaml:"sources"`
-	// Symbol identifies the trading pair queried from each source (e.g. "0g-usdt").
-	Symbol string `yaml:"symbol"`
+	// SourceSymbols gives each source its own "<base>-<quote>" identifier,
+	// because the two APIs disagree on the shape of the base:
+	//   binance:   "0g-usdt"            -> 0GUSDT
+	//   coingecko: "zero-gravity-usd"   -> ids=zero-gravity&vs_currencies=usd
+	// Every entry in Sources must have a non-empty symbol here, validated at
+	// startup.  Keys are case-insensitive and normalised to the lowercase
+	// source identifier.
+	SourceSymbols map[string]string `yaml:"sourceSymbols"`
 	// UpdateInterval is how often the processor fetches a fresh rate and
 	// refreshes the in-memory wei price cache.
 	UpdateInterval time.Duration `yaml:"updateInterval"`
@@ -168,9 +174,6 @@ type PriceFeedConfig struct {
 	// new rate. If fewer sources respond successfully, the tick is skipped and
 	// the last good cache entry remains in use (subject to StalenessThreshold).
 	MinQuorum int `yaml:"minQuorum"`
-	// CoinMarketCapAPIKey is the optional API key for CoinMarketCap. Required
-	// only if "coinmarketcap" is in Sources.
-	CoinMarketCapAPIKey string `yaml:"coinMarketCapApiKey"`
 	// CoinGeckoAPIKey, when set, is sent in the x-cg-pro-api-key header to
 	// CoinGecko, activating Pro-tier rate limits.  The anonymous free tier
 	// is strict enough in production that quorum failures become common
@@ -451,9 +454,36 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 		seen[name] = struct{}{}
 		pf.Sources[i] = name
 	}
-	if pf.Symbol == "" {
-		pf.Symbol = "0g-usdt"
+
+	// Normalise sourceSymbols keys to lowercase and require an entry for
+	// every source.  Each symbol must be in "<base>-<quote>" form (quote
+	// is split on the LAST hyphen to accommodate hyphenated CoinGecko IDs).
+	normalised := make(map[string]string, len(pf.SourceSymbols))
+	for k, v := range pf.SourceSymbols {
+		key := strings.ToLower(strings.TrimSpace(k))
+		sym := strings.TrimSpace(v)
+		if key == "" {
+			return fmt.Errorf("invalid config: priceFeed.sourceSymbols has an empty key")
+		}
+		if _, dup := normalised[key]; dup {
+			return fmt.Errorf("invalid config: priceFeed.sourceSymbols has duplicate key %q (case-insensitive)", key)
+		}
+		if sym == "" {
+			return fmt.Errorf("invalid config: priceFeed.sourceSymbols[%q] is empty", key)
+		}
+		idx := strings.LastIndex(sym, "-")
+		if idx <= 0 || idx == len(sym)-1 {
+			return fmt.Errorf("invalid config: priceFeed.sourceSymbols[%q]=%q must be in '<base>-<quote>' form", key, sym)
+		}
+		normalised[key] = sym
 	}
+	for _, name := range pf.Sources {
+		if _, ok := normalised[name]; !ok {
+			return fmt.Errorf("invalid config: priceFeed.sourceSymbols is missing an entry for source %q", name)
+		}
+	}
+	pf.SourceSymbols = normalised
+
 	if pf.UpdateInterval <= 0 {
 		pf.UpdateInterval = time.Hour
 	}
