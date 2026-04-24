@@ -201,6 +201,16 @@ func Main() {
 				logger.Errorf("price update processor exited: %v", err)
 			}
 		}()
+		// Defer processor teardown here so it's enforced by the language:
+		// this defer is registered AFTER `defer contract.Close()` above, so
+		// LIFO ordering guarantees the processor goroutine exits before
+		// contract.Close() runs.  Any in-flight SyncServicePrices call that
+		// is waiting on an RPC will abort via priceCtx cancellation before
+		// the contract client is torn down.
+		defer func() {
+			priceProcessorCancel()
+			priceProcessorWG.Wait()
+		}()
 	}
 
 	// Initialize LoRA Manager if enabled
@@ -303,18 +313,9 @@ func Main() {
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
 
-	// Stop the price update processor and wait for its goroutine to
-	// exit.  priceProcessorCancel cancels priceCtx, which is the same
-	// ctx threaded into any in-flight SyncServicePrices call — so a
-	// tx currently waiting for its receipt will abort early on ctx
-	// cancellation.  The tx itself has already been submitted (nonce
-	// burned) and will mine asynchronously; we simply stop tracking
-	// it.  The next broker startup re-reads the on-chain service via
-	// SyncServicePrices so local baseline state re-syncs naturally.
-	if priceProcessorCancel != nil {
-		priceProcessorCancel()
-		priceProcessorWG.Wait()
-	}
+	// Price processor teardown is handled by the defer registered at
+	// goroutine startup — this guarantees it joins before contract.Close()
+	// (also deferred, registered earlier so LIFO orders correctly).
 
 	// Stop rate limiter cleanup goroutines
 	proxy.Close()
