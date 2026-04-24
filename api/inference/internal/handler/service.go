@@ -4,9 +4,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
 
 // getService
@@ -28,16 +25,9 @@ import (
 func (h *Handler) GetService(ctx *gin.Context) {
 	service, err := h.ctrl.GetCachedService(ctx)
 	if err != nil {
-		// USD overlay returns ctrl.ErrPricingUnavailable when the rate
-		// cache can't satisfy the request.  Surface as 503 so SDKs and
-		// monitoring can distinguish transient rate-feed outages from
-		// genuine internal errors.
-		if errors.Is(err, ctrl.ErrPricingUnavailable) {
-			ctx.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": err.Error(),
-			})
-			return
-		}
+		// handleBrokerError maps ctrl.ErrPricingUnavailable to 503 so
+		// SDKs and monitoring can distinguish transient rate-feed
+		// outages from genuine internal errors.
 		handleBrokerError(ctx, err, "get service")
 		return
 	}

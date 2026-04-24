@@ -292,10 +292,14 @@ func Main() {
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
 
-	// Stop the price update processor and wait for it to finish.  An
-	// in-flight SyncServicePrices tx holds contractWriteMu, and we want
-	// that to settle before the process exits so the nonce isn't left
-	// dangling.
+	// Stop the price update processor and wait for its goroutine to
+	// exit.  priceProcessorCancel cancels priceCtx, which is the same
+	// ctx threaded into any in-flight SyncServicePrices call — so a
+	// tx currently waiting for its receipt will abort early on ctx
+	// cancellation.  The tx itself has already been submitted (nonce
+	// burned) and will mine asynchronously; we simply stop tracking
+	// it.  The next broker startup re-reads the on-chain service via
+	// SyncServicePrices so local baseline state re-syncs naturally.
 	if priceProcessorCancel != nil {
 		priceProcessorCancel()
 		priceProcessorWG.Wait()

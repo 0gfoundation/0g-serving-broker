@@ -167,6 +167,14 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 	if context != "" {
 		info += (": " + context)
 	}
-	errors.Response(ctx, errors.Wrap(err, info))
+	wrapped := errors.Wrap(err, info)
+	// USD pricing outage: surface as 503 with PRICING_UNAVAILABLE so SDKs
+	// can distinguish a transient rate-feed failure (retryable) from a
+	// generic bad-request error.
+	if errors.Is(err, ctrl.ErrPricingUnavailable) {
+		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": wrapped.Error()})
+		return
+	}
+	errors.Response(ctx, wrapped)
 }
 
