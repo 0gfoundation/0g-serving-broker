@@ -143,15 +143,11 @@ type PriceFeedConfig struct {
 	// Known identifiers: "coingecko", "binance".
 	// The aggregator returns the median of healthy sources; at least MinQuorum
 	// sources must respond successfully for an update to proceed.
+	//
+	// Each source's 0G trading symbol is hardcoded in the pricefeed factory
+	// (see pricefeed.BuildSources); the symbols aren't an operator choice
+	// because this broker only ever prices 0G.
 	Sources []string `yaml:"sources"`
-	// SourceSymbols gives each source its own "<base>-<quote>" identifier,
-	// because the two APIs disagree on the shape of the base:
-	//   binance:   "0g-usdt"            -> 0GUSDT
-	//   coingecko: "zero-gravity-usd"   -> ids=zero-gravity&vs_currencies=usd
-	// Every entry in Sources must have a non-empty symbol here, validated at
-	// startup.  Keys are case-insensitive and normalised to the lowercase
-	// source identifier.
-	SourceSymbols map[string]string `yaml:"sourceSymbols"`
 	// UpdateInterval is how often the processor fetches a fresh rate and
 	// refreshes the in-memory wei price cache.
 	UpdateInterval time.Duration `yaml:"updateInterval"`
@@ -454,35 +450,6 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 		seen[name] = struct{}{}
 		pf.Sources[i] = name
 	}
-
-	// Normalise sourceSymbols keys to lowercase and require an entry for
-	// every source.  Each symbol must be in "<base>-<quote>" form (quote
-	// is split on the LAST hyphen to accommodate hyphenated CoinGecko IDs).
-	normalised := make(map[string]string, len(pf.SourceSymbols))
-	for k, v := range pf.SourceSymbols {
-		key := strings.ToLower(strings.TrimSpace(k))
-		sym := strings.TrimSpace(v)
-		if key == "" {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols has an empty key")
-		}
-		if _, dup := normalised[key]; dup {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols has duplicate key %q (case-insensitive)", key)
-		}
-		if sym == "" {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols[%q] is empty", key)
-		}
-		idx := strings.LastIndex(sym, "-")
-		if idx <= 0 || idx == len(sym)-1 {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols[%q]=%q must be in '<base>-<quote>' form", key, sym)
-		}
-		normalised[key] = sym
-	}
-	for _, name := range pf.Sources {
-		if _, ok := normalised[name]; !ok {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols is missing an entry for source %q", name)
-		}
-	}
-	pf.SourceSymbols = normalised
 
 	if pf.UpdateInterval <= 0 {
 		pf.UpdateInterval = time.Hour

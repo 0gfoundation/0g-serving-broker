@@ -69,7 +69,6 @@ func newTestProcessor(t *testing.T, sources []pricefeed.Source, svcCfg config.Se
 func defaultPFCfg() config.PriceFeedConfig {
 	return config.PriceFeedConfig{
 		Sources:             []string{"mock"},
-		SourceSymbols:       map[string]string{"mock": "0g-usdt"},
 		UpdateInterval:      time.Hour,
 		StalenessThreshold:  2 * time.Hour,
 		MinOnChainUpdateBps: 500,
