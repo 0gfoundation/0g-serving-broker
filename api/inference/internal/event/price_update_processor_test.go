@@ -79,8 +79,11 @@ func defaultPFCfg() config.PriceFeedConfig {
 }
 
 func TestProcessor_Bootstrap_Success(t *testing.T) {
-	// Price: $0.50/1M tokens, rate: $0.003/0G.  Expected wei per token:
+	// Price: $0.50/1M tokens, rate: $0.003/0G.  Naive wei per token:
 	// floor((0.5 * 1e18) / (1_000_000 * 0.003)) = 166_666_666_666_666.
+	// After floor-quantising to 1e10 wei: 166_660_000_000_000.
+	// Output side: $1.50 / (1e6 * 0.003) * 1e18 = 500_000_000_000_000
+	// exactly, already a multiple of 1e10, so unchanged by quantisation.
 	srcs := []pricefeed.Source{pricefeedtest.NewMockSource("mock", mustRat("0.003"))}
 	p, cache := newTestProcessor(t, srcs, config.Service{
 		InputPriceUSD:  "0.50",
@@ -92,15 +95,13 @@ func TestProcessor_Bootstrap_Success(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	wantInput, _ := new(big.Int).SetString("166666666666666", 10)
+	wantInput, _ := new(big.Int).SetString("166660000000000", 10)
 	if inputWei.Cmp(wantInput) != 0 {
 		t.Errorf("inputWei = %s, want %s", inputWei.String(), wantInput.String())
 	}
-	// Output price is 3× input price, so output wei is 3× input wei (modulo floor).
-	wantOutput := new(big.Int).Mul(wantInput, big.NewInt(3))
-	diff := new(big.Int).Sub(outputWei, wantOutput)
-	if diff.CmpAbs(big.NewInt(3)) > 0 {
-		t.Errorf("outputWei = %s, want ~%s (3× input)", outputWei.String(), wantOutput.String())
+	wantOutput, _ := new(big.Int).SetString("500000000000000", 10)
+	if outputWei.Cmp(wantOutput) != 0 {
+		t.Errorf("outputWei = %s, want %s", outputWei.String(), wantOutput.String())
 	}
 
 	snap := cache.Get()
