@@ -113,15 +113,17 @@ type Service struct {
 
 	// PriceDenomination selects how input/output prices are expressed:
 	//   "NATIVE" (default): InputPrice/OutputPrice are wei amounts, written to chain as-is.
-	//   "USD":              InputPriceUSD/OutputPriceUSD are USD decimal strings.
+	//   "USD":              InputPriceUSDPerMillionTokens/OutputPriceUSDPerMillionTokens are USD decimal strings.
 	//                       The PriceUpdateProcessor converts them to wei using a live rate.
 	PriceDenomination string `yaml:"priceDenomination"`
-	// InputPriceUSD is the input-side price in USD per token (decimal string).
+	// InputPriceUSDPerMillionTokens is the input-side price in USD per 1M
+	// tokens, as a decimal string (e.g. "0.50" = $0.50 per 1M input tokens,
+	// matching the convention used by OpenAI/Anthropic pricing tables).
 	// Required iff PriceDenomination == "USD".
-	InputPriceUSD string `yaml:"inputPriceUSD"`
-	// OutputPriceUSD is the output-side price in USD per token (decimal string).
-	// Required iff PriceDenomination == "USD".
-	OutputPriceUSD string `yaml:"outputPriceUSD"`
+	InputPriceUSDPerMillionTokens string `yaml:"inputPriceUSDPerMillionTokens"`
+	// OutputPriceUSDPerMillionTokens is the output-side price in USD per 1M
+	// tokens, decimal string.  Required iff PriceDenomination == "USD".
+	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -143,20 +145,19 @@ type PriceFeedConfig struct {
 	// Known identifiers: "coingecko", "binance".
 	// The aggregator returns the median of healthy sources; at least MinQuorum
 	// sources must respond successfully for an update to proceed.
+	//
+	// Each source's 0G trading symbol is hardcoded in the pricefeed factory
+	// (see pricefeed.BuildSources); the symbols aren't an operator choice
+	// because this broker only ever prices 0G.
 	Sources []string `yaml:"sources"`
-	// SourceSymbols gives each source its own "<base>-<quote>" identifier,
-	// because the two APIs disagree on the shape of the base:
-	//   binance:   "0g-usdt"            -> 0GUSDT
-	//   coingecko: "zero-gravity-usd"   -> ids=zero-gravity&vs_currencies=usd
-	// Every entry in Sources must have a non-empty symbol here, validated at
-	// startup.  Keys are case-insensitive and normalised to the lowercase
-	// source identifier.
-	SourceSymbols map[string]string `yaml:"sourceSymbols"`
 	// UpdateInterval is how often the processor fetches a fresh rate and
 	// refreshes the in-memory wei price cache.
 	UpdateInterval time.Duration `yaml:"updateInterval"`
-	// StalenessThreshold rejects new requests (fail-closed) if the last successful
-	// cache refresh is older than this. Must be >= UpdateInterval.
+	// StalenessThreshold rejects new requests (fail-closed) if the last
+	// successful cache refresh is older than this.  Must be >= UpdateInterval.
+	// Defaults to 3 × UpdateInterval when unset — three consecutive tick
+	// failures (each of which runs its own retry loop first) before readers
+	// start erroring, which scales naturally with the refresh cadence.
 	StalenessThreshold time.Duration `yaml:"stalenessThreshold"`
 	// MinOnChainUpdateBps is the drift threshold (in basis points, 1/10000)
 	// between the newly-derived wei price and the currently-registered
@@ -455,40 +456,16 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 		pf.Sources[i] = name
 	}
 
-	// Normalise sourceSymbols keys to lowercase and require an entry for
-	// every source.  Each symbol must be in "<base>-<quote>" form (quote
-	// is split on the LAST hyphen to accommodate hyphenated CoinGecko IDs).
-	normalised := make(map[string]string, len(pf.SourceSymbols))
-	for k, v := range pf.SourceSymbols {
-		key := strings.ToLower(strings.TrimSpace(k))
-		sym := strings.TrimSpace(v)
-		if key == "" {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols has an empty key")
-		}
-		if _, dup := normalised[key]; dup {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols has duplicate key %q (case-insensitive)", key)
-		}
-		if sym == "" {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols[%q] is empty", key)
-		}
-		idx := strings.LastIndex(sym, "-")
-		if idx <= 0 || idx == len(sym)-1 {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols[%q]=%q must be in '<base>-<quote>' form", key, sym)
-		}
-		normalised[key] = sym
-	}
-	for _, name := range pf.Sources {
-		if _, ok := normalised[name]; !ok {
-			return fmt.Errorf("invalid config: priceFeed.sourceSymbols is missing an entry for source %q", name)
-		}
-	}
-	pf.SourceSymbols = normalised
-
 	if pf.UpdateInterval <= 0 {
 		pf.UpdateInterval = time.Hour
 	}
 	if pf.StalenessThreshold <= 0 {
-		pf.StalenessThreshold = 2 * pf.UpdateInterval
+		// 3× updateInterval: the first failed tick uses retries to absorb
+		// transient issues, the second and third ticks give the feed two
+		// more chances to recover before readers start failing closed.
+		// Scales with the operator's chosen interval so shorter/longer
+		// cadences don't need a separate staleness tune.
+		pf.StalenessThreshold = 3 * pf.UpdateInterval
 	}
 	if pf.StalenessThreshold < pf.UpdateInterval {
 		return fmt.Errorf("invalid config: priceFeed.stalenessThreshold (%s) must be >= priceFeed.updateInterval (%s)", pf.StalenessThreshold, pf.UpdateInterval)
@@ -591,17 +568,17 @@ func loadConfig(config *Config) error {
 	config.Service.PriceDenomination = strings.ToUpper(config.Service.PriceDenomination)
 	switch config.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
-		if config.Service.InputPriceUSD != "" || config.Service.OutputPriceUSD != "" {
-			return fmt.Errorf("invalid config: service.inputPriceUSD / service.outputPriceUSD must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
+		if config.Service.InputPriceUSDPerMillionTokens != "" || config.Service.OutputPriceUSDPerMillionTokens != "" {
+			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
 	case constant.PriceDenominationUSD:
-		if config.Service.InputPriceUSD == "" || config.Service.OutputPriceUSD == "" {
-			return fmt.Errorf("invalid config: service.inputPriceUSD and service.outputPriceUSD are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
+		if config.Service.InputPriceUSDPerMillionTokens == "" || config.Service.OutputPriceUSDPerMillionTokens == "" {
+			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		if err := validateUSDPriceString("service.inputPriceUSD", config.Service.InputPriceUSD); err != nil {
+		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", config.Service.InputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
-		if err := validateUSDPriceString("service.outputPriceUSD", config.Service.OutputPriceUSD); err != nil {
+		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", config.Service.OutputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
 		if config.Service.InputPrice != "" || config.Service.OutputPrice != "" {

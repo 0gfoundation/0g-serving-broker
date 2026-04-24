@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validModelInfo() *ModelInfo {
@@ -264,13 +265,10 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko", "binance"]
-  sourceSymbols:
-    coingecko: "zero-gravity-usd"
-    binance: "0g-usdt"
   updateInterval: "1h"
   stalenessThreshold: "2h"
 `)
@@ -289,15 +287,12 @@ priceFeed:
 	if cfg.PriceFeed.MinOnChainUpdateBps != 500 {
 		t.Errorf("MinOnChainUpdateBps default = %d, want 500", cfg.PriceFeed.MinOnChainUpdateBps)
 	}
-	if got := cfg.PriceFeed.SourceSymbols["coingecko"]; got != "zero-gravity-usd" {
-		t.Errorf("SourceSymbols[coingecko] = %q, want zero-gravity-usd", got)
-	}
-	if got := cfg.PriceFeed.SourceSymbols["binance"]; got != "0g-usdt" {
-		t.Errorf("SourceSymbols[binance] = %q, want 0g-usdt", got)
-	}
 }
 
-func TestLoadConfig_USDMissingSourceSymbol(t *testing.T) {
+func TestLoadConfig_USDStalenessThresholdDefault(t *testing.T) {
+	// With stalenessThreshold unset, the config loader applies 3×
+	// UpdateInterval — so the staleness window scales naturally with
+	// whatever refresh cadence the operator chose.
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -306,44 +301,21 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
-priceFeed:
-  sources: ["coingecko", "binance"]
-  sourceSymbols:
-    coingecko: "zero-gravity-usd"
-`)
-	t.Setenv("CONFIG_FILE", configPath)
-
-	cfg := &Config{}
-	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), `missing an entry for source "binance"`) {
-		t.Errorf("expected error about missing sourceSymbols entry for binance, got %v", err)
-	}
-}
-
-func TestLoadConfig_USDMalformedSourceSymbol(t *testing.T) {
-	configPath := writeTestConfig(t, `
-service:
-  servingUrl: "http://example.com"
-  targetUrl: "http://backend:8000"
-  type: "chatbot"
-  model: "gpt-4"
-  verifiability: "TeeML"
-  priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko"]
-  sourceSymbols:
-    coingecko: "noseparator"
+  updateInterval: "30m"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
 	cfg := &Config{}
-	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "<base>-<quote>") {
-		t.Errorf("expected error about malformed sourceSymbols entry, got %v", err)
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	want := 90 * time.Minute // 3 × 30m
+	if cfg.PriceFeed.StalenessThreshold != want {
+		t.Errorf("StalenessThreshold default = %s, want %s (3× updateInterval)", cfg.PriceFeed.StalenessThreshold, want)
 	}
 }
 
@@ -363,8 +335,8 @@ priceFeed:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "inputPriceUSD") {
-		t.Errorf("expected error about missing inputPriceUSD, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSDPerMillionTokens") {
+		t.Errorf("expected error about missing inputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
@@ -378,8 +350,8 @@ service:
   verifiability: "TeeML"
   priceDenomination: "USD"
   inputPrice: "1000"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko"]
 `)
@@ -413,18 +385,18 @@ service:
   type: "chatbot"
   model: "gpt-4"
   verifiability: "TeeML"
-  inputPriceUSD: "0.50"
+  inputPriceUSDPerMillionTokens: "0.50"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
 	if err == nil {
-		t.Fatal("expected error for USD inputPriceUSD under NATIVE denomination")
+		t.Fatal("expected error for USD inputPriceUSDPerMillionTokens under NATIVE denomination")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "service.inputPriceUSD") && !strings.Contains(msg, "service.outputPriceUSD") {
-		t.Errorf("expected error naming service.inputPriceUSD / service.outputPriceUSD, got %q", msg)
+	if !strings.Contains(msg, "service.inputPriceUSDPerMillionTokens") && !strings.Contains(msg, "service.outputPriceUSDPerMillionTokens") {
+		t.Errorf("expected error naming service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens, got %q", msg)
 	}
 	if !strings.Contains(msg, "NATIVE") {
 		t.Errorf("expected error to reference NATIVE denomination, got %q", msg)
@@ -440,8 +412,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "eur"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
@@ -461,8 +433,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0,50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0,50"
+  outputPriceUSDPerMillionTokens: "1.50"
 priceFeed:
   sources: ["coingecko"]
 `)
@@ -470,8 +442,8 @@ priceFeed:
 
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "inputPriceUSD") {
-		t.Errorf("expected error about malformed inputPriceUSD, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "inputPriceUSDPerMillionTokens") {
+		t.Errorf("expected error about malformed inputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
@@ -484,8 +456,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "-1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "-1.50"
 priceFeed:
   sources: ["coingecko"]
 `)
@@ -494,7 +466,7 @@ priceFeed:
 	cfg := &Config{}
 	err := loadConfig(cfg)
 	if err == nil || !strings.Contains(err.Error(), "non-negative") {
-		t.Errorf("expected error about negative outputPriceUSD, got %v", err)
+		t.Errorf("expected error about negative outputPriceUSDPerMillionTokens, got %v", err)
 	}
 }
 
@@ -507,8 +479,8 @@ service:
   model: "gpt-4"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSD: "0.50"
-  outputPriceUSD: "1.50"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
@@ -13,6 +14,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -35,6 +37,7 @@ type modelsCtrl interface {
 	GetTieredPricingConfig() config.TieredPricingConfig
 	GetCacheTokenBillingConfig() config.CacheTokenBillingConfig
 	GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig
+	GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThreshold time.Duration, isUSD bool)
 }
 
 type Handler struct {

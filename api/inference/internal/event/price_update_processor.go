@@ -55,13 +55,13 @@ func NewPriceUpdateProcessor(
 	pfCfg config.PriceFeedConfig,
 	logger log.Logger,
 ) (*PriceUpdateProcessor, error) {
-	inputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.InputPriceUSD)
+	inputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.InputPriceUSDPerMillionTokens)
 	if err != nil {
-		return nil, fmt.Errorf("processor: parse inputPriceUSD: %w", err)
+		return nil, fmt.Errorf("processor: parse inputPriceUSDPerMillionTokens: %w", err)
 	}
-	outputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.OutputPriceUSD)
+	outputUSD, err := pricefeed.ParseUSDPerMillion(serviceCfg.OutputPriceUSDPerMillionTokens)
 	if err != nil {
-		return nil, fmt.Errorf("processor: parse outputPriceUSD: %w", err)
+		return nil, fmt.Errorf("processor: parse outputPriceUSDPerMillionTokens: %w", err)
 	}
 	return &PriceUpdateProcessor{
 		cache:      cache,
@@ -74,12 +74,12 @@ func NewPriceUpdateProcessor(
 	}, nil
 }
 
-// Bootstrap retry knobs — declared as package vars rather than consts so
-// tests can shrink them to avoid minute-long sleeps.  Under Kubernetes, a
-// transient public-API outage (CoinGecko 429, regional 451, intermittent
-// 5xx) coinciding with a broker restart would otherwise CrashLoopBackoff
-// the pod; we prefer to absorb short outages and only fail once the outage
-// looks sustained.
+// Bootstrap and tick retry knobs — declared as package vars rather than
+// consts so tests can shrink them to avoid minute-long sleeps.  Under
+// Kubernetes, a transient public-API outage (CoinGecko 429, regional 451,
+// intermittent 5xx) coinciding with a broker restart would otherwise
+// CrashLoopBackoff the pod; we prefer to absorb short outages and only fail
+// once the outage looks sustained.
 var (
 	// bootstrapMaxAttempts bounds the boot-time rate-fetch retry loop.
 	bootstrapMaxAttempts = 6
@@ -89,7 +89,54 @@ var (
 	// bootstrapMaxBackoff caps the per-retry sleep so a long outage fails
 	// in bounded wall time rather than ballooning indefinitely.
 	bootstrapMaxBackoff = 30 * time.Second
+
+	// Runtime tick retries.  Scoped smaller than Bootstrap because the
+	// steady-state interval is long (hours) and we don't want retries to
+	// bleed into the next tick.  Three attempts with short backoff absorb
+	// the common flaky cases (brief 429, single 5xx) without delaying the
+	// loop significantly — worst-case total ~15-30s per failing tick.
+	tickMaxAttempts = 3
+	tickBaseBackoff = 5 * time.Second
+	tickMaxBackoff  = 30 * time.Second
 )
+
+// aggregateWithRetry wraps aggregator.Aggregate in an exponential-backoff
+// retry loop.  Shared between Bootstrap and tick so both paths behave
+// consistently under transient source failures.  label is used in log
+// messages to distinguish which caller is retrying.
+//
+// Returns the aggregated rate on the first success, or the last error after
+// maxAttempts.  Honours ctx cancellation during backoff sleeps.
+func (p *PriceUpdateProcessor) aggregateWithRetry(ctx context.Context, label string, maxAttempts int, baseBackoff, maxBackoff time.Duration) (*big.Rat, error) {
+	var lastErr error
+	backoff := baseBackoff
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		rate, _, err := p.aggregator.Aggregate(ctx)
+		if err == nil {
+			return rate, nil
+		}
+		lastErr = err
+		p.logger.Warnf("pricefeed %s: attempt %d/%d failed: %v", label, attempt, maxAttempts, err)
+		if attempt == maxAttempts {
+			break
+		}
+		// Use time.NewTimer + Stop so ctx cancellation doesn't leak a timer
+		// for up to maxBackoff.
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, fmt.Errorf("%s: context cancelled during retry: %w", label, ctx.Err())
+		case <-timer.C:
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+	return nil, fmt.Errorf("%s: aggregate rate (after %d attempts): %w", label, maxAttempts, lastErr)
+}
 
 // Bootstrap performs a synchronous rate fetch and cache update with bounded
 // retries.  Called once at startup BEFORE any request billing, so both the
@@ -102,47 +149,21 @@ var (
 // regional block, transient 5xx — without making a sustained outage look
 // like a healthy start.
 func (p *PriceUpdateProcessor) Bootstrap(ctx context.Context) (inputWei, outputWei *big.Int, err error) {
-	var rate *big.Rat
-	var lastErr error
-	backoff := bootstrapBaseBackoff
-	for attempt := 1; attempt <= bootstrapMaxAttempts; attempt++ {
-		rate, _, lastErr = p.aggregator.Aggregate(ctx)
-		if lastErr == nil {
-			break
-		}
-		p.logger.Warnf("pricefeed bootstrap: attempt %d/%d failed: %v", attempt, bootstrapMaxAttempts, lastErr)
-		if attempt == bootstrapMaxAttempts {
-			break
-		}
-		// Use time.NewTimer + Stop so a ctx cancellation doesn't leak
-		// a timer for up to bootstrapMaxBackoff.
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return nil, nil, fmt.Errorf("bootstrap: context cancelled during retry: %w", ctx.Err())
-		case <-timer.C:
-		}
-		if backoff *= 2; backoff > bootstrapMaxBackoff {
-			backoff = bootstrapMaxBackoff
-		}
-	}
-	if lastErr != nil {
-		return nil, nil, fmt.Errorf("bootstrap: aggregate initial rate (after %d attempts): %w", bootstrapMaxAttempts, lastErr)
+	rate, err := p.aggregateWithRetry(ctx, "bootstrap", bootstrapMaxAttempts, bootstrapBaseBackoff, bootstrapMaxBackoff)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	inputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSD: %w", err)
+		return nil, nil, fmt.Errorf("bootstrap: convert inputPriceUSDPerMillionTokens: %w", err)
 	}
 	outputWei, err = pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSD: %w", err)
+		return nil, nil, fmt.Errorf("bootstrap: convert outputPriceUSDPerMillionTokens: %w", err)
 	}
 
-	p.cache.Set(inputWei, outputWei, time.Now())
+	p.cache.Set(inputWei, outputWei, rate, time.Now())
 	p.logger.Infof("pricefeed bootstrap: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
 		rate.FloatString(8), inputWei.String(), outputWei.String())
 	return inputWei, outputWei, nil
@@ -168,28 +189,29 @@ func (p *PriceUpdateProcessor) Start(ctx context.Context) error {
 
 // tick runs one update cycle: aggregate → convert → update cache → maybe
 // push on-chain (via ctrl.SyncServicePrices, which performs drift gating
-// and mutex-guarded serialisation).  Any error is logged and the cache
-// from the previous tick is retained (readers enforce StalenessThreshold
-// independently).
+// and mutex-guarded serialisation).  Retries the aggregation up to
+// tickMaxAttempts to absorb transient feed failures; only on sustained
+// failure does the tick give up, log at error, and retain the last-good
+// cache (readers enforce StalenessThreshold independently).
 func (p *PriceUpdateProcessor) tick(ctx context.Context) {
-	rate, _, err := p.aggregator.Aggregate(ctx)
+	rate, err := p.aggregateWithRetry(ctx, "tick", tickMaxAttempts, tickBaseBackoff, tickMaxBackoff)
 	if err != nil {
-		p.logger.Warnf("pricefeed tick: aggregate failed (keeping last good cache): %v", err)
+		p.logger.Errorf("pricefeed tick: aggregate failed after retries (keeping last good cache): %v", err)
 		return
 	}
 
 	inputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.inputUSD, rate)
 	if err != nil {
-		p.logger.Errorf("pricefeed tick: convert inputPriceUSD: %v", err)
+		p.logger.Errorf("pricefeed tick: convert inputPriceUSDPerMillionTokens: %v", err)
 		return
 	}
 	outputWei, err := pricefeed.USDPerMillionToWeiPerToken(p.outputUSD, rate)
 	if err != nil {
-		p.logger.Errorf("pricefeed tick: convert outputPriceUSD: %v", err)
+		p.logger.Errorf("pricefeed tick: convert outputPriceUSDPerMillionTokens: %v", err)
 		return
 	}
 
-	p.cache.Set(inputWei, outputWei, time.Now())
+	p.cache.Set(inputWei, outputWei, rate, time.Now())
 	p.logger.Infof("pricefeed tick: rate=%s USD/0G, inputPriceWei=%s, outputPriceWei=%s",
 		rate.FloatString(8), inputWei.String(), outputWei.String())
 

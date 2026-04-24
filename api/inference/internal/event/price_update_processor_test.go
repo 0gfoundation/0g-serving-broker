@@ -69,7 +69,6 @@ func newTestProcessor(t *testing.T, sources []pricefeed.Source, svcCfg config.Se
 func defaultPFCfg() config.PriceFeedConfig {
 	return config.PriceFeedConfig{
 		Sources:             []string{"mock"},
-		SourceSymbols:       map[string]string{"mock": "0g-usdt"},
 		UpdateInterval:      time.Hour,
 		StalenessThreshold:  2 * time.Hour,
 		MinOnChainUpdateBps: 500,
@@ -80,12 +79,15 @@ func defaultPFCfg() config.PriceFeedConfig {
 }
 
 func TestProcessor_Bootstrap_Success(t *testing.T) {
-	// Price: $0.50/1M tokens, rate: $0.003/0G.  Expected wei per token:
+	// Price: $0.50/1M tokens, rate: $0.003/0G.  Naive wei per token:
 	// floor((0.5 * 1e18) / (1_000_000 * 0.003)) = 166_666_666_666_666.
+	// After floor-quantising to 1e10 wei: 166_660_000_000_000.
+	// Output side: $1.50 / (1e6 * 0.003) * 1e18 = 500_000_000_000_000
+	// exactly, already a multiple of 1e10, so unchanged by quantisation.
 	srcs := []pricefeed.Source{pricefeedtest.NewMockSource("mock", mustRat("0.003"))}
 	p, cache := newTestProcessor(t, srcs, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	inputWei, outputWei, err := p.Bootstrap(context.Background())
@@ -93,15 +95,13 @@ func TestProcessor_Bootstrap_Success(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	wantInput, _ := new(big.Int).SetString("166666666666666", 10)
+	wantInput, _ := new(big.Int).SetString("166660000000000", 10)
 	if inputWei.Cmp(wantInput) != 0 {
 		t.Errorf("inputWei = %s, want %s", inputWei.String(), wantInput.String())
 	}
-	// Output price is 3× input price, so output wei is 3× input wei (modulo floor).
-	wantOutput := new(big.Int).Mul(wantInput, big.NewInt(3))
-	diff := new(big.Int).Sub(outputWei, wantOutput)
-	if diff.CmpAbs(big.NewInt(3)) > 0 {
-		t.Errorf("outputWei = %s, want ~%s (3× input)", outputWei.String(), wantOutput.String())
+	wantOutput, _ := new(big.Int).SetString("500000000000000", 10)
+	if outputWei.Cmp(wantOutput) != 0 {
+		t.Errorf("outputWei = %s, want %s", outputWei.String(), wantOutput.String())
 	}
 
 	snap := cache.Get()
@@ -127,8 +127,8 @@ func TestProcessor_Bootstrap_AggregatorFails(t *testing.T) {
 	failing := pricefeedtest.NewMockSource("mock", nil)
 	failing.SetError(errors.New("boom"))
 	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	_, _, err := p.Bootstrap(context.Background())
@@ -161,8 +161,8 @@ func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
 	flaky.SetFailFirst(2) // 1st and 2nd FetchRate fail; 3rd returns the rate.
 
 	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
-		InputPriceUSD:  "0.50",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg())
 
 	if _, _, err := p.Bootstrap(context.Background()); err != nil {
@@ -176,6 +176,71 @@ func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
 	}
 }
 
+func TestProcessor_Tick_RetriesOnTransientFailure(t *testing.T) {
+	// Tick should absorb short-lived failures (fail → retry → succeed) and
+	// populate the cache rather than waiting a full updateInterval for the
+	// next scheduled tick.  Mirrors the Bootstrap transient-failure test
+	// but through the tick path.
+	oldAttempts, oldBase, oldMax := tickMaxAttempts, tickBaseBackoff, tickMaxBackoff
+	tickMaxAttempts = 3
+	tickBaseBackoff = time.Millisecond
+	tickMaxBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		tickMaxAttempts, tickBaseBackoff, tickMaxBackoff = oldAttempts, oldBase, oldMax
+	})
+
+	flaky := pricefeedtest.NewMockSource("mock", mustRat("0.003"))
+	flaky.SetFailFirst(2) // 1st and 2nd fail; 3rd returns rate.
+
+	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
+	}, defaultPFCfg())
+
+	p.tick(context.Background())
+
+	if !cache.Get().Populated {
+		t.Error("cache should be populated after tick recovered via retry")
+	}
+	if got := flaky.Calls(); got != 3 {
+		t.Errorf("expected 3 FetchRate calls (2 fail + 1 success), got %d", got)
+	}
+}
+
+func TestProcessor_Tick_KeepsLastGoodCacheOnSustainedFailure(t *testing.T) {
+	// When every retry attempt fails, the tick must NOT touch the cache —
+	// stale readers fail closed via StalenessThreshold, not via cache
+	// corruption.
+	oldAttempts, oldBase, oldMax := tickMaxAttempts, tickBaseBackoff, tickMaxBackoff
+	tickMaxAttempts = 3
+	tickBaseBackoff = time.Millisecond
+	tickMaxBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		tickMaxAttempts, tickBaseBackoff, tickMaxBackoff = oldAttempts, oldBase, oldMax
+	})
+
+	failing := pricefeedtest.NewMockSource("mock", nil)
+	failing.SetError(errors.New("boom"))
+	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
+		InputPriceUSDPerMillionTokens:  "0.50",
+		OutputPriceUSDPerMillionTokens: "1.50",
+	}, defaultPFCfg())
+
+	// Prime the cache with a known good value so we can verify it's
+	// retained untouched after the failing tick.
+	cache.Set(big.NewInt(111), big.NewInt(222), mustRat("0.001"), time.Now())
+
+	p.tick(context.Background())
+
+	if got := failing.Calls(); got != 3 {
+		t.Errorf("expected 3 FetchRate calls (all retries), got %d", got)
+	}
+	snap := cache.Get()
+	if snap.InputPriceWei.Cmp(big.NewInt(111)) != 0 || snap.OutputPriceWei.Cmp(big.NewInt(222)) != 0 {
+		t.Errorf("cache was overwritten on failing tick: input=%s output=%s", snap.InputPriceWei, snap.OutputPriceWei)
+	}
+}
+
 func TestNewPriceUpdateProcessor_InvalidUSDPrice(t *testing.T) {
 	// Parse-once moves the USD validation up to the constructor, so a bad
 	// price is caught before the server even starts ticking — no "error
@@ -183,10 +248,10 @@ func TestNewPriceUpdateProcessor_InvalidUSDPrice(t *testing.T) {
 	cache := pricefeed.NewCache()
 	agg := pricefeed.NewAggregator(nil, 1, 500, time.Second, nopLogger{})
 	_, err := NewPriceUpdateProcessor(cache, agg, nil, config.Service{
-		InputPriceUSD:  "not-a-number",
-		OutputPriceUSD: "1.50",
+		InputPriceUSDPerMillionTokens:  "not-a-number",
+		OutputPriceUSDPerMillionTokens: "1.50",
 	}, defaultPFCfg(), nopLogger{})
 	if err == nil {
-		t.Error("expected constructor to reject invalid inputPriceUSD")
+		t.Error("expected constructor to reject invalid inputPriceUSDPerMillionTokens")
 	}
 }

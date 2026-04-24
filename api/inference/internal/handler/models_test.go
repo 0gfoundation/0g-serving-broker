@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -21,6 +23,9 @@ type mockModelsCtrl struct {
 	tieredPricingConfig     config.TieredPricingConfig
 	cacheTokenBillingConfig config.CacheTokenBillingConfig
 	concurrencyLimitConfig  config.ConcurrencyLimitConfig
+	priceFeedSnapshot       pricefeed.Snapshot
+	priceFeedThreshold      time.Duration
+	priceFeedIsUSD          bool
 }
 
 func (m *mockModelsCtrl) GetCachedService(_ context.Context) (model.Service, error) {
@@ -41,6 +46,10 @@ func (m *mockModelsCtrl) GetCacheTokenBillingConfig() config.CacheTokenBillingCo
 
 func (m *mockModelsCtrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig {
 	return m.concurrencyLimitConfig
+}
+
+func (m *mockModelsCtrl) GetPriceFeedSnapshot() (pricefeed.Snapshot, time.Duration, bool) {
+	return m.priceFeedSnapshot, m.priceFeedThreshold, m.priceFeedIsUSD
 }
 
 func newModelsTestHandler(mock *mockModelsCtrl) *Handler {
@@ -473,6 +482,187 @@ func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
 	}
 	if _, exists := modelMap["provider_identity"]; exists {
 		t.Error("provider_identity should be omitted from JSON for decentralized providers")
+	}
+}
+
+func TestGetModels_USDPricingAndFeedState(t *testing.T) {
+	// USD mode: service carries per-1M USD strings, and priceCache has a
+	// fresh rate.  Response should include pricingUSD (per-token, derived
+	// from per-million by /1e6) and the top-level priceFeed block.
+	rate, _ := new(big.Rat).SetString("0.00321")
+	updatedAt := time.Now().Add(-5 * time.Second)
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:      "test-model",
+			Type:           "chatbot",
+			InputPrice:     "166660000000000",
+			OutputPrice:    "500000000000000",
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
+		},
+		serviceConfig: config.Service{},
+		priceFeedIsUSD: true,
+		priceFeedSnapshot: pricefeed.Snapshot{
+			InputPriceWei:  big.NewInt(166660000000000),
+			OutputPriceWei: big.NewInt(500000000000000),
+			RateUSDPerOG:   rate,
+			LastUpdate:     updatedAt,
+			Populated:      true,
+		},
+		priceFeedThreshold: 5 * time.Minute,
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(resp.Data))
+	}
+	m := resp.Data[0]
+
+	// pricingUSD: per-token, derived from $0.50/M and $1.50/M config.
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricingUSD to be present in USD mode")
+	}
+	if m.PricingUSD.Prompt != "0.0000005" {
+		t.Errorf("pricingUSD.prompt = %q, want 0.0000005", m.PricingUSD.Prompt)
+	}
+	if m.PricingUSD.Completion != "0.0000015" {
+		t.Errorf("pricingUSD.completion = %q, want 0.0000015", m.PricingUSD.Completion)
+	}
+
+	// priceFeed: rate decimal-formatted, isStale=false, updatedAt echoed.
+	if resp.PriceFeed == nil {
+		t.Fatal("expected top-level priceFeed block in USD mode with populated cache")
+	}
+	if resp.PriceFeed.RateUSDPerOG != "0.00321000" {
+		t.Errorf("rateUSDPerOG = %q, want 0.00321000 (FloatString(8))", resp.PriceFeed.RateUSDPerOG)
+	}
+	if resp.PriceFeed.IsStale {
+		t.Error("isStale = true, want false for 5s-old cache + 5m threshold")
+	}
+	if !resp.PriceFeed.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("updatedAt = %v, want %v", resp.PriceFeed.UpdatedAt, updatedAt)
+	}
+}
+
+func TestGetModels_NativeModeOmitsUSDBlocks(t *testing.T) {
+	// NATIVE mode: no InputPriceUSDPerMillionTokens on the service, priceFeedIsUSD=false.
+	// Response must have no pricingUSD on models and no priceFeed at top
+	// level — the raw JSON must not even contain those keys.
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "test-model",
+			Type:        "chatbot",
+			InputPrice:  "100",
+			OutputPrice: "200",
+		},
+		serviceConfig:  config.Service{},
+		priceFeedIsUSD: false,
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	// Raw-JSON check: keys must be absent (not just null/empty).
+	var raw map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("parse raw: %v", err)
+	}
+	if _, exists := raw["priceFeed"]; exists {
+		t.Error("priceFeed key should be absent in NATIVE mode")
+	}
+	data, _ := raw["data"].([]interface{})
+	if len(data) == 0 {
+		t.Fatal("data empty")
+	}
+	m, _ := data[0].(map[string]interface{})
+	if _, exists := m["pricingUSD"]; exists {
+		t.Error("pricingUSD key should be absent in NATIVE mode")
+	}
+}
+
+func TestGetModels_USDModeCachePopulatedButStale(t *testing.T) {
+	// USD mode with cache older than threshold — isStale must be true.
+	rate, _ := new(big.Rat).SetString("0.003")
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:      "test-model",
+			Type:           "chatbot",
+			InputPrice:     "1",
+			OutputPrice:    "1",
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
+		},
+		serviceConfig: config.Service{},
+		priceFeedIsUSD: true,
+		priceFeedSnapshot: pricefeed.Snapshot{
+			InputPriceWei:  big.NewInt(1),
+			OutputPriceWei: big.NewInt(1),
+			RateUSDPerOG:   rate,
+			LastUpdate:     time.Now().Add(-10 * time.Minute),
+			Populated:      true,
+		},
+		priceFeedThreshold: time.Minute,
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if resp.PriceFeed == nil {
+		t.Fatal("expected priceFeed block for populated cache (even when stale)")
+	}
+	if !resp.PriceFeed.IsStale {
+		t.Error("isStale = false, want true for 10min-old cache + 1min threshold")
+	}
+}
+
+func TestGetModels_USDModeUnpopulatedCacheOmitsPriceFeed(t *testing.T) {
+	// USD mode but cache not yet populated (pre-bootstrap).  The pricingUSD
+	// block derived from config still appears; the top-level priceFeed is
+	// omitted since there's no meaningful rate to report.
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:      "test-model",
+			Type:           "chatbot",
+			InputPrice:     "1",
+			OutputPrice:    "1",
+			InputPriceUSDPerMillionTokens:  "0.50",
+			OutputPriceUSDPerMillionTokens: "1.50",
+		},
+		serviceConfig:     config.Service{},
+		priceFeedIsUSD:    true,
+		priceFeedSnapshot: pricefeed.Snapshot{Populated: false},
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, exists := raw["priceFeed"]; exists {
+		t.Error("priceFeed should be absent when cache unpopulated")
+	}
+	var resp ModelListResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Data[0].PricingUSD == nil {
+		t.Error("pricingUSD should still be present (derived from config, not cache)")
 	}
 }
 

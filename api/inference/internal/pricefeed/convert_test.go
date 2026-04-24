@@ -53,16 +53,49 @@ func TestUSDPerMillionToWeiPerToken(t *testing.T) {
 	//   per-token OG  = 5e-7 / 0.003           ≈ 1.6666… e-4
 	//   per-token wei = 1.6666… e-4 * 1e18     ≈ 1.6666… e14
 	// Exactly: (0.5 * 1e18) / (1_000_000 * 0.003) = 5e17 / 3000 = 166_666_666_666_666.666…
-	// Floor to int → 166_666_666_666_666.
+	// Floor to int   → 166_666_666_666_666.
+	// Floor to 1e10  → 166_660_000_000_000 (trailing digits below the
+	// quantum dropped).
 	price := mustRat(t, "0.50")
 	rate := mustRat(t, "0.003")
 	got, err := USDPerMillionToWeiPerToken(price, rate)
 	if err != nil {
 		t.Fatalf("USDPerMillionToWeiPerToken: %v", err)
 	}
-	want, _ := new(big.Int).SetString("166666666666666", 10)
+	want, _ := new(big.Int).SetString("166660000000000", 10)
 	if got.Cmp(want) != 0 {
 		t.Errorf("wei = %s, want %s", got.String(), want.String())
+	}
+}
+
+func TestUSDPerMillionToWeiPerToken_FloorQuantizes(t *testing.T) {
+	// Any wei-per-token output must be an exact multiple of priceQuantumWei
+	// (1e10).  Rate chosen deliberately to produce a value whose naive
+	// conversion has non-zero digits below the quantum.
+	price := mustRat(t, "0.50")
+	rate := mustRat(t, "0.003")
+	got, err := USDPerMillionToWeiPerToken(price, rate)
+	if err != nil {
+		t.Fatalf("USDPerMillionToWeiPerToken: %v", err)
+	}
+	remainder := new(big.Int).Mod(got, priceQuantumWei)
+	if remainder.Sign() != 0 {
+		t.Errorf("wei=%s not a multiple of %s (remainder=%s)", got.String(), priceQuantumWei.String(), remainder.String())
+	}
+
+	// Floor direction: quantised value must never exceed the exact value.
+	exact := new(big.Rat).Quo(price, new(big.Rat).SetInt(tokensPerMillion))
+	exact.Quo(exact, rate)
+	exact.Mul(exact, new(big.Rat).SetInt(weiPerOG))
+	gotRat := new(big.Rat).SetInt(got)
+	if gotRat.Cmp(exact) > 0 {
+		t.Errorf("quantised wei %s exceeds exact %s — floor violated", got.String(), exact.FloatString(6))
+	}
+	// Drift from exact must be strictly less than one quantum.
+	drift := new(big.Rat).Sub(exact, gotRat)
+	quantumRat := new(big.Rat).SetInt(priceQuantumWei)
+	if drift.Cmp(quantumRat) >= 0 {
+		t.Errorf("drift %s >= quantum %s — floor should leave <1 quantum of drift", drift.FloatString(2), quantumRat.FloatString(0))
 	}
 }
 
@@ -99,6 +132,40 @@ func TestUSDPerMillionToWeiPerToken_InvalidRate(t *testing.T) {
 	}
 	if _, err := USDPerMillionToWeiPerToken(mustRat(t, "1"), nil); err == nil {
 		t.Error("expected error for nil rate")
+	}
+}
+
+func TestUSDPerMillionStringToPerToken(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"0.50", "0.0000005", false},
+		{"1.5", "0.0000015", false},
+		{"10", "0.00001", false},
+		{"0", "0", false},
+		{"1", "0.000001", false},
+		{"0.000001", "0.000000000001", false},
+		{"", "", true},
+		{"-1", "", true},
+		{"nope", "", true},
+	}
+	for _, c := range cases {
+		got, err := USDPerMillionStringToPerToken(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("USDPerMillionStringToPerToken(%q) want error, got %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("USDPerMillionStringToPerToken(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("USDPerMillionStringToPerToken(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
