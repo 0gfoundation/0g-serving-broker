@@ -37,7 +37,7 @@ type modelsCtrl interface {
 	GetTieredPricingConfig() config.TieredPricingConfig
 	GetCacheTokenBillingConfig() config.CacheTokenBillingConfig
 	GetConcurrencyLimitConfig() config.ConcurrencyLimitConfig
-	GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThreshold time.Duration, isUSD bool)
+	GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThreshold, updateInterval time.Duration, isUSD bool)
 }
 
 type Handler struct {

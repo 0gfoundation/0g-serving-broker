@@ -25,6 +25,7 @@ type mockModelsCtrl struct {
 	concurrencyLimitConfig  config.ConcurrencyLimitConfig
 	priceFeedSnapshot       pricefeed.Snapshot
 	priceFeedThreshold      time.Duration
+	priceFeedUpdateInterval time.Duration
 	priceFeedIsUSD          bool
 }
 
@@ -48,8 +49,8 @@ func (m *mockModelsCtrl) GetConcurrencyLimitConfig() config.ConcurrencyLimitConf
 	return m.concurrencyLimitConfig
 }
 
-func (m *mockModelsCtrl) GetPriceFeedSnapshot() (pricefeed.Snapshot, time.Duration, bool) {
-	return m.priceFeedSnapshot, m.priceFeedThreshold, m.priceFeedIsUSD
+func (m *mockModelsCtrl) GetPriceFeedSnapshot() (pricefeed.Snapshot, time.Duration, time.Duration, bool) {
+	return m.priceFeedSnapshot, m.priceFeedThreshold, m.priceFeedUpdateInterval, m.priceFeedIsUSD
 }
 
 func newModelsTestHandler(mock *mockModelsCtrl) *Handler {
@@ -509,7 +510,8 @@ func TestGetModels_USDPricingAndFeedState(t *testing.T) {
 			LastUpdate:     updatedAt,
 			Populated:      true,
 		},
-		priceFeedThreshold: 5 * time.Minute,
+		priceFeedThreshold:      5 * time.Minute,
+		priceFeedUpdateInterval: time.Hour,
 	}
 
 	h := newModelsTestHandler(mock)
@@ -551,6 +553,11 @@ func TestGetModels_USDPricingAndFeedState(t *testing.T) {
 	}
 	if !resp.PriceFeed.UpdatedAt.Equal(updatedAt) {
 		t.Errorf("updatedAt = %v, want %v", resp.PriceFeed.UpdatedAt, updatedAt)
+	}
+	// nextUpdateTime = updatedAt + updateInterval (1h).
+	wantNext := updatedAt.Add(time.Hour)
+	if !resp.PriceFeed.NextUpdateTime.Equal(wantNext) {
+		t.Errorf("nextUpdateTime = %v, want %v", resp.PriceFeed.NextUpdateTime, wantNext)
 	}
 }
 
