@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -79,8 +80,12 @@ type Ctrl struct {
 	contractAccountCache *cache.Cache // Cache for user account data from contract
 	serviceCache         *cache.Cache // Cache for service data from contract
 
-	// Service sync flag to ensure SyncService is only called once
-	serviceSynced bool
+	// Service sync flag to ensure SyncService is only called once.  Used as
+	// a once-guard via CompareAndSwap; kept as its own atomic rather than
+	// piggybacking on c.mu because (a) user-account callers hold c.mu and
+	// have no business contending with the service-sync path, and (b) the
+	// intent is unambiguous as an atomic.
+	serviceSynced atomic.Bool
 
 	// Shared HTTP client for backend requests to enable connection reuse
 	httpClient *http.Client

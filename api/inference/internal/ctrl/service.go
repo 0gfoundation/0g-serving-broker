@@ -141,9 +141,7 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 			c.lastPushedInputPrice = new(big.Int).Set(onChain.InputPrice)
 			c.lastPushedOutputPrice = new(big.Int).Set(onChain.OutputPrice)
 			c.contractWriteMu.Unlock()
-			c.mu.Lock()
-			c.serviceSynced = true
-			c.mu.Unlock()
+			c.serviceSynced.Store(true)
 			return nil
 		}
 	}
@@ -168,23 +166,17 @@ func (c *Ctrl) SyncServiceWithPrices(ctx context.Context, inputWei, outputWei *b
 // registered (either c.Service as-is for NATIVE mode, or a copy with
 // overlaid wei prices for USD mode).
 func (c *Ctrl) syncServiceOnce(ctx context.Context, svc config.Service) error {
-	c.mu.Lock()
-	if c.serviceSynced {
-		c.mu.Unlock()
+	if !c.serviceSynced.CompareAndSwap(false, true) {
 		c.logger.Info("SyncService already called, skipping")
 		return nil
 	}
-	c.serviceSynced = true
-	c.mu.Unlock()
 
 	c.contractWriteMu.Lock()
 	err := c.contract.SyncService(ctx, svc, c.tieredPricing, c.cacheTokenBilling)
 	c.contractWriteMu.Unlock()
 	if err != nil {
 		// Reset the flag if sync failed so it can be retried
-		c.mu.Lock()
-		c.serviceSynced = false
-		c.mu.Unlock()
+		c.serviceSynced.Store(false)
 		return errors.Wrap(err, "sync services")
 	}
 
@@ -286,9 +278,7 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	// Flip the once-guard so a later SyncService call (e.g. from a future
 	// admin endpoint or a refactor of the startup path) is a no-op instead
 	// of attempting to re-register a service that already exists on-chain.
-	c.mu.Lock()
-	c.serviceSynced = true
-	c.mu.Unlock()
+	c.serviceSynced.Store(true)
 
 	// Invalidate the on-chain service cache so the next GetCachedService
 	// re-reads fresh fields (URL, model type, TEE signer acknowledgement,
