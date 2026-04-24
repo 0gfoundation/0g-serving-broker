@@ -151,8 +151,11 @@ type PriceFeedConfig struct {
 	// UpdateInterval is how often the processor fetches a fresh rate and
 	// refreshes the in-memory wei price cache.
 	UpdateInterval time.Duration `yaml:"updateInterval"`
-	// StalenessThreshold rejects new requests (fail-closed) if the last successful
-	// cache refresh is older than this. Must be >= UpdateInterval.
+	// StalenessThreshold rejects new requests (fail-closed) if the last
+	// successful cache refresh is older than this.  Must be >= UpdateInterval.
+	// Defaults to 3h when unset — long enough to ride out a multi-hour
+	// feed outage through intra-tick retries, short enough that sustained
+	// outages surface as errors before clients notice bad pricing.
 	StalenessThreshold time.Duration `yaml:"stalenessThreshold"`
 	// MinOnChainUpdateBps is the drift threshold (in basis points, 1/10000)
 	// between the newly-derived wei price and the currently-registered
@@ -455,7 +458,12 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 		pf.UpdateInterval = time.Hour
 	}
 	if pf.StalenessThreshold <= 0 {
-		pf.StalenessThreshold = 2 * pf.UpdateInterval
+		// Absolute 3-hour default — long enough to ride out a CoinGecko /
+		// Binance outage through multiple tick retries, short enough that
+		// a sustained feed problem fails closed before users notice badly
+		// stale pricing.  Operators running with updateInterval > 3h need
+		// to set stalenessThreshold explicitly.
+		pf.StalenessThreshold = 3 * time.Hour
 	}
 	if pf.StalenessThreshold < pf.UpdateInterval {
 		return fmt.Errorf("invalid config: priceFeed.stalenessThreshold (%s) must be >= priceFeed.updateInterval (%s)", pf.StalenessThreshold, pf.UpdateInterval)

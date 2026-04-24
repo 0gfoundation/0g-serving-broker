@@ -176,6 +176,71 @@ func TestProcessor_Bootstrap_SucceedsAfterTransientFailure(t *testing.T) {
 	}
 }
 
+func TestProcessor_Tick_RetriesOnTransientFailure(t *testing.T) {
+	// Tick should absorb short-lived failures (fail → retry → succeed) and
+	// populate the cache rather than waiting a full updateInterval for the
+	// next scheduled tick.  Mirrors the Bootstrap transient-failure test
+	// but through the tick path.
+	oldAttempts, oldBase, oldMax := tickMaxAttempts, tickBaseBackoff, tickMaxBackoff
+	tickMaxAttempts = 3
+	tickBaseBackoff = time.Millisecond
+	tickMaxBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		tickMaxAttempts, tickBaseBackoff, tickMaxBackoff = oldAttempts, oldBase, oldMax
+	})
+
+	flaky := pricefeedtest.NewMockSource("mock", mustRat("0.003"))
+	flaky.SetFailFirst(2) // 1st and 2nd fail; 3rd returns rate.
+
+	p, cache := newTestProcessor(t, []pricefeed.Source{flaky}, config.Service{
+		InputPriceUSD:  "0.50",
+		OutputPriceUSD: "1.50",
+	}, defaultPFCfg())
+
+	p.tick(context.Background())
+
+	if !cache.Get().Populated {
+		t.Error("cache should be populated after tick recovered via retry")
+	}
+	if got := flaky.Calls(); got != 3 {
+		t.Errorf("expected 3 FetchRate calls (2 fail + 1 success), got %d", got)
+	}
+}
+
+func TestProcessor_Tick_KeepsLastGoodCacheOnSustainedFailure(t *testing.T) {
+	// When every retry attempt fails, the tick must NOT touch the cache —
+	// stale readers fail closed via StalenessThreshold, not via cache
+	// corruption.
+	oldAttempts, oldBase, oldMax := tickMaxAttempts, tickBaseBackoff, tickMaxBackoff
+	tickMaxAttempts = 3
+	tickBaseBackoff = time.Millisecond
+	tickMaxBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		tickMaxAttempts, tickBaseBackoff, tickMaxBackoff = oldAttempts, oldBase, oldMax
+	})
+
+	failing := pricefeedtest.NewMockSource("mock", nil)
+	failing.SetError(errors.New("boom"))
+	p, cache := newTestProcessor(t, []pricefeed.Source{failing}, config.Service{
+		InputPriceUSD:  "0.50",
+		OutputPriceUSD: "1.50",
+	}, defaultPFCfg())
+
+	// Prime the cache with a known good value so we can verify it's
+	// retained untouched after the failing tick.
+	cache.Set(big.NewInt(111), big.NewInt(222), mustRat("0.001"), time.Now())
+
+	p.tick(context.Background())
+
+	if got := failing.Calls(); got != 3 {
+		t.Errorf("expected 3 FetchRate calls (all retries), got %d", got)
+	}
+	snap := cache.Get()
+	if snap.InputPriceWei.Cmp(big.NewInt(111)) != 0 || snap.OutputPriceWei.Cmp(big.NewInt(222)) != 0 {
+		t.Errorf("cache was overwritten on failing tick: input=%s output=%s", snap.InputPriceWei, snap.OutputPriceWei)
+	}
+}
+
 func TestNewPriceUpdateProcessor_InvalidUSDPrice(t *testing.T) {
 	// Parse-once moves the USD validation up to the constructor, so a bad
 	// price is caught before the server even starts ticking — no "error

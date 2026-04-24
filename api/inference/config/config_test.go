@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validModelInfo() *ModelInfo {
@@ -285,6 +286,35 @@ priceFeed:
 	}
 	if cfg.PriceFeed.MinOnChainUpdateBps != 500 {
 		t.Errorf("MinOnChainUpdateBps default = %d, want 500", cfg.PriceFeed.MinOnChainUpdateBps)
+	}
+}
+
+func TestLoadConfig_USDStalenessThresholdDefault(t *testing.T) {
+	// With stalenessThreshold unset, the config loader should apply the
+	// 3-hour absolute default (not a multiple of updateInterval).
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSD: "0.50"
+  outputPriceUSD: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "30m"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	want := 3 * time.Hour
+	if cfg.PriceFeed.StalenessThreshold != want {
+		t.Errorf("StalenessThreshold default = %s, want %s", cfg.PriceFeed.StalenessThreshold, want)
 	}
 }
 
