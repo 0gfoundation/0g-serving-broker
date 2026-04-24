@@ -165,7 +165,7 @@ type PriceFeedConfig struct {
 	// threshold triggers it.
 	//
 	// Unset / zero value is treated as "not configured" and resolves to the
-	// default of 500 bps (5%).  Operators wanting "push on every change"
+	// default of 100 bps (1%).  Operators wanting "push on every change"
 	// should set 1 (0.01%).
 	MinOnChainUpdateBps int `yaml:"minOnChainUpdateBps"`
 	// MaxRateDeviationBps is the max deviation (in bps) from the aggregated median
@@ -299,7 +299,7 @@ type Config struct {
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval struct {
+	Interval    struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
@@ -474,7 +474,7 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 		return fmt.Errorf("invalid config: priceFeed.minOnChainUpdateBps must be in [0, 10000], got %d", pf.MinOnChainUpdateBps)
 	}
 	if pf.MinOnChainUpdateBps == 0 {
-		pf.MinOnChainUpdateBps = 500 // 5% default
+		pf.MinOnChainUpdateBps = 100 // 1% default
 	}
 	if pf.MaxRateDeviationBps < 0 || pf.MaxRateDeviationBps > 10000 {
 		return fmt.Errorf("invalid config: priceFeed.maxRateDeviationBps must be in [0, 10000], got %d", pf.MaxRateDeviationBps)

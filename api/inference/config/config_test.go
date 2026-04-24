@@ -284,8 +284,8 @@ priceFeed:
 	if cfg.PriceFeed.MinQuorum != 2 {
 		t.Errorf("MinQuorum default = %d, want 2 (two sources)", cfg.PriceFeed.MinQuorum)
 	}
-	if cfg.PriceFeed.MinOnChainUpdateBps != 500 {
-		t.Errorf("MinOnChainUpdateBps default = %d, want 500", cfg.PriceFeed.MinOnChainUpdateBps)
+	if cfg.PriceFeed.MinOnChainUpdateBps != 100 {
+		t.Errorf("MinOnChainUpdateBps default = %d, want 100", cfg.PriceFeed.MinOnChainUpdateBps)
 	}
 }
 
