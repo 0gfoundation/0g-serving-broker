@@ -584,6 +584,9 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	if !p.ctrl.Service.TargetSeparated || p.ctrl.Service.IsCentralized() {
 		sig, err := p.ctrl.GetChatSignature(chatID)
 		if err != nil {
+			if errors.Is(err, ctrl.ErrChatIDNotFound) {
+				ctx.Set("ignoreError", true)
+			}
 			p.handleBrokerError(ctx, err, "prepare HTTP request")
 			return true
 		}

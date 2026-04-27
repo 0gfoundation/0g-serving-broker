@@ -199,12 +199,17 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 }
 
+// ErrChatIDNotFound is returned when a signature lookup misses the cache.
+// The miss is client-caused (stale chatID past the cache TTL, or never-issued ID),
+// so callers should treat it as a 4xx, not a broker-side error.
+var ErrChatIDNotFound = errors.New("Chat id not found or expired, chat_id_not_found")
+
 func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	key := c.chatCacheKey(chatID)
 	c.logger.Debugf("get signature for chat: %v", chatID)
 	val, exist := c.svcCache.Get(key)
 	if !exist {
-		return nil, errors.New("Chat id not found or expired, chat_id_not_found")
+		return nil, ErrChatIDNotFound
 	}
 
 	chatSignature, ok := val.(ChatSignature)
