@@ -675,6 +675,15 @@ func isLineEmpty(line []byte) bool {
 	return bytes.Equal(line, []byte(""))
 }
 
+// isSSEComment reports whether the line is an SSE comment / keepalive line.
+// Per the SSE spec (https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream),
+// lines beginning with ":" are comments and must be ignored. Some upstreams
+// (e.g. OpenRouter) emit ": OPENROUTER PROCESSING" while waiting for the
+// underlying provider to produce the first token.
+func isSSEComment(line []byte) bool {
+	return bytes.HasPrefix(line, []byte(":"))
+}
+
 func isStream(body []byte) (bool, error) {
 	var bodyMap map[string]interface{}
 
@@ -789,6 +798,13 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 
 		// Skip empty lines
 		if isLineEmpty(line) {
+			continue
+		}
+
+		// Skip SSE comment / keepalive lines (e.g. OpenRouter's
+		// ": OPENROUTER PROCESSING" while it waits for the underlying
+		// provider). They are not "data:" payloads and would fail JSON parsing.
+		if isSSEComment(line) {
 			continue
 		}
 

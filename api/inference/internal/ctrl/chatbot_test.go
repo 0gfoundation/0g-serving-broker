@@ -494,6 +494,76 @@ func TestExtractUsageOverwritePrevention(t *testing.T) {
 }
 
 // ==========================================================================
+// isSSEComment — SSE keepalive/comment lines must be ignored
+// ==========================================================================
+
+// TestIsSSEComment locks in the regression fix for OpenRouter's keepalive
+// frames (": OPENROUTER PROCESSING") that previously caused
+// `Error unmarshaling JSON: invalid character ':'` in processOpenAIStream.
+func TestIsSSEComment(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"openrouter keepalive", ": OPENROUTER PROCESSING", true},
+		{"bare colon", ":", true},
+		{"colon with space", ": ping", true},
+		{"data line is not a comment", `data: {"id":"x"}`, false},
+		{"empty line is not a comment", "", false},
+		{"event line is not a comment", "event: message_delta", false},
+		{"colon mid-line is not a comment", `data: {"a":"b"}`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSSEComment([]byte(tt.line)); got != tt.want {
+				t.Errorf("isSSEComment(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSSECommentDoesNotPoisonUsage simulates the OpenRouter stream order
+// (keepalive comment, then data chunks, then [DONE]) and verifies the loop
+// pattern used by processOpenAIStream skips comments before they reach the
+// JSON-parsing helpers.
+func TestSSECommentDoesNotPoisonUsage(t *testing.T) {
+	ctrl := &Ctrl{}
+
+	lines := []string{
+		": OPENROUTER PROCESSING",
+		": OPENROUTER PROCESSING",
+		`data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"}}]}`,
+		`data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":14,"completion_tokens":73,"total_tokens":87}}`,
+		"data: [DONE]",
+	}
+
+	var usage *Usage
+	for _, line := range lines {
+		b := []byte(line)
+		if isLineEmpty(b) || isSSEComment(b) || isStreamDone(b) {
+			continue
+		}
+		if extracted := ctrl.extractUsageFromLine(b); extracted != nil {
+			usage = extracted
+			continue
+		}
+		if _, err := ctrl.processLine(b); err != nil {
+			t.Fatalf("processLine should not fail after comment skip: %v", err)
+		}
+	}
+
+	if usage == nil {
+		t.Fatal("usage should be captured from the final data chunk")
+	}
+	if usage.PromptTokens != 14 || usage.CompletionTokens != 73 {
+		t.Errorf("usage = prompt=%d completion=%d, want 14 and 73",
+			usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
+// ==========================================================================
 // TeeService signing round-trip
 // ==========================================================================
 
