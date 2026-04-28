@@ -1,0 +1,166 @@
+# TEE-friendly inference broker + LoRA serving compose example.
+#
+# Issue #469: in Phala/dstack TEE CVMs the host operator can ONLY mount
+# the broker config file. Other host paths (model weights, helper scripts,
+# nginx config) cannot be pre-staged. This compose file therefore:
+#
+#   * Pulls the base model with vLLM at startup using an HF model id
+#     (or 0G Storage). No host bind-mount of /models/.
+#   * Uses the published sllm-wrapper image from ghcr.io. No bind-mount
+#     of sllm-wrapper.py.
+#   * Drops nginx; the broker listens directly on the published port.
+#
+# The only host bind-mount is the broker config file itself. Everything
+# else is either in the image or downloaded into a named volume on first
+# boot.
+#
+# Tested with: vllm/vllm-openai:v0.8.5.post1 + Qwen/Qwen2.5-0.5B-Instruct
+# (use a smaller HF model id when iterating, real production runs use
+# Qwen3-32B which needs ~64GB VRAM).
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: 0g-inference-broker-db
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: provider
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 10s
+      retries: 10
+    networks:
+      - inf-net
+
+  # vLLM auto-downloads the base model from Hugging Face on first start
+  # into the hf-cache named volume. No host bind-mount of /models/.
+  # The first run requires HF reachability from inside the TEE; pin
+  # HF_ENDPOINT to a mirror if direct HF access is blocked.
+  vllm:
+    image: vllm/vllm-openai:v0.8.5.post1
+    container_name: 0g-vllm
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - lora-modules:/lora-modules
+    environment:
+      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=1
+      # Optional: HF_ENDPOINT=https://hf-mirror.com when blocked from HF
+    command: >
+      --model Qwen/Qwen2.5-0.5B-Instruct
+      --enable-lora
+      --max-lora-rank 64
+      --max-loras 8
+      --gpu-memory-utilization 0.5
+      --host 0.0.0.0
+      --port 8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 600s
+    networks:
+      - inf-net
+
+  # SLLM-compatible wrapper, baked into a published image (issue #469).
+  # No bind-mount of the wrapper script.
+  sllm-wrapper:
+    image: ghcr.io/0gfoundation/0g-sllm-wrapper:latest
+    container_name: 0g-sllm-wrapper
+    environment:
+      - VLLM_BASE=http://vllm:8000
+      - LORA_HOST_PREFIX=/lora-modules/
+      - LORA_CONTAINER_PREFIX=/lora-modules/
+    restart: unless-stopped
+    depends_on:
+      vllm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8343/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - inf-net
+
+  # Inference broker. Listens directly on the published port — no nginx
+  # proxy in front. The only mounts are the config file (single file,
+  # which the operator CAN inject in dstack) and the dstack socket.
+  inference-broker:
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    container_name: 0g-inference-broker
+    environment:
+      - PORT=3080
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=phala
+    ports:
+      - "3081:3080"
+    volumes:
+      - ./config.yaml:/etc/config.yaml:ro
+      - lora-modules:/lora-modules
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    command: 0g-inference-server
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      sllm-wrapper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3080/v1/capabilities || true"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - inf-net
+
+  inference-event:
+    image: ghcr.io/0gfoundation/0g-serving-broker:latest
+    container_name: 0g-inference-event
+    environment:
+      - CONFIG_FILE=/etc/config.yaml
+      - NETWORK=phala
+    volumes:
+      - ./config.yaml:/etc/config.yaml:ro
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    command: 0g-inference-event
+    restart: unless-stopped
+    depends_on:
+      inference-broker:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - inf-net
+
+volumes:
+  mysql-data:
+  hf-cache:
+  lora-modules:
+
+networks:
+  inf-net:
+    name: inf-net
+    driver: bridge

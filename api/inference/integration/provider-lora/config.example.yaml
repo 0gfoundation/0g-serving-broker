@@ -1,0 +1,67 @@
+# Inference broker config for the TEE-friendly LoRA serving deployment
+# (issue #469). Pair with the sibling docker-compose.yml.
+#
+# Replace <Private_Key> and the ServingURL with your own values. The base
+# model and indexer URLs match the testnet defaults; adjust for mainnet.
+
+contractAddress: "0x41bD7Ac5c19000A974D5c192bcd5FB67b56C85c5"
+skipTEESignerCheck: false
+
+database:
+  provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true"
+
+networks:
+  ethereum0g:
+    url: "https://evmrpc-testnet.0g.ai"
+    chainID: 16602
+    privateKeys:
+      - <Private_Key>
+
+service:
+  type: "chatbot"
+  model: "Qwen2.5-0.5B-Instruct"
+  servingUrl: <Serving URL>
+  targetUrl: "http://sllm-wrapper:8343/v1"
+  inputPrice: "10000000"
+  outputPrice: "10000000"
+  providerStake: "100000000000000000000"
+  verifiability: "TeeML"
+
+# LoRA serving (fine-tune-derived inference). When enable=true and
+# autoDeploy=true the broker advertises the capability on-chain in
+# additionalInfo.LoRAEnabled and at GET /v1/capabilities (issue #468).
+lora:
+  enable: true
+  autoDeploy: true
+  baseModel: "Qwen/Qwen2.5-0.5B-Instruct"
+  loraModulesDir: "/lora-modules"
+  sllmUrl: "http://sllm-wrapper:8343"
+  offloadAfterMinutes: 60
+  enableColdStorage: false
+  fineTuningContractAddress: "0x4e4158DF35CfdC0ac63264D3E112F5B8E9a5c569"
+  chainRpcUrl: "https://evmrpc-testnet.0g.ai"
+  pollBlockIntervalSeconds: 5
+  storageIndexerUrl: "https://indexer-storage-testnet-turbo.0g.ai"
+
+  # Quota & admission control (issue #470). Defaults shown.
+  quota:
+    maxAdaptersPerUser: 5
+    maxAdaptersTotal: 100
+    maxConcurrentDownloads: 3
+    maxAdapterDiskBytes: 107374182400  # 100 GiB
+    capacityCheckIntervalMinutes: 5
+    blockedUsers: []  # operator kill-switch (lower-cased addresses)
+
+event:
+  providerAddr: ":8089"
+
+interval:
+  autoSettleBufferTime: 60
+  forceSettlementProcessor: 600
+  settlementProcessor: 300
+
+logger:
+  format: "text"
+  level: "info"
+  path: ""
+  rotationCount: 7
