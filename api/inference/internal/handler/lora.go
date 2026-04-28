@@ -155,3 +155,67 @@ func (h *Handler) ListAdapters(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"adapters": result})
 }
+
+// adminEvictRequest is the body of POST /v1/lora/admin/evict (issue #470).
+type adminEvictRequest struct {
+	AdapterName string `json:"adapterName"`
+	TaskID      string `json:"taskId"`
+	Purge       bool   `json:"purge"`
+}
+
+// AdminEvictAdapter is the operator-facing kill-switch for LoRA adapters
+// (issue #470). It is gated by provider-key auth (`ValidateProviderAuth`),
+// not by the user session, so an attacker cannot DoS another user's
+// adapters even if they capture a session.
+//
+// Request body:
+//
+//	{"adapterName":"ft-...", "purge": false}
+//	{"taskId":"<uuid>", "purge": true}
+//
+// purge=false (default) sets the adapter to Archived and removes files;
+// purge=true also deletes the DB row. Adapters in Loading state cannot be
+// evicted — wait for the in-flight download to complete or fail.
+func (h *Handler) AdminEvictAdapter(c *gin.Context) {
+	if err := h.ctrl.ValidateProviderAuth(c); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "provider auth required: " + err.Error()})
+		return
+	}
+
+	var req adminEvictRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.AdapterName == "" && req.TaskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provide adapterName or taskId"})
+		return
+	}
+
+	mgr := h.ctrl.GetLoRAManager()
+	if mgr == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "LoRA serving not enabled"})
+		return
+	}
+
+	name := req.AdapterName
+	if name == "" {
+		if found := mgr.FindAdapterByTaskID(req.TaskID); found != nil {
+			name = found.AdapterName
+		} else {
+			c.JSON(http.StatusNotFound, gin.H{"error": "adapter not found for taskId " + req.TaskID})
+			return
+		}
+	}
+
+	if err := mgr.EvictAdapter(c.Request.Context(), name, req.Purge); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":      "evicted",
+		"adapterName": name,
+		"purged":      req.Purge,
+	})
+}

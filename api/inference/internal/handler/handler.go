@@ -126,6 +126,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	loraGroup.POST("/adapters/deploy", h.DeployAdapter)
 	loraGroup.GET("/adapters", h.ListAdapters)
 	loraGroup.GET("/adapters/:name", h.GetAdapterStatus)
+	// Operator kill-switch for adapters (issue #470). Provider-key gated:
+	// auth is checked inside the handler against the broker's own provider
+	// signature, not the user session, so it cannot be abused by users.
+	loraGroup.POST("/admin/evict", h.AdminEvictAdapter)
 
 	// Internal API: fine-tuning broker pushes adapter keys here
 	internal := r.Group("/internal/v1")

@@ -2,6 +2,7 @@ package lora
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -177,6 +178,16 @@ func (w *EventWatcher) processAcknowledgedEvents(
 			rootHash,
 			event.Raw.BlockNumber,
 		); err != nil {
+			// Admission rejections (quota, blocklist) are *not* retryable —
+			// re-replaying the same event will hit the same quota state.
+			// Treat them as permanent for the purpose of the watcher cursor
+			// so we don't pin block scanning forever (issue #470).
+			var adm *AdmissionError
+			if errors.As(err, &adm) {
+				w.logger.Warnf("admission rejected for task %s: %s (advancing cursor)",
+					event.DeliverableId, adm.Code)
+				continue
+			}
 			w.logger.Errorf("failed to register adapter for task %s: %v", event.DeliverableId, err)
 			if lowestFailed == 0 || event.Raw.BlockNumber < lowestFailed {
 				lowestFailed = event.Raw.BlockNumber

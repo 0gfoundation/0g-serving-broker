@@ -30,6 +30,37 @@ type AdapterInfo struct {
 	AdapterPath     string
 }
 
+// Default quota values applied when LoRAConfig.Quota fields are zero. These
+// match the documented defaults in config.go but are duplicated here so the
+// manager applies them even if the YAML schema is older or the operator
+// explicitly cleared the field. 0 means "no limit" only after passing
+// through these helpers — see quotaXxx() methods below.
+const (
+	defaultMaxAdaptersPerUser           = 5
+	defaultMaxAdaptersTotal             = 100
+	defaultMaxConcurrentDownloads       = 3
+	defaultMaxAdapterDiskBytes    int64 = 100 * 1024 * 1024 * 1024 // 100 GiB
+	defaultCapacityCheckInterval        = 5 * time.Minute
+)
+
+// AdmissionError is returned by RegisterAdapter when admission control rejects
+// a new adapter. It carries a stable code so on-chain event watchers and the
+// admin tooling can distinguish the rejection reason.
+type AdmissionError struct {
+	Code    string
+	Message string
+}
+
+func (e *AdmissionError) Error() string { return e.Message }
+
+const (
+	AdmissionRejectedBlocked       = "user_blocked"
+	AdmissionRejectedPerUserQuota  = "per_user_quota_exceeded"
+	AdmissionRejectedTotalQuota    = "total_quota_exceeded"
+	AdmissionRejectedDiskQuota     = "disk_quota_exceeded"
+	AdmissionRejectedManagerClosed = "manager_closed"
+)
+
 // Manager manages the lifecycle of LoRA adapters: discovery via on-chain events,
 // download/decrypt from 0G Storage, deployment to ServerlessLLM, offloading, and restoration.
 type Manager struct {
@@ -37,11 +68,20 @@ type Manager struct {
 	adapters map[string]*AdapterInfo // adapterName → info
 	ctx      context.Context         // application-scoped context for graceful shutdown
 
-	config             config.LoRAConfig
-	db                 *db.DB
-	sllmClient         *SLLMClient
-	storageDownloader  *StorageDownloader
-	logger             log.Logger
+	config            config.LoRAConfig
+	db                *db.DB
+	sllmClient        *SLLMClient
+	storageDownloader *StorageDownloader
+	logger            log.Logger
+
+	// blockedUsers is the lower-cased operator kill-switch set. New adapter
+	// registrations from these addresses are rejected at admission time
+	// (issue #470).
+	blockedUsers map[string]struct{}
+
+	// downloadSemaphore caps concurrent 0G Storage download goroutines.
+	// nil means no cap. Sized at construction from the quota config.
+	downloadSemaphore chan struct{}
 }
 
 // NewManager creates a LoRA adapter manager with the given config, 0G Storage downloader,
@@ -94,7 +134,142 @@ func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database 
 		logger:            logger,
 	}
 
+	// Build the blocklist as a lower-cased set for O(1) admission lookups.
+	if len(cfg.Quota.BlockedUsers) > 0 {
+		m.blockedUsers = make(map[string]struct{}, len(cfg.Quota.BlockedUsers))
+		for _, u := range cfg.Quota.BlockedUsers {
+			m.blockedUsers[strings.ToLower(strings.TrimSpace(u))] = struct{}{}
+		}
+		logger.Infof("LoRA blocklist: %d address(es) will have new registrations rejected", len(m.blockedUsers))
+	}
+
+	if cap := m.quotaMaxConcurrentDownloads(); cap > 0 {
+		m.downloadSemaphore = make(chan struct{}, cap)
+		logger.Infof("LoRA download concurrency capped at %d", cap)
+	}
+
 	return m, nil
+}
+
+// quotaMaxAdaptersPerUser returns the configured per-user quota with the
+// default applied when the field is zero. A negative value disables the
+// check entirely (operator opt-out).
+func (m *Manager) quotaMaxAdaptersPerUser() int {
+	v := m.config.Quota.MaxAdaptersPerUser
+	if v < 0 {
+		return 0 // disabled
+	}
+	if v == 0 {
+		return defaultMaxAdaptersPerUser
+	}
+	return v
+}
+
+// quotaMaxAdaptersTotal returns the broker-wide adapter cap with default applied.
+func (m *Manager) quotaMaxAdaptersTotal() int {
+	v := m.config.Quota.MaxAdaptersTotal
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return defaultMaxAdaptersTotal
+	}
+	return v
+}
+
+// quotaMaxConcurrentDownloads returns the download concurrency cap with default applied.
+func (m *Manager) quotaMaxConcurrentDownloads() int {
+	v := m.config.Quota.MaxConcurrentDownloads
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return defaultMaxConcurrentDownloads
+	}
+	return v
+}
+
+// quotaMaxAdapterDiskBytes returns the disk usage cap with default applied.
+// 0 disables; default is 100 GiB.
+func (m *Manager) quotaMaxAdapterDiskBytes() int64 {
+	v := m.config.Quota.MaxAdapterDiskBytes
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return defaultMaxAdapterDiskBytes
+	}
+	return v
+}
+
+// quotaCapacityCheckInterval returns how often the LRU eviction loop runs.
+func (m *Manager) quotaCapacityCheckInterval() time.Duration {
+	v := time.Duration(m.config.Quota.CapacityCheckIntervalMinutes) * time.Minute
+	if v <= 0 {
+		return defaultCapacityCheckInterval
+	}
+	return v
+}
+
+// isUserBlocked reports whether the address is on the operator kill-switch list.
+// Comparison is case-insensitive on the hex address.
+func (m *Manager) isUserBlocked(userAddress string) bool {
+	if len(m.blockedUsers) == 0 {
+		return false
+	}
+	_, ok := m.blockedUsers[strings.ToLower(strings.TrimSpace(userAddress))]
+	return ok
+}
+
+// admissionCheck enforces per-user, broker-wide, and disk quotas before an
+// adapter is persisted to the DB. Returning a non-nil error rejects the
+// registration upstream — the event watcher will log it and move on.
+func (m *Manager) admissionCheck(userAddress string) error {
+	if m.isUserBlocked(userAddress) {
+		return &AdmissionError{Code: AdmissionRejectedBlocked,
+			Message: fmt.Sprintf("user %s is blocked from registering new adapters", userAddress)}
+	}
+
+	if m.db == nil {
+		// Without a DB we have no way to enforce counts. Allow but log.
+		m.logger.Warn("admissionCheck: DB not configured, skipping quota checks")
+		return nil
+	}
+
+	if cap := m.quotaMaxAdaptersPerUser(); cap > 0 {
+		n, err := m.db.CountAdaptersByUser(userAddress)
+		if err != nil {
+			m.logger.Warnf("admissionCheck: count by user %s: %v (allowing)", userAddress, err)
+		} else if int(n) >= cap {
+			return &AdmissionError{
+				Code:    AdmissionRejectedPerUserQuota,
+				Message: fmt.Sprintf("per-user quota exceeded: user %s already owns %d/%d adapters", userAddress, n, cap),
+			}
+		}
+	}
+
+	if cap := m.quotaMaxAdaptersTotal(); cap > 0 {
+		n, err := m.db.CountTotalAdapters()
+		if err != nil {
+			m.logger.Warnf("admissionCheck: count total: %v (allowing)", err)
+		} else if int(n) >= cap {
+			return &AdmissionError{
+				Code:    AdmissionRejectedTotalQuota,
+				Message: fmt.Sprintf("broker-wide quota exceeded: %d/%d adapters", n, cap),
+			}
+		}
+	}
+
+	if cap := m.quotaMaxAdapterDiskBytes(); cap > 0 && m.config.LoraModulesDir != "" {
+		if used, err := dirSize(m.config.LoraModulesDir); err == nil && used >= cap {
+			return &AdmissionError{
+				Code:    AdmissionRejectedDiskQuota,
+				Message: fmt.Sprintf("disk quota exceeded: %d / %d bytes used", used, cap),
+			}
+		}
+	}
+
+	return nil
 }
 
 // Start loads known adapters from DB and begins background loops.
@@ -114,9 +289,30 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.mu.RUnlock()
 
 	go m.offloadLoop(ctx)
+	// Capacity-based eviction is enforced separately from idle-based offload
+	// (issue #470). The latter only releases GPU slots; this one releases
+	// disk and DB rows when the broker is over its quota.
+	go m.capacityEvictionLoop(ctx)
 
 	m.logger.Infof("LoRA Manager started: %d adapters loaded", adapterCount)
 	return nil
+}
+
+// dirSize sums the size of all regular files under root. Errors on individual
+// files are tolerated so a single unreadable file does not block the quota
+// check; the caller logs and continues.
+func dirSize(root string) (int64, error) {
+	var total int64
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
 }
 
 // GetBaseModel returns the base model path configured for this LoRA manager.
@@ -201,6 +397,11 @@ func (m *Manager) RecordAccess(adapterName string) {
 
 // RegisterAdapter adds a new LoRA adapter (called when on-chain event detected).
 // DB is written first so that a failed DB write doesn't leave orphaned in-memory state.
+//
+// Admission control (issue #470): rejects the registration if the user is
+// blocked or any of the per-user / broker-wide / disk quotas would be
+// exceeded. Returns an *AdmissionError so the caller can distinguish a
+// rejection from an internal error.
 func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, baseModel, storageRootHash string, blockNumber uint64) error {
 	adapterName := MakeAdapterName(baseModel, taskID)
 	adapterPath := filepath.Join(m.config.LoraModulesDir, adapterName)
@@ -211,6 +412,14 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 	if exists {
 		m.logger.Infof("adapter %s already registered, skipping", adapterName)
 		return nil
+	}
+
+	// Admission control runs before any DB write so a rejected registration
+	// does not consume disk, bandwidth, or a DB row. Re-running for the same
+	// task is idempotent because the duplicate-name check above handles it.
+	if err := m.admissionCheck(userAddress); err != nil {
+		m.logger.Warnf("admission rejected for adapter %s (user %s): %v", adapterName, userAddress, err)
+		return err
 	}
 
 	now := time.Now()
@@ -265,10 +474,26 @@ func (m *Manager) RegisterAdapter(ctx context.Context, taskID, userAddress, base
 // downloadAdapter downloads the adapter from 0G Storage and decrypts it.
 // If AutoDeploy is enabled, it also deploys to ServerlessLLM immediately.
 // Otherwise, the adapter is left in "ready" state for user-triggered deployment.
+//
+// The actual 0G Storage transfer is gated by downloadSemaphore (issue #470)
+// so a burst of on-chain ack events cannot spawn unbounded concurrent
+// downloads. State stays Loading for the entire wait + download window.
 func (m *Manager) downloadAdapter(ctx context.Context, info *AdapterInfo) {
 	m.logger.Infof("downloading adapter %s (hash: %s)", info.AdapterName, info.StorageRootHash)
 
 	if _, err := os.Stat(info.AdapterPath); os.IsNotExist(err) {
+		// Acquire a download slot; bail out cleanly on shutdown.
+		if m.downloadSemaphore != nil {
+			select {
+			case m.downloadSemaphore <- struct{}{}:
+			case <-ctx.Done():
+				m.logger.Warnf("context cancelled before acquiring download slot for %s", info.AdapterName)
+				m.setAdapterState(info.AdapterName, model.AdapterStateFailed)
+				return
+			}
+			defer func() { <-m.downloadSemaphore }()
+		}
+
 		if err := m.downloadFromStorage(ctx, info); err != nil {
 			m.logger.Errorf("failed to download adapter %s from 0G Storage: %v", info.AdapterName, err)
 			os.RemoveAll(info.AdapterPath)
@@ -579,6 +804,147 @@ func (m *Manager) offloadIdleAdapters(ctx context.Context) {
 		}
 		m.setAdapterState(a.AdapterName, model.AdapterStateOffloaded)
 	}
+}
+
+// capacityEvictionLoop runs periodically and drives capacity-based eviction
+// of LoRA adapters when the broker exceeds the per-broker count quota or
+// the disk quota (issue #470). Unlike offloadLoop which only releases the
+// GPU slot, this loop reclaims disk and DB rows by transitioning oldest
+// adapters all the way to Archived.
+func (m *Manager) capacityEvictionLoop(ctx context.Context) {
+	interval := m.quotaCapacityCheckInterval()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.evictForCapacity(ctx)
+		}
+	}
+}
+
+// evictForCapacity computes the over-quota delta and archives that many
+// LRU adapters. Eviction stops as soon as either count and disk caps are
+// satisfied, even if the disk-walk reports stale data.
+func (m *Manager) evictForCapacity(ctx context.Context) {
+	if m.db == nil {
+		return
+	}
+
+	totalCap := m.quotaMaxAdaptersTotal()
+	diskCap := m.quotaMaxAdapterDiskBytes()
+
+	currentCount, err := m.db.CountTotalAdapters()
+	if err != nil {
+		m.logger.Errorf("evict: count total: %v", err)
+		return
+	}
+
+	var diskUsed int64
+	if m.config.LoraModulesDir != "" {
+		if du, err := dirSize(m.config.LoraModulesDir); err == nil {
+			diskUsed = du
+		} else {
+			m.logger.Warnf("evict: dir size for %s: %v", m.config.LoraModulesDir, err)
+		}
+	}
+
+	overCount := totalCap > 0 && int(currentCount) > totalCap
+	overDisk := diskCap > 0 && diskUsed > diskCap
+	if !overCount && !overDisk {
+		return
+	}
+
+	m.logger.Infof("evict: over capacity (count=%d/%d, disk=%d/%d), starting LRU eviction",
+		currentCount, totalCap, diskUsed, diskCap)
+
+	// Pick at most a small batch per tick so a flood of evictions does not
+	// stall request handling.
+	const maxEvictPerTick = 20
+	candidates, err := m.db.ListLRUEvictionCandidates(maxEvictPerTick)
+	if err != nil {
+		m.logger.Errorf("evict: list LRU: %v", err)
+		return
+	}
+
+	for _, a := range candidates {
+		if !overCount && !overDisk {
+			break
+		}
+		if err := m.archiveAdapter(ctx, a.AdapterName); err != nil {
+			m.logger.Warnf("evict: archive %s: %v", a.AdapterName, err)
+			continue
+		}
+		currentCount--
+		if a.AdapterPath != "" {
+			if fi, err := os.Stat(a.AdapterPath); err == nil {
+				diskUsed -= fi.Size()
+			}
+		}
+		overCount = totalCap > 0 && int(currentCount) > totalCap
+		overDisk = diskCap > 0 && diskUsed > diskCap
+	}
+}
+
+// archiveAdapter releases ServerlessLLM slot, deletes adapter files on disk,
+// transitions the DB row to Archived. The DB row is intentionally retained
+// so a future on-chain re-acknowledge can re-download via the same path.
+//
+// Provider operators wanting full row removal should call DeleteAdapter via
+// the admin endpoint, which is gated by provider-key auth.
+func (m *Manager) archiveAdapter(ctx context.Context, adapterName string) error {
+	m.mu.RLock()
+	a, ok := m.adapters[adapterName]
+	var path string
+	if ok {
+		path = a.AdapterPath
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("adapter %s not in memory", adapterName)
+	}
+
+	if err := m.sllmClient.DeleteAdapter(ctx, adapterName); err != nil {
+		// Continue even if SLLM unload fails — the adapter may already
+		// be offloaded; we still want to reclaim disk.
+		m.logger.Warnf("archive %s: SLLM delete: %v", adapterName, err)
+	}
+	if path != "" {
+		if err := os.RemoveAll(path); err != nil {
+			m.logger.Warnf("archive %s: remove %s: %v", adapterName, path, err)
+		}
+	}
+	m.setAdapterState(adapterName, model.AdapterStateArchived)
+	m.logger.Infof("archived adapter %s (LRU eviction)", adapterName)
+	return nil
+}
+
+// EvictAdapter is the operator-facing eviction entry point. It is exposed via
+// the provider-only admin endpoint (issue #470) and goes through the same
+// archiveAdapter path used by capacity eviction.
+//
+// purge: when true the DB row is also deleted, otherwise it is kept in
+// Archived state so the user can later re-acknowledge to redownload.
+func (m *Manager) EvictAdapter(ctx context.Context, adapterName string, purge bool) error {
+	if err := m.archiveAdapter(ctx, adapterName); err != nil {
+		return err
+	}
+	if !purge {
+		return nil
+	}
+
+	m.mu.Lock()
+	delete(m.adapters, adapterName)
+	m.mu.Unlock()
+	if m.db != nil {
+		if err := m.db.DeleteLoRAAdapter(adapterName); err != nil {
+			return fmt.Errorf("delete adapter %s from DB: %w", adapterName, err)
+		}
+	}
+	return nil
 }
 
 // MakeAdapterName builds a deterministic adapter name from base model and task ID.

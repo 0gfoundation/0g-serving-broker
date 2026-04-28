@@ -172,7 +172,54 @@ type LoRAConfig struct {
 	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
 	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
 	FineTuningProviderAddr   string `yaml:"fineTuningProviderAddr"`   // Override FT provider address for event filtering (default: inference provider address)
-	EciesPrivateKey string `yaml:"-"` // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
+	EciesPrivateKey          string `yaml:"-"`                        // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
+
+	// Quota and admission control (issue #470).
+	//
+	// Without these limits, every on-chain DeliverableAcknowledged event
+	// triggers an unconditional download → decrypt → deploy goroutine.
+	// A malicious user can drain disk and bandwidth with cheap chain calls,
+	// and even organic load can saturate the GPU pool. Defaults below are
+	// applied in GetConfig() if left as zero values.
+	Quota LoRAQuotaConfig `yaml:"quota"`
+}
+
+// LoRAQuotaConfig defines per-user/per-provider quotas and rate limits for
+// LoRA adapter registration and deployment. All fields are soft caps that
+// can be set to 0 to disable a particular check (operator opt-out).
+type LoRAQuotaConfig struct {
+	// MaxAdaptersPerUser caps how many LoRA adapters a single user address
+	// can have registered (in any non-failed state) on this broker. Excess
+	// registrations are rejected at admission time.
+	// Default: 5. Set to 0 to disable.
+	MaxAdaptersPerUser int `yaml:"maxAdaptersPerUser"`
+
+	// MaxAdaptersTotal caps total adapters this broker keeps on disk.
+	// When the cap is hit, the LRU eviction loop reclaims slots by
+	// archiving the oldest idle Active adapter.
+	// Default: 100. Set to 0 to disable.
+	MaxAdaptersTotal int `yaml:"maxAdaptersTotal"`
+
+	// MaxConcurrentDownloads caps concurrent 0G Storage downloads. Each
+	// download holds bandwidth + a goroutine; without a cap a burst of
+	// ack events spawns unbounded goroutines.
+	// Default: 3. Set to 0 to disable.
+	MaxConcurrentDownloads int `yaml:"maxConcurrentDownloads"`
+
+	// MaxAdapterDiskBytes caps total disk usage of stored adapters.
+	// Currently advisory: enforced by the eviction loop when total disk
+	// usage exceeds the cap. 0 disables. Default: 100 GB.
+	MaxAdapterDiskBytes int64 `yaml:"maxAdapterDiskBytes"`
+
+	// CapacityCheckIntervalMinutes drives how often the LRU eviction loop
+	// runs. Default: 5 minutes; 0 falls back to the default.
+	CapacityCheckIntervalMinutes int `yaml:"capacityCheckIntervalMinutes"`
+
+	// BlockedUsers is an operator kill-switch — addresses listed here
+	// have all new adapter registrations rejected. Existing adapters are
+	// not touched (use the admin evict endpoint for that). Comparison is
+	// case-insensitive.
+	BlockedUsers []string `yaml:"blockedUsers"`
 }
 
 type Config struct {
@@ -385,6 +432,13 @@ func GetConfig() *Config {
 		EnableColdStorage:        false,
 		PollBlockIntervalSeconds: 5,
 		StorageTurbo:             false,
+		Quota: LoRAQuotaConfig{
+			MaxAdaptersPerUser:           5,
+			MaxAdaptersTotal:             100,
+			MaxConcurrentDownloads:       3,
+			MaxAdapterDiskBytes:          100 * 1024 * 1024 * 1024, // 100 GiB
+			CapacityCheckIntervalMinutes: 5,
+		},
 	},
 		ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,

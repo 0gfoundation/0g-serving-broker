@@ -97,6 +97,63 @@ func (d *DB) ListIdleAdapters(idleThreshold time.Duration) ([]model.LoRAAdapter,
 	return adapters, nil
 }
 
+// CountAdaptersByUser returns the number of adapters owned by a given user
+// that count toward the per-user quota (issue #470). Failed adapters do
+// not count, since they consumed no GPU and are typically purged.
+// Comparison is case-insensitive on the address.
+func (d *DB) CountAdaptersByUser(userAddress string) (int64, error) {
+	var n int64
+	err := d.db.Model(&model.LoRAAdapter{}).
+		Where("LOWER(user_address) = LOWER(?) AND state <> ?", userAddress, model.AdapterStateFailed).
+		Count(&n).Error
+	return n, err
+}
+
+// CountTotalAdapters returns total adapters (excluding Failed) across all users.
+func (d *DB) CountTotalAdapters() (int64, error) {
+	var n int64
+	err := d.db.Model(&model.LoRAAdapter{}).
+		Where("state <> ?", model.AdapterStateFailed).
+		Count(&n).Error
+	return n, err
+}
+
+// ListLRUEvictionCandidates returns adapters in {Active, Ready, Offloaded}
+// states ordered by last_access_at ascending (oldest first) — capacity-based
+// eviction targets (issue #470). Loading and Failed states are excluded so
+// in-progress work is not interrupted.
+func (d *DB) ListLRUEvictionCandidates(limit int) ([]model.LoRAAdapter, error) {
+	var adapters []model.LoRAAdapter
+	q := d.db.Where("state IN ?",
+		[]model.AdapterState{
+			model.AdapterStateActive,
+			model.AdapterStateReady,
+			model.AdapterStateOffloaded,
+		}).
+		Order("last_access_at ASC NULLS FIRST")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&adapters).Error; err != nil {
+		// Fallback for SQL dialects that reject `NULLS FIRST` (MySQL):
+		// retry with COALESCE(last_access_at, 0).
+		q2 := d.db.Where("state IN ?",
+			[]model.AdapterState{
+				model.AdapterStateActive,
+				model.AdapterStateReady,
+				model.AdapterStateOffloaded,
+			}).
+			Order("COALESCE(last_access_at, '1970-01-01') ASC")
+		if limit > 0 {
+			q2 = q2.Limit(limit)
+		}
+		if err2 := q2.Find(&adapters).Error; err2 != nil {
+			return nil, err
+		}
+	}
+	return adapters, nil
+}
+
 // CreateAdapterKey stores a provider-encrypted AES key pushed by the fine-tuning broker.
 // Uses upsert semantics: if a key for the same task already exists (e.g. from a
 // previous delivery attempt that partially succeeded), the storage hash and
