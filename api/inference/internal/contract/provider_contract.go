@@ -32,6 +32,11 @@ type ProviderContract struct {
 	// Docker client for image info (optional)
 	dockerClient *client.Client
 	imageName    string
+
+	// loraConfig is captured at construction so the on-chain additionalInfo
+	// can advertise LoRA capability (issue #468) without threading the full
+	// config through every call site.
+	loraConfig config.LoRAConfig
 }
 
 func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, logger log.Logger) (*ProviderContract, error) {
@@ -58,6 +63,7 @@ func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, l
 		LockTime:         time.Duration(lockTime.Int64()) * time.Second,
 		TeeSignerAddress: teeSignerAddress,
 		logger:           logger,
+		loraConfig:       conf.LoRA,
 	}
 
 	// Initialize Docker client if controller is enabled and Docker is configured

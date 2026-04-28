@@ -22,8 +22,13 @@ var ErrServiceNotFound = errors.New("service not found")
 // DefaultProviderStake is the default stake amount for first-time service registration (100 0G)
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
-// buildAdditionalInfo creates the additionalInfo JSON string for a service
-func buildAdditionalInfo(service config.Service, imageName, imageDigest string) (string, error) {
+// buildAdditionalInfo creates the additionalInfo JSON string for a service.
+//
+// The output schema includes a stable subset of capability flags that
+// off-chain consumers (router, web aggregator) rely on. New keys must be
+// strictly additive — removing or renaming a key is a breaking change for
+// every downstream service that already parses additionalInfo.
+func buildAdditionalInfo(service config.Service, lora config.LoRAConfig, imageName, imageDigest string) (string, error) {
 	// Determine TEE verifier based on NETWORK environment variable
 	var teeVerifier string
 	switch os.Getenv("NETWORK") {
@@ -46,6 +51,18 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string) 
 	// Set TargetTeeAddress if TargetSeparated is true
 	if service.TargetSeparated {
 		additionalInfo["TargetTeeAddress"] = service.TargetTeeAddress
+	}
+
+	// LoRA capability advertisement (issue #468). When this broker auto-deploys
+	// fine-tune-derived adapters, off-chain consumers need a way to discover
+	// it without authenticated calls. Only emit the flag when truly enabled,
+	// so existing brokers don't change their additionalInfo on upgrade.
+	if lora.Enable && lora.AutoDeploy {
+		additionalInfo["LoRAEnabled"] = true
+		if lora.BaseModel != "" {
+			additionalInfo["LoRABaseModel"] = lora.BaseModel
+		}
+		additionalInfo["LoRAAdapterPrefix"] = "ft-"
 	}
 
 	additionalInfoJSON, err := json.Marshal(additionalInfo)
@@ -188,7 +205,7 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service) 
 	imageName, imageDigest := c.GetImageInfo(ctx)
 
 	// Build additionalInfo for comparison
-	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest)
+	newAdditionalInfo, err := buildAdditionalInfo(new, c.loraConfig, imageName, imageDigest)
 	if err != nil {
 		c.logger.Errorf("[SyncService] Failed to build additional info - error=%v", err)
 		return err

@@ -31,6 +31,15 @@ type ModelObject struct {
 	TeeType             string                    `json:"tee_type,omitempty"`
 	TeeVerifier         string                    `json:"tee_verifier,omitempty"`
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
+
+	// SupportsFineTunedAdapters reports whether this broker auto-deploys
+	// fine-tune-derived LoRA adapters (issue #468). Aggregators and routers
+	// can use this flag to decide whether to route ft-* model requests here.
+	SupportsFineTunedAdapters bool `json:"supports_fine_tuned_adapters"`
+	// FineTunedAdapterPrefix tells clients the model-name prefix used for
+	// fine-tune-derived adapters served by this broker. Empty when the
+	// broker does not advertise LoRA support. Currently always "ft-".
+	FineTunedAdapterPrefix string `json:"fine_tuned_adapter_prefix,omitempty"`
 }
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
@@ -107,6 +116,13 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	// Extract TEE verifier from on-chain additionalInfo JSON
 	obj.TeeVerifier = parseTeeVerifier(svc.AdditionalInfo)
+
+	// Advertise LoRA capability so aggregators can decide whether to route
+	// ft-* model requests here without an authenticated probe (issue #468).
+	if h.modelsCtrl.SupportsFineTunedAdapters() {
+		obj.SupportsFineTunedAdapters = true
+		obj.FineTunedAdapterPrefix = "ft-"
+	}
 
 	ctx.JSON(http.StatusOK, ModelListResponse{
 		Object: "list",

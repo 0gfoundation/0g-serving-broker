@@ -15,9 +15,11 @@ import (
 // --- Mock modelsCtrl ---
 
 type mockModelsCtrl struct {
-	service       model.Service
-	serviceErr    error
-	serviceConfig config.Service
+	service                   model.Service
+	serviceErr                error
+	serviceConfig             config.Service
+	supportsFineTunedAdapters bool
+	loraBaseModel             string
 }
 
 func (m *mockModelsCtrl) GetCachedService(_ context.Context) (model.Service, error) {
@@ -26,6 +28,14 @@ func (m *mockModelsCtrl) GetCachedService(_ context.Context) (model.Service, err
 
 func (m *mockModelsCtrl) GetServiceConfig() config.Service {
 	return m.serviceConfig
+}
+
+func (m *mockModelsCtrl) SupportsFineTunedAdapters() bool {
+	return m.supportsFineTunedAdapters
+}
+
+func (m *mockModelsCtrl) LoRABaseModel() string {
+	return m.loraBaseModel
 }
 
 func newModelsTestHandler(mock *mockModelsCtrl) *Handler {

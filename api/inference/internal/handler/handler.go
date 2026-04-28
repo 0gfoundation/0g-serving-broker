@@ -32,6 +32,11 @@ type asyncCtrl interface {
 type modelsCtrl interface {
 	GetCachedService(ctx context.Context) (model.Service, error)
 	GetServiceConfig() config.Service
+	// SupportsFineTunedAdapters returns true when this broker auto-deploys
+	// fine-tune-derived LoRA adapters (issue #468).
+	SupportsFineTunedAdapters() bool
+	// LoRABaseModel returns the LoRA base model name, or "" when disabled.
+	LoRABaseModel() string
 }
 
 type Handler struct {
@@ -94,6 +99,10 @@ func (h *Handler) Register(r *gin.Engine) {
 
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
 	group.GET("/models", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetModels)
+	// Public broker-level capabilities (issue #468). Unauthenticated so the
+	// 0G inference router / aggregators can enumerate fine-tune-capable
+	// brokers without holding an account on every provider.
+	group.GET("/capabilities", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetCapabilities)
 
 	// User account query (authenticated: user can only query their own data)
 	group.GET("/user/:userAddress/unsettledfee", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetUnsettledFee)

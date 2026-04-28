@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -20,6 +21,37 @@ func (c *Ctrl) SetLoRAManager(m *lora.Manager) {
 // GetLoRAManager returns the LoRA manager (may be nil if not enabled).
 func (c *Ctrl) GetLoRAManager() *lora.Manager {
 	return c.loraManager
+}
+
+// SupportsFineTunedAdapters reports whether this broker advertises
+// fine-tune-derived (LoRA) inference. Used by the public capability
+// endpoint and /v1/models response (issue #468).
+//
+// True when LoRA serving is enabled AND auto-deployment from on-chain
+// events is on. Brokers that are technically wired but have autoDeploy
+// off intentionally do not advertise the capability, since they will not
+// pick up fine-tuning deliveries without operator action.
+func (c *Ctrl) SupportsFineTunedAdapters() bool {
+	if c.loraManager == nil {
+		return false
+	}
+	cfg := c.loraConfigSnapshot()
+	return cfg.Enable && cfg.AutoDeploy
+}
+
+// LoRABaseModel returns the configured base model name for LoRA serving,
+// or empty if LoRA is not enabled.
+func (c *Ctrl) LoRABaseModel() string {
+	if c.loraManager == nil {
+		return ""
+	}
+	return c.loraManager.GetBaseModel()
+}
+
+// loraConfigSnapshot returns the LoRA config captured at Ctrl construction.
+// Used by capability-advertising paths that must not touch the global config.
+func (c *Ctrl) loraConfigSnapshot() config.LoRAConfig {
+	return c.loraCfg
 }
 
 // CheckLoRAOwnership verifies that userAddress is the owner of the LoRA model.

@@ -79,6 +79,11 @@ type Ctrl struct {
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
+
+	// loraCfg captures the LoRA config snapshot at construction time so the
+	// capability advertising path (issue #468) can read it without holding
+	// references to the global Config singleton.
+	loraCfg config.LoRAConfig
 }
 
 func New(
@@ -145,6 +150,8 @@ func New(
 		},
 		// Initialize whitelist users map
 		whitelistUsers: make(map[string]struct{}),
+
+		loraCfg: cfg.LoRA,
 	}
 
 	// Initialize whitelist from config
