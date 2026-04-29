@@ -211,6 +211,21 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	p.serviceRoutesLock.RUnlock()
 
 	targetRoute := strings.TrimPrefix(ctx.Request.RequestURI, constant.ServicePrefix)
+	// Collapse a redundant "/v1" prefix so callers that hardcode it after the
+	// broker base URL (Anthropic SDK → /v1/messages, OpenAI SDK → /v1/chat/completions)
+	// land on the same upstream path as bare /messages or /chat/completions.
+	// Service.targetUrl is expected to carry the /v1 segment for OpenAI-compatible
+	// upstreams (vLLM, OpenAI, OpenRouter, DashScope, RedPill, …); LiteLLM also
+	// aliases both prefix variants, so this normalization is safe across all
+	// existing deployments. Billing keys (TargetRoute) are matched against the
+	// post-strip path, which is why /chat/completions and /messages — without
+	// /v1 — are the canonical entries in const.go.
+	if targetRoute == "/v1" || strings.HasPrefix(targetRoute, "/v1/") {
+		targetRoute = strings.TrimPrefix(targetRoute, "/v1")
+		if targetRoute == "" {
+			targetRoute = "/"
+		}
+	}
 	if targetRoute != "/" {
 		targetURL += targetRoute
 	}
