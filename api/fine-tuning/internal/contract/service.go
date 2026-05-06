@@ -2,6 +2,7 @@ package providercontract
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -209,22 +210,50 @@ func (c *ProviderContract) AddDeliverable(ctx context.Context, user common.Addre
 	// Pre-validate the transaction to get detailed error before sending
 	if err := c.Contract.PreValidateCall(ctx, "addDeliverable", user, id, modelRootHash); err != nil {
 		wrappedErr := WrapContractError(err)
-		return errors.Wrap(wrappedErr, "validate addDeliverable")
+		return errors.Wrap(decorateAddDeliverableErr(wrappedErr, user), "validate addDeliverable")
 	}
 
 	tx, err := c.Contract.Transact(ctx, nil, "addDeliverable", user, id, modelRootHash)
 	if err != nil {
 		wrappedErr := WrapContractError(err)
-		return errors.Wrap(wrappedErr, "call addDeliverable")
+		return errors.Wrap(decorateAddDeliverableErr(wrappedErr, user), "call addDeliverable")
 	}
 	_, err = c.Contract.WaitForReceipt(ctx, tx.Hash())
 	if err != nil {
 		wrappedErr := WrapContractError(err)
-		return errors.Wrap(wrappedErr, "wait for receipt")
+		return errors.Wrap(decorateAddDeliverableErr(wrappedErr, user), "wait for receipt")
 	}
 
 	// todo return deliver index?
 	return nil
+}
+
+// decorateAddDeliverableErr attaches actionable, user-facing remediation
+// guidance to permanent failures of addDeliverable. The message is intended
+// to surface in the task log returned by `getLog`, so that a user reading
+// the SDK output knows exactly what to do next without having to grep the
+// contract sources.
+//
+// Why we need this: the FineTuningServing contract rejects addDeliverable
+// when the user has a prior deliverable that has not yet been acknowledged
+// on-chain. In the May 2026 bug report this manifested as a permanent
+// retry loop where the fine-tuning broker kept retrying every 1-3 minutes
+// with the cryptic message "previous deliverable not acknowledged: id=…",
+// and the user had no idea what action to take. We now spell out the fix
+// and preserve the original error chain via %w so callers can still match
+// with errors.Is.
+func decorateAddDeliverableErr(err error, user common.Address) error {
+	if err == nil {
+		return nil
+	}
+	if IsPreviousDeliverableNotAcknowledged(err) {
+		return fmt.Errorf(
+			"%w (action required: user %s must call broker.fineTuning.acknowledgeDeliverable(provider, <previous_task_id>) on-chain to release the deliverable queue, then retry the new task; the previous task id is included in the error suffix above)",
+			err,
+			user.Hex(),
+		)
+	}
+	return err
 }
 
 func identicalService(old contract.Service, new config.Service, teeSignerAddress common.Address) bool {
