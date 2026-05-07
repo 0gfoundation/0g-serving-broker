@@ -2,6 +2,8 @@ package ctrl
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -158,7 +161,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	c.addNoCacheHeaders(ctx)
 
 	if resp.StatusCode != http.StatusOK {
-		c.handleServiceError(ctx, resp.StatusCode, resp.Body)
+		c.handleServiceError(ctx, resp)
 		return err
 	}
 
@@ -282,20 +285,24 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 	errors.Response(ctx, errors.Wrap(err, info))
 }
 
-func (c *Ctrl) handleServiceError(ctx *gin.Context, statusCode int, body io.ReadCloser) {
-	respBody, err := io.ReadAll(body)
+func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
+	statusCode := resp.StatusCode
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.logger.Errorf("Failed to read service error response body: %v", err)
 		ctx.Writer.WriteHeader(statusCode)
 		return
 	}
 
-	bodyStr := string(respBody)
+	// Decode the body for inspection/logging based on upstream Content-Encoding.
+	// We must keep respBody raw (still encoded) for re-emission to the client,
+	// because the upstream Content-Encoding header was already forwarded above.
+	decodedBody := decodeErrorBody(respBody, resp.Header.Get("Content-Encoding"))
 
 	// Correct misclassified status codes: litellm sometimes wraps client errors
 	// (e.g., token limit exceeded) as 503 ServiceUnavailableError via MidStreamFallbackError.
 	// These are deterministic client errors that should not be retried.
-	if statusCode >= 500 && isClientError(bodyStr) {
+	if statusCode >= 500 && isClientError(decodedBody) {
 		statusCode = http.StatusBadRequest
 	}
 
@@ -307,13 +314,50 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, statusCode int, body io.Read
 	// Log the actual service error content for debugging
 	// Skip logging for telemetry endpoints to reduce noise
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
-		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", bodyStr, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
+		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", decodedBody, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
 	ctx.Writer.WriteHeader(statusCode)
 
 	if _, err := ctx.Writer.Write(respBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
+	}
+}
+
+// decodeErrorBody returns a human-readable form of an upstream error body, decompressing
+// it according to the upstream Content-Encoding. On any failure, it returns the raw string —
+// callers use this only for logging and substring matching, never for re-emission.
+func decodeErrorBody(body []byte, contentEncoding string) string {
+	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
+	case "", "identity":
+		return string(body)
+	case "gzip":
+		gz, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return string(body)
+		}
+		defer gz.Close()
+		decoded, err := io.ReadAll(gz)
+		if err != nil {
+			return string(body)
+		}
+		return string(decoded)
+	case "br":
+		decoded, err := io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
+		if err != nil {
+			return string(body)
+		}
+		return string(decoded)
+	case "deflate":
+		fr := flate.NewReader(bytes.NewReader(body))
+		defer fr.Close()
+		decoded, err := io.ReadAll(fr)
+		if err != nil {
+			return string(body)
+		}
+		return string(decoded)
+	default:
+		return string(body)
 	}
 }
 

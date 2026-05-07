@@ -1,8 +1,13 @@
 package ctrl
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"encoding/json"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -103,5 +108,57 @@ func TestEnforceConfiguredModel_InjectsUpstreamWhenMissing(t *testing.T) {
 	}
 	if out["model"] != "z-ai/glm-5" {
 		t.Errorf("model = %q, want %q", out["model"], "z-ai/glm-5")
+	}
+}
+
+func TestDecodeErrorBody(t *testing.T) {
+	const payload = `{"error":{"message":"upstream boom"}}`
+
+	gz := func(s string) []byte {
+		var buf bytes.Buffer
+		w := gzip.NewWriter(&buf)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return buf.Bytes()
+	}
+	br := func(s string) []byte {
+		var buf bytes.Buffer
+		w := brotli.NewWriter(&buf)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return buf.Bytes()
+	}
+	df := func(s string) []byte {
+		var buf bytes.Buffer
+		w, _ := flate.NewWriter(&buf, flate.DefaultCompression)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return buf.Bytes()
+	}
+
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+		want     string
+	}{
+		{"identity empty", []byte(payload), "", payload},
+		{"identity explicit", []byte(payload), "identity", payload},
+		{"gzip", gz(payload), "gzip", payload},
+		{"gzip case-insensitive", gz(payload), "GZIP", payload},
+		{"brotli", br(payload), "br", payload},
+		{"deflate", df(payload), "deflate", payload},
+		// Falls back to the raw bytes (as a string) on decode failure rather
+		// than dropping the message — half-readable beats nothing in logs.
+		{"malformed gzip falls back to raw", []byte("not gzip"), "gzip", "not gzip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeErrorBody(tt.body, tt.encoding)
+			if got != tt.want {
+				t.Errorf("decodeErrorBody() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
