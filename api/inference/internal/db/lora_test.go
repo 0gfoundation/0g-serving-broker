@@ -265,3 +265,54 @@ func TestAdapterKeyCRUD(t *testing.T) {
 		t.Error("expected error for nonexistent key")
 	}
 }
+
+// TestAdapterKeyIdempotent reproduces the production failure mode reported in
+// May 2026 (Bug Report #3): the fine-tuning broker retries pushAdapterKey on
+// transient HTTP errors, hitting the inference broker's
+// CreateAdapterKey twice for the same TaskID. With a plain Create() the
+// second call fails with `Duplicate entry … for key 'task_id'` and the
+// retry loop dead-locks with HTTP 500. Upsert must instead overwrite the
+// existing row and return nil so the deliver pipeline can advance.
+func TestAdapterKeyIdempotent(t *testing.T) {
+	d := setupTestDB(t)
+
+	first := &model.AdapterKey{
+		TaskID:         "task-key-idem",
+		StorageHash:    "0x1111111111111111111111111111111111111111111111111111111111111111",
+		ProviderEncKey: "0xenckey-v1",
+	}
+	if err := d.CreateAdapterKey(first); err != nil {
+		t.Fatalf("first CreateAdapterKey: %v", err)
+	}
+
+	// Second call with *same* TaskID but updated hash + key (this is what
+	// the fine-tuning broker does on a retry after, e.g., re-encrypting
+	// the AES key). Must NOT return a duplicate-key error.
+	second := &model.AdapterKey{
+		TaskID:         "task-key-idem",
+		StorageHash:    "0x2222222222222222222222222222222222222222222222222222222222222222",
+		ProviderEncKey: "0xenckey-v2",
+	}
+	if err := d.CreateAdapterKey(second); err != nil {
+		t.Fatalf("idempotent CreateAdapterKey (second push): got error %v, want nil", err)
+	}
+
+	// The latest values must win.
+	got, err := d.GetAdapterKeyByTaskID("task-key-idem")
+	if err != nil {
+		t.Fatalf("GetAdapterKeyByTaskID after upsert: %v", err)
+	}
+	if got.StorageHash != second.StorageHash {
+		t.Errorf("StorageHash = %q, want %q (upsert should overwrite)", got.StorageHash, second.StorageHash)
+	}
+	if got.ProviderEncKey != second.ProviderEncKey {
+		t.Errorf("ProviderEncKey = %q, want %q (upsert should overwrite)", got.ProviderEncKey, second.ProviderEncKey)
+	}
+
+	// Third call repeating identical payload (the most common retry shape:
+	// the fine-tuning broker retries because the network blipped, but the
+	// payload itself is unchanged). Must also be a no-op success.
+	if err := d.CreateAdapterKey(second); err != nil {
+		t.Fatalf("idempotent CreateAdapterKey (third push, identical payload): %v", err)
+	}
+}
