@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"regexp"
 	"strings"
@@ -121,11 +122,83 @@ type Service struct {
 	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
 	// Only used when ProviderType is "centralized".
 	ProviderIdentity string `yaml:"providerIdentity"`
+
+	// PriceDenomination selects how input/output prices are expressed:
+	//   "NATIVE" (default): InputPrice/OutputPrice are wei amounts, written to chain as-is.
+	//   "USD":              InputPriceUSDPerMillionTokens/OutputPriceUSDPerMillionTokens are USD decimal strings.
+	//                       The PriceUpdateProcessor converts them to wei using a live rate.
+	PriceDenomination string `yaml:"priceDenomination"`
+	// InputPriceUSDPerMillionTokens is the input-side price in USD per 1M
+	// tokens, as a decimal string (e.g. "0.50" = $0.50 per 1M input tokens,
+	// matching the convention used by OpenAI/Anthropic pricing tables).
+	// Required iff PriceDenomination == "USD".
+	InputPriceUSDPerMillionTokens string `yaml:"inputPriceUSDPerMillionTokens"`
+	// OutputPriceUSDPerMillionTokens is the output-side price in USD per 1M
+	// tokens, decimal string.  Required iff PriceDenomination == "USD".
+	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
 func (s *Service) IsCentralized() bool {
 	return s.ProviderType == constant.ProviderTypeCentralized
+}
+
+// IsUSDDenominated returns true if this service's prices are configured in USD
+// and must be converted to wei by the price-feed subsystem.
+func (s *Service) IsUSDDenominated() bool {
+	return s.PriceDenomination == constant.PriceDenominationUSD
+}
+
+// PriceFeedConfig controls the 0G/USD rate feed used when service.priceDenomination == "USD".
+// Rate is never persisted — it's a transient value inside each update tick. Only the derived
+// wei prices are stored (in the in-memory cache and on-chain).
+type PriceFeedConfig struct {
+	// Sources lists the price-feed source identifiers to query in parallel.
+	// Known identifiers: "coingecko", "binance".
+	// The aggregator returns the median of healthy sources; at least MinQuorum
+	// sources must respond successfully for an update to proceed.
+	//
+	// Each source's 0G trading symbol is hardcoded in the pricefeed factory
+	// (see pricefeed.BuildSources); the symbols aren't an operator choice
+	// because this broker only ever prices 0G.
+	Sources []string `yaml:"sources"`
+	// UpdateInterval is how often the processor fetches a fresh rate and
+	// refreshes the in-memory wei price cache.
+	UpdateInterval time.Duration `yaml:"updateInterval"`
+	// StalenessThreshold rejects new requests (fail-closed) if the last
+	// successful cache refresh is older than this.  Must be >= UpdateInterval.
+	// Defaults to 3 × UpdateInterval when unset — three consecutive tick
+	// failures (each of which runs its own retry loop first) before readers
+	// start erroring, which scales naturally with the refresh cadence.
+	StalenessThreshold time.Duration `yaml:"stalenessThreshold"`
+	// MinOnChainUpdateBps is the drift threshold (in basis points, 1/10000)
+	// between the newly-derived wei price and the currently-registered
+	// on-chain price.  Drift <= threshold skips the on-chain tx; drift >
+	// threshold triggers it.
+	//
+	// Unset / zero value is treated as "not configured" and resolves to the
+	// default of 100 bps (1%).  Operators wanting "push on every change"
+	// should set 1 (0.01%).
+	MinOnChainUpdateBps int `yaml:"minOnChainUpdateBps"`
+	// MaxRateDeviationBps is the max deviation (in bps) from the aggregated median
+	// a single source may report before it's dropped as an outlier.
+	MaxRateDeviationBps int `yaml:"maxRateDeviationBps"`
+	// MinQuorum is the minimum number of healthy sources required to compute a
+	// new rate. If fewer sources respond successfully, the tick is skipped and
+	// the last good cache entry remains in use (subject to StalenessThreshold).
+	MinQuorum int `yaml:"minQuorum"`
+	// CoinGeckoAPIKey, when set, is sent in the x-cg-pro-api-key header to
+	// CoinGecko, activating Pro-tier rate limits.  The anonymous free tier
+	// is strict enough in production that quorum failures become common
+	// without a key; setting one is strongly recommended.
+	CoinGeckoAPIKey string `yaml:"coinGeckoApiKey"`
+	// UserAgent is the User-Agent header sent to every source.  Providers
+	// using private rate-feed deployments or whitelisted plans can set a
+	// stable identifier here so upstream operators can grant them higher
+	// limits.  Defaults to "0g-serving-broker/pricefeed".
+	UserAgent string `yaml:"userAgent"`
+	// HTTPTimeout bounds per-request HTTP timeout for each source.
+	HTTPTimeout time.Duration `yaml:"httpTimeout"`
 }
 
 // DefaultVideoSizeRatios provides default cost multipliers based on pixel count
@@ -238,7 +311,7 @@ type Config struct {
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval struct {
+	Interval    struct {
 		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
 		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
 		SettlementProcessor      int `yaml:"settlementProcessor"`
@@ -275,6 +348,7 @@ type Config struct {
 	Controller          ControllerConfig        `yaml:"controller"`
 	CacheTokenBilling   CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
 	TieredPricing       TieredPricingConfig     `yaml:"tieredPricing"`
+	PriceFeed           PriceFeedConfig         `yaml:"priceFeed"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
@@ -356,6 +430,93 @@ var IngressAllowedEnvKeys = []string{
 	"PORT",
 }
 
+// validateUSDPriceString rejects a USD-denominated price string that isn't a
+// non-negative decimal.  Duplicates the minimal subset of
+// pricefeed.ParseUSDPerMillion needed at config-load time; kept in-package
+// to avoid a config → pricefeed import cycle (factory.go imports config).
+func validateUSDPriceString(field, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("invalid config: %s is empty", field)
+	}
+	r, ok := new(big.Rat).SetString(trimmed)
+	if !ok {
+		return fmt.Errorf("invalid config: %s=%q is not a valid decimal", field, value)
+	}
+	if r.Sign() < 0 {
+		return fmt.Errorf("invalid config: %s=%q must be non-negative", field, value)
+	}
+	return nil
+}
+
+// validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
+// configuration. Only invoked when service.priceDenomination == "USD".
+func validatePriceFeedConfig(pf *PriceFeedConfig) error {
+	if len(pf.Sources) == 0 {
+		return fmt.Errorf("invalid config: priceFeed.sources must not be empty when priceDenomination is 'USD'")
+	}
+	seen := make(map[string]struct{}, len(pf.Sources))
+	for i, s := range pf.Sources {
+		name := strings.ToLower(strings.TrimSpace(s))
+		if name == "" {
+			return fmt.Errorf("invalid config: priceFeed.sources[%d] is empty", i)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("invalid config: priceFeed.sources[%d]=%q is duplicated", i, name)
+		}
+		seen[name] = struct{}{}
+		pf.Sources[i] = name
+	}
+
+	if pf.UpdateInterval <= 0 {
+		pf.UpdateInterval = time.Hour
+	}
+	if pf.StalenessThreshold <= 0 {
+		// 3× updateInterval: the first failed tick uses retries to absorb
+		// transient issues, the second and third ticks give the feed two
+		// more chances to recover before readers start failing closed.
+		// Scales with the operator's chosen interval so shorter/longer
+		// cadences don't need a separate staleness tune.
+		pf.StalenessThreshold = 3 * pf.UpdateInterval
+	}
+	if pf.StalenessThreshold < pf.UpdateInterval {
+		return fmt.Errorf("invalid config: priceFeed.stalenessThreshold (%s) must be >= priceFeed.updateInterval (%s)", pf.StalenessThreshold, pf.UpdateInterval)
+	}
+	if pf.MinOnChainUpdateBps < 0 || pf.MinOnChainUpdateBps > 10000 {
+		return fmt.Errorf("invalid config: priceFeed.minOnChainUpdateBps must be in [0, 10000], got %d", pf.MinOnChainUpdateBps)
+	}
+	if pf.MinOnChainUpdateBps == 0 {
+		pf.MinOnChainUpdateBps = 100 // 1% default
+	}
+	if pf.MaxRateDeviationBps < 0 || pf.MaxRateDeviationBps > 10000 {
+		return fmt.Errorf("invalid config: priceFeed.maxRateDeviationBps must be in [0, 10000], got %d", pf.MaxRateDeviationBps)
+	}
+	if pf.MaxRateDeviationBps == 0 {
+		pf.MaxRateDeviationBps = 500 // 5% default
+	}
+	if pf.MinQuorum < 0 {
+		return fmt.Errorf("invalid config: priceFeed.minQuorum must be >= 0, got %d", pf.MinQuorum)
+	}
+	if pf.MinQuorum == 0 {
+		// Default: require >= 2 when multiple sources configured, else 1.
+		if len(pf.Sources) >= 2 {
+			pf.MinQuorum = 2
+		} else {
+			pf.MinQuorum = 1
+		}
+	}
+	if pf.MinQuorum > len(pf.Sources) {
+		return fmt.Errorf("invalid config: priceFeed.minQuorum (%d) cannot exceed len(priceFeed.sources) (%d)", pf.MinQuorum, len(pf.Sources))
+	}
+	if pf.HTTPTimeout <= 0 {
+		pf.HTTPTimeout = 10 * time.Second
+	}
+	if pf.UserAgent == "" {
+		pf.UserAgent = "0g-serving-broker/pricefeed"
+	}
+	return nil
+}
+
 var (
 	instance *Config
 	once     sync.Once
@@ -410,6 +571,36 @@ func loadConfig(config *Config) error {
 		if config.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(config.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", config.Service.TargetURL)
 		}
+	}
+
+	// Normalize and validate price denomination / priceFeed configuration.
+	if config.Service.PriceDenomination == "" {
+		config.Service.PriceDenomination = constant.PriceDenominationNative
+	}
+	config.Service.PriceDenomination = strings.ToUpper(config.Service.PriceDenomination)
+	switch config.Service.PriceDenomination {
+	case constant.PriceDenominationNative:
+		if config.Service.InputPriceUSDPerMillionTokens != "" || config.Service.OutputPriceUSDPerMillionTokens != "" {
+			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
+		}
+	case constant.PriceDenominationUSD:
+		if config.Service.InputPriceUSDPerMillionTokens == "" || config.Service.OutputPriceUSDPerMillionTokens == "" {
+			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
+		}
+		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", config.Service.InputPriceUSDPerMillionTokens); err != nil {
+			return err
+		}
+		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", config.Service.OutputPriceUSDPerMillionTokens); err != nil {
+			return err
+		}
+		if config.Service.InputPrice != "" || config.Service.OutputPrice != "" {
+			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
+		}
+		if err := validatePriceFeedConfig(&config.PriceFeed); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("invalid config: service.priceDenomination must be '%s' or '%s', got '%s'", constant.PriceDenominationNative, constant.PriceDenominationUSD, config.Service.PriceDenomination)
 	}
 
 	// Validate tiered pricing configuration

@@ -3,11 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 )
 
 // ModelObject represents a single model in the OpenAI-compatible /v1/models response.
@@ -26,6 +28,7 @@ type ModelObject struct {
 	SupportedFormats    []string                  `json:"supported_formats,omitempty"`
 	DefaultParameters   map[string]interface{}    `json:"default_parameters,omitempty"`
 	Pricing             *ModelPricing             `json:"pricing,omitempty"`
+	PricingUSD          *ModelPricingUSD          `json:"pricingUSD,omitempty"`
 	Verifiability       string                    `json:"verifiability,omitempty"`
 	TeeAttested         bool                      `json:"tee_attested"`
 	TeeType             string                    `json:"tee_type,omitempty"`
@@ -66,10 +69,35 @@ type ModelPricing struct {
 	CacheTokenBilling *ModelCacheTokenBilling `json:"cache_token_billing,omitempty"`
 }
 
+// ModelPricingUSD holds per-token USD pricing as trimmed decimal strings.
+// Present only when the provider is USD-denominated; omitted in NATIVE mode.
+// Values are derived from the configured USD-per-1M-tokens by exact big.Rat
+// division — no float precision loss.
+type ModelPricingUSD struct {
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+}
+
+// PriceFeedState surfaces the live 0G/USD rate and its freshness.  Present
+// only when the provider is USD-denominated and the price cache has been
+// populated at least once.
+//
+// NextUpdateTime is a hint — it's UpdatedAt plus the configured update
+// interval, so SDK clients can schedule a refresh around that moment rather
+// than polling on a fixed cadence.  The real tick can slip behind retries,
+// so treat this as "not before", not a guarantee.
+type PriceFeedState struct {
+	RateUSDPerOG   string    `json:"rateUSDPerOG"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	NextUpdateTime time.Time `json:"nextUpdateTime"`
+	IsStale        bool      `json:"isStale"`
+}
+
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
 type ModelListResponse struct {
-	Object string        `json:"object"`
-	Data   []ModelObject `json:"data"`
+	Object    string          `json:"object"`
+	Data      []ModelObject   `json:"data"`
+	PriceFeed *PriceFeedState `json:"priceFeed,omitempty"`
 }
 
 // GetModels returns the list of models served by this broker.
@@ -185,9 +213,44 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ProviderIdentity = cfg.ProviderIdentity
 	}
 
+	// USD-denominated providers: surface per-token USD pricing (derived from
+	// the configured per-1M-tokens value) plus the live rate-feed state.
+	// Both blocks are omitted entirely in NATIVE mode.
+	//
+	// Config validation already rejects malformed USD strings at load time,
+	// so a conversion error here indicates a programming bug or a future
+	// regression that slipped past validation.  We log a warning rather
+	// than fail the whole response — the caller still gets a valid model
+	// list — but the log signal prevents "PricingUSD silently missing"
+	// from going undiagnosed.
+	var priceFeedOut *PriceFeedState
+	if svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "" {
+		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)
+		completion, completionErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
+		switch {
+		case promptErr != nil:
+			h.logger.Warnf("GetModels: derive per-token USD input price from %q failed (omitting PricingUSD block): %v",
+				svc.InputPriceUSDPerMillionTokens, promptErr)
+		case completionErr != nil:
+			h.logger.Warnf("GetModels: derive per-token USD output price from %q failed (omitting PricingUSD block): %v",
+				svc.OutputPriceUSDPerMillionTokens, completionErr)
+		default:
+			obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
+		}
+	}
+	if snap, threshold, updateInterval, isUSD := h.modelsCtrl.GetPriceFeedSnapshot(); isUSD && snap.Populated && snap.RateUSDPerOG != nil {
+		priceFeedOut = &PriceFeedState{
+			RateUSDPerOG:   snap.RateUSDPerOG.FloatString(8),
+			UpdatedAt:      snap.LastUpdate,
+			NextUpdateTime: snap.LastUpdate.Add(updateInterval),
+			IsStale:        snap.IsStale(threshold, time.Now()),
+		}
+	}
+
 	ctx.JSON(http.StatusOK, ModelListResponse{
-		Object: "list",
-		Data:   []ModelObject{obj},
+		Object:    "list",
+		Data:      []ModelObject{obj},
+		PriceFeed: priceFeedOut,
 	})
 }
 

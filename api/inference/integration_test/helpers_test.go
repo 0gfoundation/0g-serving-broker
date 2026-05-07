@@ -215,7 +215,7 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 		}
 	}
 
-	c := ctrl.New(database, provContract, cfg, svcCache, teeService, logger)
+	c := ctrl.New(database, provContract, cfg, svcCache, teeService, nil, logger)
 
 	// Pre-seed caches to avoid contract calls
 	c.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
