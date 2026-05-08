@@ -28,7 +28,7 @@ type ModelObject struct {
 	SupportedFormats    []string                  `json:"supported_formats,omitempty"`
 	DefaultParameters   map[string]interface{}    `json:"default_parameters,omitempty"`
 	Pricing             *ModelPricing             `json:"pricing,omitempty"`
-	PricingUSD          *ModelPricingUSD          `json:"pricingUSD,omitempty"`
+	PricingUSD          *ModelPricingUSD          `json:"pricing_usd,omitempty"`
 	Verifiability       string                    `json:"verifiability,omitempty"`
 	TeeAttested         bool                      `json:"tee_attested"`
 	TeeType             string                    `json:"tee_type,omitempty"`
@@ -87,17 +87,17 @@ type ModelPricingUSD struct {
 // than polling on a fixed cadence.  The real tick can slip behind retries,
 // so treat this as "not before", not a guarantee.
 type PriceFeedState struct {
-	RateUSDPerOG   string    `json:"rateUSDPerOG"`
-	UpdatedAt      time.Time `json:"updatedAt"`
-	NextUpdateTime time.Time `json:"nextUpdateTime"`
-	IsStale        bool      `json:"isStale"`
+	RateUSDPerOG   string    `json:"rate_usd_per_og"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	NextUpdateTime time.Time `json:"next_update_time"`
+	IsStale        bool      `json:"is_stale"`
 }
 
 // ModelListResponse is the OpenAI-compatible response for GET /v1/models.
 type ModelListResponse struct {
 	Object    string          `json:"object"`
 	Data      []ModelObject   `json:"data"`
-	PriceFeed *PriceFeedState `json:"priceFeed,omitempty"`
+	PriceFeed *PriceFeedState `json:"price_feed,omitempty"`
 }
 
 // GetModels returns the list of models served by this broker.

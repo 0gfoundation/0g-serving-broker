@@ -588,16 +588,16 @@ func TestGetModels_NativeModeOmitsUSDBlocks(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("parse raw: %v", err)
 	}
-	if _, exists := raw["priceFeed"]; exists {
-		t.Error("priceFeed key should be absent in NATIVE mode")
+	if _, exists := raw["price_feed"]; exists {
+		t.Error("price_feed key should be absent in NATIVE mode")
 	}
 	data, _ := raw["data"].([]interface{})
 	if len(data) == 0 {
 		t.Fatal("data empty")
 	}
 	m, _ := data[0].(map[string]interface{})
-	if _, exists := m["pricingUSD"]; exists {
-		t.Error("pricingUSD key should be absent in NATIVE mode")
+	if _, exists := m["pricing_usd"]; exists {
+		t.Error("pricing_usd key should be absent in NATIVE mode")
 	}
 }
 
@@ -663,8 +663,8 @@ func TestGetModels_USDModeUnpopulatedCacheOmitsPriceFeed(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if _, exists := raw["priceFeed"]; exists {
-		t.Error("priceFeed should be absent when cache unpopulated")
+	if _, exists := raw["price_feed"]; exists {
+		t.Error("price_feed should be absent when cache unpopulated")
 	}
 	var resp ModelListResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
