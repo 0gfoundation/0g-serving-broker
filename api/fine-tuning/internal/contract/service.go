@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -13,6 +14,14 @@ import (
 	"github.com/0glabs/0g-serving-broker/fine-tuning/config"
 	"github.com/0glabs/0g-serving-broker/fine-tuning/contract"
 )
+
+// getServiceRPCTimeout bounds a single GetService RPC call. The 0G testnet
+// endpoint has been observed to stall for tens of minutes without erroring,
+// which would freeze the executor's HandleNoTask polling goroutine
+// indefinitely. 30s is well above the normal call latency (sub-second) and
+// short enough that a stalled endpoint surfaces as an error instead of a
+// silent worker freeze.
+const getServiceRPCTimeout = 30 * time.Second
 
 var (
 	// DefaultProviderStake is the default stake amount for first-time service registration (100 0G)
@@ -162,6 +171,9 @@ func (c *ProviderContract) DeleteService(ctx context.Context) error {
 
 func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, error) {
 	c.logger.Infof("[GetService] Starting to get service - provider=%s", c.ProviderAddress)
+
+	ctx, cancel := context.WithTimeout(ctx, getServiceRPCTimeout)
+	defer cancel()
 
 	callOpts := &bind.CallOpts{
 		Context: ctx,
