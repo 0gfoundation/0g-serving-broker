@@ -19,25 +19,41 @@ const maxResponseBytes = 1 << 20
 // Symbol is the CoinGecko coin id (e.g. "0g"), quote is the fiat / stablecoin
 // id (e.g. "usd"); these differ from the exchange-pair style used by Binance.
 //
-// When apiKey is set, the request is routed to pro-api.coingecko.com with
-// the x-cg-pro-api-key header — the free anonymous tier rate-limits
-// aggressively enough in production to cause regular quorum failures, so a
-// pro key is strongly recommended.
+// CoinGecko has two independent key tiers — Demo (free, served from
+// api.coingecko.com via x-cg-demo-api-key) and Pro (paid, served from
+// pro-api.coingecko.com via x-cg-pro-api-key) — and a key issued for one
+// tier is rejected by the other.  keyType selects between them; see
+// NewCoinGeckoSource.
 type CoinGeckoSource struct {
 	httpClient *http.Client
 	baseURL    string // overridable for tests
 	coinID     string
 	quoteID    string
 	apiKey     string
+	keyHeader  string // request header to send apiKey in; empty when apiKey is empty
 	userAgent  string
 }
 
-// NewCoinGeckoSource constructs a source.  baseURL may be empty: if apiKey
-// is set the pro-api endpoint is used, otherwise the public endpoint.  Tests
-// inject a stub server's URL.
-func NewCoinGeckoSource(client *http.Client, baseURL, coinID, quoteID, apiKey, userAgent string) *CoinGeckoSource {
+// NewCoinGeckoSource constructs a source.
+//
+// keyType must be "demo" or "pro" when apiKey is non-empty; it picks both the
+// default endpoint (api.coingecko.com vs pro-api.coingecko.com) and the
+// request header (x-cg-demo-api-key vs x-cg-pro-api-key).  When apiKey is
+// empty, keyType is ignored and the public anonymous endpoint is used.
+//
+// baseURL may be empty to use the tier-appropriate default; tests inject a
+// stub server's URL while still exercising the header selection logic.
+func NewCoinGeckoSource(client *http.Client, baseURL, coinID, quoteID, apiKey, keyType, userAgent string) *CoinGeckoSource {
+	keyHeader := ""
+	if apiKey != "" {
+		if keyType == "pro" {
+			keyHeader = "x-cg-pro-api-key"
+		} else {
+			keyHeader = "x-cg-demo-api-key"
+		}
+	}
 	if baseURL == "" {
-		if apiKey != "" {
+		if keyType == "pro" {
 			baseURL = "https://pro-api.coingecko.com/api/v3"
 		} else {
 			baseURL = "https://api.coingecko.com/api/v3"
@@ -49,6 +65,7 @@ func NewCoinGeckoSource(client *http.Client, baseURL, coinID, quoteID, apiKey, u
 		coinID:     coinID,
 		quoteID:    quoteID,
 		apiKey:     apiKey,
+		keyHeader:  keyHeader,
 		userAgent:  userAgent,
 	}
 }
@@ -69,8 +86,8 @@ func (s *CoinGeckoSource) FetchRate(ctx context.Context) (*big.Rat, error) {
 	if s.userAgent != "" {
 		req.Header.Set("User-Agent", s.userAgent)
 	}
-	if s.apiKey != "" {
-		req.Header.Set("x-cg-pro-api-key", s.apiKey)
+	if s.apiKey != "" && s.keyHeader != "" {
+		req.Header.Set(s.keyHeader, s.apiKey)
 	}
 
 	resp, err := s.httpClient.Do(req)

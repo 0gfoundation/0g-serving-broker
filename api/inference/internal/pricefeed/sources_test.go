@@ -20,7 +20,7 @@ func TestCoinGeckoSource_ParsesRate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "", "test-ua")
+	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "", "", "test-ua")
 	got, err := s.FetchRate(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -38,10 +38,41 @@ func TestCoinGeckoSource_MissingCoin(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "", "test-ua")
+	s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "", "", "test-ua")
 	_, err := s.FetchRate(context.Background())
 	if err == nil {
 		t.Error("expected error for missing coin in response")
+	}
+}
+
+func TestCoinGeckoSource_SendsKeyHeader(t *testing.T) {
+	tests := []struct {
+		name       string
+		keyType    string
+		wantHeader string
+	}{
+		{name: "demo", keyType: "demo", wantHeader: "x-cg-demo-api-key"},
+		{name: "pro", keyType: "pro", wantHeader: "x-cg-pro-api-key"},
+		{name: "default (empty keyType) routes to demo", keyType: "", wantHeader: "x-cg-demo-api-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotHeader, gotValue string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = tt.wantHeader
+				gotValue = r.Header.Get(tt.wantHeader)
+				_, _ = w.Write([]byte(`{"0g": {"usd": 0.001}}`))
+			}))
+			defer srv.Close()
+
+			s := NewCoinGeckoSource(&http.Client{Timeout: time.Second}, srv.URL, "0g", "usd", "secret-key", tt.keyType, "test-ua")
+			if _, err := s.FetchRate(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if gotValue != "secret-key" {
+				t.Errorf("header %s = %q, want %q", gotHeader, gotValue, "secret-key")
+			}
+		})
 	}
 }
 
