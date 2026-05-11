@@ -37,7 +37,7 @@ func BuildSources(cfg config.PriceFeedConfig) ([]Source, error) {
 	for _, name := range cfg.Sources {
 		switch name {
 		case "coingecko":
-			sources = append(sources, NewCoinGeckoSource(httpClient, "", coinGeckoCoinID, coinGeckoQuote, cfg.CoinGeckoAPIKey, cfg.UserAgent))
+			sources = append(sources, NewCoinGeckoSource(httpClient, "", coinGeckoCoinID, coinGeckoQuote, cfg.CoinGeckoAPIKey, cfg.CoinGeckoKeyType, cfg.UserAgent))
 		case "binance":
 			sources = append(sources, NewBinanceSource(httpClient, "", binanceSymbol, cfg.UserAgent))
 		default:

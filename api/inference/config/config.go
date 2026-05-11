@@ -187,11 +187,21 @@ type PriceFeedConfig struct {
 	// new rate. If fewer sources respond successfully, the tick is skipped and
 	// the last good cache entry remains in use (subject to StalenessThreshold).
 	MinQuorum int `yaml:"minQuorum"`
-	// CoinGeckoAPIKey, when set, is sent in the x-cg-pro-api-key header to
-	// CoinGecko, activating Pro-tier rate limits.  The anonymous free tier
-	// is strict enough in production that quorum failures become common
-	// without a key; setting one is strongly recommended.
+	// CoinGeckoAPIKey, when set, authenticates requests to CoinGecko so that
+	// the per-key rate limit applies instead of the (much stricter) shared
+	// anonymous limit.  Setting one is strongly recommended — the anonymous
+	// free tier causes quorum failures regularly in production.  Whether
+	// this key is a Demo (free) or Pro (paid) key is selected via
+	// CoinGeckoKeyType; the two key tiers use different endpoints and
+	// different request headers and are not interchangeable.
 	CoinGeckoAPIKey string `yaml:"coinGeckoApiKey"`
+	// CoinGeckoKeyType selects which CoinGecko key tier CoinGeckoAPIKey
+	// belongs to.  Allowed values: "demo" (free tier — uses api.coingecko.com
+	// with x-cg-demo-api-key) or "pro" (paid tier — uses pro-api.coingecko.com
+	// with x-cg-pro-api-key).  Defaults to "demo" when CoinGeckoAPIKey is set,
+	// since the free Demo tier (30 req/min) is sufficient for typical update
+	// cadences.  Ignored when CoinGeckoAPIKey is empty.
+	CoinGeckoKeyType string `yaml:"coinGeckoKeyType"`
 	// UserAgent is the User-Agent header sent to every source.  Providers
 	// using private rate-feed deployments or whitelisted plans can set a
 	// stable identifier here so upstream operators can grant them higher
@@ -513,6 +523,18 @@ func validatePriceFeedConfig(pf *PriceFeedConfig) error {
 	}
 	if pf.UserAgent == "" {
 		pf.UserAgent = "0g-serving-broker/pricefeed"
+	}
+	if pf.CoinGeckoAPIKey != "" {
+		keyType := strings.ToLower(strings.TrimSpace(pf.CoinGeckoKeyType))
+		switch keyType {
+		case "":
+			keyType = "demo"
+		case "demo", "pro":
+			// ok
+		default:
+			return fmt.Errorf("invalid config: priceFeed.coinGeckoKeyType must be 'demo' or 'pro', got %q", pf.CoinGeckoKeyType)
+		}
+		pf.CoinGeckoKeyType = keyType
 	}
 	return nil
 }
