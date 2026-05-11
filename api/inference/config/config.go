@@ -154,7 +154,7 @@ func (s *Service) IsUSDDenominated() bool {
 // wei prices are stored (in the in-memory cache and on-chain).
 type PriceFeedConfig struct {
 	// Sources lists the price-feed source identifiers to query in parallel.
-	// Known identifiers: "coingecko", "binance".
+	// Known identifiers: "coingecko", "binance", "bybit".
 	// The aggregator returns the median of healthy sources; at least MinQuorum
 	// sources must respond successfully for an update to proceed.
 	//
