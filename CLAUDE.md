@@ -182,6 +182,18 @@ controls sustained throughput. TPM burst is automatically floored to `context_le
 max-context request doesn't cause excessive lockout. See [docs/design/rate-limiting.md](docs/design/rate-limiting.md)
 for full design rationale, token bucket mechanics, burst/context_length trade-offs, and configuration guide.
 
+## Provider Acceptance
+
+Every new model / inference provider added behind `router-api.0g.ai` must pass the
+checks in [docs/provider-acceptance.md](docs/provider-acceptance.md) before being
+exposed to integrators. The checklist covers OpenAI surface conformance,
+reasoning/thinking switch behavior (`enable_thinking`, `extra_body`, `thinking`,
+`chat_template_kwargs`), tool-call parsing into `tool_calls` (not raw
+`<tool_call>` text in `content`), output-budget starvation, error shapes,
+billing/trace consistency, and TEE signature verification. When reviewing a PR
+that wires up a new provider, require the sign-off table from that doc to be
+filled in.
+
 ## Code Review Focus Areas
 
 ### 1. Go Code Standards
