@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -63,20 +62,12 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	return limiter.Allow()
 }
 
-func RateLimitMiddleware(limiter *RateLimiter) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ip := getClientIP(c)
-		
-		if !limiter.Allow(ip) {
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "Too many requests. Please try again later.",
-			})
-			c.Abort()
-			return
-		}
-		
-		c.Next()
-	}
+// RateLimitMiddleware is a no-op. The broker runs behind an L4 TCP proxy that
+// hides the real client IP, so per-IP limiting would collapse all traffic into
+// a single global cap. PerUserRateLimiter (keyed by user address) is the
+// primary defense.
+func RateLimitMiddleware(_ *RateLimiter) gin.HandlerFunc {
+	return func(c *gin.Context) { c.Next() }
 }
 
 func getClientIP(c *gin.Context) string {
