@@ -25,9 +25,17 @@ func Response(ctx *gin.Context, err error) {
 
 	msg := err.Error()
 	if status >= 500 {
+		// FullPath() is the registered route template ("/user/:addr/task/:id")
+		// and is empty when no route matched (middleware rejects, tests using
+		// gin.CreateTestContext without a router). Fall back to the raw URL
+		// path so diagnostics never lose the request target.
+		path := ctx.FullPath()
+		if path == "" && ctx.Request != nil && ctx.Request.URL != nil {
+			path = ctx.Request.URL.Path
+		}
 		log.WithError(err).WithFields(log.Fields{
 			"status": status,
-			"path":   ctx.FullPath(),
+			"path":   path,
 			"method": ctx.Request.Method,
 		}).Error("handler returned server error")
 		if status == http.StatusInternalServerError {

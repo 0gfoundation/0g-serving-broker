@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -134,7 +135,7 @@ func TestCancelTask_RowsAffectedZeroReturnsRecordNotFound(t *testing.T) {
 			if err == nil {
 				t.Fatalf("want error, got nil")
 			}
-			if err != gorm.ErrRecordNotFound {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				t.Fatalf("want gorm.ErrRecordNotFound, got %v", err)
 			}
 		})

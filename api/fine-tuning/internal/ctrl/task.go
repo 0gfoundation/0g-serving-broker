@@ -100,16 +100,20 @@ func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 
 	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// Task exists and owner matches, so a missing row on UPDATE means
-			// the task is in a terminal/non-cancellable state. Re-read once so
-			// the message reflects the current progress rather than the value
-			// we read before the UPDATE (a concurrent writer may have advanced
-			// the state in between).
-			current := existing.Progress
-			if refreshed, rerr := c.db.GetTask(task.ID); rerr == nil {
-				current = refreshed.Progress
+			// Re-read once to disambiguate two RowsAffected==0 causes the
+			// preflight cannot rule out:
+			//  - row deleted between preflight and UPDATE -> 404
+			//  - row advanced to a non-cancellable state  -> 409
+			// The refreshed progress also avoids reporting stale state in
+			// the conflict body if a concurrent writer moved it forward.
+			refreshed, rerr := c.db.GetTask(task.ID)
+			if rerr != nil {
+				if errors.Is(rerr, gorm.ErrRecordNotFound) {
+					return errors.NewNotFound("task %s not found", task.ID.String())
+				}
+				return errors.Internal(errors.Wrap(rerr, "re-read task after cancel"))
 			}
-			return errors.NewConflict("task cannot be cancelled in its current state (%s)", current)
+			return errors.NewConflict("task cannot be cancelled in its current state (%s)", refreshed.Progress)
 		}
 		return errors.Internal(errors.Wrap(err, "cancel task"))
 	}

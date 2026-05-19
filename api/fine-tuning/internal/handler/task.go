@@ -294,7 +294,7 @@ func (h *Handler) UploadDataset(ctx *gin.Context) {
 	// Verify signature with timestamp (prevents replay attacks)
 	if err := h.ctrl.VerifyUploadSignature(userAddress, signature, timestamp); err != nil {
 		h.logger.Warnf("signature verification failed for %s: %v", userAddress, err)
-		errors.Response(ctx, errors.Unauthorized(fmt.Errorf("Authentication failed: %w", err)))
+		errors.Response(ctx, errors.Unauthorized(fmt.Errorf("authentication failed: %w", err)))
 		return
 	}
 
