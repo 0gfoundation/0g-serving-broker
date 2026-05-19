@@ -236,8 +236,12 @@ func extractB64Images(body []byte, maxImages int) ([][]byte, error) {
 	images := make([][]byte, 0, len(envelope.Data))
 	// base64 expands raw bytes by 4/3 (plus padding); reject the encoded blob
 	// before allocating the decode buffer when it would clearly exceed the
-	// per-image cap. This bounds peak memory at the maxB64ImageBytes limit
-	// rather than at the upstream-supplied size.
+	// per-image cap. Note: by this point json.Unmarshal has already pulled
+	// the full b64 string into memory, so this check does NOT bound peak
+	// ingest — it bounds the additional decode allocation (~maxB64ImageBytes
+	// per image) plus the downstream os.WriteFile, which is where the real
+	// amplification lives. Capping the upstream body itself would need a
+	// MaxBytesReader at the proxy ingress; out of scope here.
 	maxEncoded := base64.StdEncoding.EncodedLen(maxB64ImageBytes)
 	for i, d := range envelope.Data {
 		if d.B64JSON == "" {

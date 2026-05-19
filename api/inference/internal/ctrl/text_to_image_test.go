@@ -108,10 +108,10 @@ func TestExtractB64Images_RejectsOversizedImage(t *testing.T) {
 	}
 }
 
-// TestExtractB64Images_AcceptsAtCap confirms the cap is inclusive of normal-
-// sized images. A small image well under the threshold must round-trip
-// successfully — the size check should not regress the happy path.
-func TestExtractB64Images_AcceptsAtCap(t *testing.T) {
+// TestExtractB64Images_AcceptsBelowCap confirms the size check does not
+// regress the happy path: a normal-sized image well under maxB64ImageBytes
+// must round-trip successfully.
+func TestExtractB64Images_AcceptsBelowCap(t *testing.T) {
 	img := []byte("small-image-bytes-well-under-cap")
 	body, _ := json.Marshal(imageResponseEnvelope{
 		Data: []imageResponseData{{B64JSON: base64.StdEncoding.EncodeToString(img)}},
