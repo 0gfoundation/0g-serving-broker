@@ -83,7 +83,10 @@ func Main() {
 		panic(err)
 	}
 
-	ctrl := ctrl.New(db, contract, conf, nil, teeService, logger)
+	// The event process does not compute request fees, so it doesn't need the
+	// USD price cache.  Billing happens in the server process, which owns
+	// the cache and the PriceUpdateProcessor.
+	ctrl := ctrl.New(db, contract, conf, nil, teeService, nil, logger)
 
 	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)
 	if err := mgr.Add(settlementProcessor); err != nil {
