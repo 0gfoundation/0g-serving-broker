@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -50,11 +51,14 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 		return errors.Wrap(err, "mark stale processing jobs as failed")
 	}
 
-	// Start fixed worker pool — exactly maxConcurrent goroutines, never more
+	// Start fixed worker pool — exactly maxConcurrent goroutines, never more.
+	// Workers drain via close(c.asyncJobQueue) in ShutdownAsync, not the ctx —
+	// ctx only cancels the cleanup goroutine below.
 	for i := 0; i < maxConcurrent; i++ {
 		c.asyncWg.Add(1)
-		go c.asyncWorker(ctx, i)
+		go c.asyncWorker()
 	}
+	_ = ctx // retained for the cleanup goroutine; workers do not observe it
 
 	// Start periodic cleanup of expired jobs
 	c.asyncWg.Add(1)
@@ -84,7 +88,7 @@ func (c *Ctrl) InitAsyncProcessing(maxConcurrent, maxQueueSize int, resultTTL, c
 // It blocks until a job is available, processes it, and repeats. When the channel is closed
 // (by ShutdownAsync), range drains all remaining buffered jobs before exiting — ensuring
 // no accepted jobs are silently dropped.
-func (c *Ctrl) asyncWorker(_ context.Context, workerID int) {
+func (c *Ctrl) asyncWorker() {
 	defer c.asyncWg.Done()
 	for job := range c.asyncJobQueue {
 		c.processAsyncJob(job)
@@ -161,7 +165,7 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 		}
 		expectedInputFee = "0"
 	case "image-editing":
-		expectedInputFee, outputCount, err = c.GetImageEditingInputFeeAndImageNum(reqBody)
+		expectedInputFee, outputCount, err = c.GetImageEditingInputFeeAndImageNum(reqBody, extractContentType(reqHeaders))
 		if err != nil {
 			return "", errors.Wrap(err, "parse image-editing request")
 		}
@@ -272,6 +276,38 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		return
 	}
 
+	// response_format=url handling, mirroring the sync path in PrepareHTTPRequest:
+	// rewrite the upstream body to b64_json so the broker receives raw image bytes
+	// (provider-hosted URLs are not LAN-reachable from the client). clientResponseFormat
+	// captures what the caller originally asked for so we can re-rewrite the response
+	// below. reqBody (forwarded to provider) is mutated; params.RequestBody stays
+	// untouched so TEE signing binds the client's original bytes.
+	var clientResponseFormat string
+	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
+		contentType := extractContentType(params.RequestHeaders)
+		var (
+			orig      string
+			rewritten []byte
+			rwErr     error
+		)
+		if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {
+			orig, rewritten, rwErr = rewriteMultipartResponseFormat(reqBody, contentType)
+		} else {
+			orig, rewritten, rwErr = forceB64ResponseFormat(reqBody)
+		}
+		// Matches the sync path's terminal-on-failure behaviour (proxy.go:82-86):
+		// swallowing rwErr would forward the un-normalised body with
+		// response_format=url intact, the provider would return LAN-private URLs,
+		// and because clientResponseFormat stays "" the downstream refuse-guard
+		// never fires — the exact leak the rewrite exists to prevent.
+		if rwErr != nil {
+			c.markAsyncJobFailed(jobID, "normalise image request body: "+rwErr.Error())
+			return
+		}
+		clientResponseFormat = orig
+		reqBody = rewritten
+	}
+
 	// Build target URL
 	targetURL := c.Service.TargetURL
 	switch svcType {
@@ -346,22 +382,82 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		return
 	}
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
+	// Read response body (original provider bytes, before any URL rewrite).
+	providerRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.markAsyncJobFailed(jobID, "failed to read provider response: "+err.Error())
 		return
 	}
+	respBody := providerRespBody
 
-	// TEE response signing — same as sync path (text_to_image.go, image_editing.go).
-	// When TargetSeparated is false, the broker signs the request+response pair and
-	// caches the signature under a chatKey. The client retrieves the chatKey via the
-	// ZG-Res-Key header on the poll response to verify TEE integrity.
+	// For image services, try to extract b64 images once — used for both URL
+	// rewriting and TEE signing (image-byte binding). extractOK stays false for
+	// non-image services or when the provider did not return a b64 envelope.
+	var (
+		images    [][]byte
+		extractOK bool
+	)
+	if svcType == "text-to-image" || svcType == "image-editing" {
+		decoded, exErr := extractB64Images(providerRespBody, int(params.BillingReq.OutputCount))
+		if exErr == nil {
+			images = decoded
+			extractOK = true
+		} else if clientResponseFormat == "url" {
+			// Refuse rather than pass through: provider bytes may carry LAN URLs
+			// the client can't reach, which is exactly what rewriting prevents.
+			c.markAsyncJobFailed(jobID, "provider returned non-b64 image response, refusing to forward: "+exErr.Error())
+			return
+		}
+	}
+
+	// If the caller asked for response_format=url, persist decoded images locally
+	// and rewrite data[].b64_json → data[].url. jobID doubles as the chatKey —
+	// /v1/proxy/images/{jobID}/{i} resolves to the stored bytes. Store / build
+	// failures fall back to b64 (safe — body is confirmed b64 above).
+	if clientResponseFormat == "url" && extractOK {
+		// Fail-closed when store is nil: silently storing b64 violates the
+		// client's explicit contract. See handleTextToImageResponse.
+		if c.imageStore == nil {
+			c.logger.Errorf("Async job %s: URL requested but imageStore is nil (check newImageStore startup warning)", jobID)
+			c.markAsyncJobFailed(jobID, "response_format=url requested but image store is disabled")
+			return
+		}
+		if stErr := c.imageStore.store(jobID, images); stErr != nil {
+			c.logger.Warnf("Async job %s: store images failed, returning b64: %v", jobID, stErr)
+		} else if rewritten, bErr := buildURLResponse(providerRespBody, jobID, len(images), c.Service.ServingURL); bErr != nil {
+			c.logger.Warnf("Async job %s: build URL response failed, returning b64: %v", jobID, bErr)
+		} else {
+			respBody = rewritten
+		}
+	}
+
+	// TEE response signing — mirrors the sync path in text_to_image.go /
+	// image_editing.go. Dispatch on the trust model:
+	//   - Centralized: routing proof binds the TLS fingerprint to req/resp
+	//     hashes. Content cannot be attested because the provider is a black box.
+	//   - Decentralized !TargetSeparated: sign decoded image bytes directly
+	//     (image services) or full response (others).
+	//   - Decentralized TargetSeparated: no signing; the remote TEE signs.
+	// The signed body for image services is providerRespBody (original bytes),
+	// never the rewritten URL envelope.
 	var chatKey string
-	if !c.Service.TargetSeparated {
+	switch {
+	case c.Service.IsCentralized():
 		chatKey = uuid.NewString()
-		if err := c.signChatWithKey(params.RequestBody, respBody, chatKey); err != nil {
-			c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, err)
+		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, resp.TLS); err != nil {
+			c.logger.Warnf("Async job %s: routing proof not created (TEE verification unavailable): %v", jobID, err)
+			chatKey = ""
+		}
+	case !c.Service.TargetSeparated:
+		chatKey = uuid.NewString()
+		var signErr error
+		if extractOK && len(images) > 0 {
+			signErr = c.signImageResponse(params.RequestBody, images, chatKey)
+		} else {
+			signErr = c.signChatWithKey(params.RequestBody, providerRespBody, chatKey)
+		}
+		if signErr != nil {
+			c.logger.Warnf("Failed to sign async job %s response (TEE verification will be unavailable): %v", jobID, signErr)
 			chatKey = "" // don't store an unusable key
 		}
 	}
@@ -447,4 +543,23 @@ func (c *Ctrl) markAsyncJobFailed(jobID, errMsg string) {
 	if err := c.asyncDB.UpdateAsyncJobStatus(jobID, model.AsyncJobStatusFailed, nil, nil, errMsg); err != nil {
 		c.logger.Errorf("Failed to mark async job %s as failed: %v", jobID, err)
 	}
+}
+
+// extractContentType pulls Content-Type out of the JSON-serialised request headers
+// stored on an async job. Returns "" when the header is absent or the blob is
+// unparseable — callers must handle both.
+func extractContentType(reqHeaders []byte) string {
+	if len(reqHeaders) == 0 {
+		return ""
+	}
+	var saved map[string][]string
+	if err := json.Unmarshal(reqHeaders, &saved); err != nil {
+		return ""
+	}
+	for k, vals := range saved {
+		if strings.EqualFold(k, "Content-Type") && len(vals) > 0 {
+			return vals[0]
+		}
+	}
+	return ""
 }

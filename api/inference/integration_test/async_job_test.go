@@ -3,10 +3,15 @@
 package integration_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -294,6 +299,191 @@ func TestAsyncImageEditingFlow(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatal("job did not complete within timeout")
+}
+
+// ==========================================================================
+// Async + response_format="url" — sync has its own coverage in
+// text_to_image_test.go; this pins the parallel async pipeline because
+// processAsyncJob is a separate code path from the sync ProcessHTTPRequest
+// flow. Without this test, a regression in the async worker's body rewrite
+// or post-response URL build would only surface in unit tests.
+// ==========================================================================
+
+func TestAsyncTextToImageFlow_ResponseFormatURL(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
+
+	// Provider asserts the broker rewrote response_format to b64_json before
+	// dispatching — the worker must never forward "url" upstream, otherwise
+	// the provider could return LAN-private URLs that leak to the client.
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]interface{}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("provider: decode request: %v", err)
+		}
+		if req["response_format"] != "b64_json" {
+			t.Errorf("provider: response_format = %v, want b64_json (async worker must rewrite url→b64_json upstream)", req["response_format"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": 1234567890,
+			"data": []map[string]interface{}{
+				{"b64_json": b64},
+				{"b64_json": b64},
+			},
+		})
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.ServingURL = "http://broker.test"
+		cfg.Service.Type = "text-to-image"
+		cfg.Service.ModelType = "dall-e-3"
+		cfg.Service.TargetSeparated = true
+		cfg.Async = config.AsyncConfig{
+			Enabled:                true,
+			MaxConcurrentJobs:      2,
+			MaxQueueSize:           10,
+			ResultTTLMinutes:       30,
+			CleanupIntervalSeconds: 3600,
+			JobTimeoutMinutes:      1,
+		}
+	})
+
+	if err := env.ctrl.InitAsyncProcessing(2, 10, 30*time.Minute, 1*time.Hour, 1*time.Minute); err != nil {
+		t.Fatalf("init async processing: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownAsync() })
+
+	// Image store must be wired before the job runs — the worker stores decoded
+	// bytes here keyed by jobID and the GET path reads from it.
+	if err := env.ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	h := handler.New(env.ctrl, env.proxy, newTestLogger())
+	h.Register(env.engine)
+
+	// 1. Submit the async job with response_format=url.
+	reqBody := `{"model":"dall-e-3","prompt":"a cat playing piano","n":2,"response_format":"url"}`
+	req := httptest.NewRequest("POST", "/v1/async/images/generations", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var submitResp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &submitResp); err != nil {
+		t.Fatalf("parse submit response: %v", err)
+	}
+	jobID, _ := submitResp["jobId"].(string)
+	if jobID == "" {
+		t.Fatal("expected non-empty jobId")
+	}
+
+	// 2. Poll until the job completes (or fails / times out).
+	var finalResp map[string]interface{}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		pollReq := httptest.NewRequest("GET", "/v1/async/jobs/"+jobID, nil)
+		pollReq.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+		pollW := httptest.NewRecorder()
+		env.engine.ServeHTTP(pollW, pollReq)
+
+		if pollW.Code != http.StatusOK {
+			t.Fatalf("poll: expected 200, got %d: %s", pollW.Code, pollW.Body.String())
+		}
+		if err := json.Unmarshal(pollW.Body.Bytes(), &finalResp); err != nil {
+			t.Fatalf("parse poll response: %v", err)
+		}
+		status, _ := finalResp["status"].(string)
+		if status == "completed" {
+			break
+		}
+		if status == "failed" {
+			t.Fatalf("job failed: %v", finalResp["errorMessage"])
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if status, _ := finalResp["status"].(string); status != "completed" {
+		t.Fatalf("job did not complete within timeout, last status=%v", finalResp["status"])
+	}
+
+	// 3. Verify the completed result carries broker-served URLs, NOT b64.
+	//    The async worker stores its result body in job.data; it's the same
+	//    JSON the sync path returns to the client.
+	dataMap, ok := finalResp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be object, got %T", finalResp["data"])
+	}
+	images, ok := dataMap["data"].([]interface{})
+	if !ok || len(images) != 2 {
+		t.Fatalf("expected 2 images in result, got %v", dataMap["data"])
+	}
+
+	for i, raw := range images {
+		item := raw.(map[string]interface{})
+		if v, has := item["b64_json"]; has {
+			t.Errorf("data[%d].b64_json should be absent when response_format=url, got %v", i, v)
+		}
+		gotURL, _ := item["url"].(string)
+		if gotURL == "" {
+			t.Errorf("data[%d].url is empty", i)
+			continue
+		}
+		u, err := url.Parse(gotURL)
+		if err != nil {
+			t.Errorf("data[%d].url parse: %v", i, err)
+			continue
+		}
+		// Async uses jobID as the image-store key (sync uses chatKey from
+		// ZG-Res-Key). This is the path that distinguishes the two flows.
+		wantPath := "/v1/proxy/images/" + jobID + "/" + strconv.Itoa(i)
+		if u.Path != wantPath {
+			t.Errorf("data[%d].url path = %q, want %q", i, u.Path, wantPath)
+		}
+
+		// 4. GET the broker URL via the same engine — closes the loop the unit
+		//    tests can't reach (they call GetImage directly, bypassing the
+		//    proxy route, middleware, and Cache-Control/Content-Type plumbing).
+		getReq := httptest.NewRequest("GET", u.Path, nil)
+		gw := httptest.NewRecorder()
+		env.engine.ServeHTTP(gw, getReq)
+		if gw.Code != http.StatusOK {
+			t.Errorf("GET %s: status = %d, body: %s", u.Path, gw.Code, gw.Body.String())
+			continue
+		}
+		if ct := gw.Header().Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
+			t.Errorf("GET %s: content-type = %q, want image/*", u.Path, ct)
+		}
+		if !bytes.Equal(gw.Body.Bytes(), pngBytes) {
+			t.Errorf("GET %s: served bytes do not match provider bytes (got %d, want %d)", u.Path, len(gw.Body.Bytes()), len(pngBytes))
+		}
+	}
+
+	// 5. Billing: n=2, fee = 2 × outputPrice. Mirrors the sync URL test so
+	//    a divergence between the two paths' billing logic surfaces here.
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) == 0 {
+		t.Fatal("expected at least 1 billing record")
+	}
+	latestReq := userRequests[len(userRequests)-1]
+	if latestReq.OutputCount != 2 {
+		t.Errorf("expected outputCount=2, got %d", latestReq.OutputCount)
+	}
 }
 
 // ==========================================================================

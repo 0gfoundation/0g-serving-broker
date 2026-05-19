@@ -8,9 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
@@ -58,6 +62,40 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			}
 			reqBody = modifiedBody
 		}
+	}
+
+	// For text-to-image and image-editing: store the original client body (used for
+	// signing) and rewrite response_format to b64_json so the broker always receives
+	// raw image bytes from the provider rather than LAN-inaccessible URLs.
+	// Dispatches by Content-Type: JSON bodies go through forceB64ResponseFormat;
+	// multipart/form-data bodies go through rewriteMultipartResponseFormat so that
+	// image-editing clients posting multipart with response_format=url still trigger
+	// broker-side URL rewriting.
+	if (svcType == "text-to-image" || svcType == "image-editing") && len(reqBody) > 0 {
+		ctx.Set("clientReqBody", reqBody)
+		// Keep the original-case Content-Type: mime.ParseMediaType lowercases
+		// only the media-type and parameter names, but the boundary VALUE is
+		// case-sensitive when matched against the body.
+		rawContentType := ctx.Request.Header.Get("Content-Type")
+		var (
+			originalFormat string
+			rewritten      []byte
+			err            error
+		)
+		if strings.HasPrefix(strings.ToLower(rawContentType), "multipart/") {
+			originalFormat, rewritten, err = rewriteMultipartResponseFormat(reqBody, rawContentType)
+		} else {
+			originalFormat, rewritten, err = forceB64ResponseFormat(reqBody)
+		}
+		// Do NOT forward a body we could not normalise. If we did, a client that
+		// sent response_format=url would get the provider's LAN-private URL
+		// back verbatim — the exact leak the rewrite exists to prevent.
+		if err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, errors.Wrapf(err, "image request body could not be normalised (content-type=%q)", rawContentType)
+		}
+		ctx.Set("clientResponseFormat", originalFormat)
+		reqBody = rewritten
 	}
 
 	// For text-to-image requests, ensure wait=true query parameter is set
@@ -549,3 +587,167 @@ func isModelAlias(name string, aliases []string) bool {
 	return false
 }
 
+// rewriteMultipartResponseFormat ensures the forwarded multipart body carries
+// response_format=b64_json, returning what the CLIENT originally asked for so
+// the response handler knows whether to rewrite provider output to broker URLs.
+//
+// Two cases:
+//  1. response_format field present — replace its body with "b64_json".
+//     originalFormat returns the value the client sent (e.g. "url" or "b64_json").
+//  2. response_format field absent — append a new part set to "b64_json", and
+//     report originalFormat as "" (NOT "url"). We diverge from OpenAI's
+//     per-endpoint default here because forwarding the provider's fallback
+//     would leak LAN-private URLs; clients wanting broker-served URLs must
+//     opt in with response_format=url. This keeps JSON and multipart paths
+//     consistent: an absent field means b64 pass-through in both.
+//
+// Uses mime/multipart.Reader so that adversarial file content (e.g. an image
+// byte sequence that happens to contain the literal string
+// `name="response_format"`) cannot corrupt the rewrite — the parser respects
+// MIME boundaries, the previous byte scanner did not. The writer uses
+// SetBoundary so the outgoing boundary string matches the original header;
+// part headers are preserved byte-for-byte as the reader saw them.
+func rewriteMultipartResponseFormat(body []byte, contentType string) (originalFormat string, modified []byte, err error) {
+	_, params, parseErr := mime.ParseMediaType(contentType)
+	if parseErr != nil {
+		return "", body, fmt.Errorf("multipart: parse content-type %q: %w", contentType, parseErr)
+	}
+	boundary, ok := params["boundary"]
+	if !ok || boundary == "" {
+		return "", body, fmt.Errorf("multipart: content-type %q has no boundary", contentType)
+	}
+
+	type preservedPart struct {
+		header textproto.MIMEHeader
+		body   []byte
+	}
+	var parts []preservedPart
+	foundResponseFormat := false
+	originalFormat = ""
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, pErr := reader.NextPart()
+		if pErr == io.EOF {
+			break
+		}
+		if pErr != nil {
+			return "", body, fmt.Errorf("multipart: read part: %w", pErr)
+		}
+		partBody, rErr := io.ReadAll(part)
+		_ = part.Close()
+		if rErr != nil {
+			return "", body, fmt.Errorf("multipart: read part body: %w", rErr)
+		}
+		if part.FormName() == "response_format" {
+			foundResponseFormat = true
+			originalFormat = string(partBody)
+			partBody = []byte("b64_json")
+		}
+		parts = append(parts, preservedPart{header: part.Header, body: partBody})
+	}
+
+	// Fast path: already b64_json — no writer needed, forward unchanged.
+	if foundResponseFormat && originalFormat == "b64_json" {
+		return originalFormat, body, nil
+	}
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return "", body, fmt.Errorf("multipart: set boundary: %w", err)
+	}
+	for _, p := range parts {
+		w, cErr := writer.CreatePart(p.header)
+		if cErr != nil {
+			return "", body, fmt.Errorf("multipart: create part: %w", cErr)
+		}
+		if _, wErr := w.Write(p.body); wErr != nil {
+			return "", body, fmt.Errorf("multipart: write part body: %w", wErr)
+		}
+	}
+	if !foundResponseFormat {
+		hdr := textproto.MIMEHeader{}
+		hdr.Set("Content-Disposition", `form-data; name="response_format"`)
+		w, cErr := writer.CreatePart(hdr)
+		if cErr != nil {
+			return "", body, fmt.Errorf("multipart: create response_format part: %w", cErr)
+		}
+		if _, wErr := w.Write([]byte("b64_json")); wErr != nil {
+			return "", body, fmt.Errorf("multipart: write response_format part: %w", wErr)
+		}
+		// Broker default is b64_json for both JSON and multipart when the
+		// client omits the field — diverges from OpenAI's per-endpoint
+		// defaults (which are "url" for /v1/images/edits) but is the only
+		// value we can safely return: forwarding the provider's default
+		// would leak LAN-private URLs. Clients wanting broker-served URLs
+		// must opt in explicitly with response_format=url. Keeping
+		// originalFormat = "" (not "url") skips the handler's URL-rewrite
+		// path so the client receives b64_json straight through, matching
+		// the JSON-body branch in forceB64ResponseFormat.
+		originalFormat = ""
+	}
+	if err := writer.Close(); err != nil {
+		return "", body, fmt.Errorf("multipart: close writer: %w", err)
+	}
+	return originalFormat, buf.Bytes(), nil
+}
+
+// forceB64ResponseFormat rewrites the response_format field in a JSON request body
+// to "b64_json", returning the original format value and the modified body.
+// Returns an error (and the unmodified body) if the body is not valid JSON.
+//
+// Caveat: this round-trips through map[string]interface{}, so top-level field
+// order is not preserved on output. Numeric values are decoded with UseNumber
+// to preserve integer precision — e.g. a seed value of 2^53+1 survives the
+// rewrite. The signed body used for TEE proofs is the original pre-rewrite
+// bytes (captured as clientReqBody), so this reshaping is provider-visible
+// only. If a future provider starts to care about byte-for-byte equality of
+// the forwarded body, replace this with a targeted byte-level rewrite.
+func forceB64ResponseFormat(body []byte) (originalFormat string, modified []byte, err error) {
+	var m map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err = dec.Decode(&m); err != nil {
+		return "", body, err
+	}
+	if v, ok := m["response_format"].(string); ok {
+		originalFormat = v
+	}
+	// Fast path: already b64_json, forward original bytes byte-for-byte. Matches
+	// the multipart variant and avoids reshaping the body on every request.
+	if originalFormat == "b64_json" {
+		return originalFormat, body, nil
+	}
+	m["response_format"] = "b64_json"
+	modified, err = json.Marshal(m)
+	if err != nil {
+		return originalFormat, body, err
+	}
+	return originalFormat, modified, nil
+}
+
+// GetImage returns the stored image bytes for chatKey/index, or an error if
+// the entry has expired or the index is out of range.
+func (c *Ctrl) GetImage(chatKey string, index int) ([]byte, error) {
+	if c.imageStore == nil {
+		return nil, errors.New("image store not available")
+	}
+	return c.imageStore.get(chatKey, index)
+}
+
+// DetectImageContentType sniffs the MIME type of image bytes.
+func (c *Ctrl) DetectImageContentType(data []byte) string {
+	return detectContentType(data)
+}
+
+// ImageCacheTTL returns the configured lifetime of broker-stored images, used
+// by the serve route to set an accurate Cache-Control max-age. Zero means the
+// store is unavailable; callers should treat that as "do not advertise a
+// cache lifetime" rather than as "fresh forever".
+func (c *Ctrl) ImageCacheTTL() time.Duration {
+	if c.imageStore == nil {
+		return 0
+	}
+	return c.imageStore.ttl
+}
