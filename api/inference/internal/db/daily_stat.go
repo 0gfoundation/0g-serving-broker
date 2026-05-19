@@ -31,9 +31,9 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request) error {
 			`INSERT INTO daily_stat (date, total_requests, input_tokens, output_tokens)
 			 VALUES (UTC_DATE(), ?, ?, ?) AS new_vals
 			 ON DUPLICATE KEY UPDATE
-			   total_requests = total_requests + new_vals.total_requests,
-			   input_tokens = input_tokens + new_vals.input_tokens,
-			   output_tokens = output_tokens + new_vals.output_tokens`,
+			   total_requests = daily_stat.total_requests + new_vals.total_requests,
+			   input_tokens = daily_stat.input_tokens + new_vals.input_tokens,
+			   output_tokens = daily_stat.output_tokens + new_vals.output_tokens`,
 			totalRequests, inputTokens, outputTokens,
 		).Error; err != nil {
 			return fmt.Errorf("failed to accumulate daily stats: %w", err)

@@ -23,6 +23,12 @@ const (
 	// DefaultExpiryBlocks is the number of blocks after which a pending settlement without a matching
 	// on-chain event is considered expired and its requests are released.
 	DefaultExpiryBlocks = uint64(200)
+	// MaxScanBlockRange caps the block window passed to a single FilterTEESettlementResult call.
+	// Public RPC nodes typically reject queries whose result set exceeds 10,000 logs; this
+	// value must be small enough that no single window can produce that many events even on
+	// high-traffic days. At ~1000 settlements/day across ~90,000 blocks/day, 50k blocks bounds
+	// any single call to a few hundred logs with comfortable headroom.
+	MaxScanBlockRange = uint64(50000)
 )
 
 // ReconciliationProcessor scans on-chain TEESettlementResult events and reconciles
@@ -98,32 +104,44 @@ func (r *ReconciliationProcessor) reconcile(ctx context.Context) {
 		return // Nothing new to process
 	}
 
+	// 4-5. Scan and process events in chunks bounded by MaxScanBlockRange so a
+	// single call cannot exceed the RPC's per-query log limit. Advance the cursor
+	// after every successful chunk so progress survives mid-loop failures.
 	fromBlock := cursor.LastBlockNumber + 1
+	for fromBlock <= safeBlock {
+		if ctx.Err() != nil {
+			return
+		}
+		toBlock := fromBlock + MaxScanBlockRange - 1
+		if toBlock > safeBlock {
+			toBlock = safeBlock
+		}
 
-	// 4. Scan events
-	events, err := r.scanEvents(ctx, fromBlock, safeBlock)
-	if err != nil {
-		r.logger.Errorf("Reconciliation: failed to scan events from block %d to %d: %v", fromBlock, safeBlock, err)
-		return
+		events, err := r.scanEvents(ctx, fromBlock, toBlock)
+		if err != nil {
+			r.logger.Errorf("Reconciliation: failed to scan events from block %d to %d: %v", fromBlock, toBlock, err)
+			return
+		}
+
+		if len(events) > 0 {
+			r.logger.Infof("Reconciliation: processing %d events from block %d to %d", len(events), fromBlock, toBlock)
+		}
+
+		for _, evt := range events {
+			r.processEvent(evt)
+		}
+
+		if err := r.db.UpdateReconciliationCursor(toBlock); err != nil {
+			r.logger.Errorf("Reconciliation: failed to update cursor to block %d: %v", toBlock, err)
+			return
+		}
+
+		fromBlock = toBlock + 1
 	}
 
-	if len(events) > 0 {
-		r.logger.Infof("Reconciliation: processing %d events from block %d to %d", len(events), fromBlock, safeBlock)
-	}
-
-	// 5. Process each event
-	for _, evt := range events {
-		r.processEvent(evt)
-	}
-
-	// 6. Expire stale pending settlements
+	// 6. Expire stale pending settlements once per tick, after all chunks scanned.
 	if safeBlock > r.expiryBlocks {
 		r.expireStaleSettlements(safeBlock - r.expiryBlocks)
-	}
-
-	// 7. Update cursor
-	if err := r.db.UpdateReconciliationCursor(safeBlock); err != nil {
-		r.logger.Errorf("Reconciliation: failed to update cursor to block %d: %v", safeBlock, err)
 	}
 }
 

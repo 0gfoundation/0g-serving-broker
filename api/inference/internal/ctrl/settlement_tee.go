@@ -134,9 +134,10 @@ func (c *Ctrl) ProcessSettlement(ctx context.Context) error {
 	return errors.Wrap(c.SettleFeesWithTEE(ctx), "settle fees with TEE")
 }
 
-// ResetSettlementState clears settling flags and skip_until for all
-// pending requests and users. Call this on startup to allow all
-// pending requests to be retried immediately.
+// ResetSettlementState clears skip_until throttles on requests and users
+// so pending work can be retried immediately after restart. The settling
+// flag is intentionally left untouched; see db.ResetSettlementState for
+// why (clearing it risks double-charging via contract replay).
 func (c *Ctrl) ResetSettlementState() error {
 	return c.db.ResetSettlementState()
 }
