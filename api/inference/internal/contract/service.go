@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -18,6 +19,23 @@ import (
 )
 
 var ErrServiceNotFound = errors.New("service not found")
+
+// isServiceNotFoundMessage reports whether an error message came from the
+// RPC's "service not found" response.  The RPC can surface the sentinel
+// text bare ("service not found") or prefixed by wrapping layers
+// ("execution reverted: service not found", "contract call failed: service
+// not found").  We accept both forms and reject messages where the phrase
+// is merely embedded in a longer, unrelated message — anchoring prevents
+// a sibling error like "nested service not found path" from being
+// misclassified as "not registered yet" and incorrectly triggering
+// first-time registration.
+func isServiceNotFoundMessage(msg string) bool {
+	sentinel := ErrServiceNotFound.Error()
+	if msg == sentinel {
+		return true
+	}
+	return strings.HasSuffix(msg, ": "+sentinel)
+}
 
 // DefaultProviderStake is the default stake amount for first-time service registration (100 0G)
 var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
@@ -182,6 +200,17 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 		// Wrap error to extract details from rpc.jsonError Data field
 		wrappedErr := WrapContractError(err)
 		c.logger.Errorf("[GetService] Contract error - provider=%s: %v", c.ProviderAddress, wrappedErr)
+		// Callers use errors.Is(err, ErrServiceNotFound) to detect the
+		// "service not registered yet" case.  The underlying RPC returns
+		// the literal text "service not found" — sometimes bare, sometimes
+		// prefixed by wrapping ("execution reverted: service not found").
+		// Anchor the match so a sibling error whose message merely contains
+		// the phrase (e.g. "nested service not found path") isn't
+		// misclassified as a not-registered error and accidentally drive
+		// first-time registration.
+		if isServiceNotFoundMessage(wrappedErr.Error()) {
+			return nil, fmt.Errorf("%w: %v", ErrServiceNotFound, wrappedErr)
+		}
 		return nil, wrappedErr
 	}
 
@@ -196,7 +225,7 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, 
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 
 	old, err := c.GetService(ctx)
-	if err != nil && err.Error() == "service not found" {
+	if err != nil && errors.Is(err, ErrServiceNotFound) {
 		c.logger.Info("[SyncService] No existing service found in contract")
 	} else if old != nil {
 		c.logger.Infof("[SyncService] Found existing service - url=%s, model=%s, type=%s, inputPrice=%s, outputPrice=%s",
@@ -253,16 +282,26 @@ func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, 
 }
 
 func identicalService(old contract.Service, new config.Service, teeSignerAddress common.Address, newAdditionalInfo string) bool {
-	if old.Model != new.ModelType {
-		return false
-	}
-	if old.Verifiability != new.Verifiability {
+	if !identicalServiceExceptPrice(old, new, teeSignerAddress, newAdditionalInfo) {
 		return false
 	}
 	if old.InputPrice.String() != new.InputPrice {
 		return false
 	}
 	if old.OutputPrice.String() != new.OutputPrice {
+		return false
+	}
+	return true
+}
+
+// identicalServiceExceptPrice mirrors identicalService but ignores the
+// InputPrice / OutputPrice fields.  Used by the USD-startup drift gate to
+// decide whether a pure-rate-drift restart can skip the on-chain push.
+func identicalServiceExceptPrice(old contract.Service, new config.Service, teeSignerAddress common.Address, newAdditionalInfo string) bool {
+	if old.Model != new.ModelType {
+		return false
+	}
+	if old.Verifiability != new.Verifiability {
 		return false
 	}
 	if old.ServiceType != new.Type {
@@ -278,4 +317,25 @@ func identicalService(old contract.Service, new config.Service, teeSignerAddress
 		return false
 	}
 	return true
+}
+
+// CompareServiceExceptPrice reports whether the on-chain service matches the
+// supplied config across all fields EXCEPT InputPrice / OutputPrice.  It
+// returns the current on-chain service so callers can compare prices
+// themselves (typically via pricefeed.DriftBps).
+//
+// If the service is not yet registered on-chain, returns (false, nil,
+// ErrServiceNotFound) — callers that want "not equal, no error" should
+// check errors.Is(err, ErrServiceNotFound) and translate.
+func (c *ProviderContract) CompareServiceExceptPrice(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (bool, *contract.Service, error) {
+	old, err := c.GetService(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	imageName, imageDigest := c.GetImageInfo(ctx)
+	newAdditionalInfo, err := buildAdditionalInfo(new, imageName, imageDigest, tieredPricing, cacheTokenBilling)
+	if err != nil {
+		return false, old, errors.Wrap(err, "build additional info")
+	}
+	return identicalServiceExceptPrice(*old, new, c.TeeSignerAddress, newAdditionalInfo), old, nil
 }

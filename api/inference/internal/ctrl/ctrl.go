@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -16,6 +17,7 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -46,7 +48,27 @@ type Ctrl struct {
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
 	tieredPricing     config.TieredPricingConfig
+	priceFeed         config.PriceFeedConfig
 	concurrencyLimit  config.ConcurrencyLimitConfig
+
+	// priceCache holds the latest wei prices derived from the live 0G/USD
+	// rate.  Non-nil only when Service.PriceDenomination == "USD".  Written
+	// by the PriceUpdateProcessor, read by GetCachedService to overlay
+	// USD-derived prices onto the otherwise-stale on-chain service record.
+	priceCache *pricefeed.Cache
+
+	// contractWriteMu serialises all on-chain service writes (SyncService
+	// and SyncServicePrices).  Prevents racing nonces when the
+	// PriceUpdateProcessor and a SyncService caller run concurrently.
+	contractWriteMu sync.Mutex
+
+	// lastPushedInputPrice / lastPushedOutputPrice cache the wei values the
+	// broker most recently wrote to chain, so subsequent drift checks can
+	// short-circuit without an eth_call.  Reset to nil on process restart,
+	// in which case SyncServicePrices falls back to reading on-chain.
+	// Guarded by contractWriteMu.
+	lastPushedInputPrice  *big.Int
+	lastPushedOutputPrice *big.Int
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
@@ -58,8 +80,12 @@ type Ctrl struct {
 	contractAccountCache *cache.Cache // Cache for user account data from contract
 	serviceCache         *cache.Cache // Cache for service data from contract
 
-	// Service sync flag to ensure SyncService is only called once
-	serviceSynced bool
+	// Service sync flag to ensure SyncService is only called once.  Used as
+	// a once-guard via CompareAndSwap; kept as its own atomic rather than
+	// piggybacking on c.mu because (a) user-account callers hold c.mu and
+	// have no business contending with the service-sync path, and (b) the
+	// intent is unambiguous as an atomic.
+	serviceSynced atomic.Bool
 
 	// Shared HTTP client for backend requests to enable connection reuse
 	httpClient *http.Client
@@ -91,6 +117,7 @@ func New(
 	cfg *config.Config,
 	svcCache *cache.Cache,
 	teeService *tee.TeeService,
+	priceCache *pricefeed.Cache,
 	logger log.Logger,
 ) *Ctrl {
 	// Extract log path from logger config
@@ -125,7 +152,9 @@ func New(
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
 		tieredPricing:        cfg.TieredPricing,
+		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
+		priceCache:           priceCache,
 		svcCache:             svcCache,
 		teeService:           teeService,
 		chatCacheExpiration:  cfg.ChatCacheExpiration,
@@ -216,6 +245,41 @@ func (c *Ctrl) GetTieredPricingConfig() config.TieredPricingConfig {
 // GetCacheTokenBillingConfig returns the cache token billing configuration.
 func (c *Ctrl) GetCacheTokenBillingConfig() config.CacheTokenBillingConfig {
 	return c.cacheTokenBilling
+}
+
+// GetPriceFeedConfig returns the price-feed configuration.
+func (c *Ctrl) GetPriceFeedConfig() config.PriceFeedConfig {
+	return c.priceFeed
+}
+
+// GetPriceCache returns the in-memory wei-price cache, or nil if the service
+// is not USD-denominated.  Exposed for the PriceUpdateProcessor.
+func (c *Ctrl) GetPriceCache() *pricefeed.Cache {
+	return c.priceCache
+}
+
+// GetPriceFeedSnapshot returns a snapshot of the in-memory wei-price +
+// rate cache together with the configured staleness threshold and update
+// interval, plus a boolean indicating whether the service is USD-denominated
+// at all.
+//
+// Callers (e.g. the /v1/models handler) use this to surface the current
+// rate, staleness state, and the next expected refresh to SDK clients
+// without needing to reason about USD-vs-NATIVE mode themselves: if
+// isUSD=false the snapshot should be ignored; if isUSD=true and
+// snap.Populated is false the feed hasn't bootstrapped yet.
+func (c *Ctrl) GetPriceFeedSnapshot() (snap pricefeed.Snapshot, stalenessThreshold, updateInterval time.Duration, isUSD bool) {
+	if !c.Service.IsUSDDenominated() || c.priceCache == nil {
+		return pricefeed.Snapshot{}, 0, 0, false
+	}
+	return c.priceCache.Get(), c.priceFeed.StalenessThreshold, c.priceFeed.UpdateInterval, true
+}
+
+// InvalidateServiceCache clears the cached on-chain service record so the
+// next GetCachedService call re-reads from the contract.  Called by the
+// PriceUpdateProcessor after pushing a new price on-chain.
+func (c *Ctrl) InvalidateServiceCache() {
+	c.serviceCache.Delete("current_service")
 }
 
 // IsWhitelistedUser checks if the user address is in the whitelist.

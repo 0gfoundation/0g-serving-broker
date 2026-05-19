@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,8 +24,10 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	database "github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/internal/event"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
 	lorapkg "github.com/0glabs/0g-serving-broker/inference/internal/lora"
+	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/internal/proxy"
 )
 
@@ -104,7 +108,45 @@ func Main() {
 	}
 	defer contract.Close()
 
-	ctrl := ctrl.New(db, contract, config, svcCache, teeService, logger)
+	// Build the USD price-feed stack (cache + aggregator) when the provider
+	// is USD-denominated.  The cache is constructed early so Ctrl can hold a
+	// reference; the aggregator is reused across boot-time bootstrap and
+	// steady-state processor ticks.  The processor itself is instantiated
+	// after Ctrl exists because it dispatches on-chain writes through
+	// ctrl.SyncServicePrices (which owns the contract-write mutex).
+	var priceCache *pricefeed.Cache
+	var aggregator *pricefeed.Aggregator
+	var bootstrapInputWei, bootstrapOutputWei *big.Int
+	var bootstrapRate *big.Rat
+	if config.Service.IsUSDDenominated() {
+		priceCache = pricefeed.NewCache()
+		sources, err := pricefeed.BuildSources(config.PriceFeed)
+		if err != nil {
+			panic(err)
+		}
+		aggregator = pricefeed.NewAggregator(
+			sources,
+			config.PriceFeed.MinQuorum,
+			config.PriceFeed.MaxRateDeviationBps,
+			config.PriceFeed.HTTPTimeout,
+			logger,
+		)
+		// Bootstrap uses a temporary processor that isn't wired to a
+		// syncer — we only need the rate-fetch + conversion logic here.
+		// The cache is deliberately NOT populated by Bootstrap; we
+		// seed it below with the effective values returned from
+		// SyncServiceWithPrices so cache.wei matches what's on chain.
+		bootProc, err := event.NewPriceUpdateProcessor(priceCache, aggregator, nil, config.Service, config.PriceFeed, logger)
+		if err != nil {
+			panic(fmt.Errorf("build bootstrap price processor: %w", err))
+		}
+		bootstrapInputWei, bootstrapOutputWei, bootstrapRate, err = bootProc.Bootstrap(ctx)
+		if err != nil {
+			panic(fmt.Errorf("usd price bootstrap failed: %w", err))
+		}
+	}
+
+	ctrl := ctrl.New(db, contract, config, svcCache, teeService, priceCache, logger)
 
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
@@ -113,8 +155,62 @@ func Main() {
 	if settleFeesErr != nil {
 		logger.Errorf("error settling fees: %v", settleFeesErr)
 	}
-	if err := ctrl.SyncService(ctx); err != nil {
-		panic(err)
+	// At startup, USD providers use SyncServiceWithPrices — the same full
+	// identicalService comparison as NATIVE's SyncService, but with the
+	// bootstrapped wei prices overlaid on the config so price fields
+	// participate in the equality check alongside URL, model type, TEE
+	// signer, tieredPricing, and additionalInfo.  The drift gate only
+	// applies to subsequent PriceUpdateProcessor ticks via
+	// SyncServicePrices.
+	//
+	// The returned effectiveInput/effectiveOutput are the wei prices now
+	// on chain (either the bootstrapped values we just wrote, or the
+	// pre-existing on-chain values when drift was within threshold).  We
+	// seed the cache with those so billing matches chain from the first
+	// request, not with the bootstrap-derived values which may have been
+	// rejected by the drift gate.
+	if config.Service.IsUSDDenominated() {
+		effectiveInput, effectiveOutput, err := ctrl.SyncServiceWithPrices(ctx, bootstrapInputWei, bootstrapOutputWei)
+		if err != nil {
+			panic(fmt.Errorf("usd startup sync-service failed: %w", err))
+		}
+		priceCache.Set(effectiveInput, effectiveOutput, bootstrapRate, time.Now())
+	} else {
+		if err := ctrl.SyncService(ctx); err != nil {
+			panic(err)
+		}
+	}
+
+	// Start the PriceUpdateProcessor goroutine (USD mode only).  It ticks
+	// until the server shuts down and ctx is cancelled.  On-chain writes
+	// flow through ctrl.SyncServicePrices, which serialises with SyncService
+	// via the same contract-write mutex.
+	var priceProcessorCancel context.CancelFunc
+	var priceProcessorWG sync.WaitGroup
+	if config.Service.IsUSDDenominated() {
+		priceProcessor, err := event.NewPriceUpdateProcessor(priceCache, aggregator, ctrl, config.Service, config.PriceFeed, logger)
+		if err != nil {
+			panic(fmt.Errorf("build price update processor: %w", err))
+		}
+		var priceCtx context.Context
+		priceCtx, priceProcessorCancel = context.WithCancel(ctx)
+		priceProcessorWG.Add(1)
+		go func() {
+			defer priceProcessorWG.Done()
+			if err := priceProcessor.Start(priceCtx); err != nil && err != context.Canceled {
+				logger.Errorf("price update processor exited: %v", err)
+			}
+		}()
+		// Defer processor teardown here so it's enforced by the language:
+		// this defer is registered AFTER `defer contract.Close()` above, so
+		// LIFO ordering guarantees the processor goroutine exits before
+		// contract.Close() runs.  Any in-flight SyncServicePrices call that
+		// is waiting on an RPC will abort via priceCtx cancellation before
+		// the contract client is torn down.
+		defer func() {
+			priceProcessorCancel()
+			priceProcessorWG.Wait()
+		}()
 	}
 
 	// Initialize LoRA Manager if enabled
@@ -216,6 +312,10 @@ func Main() {
 
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
+
+	// Price processor teardown is handled by the defer registered at
+	// goroutine startup — this guarantees it joins before contract.Close()
+	// (also deferred, registered earlier so LIFO orders correctly).
 
 	// Stop rate limiter cleanup goroutines
 	proxy.Close()

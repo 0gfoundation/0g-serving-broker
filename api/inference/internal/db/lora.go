@@ -97,9 +97,25 @@ func (d *DB) ListIdleAdapters(idleThreshold time.Duration) ([]model.LoRAAdapter,
 	return adapters, nil
 }
 
-// CreateAdapterKey stores a provider-encrypted AES key pushed by the fine-tuning broker.
+// CreateAdapterKey stores a provider-encrypted AES key pushed by the fine-tuning
+// broker. It is intentionally idempotent: if a row for the same TaskID already
+// exists (e.g. from a previous push attempt that succeeded server-side but
+// timed out / errored on the client side), the StorageHash and ProviderEncKey
+// are updated rather than returning a unique-constraint violation.
+//
+// Why idempotency matters: the fine-tuning broker retries pushAdapterKey on
+// transient HTTP failures, but the inference broker's stored state only
+// depends on (TaskID, StorageHash, ProviderEncKey). Without upsert the retry
+// loop dead-locks on `Duplicate entry for key 'task_id'` and the task never
+// reaches Delivered (Bug Report — May 2026, Bug #3).
 func (d *DB) CreateAdapterKey(key *model.AdapterKey) error {
-	return d.db.Create(key).Error
+	return d.db.
+		Where("task_id = ?", key.TaskID).
+		Assign(model.AdapterKey{
+			StorageHash:    key.StorageHash,
+			ProviderEncKey: key.ProviderEncKey,
+		}).
+		FirstOrCreate(key).Error
 }
 
 // GetAdapterKeyByTaskID retrieves a pre-pushed adapter key by its task ID.

@@ -399,3 +399,24 @@ func IsLockTimeOutOfRange(err error) bool {
 func IsPenaltyPercentageTooHigh(err error) bool {
 	return errors.Is(err, ErrPenaltyPercentageTooHigh)
 }
+
+// IsPreviousDeliverableNotAcknowledged reports whether err originates from the
+// FineTuningServing contract rejecting addDeliverable because the user's
+// previous deliverable for this provider has not yet been acknowledged on-chain.
+//
+// Surfaced verbatim from the user-facing bug report (May 2026, Bug #4): when
+// the user retrieves a model via the legacy two-step flow (downloadModelFrom0GStorage
+// + decryptModel) and forgets to call acknowledgeDeliverable, all subsequent
+// fine-tune tasks for the same (user, provider) pair fail here. The fine-tuning
+// broker uses this predicate to attach an actionable hint to the task log
+// instead of looping forever on a permanent contract failure.
+func IsPreviousDeliverableNotAcknowledged(err error) bool {
+	return errors.Is(err, ErrPreviousDeliverableNotAcknowledged)
+}
+
+// IsDeliverableIdInvalidLength reports whether err originates from the
+// FineTuningServing contract rejecting a deliverable id that exceeds the
+// configured length bound. Surfaced for symmetry with the helpers above.
+func IsDeliverableIdInvalidLength(err error) bool {
+	return errors.Is(err, ErrDeliverableIdInvalidLength)
+}

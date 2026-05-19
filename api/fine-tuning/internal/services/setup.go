@@ -103,7 +103,14 @@ func (s *Setup) HandleNoTask(ctx context.Context) error {
 }
 
 func (s *Setup) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
-	return s.db.HandleSetupFailure(dbTask, s.config.MaxFinalizerRetriesPerTask, s.states.Intermediate, s.states.Initial)
+	// Surface the failure in the per-task progress.log so callers can see the
+	// real cause via broker.fineTuning.getLog(provider, taskId). Previously
+	// only the broker-wide log carried the error and users saw a bare
+	// "progress: Failed" with no message.
+	if writeErr := utils.WriteToLogFile(dbTask.ID, fmt.Sprintf("setup failed: %v\n", err)); writeErr != nil {
+		s.logger.Errorf("failed to write setup failure to task log: %v", writeErr)
+	}
+	return s.db.HandleSetupFailure(dbTask, s.config.MaxSetupRetriesPerTask, s.states.Intermediate, s.states.Initial)
 }
 
 func (s *Setup) prepareData(ctx context.Context, task *db.Task, paths *utils.TaskPaths) error {
@@ -424,7 +431,6 @@ print(f"Converted {len(lines)} examples to {output_dir}")
 	}
 	defer os.Remove(scriptPath)
 
-	// Try running Python directly first
 	cmd := exec.Command("python3", scriptPath, rawPath, datasetPath)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
@@ -432,27 +438,20 @@ print(f"Converted {len(lines)} examples to {output_dir}")
 		os.Remove(rawPath)
 		return nil
 	}
-	s.logger.Warnf("Direct Python conversion failed: %v (output: %s), trying Docker...", err, string(output))
 
-	// Fall back to Docker
-	parentDir := filepath.Dir(rawPath)
-	cmd = exec.Command("docker", "run", "--rm",
-		"-v", parentDir+":/data",
-		s.config.Images.ExecutionImageName,
-		"python3", "/data/"+filepath.Base(scriptPath),
-		"/data/"+filepath.Base(rawPath),
-		"/data/"+filepath.Base(datasetPath))
-
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		// Restore the raw file on failure
-		os.Rename(rawPath, datasetPath)
-		return errors.Wrapf(err, "convert raw dataset to HF format: %s", string(output))
+	// Restore the raw file so the task directory is in a consistent state for retries.
+	if renameErr := os.Rename(rawPath, datasetPath); renameErr != nil {
+		s.logger.Warnf("failed to restore raw dataset after conversion error: %v", renameErr)
 	}
 
-	s.logger.Infof("Converted raw dataset to HF format using Docker: %s", string(output))
-	os.Remove(rawPath)
-	return nil
+	// JSONDecodeError almost always means the user's dataset is not valid JSONL
+	// (empty leading line, BOM, wrong format). Returning the raw Python traceback
+	// is unhelpful — give the user something actionable to fix on their side.
+	if strings.Contains(string(output), "JSONDecodeError") {
+		return fmt.Errorf("dataset is not valid JSONL: each line must be a standalone JSON object (no BOM, no blank leading lines, UTF-8 encoded). Verify with: head -c 200 your-file.jsonl | xxd")
+	}
+
+	return errors.Wrapf(err, "convert raw dataset to HF format: %s", string(output))
 }
 
 // tryHuggingFaceFallback attempts to download model from HuggingFace if configured.
