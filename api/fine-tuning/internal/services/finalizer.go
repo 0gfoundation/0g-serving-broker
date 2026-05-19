@@ -304,6 +304,28 @@ func (f *Finalizer) HandleNoTask(ctx context.Context) error {
 }
 
 func (f *Finalizer) HandleExecuteFailure(err error, dbTask *db.Task) (bool, error) {
+	// addDeliverable rejection because the user has an unacknowledged previous
+	// deliverable is a *permanent* failure: the contract will keep rejecting
+	// every retry until the user calls acknowledgeDeliverable on-chain. We
+	// therefore short-circuit the retry loop and mark the task failed so the
+	// queue advances and the operator does not waste 1-3 minutes per attempt
+	// burning gas on a failure that never resolves (May 2026 bug report #4).
+	//
+	// The user-facing remediation hint is already attached to err by
+	// providercontract.decorateAddDeliverableErr and will be visible in the
+	// task log via getLog.
+	if providercontract.IsPreviousDeliverableNotAcknowledged(err) {
+		_ = utils.WriteToLogFile(
+			dbTask.ID,
+			fmt.Sprintf(
+				"Task %v marked permanently failed: previous deliverable not acknowledged. "+
+					"User must call broker.fineTuning.acknowledgeDeliverable(provider, <previous_task_id>) "+
+					"on-chain to release the queue before submitting any new fine-tune task.\n",
+				dbTask.ID,
+			),
+		)
+		return false, f.db.MarkTaskFailed(dbTask)
+	}
 	return f.db.HandleFinalizerFailure(dbTask, f.config.MaxFinalizerRetriesPerTask, f.states.Intermediate, f.states.Initial)
 }
 

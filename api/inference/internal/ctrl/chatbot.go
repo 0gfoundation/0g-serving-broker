@@ -32,8 +32,71 @@ import (
 // live in signing.go — they are shared TEE-signing infrastructure, not
 // chatbot-specific logic.
 
+// MessageContent can hold either a plain string or an array of content parts
+// (OpenAI multimodal/vision format). This enables support for requests like:
+//
+//	{"role": "user", "content": "Hello"}
+//	{"role": "user", "content": [{"type":"text","text":"Describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}
+type MessageContent struct {
+	// Text holds the content when it is a plain string.
+	Text string
+	// Parts holds the content when it is a multimodal array.
+	Parts []ContentPart
+}
+
+// ContentPart represents one element of a multimodal content array.
+type ContentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+// ImageURL holds an image reference in an OpenAI-compatible content part.
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+func (mc MessageContent) MarshalJSON() ([]byte, error) {
+	if len(mc.Parts) > 0 {
+		return json.Marshal(mc.Parts)
+	}
+	return json.Marshal(mc.Text)
+}
+
+func (mc *MessageContent) UnmarshalJSON(data []byte) error {
+	// Try string first (most common case and all LLM responses).
+	if len(data) > 0 && data[0] == '"' {
+		return json.Unmarshal(data, &mc.Text)
+	}
+	// Try array (multimodal input).
+	if len(data) > 0 && data[0] == '[' {
+		if err := json.Unmarshal(data, &mc.Parts); err != nil {
+			return err
+		}
+		// Also populate Text with concatenated text parts for convenience.
+		var sb strings.Builder
+		for _, p := range mc.Parts {
+			if p.Type == "text" {
+				sb.WriteString(p.Text)
+			}
+		}
+		mc.Text = sb.String()
+		return nil
+	}
+	// null or other — treat as empty.
+	return nil
+}
+
+// RequestMessage represents a message in an OpenAI chat completion request.
+// Content supports both plain string and multimodal array formats.
+type RequestMessage struct {
+	Role    string         `json:"role"`
+	Content MessageContent `json:"content"`
+}
+
 type RequestBody struct {
-	Messages []Message `json:"messages"`
+	Messages []RequestMessage `json:"messages"`
 }
 
 type CompletionChunk struct {
@@ -57,14 +120,16 @@ type Usage struct {
 }
 
 type Choice struct {
-	Message Message `json:"message"`
+	Message ResponseMessage `json:"message"`
 	Delta   struct {
 		Content string `json:"content"`
 	} `json:"delta"`
 	FinishReason string `json:"finish_reason"`
 }
 
-type Message struct {
+// ResponseMessage represents a message in an LLM response.
+// Content is always a plain string in responses.
+type ResponseMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
@@ -558,6 +623,15 @@ func isLineEmpty(line []byte) bool {
 	return bytes.Equal(line, []byte(""))
 }
 
+// isSSEComment reports whether the line is an SSE comment / keepalive line.
+// Per the SSE spec (https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream),
+// lines beginning with ":" are comments and must be ignored. Some upstreams
+// (e.g. OpenRouter) emit ": OPENROUTER PROCESSING" while waiting for the
+// underlying provider to produce the first token.
+func isSSEComment(line []byte) bool {
+	return bytes.HasPrefix(line, []byte(":"))
+}
+
 func isStream(body []byte) (bool, error) {
 	var bodyMap map[string]interface{}
 
@@ -672,6 +746,13 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 
 		// Skip empty lines
 		if isLineEmpty(line) {
+			continue
+		}
+
+		// Skip SSE comment / keepalive lines (e.g. OpenRouter's
+		// ": OPENROUTER PROCESSING" while it waits for the underlying
+		// provider). They are not "data:" payloads and would fail JSON parsing.
+		if isSSEComment(line) {
 			continue
 		}
 

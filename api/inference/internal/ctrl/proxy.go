@@ -2,6 +2,8 @@ package ctrl
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -44,8 +47,11 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			}
 		}
 
-		// Enforce configured model only when TargetSeparated is true.
-		if c.Service.TargetSeparated {
+		// Enforce configured model when the service has asked for model
+		// validation/rewriting. TargetSeparated providers opt in for legacy
+		// reasons; UpstreamModel and ModelAliases each imply opt-in because
+		// they only make sense with this path running.
+		if c.Service.TargetSeparated || c.Service.UpstreamModel != "" || len(c.Service.ModelAliases) > 0 {
 			userAddr, _ := ctx.Get("userAddress")
 			userAddrStr, _ := userAddr.(string)
 			modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
@@ -192,7 +198,7 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	c.addNoCacheHeaders(ctx)
 
 	if resp.StatusCode != http.StatusOK {
-		c.handleServiceError(ctx, resp.StatusCode, resp.Body)
+		c.handleServiceError(ctx, resp)
 		return err
 	}
 
@@ -233,12 +239,17 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 }
 
+// ErrChatIDNotFound is returned when a signature lookup misses the cache.
+// The miss is client-caused (stale chatID past the cache TTL, or never-issued ID),
+// so callers should treat it as a 4xx, not a broker-side error.
+var ErrChatIDNotFound = errors.New("Chat id not found or expired, chat_id_not_found")
+
 func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	key := c.chatCacheKey(chatID)
 	c.logger.Debugf("get signature for chat: %v", chatID)
 	val, exist := c.svcCache.Get(key)
 	if !exist {
-		return nil, errors.New("Chat id not found or expired, chat_id_not_found")
+		return nil, ErrChatIDNotFound
 	}
 
 	chatSignature, ok := val.(ChatSignature)
@@ -308,23 +319,35 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 	if context != "" {
 		info += (", " + context)
 	}
-	errors.Response(ctx, errors.Wrap(err, info))
+	wrapped := errors.Wrap(err, info)
+	// USD pricing outage: surface as 503 with PRICING_UNAVAILABLE so SDKs
+	// can distinguish a transient rate-feed failure (retryable) from a
+	// generic bad-request error.  Matches the /v1/service handler.
+	if errors.Is(err, ErrPricingUnavailable) {
+		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": wrapped.Error()})
+		return
+	}
+	errors.Response(ctx, wrapped)
 }
 
-func (c *Ctrl) handleServiceError(ctx *gin.Context, statusCode int, body io.ReadCloser) {
-	respBody, err := io.ReadAll(body)
+func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
+	statusCode := resp.StatusCode
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.logger.Errorf("Failed to read service error response body: %v", err)
 		ctx.Writer.WriteHeader(statusCode)
 		return
 	}
 
-	bodyStr := string(respBody)
+	// Decode the body for inspection/logging based on upstream Content-Encoding.
+	// We must keep respBody raw (still encoded) for re-emission to the client,
+	// because the upstream Content-Encoding header was already forwarded above.
+	decodedBody := decodeErrorBody(respBody, resp.Header.Get("Content-Encoding"))
 
 	// Correct misclassified status codes: litellm sometimes wraps client errors
 	// (e.g., token limit exceeded) as 503 ServiceUnavailableError via MidStreamFallbackError.
 	// These are deterministic client errors that should not be retried.
-	if statusCode >= 500 && isClientError(bodyStr) {
+	if statusCode >= 500 && isClientError(decodedBody) {
 		statusCode = http.StatusBadRequest
 	}
 
@@ -336,13 +359,50 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, statusCode int, body io.Read
 	// Log the actual service error content for debugging
 	// Skip logging for telemetry endpoints to reduce noise
 	if !strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
-		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", bodyStr, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
+		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", decodedBody, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
 	ctx.Writer.WriteHeader(statusCode)
 
 	if _, err := ctx.Writer.Write(respBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
+	}
+}
+
+// decodeErrorBody returns a human-readable form of an upstream error body, decompressing
+// it according to the upstream Content-Encoding. On any failure, it returns the raw string —
+// callers use this only for logging and substring matching, never for re-emission.
+func decodeErrorBody(body []byte, contentEncoding string) string {
+	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
+	case "", "identity":
+		return string(body)
+	case "gzip":
+		gz, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return string(body)
+		}
+		defer gz.Close()
+		decoded, err := io.ReadAll(gz)
+		if err != nil {
+			return string(body)
+		}
+		return string(decoded)
+	case "br":
+		decoded, err := io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
+		if err != nil {
+			return string(body)
+		}
+		return string(decoded)
+	case "deflate":
+		fr := flate.NewReader(bytes.NewReader(body))
+		defer fr.Close()
+		decoded, err := io.ReadAll(fr)
+		if err != nil {
+			return string(body)
+		}
+		return string(decoded)
+	default:
+		return string(body)
 	}
 }
 
@@ -436,7 +496,12 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 //   2. Users getting access to premium models at cheaper prices
 //
 // This function forcibly overwrites any "model" field in the request body with the
-// configured model from c.Service.ModelType.
+// configured model from c.Service.ModelType, or c.Service.UpstreamModel if set.
+//
+// Incoming requests are validated against ModelType (the advertised/on-chain name).
+// The outgoing body uses UpstreamModel when non-empty, otherwise ModelType. This
+// lets a provider advertise a stable public model id while forwarding to an
+// upstream that uses a different id.
 func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, error) {
 	// Return original body if empty (e.g., GET requests)
 	if len(body) == 0 {
@@ -449,9 +514,15 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		return body, nil
 	}
 
+	// The model id sent to the upstream service.
+	upstreamModel := c.Service.ModelType
+	if c.Service.UpstreamModel != "" {
+		upstreamModel = c.Service.UpstreamModel
+	}
+
 	// Debug log to verify configuration
-	c.logger.Debugf("EnforceConfiguredModel: Service.Type=%s, Service.ModelType=%s",
-		c.Service.Type, c.Service.ModelType)
+	c.logger.Debugf("EnforceConfiguredModel: Service.Type=%s, Service.ModelType=%s, upstream=%s",
+		c.Service.Type, c.Service.ModelType, upstreamModel)
 
 	var bodyMap map[string]interface{}
 
@@ -464,9 +535,9 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	// Check if request contains a model field
 	requestModel, hasModel := bodyMap["model"]
 	if !hasModel {
-		// No model specified, add the configured model
-		c.logger.Infof("No model specified in request, adding configured model: %s", c.Service.ModelType)
-		bodyMap["model"] = c.Service.ModelType
+		// No model specified, add the configured upstream model
+		c.logger.Infof("No model specified in request, adding upstream model: %s", upstreamModel)
+		bodyMap["model"] = upstreamModel
 	} else {
 		// Model specified in request, check if it matches configured model
 		requestModelStr, ok := requestModel.(string)
@@ -475,7 +546,7 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 			return nil, errors.New(fmt.Sprintf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType))
 		}
 
-		if requestModelStr != c.Service.ModelType {
+		if requestModelStr != c.Service.ModelType && !isModelAlias(requestModelStr, c.Service.ModelAliases) {
 			// Model mismatch detected - record in rate limiter and REJECT
 			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, configured=%s",
 				userAddr, requestModelStr, c.Service.ModelType)
@@ -494,8 +565,10 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 				requestModelStr, c.Service.ModelType))
 		}
 
-		// Model matches - log for audit
-		c.logger.Debugf("Model validation passed: requested=%s matches configured=%s", requestModelStr, c.Service.ModelType)
+		// Match — rewrite to the upstream id (no-op when UpstreamModel is empty).
+		bodyMap["model"] = upstreamModel
+		c.logger.Debugf("Model validation passed: requested=%s matches configured=%s, forwarding as=%s",
+			requestModelStr, c.Service.ModelType, upstreamModel)
 	}
 
 	// Marshal back to JSON
@@ -505,6 +578,15 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	}
 
 	return modifiedBody, nil
+}
+
+func isModelAlias(name string, aliases []string) bool {
+	for _, a := range aliases {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }
 
 // rewriteMultipartResponseFormat ensures the forwarded multipart body carries
