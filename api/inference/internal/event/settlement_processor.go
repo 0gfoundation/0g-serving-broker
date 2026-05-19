@@ -38,8 +38,9 @@ func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInt
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
 func (s *SettlementProcessor) Start(ctx context.Context) error {
-	// Reset settlement state (settling flags + skip_until) so all pending
-	// requests are eligible for immediate settlement after restart
+	// Clear skip_until throttles so pending requests are eligible for immediate
+	// settlement after restart. The settling flag is intentionally preserved —
+	// see db.ResetSettlementState for the replay-protection rationale.
 	if err := s.ctrl.ResetSettlementState(); err != nil {
 		s.logger.Errorf("Failed to reset settlement state on startup: %s", err.Error())
 	}
