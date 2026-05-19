@@ -1,21 +1,29 @@
 package ctrl
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -656,6 +664,8 @@ func TestProcessAsyncJob_RestoresRequestHeaders(t *testing.T) {
 	var receivedContentType string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedContentType = r.Header.Get("Content-Type")
+		// Boundary string can be rewritten by multipart.Writer — compare the
+		// parsed media type prefix instead of expecting the original string.
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"data":[]}`))
 	}))
@@ -669,18 +679,24 @@ func TestProcessAsyncJob_RestoresRequestHeaders(t *testing.T) {
 	headers, _ := json.Marshal(map[string][]string{
 		"Content-Type": {"multipart/form-data; boundary=abc123"},
 	})
+	// Valid multipart body so the rewrite succeeds — empty or malformed bodies
+	// would now be rejected upstream (see TestProcessAsyncJob_MalformedJSON…).
+	body := []byte(
+		"--abc123\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhi\r\n" +
+			"--abc123--\r\n",
+	)
 
 	ctrl := newTestCtrl(store, provider.URL)
 	ctrl.processAsyncJob(asyncJobParams{
 		JobID:          "job-headers",
 		ServiceType:    "text-to-image",
 		RequestHeaders: headers,
-		RequestBody:    []byte(`data`),
+		RequestBody:    body,
 		IsWhitelisted:  true,
 	})
 
-	if receivedContentType != "multipart/form-data; boundary=abc123" {
-		t.Errorf("expected multipart content type, got %s", receivedContentType)
+	if !strings.HasPrefix(receivedContentType, "multipart/form-data;") {
+		t.Errorf("expected multipart content type, got %q", receivedContentType)
 	}
 }
 
@@ -1201,6 +1217,536 @@ func TestProcessAsyncJob_NonWhitelisted_BillingDBFails(t *testing.T) {
 	}
 	if !strings.Contains(job.ErrorMessage, "failed to store result") {
 		t.Errorf("expected 'failed to store result' error, got: %s", job.ErrorMessage)
+	}
+}
+
+// ==========================================================================
+// processAsyncJob — response_format="url" rewrite
+// ==========================================================================
+
+// TestProcessAsyncJob_URLFormat_JSON covers the async equivalent of the sync
+// text-to-image URL flow: the upstream request is forced to b64_json, the
+// provider's b64 response is stored locally, and the stored async result
+// carries broker-served URLs keyed off jobID.
+func TestProcessAsyncJob_URLFormat_JSON(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
+
+	var providerSawFormat string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]interface{}
+		_ = json.Unmarshal(body, &req)
+		providerSawFormat, _ = req["response_format"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"created":1,"data":[{"b64_json":"` + b64 + `"},{"b64_json":"` + b64 + `"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "url-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "https://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "url-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"cat","n":2,"response_format":"url"}`),
+		IsWhitelisted:  true,
+	})
+
+	if providerSawFormat != "b64_json" {
+		t.Errorf("provider response_format = %q, want b64_json (broker must rewrite url→b64 upstream)", providerSawFormat)
+	}
+
+	job, _ := store.GetAsyncJob("url-job")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(job.ResponseBody, &resp); err != nil {
+		t.Fatalf("unmarshal stored response: %v", err)
+	}
+	data, _ := resp["data"].([]interface{})
+	if len(data) != 2 {
+		t.Fatalf("expected 2 data entries in stored response, got %d", len(data))
+	}
+	for i, raw := range data {
+		item := raw.(map[string]interface{})
+		if _, has := item["b64_json"]; has {
+			t.Errorf("data[%d].b64_json should be absent when url format requested", i)
+		}
+		gotURL, _ := item["url"].(string)
+		want := "https://broker.test/v1/proxy/images/url-job/" + strconv.Itoa(i)
+		if gotURL != want {
+			t.Errorf("data[%d].url = %q, want %q", i, gotURL, want)
+		}
+
+		img, err := ctrl.GetImage("url-job", i)
+		if err != nil {
+			t.Errorf("GetImage(url-job, %d): %v", i, err)
+			continue
+		}
+		if !bytes.Equal(img, pngBytes) {
+			t.Errorf("stored image %d does not match provider bytes", i)
+		}
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_Multipart pins the multipart image-editing
+// variant: the stored request body has a response_format form field set to
+// "url", the worker must rewrite it to b64_json before dispatching, and the
+// stored response must carry broker URLs.
+func TestProcessAsyncJob_URLFormat_Multipart(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01}
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
+
+	var providerSawFormat string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(32 << 20)
+		providerSawFormat = r.FormValue("response_format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"created":1,"data":[{"b64_json":"` + b64 + `"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "url-edit", Status: model.AsyncJobStatusPending, ServiceType: "image-editing",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "https://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	boundary := "----AsyncUrlBoundary"
+	body := "--" + boundary + "\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it red\r\n" +
+		"--" + boundary + "\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n1\r\n" +
+		"--" + boundary + "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nurl\r\n" +
+		"--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\nfake-png\r\n" +
+		"--" + boundary + "--"
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "url-edit",
+		ServiceType:    "image-editing",
+		RequestHeaders: headers,
+		RequestBody:    []byte(body),
+		IsWhitelisted:  true,
+	})
+
+	if providerSawFormat != "b64_json" {
+		t.Errorf("provider response_format = %q, want b64_json", providerSawFormat)
+	}
+
+	job, _ := store.GetAsyncJob("url-edit")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(job.ResponseBody, &resp); err != nil {
+		t.Fatalf("unmarshal stored response: %v", err)
+	}
+	item := resp["data"].([]interface{})[0].(map[string]interface{})
+	gotURL, _ := item["url"].(string)
+	want := "https://broker.test/v1/proxy/images/url-edit/0"
+	if gotURL != want {
+		t.Errorf("url = %q, want %q", gotURL, want)
+	}
+	if _, has := item["b64_json"]; has {
+		t.Error("b64_json should be absent when url format requested")
+	}
+	img, err := ctrl.GetImage("url-edit", 0)
+	if err != nil || !bytes.Equal(img, pngBytes) {
+		t.Errorf("stored image mismatch: err=%v", err)
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_PassThrough ensures b64_json requests are not
+// rewritten — the stored response still carries b64_json and no image-store
+// entries are created.
+func TestProcessAsyncJob_URLFormat_PassThrough(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("px"))
+
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"b64_json":"` + b64 + `"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "b64-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "https://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "b64-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"cat","response_format":"b64_json"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("b64-job")
+	var resp map[string]interface{}
+	if err := json.Unmarshal(job.ResponseBody, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	item := resp["data"].([]interface{})[0].(map[string]interface{})
+	if gotB64, _ := item["b64_json"].(string); gotB64 != b64 {
+		t.Errorf("b64_json lost in pass-through: got len=%d, want len=%d", len(gotB64), len(b64))
+	}
+	if _, has := item["url"]; has {
+		t.Error("url should not be injected when b64_json requested")
+	}
+	if _, err := ctrl.GetImage("b64-job", 0); err == nil {
+		t.Error("imageStore should be empty when url rewrite was not requested")
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_SignatureBindsImageBytes is the regression
+// guard for the async TEE-signing bug: when clientResponseFormat=url, the
+// broker rewrites respBody to the URL envelope before signing. An earlier
+// version of processAsyncJob passed the rewritten envelope to signChatWithKey,
+// so the signature covered URL strings — images at /v1/proxy/images/{jobID}/{i}
+// were bound by nothing. The fix routes image responses through
+// signImageResponse(reqBody, images, chatKey), producing a signature text of
+// sha256(reqBody):sha256(img0),sha256(img1),... This test asserts the cached
+// signature matches that form — not the URL-envelope form — and would fail
+// against the old code.
+func TestProcessAsyncJob_URLFormat_SignatureBindsImageBytes(t *testing.T) {
+	img0 := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF}
+	img1 := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xCA, 0xFE, 0xBA, 0xBE}
+
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q},{"b64_json":%q}]}`,
+			base64.StdEncoding.EncodeToString(img0),
+			base64.StdEncoding.EncodeToString(img1))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "sig-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	// Enable TEE signing (newTestCtrl defaults TargetSeparated=true which skips it).
+	ctrl.Service.TargetSeparated = false
+	ctrl.Service.ServingURL = "https://broker.test"
+	priv, _ := crypto.GenerateKey()
+	ctrl.teeService = &teeutil.TeeService{
+		ProviderSigner: priv,
+		Address:        crypto.PubkeyToAddress(priv.PublicKey),
+	}
+	if ctrl.svcCache == nil {
+		ctrl.svcCache = cache.New(5*time.Minute, 10*time.Minute)
+	}
+	ctrl.chatCacheExpiration = 5 * time.Minute
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	reqBody := []byte(`{"prompt":"cat","n":2,"response_format":"url"}`)
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "sig-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    reqBody,
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("sig-job")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+
+	// Recover chatKey from stored ZG-Res-Key header.
+	var respHeaders map[string][]string
+	if err := json.Unmarshal(job.ResponseHeaders, &respHeaders); err != nil {
+		t.Fatalf("decode headers: %v", err)
+	}
+	keys := respHeaders["ZG-Res-Key"]
+	if len(keys) == 0 {
+		t.Fatal("expected ZG-Res-Key header to be stored after signing")
+	}
+	chatKey := keys[0]
+
+	sum := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	wantText := sum(reqBody) + ":" + sum(img0) + "," + sum(img1)
+
+	cached, ok := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
+	if !ok {
+		t.Fatal("no signature cached under chatKey — signing step did not run")
+	}
+	sig, ok := cached.(ChatSignature)
+	if !ok {
+		t.Fatalf("cached value is not ChatSignature: %T", cached)
+	}
+	if sig.Text != wantText {
+		t.Errorf("\nsignature text binds the WRONG content.\n got: %s\nwant: %s\n(old buggy path signed the URL envelope, not image bytes)", sig.Text, wantText)
+	}
+	// Extra guard: must not be sha256(req):sha256(rewrittenURLJSON).
+	if strings.Contains(sig.Text, "broker.test") {
+		t.Errorf("signature text contains URL host; must cover image bytes, got: %s", sig.Text)
+	}
+
+	// Full round-trip: recover the signer address from the signature and compare
+	// to the broker's TEE signing key. This is what external verifiers actually
+	// run, and it's the only check that catches a malformed signature byte.
+	recovered := recoverSignerAddress(t, sig)
+	if recovered != ctrl.teeService.Address {
+		t.Errorf("recovered signer %s != broker TEE address %s", recovered.Hex(), ctrl.teeService.Address.Hex())
+	}
+}
+
+// TestProcessAsyncJob_Centralized_SignsRoutingProof pins the centralized
+// trust-model dispatch: for a centralized provider (where broker can't vouch
+// for content), the async worker must sign a routing proof — binding the TLS
+// cert fingerprint + provider identity + req/resp hashes — instead of signing
+// image bytes as if the broker were the source of truth. Regressing this would
+// produce a TEE-signed envelope that LOOKS valid to naive verifiers but omits
+// the only attestation that actually matters for a centralized path.
+func TestProcessAsyncJob_Centralized_SignsRoutingProof(t *testing.T) {
+	// HTTPS provider so resp.TLS is populated — routing proof needs the cert.
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"b64_json":"aW1n"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "centralized-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ProviderType = "centralized"
+	ctrl.Service.ProviderIdentity = "openai"
+	ctrl.Service.TargetSeparated = true // canonical centralized config
+	ctrl.httpClient = provider.Client() // trust the self-signed test cert
+	priv, _ := crypto.GenerateKey()
+	ctrl.teeService = &teeutil.TeeService{
+		ProviderSigner: priv,
+		Address:        crypto.PubkeyToAddress(priv.PublicKey),
+	}
+	if ctrl.svcCache == nil {
+		ctrl.svcCache = cache.New(5*time.Minute, 10*time.Minute)
+	}
+	ctrl.chatCacheExpiration = 5 * time.Minute
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "centralized-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"x"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("centralized-job")
+	if job.Status != model.AsyncJobStatusCompleted {
+		t.Fatalf("expected completed, got %s (%s)", job.Status, job.ErrorMessage)
+	}
+
+	var respHeaders map[string][]string
+	if err := json.Unmarshal(job.ResponseHeaders, &respHeaders); err != nil {
+		t.Fatalf("decode response headers: %v", err)
+	}
+	keys := respHeaders["ZG-Res-Key"]
+	if len(keys) == 0 {
+		t.Fatal("ZG-Res-Key missing — routing proof did not run")
+	}
+
+	cached, ok := ctrl.svcCache.Get(ctrl.chatCacheKey(keys[0]))
+	if !ok {
+		t.Fatal("no ChatSignature cached under chatKey")
+	}
+	sig := cached.(ChatSignature)
+	if sig.TLSCertFingerprint == "" {
+		t.Error("routing proof must bind the TLS cert fingerprint")
+	}
+	if sig.ProviderIdentity != "openai" {
+		t.Errorf("ProviderIdentity = %q, want openai", sig.ProviderIdentity)
+	}
+	if sig.ProviderType != "centralized" {
+		t.Errorf("ProviderType = %q, want centralized", sig.ProviderType)
+	}
+	// Guard against regression to signImageResponse / signChatWithKey, neither of
+	// which emits the 5-segment routing-proof text (req:resp:type:identity:fp).
+	if parts := strings.Split(sig.Text, ":"); len(parts) != 5 {
+		t.Errorf("expected 5-part routing-proof text, got %d parts: %s", len(parts), sig.Text)
+	}
+}
+
+// TestProcessAsyncJob_MalformedJSON_JobFailedBeforeForwarding pins the async
+// rewrite-failure leak fix: when forceB64ResponseFormat errors (e.g. malformed
+// JSON), the OLD code silently forwarded the un-normalised body and the
+// provider's URL-form response flowed back to the client. Must mark the job
+// failed without ever hitting the provider.
+func TestProcessAsyncJob_MalformedJSON_JobFailedBeforeForwarding(t *testing.T) {
+	providerHit := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerHit = true
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"url":"http://10.0.0.9/leak.png"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "malformed-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "http://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	// Malformed JSON body — forceB64ResponseFormat returns err.
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "malformed-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":`),
+		IsWhitelisted:  true,
+	})
+
+	if providerHit {
+		t.Error("provider must not be called when request-body normalisation fails (old code forwarded it silently)")
+	}
+	job, _ := store.GetAsyncJob("malformed-job")
+	if job.Status != model.AsyncJobStatusFailed {
+		t.Errorf("expected failed status on normalisation error, got %s", job.Status)
+	}
+	if !strings.Contains(job.ErrorMessage, "normalise image request body") {
+		t.Errorf("error message should identify the failure stage, got: %s", job.ErrorMessage)
+	}
+	// Guard against any leaked LAN bytes in the stored record.
+	if bytes.Contains(job.ResponseBody, []byte("10.0.0.9")) {
+		t.Errorf("no bytes from provider should exist: %s", job.ResponseBody)
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_NilImageStore_JobFailed pins the fail-closed
+// behaviour when the client asks for URL format but imageStore is nil (e.g.
+// the broker couldn't create its cache dir at startup). Silently returning
+// b64 would violate the client's explicit contract with no per-request signal;
+// the job is marked failed instead so the caller sees what happened.
+func TestProcessAsyncJob_URLFormat_NilImageStore_JobFailed(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x4E, 0x47})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, b64)
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "nil-store-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "http://broker.test"
+	// Deliberately skip SetupImageStoreForTest — imageStore stays nil.
+	if ctrl.imageStore != nil {
+		t.Fatal("imageStore should be nil for this test")
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "nil-store-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"x","response_format":"url"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("nil-store-job")
+	if job.Status != model.AsyncJobStatusFailed {
+		t.Fatalf("expected failed, got %s (body=%q)", job.Status, job.ResponseBody)
+	}
+	if !strings.Contains(job.ErrorMessage, "image store") {
+		t.Errorf("error message should mention the disabled store; got: %s", job.ErrorMessage)
+	}
+}
+
+// TestProcessAsyncJob_URLFormat_ProviderReturnsURLForm_JobFailed pins the
+// response-side fallback-leak guard on the async path. A non-compliant provider
+// ignores response_format=b64_json and returns LAN-private URLs; the broker
+// must mark the job failed rather than storing/forwarding that body. Absence
+// of this test would let the earlier pass-through behaviour regress silently:
+// job completes, ResponseBody contains "http://10.0.0.7/leaked.png", client
+// gets a URL it cannot reach (and the broker has signed it).
+func TestProcessAsyncJob_URLFormat_ProviderReturnsURLForm_JobFailed(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[{"url":"http://10.0.0.7/leaked.png"}]}`))
+	}))
+	defer provider.Close()
+
+	store := newMockDB()
+	store.CreateAsyncJob(model.AsyncJob{
+		JobID: "leak-job", Status: model.AsyncJobStatusPending, ServiceType: "text-to-image",
+	})
+
+	ctrl := newTestCtrl(store, provider.URL)
+	ctrl.Service.ServingURL = "http://broker.test"
+	if err := ctrl.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("setup image store: %v", err)
+	}
+
+	headers, _ := json.Marshal(map[string][]string{"Content-Type": {"application/json"}})
+	ctrl.processAsyncJob(asyncJobParams{
+		JobID:          "leak-job",
+		ServiceType:    "text-to-image",
+		RequestHeaders: headers,
+		RequestBody:    []byte(`{"prompt":"x","response_format":"url"}`),
+		IsWhitelisted:  true,
+	})
+
+	job, _ := store.GetAsyncJob("leak-job")
+	if job.Status != model.AsyncJobStatusFailed {
+		t.Fatalf("expected failed status when provider returns URL form under response_format=url; got %s (body=%q)", job.Status, job.ResponseBody)
+	}
+	// The LAN URL must not survive anywhere the client could read it.
+	if bytes.Contains(job.ResponseBody, []byte("10.0.0.7")) || bytes.Contains(job.ResponseBody, []byte("leaked.png")) {
+		t.Errorf("provider LAN URL leaked into stored ResponseBody: %s", job.ResponseBody)
+	}
+	if strings.Contains(job.ErrorMessage, "10.0.0.7") || strings.Contains(job.ErrorMessage, "leaked.png") {
+		t.Errorf("provider LAN URL leaked into ErrorMessage: %s", job.ErrorMessage)
 	}
 }
 

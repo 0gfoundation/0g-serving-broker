@@ -1,9 +1,15 @@
 package ctrl
 
 import (
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -11,9 +17,33 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
+
+// maxB64ImageBytes caps the decoded size of a single image returned by the
+// provider. Without this, a compromised or buggy provider could ship a single
+// hundred-MB b64_json blob that the broker would buffer in memory (during
+// io.ReadAll on the upstream body), decode in memory again, and then write to
+// disk — amplifying a single request into a multi-hundred-MB allocation per
+// image. 50 MiB is well above any realistic AI image output (DALL-E 3 PNGs
+// top out around 4 MB) and still small enough that even N=10 (the OpenAI
+// upper bound for "n") stays under 500 MiB worst-case.
+const maxB64ImageBytes = 50 * 1024 * 1024
+
+// imageResponseData mirrors the OpenAI image object inside data[].
+type imageResponseData struct {
+	B64JSON       string `json:"b64_json,omitempty"`
+	URL           string `json:"url,omitempty"`
+	RevisedPrompt string `json:"revised_prompt,omitempty"`
+}
+
+// imageResponseEnvelope is the top-level OpenAI image response shape.
+type imageResponseEnvelope struct {
+	Created int64               `json:"created"`
+	Data    []imageResponseData `json:"data"`
+}
 
 // GetTextToImageInputFeeAndImageNum gets input fee and imageNum for text-to-image generation
 func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64, error) {
@@ -36,34 +66,120 @@ func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64,
 	return expectedInputFee, imageNum, nil
 }
 
-// handleTextToImageResponse handles image generation response
+// handleTextToImageResponse handles image generation response.
+//
+// Flow:
+//  1. Read the provider response (always b64_json — enforced in PrepareHTTPRequest).
+//  2. Decode each image and sign sha256(originalClientReq):sha256(img0),...
+//  3. If the original client requested URL format, persist images to the local
+//     image store and rewrite the response with broker-served URLs before sending
+//     to the client.  Otherwise pass the b64 response through unchanged.
 func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
 	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 
-	// Read and return image data
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read image response body")
 		return err
 	}
 
+	// Resolve the original client request body (pre-b64 rewrite) for signing.
+	sigReqBody := reqBody
+	if v, ok := ctx.Get("clientReqBody"); ok {
+		if orig, ok := v.([]byte); ok {
+			sigReqBody = orig
+		}
+	}
+
+	// Extract decoded image bytes; fall back to signing the full response body
+	// if the provider did not return b64_json (e.g. multipart provider quirks).
+	// Cap at the request's declared output count so a compromised provider
+	// cannot OOM the broker by returning a giant data array.
+	images, extractErr := extractB64Images(body, int(reqModel.OutputCount))
+
+	// Determine what the client originally asked for.
+	originalFormat, _ := ctx.Get("clientResponseFormat")
+	wantURL := originalFormat == "url"
+
+	// If the client asked for url but the provider returned something we can't
+	// decode (non-b64 envelope, empty array), refuse the response rather than
+	// passing provider bytes through — they may contain LAN-private URLs.
+	if wantURL && (extractErr != nil || len(images) == 0) {
+		ctx.Set("ignoreError", true)
+		err := fmt.Errorf("provider returned non-b64 image response, refusing to forward (may contain LAN-private URLs): %w", extractErr)
+		c.handleBrokerError(ctx, err, "image response for response_format=url")
+		return err
+	}
+
+	// If the client asked for url but we have no image store, the URL contract
+	// can't be honoured. Silently serving b64 instead would violate the
+	// explicitly-requested format without any per-request signal — fail-closed
+	// so operators correlate with the "image store disabled" startup warning.
+	if wantURL && c.imageStore == nil {
+		ctx.Set("ignoreError", true)
+		err := fmt.Errorf("response_format=url requested but image store is disabled (check startup logs for newImageStore error)")
+		c.logger.Errorf("text-to-image URL request while imageStore is nil")
+		c.handleBrokerError(ctx, err, "image response for response_format=url")
+		return err
+	}
+
+	// Build the body to send to the client. store + rewrite; any failure here
+	// downgrades to b64 (safe — body is confirmed b64 above, and the client
+	// gets a legitimate response just in the wrong format). Log at warn so
+	// the degradation is visible in operator logs.
+	clientBody := body
+	if wantURL {
+		if storeErr := c.imageStore.store(chatKey, images); storeErr != nil {
+			c.logger.Warnf("Failed to store images for URL rewrite, sending b64: %v", storeErr)
+		} else {
+			rewritten, buildErr := buildURLResponse(body, chatKey, len(images), c.Service.ServingURL)
+			if buildErr != nil {
+				c.logger.Warnf("Failed to build URL response, sending b64: %v", buildErr)
+			} else {
+				clientBody = rewritten
+			}
+		}
+	}
+
 	// Attempt to return image to client. If client disconnected, continue to billing.
-	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during text-to-image response, billing for completed response (%d bytes)", len(body))
 		} else {
 			c.handleBrokerError(ctx, writeErr, "write image response")
-			// Still proceed to billing below
 		}
 	}
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing text-to-image response")
-		_ = c.signChatWithKey(reqBody, body, chatKey)
+	// TEE signing is a function of the trust model, not the response shape:
+	//   - Centralized: broker cannot attest to OpenAI's content; it can only
+	//     attest to the TLS path it took. Use routing proof (binds TLS cert
+	//     fingerprint + provider identity + req/resp hashes).
+	//   - Decentralized, LLM in broker TEE network (!TargetSeparated): broker
+	//     CAN vouch for content, so sign the decoded image bytes directly.
+	//   - Decentralized, TargetSeparated: the remote TEE signs its own output;
+	//     the broker does not duplicate.
+	switch {
+	case c.Service.IsCentralized():
+		var tlsState *tls.ConnectionState
+		if v, exists := ctx.Get("tlsState"); exists {
+			tlsState, _ = v.(*tls.ConnectionState)
+		}
+		c.logger.Debug("Centralized provider, signing text-to-image routing proof")
+		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, tlsState); err != nil {
+			c.logger.Errorf("routing proof not created: %v", err)
+		}
+	case !c.Service.TargetSeparated:
+		c.logger.Debug("LLM server in the same network, signing text-to-image content")
+		if extractErr == nil && len(images) > 0 {
+			_ = c.signImageResponse(sigReqBody, images, chatKey)
+		} else {
+			c.logger.Warnf("No b64 images extracted, falling back to full-body signature: %v", extractErr)
+			_ = c.signChatWithKey(sigReqBody, body, chatKey)
+		}
 	}
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
@@ -95,4 +211,97 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		}
 	}
 	return nil
+}
+
+// extractB64Images parses an OpenAI-style image response envelope and decodes
+// each data[i].b64_json into raw bytes.
+//
+// maxImages is the cap on envelope length (typically the request's "n" field,
+// which billing has already been committed against). Reject when the provider
+// returns more entries than requested — always a bug, and decoding everything
+// blindly lets a compromised provider OOM the broker via a giant data array
+// of tiny b64 strings. Pass <= 0 to disable the cap (tests only; production
+// callers should always supply one).
+func extractB64Images(body []byte, maxImages int) ([][]byte, error) {
+	var envelope imageResponseEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("unmarshal image response: %w", err)
+	}
+	if len(envelope.Data) == 0 {
+		return nil, fmt.Errorf("image response has empty data array")
+	}
+	if maxImages > 0 && len(envelope.Data) > maxImages {
+		return nil, fmt.Errorf("image response has %d entries, exceeds declared output count %d", len(envelope.Data), maxImages)
+	}
+	images := make([][]byte, 0, len(envelope.Data))
+	// base64 expands raw bytes by 4/3 (plus padding); reject the encoded blob
+	// before allocating the decode buffer when it would clearly exceed the
+	// per-image cap. Note: by this point json.Unmarshal has already pulled
+	// the full b64 string into memory, so this check does NOT bound peak
+	// ingest — it bounds the additional decode allocation (~maxB64ImageBytes
+	// per image) plus the downstream os.WriteFile, which is where the real
+	// amplification lives. Capping the upstream body itself would need a
+	// MaxBytesReader at the proxy ingress; out of scope here.
+	maxEncoded := base64.StdEncoding.EncodedLen(maxB64ImageBytes)
+	for i, d := range envelope.Data {
+		if d.B64JSON == "" {
+			return nil, fmt.Errorf("data[%d] missing b64_json field", i)
+		}
+		if len(d.B64JSON) > maxEncoded {
+			return nil, fmt.Errorf("data[%d].b64_json encoded size %d exceeds per-image cap %d", i, len(d.B64JSON), maxEncoded)
+		}
+		img, err := base64.StdEncoding.DecodeString(d.B64JSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode data[%d].b64_json: %w", i, err)
+		}
+		if len(img) > maxB64ImageBytes {
+			return nil, fmt.Errorf("data[%d] decoded size %d exceeds per-image cap %d", i, len(img), maxB64ImageBytes)
+		}
+		images = append(images, img)
+	}
+	return images, nil
+}
+
+// buildURLResponse replaces each data[i].b64_json with a broker-served URL while
+// preserving all other fields (e.g. revised_prompt, created).
+//
+// The URL base is derived from the operator-configured service.servingUrl so it
+// matches the public URL the provider registered on-chain. Returns an error if
+// servingUrl is missing or malformed; the caller falls back to b64 on error.
+func buildURLResponse(body []byte, chatKey string, count int, servingURL string) ([]byte, error) {
+	var envelope imageResponseEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("unmarshal image response: %w", err)
+	}
+
+	if servingURL == "" {
+		return nil, fmt.Errorf("service.servingUrl is not configured")
+	}
+	u, err := url.Parse(servingURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("service.servingUrl %q is not a valid absolute URL", servingURL)
+	}
+	base := strings.TrimRight(servingURL, "/") + constant.ServicePrefix + "/images/" + chatKey + "/"
+
+	// Callers pass count == len(extractB64Images(body)). If that diverges from
+	// the envelope length (provider envelope and our decoded image list came
+	// from the same body, so this should be impossible), refuse rather than
+	// emit a mixed b64/url response that neither the client nor the signature
+	// machinery would handle sensibly.
+	if len(envelope.Data) != count {
+		return nil, fmt.Errorf("envelope has %d data entries but %d images were stored", len(envelope.Data), count)
+	}
+
+	for i := range envelope.Data {
+		envelope.Data[i] = imageResponseData{
+			URL:           base + strconv.Itoa(i),
+			RevisedPrompt: envelope.Data[i].RevisedPrompt,
+		}
+	}
+
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("marshal URL response: %w", err)
+	}
+	return out, nil
 }

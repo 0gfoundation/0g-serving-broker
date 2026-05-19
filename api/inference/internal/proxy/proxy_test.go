@@ -11,10 +11,28 @@ import (
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
+
+// newTestProxy builds the minimal Proxy needed for handleImageServeRoute tests.
+func newTestProxy(t *testing.T, c *ctrl.Ctrl) *Proxy {
+	t.Helper()
+	return &Proxy{ctrl: c, logger: noopLogger{}}
+}
+
+// newGinCtxForPath builds a gin.Context whose RequestURI matches path under ServicePrefix.
+func newGinCtxForPath(t *testing.T, path string) (*gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+path, nil)
+	// Populate the wildcard "any" param the same way gin does in production.
+	ctx.Params = gin.Params{{Key: "any", Value: path}}
+	return ctx, w
+}
 
 // ==========================================================================
 // Video route registration in TargetRoute
@@ -228,5 +246,306 @@ func TestCentralizedAttestationGuard_Logic(t *testing.T) {
 				t.Errorf("expected shouldBlock=%v, got %v", tt.shouldBlock, blocked)
 			}
 		})
+	}
+}
+
+// ==========================================================================
+// handleImageServeRoute
+// ==========================================================================
+
+func TestHandleImageServeRoute_NoMatch_ShortPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, _ := newGinCtxForPath(t, "/images/only-one-segment")
+	handled := p.handleImageServeRoute(ctx, "/images/only-one-segment")
+	if handled {
+		t.Error("path with no index segment should not be handled")
+	}
+}
+
+// TestHandleImageServeRoute_ShapeFailDoesNotConsumeRateLimit pins the
+// ordering fix: malformed paths under /images/ (e.g. missing the index
+// segment) must NOT consume a rate-limit token. Otherwise a caller looping
+// on GET /images/xyz could drain the per-IP bucket without ever reaching the
+// store, then fall through to the next matcher at zero cost to themselves.
+func TestHandleImageServeRoute_ShapeFailDoesNotConsumeRateLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	// Seed one valid image so the well-formed probe at the end succeeds.
+	if err := c.StoreTestImage("ordered", [][]byte{[]byte{0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 1}}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	// Budget of 1 per "minute" at 60 RPM, burst 1 — simulates a drained bucket
+	// if the shape-fail path consumed a token. Using PerUserRateLimiter so we
+	// depend on the production primitive, not a test fake.
+	p.imageServeLimiter = middleware.NewPerUserRateLimiter(60, 1)
+
+	// 3 shape-fail requests with the same RemoteAddr. Each SHOULD return false
+	// (unhandled) without touching the limiter.
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+"/images/only-one-segment", nil)
+		ctx.Request.RemoteAddr = "10.0.0.1:55555"
+		ctx.Params = gin.Params{{Key: "any", Value: "/images/only-one-segment"}}
+
+		if handled := p.handleImageServeRoute(ctx, "/images/only-one-segment"); handled {
+			t.Fatalf("iter %d: shape-fail should return false (unhandled), not consume a token", i)
+		}
+	}
+
+	// A well-formed request from the same IP should still have its burst.
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+"/images/ordered/0", nil)
+	ctx.Request.RemoteAddr = "10.0.0.1:55555"
+	ctx.Params = gin.Params{{Key: "any", Value: "/images/ordered/0"}}
+
+	if !p.handleImageServeRoute(ctx, "/images/ordered/0") {
+		t.Fatal("well-formed request after shape-fails should be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("well-formed after shape-fails: status = %d, want 200 (burst exhausted by shape-fails?)", w.Code)
+	}
+}
+
+func TestHandleImageServeRoute_NoMatch_NonImagePath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, _ := newGinCtxForPath(t, "/signature/some-key")
+	handled := p.handleImageServeRoute(ctx, "/signature/some-key")
+	if handled {
+		t.Error("non-image path should not be handled")
+	}
+}
+
+// TestHandleImageServeRoute_RejectsNonGET pins the method guard. Before the
+// fix, any HTTP method (POST, PUT, DELETE, OPTIONS) at the same path would have
+// been silently served or silently handled as "not matched" depending on path
+// shape. Now anything other than GET/HEAD must return 405 so a future route
+// collision doesn't mask a real handler.
+func TestHandleImageServeRoute_RejectsNonGET(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "method-test"
+	if err := c.StoreTestImage(chatKey, [][]byte{[]byte("img")}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+
+	for _, method := range []string{"POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
+		t.Run(method, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest(method, constant.ServicePrefix+path, nil)
+			ctx.Params = gin.Params{{Key: "any", Value: path}}
+
+			if !p.handleImageServeRoute(ctx, path) {
+				t.Fatal("expected route to be handled (handler must reject the method, not return false)")
+			}
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("status = %d, want 405", w.Code)
+			}
+			if allow := w.Header().Get("Allow"); allow == "" {
+				t.Error("expected Allow header on 405 response")
+			}
+		})
+	}
+
+	t.Run("HEAD-allowed", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest("HEAD", constant.ServicePrefix+path, nil)
+		ctx.Params = gin.Params{{Key: "any", Value: path}}
+
+		if !p.handleImageServeRoute(ctx, path) {
+			t.Fatal("HEAD should be handled")
+		}
+		if w.Code != http.StatusOK {
+			t.Errorf("HEAD status = %d, want 200", w.Code)
+		}
+	})
+}
+
+func TestHandleImageServeRoute_InvalidIndex_Returns400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, w := newGinCtxForPath(t, "/images/some-chat-key/notanumber")
+	handled := p.handleImageServeRoute(ctx, "/images/some-chat-key/notanumber")
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleImageServeRoute_NotFound_Returns404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	p := newTestProxy(t, &ctrl.Ctrl{})
+
+	ctx, w := newGinCtxForPath(t, "/images/unknown-uuid/0")
+	handled := p.handleImageServeRoute(ctx, "/images/unknown-uuid/0")
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleImageServeRoute_ServesImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+
+	chatKey := "serve-test-uuid"
+	// PNG-like bytes so content-type detection works.
+	pngImg := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}
+	if err := c.StoreTestImage(chatKey, [][]byte{pngImg}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+	ctx, w := newGinCtxForPath(t, path)
+
+	handled := p.handleImageServeRoute(ctx, path)
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		t.Errorf("content-type = %q, want image/*", ct)
+	}
+	if w.Body.Bytes() == nil || len(w.Body.Bytes()) == 0 {
+		t.Error("expected non-empty image body")
+	}
+}
+
+func TestHandleImageServeRoute_IndexOutOfRange_Returns404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "range-test"
+	if err := c.StoreTestImage(chatKey, [][]byte{[]byte("img")}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/5" // only index 0 exists
+	ctx, w := newGinCtxForPath(t, path)
+
+	handled := p.handleImageServeRoute(ctx, path)
+	if !handled {
+		t.Fatal("expected route to be handled")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+// TestHandleImageServeRoute_SetsCacheControl pins the cache header. The
+// {chatKey,index} → bytes mapping is immutable for the entry's lifetime; the
+// header lets browsers skip revalidation on reload, but it MUST be "private"
+// because the UUID is the access token and a shared cache would leak across
+// users.
+func TestHandleImageServeRoute_SetsCacheControl(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "cache-test"
+	pngImg := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}
+	if err := c.StoreTestImage(chatKey, [][]byte{pngImg}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+	ctx, w := newGinCtxForPath(t, path)
+
+	if !p.handleImageServeRoute(ctx, path) {
+		t.Fatal("expected route to be handled")
+	}
+	cc := w.Header().Get("Cache-Control")
+	if cc == "" {
+		t.Fatal("Cache-Control header missing")
+	}
+	if !strings.Contains(cc, "private") {
+		t.Errorf("Cache-Control = %q, want it to include 'private'", cc)
+	}
+	if !strings.Contains(cc, "immutable") {
+		t.Errorf("Cache-Control = %q, want it to include 'immutable'", cc)
+	}
+	if !strings.Contains(cc, "max-age=") {
+		t.Errorf("Cache-Control = %q, want a max-age directive", cc)
+	}
+}
+
+// TestHandleImageServeRoute_HEADReturnsNoBody pins the HEAD short-circuit:
+// Content-Type/Content-Length must reflect the GET response so byte-range
+// clients can size their request, but no body bytes should be written.
+func TestHandleImageServeRoute_HEADReturnsNoBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "head-test"
+	pngImg := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}
+	if err := c.StoreTestImage(chatKey, [][]byte{pngImg}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("HEAD", constant.ServicePrefix+path, nil)
+	ctx.Params = gin.Params{{Key: "any", Value: path}}
+
+	if !p.handleImageServeRoute(ctx, path) {
+		t.Fatal("expected HEAD to be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("HEAD status = %d, want 200", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("HEAD response body length = %d, want 0", w.Body.Len())
+	}
+	if cl := w.Header().Get("Content-Length"); cl == "" {
+		t.Error("expected Content-Length header on HEAD response")
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
+		t.Errorf("Content-Type = %q, want image/*", ct)
 	}
 }

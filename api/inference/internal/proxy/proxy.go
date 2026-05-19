@@ -3,7 +3,9 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,12 @@ type Proxy struct {
 	perUserRateLimiter        *middleware.PerUserRateLimiter
 	perUserTPMLimiter         *middleware.PerUserTPMLimiter
 	perUserIPMLimiter         *middleware.PerUserTPMLimiter
+	// imageServeLimiter throttles the unauthenticated /v1/proxy/images/{key}/{i}
+	// endpoint per-client-IP. The endpoint bypasses session auth (UUID-as-token
+	// model), so a bandwidth-amplification bound is the only defence against a
+	// caller hammering a single chatKey. Reuses PerUserRateLimiter with IP as
+	// the key — see handleImageServeRoute.
+	imageServeLimiter *middleware.PerUserRateLimiter
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -109,6 +117,14 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		p.perUserIPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserIPM, ipmBurst)
 		logger.Infof("Per-user image limit: %d IPM, burst=%d", concurrencyConfig.PerUserIPM, ipmBurst)
 	}
+
+	// Per-IP limit for the unauthenticated image-serve route. Chosen loose so
+	// legitimate browser tabs re-fetching a few images do not trip: 120 RPM
+	// with a 30-request burst. Bandwidth-amplification is bounded at roughly
+	// 120 * image_size per IP per minute; tighten via config if ever needed.
+	// Keyed by client IP; the IP field lives outside the per-user keyspace so
+	// it never starves user-scoped limits.
+	p.imageServeLimiter = middleware.NewPerUserRateLimiter(120, 30)
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
 		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
@@ -266,6 +282,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// handleSignatureRoute returns true if it handled the request from broker cache
 		// returns false if it should be forwarded to backend (targetSeparated=true)
 		if p.handleSignatureRoute(ctx, targetPath) {
+			return
+		}
+
+		if p.handleImageServeRoute(ctx, targetPath) {
 			return
 		}
 
@@ -534,7 +554,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = "0"
 	case "image-editing":
-		inputFee, imageNum, err := p.ctrl.GetImageEditingInputFeeAndImageNum(reqBody)
+		inputFee, imageNum, err := p.ctrl.GetImageEditingInputFeeAndImageNum(reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
 			// Invalid request body is a user-caused error
 			ctx.Set("ignoreError", true)
@@ -586,6 +606,101 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, service.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
 	}
+}
+
+// handleImageServeRoute serves broker-stored image bytes at
+// /images/{chatKey}/{index}. The chatKey is a UUID issued in ZG-Res-Key, so
+// only the requester who received it can derive the URL. No session auth is
+// required (the UUID itself is the access token), matching OpenAI's CDN URL
+// behaviour.
+//
+// This path runs BEFORE FreePrefixes evaluation and has no billing or rate-
+// limit middleware attached — by design, a browser must be able to GET these
+// URLs without bearer auth. The security argument is that the chatKey is an
+// unguessable UUID; anyone with it can refetch repeatedly. If abuse becomes a
+// concern (repeated fetches of the same chatKey amplifying bandwidth), add a
+// per-IP or per-chatKey rate limiter at this callsite — don't rely on the
+// upstream RPM/TPM limiter, which runs on a different path.
+//
+// Returns true if the request was handled (including error cases).
+func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool {
+	if !strings.HasPrefix(strings.ToLower(targetPath), "/images/") {
+		return false
+	}
+	// Parse /images/{chatKey}/{index}; must have exactly two path segments.
+	// Validate BEFORE consuming a rate-limit token: otherwise a caller looping
+	// on GET /images/xyz (no index) would drain the per-IP bucket without ever
+	// reaching the store, then fall through to the next handler. Shape-fail
+	// means "this wasn't for me" → return false so the next matcher tries.
+	rest := strings.TrimPrefix(targetPath, "/images/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	// GET (and HEAD for byte-range probes) only. A POST/PUT/DELETE here would
+	// have been silently 200-and-served before; reject it explicitly so that a
+	// future route collision at the same path doesn't mask a real handler.
+	if ctx.Request.Method != http.MethodGet && ctx.Request.Method != http.MethodHead {
+		ctx.Header("Allow", "GET, HEAD")
+		ctx.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+		return true
+	}
+	// Per-IP rate limit. The route has no session auth — without a throttle a
+	// single caller with one UUID could hammer the endpoint to amplify
+	// bandwidth. Key off the socket's RemoteAddr, NOT ctx.ClientIP(): gin's
+	// default trusted-proxy list is permissive, so ClientIP honours a
+	// spoofed X-Forwarded-For from any direct client unless the deployment
+	// explicitly narrows TrustedProxies. RemoteAddr is the direct TCP peer
+	// and cannot be spoofed at the HTTP layer. If the broker runs behind a
+	// TLS-terminating ingress, all traffic appears to come from the ingress
+	// IP — acceptable (the ingress is the abuse-control point anyway).
+	peer := ctx.Request.RemoteAddr
+	if host, _, splitErr := net.SplitHostPort(peer); splitErr == nil {
+		peer = host
+	}
+	if p.imageServeLimiter != nil && !p.imageServeLimiter.Allow(peer) {
+		ctx.Header("Retry-After", "1")
+		ctx.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded on image serve endpoint"})
+		return true
+	}
+	chatKey := parts[0]
+	index, err := strconv.Atoi(parts[1])
+	if err != nil || index < 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid image index"})
+		return true
+	}
+
+	img, err := p.ctrl.GetImage(chatKey, index)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "image not found or expired"})
+		return true
+	}
+
+	ct := p.ctrl.DetectImageContentType(img)
+	// chatKey is an unguessable UUID and the {chatKey,index} → bytes mapping is
+	// immutable for the entry's lifetime, so the response is safely cacheable
+	// up to the store's TTL. "private" prevents shared caches from holding it
+	// (the UUID is the access token, so a shared cache would leak across
+	// users); "immutable" tells modern browsers to skip revalidation on
+	// reload. Falling back to no Cache-Control when TTL is unknown is safer
+	// than guessing a value that outlives the on-disk file.
+	if ttl := p.ctrl.ImageCacheTTL(); ttl > 0 {
+		maxAge := int(ttl.Seconds())
+		ctx.Header("Cache-Control", fmt.Sprintf("private, max-age=%d, immutable", maxAge))
+	}
+	// HEAD short-circuit: net/http already drops the body bytes for HEAD, but
+	// ctx.Data still allocates the response buffer and writes through. Set
+	// the headers explicitly and skip the body to avoid that copy on byte-
+	// range probes / preflight HEADs. Content-Length must match what a GET
+	// would return so range clients can size their request correctly.
+	if ctx.Request.Method == http.MethodHead {
+		ctx.Header("Content-Type", ct)
+		ctx.Header("Content-Length", strconv.Itoa(len(img)))
+		ctx.Status(http.StatusOK)
+		return true
+	}
+	ctx.Data(http.StatusOK, ct, img)
+	return true
 }
 
 func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool {

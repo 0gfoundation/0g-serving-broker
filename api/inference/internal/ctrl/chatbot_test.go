@@ -602,6 +602,130 @@ func TestTeeServiceSigningRoundTrip(t *testing.T) {
 }
 
 // ==========================================================================
+// signImageResponse
+// ==========================================================================
+
+func TestSignImageResponse_TextFormat(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "decentralized"})
+
+	reqBody := []byte(`{"prompt":"a cat","n":2}`)
+	images := [][]byte{[]byte("img0bytes"), []byte("img1bytes")}
+	chatKey := "image-sign-test-key"
+
+	if err := ctrl.signImageResponse(reqBody, images, chatKey); err != nil {
+		t.Fatalf("signImageResponse: %v", err)
+	}
+
+	val, ok := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
+	if !ok {
+		t.Fatal("signature not found in cache")
+	}
+	cs := val.(ChatSignature)
+
+	hashAndEncode := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	want := hashAndEncode(reqBody) + ":" + hashAndEncode(images[0]) + "," + hashAndEncode(images[1])
+	if cs.Text != want {
+		t.Errorf("text = %q\nwant = %q", cs.Text, want)
+	}
+}
+
+func TestSignImageResponse_SignatureRecoverable(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "decentralized"})
+
+	if err := ctrl.signImageResponse(
+		[]byte(`{"prompt":"dog"}`),
+		[][]byte{[]byte("img-data")},
+		"recoverable-key",
+	); err != nil {
+		t.Fatalf("signImageResponse: %v", err)
+	}
+
+	val, _ := ctrl.svcCache.Get(ctrl.chatCacheKey("recoverable-key"))
+	cs := val.(ChatSignature)
+
+	recovered := recoverSignerAddress(t, cs)
+	if recovered != ctrl.teeService.Address {
+		t.Errorf("recovered %v, want %v", recovered, ctrl.teeService.Address)
+	}
+	if cs.SigningAlgo != ECDSA.String() {
+		t.Errorf("signing_algo = %q, want %q", cs.SigningAlgo, ECDSA.String())
+	}
+}
+
+func TestSignImageResponse_SingleImage_NoCommaInText(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "decentralized"})
+
+	reqBody := []byte(`{"prompt":"solo"}`)
+	img := []byte("one-image")
+	chatKey := "single-img-key"
+
+	if err := ctrl.signImageResponse(reqBody, [][]byte{img}, chatKey); err != nil {
+		t.Fatalf("signImageResponse: %v", err)
+	}
+
+	val, _ := ctrl.svcCache.Get(ctrl.chatCacheKey(chatKey))
+	cs := val.(ChatSignature)
+
+	// With a single image there should be no comma separating hashes.
+	parts := strings.SplitN(cs.Text, ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("text has unexpected format: %q", cs.Text)
+	}
+	if strings.Contains(parts[1], ",") {
+		t.Errorf("single image text should not contain comma, got %q", cs.Text)
+	}
+}
+
+func TestSignImageResponse_DifferentImagesProduceDifferentText(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "decentralized"})
+
+	req := []byte(`{"prompt":"same"}`)
+	imagesA := [][]byte{[]byte("image-A")}
+	imagesB := [][]byte{[]byte("image-B")}
+
+	_ = ctrl.signImageResponse(req, imagesA, "key-a")
+	_ = ctrl.signImageResponse(req, imagesB, "key-b")
+
+	valA, _ := ctrl.svcCache.Get(ctrl.chatCacheKey("key-a"))
+	valB, _ := ctrl.svcCache.Get(ctrl.chatCacheKey("key-b"))
+	csA := valA.(ChatSignature)
+	csB := valB.(ChatSignature)
+
+	if csA.Text == csB.Text {
+		t.Error("different images should produce different signed text")
+	}
+}
+
+// TestSignImageResponse_RefusesCentralized pins the parity guard: the
+// decentralized signer must never run for a centralized provider, because its
+// signature envelope omits the TLS fingerprint / ProviderType / ProviderIdentity
+// fields that signCentralizedRoutingProof carries. Without this guard, a dev
+// who flips providerType=centralized while targetSeparated=false would get a
+// silently weaker TEE proof — a routing-proof envelope without the TLS
+// evidence, giving verifiers a false sense of security.
+func TestSignImageResponse_RefusesCentralized(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "openai",
+	})
+
+	err := ctrl.signImageResponse([]byte(`{"prompt":"x"}`), [][]byte{[]byte("img")}, "centralized-key")
+	if err == nil {
+		t.Fatal("signImageResponse must refuse when the service is centralized")
+	}
+	if !strings.Contains(err.Error(), "routing-proof") {
+		t.Errorf("error should point to the missing routing-proof variant; got: %v", err)
+	}
+	// Nothing should be cached.
+	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("centralized-key")); found {
+		t.Error("no signature must be cached when the centralized guard trips")
+	}
+}
+
+// ==========================================================================
 // MessageContent JSON marshaling/unmarshaling
 // ==========================================================================
 
