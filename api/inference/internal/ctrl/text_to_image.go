@@ -22,6 +22,16 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
+// maxB64ImageBytes caps the decoded size of a single image returned by the
+// provider. Without this, a compromised or buggy provider could ship a single
+// hundred-MB b64_json blob that the broker would buffer in memory (during
+// io.ReadAll on the upstream body), decode in memory again, and then write to
+// disk — amplifying a single request into a multi-hundred-MB allocation per
+// image. 50 MiB is well above any realistic AI image output (DALL-E 3 PNGs
+// top out around 4 MB) and still small enough that even N=10 (the OpenAI
+// upper bound for "n") stays under 500 MiB worst-case.
+const maxB64ImageBytes = 50 * 1024 * 1024
+
 // imageResponseData mirrors the OpenAI image object inside data[].
 type imageResponseData struct {
 	B64JSON       string `json:"b64_json,omitempty"`
@@ -224,13 +234,24 @@ func extractB64Images(body []byte, maxImages int) ([][]byte, error) {
 		return nil, fmt.Errorf("image response has %d entries, exceeds declared output count %d", len(envelope.Data), maxImages)
 	}
 	images := make([][]byte, 0, len(envelope.Data))
+	// base64 expands raw bytes by 4/3 (plus padding); reject the encoded blob
+	// before allocating the decode buffer when it would clearly exceed the
+	// per-image cap. This bounds peak memory at the maxB64ImageBytes limit
+	// rather than at the upstream-supplied size.
+	maxEncoded := base64.StdEncoding.EncodedLen(maxB64ImageBytes)
 	for i, d := range envelope.Data {
 		if d.B64JSON == "" {
 			return nil, fmt.Errorf("data[%d] missing b64_json field", i)
 		}
+		if len(d.B64JSON) > maxEncoded {
+			return nil, fmt.Errorf("data[%d].b64_json encoded size %d exceeds per-image cap %d", i, len(d.B64JSON), maxEncoded)
+		}
 		img, err := base64.StdEncoding.DecodeString(d.B64JSON)
 		if err != nil {
 			return nil, fmt.Errorf("decode data[%d].b64_json: %w", i, err)
+		}
+		if len(img) > maxB64ImageBytes {
+			return nil, fmt.Errorf("data[%d] decoded size %d exceeds per-image cap %d", i, len(img), maxB64ImageBytes)
 		}
 		images = append(images, img)
 	}

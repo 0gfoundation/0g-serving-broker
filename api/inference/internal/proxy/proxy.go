@@ -677,6 +677,28 @@ func (p *Proxy) handleImageServeRoute(ctx *gin.Context, targetPath string) bool 
 	}
 
 	ct := p.ctrl.DetectImageContentType(img)
+	// chatKey is an unguessable UUID and the {chatKey,index} → bytes mapping is
+	// immutable for the entry's lifetime, so the response is safely cacheable
+	// up to the store's TTL. "private" prevents shared caches from holding it
+	// (the UUID is the access token, so a shared cache would leak across
+	// users); "immutable" tells modern browsers to skip revalidation on
+	// reload. Falling back to no Cache-Control when TTL is unknown is safer
+	// than guessing a value that outlives the on-disk file.
+	if ttl := p.ctrl.ImageCacheTTL(); ttl > 0 {
+		maxAge := int(ttl.Seconds())
+		ctx.Header("Cache-Control", fmt.Sprintf("private, max-age=%d, immutable", maxAge))
+	}
+	// HEAD short-circuit: net/http already drops the body bytes for HEAD, but
+	// ctx.Data still allocates the response buffer and writes through. Set
+	// the headers explicitly and skip the body to avoid that copy on byte-
+	// range probes / preflight HEADs. Content-Length must match what a GET
+	// would return so range clients can size their request correctly.
+	if ctx.Request.Method == http.MethodHead {
+		ctx.Header("Content-Type", ct)
+		ctx.Header("Content-Length", strconv.Itoa(len(img)))
+		ctx.Status(http.StatusOK)
+		return true
+	}
 	ctx.Data(http.StatusOK, ct, img)
 	return true
 }

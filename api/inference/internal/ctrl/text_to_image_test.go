@@ -84,6 +84,48 @@ func TestExtractB64Images_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestExtractB64Images_RejectsOversizedImage pins the per-image byte cap.
+// Without it, a compromised provider could return a single multi-hundred-MB
+// b64_json blob: the upstream body would be buffered by io.ReadAll, decoded
+// into memory by extractB64Images, and then written to disk — amplifying one
+// request into a multi-hundred-MB allocation. The encoded-length pre-check
+// fires BEFORE base64 decode so we never allocate the decode buffer for
+// oversized inputs.
+func TestExtractB64Images_RejectsOversizedImage(t *testing.T) {
+	// Build a b64 string longer than the encoded cap. The actual contents
+	// don't matter — the size check runs before decode.
+	overSized := strings.Repeat("A", base64.StdEncoding.EncodedLen(maxB64ImageBytes)+4)
+	body, _ := json.Marshal(imageResponseEnvelope{
+		Data: []imageResponseData{{B64JSON: overSized}},
+	})
+
+	_, err := extractB64Images(body, 1)
+	if err == nil {
+		t.Fatal("expected error for oversized b64_json blob, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds per-image cap") {
+		t.Errorf("error should mention the per-image cap; got: %v", err)
+	}
+}
+
+// TestExtractB64Images_AcceptsAtCap confirms the cap is inclusive of normal-
+// sized images. A small image well under the threshold must round-trip
+// successfully — the size check should not regress the happy path.
+func TestExtractB64Images_AcceptsAtCap(t *testing.T) {
+	img := []byte("small-image-bytes-well-under-cap")
+	body, _ := json.Marshal(imageResponseEnvelope{
+		Data: []imageResponseData{{B64JSON: base64.StdEncoding.EncodeToString(img)}},
+	})
+
+	images, err := extractB64Images(body, 1)
+	if err != nil {
+		t.Fatalf("extractB64Images: %v", err)
+	}
+	if len(images) != 1 || string(images[0]) != string(img) {
+		t.Errorf("round-trip mismatch: got %q", images[0])
+	}
+}
+
 // TestExtractB64Images_RejectsMoreThanRequested pins the provider-OOM guard:
 // a compromised provider returning 50 images when the client asked for 1 is
 // a billing bug AND a memory risk (all 50 b64 blobs would be decoded). The

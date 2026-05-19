@@ -14,6 +14,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
@@ -741,4 +742,15 @@ func (c *Ctrl) GetImage(chatKey string, index int) ([]byte, error) {
 // DetectImageContentType sniffs the MIME type of image bytes.
 func (c *Ctrl) DetectImageContentType(data []byte) string {
 	return detectContentType(data)
+}
+
+// ImageCacheTTL returns the configured lifetime of broker-stored images, used
+// by the serve route to set an accurate Cache-Control max-age. Zero means the
+// store is unavailable; callers should treat that as "do not advertise a
+// cache lifetime" rather than as "fresh forever".
+func (c *Ctrl) ImageCacheTTL() time.Duration {
+	if c.imageStore == nil {
+		return 0
+	}
+	return c.imageStore.ttl
 }

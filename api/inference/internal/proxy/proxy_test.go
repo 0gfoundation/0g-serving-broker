@@ -468,3 +468,84 @@ func TestHandleImageServeRoute_IndexOutOfRange_Returns404(t *testing.T) {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
+
+// TestHandleImageServeRoute_SetsCacheControl pins the cache header. The
+// {chatKey,index} → bytes mapping is immutable for the entry's lifetime; the
+// header lets browsers skip revalidation on reload, but it MUST be "private"
+// because the UUID is the access token and a shared cache would leak across
+// users.
+func TestHandleImageServeRoute_SetsCacheControl(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "cache-test"
+	pngImg := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}
+	if err := c.StoreTestImage(chatKey, [][]byte{pngImg}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+	ctx, w := newGinCtxForPath(t, path)
+
+	if !p.handleImageServeRoute(ctx, path) {
+		t.Fatal("expected route to be handled")
+	}
+	cc := w.Header().Get("Cache-Control")
+	if cc == "" {
+		t.Fatal("Cache-Control header missing")
+	}
+	if !strings.Contains(cc, "private") {
+		t.Errorf("Cache-Control = %q, want it to include 'private'", cc)
+	}
+	if !strings.Contains(cc, "immutable") {
+		t.Errorf("Cache-Control = %q, want it to include 'immutable'", cc)
+	}
+	if !strings.Contains(cc, "max-age=") {
+		t.Errorf("Cache-Control = %q, want a max-age directive", cc)
+	}
+}
+
+// TestHandleImageServeRoute_HEADReturnsNoBody pins the HEAD short-circuit:
+// Content-Type/Content-Length must reflect the GET response so byte-range
+// clients can size their request, but no body bytes should be written.
+func TestHandleImageServeRoute_HEADReturnsNoBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &ctrl.Ctrl{}
+	if err := c.SetupImageStoreForTest(t.TempDir()); err != nil {
+		t.Fatalf("SetupImageStoreForTest: %v", err)
+	}
+	chatKey := "head-test"
+	pngImg := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 1}
+	if err := c.StoreTestImage(chatKey, [][]byte{pngImg}); err != nil {
+		t.Fatalf("StoreTestImage: %v", err)
+	}
+
+	p := newTestProxy(t, c)
+	path := "/images/" + chatKey + "/0"
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("HEAD", constant.ServicePrefix+path, nil)
+	ctx.Params = gin.Params{{Key: "any", Value: path}}
+
+	if !p.handleImageServeRoute(ctx, path) {
+		t.Fatal("expected HEAD to be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("HEAD status = %d, want 200", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("HEAD response body length = %d, want 0", w.Body.Len())
+	}
+	if cl := w.Header().Get("Content-Length"); cl == "" {
+		t.Error("expected Content-Length header on HEAD response")
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
+		t.Errorf("Content-Type = %q, want image/*", ct)
+	}
+}
