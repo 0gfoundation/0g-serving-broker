@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	constant "github.com/0glabs/0g-serving-broker/fine-tuning/const"
@@ -51,10 +52,10 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 		return nil, err
 	}
 	if count > int64(c.config.MaxTaskQueueSize) {
-		return nil, errors.New("task queue is full")
+		return nil, errors.NewConflict("task queue is full")
 	}
 	if count != 0 && !task.Wait {
-		return nil, errors.New("cannot create a new task while there are in-progress tasks")
+		return nil, errors.NewConflict("cannot create a new task while there are in-progress tasks")
 	}
 
 	dbTask := task.GenerateDBTask()
@@ -80,10 +81,43 @@ func (c *Ctrl) CreateTask(ctx context.Context, task *schema.Task) (*uuid.UUID, e
 
 func (c *Ctrl) CancelTask(ctx context.Context, task *schema.Task) error {
 	if err := c.validateSignature(task); err != nil {
-		return err
+		return errors.Unauthorized(err)
 	}
 
-	return c.db.CancelTask(task.ID, task.UserAddress)
+	// Resolve the task up front so we can distinguish "does not exist" (404)
+	// from "exists but cannot be cancelled in its current state" (409). Both
+	// surface as RowsAffected==0 from db.CancelTask, which is ambiguous.
+	existing, err := c.db.GetTask(task.ID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.NewNotFound("task %s not found", task.ID.String())
+		}
+		return errors.Internal(errors.Wrap(err, "load task"))
+	}
+	if existing.UserAddress != task.UserAddress {
+		return errors.NewForbidden("task does not belong to this user")
+	}
+
+	if err := c.db.CancelTask(task.ID, task.UserAddress); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Re-read once to disambiguate two RowsAffected==0 causes the
+			// preflight cannot rule out:
+			//  - row deleted between preflight and UPDATE -> 404
+			//  - row advanced to a non-cancellable state  -> 409
+			// The refreshed progress also avoids reporting stale state in
+			// the conflict body if a concurrent writer moved it forward.
+			refreshed, rerr := c.db.GetTask(task.ID)
+			if rerr != nil {
+				if errors.Is(rerr, gorm.ErrRecordNotFound) {
+					return errors.NewNotFound("task %s not found", task.ID.String())
+				}
+				return errors.Internal(errors.Wrap(rerr, "re-read task after cancel"))
+			}
+			return errors.NewConflict("task cannot be cancelled in its current state (%s)", refreshed.Progress)
+		}
+		return errors.Internal(errors.Wrap(err, "cancel task"))
+	}
+	return nil
 }
 
 func (*Ctrl) validateSignature(task *schema.Task) error {
@@ -124,7 +158,10 @@ func (*Ctrl) validateSignature(task *schema.Task) error {
 func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 	task, err := c.db.GetTask(id)
 	if err != nil {
-		return schema.Task{}, errors.Wrap(err, "get service from db")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return schema.Task{}, errors.NewNotFound("task %s not found", id.String())
+		}
+		return schema.Task{}, errors.Internal(errors.Wrap(err, "get service from db"))
 	}
 
 	return *schema.GenerateSchemaTask(&task), nil
@@ -133,7 +170,7 @@ func (c *Ctrl) GetTask(id *uuid.UUID) (schema.Task, error) {
 func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest, desc bool) ([]schema.Task, error) {
 	tasks, err := c.db.ListTask(userAddress, latest, desc)
 	if err != nil {
-		return nil, errors.Wrap(err, "get delivered tasks")
+		return nil, errors.Internal(errors.Wrap(err, "get delivered tasks"))
 	}
 	taskRes := make([]schema.Task, len(tasks))
 	for i := range tasks {
@@ -146,12 +183,15 @@ func (c *Ctrl) ListTask(ctx context.Context, userAddress string, latest, desc bo
 func (c *Ctrl) GetProgress(id *uuid.UUID, userAddress string) (string, error) {
 	task, err := c.db.GetTask(id)
 	if err != nil {
-		return "", err
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errors.NewNotFound("task %s not found", id.String())
+		}
+		return "", errors.Internal(errors.Wrap(err, "get task"))
 	}
 
 	// Verify user owns this task
 	if task.UserAddress != userAddress {
-		return "", errors.New("unauthorized: task does not belong to this user")
+		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
 	return filepath.Join(utils.GetDataDir(), id.String(), utils.TaskLogFileName), nil
@@ -464,17 +504,20 @@ func (c *Ctrl) VerifyUploadSignature(userAddress string, signature string, times
 // The file is encrypted with AES and the key is available through contract settlement
 func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	if id == nil {
-		return "", errors.New("task ID cannot be nil")
+		return "", errors.NewBadRequest("task ID cannot be nil")
 	}
 
 	task, err := c.db.GetTask(id)
 	if err != nil {
-		return "", errors.Wrap(err, "get task from db")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errors.NewNotFound("task %s not found", id.String())
+		}
+		return "", errors.Internal(errors.Wrap(err, "get task from db"))
 	}
 
 	// Verify user owns this task
 	if task.UserAddress != userAddress {
-		return "", errors.New("unauthorized: task does not belong to this user")
+		return "", errors.NewForbidden("task does not belong to this user")
 	}
 
 	// Check if task is delivered (encryption completed)
@@ -482,16 +525,22 @@ func (c *Ctrl) GetLoRAModel(id *uuid.UUID, userAddress string) (string, error) {
 	if progress != db.ProgressStateDelivered.String() &&
 		progress != db.ProgressStateUserAcknowledged.String() &&
 		progress != db.ProgressStateFinished.String() {
-		return "", errors.New("task is not ready for download. Please wait for 'Delivered' status")
+		return "", errors.NewConflict("task is not ready for download. Please wait for 'Delivered' status")
 	}
 
 	// Build paths
 	paths := utils.NewTaskPaths(filepath.Join(utils.GetDataDir(), id.String()))
 
-	// Return encrypted file path (created by finalizer)
+	// Return encrypted file path (created by finalizer).
+	// If progress is Delivered/UserAcknowledged/Finished (checked above) the
+	// finalizer should have written this file. A missing file here is almost
+	// always transient — filesystem remount, cleanup race, cold distributed
+	// cache — and is safe for the client to retry, so surface it as 503
+	// Service Unavailable rather than 500 (which signals a broker bug and is
+	// treated as non-retriable by most SDKs).
 	encryptedFilePath := paths.Output + "_encrypted.data"
 	if _, err := os.Stat(encryptedFilePath); os.IsNotExist(err) {
-		return "", errors.New("encrypted LoRA file not found. The task may not have completed encryption yet")
+		return "", errors.NewServiceUnavailable("encrypted LoRA not yet available for task %s (state %s); retry shortly", id.String(), progress)
 	}
 
 	return encryptedFilePath, nil

@@ -25,3 +25,10 @@ func NewDB(conf *config.Config, logger log.Logger) (*DB, error) {
 
 	return &DB{db: db, logger: logger}, nil
 }
+
+// NewDBFromGorm wraps an already-open *gorm.DB. Intended for integration
+// tests that bring their own connection (e.g. testcontainers); production
+// callers should use NewDB.
+func NewDBFromGorm(gdb *gorm.DB) *DB {
+	return &DB{db: gdb}
+}

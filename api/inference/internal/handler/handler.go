@@ -162,19 +162,20 @@ func (h *Handler) internalApiAuth() gin.HandlerFunc {
 	}
 }
 
+// handleBrokerError routes err to errors.Response, optionally prefixing it
+// with a short context string for server-side debuggability. Client body
+// semantics come from the error's HTTP status code, not from a synthetic
+// "Provider" prefix — bodies are uniform across all handlers.
 func handleBrokerError(ctx *gin.Context, err error, context string) {
-	info := "Provider"
 	if context != "" {
-		info += (": " + context)
+		err = errors.Wrap(err, context)
 	}
-	wrapped := errors.Wrap(err, info)
 	// USD pricing outage: surface as 503 with PRICING_UNAVAILABLE so SDKs
 	// can distinguish a transient rate-feed failure (retryable) from a
 	// generic bad-request error.
 	if errors.Is(err, ctrl.ErrPricingUnavailable) {
-		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": wrapped.Error()})
-		return
+		err = errors.ServiceUnavailable(err)
 	}
-	errors.Response(ctx, wrapped)
+	errors.Response(ctx, err)
 }
 

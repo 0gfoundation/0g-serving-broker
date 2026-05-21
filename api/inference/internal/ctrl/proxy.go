@@ -316,19 +316,16 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 	if ignoreError, exists := ctx.Get("ignoreError"); !exists || !ignoreError.(bool) {
 		c.logger.Errorf("Proxy broker error in ctrl: %v, context: %s", err, context)
 	}
-	info := "Provider proxy: handle proxied service response"
 	if context != "" {
-		info += (", " + context)
+		err = errors.Wrap(err, context)
 	}
-	wrapped := errors.Wrap(err, info)
 	// USD pricing outage: surface as 503 with PRICING_UNAVAILABLE so SDKs
 	// can distinguish a transient rate-feed failure (retryable) from a
-	// generic bad-request error.  Matches the /v1/service handler.
+	// generic bad-request error. Matches the /v1/service handler.
 	if errors.Is(err, ErrPricingUnavailable) {
-		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": wrapped.Error()})
-		return
+		err = errors.ServiceUnavailable(err)
 	}
-	errors.Response(ctx, wrapped)
+	errors.Response(ctx, err)
 }
 
 func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
