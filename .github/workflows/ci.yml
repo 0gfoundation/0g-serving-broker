@@ -49,7 +49,7 @@ jobs:
 
     - name: Integration tests
       working-directory: api
-      run: go test -tags integration ./inference/... -coverpkg=./... -coverprofile=coverage.out -covermode=atomic -timeout 600s
+      run: go test -tags integration ./inference/... ./fine-tuning/... -coverpkg=./... -coverprofile=coverage.out -covermode=atomic -timeout 900s
 
     - name: Upload coverage
       if: always()
