@@ -694,23 +694,14 @@ if lines:
         messages_format = True
 
 if messages_format:
-    # Convert messages format to instruction/input/output
-    for line in lines:
+    # Preserve full messages array; trainer applies the model's chat template
+    data = {"messages": []}
+    for line_num, line in enumerate(lines, start=1):
         item = json.loads(line)
-        messages = item.get("messages", [])
-        # Extract user message as instruction, assistant message as output
-        instruction = ""
-        output = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "user":
-                instruction = content
-            elif role == "assistant":
-                output = content
-        data["instruction"].append(instruction)
-        data["input"].append("")
-        data["output"].append(output)
+        messages = item.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError(f"line {line_num}: messages must be a list")
+        data["messages"].append(messages)
 else:
     # Standard instruction/input/output format
     for line in lines:
@@ -722,7 +713,7 @@ else:
 # Create and save DatasetDict
 ds = DatasetDict({"train": Dataset.from_dict(data)})
 ds.save_to_disk(output_dir)
-print(f"Converted {len(data['instruction'])} examples to {output_dir}")
+print(f"Converted {len(lines)} examples to {output_dir}")
 `
 
 	// Save Python script to temp file
