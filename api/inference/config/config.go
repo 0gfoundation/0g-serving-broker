@@ -271,9 +271,9 @@ type TieredPricingConfig struct {
 // The first tier whose MaxInputTokens >= promptTokens is selected.
 // Use MaxInputTokens: 0 to represent an unbounded upper tier.
 type PricingTier struct {
-	MaxInputTokens   int   `yaml:"maxInputTokens"`   // Upper bound of input tokens for this tier (0 = unlimited)
-	InputMultiplier  int64 `yaml:"inputMultiplier"`  // Multiplier for input price in this tier
-	OutputMultiplier int64 `yaml:"outputMultiplier"` // Multiplier for output price in this tier
+	MaxInputTokens   int     `yaml:"maxInputTokens"`   // Upper bound of input tokens for this tier (0 = unlimited)
+	InputMultiplier  float64 `yaml:"inputMultiplier"`  // Multiplier for input price in this tier (>= 1.0; fractional values like 1.333 are supported)
+	OutputMultiplier float64 `yaml:"outputMultiplier"` // Multiplier for output price in this tier (>= 1.0; fractional values like 1.166 are supported)
 }
 
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
@@ -632,10 +632,10 @@ func loadConfig(config *Config) error {
 		}
 		for i, tier := range config.TieredPricing.Tiers {
 			if tier.InputMultiplier < 1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %d", i, tier.InputMultiplier)
+				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %g", i, tier.InputMultiplier)
 			}
 			if tier.OutputMultiplier < 1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].outputMultiplier must be >= 1, got %d", i, tier.OutputMultiplier)
+				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].outputMultiplier must be >= 1, got %g", i, tier.OutputMultiplier)
 			}
 			if tier.MaxInputTokens < 0 {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens must be >= 0, got %d", i, tier.MaxInputTokens)

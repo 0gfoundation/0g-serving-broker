@@ -49,9 +49,9 @@ type ModelRateLimits struct {
 
 // ModelPricingTier represents a single tier in tiered pricing.
 type ModelPricingTier struct {
-	MaxInputTokens   int   `json:"max_input_tokens"`
-	InputMultiplier  int64 `json:"input_multiplier"`
-	OutputMultiplier int64 `json:"output_multiplier"`
+	MaxInputTokens   int     `json:"max_input_tokens"`
+	InputMultiplier  float64 `json:"input_multiplier"`
+	OutputMultiplier float64 `json:"output_multiplier"`
 }
 
 // ModelCacheTokenBilling holds cache token billing info for display.

@@ -455,7 +455,7 @@ func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outp
 // fallback (e.g., if the final tier has MaxInputTokens == 0, it always matches as the catch-all).
 // This function should only be called when len(c.tieredPricing.Tiers) > 0; config validation ensures
 // that enabled tiered pricing always has at least one tier with valid multipliers (>= 1).
-func (c *Ctrl) getTierMultipliers(promptTokens int) (int64, int64) {
+func (c *Ctrl) getTierMultipliers(promptTokens int) (float64, float64) {
 	for _, tier := range c.tieredPricing.Tiers {
 		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
 			return tier.InputMultiplier, tier.OutputMultiplier
@@ -464,6 +464,18 @@ func (c *Ctrl) getTierMultipliers(promptTokens int) (int64, int64) {
 	// Fallback: promptTokens exceeds all bounded tiers, use the last tier
 	last := c.tieredPricing.Tiers[len(c.tieredPricing.Tiers)-1]
 	return last.InputMultiplier, last.OutputMultiplier
+}
+
+// applyMultiplier multiplies a wei-denominated big.Int by a fractional multiplier
+// and rounds to nearest integer. Uses 256-bit big.Float precision to avoid any
+// loss when the base value exceeds float64 mantissa range.
+func applyMultiplier(base *big.Int, mul float64) *big.Int {
+	bf := new(big.Float).SetPrec(256).SetInt(base)
+	bf.Mul(bf, big.NewFloat(mul))
+	// Round to nearest by adding 0.5 before truncation.
+	bf.Add(bf, big.NewFloat(0.5))
+	result, _ := bf.Int(nil)
+	return result
 }
 
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response
@@ -477,17 +489,17 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 			if !ok {
 				return fmt.Errorf("tiered pricing: failed to parse inputPrice %q as big.Int", inputPrice)
 			}
-			inputPrice = new(big.Int).Mul(base, big.NewInt(inputMul)).String()
+			inputPrice = applyMultiplier(base, inputMul).String()
 		}
 		if outputMul > 1 {
 			base, ok := new(big.Int).SetString(outputPrice, 10)
 			if !ok {
 				return fmt.Errorf("tiered pricing: failed to parse outputPrice %q as big.Int", outputPrice)
 			}
-			outputPrice = new(big.Int).Mul(base, big.NewInt(outputMul)).String()
+			outputPrice = applyMultiplier(base, outputMul).String()
 		}
 		if inputMul > 1 || outputMul > 1 {
-			c.logger.Infof("Tiered pricing: prompt_tokens=%d, inputMultiplier=%d, outputMultiplier=%d, effectiveInputPrice=%s, effectiveOutputPrice=%s",
+			c.logger.Infof("Tiered pricing: prompt_tokens=%d, inputMultiplier=%g, outputMultiplier=%g, effectiveInputPrice=%s, effectiveOutputPrice=%s",
 				usage.PromptTokens, inputMul, outputMul, inputPrice, outputPrice)
 		}
 	}
