@@ -3,14 +3,13 @@
 # DO NOT commit actual credentials to the repository
 
 # Network configuration
-networks:
-  ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16602
-    privateKeys:
-      - "${PRIVATE_KEY}"  # Set via environment variable or replace with actual key
-    transactionLimit: 1000000
-    gasEstimationBuffer: 10000
+network:
+  url: "https://evmrpc-testnet.0g.ai"
+  chainID: 16602
+  privateKeys:
+    - "${PRIVATE_KEY}"  # Set via environment variable or replace with actual key
+  transactionLimit: 1000000
+  gasEstimationBuffer: 10000
 
 # Service configuration
 service:
@@ -64,8 +63,8 @@ service:
   # Skip 0G Storage upload - encrypt locally for direct TEE download
   skipStorageUpload: false
 
-  # File retention (hours) - how long to keep files before cleanup
-  fileRetentionHours: 72
+  # How long to keep files before cleanup (Go duration string)
+  fileRetention: "72h"
 
 # 0G Storage client configuration
 storageClient:
@@ -97,6 +96,6 @@ maxExecutorRetriesPerTask: 3
 maxFinalizerRetriesPerTask: 10
 maxSettlementRetriesPerTask: 10
 settlementBatchSize: 1
-deliveredTaskAckTimeoutSecs: 21600
+deliveredTaskAckTimeout: "6h"
 dataRetentionDays: 3
 maxTaskQueueSize: 5

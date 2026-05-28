@@ -141,8 +141,27 @@ func MigrateIntegerSecondsDuration(raw map[string]interface{}, target *time.Dura
 	}
 	*target = time.Duration(n) * unit
 	dotted := strings.Join(path, ".")
-	log.Printf("[CONFIG-DEPRECATED] %q is an integer (legacy %s); will be removed after %s, use a duration string e.g. \"30s\" / \"1h\"",
-		dotted, unit, DeprecationRemovalDate)
+	log.Printf("[CONFIG-DEPRECATED] %q is an integer count of %s (legacy form); will be removed after %s, use a duration string like \"30s\" / \"1h\" instead",
+		dotted, unitName(unit), DeprecationRemovalDate)
+}
+
+func unitName(d time.Duration) string {
+	switch d {
+	case time.Nanosecond:
+		return "nanoseconds"
+	case time.Microsecond:
+		return "microseconds"
+	case time.Millisecond:
+		return "milliseconds"
+	case time.Second:
+		return "seconds"
+	case time.Minute:
+		return "minutes"
+	case time.Hour:
+		return "hours"
+	default:
+		return d.String()
+	}
 }
 
 // ReadConfigFile is a convenience wrapper that returns the config bytes and an

@@ -142,7 +142,7 @@ type Config struct {
 	// Networks is the legacy multi-network map kept for backwards
 	// compatibility. Deprecated: use Network instead. Removed after
 	// config.DeprecationRemovalDate.
-	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks,omitempty"`
+	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty"` //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 	Images                      Images              `yaml:"images"`
 	StorageClientConfig         StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
 	ServingUrl                  string              `yaml:"servingUrl"`

@@ -9,13 +9,13 @@ contractAddress: "0x47340d900bdFec2BD393c626E12ea0656F938d84"
 
 # Database configuration
 database:
-  # Database connection string (format: user:password@tcp(host:port)/database?parseTime=true)
-  provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true"
+  # MySQL DSN (format: user:password@tcp(host:port)/database?parseTime=true)
+  dsn: "root:123456@tcp(mysql:3306)/provider?parseTime=true"
 
 # Event service configuration
 event:
-  # Address where the event service listens
-  providerAddr: ":8088"
+  # Listen address for the event process's metrics HTTP server
+  listenAddr: ":8088"
 
 # Gas price configuration for blockchain transactions
 # Leave empty for automatic gas price detection
@@ -25,16 +25,16 @@ gasPrice: <gasPrice>
 # Leave empty for no limit
 maxGasPrice: <maxGasPrice>
 
-# Timing intervals for various processing tasks (in seconds)
+# Timing intervals for various processing tasks (Go duration strings)
 interval:
   # Buffer time before automatic settlement triggers
-  autoSettleBufferTime: 60
+  autoSettleBufferTime: "60s"
 
-  # Interval for forced settlement processor (in seconds)
-  forceSettlementProcessor: 600
+  # Interval for forced settlement processor
+  forceSettlementProcessor: "10m"
 
-  # Interval for regular settlement processor (in seconds)
-  settlementProcessor: 300
+  # Interval for regular settlement processor
+  settlementProcessor: "5m"
 
 # Settlement profitability configuration
 settlement:
@@ -96,25 +96,23 @@ service:
   #   teeType: "TDX"
   #   expirationDate: "2026-12-31T00:00:00Z"
 
-# Network configurations for blockchain connections
-networks:
-  # Example network configuration - 0G testnet
-  ethereum0g:
-    # RPC URL for the blockchain network
-    url: "https://evmrpc.0g.ai"
+# Network configuration for blockchain connection (0G mainnet)
+network:
+  # RPC URL for the blockchain network
+  url: "https://evmrpc.0g.ai"
 
-    # Chain ID of the network
-    chainID: 16661
+  # Chain ID of the network
+  chainID: 16661
 
-    # Private keys for transaction signing (keep secure!)
-    privateKeys:
-      - <privateKey>
+  # Private keys for transaction signing (keep secure!)
+  privateKeys:
+    - <privateKey>
 
-    # Maximum number of transactions to process in parallel
-    transactionLimit: 5000000
+  # Maximum number of transactions to process in parallel
+  transactionLimit: 5000000
 
-    # Buffer for gas estimation
-    gasEstimationBuffer: 100000
+  # Buffer for gas estimation
+  gasEstimationBuffer: 100000
 
 # Monitoring configuration
 monitor:
@@ -126,8 +124,8 @@ monitor:
 
 # Zero-knowledge configuration
 zk:
-  # Provider URL for ZK service
-  provider: "nginx:3001"
+  # URL for the ZK service
+  url: "nginx:3001"
 
   # Maximum request length for ZK operations
   requestLength: 40

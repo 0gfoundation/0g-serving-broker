@@ -1,20 +1,19 @@
 interval:
-  autoSettleBufferTime: 60
-  forceSettlementProcessor: 600
-  settlementProcessor: 300
+  autoSettleBufferTime: "60s"
+  forceSettlementProcessor: "10m"
+  settlementProcessor: "5m"
 # Settlement profitability: defer users whose fees don't cover gas costs.
 # minSettlementFee is the minimum accumulated fee (in neuron) per user.
 # Default "4000000000000000" (0.004 A0GI). Set to "0" to disable.
 # settlement:
 #   minSettlementFee: "4000000000000000"
-networks:
-  ethereum0g:
-    url: "https://evmrpc-testnet.0g.ai"
-    chainID: 16602
-    privateKeys:
-      - <Private_Key>
-    transactionLimit: 5000000
-    gasEstimationBuffer: 100000
+network:
+  url: "https://evmrpc-testnet.0g.ai"
+  chainID: 16602
+  privateKeys:
+    - <Private_Key>
+  transactionLimit: 5000000
+  gasEstimationBuffer: 100000
 service:
   servingUrl: <Serving URL>
   targetUrl: <Target URL>
@@ -68,5 +67,5 @@ service:
 # Optional: HTTP client timeouts for broker→provider communication.
 # Tune based on GPU speed and model complexity (e.g., image generation may need longer timeouts).
 # providerHttp:
-#   totalTimeoutMinutes: 15          # Overall HTTP request timeout (default: 15)
-#   responseHeaderTimeoutMinutes: 15 # Max time to wait for provider to start responding (default: 15)
+#   totalTimeout: "15m"          # Overall HTTP request timeout (default: 15m)
+#   responseHeaderTimeout: "15m" # Max time to wait for provider to start responding (default: 15m)
