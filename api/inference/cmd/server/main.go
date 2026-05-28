@@ -252,9 +252,9 @@ func Main() {
 
 	// Initialize async processing if enabled
 	if config.Async.Enabled {
-		resultTTL := time.Duration(config.Async.ResultTTLMinutes) * time.Minute
-		cleanupInterval := time.Duration(config.Async.CleanupIntervalSeconds) * time.Second
-		jobTimeout := time.Duration(config.Async.JobTimeoutMinutes) * time.Minute
+		resultTTL := config.Async.ResultTTL
+		cleanupInterval := config.Async.CleanupInterval
+		jobTimeout := config.Async.JobTimeout
 		if err := ctrl.InitAsyncProcessing(
 			config.Async.MaxConcurrentJobs,
 			config.Async.MaxQueueSize,

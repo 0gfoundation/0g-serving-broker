@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -76,6 +78,71 @@ func RawHasKey(raw map[string]interface{}, path ...string) bool {
 		}
 	}
 	return true
+}
+
+// RawGet walks the same shape as RawHasKey and returns the value at the leaf
+// path along with a presence flag. Mirrors RawHasKey for symmetry; callers
+// that need both presence and value use RawGet to avoid two walks.
+func RawGet(raw map[string]interface{}, path ...string) (interface{}, bool) {
+	if len(path) == 0 || raw == nil {
+		return nil, false
+	}
+	var current interface{} = raw
+	for _, key := range path {
+		switch m := current.(type) {
+		case map[string]interface{}:
+			next, ok := m[key]
+			if !ok {
+				return nil, false
+			}
+			current = next
+		case map[interface{}]interface{}:
+			next, ok := m[key]
+			if !ok {
+				return nil, false
+			}
+			current = next
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+// MigrateIntegerSecondsDuration is the in-place migration helper for fields
+// that historically held an integer count of `unit` (e.g. seconds, minutes,
+// hours) and now hold a time.Duration. The yaml key is unchanged, so the
+// raw-yaml value's type tells us whether the user wrote the legacy integer
+// form or the new string form.
+//
+// If the raw value is a number, target is overwritten with value*unit and a
+// deprecation warning is emitted. Strings and missing keys are no-ops — the
+// new-style Duration value parsed by yaml.UnmarshalStrict is kept as-is.
+func MigrateIntegerSecondsDuration(raw map[string]interface{}, target *time.Duration, unit time.Duration, path ...string) {
+	v, ok := RawGet(raw, path...)
+	if !ok {
+		return
+	}
+	var n int64
+	switch x := v.(type) {
+	case int:
+		n = int64(x)
+	case int64:
+		n = x
+	case uint:
+		n = int64(x)
+	case uint64:
+		n = int64(x)
+	case float64:
+		// yaml.v2 sometimes decodes numbers as float64 for large values.
+		n = int64(x)
+	default:
+		return
+	}
+	*target = time.Duration(n) * unit
+	dotted := strings.Join(path, ".")
+	log.Printf("[CONFIG-DEPRECATED] %q is an integer (legacy %s); will be removed after %s, use a duration string e.g. \"30s\" / \"1h\"",
+		dotted, unit, DeprecationRemovalDate)
 }
 
 // ReadConfigFile is a convenience wrapper that returns the config bytes and an

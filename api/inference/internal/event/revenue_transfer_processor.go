@@ -13,18 +13,18 @@ import (
 )
 
 type RevenueTransferProcessor struct {
-	contract       *providercontract.ProviderContract
-	logger         log.Logger
-	targetAddress  common.Address
-	reserveAmount  *big.Int
-	transferInterval int
+	contract         *providercontract.ProviderContract
+	logger           log.Logger
+	targetAddress    common.Address
+	reserveAmount    *big.Int
+	transferInterval time.Duration
 }
 
 func NewRevenueTransferProcessor(
 	contract *providercontract.ProviderContract,
 	targetAddress string,
 	reserveAmount string,
-	transferInterval int,
+	transferInterval time.Duration,
 	logger log.Logger,
 ) (*RevenueTransferProcessor, error) {
 	if !common.IsHexAddress(targetAddress) {
@@ -48,7 +48,7 @@ func NewRevenueTransferProcessor(
 
 // Start implements controller-runtime/pkg/manager.Runnable interface
 func (r *RevenueTransferProcessor) Start(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(r.transferInterval) * time.Second)
+	ticker := time.NewTicker(r.transferInterval)
 	defer ticker.Stop()
 
 	for {

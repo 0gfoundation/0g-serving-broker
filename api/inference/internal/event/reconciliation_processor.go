@@ -39,7 +39,7 @@ type ReconciliationProcessor struct {
 	contract *providercontract.ProviderContract
 	logger   log.Logger
 
-	interval           int    // seconds between scans
+	interval           time.Duration
 	confirmationBlocks uint64 // blocks to wait for finality
 	expiryBlocks       uint64 // blocks after which a pending settlement is expired
 }
@@ -49,11 +49,11 @@ type ReconciliationProcessor struct {
 func NewReconciliationProcessor(
 	db *db.DB,
 	contract *providercontract.ProviderContract,
-	interval int,
+	interval time.Duration,
 	logger log.Logger,
 ) *ReconciliationProcessor {
 	if interval <= 0 {
-		interval = 60
+		interval = 60 * time.Second
 	}
 	return &ReconciliationProcessor{
 		db:                 db,
@@ -67,7 +67,7 @@ func NewReconciliationProcessor(
 
 // Start implements the controller-runtime Runnable interface
 func (r *ReconciliationProcessor) Start(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(r.interval) * time.Second)
+	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 
 	for {

@@ -544,7 +544,7 @@ func (m *Manager) offloadLoop(ctx context.Context) {
 		return
 	}
 
-	interval := time.Duration(m.config.OffloadAfterMinutes) * time.Minute
+	interval := m.config.OffloadAfter
 	if interval <= 0 {
 		interval = 60 * time.Minute
 	}
@@ -564,7 +564,7 @@ func (m *Manager) offloadLoop(ctx context.Context) {
 }
 
 func (m *Manager) offloadIdleAdapters(ctx context.Context) {
-	threshold := time.Duration(m.config.OffloadAfterMinutes) * time.Minute
+	threshold := m.config.OffloadAfter
 	idle, err := m.db.ListIdleAdapters(threshold)
 	if err != nil {
 		m.logger.Errorf("failed to list idle adapters: %v", err)

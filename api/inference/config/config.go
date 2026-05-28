@@ -294,20 +294,30 @@ type WhitelistConfig struct {
 // via ServerlessLLM, with per-user access control and automatic adapter
 // lifecycle management driven by on-chain events.
 type LoRAConfig struct {
-	Enable                   bool   `yaml:"enable"`
-	BaseModel                string `yaml:"baseModel"`           // Base model name (e.g., "Qwen2.5-7B")
-	LoraModulesDir           string `yaml:"loraModulesDir"`      // Local directory for LoRA adapter files
-	SllmUrl                  string `yaml:"sllmUrl"`             // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
-	OffloadAfterMinutes      int    `yaml:"offloadAfterMinutes"` // Idle time before offloading adapter from ServerlessLLM
-	EnableColdStorage        bool   `yaml:"enableColdStorage"`   // Enable offload to 0G Storage
-	FineTuningContractAddr   string `yaml:"fineTuningContractAddress"`
-	ChainRpcUrl              string `yaml:"chainRpcUrl"`
-	PollBlockIntervalSeconds int    `yaml:"pollBlockIntervalSeconds"` // How often to poll for new on-chain events
-	StorageIndexerUrl        string `yaml:"storageIndexerUrl"`        // 0G Storage indexer URL for downloading adapters
-	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
-	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
-	FineTuningProviderAddr   string `yaml:"fineTuningProviderAddr"`   // Override FT provider address for event filtering (default: inference provider address)
-	EciesPrivateKey          string `yaml:"-"`                        // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
+	Enable         bool   `yaml:"enable"`
+	BaseModel      string `yaml:"baseModel"`      // Base model name (e.g., "Qwen2.5-7B")
+	LoraModulesDir string `yaml:"loraModulesDir"` // Local directory for LoRA adapter files
+	SllmUrl        string `yaml:"sllmUrl"`        // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
+	// OffloadAfter is the idle time before offloading an adapter from ServerlessLLM.
+	OffloadAfter time.Duration `yaml:"offloadAfter"`
+	// OffloadAfterMinutes is the legacy integer-minutes form.
+	// Deprecated: use OffloadAfter. Removed after config.DeprecationRemovalDate.
+	OffloadAfterMinutes int `yaml:"offloadAfterMinutes,omitempty"`
+
+	EnableColdStorage      bool   `yaml:"enableColdStorage"`         // Enable offload to 0G Storage
+	FineTuningContractAddr string `yaml:"fineTuningContractAddress"` //nolint:revive
+	ChainRpcUrl            string `yaml:"chainRpcUrl"`
+	// PollBlockInterval is how often the watcher polls for new on-chain events.
+	PollBlockInterval time.Duration `yaml:"pollBlockInterval"`
+	// PollBlockIntervalSeconds is the legacy integer-seconds form.
+	// Deprecated: use PollBlockInterval. Removed after config.DeprecationRemovalDate.
+	PollBlockIntervalSeconds int `yaml:"pollBlockIntervalSeconds,omitempty"`
+
+	StorageIndexerUrl      string `yaml:"storageIndexerUrl"`      // 0G Storage indexer URL for downloading adapters
+	StorageTurbo           bool   `yaml:"storageTurbo"`           // Use turbo indexer for 0G Storage
+	AutoDeploy             bool   `yaml:"autoDeploy"`             // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
+	FineTuningProviderAddr string `yaml:"fineTuningProviderAddr"` // Override FT provider address for event filtering (default: inference provider address)
+	EciesPrivateKey        string `yaml:"-"`                      // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
 type Config struct {
@@ -321,11 +331,16 @@ type Config struct {
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval    struct {
-		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-		SettlementProcessor      int `yaml:"settlementProcessor"`
-		ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
+	Interval struct {
+		// All four fields used to be integer seconds; they are now
+		// time.Duration (parsed from yaml strings like "60s" / "10m").
+		// loadConfig restores the legacy integer-seconds semantics when
+		// it detects the raw yaml value is a number — see
+		// migrateDeprecated.
+		AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
+		ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
+		SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
+		ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
 	} `yaml:"interval"`
 	Settlement struct {
 		// MinSettlementFee is the minimum accumulated fee (in neuron) per user
@@ -336,9 +351,9 @@ type Config struct {
 		MinSettlementFee string `yaml:"minSettlementFee"`
 	} `yaml:"settlement"`
 	RevenueTransfer struct {
-		TargetAddress string `yaml:"targetAddress"`
-		ReserveAmount string `yaml:"reserveAmount"`
-		Interval      int    `yaml:"interval"`
+		TargetAddress string        `yaml:"targetAddress"`
+		ReserveAmount string        `yaml:"reserveAmount"`
+		Interval      time.Duration `yaml:"interval"`
 	} `yaml:"revenueTransfer"`
 	Service Service    `yaml:"service"`
 	LoRA    LoRAConfig `yaml:"lora"`
@@ -386,19 +401,38 @@ type ConcurrencyLimitConfig struct {
 
 // AsyncConfig defines configuration for async job processing.
 type AsyncConfig struct {
-	Enabled                bool `yaml:"enabled"`                // Enable async endpoints (default: true)
-	MaxConcurrentJobs      int  `yaml:"maxConcurrentJobs"`      // Max concurrent worker goroutines (default: 10)
-	MaxQueueSize           int  `yaml:"maxQueueSize"`           // Max pending jobs waiting for a worker (default: 100)
-	ResultTTLMinutes       int  `yaml:"resultTTLMinutes"`       // How long to keep completed results (default: 30)
-	CleanupIntervalSeconds int  `yaml:"cleanupIntervalSeconds"` // Interval for expired job cleanup (default: 60)
-	JobTimeoutMinutes      int  `yaml:"jobTimeoutMinutes"`      // Per-job HTTP request timeout (default: 15)
+	Enabled           bool `yaml:"enabled"`           // Enable async endpoints (default: true)
+	MaxConcurrentJobs int  `yaml:"maxConcurrentJobs"` // Max concurrent worker goroutines (default: 10)
+	MaxQueueSize      int  `yaml:"maxQueueSize"`      // Max pending jobs waiting for a worker (default: 100)
+
+	// ResultTTL: how long to keep completed results.
+	ResultTTL time.Duration `yaml:"resultTTL"`
+	// Deprecated: use ResultTTL. Removed after config.DeprecationRemovalDate.
+	ResultTTLMinutes int `yaml:"resultTTLMinutes,omitempty"`
+
+	// CleanupInterval: interval for expired job cleanup.
+	CleanupInterval time.Duration `yaml:"cleanupInterval"`
+	// Deprecated: use CleanupInterval. Removed after config.DeprecationRemovalDate.
+	CleanupIntervalSeconds int `yaml:"cleanupIntervalSeconds,omitempty"`
+
+	// JobTimeout: per-job HTTP request timeout.
+	JobTimeout time.Duration `yaml:"jobTimeout"`
+	// Deprecated: use JobTimeout. Removed after config.DeprecationRemovalDate.
+	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
 }
 
 // ProviderHttpConfig defines HTTP client timeouts for broker→provider communication.
 // Providers can tune these values based on their GPU capacity and model complexity.
 type ProviderHttpConfig struct {
-	TotalTimeoutMinutes          int `yaml:"totalTimeoutMinutes"`          // Overall HTTP request timeout (default: 15)
-	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes"` // Max time to wait for provider to start responding (default: 15)
+	// TotalTimeout: overall HTTP request timeout.
+	TotalTimeout time.Duration `yaml:"totalTimeout"`
+	// Deprecated: use TotalTimeout. Removed after config.DeprecationRemovalDate.
+	TotalTimeoutMinutes int `yaml:"totalTimeoutMinutes,omitempty"`
+
+	// ResponseHeaderTimeout: max time to wait for provider to start responding.
+	ResponseHeaderTimeout time.Duration `yaml:"responseHeaderTimeout"`
+	// Deprecated: use ResponseHeaderTimeout. Removed after config.DeprecationRemovalDate.
+	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty"`
 }
 
 type LogPathsConfig struct {
@@ -549,6 +583,25 @@ var (
 	once     sync.Once
 )
 
+// migrateDuration migrates a "field with unit suffix" deprecated form: the old
+// yaml key (e.g. offloadAfterMinutes) holds an integer count of `unit`, and the
+// new key (e.g. offloadAfter) holds a time.Duration. Precedence: new key wins
+// when both are present.
+func migrateDuration(raw map[string]interface{}, oldPath, newPath []string, target *time.Duration, oldValue int, unit time.Duration) {
+	oldHere := config.RawHasKey(raw, oldPath...)
+	if !oldHere {
+		return
+	}
+	oldDotted := strings.Join(oldPath, ".")
+	newDotted := strings.Join(newPath, ".")
+	if config.RawHasKey(raw, newPath...) {
+		config.WarnDeprecatedBothSet(oldDotted, newDotted)
+		return
+	}
+	config.WarnDeprecated(oldDotted, newDotted)
+	*target = time.Duration(oldValue) * unit
+}
+
 // migrateDeprecated copies values from deprecated yaml keys to their
 // replacements when the user has populated the deprecated form. Each call to
 // config.WarnDeprecated emits a one-shot stderr line so operators see exactly
@@ -557,6 +610,41 @@ var (
 // Precedence rule: if the user wrote both the old and the new key, the new
 // key wins and a separate "both set" warning is emitted.
 func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
+	// Interval / RevenueTransfer.Interval kept their yaml keys but flipped
+	// from int (implicit seconds) to time.Duration. When the raw yaml value
+	// is a number, migrate it to seconds; otherwise the new-style string
+	// value already parsed by UnmarshalStrict is correct.
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.AutoSettleBufferTime, time.Second, "interval", "autoSettleBufferTime")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.ForceSettlementProcessor, time.Second, "interval", "forceSettlementProcessor")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.SettlementProcessor, time.Second, "interval", "settlementProcessor")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.ReconciliationProcessor, time.Second, "interval", "reconciliationProcessor")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.RevenueTransfer.Interval, time.Second, "revenueTransfer", "interval")
+
+	// Suffixed fields (Minutes/Seconds): old yaml key was kept as a separate
+	// deprecated struct field; copy it over if the user still has the old
+	// form. New key wins if both are set.
+	migrateDuration(raw,
+		[]string{"lora", "offloadAfterMinutes"}, []string{"lora", "offloadAfter"},
+		&cfg.LoRA.OffloadAfter, cfg.LoRA.OffloadAfterMinutes, time.Minute)
+	migrateDuration(raw,
+		[]string{"lora", "pollBlockIntervalSeconds"}, []string{"lora", "pollBlockInterval"},
+		&cfg.LoRA.PollBlockInterval, cfg.LoRA.PollBlockIntervalSeconds, time.Second)
+	migrateDuration(raw,
+		[]string{"async", "resultTTLMinutes"}, []string{"async", "resultTTL"},
+		&cfg.Async.ResultTTL, cfg.Async.ResultTTLMinutes, time.Minute)
+	migrateDuration(raw,
+		[]string{"async", "cleanupIntervalSeconds"}, []string{"async", "cleanupInterval"},
+		&cfg.Async.CleanupInterval, cfg.Async.CleanupIntervalSeconds, time.Second)
+	migrateDuration(raw,
+		[]string{"async", "jobTimeoutMinutes"}, []string{"async", "jobTimeout"},
+		&cfg.Async.JobTimeout, cfg.Async.JobTimeoutMinutes, time.Minute)
+	migrateDuration(raw,
+		[]string{"providerHttp", "totalTimeoutMinutes"}, []string{"providerHttp", "totalTimeout"},
+		&cfg.ProviderHttp.TotalTimeout, cfg.ProviderHttp.TotalTimeoutMinutes, time.Minute)
+	migrateDuration(raw,
+		[]string{"providerHttp", "responseHeaderTimeoutMinutes"}, []string{"providerHttp", "responseHeaderTimeout"},
+		&cfg.ProviderHttp.ResponseHeaderTimeout, cfg.ProviderHttp.ResponseHeaderTimeoutMinutes, time.Minute)
+
 	// Networks (map) → Network (single).
 	if config.RawHasKey(raw, "networks") {
 		if config.RawHasKey(raw, "network") {
@@ -721,15 +809,15 @@ func GetConfig() *Config {
 			GasPrice:    "2000000007",
 			MaxGasPrice: "",
 			Interval: struct {
-				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-				SettlementProcessor      int `yaml:"settlementProcessor"`
-				ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
+				AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
+				ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
+				SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
+				ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
 			}{
-				AutoSettleBufferTime:     60,
-				ForceSettlementProcessor: 600,
-				SettlementProcessor:      300,
-				ReconciliationProcessor:  60,
+				AutoSettleBufferTime:     60 * time.Second,
+				ForceSettlementProcessor: 10 * time.Minute,
+				SettlementProcessor:      5 * time.Minute,
+				ReconciliationProcessor:  60 * time.Second,
 			},
 			Settlement: struct {
 				MinSettlementFee string `yaml:"minSettlementFee"`
@@ -737,13 +825,13 @@ func GetConfig() *Config {
 				MinSettlementFee: "4000000000000000",
 			},
 			RevenueTransfer: struct {
-				TargetAddress string `yaml:"targetAddress"`
-				ReserveAmount string `yaml:"reserveAmount"`
-				Interval      int    `yaml:"interval"`
+				TargetAddress string        `yaml:"targetAddress"`
+				ReserveAmount string        `yaml:"reserveAmount"`
+				Interval      time.Duration `yaml:"interval"`
 			}{
 				TargetAddress: "",
 				ReserveAmount: "10000000000000000000",
-				Interval:      3600,
+				Interval:      time.Hour,
 			},
 			Monitor: struct {
 				Enable       bool   `yaml:"enable"`
@@ -760,13 +848,13 @@ func GetConfig() *Config {
 				RequestLength: 40,
 			},
 			LoRA: LoRAConfig{
-				Enable:                   false,
-				LoraModulesDir:           "/data/lora-modules",
-				SllmUrl:                  "http://sllm:8343",
-				OffloadAfterMinutes:      60,
-				EnableColdStorage:        false,
-				PollBlockIntervalSeconds: 5,
-				StorageTurbo:             false,
+				Enable:            false,
+				LoraModulesDir:    "/data/lora-modules",
+				SllmUrl:           "http://sllm:8343",
+				OffloadAfter:      60 * time.Minute,
+				EnableColdStorage: false,
+				PollBlockInterval: 5 * time.Second,
+				StorageTurbo:      false,
 			},
 			ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
@@ -827,16 +915,16 @@ func GetConfig() *Config {
 				PerUserIPMBurst:      0,
 			},
 			Async: AsyncConfig{
-				Enabled:                true,
-				MaxConcurrentJobs:      10,
-				MaxQueueSize:           100,
-				ResultTTLMinutes:       30,
-				CleanupIntervalSeconds: 60,
-				JobTimeoutMinutes:      15,
+				Enabled:           true,
+				MaxConcurrentJobs: 10,
+				MaxQueueSize:      100,
+				ResultTTL:         30 * time.Minute,
+				CleanupInterval:   60 * time.Second,
+				JobTimeout:        15 * time.Minute,
 			},
 			ProviderHttp: ProviderHttpConfig{
-				TotalTimeoutMinutes:          15,
-				ResponseHeaderTimeoutMinutes: 15,
+				TotalTimeout:          15 * time.Minute,
+				ResponseHeaderTimeout: 15 * time.Minute,
 			},
 		}
 

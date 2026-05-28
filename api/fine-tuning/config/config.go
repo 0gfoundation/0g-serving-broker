@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v2"
 
@@ -51,10 +52,11 @@ type Service struct {
 	// The fine-tuning broker pushes adapter keys here via POST /internal/v1/adapter-keys
 	// so the inference broker can decrypt adapters from 0G Storage.
 	InferenceServiceUrl string `yaml:"inferenceServiceUrl"`
-	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
-	// After this period, files will be automatically cleaned up
-	// Default: 72 hours (3 days)
-	FileRetentionHours int `yaml:"fileRetentionHours"`
+	// FileRetention is how long to keep task files (dataset, output,
+	// encrypted LoRA) before they are automatically cleaned up. Default 72h.
+	FileRetention time.Duration `yaml:"fileRetention"`
+	// Deprecated: use FileRetention. Removed after config.DeprecationRemovalDate.
+	FileRetentionHours int `yaml:"fileRetentionHours,omitempty"`
 	// DataDir specifies the root directory for storing task data (datasets, models, outputs)
 	// Default: /tmp (uses os.TempDir())
 	// Recommended: /dstack/persistent for large models to avoid memory pressure
@@ -146,24 +148,35 @@ type Config struct {
 	ServingUrl                  string              `yaml:"servingUrl"`
 	Service                     Service             `yaml:"service"`
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
-	Logger                      config.LoggerConfig `yaml:"logger"`
-	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
-	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
-	GasPrice                    string              `yaml:"gasPrice"`
-	MaxGasPrice                 string              `yaml:"maxGasPrice"`
-	TrainingWorkerCount         int                 `yaml:"trainingWorkerCount"`
-	SetupWorkerCount            int                 `yaml:"setupWorkerCount"`
-	FinalizerWorkerCount        int                 `yaml:"finalizerWorkerCount"`
-	MaxSetupRetriesPerTask      uint                `yaml:"maxSetupRetriesPerTask"`
-	MaxExecutorRetriesPerTask   uint                `yaml:"maxExecutorRetriesPerTask"`
-	MaxFinalizerRetriesPerTask  uint                `yaml:"maxFinalizerRetriesPerTask"`
-	MaxSettlementRetriesPerTask uint                `yaml:"maxSettlementRetriesPerTask"`
-	SettlementBatchSize         uint                `yaml:"settlementBatchSize"`
-	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
-	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
-	MaxTaskQueueSize            uint                `yaml:"maxTaskQueueSize"`
-	RateLimitRPS                float64             `yaml:"rateLimitRPS"`   // Rate limit requests per second
-	RateLimitBurst              int                 `yaml:"rateLimitBurst"` // Rate limit burst size
+	Logger config.LoggerConfig `yaml:"logger"`
+
+	// SettlementCheckInterval is how often the settlement service polls.
+	// Was integer seconds pre-#507; loadConfig restores the legacy semantics
+	// when the raw yaml value is a number — see migrateDeprecated.
+	SettlementCheckInterval time.Duration `yaml:"settlementCheckInterval"`
+
+	BalanceThresholdInEther     int64  `yaml:"balanceThresholdInEther"`
+	GasPrice                    string `yaml:"gasPrice"`
+	MaxGasPrice                 string `yaml:"maxGasPrice"`
+	TrainingWorkerCount         int    `yaml:"trainingWorkerCount"`
+	SetupWorkerCount            int    `yaml:"setupWorkerCount"`
+	FinalizerWorkerCount        int    `yaml:"finalizerWorkerCount"`
+	MaxSetupRetriesPerTask      uint   `yaml:"maxSetupRetriesPerTask"`
+	MaxExecutorRetriesPerTask   uint   `yaml:"maxExecutorRetriesPerTask"`
+	MaxFinalizerRetriesPerTask  uint   `yaml:"maxFinalizerRetriesPerTask"`
+	MaxSettlementRetriesPerTask uint   `yaml:"maxSettlementRetriesPerTask"`
+	SettlementBatchSize         uint   `yaml:"settlementBatchSize"`
+
+	// DeliveredTaskAckTimeout is the time a Delivered task waits for user ack
+	// before being auto-finalized.
+	DeliveredTaskAckTimeout time.Duration `yaml:"deliveredTaskAckTimeout"`
+	// Deprecated: use DeliveredTaskAckTimeout. Removed after config.DeprecationRemovalDate.
+	DeliveredTaskAckTimeoutSecs uint `yaml:"deliveredTaskAckTimeoutSecs,omitempty"`
+
+	DataRetentionDays uint    `yaml:"dataRetentionDays"`
+	MaxTaskQueueSize  uint    `yaml:"maxTaskQueueSize"`
+	RateLimitRPS      float64 `yaml:"rateLimitRPS"`   // Rate limit requests per second
+	RateLimitBurst    int     `yaml:"rateLimitBurst"` // Rate limit burst size
 }
 
 type StorageClientConfig struct {
@@ -192,9 +205,37 @@ var (
 	once     sync.Once
 )
 
+// migrateDuration migrates a "field with unit suffix" deprecated form. See
+// the inference equivalent for details.
+func migrateDuration(raw map[string]interface{}, oldPath, newPath []string, target *time.Duration, oldValue int64, unit time.Duration) {
+	oldHere := config.RawHasKey(raw, oldPath...)
+	if !oldHere {
+		return
+	}
+	oldDotted := strings.Join(oldPath, ".")
+	newDotted := strings.Join(newPath, ".")
+	if config.RawHasKey(raw, newPath...) {
+		config.WarnDeprecatedBothSet(oldDotted, newDotted)
+		return
+	}
+	config.WarnDeprecated(oldDotted, newDotted)
+	*target = time.Duration(oldValue) * unit
+}
+
 // migrateDeprecated copies values from deprecated yaml keys to their
 // replacements. See the inference equivalent for the precedence rules.
 func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
+	// SettlementCheckInterval kept its yaml key; restore legacy
+	// integer-seconds semantics if the raw value is a number.
+	config.MigrateIntegerSecondsDuration(raw, &cfg.SettlementCheckInterval, time.Second, "settlementCheckInterval")
+
+	migrateDuration(raw,
+		[]string{"deliveredTaskAckTimeoutSecs"}, []string{"deliveredTaskAckTimeout"},
+		&cfg.DeliveredTaskAckTimeout, int64(cfg.DeliveredTaskAckTimeoutSecs), time.Second)
+	migrateDuration(raw,
+		[]string{"service", "fileRetentionHours"}, []string{"service", "fileRetention"},
+		&cfg.Service.FileRetention, int64(cfg.Service.FileRetentionHours), time.Hour)
+
 	if config.RawHasKey(raw, "networks") {
 		if config.RawHasKey(raw, "network") {
 			config.WarnDeprecatedBothSet("networks", "network")
@@ -260,7 +301,7 @@ func GetConfig() *Config {
 				Path:          "",
 				RotationCount: 50,
 			},
-			SettlementCheckIntervalSecs: 60,
+			SettlementCheckInterval:     60 * time.Second,
 			BalanceThresholdInEther:     1,
 			MaxGasPrice:                 "1000000000000",
 			TrainingWorkerCount:         1,
@@ -271,7 +312,7 @@ func GetConfig() *Config {
 			MaxFinalizerRetriesPerTask:  10,
 			MaxSettlementRetriesPerTask: 10,
 			SettlementBatchSize:         1,
-			DeliveredTaskAckTimeoutSecs: 60 * 60 * 48,
+			DeliveredTaskAckTimeout:     48 * time.Hour,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
 			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations
