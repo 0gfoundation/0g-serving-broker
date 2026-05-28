@@ -238,24 +238,46 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 
 	if config.RawHasKey(raw, "networks") {
 		if config.RawHasKey(raw, "network") {
-			config.WarnDeprecatedBothSet("networks", "network")
-		} else {
-			config.WarnDeprecated("networks", "network")
-			switch len(cfg.Networks) {
-			case 0:
-				return fmt.Errorf("invalid config: 'networks' is set but empty")
-			case 1:
-				for _, nc := range cfg.Networks {
-					if nc != nil {
-						cfg.Network = *nc
-					}
-				}
-			default:
-				return fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(cfg.Networks))
+			return fmt.Errorf("invalid config: both deprecated 'networks' and new 'network' are set in yaml; delete the 'networks' block to complete the migration")
+		}
+		config.WarnDeprecated("networks", "network")
+		picked, err := pickLegacyNetwork(cfg.Networks)
+		if err != nil {
+			return err
+		}
+		cfg.Network = *picked
+	}
+
+	if (config.RawHasKey(raw, "network") || config.RawHasKey(raw, "networks")) && cfg.Network.URL == "" {
+		return fmt.Errorf("invalid config: network.url is empty after loading; check that the 'network' (or legacy 'networks') block carries a url value")
+	}
+
+	return nil
+}
+
+// pickLegacyNetwork mirrors the inference helper of the same name — multi-entry
+// legacy Networks maps respect the pre-#507 NETWORK env var so dev/CI workflows
+// keep working during the deprecation window.
+func pickLegacyNetwork(networks config.Networks) (*config.NetworkConfig, error) { //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
+	if len(networks) == 0 {
+		return nil, fmt.Errorf("invalid config: 'networks' is set but empty")
+	}
+	if len(networks) == 1 {
+		for _, nc := range networks {
+			if nc == nil {
+				return nil, fmt.Errorf("invalid config: 'networks' entry has no value; either delete it or fill in url/chainID/privateKeys")
 			}
+			return nc, nil
 		}
 	}
-	return nil
+	wanted := "ethereum0g"
+	if os.Getenv("NETWORK") == "hardhat" {
+		wanted = "ethereumHardhat"
+	}
+	if nc, ok := networks[wanted]; ok && nc != nil {
+		return nc, nil
+	}
+	return nil, fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(networks))
 }
 
 func loadConfig(cfg *Config) error {

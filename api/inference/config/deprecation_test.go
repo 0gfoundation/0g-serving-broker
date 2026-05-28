@@ -49,24 +49,28 @@ networks:
 	}
 }
 
-func TestLoadConfig_Migrate_NetworksMultipleEntries(t *testing.T) {
+func TestLoadConfig_Migrate_MultiEntryNetworks_UnknownKeysError(t *testing.T) {
+	// Multi-entry legacy config with no ethereum0g (and NETWORK env unset
+	// so the ethereumHardhat fallback doesn't apply either) has no
+	// principled selection — must fail rather than guess.
+	t.Setenv("NETWORK", "")
 	_, err := loadFromYAML(t, `
 networks:
-  ethereum0g:
-    url: "https://evmrpc.0g.ai"
-  ethereumHardhat:
-    url: "http://localhost:8545"
+  alpha:
+    url: "https://alpha.example"
+  beta:
+    url: "https://beta.example"
 `)
 	if err == nil {
-		t.Fatal("expected error for multi-entry networks map")
+		t.Fatal("expected error for multi-entry networks map without canonical keys")
 	}
 	if !strings.Contains(err.Error(), "2 entries") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
 
-func TestLoadConfig_Migrate_NetworkPreferredOverNetworks(t *testing.T) {
-	cfg, err := loadFromYAML(t, `
+func TestLoadConfig_Migrate_BothSet_Errors(t *testing.T) {
+	_, err := loadFromYAML(t, `
 network:
   url: "https://new.0g.ai"
   chainID: 99
@@ -75,11 +79,91 @@ networks:
     url: "https://old.0g.ai"
     chainID: 1
 `)
+	if err == nil {
+		t.Fatal("expected error when both 'network' and 'networks' are set")
+	}
+	if !strings.Contains(err.Error(), "both deprecated 'networks' and new 'network'") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_Migrate_NetworksWithNilEntryErrors(t *testing.T) {
+	_, err := loadFromYAML(t, `
+networks:
+  ethereum0g:
+`)
+	if err == nil {
+		t.Fatal("expected error when 'networks' entry has no value")
+	}
+	if !strings.Contains(err.Error(), "entry has no value") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_Migrate_NetworksWithEmptyEntryErrors(t *testing.T) {
+	_, err := loadFromYAML(t, `
+networks:
+  ethereum0g: {}
+`)
+	if err == nil {
+		t.Fatal("expected error when 'networks' entry has no url")
+	}
+	if !strings.Contains(err.Error(), "network.url is empty") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_Migrate_NetworkWithoutURLErrors(t *testing.T) {
+	_, err := loadFromYAML(t, `
+network:
+  chainID: 16661
+  privateKeys: ["0xabc"]
+`)
+	if err == nil {
+		t.Fatal("expected error when 'network' has no url")
+	}
+	if !strings.Contains(err.Error(), "network.url is empty") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_Migrate_MultiEntryNetworks_NetworkEnvSelects(t *testing.T) {
+	// Pre-#507 dev workflow: NETWORK=hardhat selects ethereumHardhat from
+	// a multi-entry Networks map. Honored during the deprecation window.
+	t.Setenv("NETWORK", "hardhat")
+	cfg, err := loadFromYAML(t, `
+networks:
+  ethereumHardhat:
+    url: "http://localhost:8545"
+    chainID: 31337
+  ethereum0g:
+    url: "https://evmrpc.0g.ai"
+    chainID: 16661
+`)
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.Network.URL != "https://new.0g.ai" {
-		t.Errorf("Network.URL = %q; expected new key to win", cfg.Network.URL)
+	if cfg.Network.URL != "http://localhost:8545" {
+		t.Errorf("Network.URL = %q; expected hardhat entry to win when NETWORK=hardhat", cfg.Network.URL)
+	}
+}
+
+func TestLoadConfig_Migrate_MultiEntryNetworks_DefaultsTo0g(t *testing.T) {
+	t.Setenv("NETWORK", "")
+	cfg, err := loadFromYAML(t, `
+networks:
+  ethereumHardhat:
+    url: "http://localhost:8545"
+    chainID: 31337
+  ethereum0g:
+    url: "https://evmrpc.0g.ai"
+    chainID: 16661
+`)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Network.URL != "https://evmrpc.0g.ai" {
+		t.Errorf("Network.URL = %q; expected ethereum0g entry to win by default", cfg.Network.URL)
 	}
 }
 

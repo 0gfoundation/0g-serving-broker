@@ -162,6 +162,30 @@ type ControllerConfig struct {
 	Image          string   `yaml:"image,omitempty"`
 }
 
+// durationYAML carries a Go duration value as a string. UnmarshalYAML accepts
+// both the new string form ("60s") and the pre-#507 bare-integer form (60,
+// interpreted as seconds). The marshal side always emits the string form so a
+// wizard run rewrites legacy yaml in the canonical schema.
+type durationYAML string
+
+func (d *durationYAML) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("duration must be a scalar (line %d)", node.Line)
+	}
+	// !!int → legacy seconds; !!str → new duration string. yaml.v3 picks
+	// the tag from the literal form, so we can rely on it rather than
+	// parsing the value twice.
+	switch node.Tag {
+	case "!!int":
+		*d = durationYAML(node.Value + "s")
+	case "!!str", "":
+		*d = durationYAML(node.Value)
+	default:
+		return fmt.Errorf("duration must be an int (legacy seconds) or string (\"30s\" / \"1h\"), got tag %s at line %d", node.Tag, node.Line)
+	}
+	return nil
+}
+
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins,omitempty"`
 	ContractAddress string   `yaml:"contractAddress,omitempty"`
@@ -177,20 +201,20 @@ type Config struct {
 	} `yaml:"event,omitempty"`
 	GasPrice    interface{} `yaml:"gasPrice,omitempty"`
 	MaxGasPrice interface{} `yaml:"maxGasPrice,omitempty"`
-	// Interval fields hold Go duration strings ("60s", "10m") in the new
-	// schema. Pre-#507 yaml using integer seconds would fail strict
-	// unmarshal here — users on legacy yaml should bump up to the new
-	// format before re-running the wizard.
+	// Interval fields hold Go duration values in the new schema. The
+	// durationYAML type unmarshals both "60s" (new form) and a bare 60
+	// (pre-#507 legacy integer seconds), then always marshals as a
+	// string — so re-running the wizard normalizes legacy yaml.
 	Interval struct {
-		AutoSettleBufferTime     string `yaml:"autoSettleBufferTime,omitempty"`
-		ForceSettlementProcessor string `yaml:"forceSettlementProcessor,omitempty"`
-		SettlementProcessor      string `yaml:"settlementProcessor,omitempty"`
-		ReconciliationProcessor  string `yaml:"reconciliationProcessor,omitempty"`
+		AutoSettleBufferTime     durationYAML `yaml:"autoSettleBufferTime,omitempty"`
+		ForceSettlementProcessor durationYAML `yaml:"forceSettlementProcessor,omitempty"`
+		SettlementProcessor      durationYAML `yaml:"settlementProcessor,omitempty"`
+		ReconciliationProcessor  durationYAML `yaml:"reconciliationProcessor,omitempty"`
 	} `yaml:"interval,omitempty"`
 	RevenueTransfer struct {
-		TargetAddress string `yaml:"targetAddress,omitempty"`
-		ReserveAmount string `yaml:"reserveAmount,omitempty"`
-		Interval      string `yaml:"interval,omitempty"`
+		TargetAddress string       `yaml:"targetAddress,omitempty"`
+		ReserveAmount string       `yaml:"reserveAmount,omitempty"`
+		Interval      durationYAML `yaml:"interval,omitempty"`
 	} `yaml:"revenueTransfer,omitempty"`
 	Service  Service  `yaml:"service,omitempty"`
 	Network  *NetworkConfig `yaml:"network,omitempty"`
@@ -989,7 +1013,7 @@ func main() {
 		ReserveAmount string
 		// Duration string e.g. "1h" — see #507. Pre-#507 the value here
 		// was an integer count of seconds.
-		Interval string
+		Interval durationYAML
 	}
 	fmt.Print("\n💰 Do you want to configure automatic revenue transfer to another address? [y/N]: ")
 	revenueResponse, _ := reader.ReadString('\n')
@@ -1037,9 +1061,9 @@ func main() {
 			revenueTransferConfig.Interval = "1h"
 		default:
 			if n, err := strconv.Atoi(intervalInput); err == nil {
-				revenueTransferConfig.Interval = fmt.Sprintf("%ds", n)
+				revenueTransferConfig.Interval = durationYAML(fmt.Sprintf("%ds", n))
 			} else if _, err := time.ParseDuration(intervalInput); err == nil {
-				revenueTransferConfig.Interval = intervalInput
+				revenueTransferConfig.Interval = durationYAML(intervalInput)
 			} else {
 				revenueTransferConfig.Interval = "1h"
 				fmt.Println("   ⚠️  Invalid interval, using default: 1h")
@@ -1413,7 +1437,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval string, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval durationYAML, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -2427,6 +2451,8 @@ func isPlaceholderInterface(value interface{}) bool {
 }
 
 func saveConfig(config *Config, path string) error {
+	normalizeForSave(config)
+
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -2438,6 +2464,44 @@ func saveConfig(config *Config, path string) error {
 	defer encoder.Close()
 
 	return encoder.Encode(config)
+}
+
+// normalizeForSave guarantees the wizard's output yaml is in the post-#507
+// schema: a single `network:` block, never the legacy `networks:` map
+// alongside it.
+//
+// Without this step a wizard run against a legacy config produces a yaml with
+// both blocks set (the new write path touches only Network, while merge
+// preserves the user's existing Networks map). The broker's strict
+// "both keys set" check would then reject that yaml at startup.
+func normalizeForSave(c *Config) {
+	if c == nil {
+		return
+	}
+	if c.Network != nil && (c.Network.URL != "" || len(c.Network.PrivateKeys) > 0) {
+		c.Networks = nil
+		return
+	}
+	if c.Network == nil && len(c.Networks) > 0 {
+		// Wizard didn't touch the new field but the user still has a
+		// legacy block. Migrate the canonical entry (ethereum0g) if
+		// present, else the only entry.
+		var picked *NetworkConfig
+		if nc, ok := c.Networks["ethereum0g"]; ok && nc != nil {
+			picked = nc
+		} else if len(c.Networks) == 1 {
+			for _, nc := range c.Networks {
+				if nc != nil {
+					picked = nc
+					break
+				}
+			}
+		}
+		if picked != nil {
+			c.Network = picked
+			c.Networks = nil
+		}
+	}
 }
 
 func isValidURL(value string) bool {
