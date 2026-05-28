@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -176,16 +177,20 @@ type Config struct {
 	} `yaml:"event,omitempty"`
 	GasPrice    interface{} `yaml:"gasPrice,omitempty"`
 	MaxGasPrice interface{} `yaml:"maxGasPrice,omitempty"`
-	Interval    struct {
-		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime,omitempty"`
-		ForceSettlementProcessor int `yaml:"forceSettlementProcessor,omitempty"`
-		SettlementProcessor      int `yaml:"settlementProcessor,omitempty"`
-		ReconciliationProcessor  int `yaml:"reconciliationProcessor,omitempty"`
+	// Interval fields hold Go duration strings ("60s", "10m") in the new
+	// schema. Pre-#507 yaml using integer seconds would fail strict
+	// unmarshal here — users on legacy yaml should bump up to the new
+	// format before re-running the wizard.
+	Interval struct {
+		AutoSettleBufferTime     string `yaml:"autoSettleBufferTime,omitempty"`
+		ForceSettlementProcessor string `yaml:"forceSettlementProcessor,omitempty"`
+		SettlementProcessor      string `yaml:"settlementProcessor,omitempty"`
+		ReconciliationProcessor  string `yaml:"reconciliationProcessor,omitempty"`
 	} `yaml:"interval,omitempty"`
 	RevenueTransfer struct {
 		TargetAddress string `yaml:"targetAddress,omitempty"`
 		ReserveAmount string `yaml:"reserveAmount,omitempty"`
-		Interval      int    `yaml:"interval,omitempty"`
+		Interval      string `yaml:"interval,omitempty"`
 	} `yaml:"revenueTransfer,omitempty"`
 	Service  Service  `yaml:"service,omitempty"`
 	Network  *NetworkConfig `yaml:"network,omitempty"`
@@ -982,7 +987,9 @@ func main() {
 	var revenueTransferConfig struct {
 		TargetAddress string
 		ReserveAmount string
-		Interval      int
+		// Duration string e.g. "1h" — see #507. Pre-#507 the value here
+		// was an integer count of seconds.
+		Interval string
 	}
 	fmt.Print("\n💰 Do you want to configure automatic revenue transfer to another address? [y/N]: ")
 	revenueResponse, _ := reader.ReadString('\n')
@@ -1018,21 +1025,27 @@ func main() {
 		}
 		fmt.Printf("   ✓ Reserve amount set to: %s neuron\n", revenueTransferConfig.ReserveAmount)
 
-		// Ask for transfer interval
-		fmt.Print("\n⏱️  Enter the transfer interval in seconds (default: 3600 = 1 hour): ")
+		// Ask for transfer interval. Accept either a Go duration string
+		// ("1h", "30m") or a bare integer (legacy seconds) for
+		// convenience; the wizard always writes the new duration-string
+		// form into the generated yaml.
+		fmt.Print("\n⏱️  Enter the transfer interval as a duration (default: 1h; e.g. \"30m\", \"2h\", or an integer count of seconds): ")
 		intervalInput, _ := reader.ReadString('\n')
 		intervalInput = strings.TrimSpace(intervalInput)
-		if intervalInput == "" {
-			revenueTransferConfig.Interval = 3600
-		} else {
-			if interval, err := strconv.Atoi(intervalInput); err == nil {
-				revenueTransferConfig.Interval = interval
+		switch {
+		case intervalInput == "":
+			revenueTransferConfig.Interval = "1h"
+		default:
+			if n, err := strconv.Atoi(intervalInput); err == nil {
+				revenueTransferConfig.Interval = fmt.Sprintf("%ds", n)
+			} else if _, err := time.ParseDuration(intervalInput); err == nil {
+				revenueTransferConfig.Interval = intervalInput
 			} else {
-				revenueTransferConfig.Interval = 3600
-				fmt.Println("   ⚠️  Invalid interval, using default: 3600 seconds")
+				revenueTransferConfig.Interval = "1h"
+				fmt.Println("   ⚠️  Invalid interval, using default: 1h")
 			}
 		}
-		fmt.Printf("   ✓ Transfer interval set to: %d seconds\n", revenueTransferConfig.Interval)
+		fmt.Printf("   ✓ Transfer interval set to: %s\n", revenueTransferConfig.Interval)
 	} else {
 		fmt.Println("   ✓ Revenue transfer disabled")
 	}
@@ -1400,7 +1413,7 @@ func promptOutputDirectory() (string, error) {
 	return outputDir, nil
 }
 
-func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval int, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
+func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress string, targetSeparated bool, verifierUrl string, additionalHeaders map[string]string, useMonitoring bool, networkType string, revenueTargetAddress string, revenueReserveAmount string, revenueInterval string, controllerEnable bool, controllerAdminAddress string, modelInfo *ModelInfo, ownedBy string, providerType string, providerIdentity string) (string, string, *Config, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Find base config file in original directory
@@ -2035,14 +2048,14 @@ func mergeConfigs(base, user *Config) {
 		base.MaxGasPrice = user.MaxGasPrice
 	}
 
-	// Merge intervals
-	if user.Interval.AutoSettleBufferTime != 0 {
+	// Merge intervals (duration strings).
+	if user.Interval.AutoSettleBufferTime != "" {
 		base.Interval.AutoSettleBufferTime = user.Interval.AutoSettleBufferTime
 	}
-	if user.Interval.ForceSettlementProcessor != 0 {
+	if user.Interval.ForceSettlementProcessor != "" {
 		base.Interval.ForceSettlementProcessor = user.Interval.ForceSettlementProcessor
 	}
-	if user.Interval.SettlementProcessor != 0 {
+	if user.Interval.SettlementProcessor != "" {
 		base.Interval.SettlementProcessor = user.Interval.SettlementProcessor
 	}
 
@@ -2053,7 +2066,7 @@ func mergeConfigs(base, user *Config) {
 	if user.RevenueTransfer.ReserveAmount != "" {
 		base.RevenueTransfer.ReserveAmount = user.RevenueTransfer.ReserveAmount
 	}
-	if user.RevenueTransfer.Interval != 0 {
+	if user.RevenueTransfer.Interval != "" {
 		base.RevenueTransfer.Interval = user.RevenueTransfer.Interval
 	}
 
