@@ -217,7 +217,7 @@ func Main() {
 	var loraCancel context.CancelFunc
 	var eventWatcher *lorapkg.EventWatcher
 	if config.LoRA.Enable {
-		loraManager, err := lorapkg.NewManager(config.LoRA, config.Networks, db, logger)
+		loraManager, err := lorapkg.NewManager(config.LoRA, &config.Network, db, logger)
 		if err != nil {
 			panic(err)
 		}

@@ -135,7 +135,25 @@ type NetworkConfig struct {
 	GasEstimationBuffer uint64   `yaml:"gasEstimationBuffer,omitempty"`
 }
 
-type Networks map[string]*NetworkConfig
+type Networks map[string]*NetworkConfig // Deprecated: kept so legacy config files still merge during the #507 deprecation window.
+
+// networkConfigOrEmpty returns the user's NetworkConfig, preferring the new
+// `network` field. Falls back to the first entry under the legacy `networks`
+// map for users still on the pre-#507 schema.
+func networkConfigOrEmpty(c *Config) *NetworkConfig {
+	if c.Network != nil {
+		return c.Network
+	}
+	if nc, ok := c.Networks["ethereum0g"]; ok && nc != nil {
+		return nc
+	}
+	for _, nc := range c.Networks {
+		if nc != nil {
+			return nc
+		}
+	}
+	return nil
+}
 
 type ControllerConfig struct {
 	Enable         bool     `yaml:"enable,omitempty"`
@@ -166,6 +184,9 @@ type Config struct {
 		Interval      int    `yaml:"interval,omitempty"`
 	} `yaml:"revenueTransfer,omitempty"`
 	Service  Service  `yaml:"service,omitempty"`
+	Network  *NetworkConfig `yaml:"network,omitempty"`
+	// Networks is kept so legacy config files still parse during the #507
+	// deprecation window. Deprecated: use Network.
 	Networks Networks `yaml:"networks,omitempty"`
 	Monitor  struct {
 		Enable       bool   `yaml:"enable,omitempty"`
@@ -708,7 +729,7 @@ var requiredFields = []RequiredField{
 		Validator:   isNotEmpty,
 	},
 	{
-		Path:        "networks.ethereum0g.privateKeys[0]",
+		Path:        "network.privateKeys[0]",
 		Description: "Private key for blockchain transactions (64 hex characters)",
 		Validator:   nil,
 	},
@@ -2092,7 +2113,11 @@ func mergeConfigs(base, user *Config) {
 		base.Service.ProviderIdentity = user.Service.ProviderIdentity
 	}
 
-	// Merge networks
+	// Merge network (new field takes precedence; legacy `networks` map is
+	// still merged so users mid-migration don't lose values).
+	if user.Network != nil {
+		base.Network = user.Network
+	}
 	if user.Networks != nil {
 		if base.Networks == nil {
 			base.Networks = make(Networks)
@@ -2133,7 +2158,7 @@ func checkAndPromptRequiredFields(config *Config, deployLLM bool) error {
 		"service.inputPrice",
 		"service.outputPrice",
 		"service.model",
-		"networks.ethereum0g.privateKeys[0]",
+		"network.privateKeys[0]",
 	}
 
 	fieldMap := make(map[string]RequiredField)
@@ -2242,9 +2267,9 @@ func getFieldValue(config *Config, path string) string {
 		return ""
 	case "service.model":
 		return config.Service.ModelType
-	case "networks.ethereum0g.privateKeys[0]":
-		if config.Networks != nil && config.Networks["ethereum0g"] != nil && len(config.Networks["ethereum0g"].PrivateKeys) > 0 {
-			return config.Networks["ethereum0g"].PrivateKeys[0]
+	case "network.privateKeys[0]":
+		if nc := networkConfigOrEmpty(config); nc != nil && len(nc.PrivateKeys) > 0 {
+			return nc.PrivateKeys[0]
 		}
 		return ""
 	}
@@ -2271,17 +2296,14 @@ func setFieldValue(config *Config, path, value string) error {
 		}
 	case "service.model":
 		config.Service.ModelType = value
-	case "networks.ethereum0g.privateKeys[0]":
-		if config.Networks == nil {
-			config.Networks = make(Networks)
+	case "network.privateKeys[0]":
+		if config.Network == nil {
+			config.Network = &NetworkConfig{}
 		}
-		if config.Networks["ethereum0g"] == nil {
-			config.Networks["ethereum0g"] = &NetworkConfig{}
-		}
-		if len(config.Networks["ethereum0g"].PrivateKeys) == 0 {
-			config.Networks["ethereum0g"].PrivateKeys = []string{value}
+		if len(config.Network.PrivateKeys) == 0 {
+			config.Network.PrivateKeys = []string{value}
 		} else {
-			config.Networks["ethereum0g"].PrivateKeys[0] = value
+			config.Network.PrivateKeys[0] = value
 		}
 	default:
 		return fmt.Errorf("unknown field path: %s", path)
@@ -2330,29 +2352,40 @@ func cleanupPlaceholderFields(config *Config) {
 		config.ContractAddress = ""
 	}
 
-	// Clean up placeholder private keys in all networks
+	// Clean up placeholder private keys in the new single-network field.
+	if config.Network != nil {
+		cleanPlaceholderPrivateKeys(config.Network)
+		if config.Network.PrivateKeys == nil && config.Network.URL == "" {
+			config.Network = nil
+		}
+	}
+
+	// Same cleanup for the legacy networks map (still merged during the
+	// deprecation window).
 	if config.Networks != nil {
 		for networkName, network := range config.Networks {
-			if network.PrivateKeys != nil {
-				var cleanedKeys []string
-				for _, key := range network.PrivateKeys {
-					if !isPlaceholder(key) {
-						cleanedKeys = append(cleanedKeys, key)
-					}
-				}
-				// If no valid keys remain, set to nil to omit from YAML
-				if len(cleanedKeys) == 0 {
-					network.PrivateKeys = nil
-				} else {
-					network.PrivateKeys = cleanedKeys
-				}
-			}
-
-			// Remove entire network if it has no meaningful configuration
+			cleanPlaceholderPrivateKeys(network)
 			if network.PrivateKeys == nil && network.URL == "" {
 				delete(config.Networks, networkName)
 			}
 		}
+	}
+}
+
+func cleanPlaceholderPrivateKeys(n *NetworkConfig) {
+	if n == nil || n.PrivateKeys == nil {
+		return
+	}
+	var cleanedKeys []string
+	for _, key := range n.PrivateKeys {
+		if !isPlaceholder(key) {
+			cleanedKeys = append(cleanedKeys, key)
+		}
+	}
+	if len(cleanedKeys) == 0 {
+		n.PrivateKeys = nil
+	} else {
+		n.PrivateKeys = cleanedKeys
 	}
 }
 

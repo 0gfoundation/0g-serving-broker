@@ -2,19 +2,16 @@ package config
 
 import (
 	"errors"
-	"sort"
 	"strings"
 )
 
+// Networks is the legacy multi-network map. New code should use a single
+// *NetworkConfig instead — this type only exists so config files written
+// against the pre-#507 schema continue to unmarshal during the deprecation
+// window (see DeprecationRemovalDate).
+//
+// Deprecated: use NetworkConfig directly.
 type Networks map[string]*NetworkConfig
-
-// GetNetworkConfig finds a specified network config based on its name
-func (c Networks) GetNetworkConfig(name string) (*NetworkConfig, error) {
-	if network, ok := c[name]; ok {
-		return network, nil
-	}
-	return nil, errors.New("no supported network of name " + name + " was found. Ensure that the config for it exists.")
-}
 
 type NetworkConfig struct {
 	URL                 string   `mapstructure:"url" yaml:"url"`
@@ -42,25 +39,17 @@ func (l *PrivateKeyStore) Fetch() ([]string, error) {
 	return l.rawKeys, nil
 }
 
-// GetProviderPrivateKey returns the first available private key from any configured network.
-// Both fine-tuning and inference brokers use this to access the provider wallet key
-// for ECIES encryption/decryption of LoRA adapter secrets.
-func GetProviderPrivateKey(networks Networks) (string, error) {
-	names := make([]string, 0, len(networks))
-	for name := range networks {
-		names = append(names, name)
+// GetProviderPrivateKey returns the first available private key from the
+// configured network. Both fine-tuning and inference brokers use this to access
+// the provider wallet key for ECIES encryption/decryption of LoRA adapter
+// secrets.
+func GetProviderPrivateKey(network *NetworkConfig) (string, error) {
+	if network == nil || network.PrivateKeyStore == nil {
+		return "", errors.New("no provider private key found in network config")
 	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		nc := networks[name]
-		if nc.PrivateKeyStore != nil {
-			keys, err := nc.PrivateKeyStore.Fetch()
-			if err != nil || len(keys) == 0 {
-				continue
-			}
-			return strings.TrimSpace(keys[0]), nil
-		}
+	keys, err := network.PrivateKeyStore.Fetch()
+	if err != nil || len(keys) == 0 {
+		return "", errors.New("no provider private key found in network config")
 	}
-	return "", errors.New("no provider private key found in any configured network")
+	return strings.TrimSpace(keys[0]), nil
 }

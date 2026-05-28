@@ -47,7 +47,7 @@ type Manager struct {
 
 // NewManager creates a LoRA adapter manager with the given config, 0G Storage downloader,
 // and ServerlessLLM client. Call Start() to begin background event processing.
-func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database *db.DB, logger log.Logger) (*Manager, error) {
+func NewManager(cfg config.LoRAConfig, network *commonconfig.NetworkConfig, database *db.DB, logger log.Logger) (*Manager, error) {
 	if cfg.LoraModulesDir != "" {
 		if err := os.MkdirAll(cfg.LoraModulesDir, 0755); err != nil {
 			return nil, errors.Wrap(err, "create lora modules directory")
@@ -67,7 +67,7 @@ func NewManager(cfg config.LoRAConfig, networks commonconfig.Networks, database 
 		logger.Infof("using ECIES private key from LORA_ECIES_PRIVATE_KEY environment variable")
 	}
 	if eciesKey == "" {
-		k, err := commonconfig.GetProviderPrivateKey(networks)
+		k, err := commonconfig.GetProviderPrivateKey(network)
 		if err != nil {
 			logger.Warnf("provider private key not available for 0G Storage download: %v", err)
 		} else {

@@ -340,9 +340,14 @@ type Config struct {
 		ReserveAmount string `yaml:"reserveAmount"`
 		Interval      int    `yaml:"interval"`
 	} `yaml:"revenueTransfer"`
-	Service  Service         `yaml:"service"`
-	LoRA     LoRAConfig      `yaml:"lora"`
-	Networks config.Networks `mapstructure:"networks" yaml:"networks"`
+	Service Service    `yaml:"service"`
+	LoRA    LoRAConfig `yaml:"lora"`
+	// Network is the canonical single-network config (introduced by #507).
+	Network config.NetworkConfig `mapstructure:"network" yaml:"network"`
+	// Networks is the legacy multi-network map kept for backwards
+	// compatibility. Deprecated: use Network instead. Removed after
+	// config.DeprecationRemovalDate.
+	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty"`
 	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
 		EventAddress string `yaml:"eventAddress"`
@@ -544,93 +549,133 @@ var (
 	once     sync.Once
 )
 
-func loadConfig(config *Config) error {
+// migrateDeprecated copies values from deprecated yaml keys to their
+// replacements when the user has populated the deprecated form. Each call to
+// config.WarnDeprecated emits a one-shot stderr line so operators see exactly
+// which keys still need to move before the removal deadline.
+//
+// Precedence rule: if the user wrote both the old and the new key, the new
+// key wins and a separate "both set" warning is emitted.
+func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
+	// Networks (map) → Network (single).
+	if config.RawHasKey(raw, "networks") {
+		if config.RawHasKey(raw, "network") {
+			config.WarnDeprecatedBothSet("networks", "network")
+		} else {
+			config.WarnDeprecated("networks", "network")
+			switch len(cfg.Networks) {
+			case 0:
+				return fmt.Errorf("invalid config: 'networks' is set but empty")
+			case 1:
+				for _, nc := range cfg.Networks {
+					if nc != nil {
+						cfg.Network = *nc
+					}
+				}
+			default:
+				return fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(cfg.Networks))
+			}
+		}
+	}
+	return nil
+}
+
+func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
 		configPath = envPath
 	}
 
 	// Always set ConfigFile so Controller knows the path
-	config.Controller.ConfigFile = configPath
+	cfg.Controller.ConfigFile = configPath
 
-	data, err := os.ReadFile(configPath)
+	data, missing, err := config.ReadConfigFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+		return err
+	}
+	if missing {
+		return nil
+	}
+
+	// Two-phase parse: the raw map lets migration logic detect which keys
+	// the user actually wrote (vs. which came from struct defaults). See
+	// migrateDeprecated.
+	raw := config.RawYAMLKeys(data)
+
+	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
 		return err
 	}
 
-	if err := yaml.UnmarshalStrict(data, config); err != nil {
+	if err := migrateDeprecated(cfg, raw); err != nil {
 		return err
 	}
 
-	if config.Service.ModelInfo != nil {
-		if err := config.Service.ModelInfo.Validate(config.Service.Type); err != nil {
+	if cfg.Service.ModelInfo != nil {
+		if err := cfg.Service.ModelInfo.Validate(cfg.Service.Type); err != nil {
 			return fmt.Errorf("invalid config: %w", err)
 		}
 	}
 
 	// Normalize and validate provider type
-	if config.Service.ProviderType == "" {
-		config.Service.ProviderType = constant.ProviderTypeDecentralized
+	if cfg.Service.ProviderType == "" {
+		cfg.Service.ProviderType = constant.ProviderTypeDecentralized
 	}
-	if config.Service.ProviderType != constant.ProviderTypeDecentralized && config.Service.ProviderType != constant.ProviderTypeCentralized {
-		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, config.Service.ProviderType)
+	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
+		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, cfg.Service.ProviderType)
 	}
-	if config.Service.ProviderType == constant.ProviderTypeCentralized {
-		if config.Service.ProviderIdentity == "" {
+	if cfg.Service.ProviderType == constant.ProviderTypeCentralized {
+		if cfg.Service.ProviderIdentity == "" {
 			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
 		}
-		config.Service.ProviderIdentity = strings.ToLower(config.Service.ProviderIdentity)
-		if !validProviderIdentity.MatchString(config.Service.ProviderIdentity) {
-			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", config.Service.ProviderIdentity)
+		cfg.Service.ProviderIdentity = strings.ToLower(cfg.Service.ProviderIdentity)
+		if !validProviderIdentity.MatchString(cfg.Service.ProviderIdentity) {
+			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", cfg.Service.ProviderIdentity)
 		}
 		// Centralized providers always behave as TargetSeparated (shared external backend)
-		config.Service.TargetSeparated = true
+		cfg.Service.TargetSeparated = true
 		// Require HTTPS for centralized providers — routing proof relies on
 		// resp.TLS which is only populated for HTTPS connections.
-		if config.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(config.Service.TargetURL), "https://") {
-			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", config.Service.TargetURL)
+		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
+			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
 		}
 	}
 
 	// Normalize and validate price denomination / priceFeed configuration.
-	if config.Service.PriceDenomination == "" {
-		config.Service.PriceDenomination = constant.PriceDenominationNative
+	if cfg.Service.PriceDenomination == "" {
+		cfg.Service.PriceDenomination = constant.PriceDenominationNative
 	}
-	config.Service.PriceDenomination = strings.ToUpper(config.Service.PriceDenomination)
-	switch config.Service.PriceDenomination {
+	cfg.Service.PriceDenomination = strings.ToUpper(cfg.Service.PriceDenomination)
+	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
-		if config.Service.InputPriceUSDPerMillionTokens != "" || config.Service.OutputPriceUSDPerMillionTokens != "" {
+		if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
 	case constant.PriceDenominationUSD:
-		if config.Service.InputPriceUSDPerMillionTokens == "" || config.Service.OutputPriceUSDPerMillionTokens == "" {
+		if cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "" {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", config.Service.InputPriceUSDPerMillionTokens); err != nil {
+		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
-		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", config.Service.OutputPriceUSDPerMillionTokens); err != nil {
+		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
-		if config.Service.InputPrice != "" || config.Service.OutputPrice != "" {
+		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
 		}
-		if err := validatePriceFeedConfig(&config.PriceFeed); err != nil {
+		if err := validatePriceFeedConfig(&cfg.PriceFeed); err != nil {
 			return err
 		}
 	default:
-		return fmt.Errorf("invalid config: service.priceDenomination must be '%s' or '%s', got '%s'", constant.PriceDenominationNative, constant.PriceDenominationUSD, config.Service.PriceDenomination)
+		return fmt.Errorf("invalid config: service.priceDenomination must be '%s' or '%s', got '%s'", constant.PriceDenominationNative, constant.PriceDenominationUSD, cfg.Service.PriceDenomination)
 	}
 
 	// Validate tiered pricing configuration
-	if config.TieredPricing.Enabled {
-		if len(config.TieredPricing.Tiers) == 0 {
+	if cfg.TieredPricing.Enabled {
+		if len(cfg.TieredPricing.Tiers) == 0 {
 			return fmt.Errorf("invalid config: tieredPricing.tiers must not be empty when tieredPricing is enabled")
 		}
-		for i, tier := range config.TieredPricing.Tiers {
+		for i, tier := range cfg.TieredPricing.Tiers {
 			if tier.InputMultiplier < 1 {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %d", i, tier.InputMultiplier)
 			}
@@ -641,12 +686,12 @@ func loadConfig(config *Config) error {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens must be >= 0, got %d", i, tier.MaxInputTokens)
 			}
 			// MaxInputTokens == 0 (unbounded) must be the last tier
-			if tier.MaxInputTokens == 0 && i != len(config.TieredPricing.Tiers)-1 {
+			if tier.MaxInputTokens == 0 && i != len(cfg.TieredPricing.Tiers)-1 {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens=0 (unbounded) must be the last tier", i)
 			}
 			// Ensure ascending order
 			if i > 0 && tier.MaxInputTokens != 0 {
-				prev := config.TieredPricing.Tiers[i-1]
+				prev := cfg.TieredPricing.Tiers[i-1]
 				if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
 					return fmt.Errorf("invalid config: tieredPricing.tiers must be ordered by maxInputTokens ascending, tiers[%d]=%d <= tiers[%d]=%d",
 						i, tier.MaxInputTokens, i-1, prev.MaxInputTokens)
@@ -799,9 +844,7 @@ func GetConfig() *Config {
 			panic(err)
 		}
 
-		for _, networkConf := range instance.Networks {
-			networkConf.PrivateKeyStore = config.NewPrivateKeyStore(networkConf)
-		}
+		instance.Network.PrivateKeyStore = config.NewPrivateKeyStore(&instance.Network)
 	})
 
 	return instance

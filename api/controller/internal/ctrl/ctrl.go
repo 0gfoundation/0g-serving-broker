@@ -71,14 +71,13 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	if fullConfig.ContractAddress == "" {
 		return nil, fmt.Errorf("contract address is required for controller")
 	}
-	if len(fullConfig.Networks) == 0 {
-		return nil, fmt.Errorf("networks configuration is required for controller")
+	if fullConfig.Network.URL == "" {
+		return nil, fmt.Errorf("network configuration is required for controller")
 	}
 
 	servingContract, err := contract.NewServingContract(
 		common.HexToAddress(fullConfig.ContractAddress),
-		&fullConfig.Networks,
-		os.Getenv("NETWORK"),
+		&fullConfig.Network,
 		fullConfig.GasPrice,
 		fullConfig.MaxGasPrice,
 		logger,

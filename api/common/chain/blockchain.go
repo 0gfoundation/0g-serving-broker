@@ -11,13 +11,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/config"
 )
 
-type BlockchainNetworkID string
-
-const (
-	EthereumHardhatID BlockchainNetworkID = "ethereumHardhat"
-	Ethereum0gID      BlockchainNetworkID = "ethereum0g"
-)
-
 type BlockchainNetwork interface {
 	URL() string
 	ChainID() *big.Int
@@ -25,28 +18,19 @@ type BlockchainNetwork interface {
 	Config() *config.NetworkConfig
 }
 
-type BlockchainNetworkInit func(conf *config.Networks) (BlockchainNetwork, error)
-
 type EthereumNetwork struct {
 	networkConfig *config.NetworkConfig
 }
 
-func newEthereumNetwork(conf *config.Networks, networkID BlockchainNetworkID) (BlockchainNetwork, error) {
-	networkConf, err := conf.GetNetworkConfig(string(networkID))
-	if err != nil {
-		return nil, err
+// NewEthereumNetwork builds a BlockchainNetwork from a single NetworkConfig.
+// Replaces the pre-#507 NewHardhatNetwork / New0gNetwork pair, which selected
+// from a Networks map keyed by a hardcoded id — that map only ever carried one
+// entry in production, and Hardhat/0g shared identical behaviour.
+func NewEthereumNetwork(cfg *config.NetworkConfig) (BlockchainNetwork, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("nil network config")
 	}
-	return &EthereumNetwork{
-		networkConfig: networkConf,
-	}, nil
-}
-
-func NewHardhatNetwork(conf *config.Networks) (BlockchainNetwork, error) {
-	return newEthereumNetwork(conf, EthereumHardhatID)
-}
-
-func New0gNetwork(conf *config.Networks) (BlockchainNetwork, error) {
-	return newEthereumNetwork(conf, Ethereum0gID)
+	return &EthereumNetwork{networkConfig: cfg}, nil
 }
 
 func (e *EthereumNetwork) URL() string {
@@ -125,6 +109,9 @@ func (e *EthereumWallet) Address() string {
 }
 
 func newEthereumWallets(pkStore *config.PrivateKeyStore) (BlockchainWallets, error) {
+	if pkStore == nil {
+		return nil, fmt.Errorf("private key store not initialized")
+	}
 	// Check private keystore value, create wallets from such
 	var processedWallets []BlockchainWallet
 	keys, err := pkStore.Fetch()

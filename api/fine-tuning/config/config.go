@@ -135,7 +135,12 @@ type Config struct {
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks"`
+	// Network is the canonical single-network config (introduced by #507).
+	Network config.NetworkConfig `mapstructure:"network" yaml:"network"`
+	// Networks is the legacy multi-network map kept for backwards
+	// compatibility. Deprecated: use Network instead. Removed after
+	// config.DeprecationRemovalDate.
+	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks,omitempty"`
 	Images                      Images              `yaml:"images"`
 	StorageClientConfig         StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
 	ServingUrl                  string              `yaml:"servingUrl"`
@@ -187,21 +192,50 @@ var (
 	once     sync.Once
 )
 
-func loadConfig(config *Config) error {
+// migrateDeprecated copies values from deprecated yaml keys to their
+// replacements. See the inference equivalent for the precedence rules.
+func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
+	if config.RawHasKey(raw, "networks") {
+		if config.RawHasKey(raw, "network") {
+			config.WarnDeprecatedBothSet("networks", "network")
+		} else {
+			config.WarnDeprecated("networks", "network")
+			switch len(cfg.Networks) {
+			case 0:
+				return fmt.Errorf("invalid config: 'networks' is set but empty")
+			case 1:
+				for _, nc := range cfg.Networks {
+					if nc != nil {
+						cfg.Network = *nc
+					}
+				}
+			default:
+				return fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(cfg.Networks))
+			}
+		}
+	}
+	return nil
+}
+
+func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
 		configPath = envPath
 	}
 
-	data, err := os.ReadFile(configPath)
+	data, missing, err := config.ReadConfigFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
+	if missing {
+		return nil
+	}
 
-	return yaml.UnmarshalStrict(data, config)
+	raw := config.RawYAMLKeys(data)
+	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+		return err
+	}
+	return migrateDeprecated(cfg, raw)
 }
 
 func GetConfig() *Config {
@@ -248,9 +282,7 @@ func GetConfig() *Config {
 			log.Fatalf("Error loading configuration: %v", err)
 		}
 
-		for _, networkConf := range instance.Networks {
-			networkConf.PrivateKeyStore = config.NewPrivateKeyStore(networkConf)
-		}
+		instance.Network.PrivateKeyStore = config.NewPrivateKeyStore(&instance.Network)
 
 		validateCustomizedModels()
 	})
