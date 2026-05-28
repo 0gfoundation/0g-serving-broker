@@ -58,7 +58,7 @@ func Main() {
 	cfg := &rest.Config{}
 	mgr, err := controller.NewManager(cfg, controller.Options{
 		Metrics: metricserver.Options{
-			BindAddress: conf.Event.ProviderAddr,
+			BindAddress: conf.Event.ListenAddr,
 		},
 	})
 	if err != nil {

@@ -164,10 +164,14 @@ type ControllerConfig struct {
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins,omitempty"`
 	ContractAddress string   `yaml:"contractAddress,omitempty"`
-	Database        struct {
+	Database struct {
+		DSN string `yaml:"dsn,omitempty"`
+		// Deprecated: use DSN.
 		Provider string `yaml:"provider,omitempty"`
 	} `yaml:"database,omitempty"`
 	Event struct {
+		ListenAddr string `yaml:"listenAddr,omitempty"`
+		// Deprecated: use ListenAddr.
 		ProviderAddr string `yaml:"providerAddr,omitempty"`
 	} `yaml:"event,omitempty"`
 	GasPrice    interface{} `yaml:"gasPrice,omitempty"`
@@ -2010,8 +2014,16 @@ func mergeConfigs(base, user *Config) {
 	if user.ContractAddress != "" {
 		base.ContractAddress = user.ContractAddress
 	}
+	// New canonical fields take precedence; legacy fields still merged
+	// during the #507 deprecation window.
+	if user.Database.DSN != "" {
+		base.Database.DSN = user.Database.DSN
+	}
 	if user.Database.Provider != "" {
 		base.Database.Provider = user.Database.Provider
+	}
+	if user.Event.ListenAddr != "" {
+		base.Event.ListenAddr = user.Event.ListenAddr
 	}
 	if user.Event.ProviderAddr != "" {
 		base.Event.ProviderAddr = user.Event.ProviderAddr

@@ -323,11 +323,22 @@ type LoRAConfig struct {
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
-	Database        struct {
-		Provider string `yaml:"provider"`
+	Database struct {
+		// DSN is the MySQL connection string used by the broker process.
+		DSN string `yaml:"dsn"`
+		// Provider was the misleading legacy name for DSN ("Provider" is the
+		// project's GPU-side actor, not a database vendor).
+		// Deprecated: use DSN. Removed after config.DeprecationRemovalDate.
+		Provider string `yaml:"provider,omitempty"`
 	} `yaml:"database"`
 	Event struct {
-		ProviderAddr string `yaml:"providerAddr"`
+		// ListenAddr is the metrics HTTP server bind address used by the
+		// event process (e.g. ":8088").
+		ListenAddr string `yaml:"listenAddr"`
+		// ProviderAddr was the misleading legacy name (it is not a Provider
+		// address — it is a local listen address).
+		// Deprecated: use ListenAddr. Removed after config.DeprecationRemovalDate.
+		ProviderAddr string `yaml:"providerAddr,omitempty"`
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
@@ -368,7 +379,11 @@ type Config struct {
 		EventAddress string `yaml:"eventAddress"`
 	} `yaml:"monitor"`
 	ZK struct {
-		Provider      string `yaml:"provider"`
+		// URL is the ZK service endpoint.
+		URL string `yaml:"url"`
+		// Provider was the misleading legacy name for URL.
+		// Deprecated: use URL. Removed after config.DeprecationRemovalDate.
+		Provider      string `yaml:"provider,omitempty"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zk"`
 	ChatCacheExpiration time.Duration           `yaml:"chatCacheExpiration"`
@@ -602,6 +617,23 @@ func migrateDuration(raw map[string]interface{}, oldPath, newPath []string, targ
 	*target = time.Duration(oldValue) * unit
 }
 
+// migrateStringRename migrates a renamed string yaml key. New key wins when
+// both are set.
+func migrateStringRename(raw map[string]interface{}, oldPath, newPath []string, target *string, oldValue string) {
+	oldHere := config.RawHasKey(raw, oldPath...)
+	if !oldHere {
+		return
+	}
+	oldDotted := strings.Join(oldPath, ".")
+	newDotted := strings.Join(newPath, ".")
+	if config.RawHasKey(raw, newPath...) {
+		config.WarnDeprecatedBothSet(oldDotted, newDotted)
+		return
+	}
+	config.WarnDeprecated(oldDotted, newDotted)
+	*target = oldValue
+}
+
 // migrateDeprecated copies values from deprecated yaml keys to their
 // replacements when the user has populated the deprecated form. Each call to
 // config.WarnDeprecated emits a one-shot stderr line so operators see exactly
@@ -644,6 +676,18 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	migrateDuration(raw,
 		[]string{"providerHttp", "responseHeaderTimeoutMinutes"}, []string{"providerHttp", "responseHeaderTimeout"},
 		&cfg.ProviderHttp.ResponseHeaderTimeout, cfg.ProviderHttp.ResponseHeaderTimeoutMinutes, time.Minute)
+
+	// Rename: database.provider → database.dsn
+	migrateStringRename(raw, []string{"database", "provider"}, []string{"database", "dsn"},
+		&cfg.Database.DSN, cfg.Database.Provider)
+
+	// Rename: event.providerAddr → event.listenAddr
+	migrateStringRename(raw, []string{"event", "providerAddr"}, []string{"event", "listenAddr"},
+		&cfg.Event.ListenAddr, cfg.Event.ProviderAddr)
+
+	// Rename: zk.provider → zk.url
+	migrateStringRename(raw, []string{"zk", "provider"}, []string{"zk", "url"},
+		&cfg.ZK.URL, cfg.ZK.Provider)
 
 	// Networks (map) → Network (single).
 	if config.RawHasKey(raw, "networks") {
@@ -797,14 +841,16 @@ func GetConfig() *Config {
 			AllowOrigins:    []string{"*"},
 			ContractAddress: "0x47340d900bdFec2BD393c626E12ea0656F938d84",
 			Database: struct {
-				Provider string `yaml:"provider"`
+				DSN      string `yaml:"dsn"`
+				Provider string `yaml:"provider,omitempty"`
 			}{
-				Provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
+				DSN: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
 			},
 			Event: struct {
-				ProviderAddr string `yaml:"providerAddr"`
+				ListenAddr   string `yaml:"listenAddr"`
+				ProviderAddr string `yaml:"providerAddr,omitempty"`
 			}{
-				ProviderAddr: ":8088",
+				ListenAddr: ":8088",
 			},
 			GasPrice:    "2000000007",
 			MaxGasPrice: "",
@@ -841,10 +887,11 @@ func GetConfig() *Config {
 				EventAddress: "0g-serving-provider-event:3081",
 			},
 			ZK: struct {
-				Provider      string `yaml:"provider"`
+				URL           string `yaml:"url"`
+				Provider      string `yaml:"provider,omitempty"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Provider:      "nginx:3001",
+				URL:           "nginx:3001",
 				RequestLength: 40,
 			},
 			LoRA: LoRAConfig{
