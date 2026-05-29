@@ -149,7 +149,7 @@ func New(
 	// Otherwise a completed async job can return broker URLs whose backing files
 	// have already been evicted, producing a 404 before the job row itself expires.
 	imageTTL := cfg.ChatCacheExpiration
-	if asyncTTL := time.Duration(cfg.Async.ResultTTLMinutes) * time.Minute; asyncTTL > imageTTL {
+	if asyncTTL := cfg.Async.ResultTTL; asyncTTL > imageTTL {
 		imageTTL = asyncTTL
 	}
 	imgStore, err := newImageStore(imageCacheDir, imageTTL)
@@ -195,7 +195,7 @@ func New(
 	}
 
 	p := &Ctrl{
-		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
+		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
 		minSettlementFee:     minSettlementFee,
 		db:                   db,
 		asyncDB:              db,
@@ -222,7 +222,7 @@ func New(
 		// Optimized for single backend container with many concurrent users
 		// Timeouts are configurable via providerHttp config for different GPU/model requirements
 		httpClient: &http.Client{
-			Timeout: time.Duration(cfg.ProviderHttp.TotalTimeoutMinutes) * time.Minute, // Overall request timeout
+			Timeout: cfg.ProviderHttp.TotalTimeout, // Overall request timeout
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
 				MaxIdleConns:          200,                                                                        // Increased total idle connections to handle more concurrent users
@@ -230,7 +230,7 @@ func New(
 				MaxConnsPerHost:       500,                                                                        // Limit max active connections to prevent resource exhaustion
 				IdleConnTimeout:       90 * time.Second,                                                           // How long idle connections stay open
 				TLSHandshakeTimeout:   10 * time.Second,                                                           // TLS handshake timeout
-				ResponseHeaderTimeout: time.Duration(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes) * time.Minute, // Time to wait for response headers
+				ResponseHeaderTimeout: cfg.ProviderHttp.ResponseHeaderTimeout, // Time to wait for response headers
 				ExpectContinueTimeout: 1 * time.Second,                                                            // Time to wait for 100-continue response
 				DisableKeepAlives:     false,                                                                      // Enable connection reuse (critical)
 				DisableCompression:    false,                                                                      // Allow gzip compression

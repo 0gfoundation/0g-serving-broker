@@ -294,38 +294,64 @@ type WhitelistConfig struct {
 // via ServerlessLLM, with per-user access control and automatic adapter
 // lifecycle management driven by on-chain events.
 type LoRAConfig struct {
-	Enable                   bool   `yaml:"enable"`
-	BaseModel                string `yaml:"baseModel"`           // Base model name (e.g., "Qwen2.5-7B")
-	LoraModulesDir           string `yaml:"loraModulesDir"`      // Local directory for LoRA adapter files
-	SllmUrl                  string `yaml:"sllmUrl"`             // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
-	OffloadAfterMinutes      int    `yaml:"offloadAfterMinutes"` // Idle time before offloading adapter from ServerlessLLM
-	EnableColdStorage        bool   `yaml:"enableColdStorage"`   // Enable offload to 0G Storage
-	FineTuningContractAddr   string `yaml:"fineTuningContractAddress"`
-	ChainRpcUrl              string `yaml:"chainRpcUrl"`
-	PollBlockIntervalSeconds int    `yaml:"pollBlockIntervalSeconds"` // How often to poll for new on-chain events
-	StorageIndexerUrl        string `yaml:"storageIndexerUrl"`        // 0G Storage indexer URL for downloading adapters
-	StorageTurbo             bool   `yaml:"storageTurbo"`             // Use turbo indexer for 0G Storage
-	AutoDeploy               bool   `yaml:"autoDeploy"`               // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
-	FineTuningProviderAddr   string `yaml:"fineTuningProviderAddr"`   // Override FT provider address for event filtering (default: inference provider address)
-	EciesPrivateKey          string `yaml:"-"`                        // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
+	Enable         bool   `yaml:"enable"`
+	BaseModel      string `yaml:"baseModel"`      // Base model name (e.g., "Qwen2.5-7B")
+	LoraModulesDir string `yaml:"loraModulesDir"` // Local directory for LoRA adapter files
+	SllmUrl        string `yaml:"sllmUrl"`        // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
+	// OffloadAfter is the idle time before offloading an adapter from ServerlessLLM.
+	OffloadAfter time.Duration `yaml:"offloadAfter"`
+	// OffloadAfterMinutes is the legacy integer-minutes form.
+	// Deprecated: use OffloadAfter. Removed after config.DeprecationRemovalDate.
+	OffloadAfterMinutes int `yaml:"offloadAfterMinutes,omitempty"`
+
+	EnableColdStorage      bool   `yaml:"enableColdStorage"`         // Enable offload to 0G Storage
+	FineTuningContractAddr string `yaml:"fineTuningContractAddress"` //nolint:revive
+	ChainRpcUrl            string `yaml:"chainRpcUrl"`
+	// PollBlockInterval is how often the watcher polls for new on-chain events.
+	PollBlockInterval time.Duration `yaml:"pollBlockInterval"`
+	// PollBlockIntervalSeconds is the legacy integer-seconds form.
+	// Deprecated: use PollBlockInterval. Removed after config.DeprecationRemovalDate.
+	PollBlockIntervalSeconds int `yaml:"pollBlockIntervalSeconds,omitempty"`
+
+	StorageIndexerUrl      string `yaml:"storageIndexerUrl"`      // 0G Storage indexer URL for downloading adapters
+	StorageTurbo           bool   `yaml:"storageTurbo"`           // Use turbo indexer for 0G Storage
+	AutoDeploy             bool   `yaml:"autoDeploy"`             // If true, auto-deploy adapters to vLLM on acknowledge; if false, download only (user must call deploy API)
+	FineTuningProviderAddr string `yaml:"fineTuningProviderAddr"` // Override FT provider address for event filtering (default: inference provider address)
+	EciesPrivateKey        string `yaml:"-"`                      // Override ECIES private key for adapter decryption (2-CVM setup). Set via env var LORA_ECIES_PRIVATE_KEY.
 }
 
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
-	Database        struct {
-		Provider string `yaml:"provider"`
+	Database struct {
+		// DSN is the MySQL connection string used by the broker process.
+		DSN string `yaml:"dsn"`
+		// Provider was the misleading legacy name for DSN ("Provider" is the
+		// project's GPU-side actor, not a database vendor).
+		// Deprecated: use DSN. Removed after config.DeprecationRemovalDate.
+		Provider string `yaml:"provider,omitempty"`
 	} `yaml:"database"`
 	Event struct {
-		ProviderAddr string `yaml:"providerAddr"`
+		// ListenAddr is the metrics HTTP server bind address used by the
+		// event process (e.g. ":8088").
+		ListenAddr string `yaml:"listenAddr"`
+		// ProviderAddr was the misleading legacy name (it is not a Provider
+		// address — it is a local listen address).
+		// Deprecated: use ListenAddr. Removed after config.DeprecationRemovalDate.
+		ProviderAddr string `yaml:"providerAddr,omitempty"`
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval    struct {
-		AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-		ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-		SettlementProcessor      int `yaml:"settlementProcessor"`
-		ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
+	Interval struct {
+		// All four fields used to be integer seconds; they are now
+		// time.Duration (parsed from yaml strings like "60s" / "10m").
+		// loadConfig restores the legacy integer-seconds semantics when
+		// it detects the raw yaml value is a number — see
+		// migrateDeprecated.
+		AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
+		ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
+		SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
+		ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
 	} `yaml:"interval"`
 	Settlement struct {
 		// MinSettlementFee is the minimum accumulated fee (in neuron) per user
@@ -336,19 +362,28 @@ type Config struct {
 		MinSettlementFee string `yaml:"minSettlementFee"`
 	} `yaml:"settlement"`
 	RevenueTransfer struct {
-		TargetAddress string `yaml:"targetAddress"`
-		ReserveAmount string `yaml:"reserveAmount"`
-		Interval      int    `yaml:"interval"`
+		TargetAddress string        `yaml:"targetAddress"`
+		ReserveAmount string        `yaml:"reserveAmount"`
+		Interval      time.Duration `yaml:"interval"`
 	} `yaml:"revenueTransfer"`
-	Service  Service         `yaml:"service"`
-	LoRA     LoRAConfig      `yaml:"lora"`
-	Networks config.Networks `mapstructure:"networks" yaml:"networks"`
+	Service Service    `yaml:"service"`
+	LoRA    LoRAConfig `yaml:"lora"`
+	// Network is the canonical single-network config (introduced by #507).
+	Network config.NetworkConfig `mapstructure:"network" yaml:"network"`
+	// Networks is the legacy multi-network map kept for backwards
+	// compatibility. Deprecated: use Network instead. Removed after
+	// config.DeprecationRemovalDate.
+	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty"` //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
 		EventAddress string `yaml:"eventAddress"`
 	} `yaml:"monitor"`
 	ZK struct {
-		Provider      string `yaml:"provider"`
+		// URL is the ZK service endpoint.
+		URL string `yaml:"url"`
+		// Provider was the misleading legacy name for URL.
+		// Deprecated: use URL. Removed after config.DeprecationRemovalDate.
+		Provider      string `yaml:"provider,omitempty"`
 		RequestLength int    `yaml:"requestLength"`
 	} `yaml:"zk"`
 	ChatCacheExpiration time.Duration           `yaml:"chatCacheExpiration"`
@@ -381,19 +416,38 @@ type ConcurrencyLimitConfig struct {
 
 // AsyncConfig defines configuration for async job processing.
 type AsyncConfig struct {
-	Enabled                bool `yaml:"enabled"`                // Enable async endpoints (default: true)
-	MaxConcurrentJobs      int  `yaml:"maxConcurrentJobs"`      // Max concurrent worker goroutines (default: 10)
-	MaxQueueSize           int  `yaml:"maxQueueSize"`           // Max pending jobs waiting for a worker (default: 100)
-	ResultTTLMinutes       int  `yaml:"resultTTLMinutes"`       // How long to keep completed results (default: 30)
-	CleanupIntervalSeconds int  `yaml:"cleanupIntervalSeconds"` // Interval for expired job cleanup (default: 60)
-	JobTimeoutMinutes      int  `yaml:"jobTimeoutMinutes"`      // Per-job HTTP request timeout (default: 15)
+	Enabled           bool `yaml:"enabled"`           // Enable async endpoints (default: true)
+	MaxConcurrentJobs int  `yaml:"maxConcurrentJobs"` // Max concurrent worker goroutines (default: 10)
+	MaxQueueSize      int  `yaml:"maxQueueSize"`      // Max pending jobs waiting for a worker (default: 100)
+
+	// ResultTTL: how long to keep completed results.
+	ResultTTL time.Duration `yaml:"resultTTL"`
+	// Deprecated: use ResultTTL. Removed after config.DeprecationRemovalDate.
+	ResultTTLMinutes int `yaml:"resultTTLMinutes,omitempty"`
+
+	// CleanupInterval: interval for expired job cleanup.
+	CleanupInterval time.Duration `yaml:"cleanupInterval"`
+	// Deprecated: use CleanupInterval. Removed after config.DeprecationRemovalDate.
+	CleanupIntervalSeconds int `yaml:"cleanupIntervalSeconds,omitempty"`
+
+	// JobTimeout: per-job HTTP request timeout.
+	JobTimeout time.Duration `yaml:"jobTimeout"`
+	// Deprecated: use JobTimeout. Removed after config.DeprecationRemovalDate.
+	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
 }
 
 // ProviderHttpConfig defines HTTP client timeouts for broker→provider communication.
 // Providers can tune these values based on their GPU capacity and model complexity.
 type ProviderHttpConfig struct {
-	TotalTimeoutMinutes          int `yaml:"totalTimeoutMinutes"`          // Overall HTTP request timeout (default: 15)
-	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes"` // Max time to wait for provider to start responding (default: 15)
+	// TotalTimeout: overall HTTP request timeout.
+	TotalTimeout time.Duration `yaml:"totalTimeout"`
+	// Deprecated: use TotalTimeout. Removed after config.DeprecationRemovalDate.
+	TotalTimeoutMinutes int `yaml:"totalTimeoutMinutes,omitempty"`
+
+	// ResponseHeaderTimeout: max time to wait for provider to start responding.
+	ResponseHeaderTimeout time.Duration `yaml:"responseHeaderTimeout"`
+	// Deprecated: use ResponseHeaderTimeout. Removed after config.DeprecationRemovalDate.
+	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty"`
 }
 
 type LogPathsConfig struct {
@@ -544,93 +598,187 @@ var (
 	once     sync.Once
 )
 
-func loadConfig(config *Config) error {
+// migrateDeprecated copies values from deprecated yaml keys to their
+// replacements when the user has populated the deprecated form. Each call to
+// config.WarnDeprecated emits a one-shot stderr line so operators see exactly
+// which keys still need to move before the removal deadline.
+//
+// Precedence rule: if the user wrote both the old and the new key, the new
+// key wins and a separate "both set" warning is emitted.
+func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
+	// Interval / RevenueTransfer.Interval kept their yaml keys but flipped
+	// from int (implicit seconds) to time.Duration. When the raw yaml value
+	// is a number, migrate it to seconds; otherwise the new-style string
+	// value already parsed by UnmarshalStrict is correct.
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.AutoSettleBufferTime, time.Second, "interval", "autoSettleBufferTime")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.ForceSettlementProcessor, time.Second, "interval", "forceSettlementProcessor")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.SettlementProcessor, time.Second, "interval", "settlementProcessor")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.Interval.ReconciliationProcessor, time.Second, "interval", "reconciliationProcessor")
+	config.MigrateIntegerSecondsDuration(raw, &cfg.RevenueTransfer.Interval, time.Second, "revenueTransfer", "interval")
+
+	// Suffixed fields (Minutes/Seconds): old yaml key was kept as a separate
+	// deprecated struct field; copy it over if the user still has the old
+	// form. New key wins if both are set.
+	config.MigrateDurationFromInt(raw,
+		[]string{"lora", "offloadAfterMinutes"}, []string{"lora", "offloadAfter"},
+		&cfg.LoRA.OffloadAfter, int64(cfg.LoRA.OffloadAfterMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
+		[]string{"lora", "pollBlockIntervalSeconds"}, []string{"lora", "pollBlockInterval"},
+		&cfg.LoRA.PollBlockInterval, int64(cfg.LoRA.PollBlockIntervalSeconds), time.Second)
+	config.MigrateDurationFromInt(raw,
+		[]string{"async", "resultTTLMinutes"}, []string{"async", "resultTTL"},
+		&cfg.Async.ResultTTL, int64(cfg.Async.ResultTTLMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
+		[]string{"async", "cleanupIntervalSeconds"}, []string{"async", "cleanupInterval"},
+		&cfg.Async.CleanupInterval, int64(cfg.Async.CleanupIntervalSeconds), time.Second)
+	config.MigrateDurationFromInt(raw,
+		[]string{"async", "jobTimeoutMinutes"}, []string{"async", "jobTimeout"},
+		&cfg.Async.JobTimeout, int64(cfg.Async.JobTimeoutMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
+		[]string{"providerHttp", "totalTimeoutMinutes"}, []string{"providerHttp", "totalTimeout"},
+		&cfg.ProviderHttp.TotalTimeout, int64(cfg.ProviderHttp.TotalTimeoutMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
+		[]string{"providerHttp", "responseHeaderTimeoutMinutes"}, []string{"providerHttp", "responseHeaderTimeout"},
+		&cfg.ProviderHttp.ResponseHeaderTimeout, int64(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes), time.Minute)
+
+	// Rename: database.provider → database.dsn
+	config.MigrateStringRename(raw, []string{"database", "provider"}, []string{"database", "dsn"},
+		&cfg.Database.DSN, cfg.Database.Provider)
+
+	// Rename: event.providerAddr → event.listenAddr
+	config.MigrateStringRename(raw, []string{"event", "providerAddr"}, []string{"event", "listenAddr"},
+		&cfg.Event.ListenAddr, cfg.Event.ProviderAddr)
+
+	// Rename: zk.provider → zk.url
+	config.MigrateStringRename(raw, []string{"zk", "provider"}, []string{"zk", "url"},
+		&cfg.ZK.URL, cfg.ZK.Provider)
+
+	// Networks (map) → Network (single).
+	if config.RawHasKey(raw, "networks") {
+		if config.RawHasKey(raw, "network") {
+			// Both keys explicitly set in yaml is genuinely ambiguous:
+			// the legacy block usually carries url/chainID while the new
+			// block often only carries privateKeys mid-migration.
+			// Refuse to guess. (Scalar renames above stay lenient — a
+			// single deprecated string field can't lose complementary
+			// data the way a structured Networks block can.)
+			return fmt.Errorf("invalid config: both deprecated 'networks' and new 'network' are set in yaml; delete the 'networks' block to complete the migration")
+		}
+		config.WarnDeprecated("networks", "network")
+		picked, err := config.PickLegacyNetwork(cfg.Networks) //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
+		if err != nil {
+			return err
+		}
+		cfg.Network = *picked
+	}
+
+	// Validate that, after any migration, we have a usable Network. Catches
+	// the silent-empty cases: `networks: { foo: }` (nil entry) and
+	// `networks: { foo: {} }` (empty struct). Skips when neither yaml key
+	// was present — defaults / programmatic setup are out of scope.
+	if (config.RawHasKey(raw, "network") || config.RawHasKey(raw, "networks")) && cfg.Network.URL == "" {
+		return fmt.Errorf("invalid config: network.url is empty after loading; check that the 'network' (or legacy 'networks') block carries a url value")
+	}
+
+	return nil
+}
+
+func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
 		configPath = envPath
 	}
 
 	// Always set ConfigFile so Controller knows the path
-	config.Controller.ConfigFile = configPath
+	cfg.Controller.ConfigFile = configPath
 
-	data, err := os.ReadFile(configPath)
+	data, missing, err := config.ReadConfigFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+		return err
+	}
+	if missing {
+		return nil
+	}
+
+	// Two-phase parse: the raw map lets migration logic detect which keys
+	// the user actually wrote (vs. which came from struct defaults). See
+	// migrateDeprecated.
+	raw := config.RawYAMLKeys(data)
+
+	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
 		return err
 	}
 
-	if err := yaml.UnmarshalStrict(data, config); err != nil {
+	if err := migrateDeprecated(cfg, raw); err != nil {
 		return err
 	}
 
-	if config.Service.ModelInfo != nil {
-		if err := config.Service.ModelInfo.Validate(config.Service.Type); err != nil {
+	if cfg.Service.ModelInfo != nil {
+		if err := cfg.Service.ModelInfo.Validate(cfg.Service.Type); err != nil {
 			return fmt.Errorf("invalid config: %w", err)
 		}
 	}
 
 	// Normalize and validate provider type
-	if config.Service.ProviderType == "" {
-		config.Service.ProviderType = constant.ProviderTypeDecentralized
+	if cfg.Service.ProviderType == "" {
+		cfg.Service.ProviderType = constant.ProviderTypeDecentralized
 	}
-	if config.Service.ProviderType != constant.ProviderTypeDecentralized && config.Service.ProviderType != constant.ProviderTypeCentralized {
-		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, config.Service.ProviderType)
+	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
+		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, cfg.Service.ProviderType)
 	}
-	if config.Service.ProviderType == constant.ProviderTypeCentralized {
-		if config.Service.ProviderIdentity == "" {
+	if cfg.Service.ProviderType == constant.ProviderTypeCentralized {
+		if cfg.Service.ProviderIdentity == "" {
 			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
 		}
-		config.Service.ProviderIdentity = strings.ToLower(config.Service.ProviderIdentity)
-		if !validProviderIdentity.MatchString(config.Service.ProviderIdentity) {
-			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", config.Service.ProviderIdentity)
+		cfg.Service.ProviderIdentity = strings.ToLower(cfg.Service.ProviderIdentity)
+		if !validProviderIdentity.MatchString(cfg.Service.ProviderIdentity) {
+			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", cfg.Service.ProviderIdentity)
 		}
 		// Centralized providers always behave as TargetSeparated (shared external backend)
-		config.Service.TargetSeparated = true
+		cfg.Service.TargetSeparated = true
 		// Require HTTPS for centralized providers — routing proof relies on
 		// resp.TLS which is only populated for HTTPS connections.
-		if config.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(config.Service.TargetURL), "https://") {
-			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", config.Service.TargetURL)
+		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
+			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
 		}
 	}
 
 	// Normalize and validate price denomination / priceFeed configuration.
-	if config.Service.PriceDenomination == "" {
-		config.Service.PriceDenomination = constant.PriceDenominationNative
+	if cfg.Service.PriceDenomination == "" {
+		cfg.Service.PriceDenomination = constant.PriceDenominationNative
 	}
-	config.Service.PriceDenomination = strings.ToUpper(config.Service.PriceDenomination)
-	switch config.Service.PriceDenomination {
+	cfg.Service.PriceDenomination = strings.ToUpper(cfg.Service.PriceDenomination)
+	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
-		if config.Service.InputPriceUSDPerMillionTokens != "" || config.Service.OutputPriceUSDPerMillionTokens != "" {
+		if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
 	case constant.PriceDenominationUSD:
-		if config.Service.InputPriceUSDPerMillionTokens == "" || config.Service.OutputPriceUSDPerMillionTokens == "" {
+		if cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "" {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", config.Service.InputPriceUSDPerMillionTokens); err != nil {
+		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
-		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", config.Service.OutputPriceUSDPerMillionTokens); err != nil {
+		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
 			return err
 		}
-		if config.Service.InputPrice != "" || config.Service.OutputPrice != "" {
+		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
 		}
-		if err := validatePriceFeedConfig(&config.PriceFeed); err != nil {
+		if err := validatePriceFeedConfig(&cfg.PriceFeed); err != nil {
 			return err
 		}
 	default:
-		return fmt.Errorf("invalid config: service.priceDenomination must be '%s' or '%s', got '%s'", constant.PriceDenominationNative, constant.PriceDenominationUSD, config.Service.PriceDenomination)
+		return fmt.Errorf("invalid config: service.priceDenomination must be '%s' or '%s', got '%s'", constant.PriceDenominationNative, constant.PriceDenominationUSD, cfg.Service.PriceDenomination)
 	}
 
 	// Validate tiered pricing configuration
-	if config.TieredPricing.Enabled {
-		if len(config.TieredPricing.Tiers) == 0 {
+	if cfg.TieredPricing.Enabled {
+		if len(cfg.TieredPricing.Tiers) == 0 {
 			return fmt.Errorf("invalid config: tieredPricing.tiers must not be empty when tieredPricing is enabled")
 		}
-		for i, tier := range config.TieredPricing.Tiers {
+		for i, tier := range cfg.TieredPricing.Tiers {
 			if tier.InputMultiplier < 1 {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %d", i, tier.InputMultiplier)
 			}
@@ -641,12 +789,12 @@ func loadConfig(config *Config) error {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens must be >= 0, got %d", i, tier.MaxInputTokens)
 			}
 			// MaxInputTokens == 0 (unbounded) must be the last tier
-			if tier.MaxInputTokens == 0 && i != len(config.TieredPricing.Tiers)-1 {
+			if tier.MaxInputTokens == 0 && i != len(cfg.TieredPricing.Tiers)-1 {
 				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens=0 (unbounded) must be the last tier", i)
 			}
 			// Ensure ascending order
 			if i > 0 && tier.MaxInputTokens != 0 {
-				prev := config.TieredPricing.Tiers[i-1]
+				prev := cfg.TieredPricing.Tiers[i-1]
 				if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
 					return fmt.Errorf("invalid config: tieredPricing.tiers must be ordered by maxInputTokens ascending, tiers[%d]=%d <= tiers[%d]=%d",
 						i, tier.MaxInputTokens, i-1, prev.MaxInputTokens)
@@ -664,27 +812,29 @@ func GetConfig() *Config {
 			AllowOrigins:    []string{"*"},
 			ContractAddress: "0x47340d900bdFec2BD393c626E12ea0656F938d84",
 			Database: struct {
-				Provider string `yaml:"provider"`
+				DSN      string `yaml:"dsn"`
+				Provider string `yaml:"provider,omitempty"`
 			}{
-				Provider: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
+				DSN: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
 			},
 			Event: struct {
-				ProviderAddr string `yaml:"providerAddr"`
+				ListenAddr   string `yaml:"listenAddr"`
+				ProviderAddr string `yaml:"providerAddr,omitempty"`
 			}{
-				ProviderAddr: ":8088",
+				ListenAddr: ":8088",
 			},
 			GasPrice:    "2000000007",
 			MaxGasPrice: "",
 			Interval: struct {
-				AutoSettleBufferTime     int `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-				SettlementProcessor      int `yaml:"settlementProcessor"`
-				ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
+				AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
+				ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
+				SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
+				ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
 			}{
-				AutoSettleBufferTime:     60,
-				ForceSettlementProcessor: 600,
-				SettlementProcessor:      300,
-				ReconciliationProcessor:  60,
+				AutoSettleBufferTime:     60 * time.Second,
+				ForceSettlementProcessor: 10 * time.Minute,
+				SettlementProcessor:      5 * time.Minute,
+				ReconciliationProcessor:  60 * time.Second,
 			},
 			Settlement: struct {
 				MinSettlementFee string `yaml:"minSettlementFee"`
@@ -692,13 +842,13 @@ func GetConfig() *Config {
 				MinSettlementFee: "4000000000000000",
 			},
 			RevenueTransfer: struct {
-				TargetAddress string `yaml:"targetAddress"`
-				ReserveAmount string `yaml:"reserveAmount"`
-				Interval      int    `yaml:"interval"`
+				TargetAddress string        `yaml:"targetAddress"`
+				ReserveAmount string        `yaml:"reserveAmount"`
+				Interval      time.Duration `yaml:"interval"`
 			}{
 				TargetAddress: "",
 				ReserveAmount: "10000000000000000000",
-				Interval:      3600,
+				Interval:      time.Hour,
 			},
 			Monitor: struct {
 				Enable       bool   `yaml:"enable"`
@@ -708,20 +858,21 @@ func GetConfig() *Config {
 				EventAddress: "0g-serving-provider-event:3081",
 			},
 			ZK: struct {
-				Provider      string `yaml:"provider"`
+				URL           string `yaml:"url"`
+				Provider      string `yaml:"provider,omitempty"`
 				RequestLength int    `yaml:"requestLength"`
 			}{
-				Provider:      "nginx:3001",
+				URL:           "nginx:3001",
 				RequestLength: 40,
 			},
 			LoRA: LoRAConfig{
-				Enable:                   false,
-				LoraModulesDir:           "/data/lora-modules",
-				SllmUrl:                  "http://sllm:8343",
-				OffloadAfterMinutes:      60,
-				EnableColdStorage:        false,
-				PollBlockIntervalSeconds: 5,
-				StorageTurbo:             false,
+				Enable:            false,
+				LoraModulesDir:    "/data/lora-modules",
+				SllmUrl:           "http://sllm:8343",
+				OffloadAfter:      60 * time.Minute,
+				EnableColdStorage: false,
+				PollBlockInterval: 5 * time.Second,
+				StorageTurbo:      false,
 			},
 			ChatCacheExpiration: time.Minute * 20,
 			NvGPU:               false,
@@ -782,16 +933,16 @@ func GetConfig() *Config {
 				PerUserIPMBurst:      0,
 			},
 			Async: AsyncConfig{
-				Enabled:                true,
-				MaxConcurrentJobs:      10,
-				MaxQueueSize:           100,
-				ResultTTLMinutes:       30,
-				CleanupIntervalSeconds: 60,
-				JobTimeoutMinutes:      15,
+				Enabled:           true,
+				MaxConcurrentJobs: 10,
+				MaxQueueSize:      100,
+				ResultTTL:         30 * time.Minute,
+				CleanupInterval:   60 * time.Second,
+				JobTimeout:        15 * time.Minute,
 			},
 			ProviderHttp: ProviderHttpConfig{
-				TotalTimeoutMinutes:          15,
-				ResponseHeaderTimeoutMinutes: 15,
+				TotalTimeout:          15 * time.Minute,
+				ResponseHeaderTimeout: 15 * time.Minute,
 			},
 		}
 
@@ -799,9 +950,7 @@ func GetConfig() *Config {
 			panic(err)
 		}
 
-		for _, networkConf := range instance.Networks {
-			networkConf.PrivateKeyStore = config.NewPrivateKeyStore(networkConf)
-		}
+		instance.Network.PrivateKeyStore = config.NewPrivateKeyStore(&instance.Network)
 	})
 
 	return instance

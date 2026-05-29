@@ -124,7 +124,7 @@ func (f *Finalizer) Execute(ctx context.Context, task *db.Task, paths *utils.Tas
 	// Step 3: Encrypt AES key with provider wallet's ECIES public key
 	// and push to the inference broker via HTTP.
 	var providerEncKey []byte
-	providerPrivKey, privKeyErr := commonconfig.GetProviderPrivateKey(f.config.Networks)
+	providerPrivKey, privKeyErr := commonconfig.GetProviderPrivateKey(&f.config.Network)
 	if privKeyErr != nil {
 		f.logger.Warnf("Could not get provider private key for ECIES encryption: %v", privKeyErr)
 	} else {
@@ -248,7 +248,7 @@ func (f *Finalizer) doPushAdapterKey(parentCtx context.Context, url string, body
 // This follows the same pattern as user session authentication.
 func (f *Finalizer) addWalletSignature(req *http.Request, body []byte, taskID string) error {
 	// Get provider private key
-	providerKey, err := commonconfig.GetProviderPrivateKey(f.config.Networks)
+	providerKey, err := commonconfig.GetProviderPrivateKey(&f.config.Network)
 	if err != nil {
 		return errors.Wrap(err, "get provider private key for signing")
 	}

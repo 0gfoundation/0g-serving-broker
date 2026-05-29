@@ -43,10 +43,8 @@ type RetryOption struct {
 	MaxGasPrice      *big.Int
 }
 
-func NewServingContract(servingAddress common.Address, conf *config.Networks, gasPrice, maxGasPrice string, logger log.Logger) (*ServingContract, error) {
-	var networkConfig client.BlockchainNetwork
-	var err error
-	networkConfig, err = client.New0gNetwork(conf)
+func NewServingContract(servingAddress common.Address, conf *config.NetworkConfig, gasPrice, maxGasPrice string, logger log.Logger) (*ServingContract, error) {
+	networkConfig, err := client.NewEthereumNetwork(conf)
 	if err != nil {
 		return nil, err
 	}

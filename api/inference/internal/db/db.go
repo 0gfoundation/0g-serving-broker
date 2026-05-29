@@ -17,7 +17,7 @@ func NewTestDB(gdb *gorm.DB) *DB {
 }
 
 func NewDB(conf *config.Config) (*DB, error) {
-	db, err := gorm.Open(mysql.Open(conf.Database.Provider), &gorm.Config{
+	db, err := gorm.Open(mysql.Open(conf.Database.DSN), &gorm.Config{
 		NamingStrategy: schema.NamingStrategy{
 			SingularTable: true,
 		},

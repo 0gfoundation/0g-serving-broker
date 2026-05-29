@@ -16,8 +16,8 @@ type SettlementProcessor struct {
 	ctrl   *ctrl.Ctrl
 	logger log.Logger
 
-	checkSettleInterval int
-	forceSettleInterval int
+	checkSettleInterval time.Duration
+	forceSettleInterval time.Duration
 
 	enableMonitor      bool
 	settleMu           sync.Mutex
@@ -25,7 +25,7 @@ type SettlementProcessor struct {
 	teeSignerReadyOnce sync.Once
 }
 
-func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval int, enableMonitor bool, logger log.Logger) *SettlementProcessor {
+func NewSettlementProcessor(ctrl *ctrl.Ctrl, checkSettleInterval, forceSettleInterval time.Duration, enableMonitor bool, logger log.Logger) *SettlementProcessor {
 	s := &SettlementProcessor{
 		ctrl:                ctrl,
 		logger:              logger,
@@ -45,8 +45,8 @@ func (s *SettlementProcessor) Start(ctx context.Context) error {
 		s.logger.Errorf("Failed to reset settlement state on startup: %s", err.Error())
 	}
 
-	checkSettleTicker := time.NewTicker(time.Duration(s.checkSettleInterval) * time.Second)
-	forceSettleTicker := time.NewTicker(time.Duration(s.forceSettleInterval) * time.Second)
+	checkSettleTicker := time.NewTicker(s.checkSettleInterval)
+	forceSettleTicker := time.NewTicker(s.forceSettleInterval)
 	defer checkSettleTicker.Stop()
 	defer forceSettleTicker.Stop()
 

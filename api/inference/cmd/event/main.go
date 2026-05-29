@@ -2,6 +2,7 @@ package event
 
 import (
 	"os"
+	"time"
 
 	"k8s.io/client-go/rest"
 	controller "sigs.k8s.io/controller-runtime"
@@ -39,23 +40,25 @@ func Main() {
 	if err != nil {
 		panic(err)
 	}
-	if conf.Interval.AutoSettleBufferTime > int(contract.LockTime) {
-		panic(errors.New("Interval.AutoSettleBufferTime grater than refund LockTime"))
+	// contract.LockTime is a time.Duration; AutoSettleBufferTime is now also
+	// a Duration. The pre-#507 checks compared integer seconds.
+	if conf.Interval.AutoSettleBufferTime > contract.LockTime {
+		panic(errors.New("Interval.AutoSettleBufferTime greater than refund LockTime"))
 	}
 	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
-		panic(errors.New("Interval.AutoSettleBufferTime grater than forceSettlement Interval"))
+		panic(errors.New("Interval.AutoSettleBufferTime greater than forceSettlement Interval"))
 	}
-	if int(contract.LockTime)-conf.Interval.AutoSettleBufferTime < 60 {
+	if contract.LockTime-conf.Interval.AutoSettleBufferTime < time.Minute {
 		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))
 	}
-	if conf.Interval.ForceSettlementProcessor < 60 {
+	if conf.Interval.ForceSettlementProcessor < time.Minute {
 		panic(errors.New("Interval.ForceSettlementProcessor is too small, which could lead to overly frequent settlements"))
 	}
 
 	cfg := &rest.Config{}
 	mgr, err := controller.NewManager(cfg, controller.Options{
 		Metrics: metricserver.Options{
-			BindAddress: conf.Event.ProviderAddr,
+			BindAddress: conf.Event.ListenAddr,
 		},
 	})
 	if err != nil {
@@ -99,7 +102,7 @@ func Main() {
 		if err := mgr.Add(reconciliationProcessor); err != nil {
 			panic(err)
 		}
-		logger.Infof("Starting reconciliation processor: interval=%ds", conf.Interval.ReconciliationProcessor)
+		logger.Infof("Starting reconciliation processor: interval=%s", conf.Interval.ReconciliationProcessor)
 	}
 
 	// Add revenue transfer processor if configured
@@ -115,7 +118,7 @@ func Main() {
 			panic(err)
 		}
 		if revenueTransferProcessor != nil {
-			logger.Infof("Starting revenue transfer processor: target=%s, interval=%ds, reserve=%s",
+			logger.Infof("Starting revenue transfer processor: target=%s, interval=%s, reserve=%s",
 				conf.RevenueTransfer.TargetAddress,
 				conf.RevenueTransfer.Interval,
 				conf.RevenueTransfer.ReserveAmount,

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v2"
 
@@ -51,10 +52,11 @@ type Service struct {
 	// The fine-tuning broker pushes adapter keys here via POST /internal/v1/adapter-keys
 	// so the inference broker can decrypt adapters from 0G Storage.
 	InferenceServiceUrl string `yaml:"inferenceServiceUrl"`
-	// FileRetentionHours specifies how long to keep task files (dataset, output, encrypted LoRA)
-	// After this period, files will be automatically cleaned up
-	// Default: 72 hours (3 days)
-	FileRetentionHours int `yaml:"fileRetentionHours"`
+	// FileRetention is how long to keep task files (dataset, output,
+	// encrypted LoRA) before they are automatically cleaned up. Default 72h.
+	FileRetention time.Duration `yaml:"fileRetention"`
+	// Deprecated: use FileRetention. Removed after config.DeprecationRemovalDate.
+	FileRetentionHours int `yaml:"fileRetentionHours,omitempty"`
 	// DataDir specifies the root directory for storing task data (datasets, models, outputs)
 	// Default: /tmp (uses os.TempDir())
 	// Recommended: /dstack/persistent for large models to avoid memory pressure
@@ -135,30 +137,46 @@ type Config struct {
 	Database        struct {
 		FineTune string `yaml:"fineTune"`
 	} `yaml:"database"`
-	Networks                    config.Networks     `mapstructure:"networks" yaml:"networks"`
+	// Network is the canonical single-network config (introduced by #507).
+	Network config.NetworkConfig `mapstructure:"network" yaml:"network"`
+	// Networks is the legacy multi-network map kept for backwards
+	// compatibility. Deprecated: use Network instead. Removed after
+	// config.DeprecationRemovalDate.
+	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty"` //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 	Images                      Images              `yaml:"images"`
 	StorageClientConfig         StorageClientConfig `mapstructure:"storageClient" yaml:"storageClient"`
 	ServingUrl                  string              `yaml:"servingUrl"`
 	Service                     Service             `yaml:"service"`
 	ProviderOption              providers.Option    `mapstructure:"providerOption" yaml:"providerOption"`
-	Logger                      config.LoggerConfig `yaml:"logger"`
-	SettlementCheckIntervalSecs int64               `yaml:"settlementCheckInterval"`
-	BalanceThresholdInEther     int64               `yaml:"balanceThresholdInEther"`
-	GasPrice                    string              `yaml:"gasPrice"`
-	MaxGasPrice                 string              `yaml:"maxGasPrice"`
-	TrainingWorkerCount         int                 `yaml:"trainingWorkerCount"`
-	SetupWorkerCount            int                 `yaml:"setupWorkerCount"`
-	FinalizerWorkerCount        int                 `yaml:"finalizerWorkerCount"`
-	MaxSetupRetriesPerTask      uint                `yaml:"maxSetupRetriesPerTask"`
-	MaxExecutorRetriesPerTask   uint                `yaml:"maxExecutorRetriesPerTask"`
-	MaxFinalizerRetriesPerTask  uint                `yaml:"maxFinalizerRetriesPerTask"`
-	MaxSettlementRetriesPerTask uint                `yaml:"maxSettlementRetriesPerTask"`
-	SettlementBatchSize         uint                `yaml:"settlementBatchSize"`
-	DeliveredTaskAckTimeoutSecs uint                `yaml:"deliveredTaskAckTimeoutSecs"`
-	DataRetentionDays           uint                `yaml:"dataRetentionDays"`
-	MaxTaskQueueSize            uint                `yaml:"maxTaskQueueSize"`
-	RateLimitRPS                float64             `yaml:"rateLimitRPS"`   // Rate limit requests per second
-	RateLimitBurst              int                 `yaml:"rateLimitBurst"` // Rate limit burst size
+	Logger config.LoggerConfig `yaml:"logger"`
+
+	// SettlementCheckInterval is how often the settlement service polls.
+	// Was integer seconds pre-#507; loadConfig restores the legacy semantics
+	// when the raw yaml value is a number — see migrateDeprecated.
+	SettlementCheckInterval time.Duration `yaml:"settlementCheckInterval"`
+
+	BalanceThresholdInEther     int64  `yaml:"balanceThresholdInEther"`
+	GasPrice                    string `yaml:"gasPrice"`
+	MaxGasPrice                 string `yaml:"maxGasPrice"`
+	TrainingWorkerCount         int    `yaml:"trainingWorkerCount"`
+	SetupWorkerCount            int    `yaml:"setupWorkerCount"`
+	FinalizerWorkerCount        int    `yaml:"finalizerWorkerCount"`
+	MaxSetupRetriesPerTask      uint   `yaml:"maxSetupRetriesPerTask"`
+	MaxExecutorRetriesPerTask   uint   `yaml:"maxExecutorRetriesPerTask"`
+	MaxFinalizerRetriesPerTask  uint   `yaml:"maxFinalizerRetriesPerTask"`
+	MaxSettlementRetriesPerTask uint   `yaml:"maxSettlementRetriesPerTask"`
+	SettlementBatchSize         uint   `yaml:"settlementBatchSize"`
+
+	// DeliveredTaskAckTimeout is the time a Delivered task waits for user ack
+	// before being auto-finalized.
+	DeliveredTaskAckTimeout time.Duration `yaml:"deliveredTaskAckTimeout"`
+	// Deprecated: use DeliveredTaskAckTimeout. Removed after config.DeprecationRemovalDate.
+	DeliveredTaskAckTimeoutSecs uint `yaml:"deliveredTaskAckTimeoutSecs,omitempty"`
+
+	DataRetentionDays uint    `yaml:"dataRetentionDays"`
+	MaxTaskQueueSize  uint    `yaml:"maxTaskQueueSize"`
+	RateLimitRPS      float64 `yaml:"rateLimitRPS"`   // Rate limit requests per second
+	RateLimitBurst    int     `yaml:"rateLimitBurst"` // Rate limit burst size
 }
 
 type StorageClientConfig struct {
@@ -187,21 +205,58 @@ var (
 	once     sync.Once
 )
 
-func loadConfig(config *Config) error {
+// migrateDeprecated copies values from deprecated yaml keys to their
+// replacements. See the inference equivalent for the precedence rules.
+func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
+	// SettlementCheckInterval kept its yaml key; restore legacy
+	// integer-seconds semantics if the raw value is a number.
+	config.MigrateIntegerSecondsDuration(raw, &cfg.SettlementCheckInterval, time.Second, "settlementCheckInterval")
+
+	config.MigrateDurationFromInt(raw,
+		[]string{"deliveredTaskAckTimeoutSecs"}, []string{"deliveredTaskAckTimeout"},
+		&cfg.DeliveredTaskAckTimeout, int64(cfg.DeliveredTaskAckTimeoutSecs), time.Second)
+	config.MigrateDurationFromInt(raw,
+		[]string{"service", "fileRetentionHours"}, []string{"service", "fileRetention"},
+		&cfg.Service.FileRetention, int64(cfg.Service.FileRetentionHours), time.Hour)
+
+	if config.RawHasKey(raw, "networks") {
+		if config.RawHasKey(raw, "network") {
+			return fmt.Errorf("invalid config: both deprecated 'networks' and new 'network' are set in yaml; delete the 'networks' block to complete the migration")
+		}
+		config.WarnDeprecated("networks", "network")
+		picked, err := config.PickLegacyNetwork(cfg.Networks) //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
+		if err != nil {
+			return err
+		}
+		cfg.Network = *picked
+	}
+
+	if (config.RawHasKey(raw, "network") || config.RawHasKey(raw, "networks")) && cfg.Network.URL == "" {
+		return fmt.Errorf("invalid config: network.url is empty after loading; check that the 'network' (or legacy 'networks') block carries a url value")
+	}
+
+	return nil
+}
+
+func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
 		configPath = envPath
 	}
 
-	data, err := os.ReadFile(configPath)
+	data, missing, err := config.ReadConfigFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
+	if missing {
+		return nil
+	}
 
-	return yaml.UnmarshalStrict(data, config)
+	raw := config.RawYAMLKeys(data)
+	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+		return err
+	}
+	return migrateDeprecated(cfg, raw)
 }
 
 func GetConfig() *Config {
@@ -226,7 +281,7 @@ func GetConfig() *Config {
 				Path:          "",
 				RotationCount: 50,
 			},
-			SettlementCheckIntervalSecs: 60,
+			SettlementCheckInterval:     60 * time.Second,
 			BalanceThresholdInEther:     1,
 			MaxGasPrice:                 "1000000000000",
 			TrainingWorkerCount:         1,
@@ -237,7 +292,7 @@ func GetConfig() *Config {
 			MaxFinalizerRetriesPerTask:  10,
 			MaxSettlementRetriesPerTask: 10,
 			SettlementBatchSize:         1,
-			DeliveredTaskAckTimeoutSecs: 60 * 60 * 48,
+			DeliveredTaskAckTimeout:     48 * time.Hour,
 			DataRetentionDays:           3,
 			MaxTaskQueueSize:            5,
 			RateLimitRPS:                0.1, // Default: 0.1 requests per second (1 request per 10 seconds) - suitable for file upload/download operations
@@ -248,9 +303,7 @@ func GetConfig() *Config {
 			log.Fatalf("Error loading configuration: %v", err)
 		}
 
-		for _, networkConf := range instance.Networks {
-			networkConf.PrivateKeyStore = config.NewPrivateKeyStore(networkConf)
-		}
+		instance.Network.PrivateKeyStore = config.NewPrivateKeyStore(&instance.Network)
 
 		validateCustomizedModels()
 	})

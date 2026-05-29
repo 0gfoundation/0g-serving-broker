@@ -335,7 +335,7 @@ func TestEventWatcher_Start_PollsOnTick(t *testing.T) {
 		},
 		db:              nil,
 		client:          client,
-		config:          config.LoRAConfig{FineTuningContractAddr: "0xdeadbeef", PollBlockIntervalSeconds: 0},
+		config:          config.LoRAConfig{FineTuningContractAddr: "0xdeadbeef", PollBlockInterval: 0},
 		providerAddress: common.HexToAddress("0x1234"),
 		logger:          getTestLogger(),
 	}
@@ -399,9 +399,9 @@ func TestNewEventWatcher_SetsFields(t *testing.T) {
 	}
 
 	cfg := config.LoRAConfig{
-		ChainRpcUrl:              srv.URL,
-		FineTuningContractAddr:   "0xdeadbeef",
-		PollBlockIntervalSeconds: 10,
+		ChainRpcUrl:            srv.URL,
+		FineTuningContractAddr: "0xdeadbeef",
+		PollBlockInterval:      10 * time.Second,
 	}
 	providerAddr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
 

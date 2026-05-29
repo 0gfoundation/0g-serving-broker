@@ -39,7 +39,7 @@ type Client struct {
 }
 
 func New(config *config.Config, logger log.Logger) (*Client, error) {
-	zgConfig, err := chain.New0gNetwork(&config.Networks)
+	zgConfig, err := chain.NewEthereumNetwork(&config.Network)
 	if err != nil {
 		panic(err)
 	}

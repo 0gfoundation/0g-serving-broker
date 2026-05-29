@@ -35,7 +35,7 @@ type SettlementConfig struct {
 	Service                 config.Service
 	MaxNumRetriesPerTask    uint
 	SettlementBatchSize     uint
-	DeliveredTaskAckTimeout uint
+	DeliveredTaskAckTimeout time.Duration
 	DataRetentionDays       uint
 }
 
@@ -45,11 +45,11 @@ func NewSettlement(db *db.DB, contract *providercontract.ProviderContract, confi
 		contract:   contract,
 		teeService: teeService,
 		config: SettlementConfig{
-			CheckInterval:           time.Duration(config.SettlementCheckIntervalSecs) * time.Second,
+			CheckInterval:           config.SettlementCheckInterval,
 			Service:                 config.Service,
 			MaxNumRetriesPerTask:    config.MaxSettlementRetriesPerTask,
 			SettlementBatchSize:     config.SettlementBatchSize,
-			DeliveredTaskAckTimeout: config.DeliveredTaskAckTimeoutSecs,
+			DeliveredTaskAckTimeout: config.DeliveredTaskAckTimeout,
 			DataRetentionDays:       config.DataRetentionDays,
 		},
 		logger: logger,
@@ -153,7 +153,9 @@ func (s *Settlement) processPendingUserAckTasks(ctx context.Context) []db.Task {
 		s.logger.Errorf("error getting lock time from contract: %v", err)
 	}
 
-	ackTimeout := int64(s.config.DeliveredTaskAckTimeout)
+	// lockTime and task.DeliverTime are Unix seconds; convert Duration to
+	// seconds before comparison.
+	ackTimeout := int64(s.config.DeliveredTaskAckTimeout / time.Second)
 	if ackTimeout > lockTime/2 {
 		ackTimeout = lockTime / 2
 	}

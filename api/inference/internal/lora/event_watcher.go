@@ -59,7 +59,7 @@ func (w *EventWatcher) Start(ctx context.Context) {
 		return
 	}
 
-	pollInterval := time.Duration(w.config.PollBlockIntervalSeconds) * time.Second
+	pollInterval := w.config.PollBlockInterval
 	if pollInterval <= 0 {
 		pollInterval = 5 * time.Second
 	}
