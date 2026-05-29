@@ -401,7 +401,7 @@ func TestOffloadIdleAdapters_OffloadsViaClient(t *testing.T) {
 		},
 		config: func() config.LoRAConfig {
 			c := cfgForTest(t.TempDir())
-			c.OffloadAfterMinutes = 60
+			c.OffloadAfter = 60 * time.Minute
 			return c
 		}(),
 		db:         database,

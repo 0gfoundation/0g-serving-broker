@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	commonConfig "github.com/0glabs/0g-serving-broker/common/config"
 	commonLog "github.com/0glabs/0g-serving-broker/common/log"
@@ -190,7 +191,7 @@ func cfgForTest(dir string) inferenceConfig.LoRAConfig {
 		Enable:              true,
 		BaseModel:           "base",
 		LoraModulesDir:      dir,
-		OffloadAfterMinutes: 60,
+		OffloadAfter:        60 * time.Minute,
 		EnableColdStorage:   false,
 	}
 }
