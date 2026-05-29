@@ -254,8 +254,8 @@ func (s *Service) GetVideoSizeRatio(size string) float64 {
 // When enabled, cached input tokens (reported by the LLM via prompt_tokens_details.cached_tokens)
 // are billed at a discounted rate: inputPrice / Divisor.
 type CacheTokenBillingConfig struct {
-	Enabled bool  `yaml:"enabled"` // Enable cached token discount billing (default: false)
-	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
+	Enabled bool  `yaml:"enabled"`               // Enable cached token discount billing
+	Divisor int64 `yaml:"divisor" default:"4"`   // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
 }
 
 // TieredPricingConfig defines input-length-based tiered pricing.
@@ -298,11 +298,11 @@ type WhitelistConfig struct {
 // lifecycle management driven by on-chain events.
 type LoRAConfig struct {
 	Enable         bool   `yaml:"enable"`
-	BaseModel      string `yaml:"baseModel"`      // Base model name (e.g., "Qwen2.5-7B")
-	LoraModulesDir string `yaml:"loraModulesDir"` // Local directory for LoRA adapter files
-	SllmUrl        string `yaml:"sllmUrl"`        // ServerlessLLM HTTP endpoint (default: http://sllm:8343)
+	BaseModel      string `yaml:"baseModel"`                                          // Base model name (e.g., "Qwen2.5-7B")
+	LoraModulesDir string `yaml:"loraModulesDir" default:"/data/lora-modules"`        // Local directory for LoRA adapter files
+	SllmUrl        string `yaml:"sllmUrl" default:"http://sllm:8343"`                 // ServerlessLLM HTTP endpoint
 	// OffloadAfter is the idle time before offloading an adapter from ServerlessLLM.
-	OffloadAfter time.Duration `yaml:"offloadAfter"`
+	OffloadAfter time.Duration `yaml:"offloadAfter" default:"60m"`
 	// OffloadAfterMinutes is the legacy integer-minutes form.
 	// Deprecated: use OffloadAfter. Removed after config.DeprecationRemovalDate.
 	OffloadAfterMinutes int `yaml:"offloadAfterMinutes,omitempty"`
@@ -311,7 +311,7 @@ type LoRAConfig struct {
 	FineTuningContractAddr string `yaml:"fineTuningContractAddress"` //nolint:revive
 	ChainRpcUrl            string `yaml:"chainRpcUrl"`
 	// PollBlockInterval is how often the watcher polls for new on-chain events.
-	PollBlockInterval time.Duration `yaml:"pollBlockInterval"`
+	PollBlockInterval time.Duration `yaml:"pollBlockInterval" default:"5s"`
 	// PollBlockIntervalSeconds is the legacy integer-seconds form.
 	// Deprecated: use PollBlockInterval. Removed after config.DeprecationRemovalDate.
 	PollBlockIntervalSeconds int `yaml:"pollBlockIntervalSeconds,omitempty"`
@@ -324,11 +324,11 @@ type LoRAConfig struct {
 }
 
 type Config struct {
-	AllowOrigins    []string `yaml:"allowOrigins"`
-	ContractAddress string   `yaml:"contractAddress"`
+	AllowOrigins    []string `yaml:"allowOrigins" default:"*"`
+	ContractAddress string   `yaml:"contractAddress" default:"0x47340d900bdFec2BD393c626E12ea0656F938d84"`
 	Database struct {
 		// DSN is the MySQL connection string used by the broker process.
-		DSN string `yaml:"dsn"`
+		DSN string `yaml:"dsn" default:"root:123456@tcp(mysql:3306)/provider?parseTime=true"`
 		// Provider was the misleading legacy name for DSN ("Provider" is the
 		// project's GPU-side actor, not a database vendor).
 		// Deprecated: use DSN. Removed after config.DeprecationRemovalDate.
@@ -337,13 +337,13 @@ type Config struct {
 	Event struct {
 		// ListenAddr is the metrics HTTP server bind address used by the
 		// event process (e.g. ":8088").
-		ListenAddr string `yaml:"listenAddr"`
+		ListenAddr string `yaml:"listenAddr" default:":8088"`
 		// ProviderAddr was the misleading legacy name (it is not a Provider
 		// address — it is a local listen address).
 		// Deprecated: use ListenAddr. Removed after config.DeprecationRemovalDate.
 		ProviderAddr string `yaml:"providerAddr,omitempty"`
 	} `yaml:"event"`
-	GasPrice    string `yaml:"gasPrice"`
+	GasPrice    string `yaml:"gasPrice" default:"2000000007"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
 	Interval struct {
 		// All four fields used to be integer seconds; they are now
@@ -351,10 +351,10 @@ type Config struct {
 		// loadConfig restores the legacy integer-seconds semantics when
 		// it detects the raw yaml value is a number — see
 		// migrateDeprecated.
-		AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
-		ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
-		SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
-		ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
+		AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime" default:"60s"`
+		ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor" default:"10m"`
+		SettlementProcessor      time.Duration `yaml:"settlementProcessor" default:"5m"`
+		ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor" default:"60s"`
 	} `yaml:"interval"`
 	Settlement struct {
 		// MinSettlementFee is the minimum accumulated fee (in neuron) per user
@@ -362,12 +362,12 @@ type Config struct {
 		// are deferred to accumulate more fees. Default "4000000000000000"
 		// (0.004 A0GI) covers gas cost (~0.0006 A0GI) with ~7× margin.
 		// Set to "0" to disable per-user filtering.
-		MinSettlementFee string `yaml:"minSettlementFee"`
+		MinSettlementFee string `yaml:"minSettlementFee" default:"4000000000000000"`
 	} `yaml:"settlement"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`
-		ReserveAmount string        `yaml:"reserveAmount"`
-		Interval      time.Duration `yaml:"interval"`
+		ReserveAmount string        `yaml:"reserveAmount" default:"10000000000000000000"`
+		Interval      time.Duration `yaml:"interval" default:"1h"`
 	} `yaml:"revenueTransfer"`
 	Service Service    `yaml:"service"`
 	LoRA    LoRAConfig `yaml:"lora"`
@@ -379,17 +379,17 @@ type Config struct {
 	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty"` //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
-		EventAddress string `yaml:"eventAddress"`
+		EventAddress string `yaml:"eventAddress" default:"0g-serving-provider-event:3081"`
 	} `yaml:"monitor"`
 	ZK struct {
 		// URL is the ZK service endpoint.
-		URL string `yaml:"url"`
+		URL string `yaml:"url" default:"nginx:3001"`
 		// Provider was the misleading legacy name for URL.
 		// Deprecated: use URL. Removed after config.DeprecationRemovalDate.
 		Provider      string `yaml:"provider,omitempty"`
-		RequestLength int    `yaml:"requestLength"`
+		RequestLength int    `yaml:"requestLength" default:"40"`
 	} `yaml:"zk"`
-	ChatCacheExpiration time.Duration           `yaml:"chatCacheExpiration"`
+	ChatCacheExpiration time.Duration           `yaml:"chatCacheExpiration" default:"20m"`
 	NvGPU               bool                    `yaml:"nvGPU"`
 	Logger              *config.LoggerConfig    `yaml:"logger"`
 	LogPaths            LogPathsConfig          `yaml:"logPaths"`
@@ -407,10 +407,10 @@ type Config struct {
 // Global limit caps total in-flight requests to the backend (should match GPU capacity).
 // Per-user limit prevents a single user from monopolizing all slots.
 type ConcurrencyLimitConfig struct {
-	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent"`  // Max total concurrent requests to backend (default: 20)
-	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent"` // Max concurrent requests per user (default: 5, whitelisted users are exempt)
-	PerUserRPM           int `yaml:"perUserRPM"`           // Max requests per minute per user (default: 30, 0 = disabled)
-	PerUserBurst         int `yaml:"perUserBurst"`         // Max burst size for per-user rate limit (default: 5)
+	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent" default:"20"`  // Max total concurrent requests to backend
+	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent" default:"5"`  // Max concurrent requests per user (whitelisted users are exempt)
+	PerUserRPM           int `yaml:"perUserRPM" default:"30"`           // Max requests per minute per user (0 = disabled)
+	PerUserBurst         int `yaml:"perUserBurst" default:"5"`          // Max burst size for per-user rate limit
 	PerUserTPM           int `yaml:"perUserTPM"`           // Max tokens per minute per user (default: 0 = disabled, chatbot/speech-to-text)
 	PerUserTPMBurst      int `yaml:"perUserTPMBurst"`      // Max burst size for per-user TPM limit (default: 0)
 	PerUserIPM           int `yaml:"perUserIPM"`           // Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
@@ -419,22 +419,22 @@ type ConcurrencyLimitConfig struct {
 
 // AsyncConfig defines configuration for async job processing.
 type AsyncConfig struct {
-	Enabled           bool `yaml:"enabled"`           // Enable async endpoints (default: true)
-	MaxConcurrentJobs int  `yaml:"maxConcurrentJobs"` // Max concurrent worker goroutines (default: 10)
-	MaxQueueSize      int  `yaml:"maxQueueSize"`      // Max pending jobs waiting for a worker (default: 100)
+	Enabled           bool `yaml:"enabled" default:"true"`       // Enable async endpoints
+	MaxConcurrentJobs int  `yaml:"maxConcurrentJobs" default:"10"` // Max concurrent worker goroutines
+	MaxQueueSize      int  `yaml:"maxQueueSize" default:"100"`     // Max pending jobs waiting for a worker
 
 	// ResultTTL: how long to keep completed results.
-	ResultTTL time.Duration `yaml:"resultTTL"`
+	ResultTTL time.Duration `yaml:"resultTTL" default:"30m"`
 	// Deprecated: use ResultTTL. Removed after config.DeprecationRemovalDate.
 	ResultTTLMinutes int `yaml:"resultTTLMinutes,omitempty"`
 
 	// CleanupInterval: interval for expired job cleanup.
-	CleanupInterval time.Duration `yaml:"cleanupInterval"`
+	CleanupInterval time.Duration `yaml:"cleanupInterval" default:"60s"`
 	// Deprecated: use CleanupInterval. Removed after config.DeprecationRemovalDate.
 	CleanupIntervalSeconds int `yaml:"cleanupIntervalSeconds,omitempty"`
 
 	// JobTimeout: per-job HTTP request timeout.
-	JobTimeout time.Duration `yaml:"jobTimeout"`
+	JobTimeout time.Duration `yaml:"jobTimeout" default:"15m"`
 	// Deprecated: use JobTimeout. Removed after config.DeprecationRemovalDate.
 	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
 }
@@ -443,47 +443,47 @@ type AsyncConfig struct {
 // Providers can tune these values based on their GPU capacity and model complexity.
 type ProviderHttpConfig struct {
 	// TotalTimeout: overall HTTP request timeout.
-	TotalTimeout time.Duration `yaml:"totalTimeout"`
+	TotalTimeout time.Duration `yaml:"totalTimeout" default:"15m"`
 	// Deprecated: use TotalTimeout. Removed after config.DeprecationRemovalDate.
 	TotalTimeoutMinutes int `yaml:"totalTimeoutMinutes,omitempty"`
 
 	// ResponseHeaderTimeout: max time to wait for provider to start responding.
-	ResponseHeaderTimeout time.Duration `yaml:"responseHeaderTimeout"`
+	ResponseHeaderTimeout time.Duration `yaml:"responseHeaderTimeout" default:"15m"`
 	// Deprecated: use ResponseHeaderTimeout. Removed after config.DeprecationRemovalDate.
 	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty"`
 }
 
 type LogPathsConfig struct {
-	BrokerLogDir string `yaml:"brokerLogDir"`
-	EventLogDir  string `yaml:"eventLogDir"`
+	BrokerLogDir string `yaml:"brokerLogDir" default:"/var/log/inference"`
+	EventLogDir  string `yaml:"eventLogDir" default:"/var/log/event"`
 }
 
 // ControllerConfig Controller service configuration
 type ControllerConfig struct {
-	Enable         bool                 `yaml:"enable"`         // Enable controller service
-	Port           int                  `yaml:"port"`           // HTTP service port, default 3090
-	AdminAddresses []string             `yaml:"adminAddresses"` // Authorized admin wallet addresses
-	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
-	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
-	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
-	Containers     ContainersConfig     `yaml:"containers"`     // All managed containers
-	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
-	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
+	Enable         bool                 `yaml:"enable"`                                                        // Enable controller service
+	Port           int                  `yaml:"port" default:"3090"`                                           // HTTP service port
+	AdminAddresses []string             `yaml:"adminAddresses"`                                                // Authorized admin wallet addresses
+	AllowedIPs     []string             `yaml:"allowedIPs"`                                                    // IP whitelist, empty means allow all
+	Image          string               `yaml:"image" default:"ghcr.io/0gfoundation/0g-serving-broker:latest"` // Image for broker/event containers
+	Docker         DockerConfig         `yaml:"docker"`                                                        // Docker connection config
+	Containers     ContainersConfig     `yaml:"containers"`                                                    // All managed containers
+	Logger         *config.LoggerConfig `yaml:"logger"`                                                        // Logger config
+	ConfigFile     string               `yaml:"-"`                                                             // Resolved config file path (set at runtime, not from yaml)
 }
 
 // DockerConfig Docker connection configuration
 type DockerConfig struct {
-	Host       string `yaml:"host"`       // Docker socket path, default unix:///var/run/docker.sock
-	APIVersion string `yaml:"apiVersion"` // Docker API version, default 1.41
+	Host       string `yaml:"host" default:"unix:///var/run/docker.sock"` // Docker socket path
+	APIVersion string `yaml:"apiVersion" default:"1.41"`                  // Docker API version
 }
 
 // ContainersConfig all managed containers configuration
 type ContainersConfig struct {
-	Broker         string `yaml:"broker"`         // Broker container name, default "0g-serving-provider-broker"
-	Event          string `yaml:"event"`          // Event container name, default "0g-serving-provider-event"
-	Ingress        string `yaml:"ingress"`        // Ingress container name, default "broker-ingress"
-	PrometheusInit string `yaml:"prometheusInit"` // Prometheus init container name, default "prometheus-init"
-	Prometheus     string `yaml:"prometheus"`     // Prometheus container name, default "prometheus"
+	Broker         string `yaml:"broker" default:"0g-serving-provider-broker"` // Broker container name
+	Event          string `yaml:"event" default:"0g-serving-provider-event"`   // Event container name
+	Ingress        string `yaml:"ingress" default:"broker-ingress"`            // Ingress container name
+	PrometheusInit string `yaml:"prometheusInit" default:"prometheus-init"`    // Prometheus init container name
+	Prometheus     string `yaml:"prometheus" default:"prometheus"`             // Prometheus container name
 }
 
 // IngressAllowedEnvKeys whitelist of environment variables that can be modified for ingress
@@ -720,6 +720,23 @@ func unmarshalStrict(data []byte, cfg *Config) error {
 }
 
 func loadConfig(cfg *Config) error {
+	// Defaults from `default:"..."` struct tags. Applied before any yaml
+	// load so yaml (and, in subsequent refactor steps, env) overlay onto a
+	// pre-populated struct. Auto-instantiates *LoggerConfig and any other
+	// pointer-to-struct field that has nested defaults.
+	if err := applyDefaults(cfg); err != nil {
+		return fmt.Errorf("apply defaults: %w", err)
+	}
+	// Logger.Path differs between the top-level and the Controller logger,
+	// so it can't live on the shared LoggerConfig type. Set here after the
+	// walker auto-instantiated both pointers.
+	if cfg.Logger != nil && cfg.Logger.Path == "" {
+		cfg.Logger.Path = "./logs/inference.log"
+	}
+	if cfg.Controller.Logger != nil && cfg.Controller.Logger.Path == "" {
+		cfg.Controller.Logger.Path = "./logs/controller.log"
+	}
+
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
 		configPath = envPath
@@ -844,144 +861,12 @@ func loadConfig(cfg *Config) error {
 
 func GetConfig() *Config {
 	once.Do(func() {
-		instance = &Config{
-			AllowOrigins:    []string{"*"},
-			ContractAddress: "0x47340d900bdFec2BD393c626E12ea0656F938d84",
-			Database: struct {
-				DSN      string `yaml:"dsn"`
-				Provider string `yaml:"provider,omitempty"`
-			}{
-				DSN: "root:123456@tcp(mysql:3306)/provider?parseTime=true",
-			},
-			Event: struct {
-				ListenAddr   string `yaml:"listenAddr"`
-				ProviderAddr string `yaml:"providerAddr,omitempty"`
-			}{
-				ListenAddr: ":8088",
-			},
-			GasPrice:    "2000000007",
-			MaxGasPrice: "",
-			Interval: struct {
-				AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
-				ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
-				SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
-				ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
-			}{
-				AutoSettleBufferTime:     60 * time.Second,
-				ForceSettlementProcessor: 10 * time.Minute,
-				SettlementProcessor:      5 * time.Minute,
-				ReconciliationProcessor:  60 * time.Second,
-			},
-			Settlement: struct {
-				MinSettlementFee string `yaml:"minSettlementFee"`
-			}{
-				MinSettlementFee: "4000000000000000",
-			},
-			RevenueTransfer: struct {
-				TargetAddress string        `yaml:"targetAddress"`
-				ReserveAmount string        `yaml:"reserveAmount"`
-				Interval      time.Duration `yaml:"interval"`
-			}{
-				TargetAddress: "",
-				ReserveAmount: "10000000000000000000",
-				Interval:      time.Hour,
-			},
-			Monitor: struct {
-				Enable       bool   `yaml:"enable"`
-				EventAddress string `yaml:"eventAddress"`
-			}{
-				Enable:       false,
-				EventAddress: "0g-serving-provider-event:3081",
-			},
-			ZK: struct {
-				URL           string `yaml:"url"`
-				Provider      string `yaml:"provider,omitempty"`
-				RequestLength int    `yaml:"requestLength"`
-			}{
-				URL:           "nginx:3001",
-				RequestLength: 40,
-			},
-			LoRA: LoRAConfig{
-				Enable:            false,
-				LoraModulesDir:    "/data/lora-modules",
-				SllmUrl:           "http://sllm:8343",
-				OffloadAfter:      60 * time.Minute,
-				EnableColdStorage: false,
-				PollBlockInterval: 5 * time.Second,
-				StorageTurbo:      false,
-			},
-			ChatCacheExpiration: time.Minute * 20,
-			NvGPU:               false,
-			Logger: &config.LoggerConfig{
-				Format:        "text",
-				Level:         "info",
-				Path:          "./logs/inference.log",
-				RotationCount: 7,
-			},
-			LogPaths: LogPathsConfig{
-				BrokerLogDir: "/var/log/inference",
-				EventLogDir:  "/var/log/event",
-			},
-			Controller: ControllerConfig{
-				Enable:         false,
-				Port:           3090,
-				AdminAddresses: []string{},
-				AllowedIPs:     []string{},
-				Image:          "ghcr.io/0gfoundation/0g-serving-broker:latest",
-				Docker: DockerConfig{
-					Host:       "unix:///var/run/docker.sock",
-					APIVersion: "1.41",
-				},
-				Containers: ContainersConfig{
-					Broker:         "0g-serving-provider-broker",
-					Event:          "0g-serving-provider-event",
-					Ingress:        "broker-ingress",
-					PrometheusInit: "prometheus-init",
-					Prometheus:     "prometheus",
-				},
-				Logger: &config.LoggerConfig{
-					Format:        "text",
-					Level:         "info",
-					Path:          "./logs/controller.log",
-					RotationCount: 7,
-				},
-			},
-			CacheTokenBilling: CacheTokenBillingConfig{
-				Enabled: false,
-				Divisor: 4,
-			},
-			TieredPricing: TieredPricingConfig{
-				Enabled: false,
-				Tiers:   nil,
-			},
-			Whitelist: WhitelistConfig{
-				Enabled:       false,
-				UserAddresses: []string{},
-			},
-			ConcurrencyLimit: ConcurrencyLimitConfig{
-				MaxGlobalConcurrent:  20,
-				MaxPerUserConcurrent: 5,
-				PerUserRPM:           30,
-				PerUserBurst:         5,
-				PerUserTPM:           0, // disabled by default
-				PerUserTPMBurst:      0,
-				PerUserIPM:           0, // disabled by default
-				PerUserIPMBurst:      0,
-			},
-			Async: AsyncConfig{
-				Enabled:           true,
-				MaxConcurrentJobs: 10,
-				MaxQueueSize:      100,
-				ResultTTL:         30 * time.Minute,
-				CleanupInterval:   60 * time.Second,
-				JobTimeout:        15 * time.Minute,
-			},
-			ProviderHttp: ProviderHttpConfig{
-				TotalTimeout:          15 * time.Minute,
-				ResponseHeaderTimeout: 15 * time.Minute,
-			},
-		}
-
+		// Defaults are now sourced from `default:"..."` struct tags via
+		// applyDefaults inside loadConfig. The previous ~140-line struct
+		// literal lived here only to seed those defaults; everything moved
+		// to tags lives at the field declaration sites in this file (and
+		// in common/config/logger.go for LoggerConfig.Format/Level/etc).
+		instance = &Config{}
 		if err := loadConfig(instance); err != nil {
 			panic(err)
 		}
