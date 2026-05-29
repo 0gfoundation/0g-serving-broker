@@ -11,7 +11,10 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"gopkg.in/yaml.v2"
+	"github.com/go-viper/mapstructure/v2"
+	koanfyaml "github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/rawbytes"
+	"github.com/knadh/koanf/v2"
 )
 
 // validProviderIdentity matches lowercase alphanumeric identifiers with optional hyphens.
@@ -683,6 +686,39 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	return nil
 }
 
+// unmarshalStrict parses a yaml document into cfg with the same strict-unknown-key
+// semantics that gopkg.in/yaml.v2.UnmarshalStrict provided. The parse path now
+// runs through koanf so that PR1 establishes the loading pipeline the env /
+// reflection-driven layers in the rest of this refactor build on, but the
+// observable behaviour (which keys are accepted, which raise errors) is
+// unchanged for PR1.
+//
+// Notes for downstream PRs:
+//   - The "yaml" tag is reused as the koanf path tag, so existing field tags
+//     don't need to be touched.
+//   - ErrorUnused mirrors yaml.UnmarshalStrict's "unknown key is an error".
+//   - StringToTimeDurationHookFunc preserves the time.Duration parsing yaml.v2
+//     handled natively (e.g. "1h", "30s").
+func unmarshalStrict(data []byte, cfg *Config) error {
+	k := koanf.New(".")
+	if err := k.Load(rawbytes.Provider(data), koanfyaml.Parser()); err != nil {
+		return fmt.Errorf("parse yaml: %w", err)
+	}
+	return k.UnmarshalWithConf("", cfg, koanf.UnmarshalConf{
+		Tag: "yaml",
+		DecoderConfig: &mapstructure.DecoderConfig{
+			TagName:          "yaml",
+			ErrorUnused:      true,
+			WeaklyTypedInput: false,
+			Result:           cfg,
+			DecodeHook: mapstructure.ComposeDecodeHookFunc(
+				mapstructure.StringToTimeDurationHookFunc(),
+				mapstructure.StringToSliceHookFunc(","),
+			),
+		},
+	})
+}
+
 func loadConfig(cfg *Config) error {
 	configPath := "/etc/config/config.yaml"
 	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
@@ -705,7 +741,7 @@ func loadConfig(cfg *Config) error {
 	// migrateDeprecated.
 	raw := config.RawYAMLKeys(data)
 
-	if err := yaml.UnmarshalStrict(data, cfg); err != nil {
+	if err := unmarshalStrict(data, cfg); err != nil {
 		return err
 	}
 
