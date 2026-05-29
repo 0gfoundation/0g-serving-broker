@@ -52,8 +52,10 @@ networks:
 func TestLoadConfig_Migrate_MultiEntryNetworks_UnknownKeysError(t *testing.T) {
 	// Multi-entry legacy config with no ethereum0g (and NETWORK env unset
 	// so the ethereumHardhat fallback doesn't apply either) has no
-	// principled selection — must fail rather than guess.
-	t.Setenv("NETWORK", "")
+	// principled selection — must fail rather than guess. The error
+	// message must list the actual keys and the NETWORK value so the
+	// operator can act without re-reading the source.
+	t.Setenv("NETWORK", "staging")
 	_, err := loadFromYAML(t, `
 networks:
   alpha:
@@ -64,8 +66,10 @@ networks:
 	if err == nil {
 		t.Fatal("expected error for multi-entry networks map without canonical keys")
 	}
-	if !strings.Contains(err.Error(), "2 entries") {
-		t.Errorf("unexpected error: %v", err)
+	for _, expected := range []string{"alpha", "beta", "staging", "ethereum0g"} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Errorf("error message should mention %q; got: %v", expected, err)
+		}
 	}
 }
 
@@ -233,6 +237,24 @@ revenueTransfer:
 	}
 	if cfg.RevenueTransfer.Interval != 2*time.Hour {
 		t.Errorf("RevenueTransfer.Interval = %s", cfg.RevenueTransfer.Interval)
+	}
+}
+
+func TestLoadConfig_Migrate_IntegerZero_NoWarning(t *testing.T) {
+	// `key: 0` is the same in both schemas (zero duration); the migration
+	// helper should not emit a deprecation warning that would confuse
+	// operators who explicitly wrote 0 to disable a feature. We don't
+	// capture stderr here, but we do assert the resulting value is zero
+	// and that the call returns successfully.
+	cfg, err := loadFromYAML(t, `
+interval:
+  reconciliationProcessor: 0
+`)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Interval.ReconciliationProcessor != 0 {
+		t.Errorf("ReconciliationProcessor = %s, want 0", cfg.Interval.ReconciliationProcessor)
 	}
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -45,11 +46,14 @@ func (l *PrivateKeyStore) Fetch() ([]string, error) {
 // secrets.
 func GetProviderPrivateKey(network *NetworkConfig) (string, error) {
 	if network == nil || network.PrivateKeyStore == nil {
-		return "", errors.New("no provider private key found in network config")
+		return "", errors.New("no provider private key found: network config has no PrivateKeyStore")
 	}
 	keys, err := network.PrivateKeyStore.Fetch()
-	if err != nil || len(keys) == 0 {
-		return "", errors.New("no provider private key found in network config")
+	if err != nil {
+		return "", fmt.Errorf("fetch provider private key: %w", err)
+	}
+	if len(keys) == 0 {
+		return "", errors.New("no provider private key found: PrivateKeyStore returned empty key list")
 	}
 	return strings.TrimSpace(keys[0]), nil
 }

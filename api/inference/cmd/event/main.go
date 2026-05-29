@@ -43,10 +43,10 @@ func Main() {
 	// contract.LockTime is a time.Duration; AutoSettleBufferTime is now also
 	// a Duration. The pre-#507 checks compared integer seconds.
 	if conf.Interval.AutoSettleBufferTime > contract.LockTime {
-		panic(errors.New("Interval.AutoSettleBufferTime grater than refund LockTime"))
+		panic(errors.New("Interval.AutoSettleBufferTime greater than refund LockTime"))
 	}
 	if conf.Interval.AutoSettleBufferTime > conf.Interval.ForceSettlementProcessor {
-		panic(errors.New("Interval.AutoSettleBufferTime grater than forceSettlement Interval"))
+		panic(errors.New("Interval.AutoSettleBufferTime greater than forceSettlement Interval"))
 	}
 	if contract.LockTime-conf.Interval.AutoSettleBufferTime < time.Minute {
 		panic(errors.New("Interval.AutoSettleBufferTime is too large, which could lead to overly frequent settlements"))

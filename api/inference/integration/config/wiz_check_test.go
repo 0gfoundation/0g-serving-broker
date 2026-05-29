@@ -88,6 +88,47 @@ func TestWizard_NormalizeStripsLegacyNetworksOnSave(t *testing.T) {
 	}
 }
 
+// TestWizard_DurationYAMLRejectsInvalidString guards against the wizard
+// silently round-tripping garbage like `autoSettleBufferTime: "banana"` into
+// the generated yaml. The validation should fire at wizard load time, not at
+// broker startup.
+func TestWizard_DurationYAMLRejectsInvalidString(t *testing.T) {
+	var c Config
+	err := yaml.Unmarshal([]byte("interval:\n  autoSettleBufferTime: \"banana\"\n"), &c)
+	if err == nil {
+		t.Fatal("expected error for non-duration string value")
+	}
+	if !strings.Contains(err.Error(), "banana") {
+		t.Errorf("error should quote the invalid value; got: %v", err)
+	}
+}
+
+// TestWizard_NormalizeMultiEntryNoCanonicalFails ensures normalizeForSave
+// surfaces an error rather than silently emitting both `network:` and
+// `networks:` blocks when the legacy map has multiple entries and none of
+// them match the canonical key (ethereum0g or NETWORK=hardhat's
+// ethereumHardhat).
+func TestWizard_NormalizeMultiEntryNoCanonicalFails(t *testing.T) {
+	t.Setenv("NETWORK", "")
+	c := &Config{}
+	c.Networks = Networks{
+		"alpha": &NetworkConfig{URL: "https://a.example", ChainID: 1},
+		"beta":  &NetworkConfig{URL: "https://b.example", ChainID: 2},
+	}
+	tmp, err := os.CreateTemp(t.TempDir(), "out-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp.Close()
+	err = saveConfig(c, tmp.Name())
+	if err == nil {
+		t.Fatal("expected saveConfig to fail on ambiguous multi-entry networks")
+	}
+	if !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta") {
+		t.Errorf("error should list actual keys; got: %v", err)
+	}
+}
+
 // TestWizard_NormalizeMigratesLegacyOnlyOnSave covers the inverse case: the
 // wizard merged user config still has only the legacy block — normalize must
 // migrate it forward so the broker doesn't re-see the legacy yaml on next run.

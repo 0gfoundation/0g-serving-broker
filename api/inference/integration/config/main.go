@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -175,14 +176,23 @@ func (d *durationYAML) UnmarshalYAML(node *yaml.Node) error {
 	// !!int → legacy seconds; !!str → new duration string. yaml.v3 picks
 	// the tag from the literal form, so we can rely on it rather than
 	// parsing the value twice.
+	var s string
 	switch node.Tag {
 	case "!!int":
-		*d = durationYAML(node.Value + "s")
+		s = node.Value + "s"
 	case "!!str", "":
-		*d = durationYAML(node.Value)
+		s = node.Value
 	default:
 		return fmt.Errorf("duration must be an int (legacy seconds) or string (\"30s\" / \"1h\"), got tag %s at line %d", node.Tag, node.Line)
 	}
+	// Validate that the resulting string is actually a Go duration. Without
+	// this check the wizard happily round-trips `autoSettleBufferTime: "banana"`
+	// into the generated yaml, and the misconfig only surfaces later at
+	// broker startup with a less specific error.
+	if _, err := time.ParseDuration(s); err != nil {
+		return fmt.Errorf("duration %q (line %d) is not a valid Go duration: %w", node.Value, node.Line, err)
+	}
+	*d = durationYAML(s)
 	return nil
 }
 
@@ -2451,7 +2461,9 @@ func isPlaceholderInterface(value interface{}) bool {
 }
 
 func saveConfig(config *Config, path string) error {
-	normalizeForSave(config)
+	if err := normalizeForSave(config); err != nil {
+		return err
+	}
 
 	file, err := os.Create(path)
 	if err != nil {
@@ -2474,34 +2486,50 @@ func saveConfig(config *Config, path string) error {
 // both blocks set (the new write path touches only Network, while merge
 // preserves the user's existing Networks map). The broker's strict
 // "both keys set" check would then reject that yaml at startup.
-func normalizeForSave(c *Config) {
+func normalizeForSave(c *Config) error {
 	if c == nil {
-		return
+		return nil
 	}
 	if c.Network != nil && (c.Network.URL != "" || len(c.Network.PrivateKeys) > 0) {
 		c.Networks = nil
-		return
+		return nil
 	}
 	if c.Network == nil && len(c.Networks) > 0 {
 		// Wizard didn't touch the new field but the user still has a
-		// legacy block. Migrate the canonical entry (ethereum0g) if
-		// present, else the only entry.
+		// legacy block. Match common/config.PickLegacyNetwork's selection:
+		// single entry wins; otherwise pick ethereum0g (or ethereumHardhat
+		// when NETWORK=hardhat). If neither canonical key matches, fail
+		// loudly rather than emit a yaml with both blocks set.
 		var picked *NetworkConfig
-		if nc, ok := c.Networks["ethereum0g"]; ok && nc != nil {
-			picked = nc
-		} else if len(c.Networks) == 1 {
+		if len(c.Networks) == 1 {
 			for _, nc := range c.Networks {
 				if nc != nil {
 					picked = nc
 					break
 				}
 			}
+		} else {
+			wanted := "ethereum0g"
+			if os.Getenv("NETWORK") == "hardhat" {
+				wanted = "ethereumHardhat"
+			}
+			if nc, ok := c.Networks[wanted]; ok && nc != nil {
+				picked = nc
+			}
 		}
 		if picked != nil {
 			c.Network = picked
 			c.Networks = nil
+			return nil
 		}
+		keys := make([]string, 0, len(c.Networks))
+		for k := range c.Networks {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return fmt.Errorf("wizard cannot normalize multi-entry legacy 'networks' map %v: no canonical entry (ethereum0g/ethereumHardhat) found and NETWORK=%q does not select any. Flatten to a single entry or set NETWORK to an existing key before re-running the wizard", keys, os.Getenv("NETWORK"))
 	}
+	return nil
 }
 
 func isValidURL(value string) bool {

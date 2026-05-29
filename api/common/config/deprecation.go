@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -139,7 +140,14 @@ func MigrateIntegerSecondsDuration(raw map[string]interface{}, target *time.Dura
 	default:
 		return
 	}
+	// 0 has only one interpretation across both schemas (zero duration),
+	// so suppress the deprecation warning for this no-op case — it's
+	// noise that confuses operators who explicitly wrote `key: 0` to
+	// disable a feature.
 	*target = time.Duration(n) * unit
+	if n == 0 {
+		return
+	}
 	dotted := strings.Join(path, ".")
 	log.Printf("[CONFIG-DEPRECATED] %q is an integer count of %s (legacy form); will be removed after %s, use a duration string like \"30s\" / \"1h\" instead",
 		dotted, unitName(unit), DeprecationRemovalDate)
@@ -174,6 +182,12 @@ func unitName(d time.Duration) string {
 //     target and emit a deprecation warning
 //   - if both are present, the new key wins; a "both set" warning is emitted
 //     so operators can spot the inconsistency
+//
+// oldValue MUST come straight from the deprecated raw-integer struct field
+// (e.g. `cfg.LoRA.OffloadAfterMinutes`). DO NOT pass a pre-converted value
+// derived from the new Duration field (e.g.
+// `int64(cfg.LoRA.OffloadAfter/time.Minute)`) — that would silently apply
+// the unit multiplier twice on legacy yaml.
 func MigrateDurationFromInt(raw map[string]interface{}, oldPath, newPath []string, target *time.Duration, oldValue int64, unit time.Duration) {
 	if !RawHasKey(raw, oldPath...) {
 		return
@@ -231,7 +245,12 @@ func PickLegacyNetwork(networks Networks) (*NetworkConfig, error) { //nolint:sta
 	if nc, ok := networks[wanted]; ok && nc != nil {
 		return nc, nil
 	}
-	return nil, fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(networks))
+	keys := make([]string, 0, len(networks))
+	for k := range networks {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return nil, fmt.Errorf("invalid config: 'networks' has %d entries %v; tried to pick %q (NETWORK=%q) but it is absent or nil — flatten to a single 'network' block or rename one of the entries", len(networks), keys, wanted, os.Getenv("NETWORK"))
 }
 
 // ReadConfigFile is a convenience wrapper that returns the config bytes and an
