@@ -164,6 +164,76 @@ func unitName(d time.Duration) string {
 	}
 }
 
+// MigrateDurationFromInt is the migration helper for fields whose deprecated
+// form was an integer-with-unit-suffix yaml key (e.g. "offloadAfterMinutes")
+// and whose new form is a time.Duration under a renamed key (e.g.
+// "offloadAfter"). The behaviour is:
+//
+//   - if the user wrote only the new key (or neither), no-op
+//   - if the user wrote only the deprecated key, copy oldValue*unit into
+//     target and emit a deprecation warning
+//   - if both are present, the new key wins; a "both set" warning is emitted
+//     so operators can spot the inconsistency
+func MigrateDurationFromInt(raw map[string]interface{}, oldPath, newPath []string, target *time.Duration, oldValue int64, unit time.Duration) {
+	if !RawHasKey(raw, oldPath...) {
+		return
+	}
+	oldDotted := strings.Join(oldPath, ".")
+	newDotted := strings.Join(newPath, ".")
+	if RawHasKey(raw, newPath...) {
+		WarnDeprecatedBothSet(oldDotted, newDotted)
+		return
+	}
+	WarnDeprecated(oldDotted, newDotted)
+	*target = time.Duration(oldValue) * unit
+}
+
+// MigrateStringRename is the migration helper for keys that were simply
+// renamed (e.g. "database.provider" → "database.dsn"). New key wins when both
+// are present.
+func MigrateStringRename(raw map[string]interface{}, oldPath, newPath []string, target *string, oldValue string) {
+	if !RawHasKey(raw, oldPath...) {
+		return
+	}
+	oldDotted := strings.Join(oldPath, ".")
+	newDotted := strings.Join(newPath, ".")
+	if RawHasKey(raw, newPath...) {
+		WarnDeprecatedBothSet(oldDotted, newDotted)
+		return
+	}
+	WarnDeprecated(oldDotted, newDotted)
+	*target = oldValue
+}
+
+// PickLegacyNetwork chooses a single entry out of a legacy Networks map. For
+// 1-entry maps the only entry wins. For multi-entry maps (pre-#507 dev
+// configs that shipped with both ethereumHardhat and ethereum0g side by side)
+// the pre-#507 NETWORK env var is honored so existing CI/dev workflows keep
+// working during the deprecation window: NETWORK=hardhat selects the
+// ethereumHardhat entry, anything else selects ethereum0g. Both the NETWORK
+// coupling and this whole helper go away at the cleanup deadline.
+func PickLegacyNetwork(networks Networks) (*NetworkConfig, error) { //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
+	if len(networks) == 0 {
+		return nil, fmt.Errorf("invalid config: 'networks' is set but empty")
+	}
+	if len(networks) == 1 {
+		for _, nc := range networks {
+			if nc == nil {
+				return nil, fmt.Errorf("invalid config: 'networks' entry has no value; either delete it or fill in url/chainID/privateKeys")
+			}
+			return nc, nil
+		}
+	}
+	wanted := "ethereum0g"
+	if os.Getenv("NETWORK") == "hardhat" {
+		wanted = "ethereumHardhat"
+	}
+	if nc, ok := networks[wanted]; ok && nc != nil {
+		return nc, nil
+	}
+	return nil, fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(networks))
+}
+
 // ReadConfigFile is a convenience wrapper that returns the config bytes and an
 // "is missing" flag, so callers can keep their existing "no file = use
 // defaults" semantics without duplicating os.IsNotExist boilerplate.

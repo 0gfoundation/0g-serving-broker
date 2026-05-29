@@ -598,42 +598,6 @@ var (
 	once     sync.Once
 )
 
-// migrateDuration migrates a "field with unit suffix" deprecated form: the old
-// yaml key (e.g. offloadAfterMinutes) holds an integer count of `unit`, and the
-// new key (e.g. offloadAfter) holds a time.Duration. Precedence: new key wins
-// when both are present.
-func migrateDuration(raw map[string]interface{}, oldPath, newPath []string, target *time.Duration, oldValue int, unit time.Duration) {
-	oldHere := config.RawHasKey(raw, oldPath...)
-	if !oldHere {
-		return
-	}
-	oldDotted := strings.Join(oldPath, ".")
-	newDotted := strings.Join(newPath, ".")
-	if config.RawHasKey(raw, newPath...) {
-		config.WarnDeprecatedBothSet(oldDotted, newDotted)
-		return
-	}
-	config.WarnDeprecated(oldDotted, newDotted)
-	*target = time.Duration(oldValue) * unit
-}
-
-// migrateStringRename migrates a renamed string yaml key. New key wins when
-// both are set.
-func migrateStringRename(raw map[string]interface{}, oldPath, newPath []string, target *string, oldValue string) {
-	oldHere := config.RawHasKey(raw, oldPath...)
-	if !oldHere {
-		return
-	}
-	oldDotted := strings.Join(oldPath, ".")
-	newDotted := strings.Join(newPath, ".")
-	if config.RawHasKey(raw, newPath...) {
-		config.WarnDeprecatedBothSet(oldDotted, newDotted)
-		return
-	}
-	config.WarnDeprecated(oldDotted, newDotted)
-	*target = oldValue
-}
-
 // migrateDeprecated copies values from deprecated yaml keys to their
 // replacements when the user has populated the deprecated form. Each call to
 // config.WarnDeprecated emits a one-shot stderr line so operators see exactly
@@ -655,38 +619,38 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	// Suffixed fields (Minutes/Seconds): old yaml key was kept as a separate
 	// deprecated struct field; copy it over if the user still has the old
 	// form. New key wins if both are set.
-	migrateDuration(raw,
+	config.MigrateDurationFromInt(raw,
 		[]string{"lora", "offloadAfterMinutes"}, []string{"lora", "offloadAfter"},
-		&cfg.LoRA.OffloadAfter, cfg.LoRA.OffloadAfterMinutes, time.Minute)
-	migrateDuration(raw,
+		&cfg.LoRA.OffloadAfter, int64(cfg.LoRA.OffloadAfterMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
 		[]string{"lora", "pollBlockIntervalSeconds"}, []string{"lora", "pollBlockInterval"},
-		&cfg.LoRA.PollBlockInterval, cfg.LoRA.PollBlockIntervalSeconds, time.Second)
-	migrateDuration(raw,
+		&cfg.LoRA.PollBlockInterval, int64(cfg.LoRA.PollBlockIntervalSeconds), time.Second)
+	config.MigrateDurationFromInt(raw,
 		[]string{"async", "resultTTLMinutes"}, []string{"async", "resultTTL"},
-		&cfg.Async.ResultTTL, cfg.Async.ResultTTLMinutes, time.Minute)
-	migrateDuration(raw,
+		&cfg.Async.ResultTTL, int64(cfg.Async.ResultTTLMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
 		[]string{"async", "cleanupIntervalSeconds"}, []string{"async", "cleanupInterval"},
-		&cfg.Async.CleanupInterval, cfg.Async.CleanupIntervalSeconds, time.Second)
-	migrateDuration(raw,
+		&cfg.Async.CleanupInterval, int64(cfg.Async.CleanupIntervalSeconds), time.Second)
+	config.MigrateDurationFromInt(raw,
 		[]string{"async", "jobTimeoutMinutes"}, []string{"async", "jobTimeout"},
-		&cfg.Async.JobTimeout, cfg.Async.JobTimeoutMinutes, time.Minute)
-	migrateDuration(raw,
+		&cfg.Async.JobTimeout, int64(cfg.Async.JobTimeoutMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
 		[]string{"providerHttp", "totalTimeoutMinutes"}, []string{"providerHttp", "totalTimeout"},
-		&cfg.ProviderHttp.TotalTimeout, cfg.ProviderHttp.TotalTimeoutMinutes, time.Minute)
-	migrateDuration(raw,
+		&cfg.ProviderHttp.TotalTimeout, int64(cfg.ProviderHttp.TotalTimeoutMinutes), time.Minute)
+	config.MigrateDurationFromInt(raw,
 		[]string{"providerHttp", "responseHeaderTimeoutMinutes"}, []string{"providerHttp", "responseHeaderTimeout"},
-		&cfg.ProviderHttp.ResponseHeaderTimeout, cfg.ProviderHttp.ResponseHeaderTimeoutMinutes, time.Minute)
+		&cfg.ProviderHttp.ResponseHeaderTimeout, int64(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes), time.Minute)
 
 	// Rename: database.provider → database.dsn
-	migrateStringRename(raw, []string{"database", "provider"}, []string{"database", "dsn"},
+	config.MigrateStringRename(raw, []string{"database", "provider"}, []string{"database", "dsn"},
 		&cfg.Database.DSN, cfg.Database.Provider)
 
 	// Rename: event.providerAddr → event.listenAddr
-	migrateStringRename(raw, []string{"event", "providerAddr"}, []string{"event", "listenAddr"},
+	config.MigrateStringRename(raw, []string{"event", "providerAddr"}, []string{"event", "listenAddr"},
 		&cfg.Event.ListenAddr, cfg.Event.ProviderAddr)
 
 	// Rename: zk.provider → zk.url
-	migrateStringRename(raw, []string{"zk", "provider"}, []string{"zk", "url"},
+	config.MigrateStringRename(raw, []string{"zk", "provider"}, []string{"zk", "url"},
 		&cfg.ZK.URL, cfg.ZK.Provider)
 
 	// Networks (map) → Network (single).
@@ -695,11 +659,13 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 			// Both keys explicitly set in yaml is genuinely ambiguous:
 			// the legacy block usually carries url/chainID while the new
 			// block often only carries privateKeys mid-migration.
-			// Refuse to guess.
+			// Refuse to guess. (Scalar renames above stay lenient — a
+			// single deprecated string field can't lose complementary
+			// data the way a structured Networks block can.)
 			return fmt.Errorf("invalid config: both deprecated 'networks' and new 'network' are set in yaml; delete the 'networks' block to complete the migration")
 		}
 		config.WarnDeprecated("networks", "network")
-		picked, err := pickLegacyNetwork(cfg.Networks)
+		picked, err := config.PickLegacyNetwork(cfg.Networks) //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 		if err != nil {
 			return err
 		}
@@ -715,34 +681,6 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	}
 
 	return nil
-}
-
-// pickLegacyNetwork chooses a single entry out of a legacy Networks map. For
-// 1-entry maps the only entry wins. For multi-entry (pre-#507 multi-network
-// configs that shipped with both ethereumHardhat and ethereum0g) we honor the
-// pre-#507 NETWORK env var so existing dev workflows keep working through the
-// deprecation window: NETWORK=hardhat → ethereumHardhat, otherwise →
-// ethereum0g. The selection is removed entirely at the cleanup deadline.
-func pickLegacyNetwork(networks config.Networks) (*config.NetworkConfig, error) { //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
-	if len(networks) == 0 {
-		return nil, fmt.Errorf("invalid config: 'networks' is set but empty")
-	}
-	if len(networks) == 1 {
-		for _, nc := range networks {
-			if nc == nil {
-				return nil, fmt.Errorf("invalid config: 'networks' entry has no value; either delete it or fill in url/chainID/privateKeys")
-			}
-			return nc, nil
-		}
-	}
-	wanted := "ethereum0g"
-	if os.Getenv("NETWORK") == "hardhat" {
-		wanted = "ethereumHardhat"
-	}
-	if nc, ok := networks[wanted]; ok && nc != nil {
-		return nc, nil
-	}
-	return nil, fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(networks))
 }
 
 func loadConfig(cfg *Config) error {

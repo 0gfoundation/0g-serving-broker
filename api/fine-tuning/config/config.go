@@ -205,23 +205,6 @@ var (
 	once     sync.Once
 )
 
-// migrateDuration migrates a "field with unit suffix" deprecated form. See
-// the inference equivalent for details.
-func migrateDuration(raw map[string]interface{}, oldPath, newPath []string, target *time.Duration, oldValue int64, unit time.Duration) {
-	oldHere := config.RawHasKey(raw, oldPath...)
-	if !oldHere {
-		return
-	}
-	oldDotted := strings.Join(oldPath, ".")
-	newDotted := strings.Join(newPath, ".")
-	if config.RawHasKey(raw, newPath...) {
-		config.WarnDeprecatedBothSet(oldDotted, newDotted)
-		return
-	}
-	config.WarnDeprecated(oldDotted, newDotted)
-	*target = time.Duration(oldValue) * unit
-}
-
 // migrateDeprecated copies values from deprecated yaml keys to their
 // replacements. See the inference equivalent for the precedence rules.
 func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
@@ -229,10 +212,10 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	// integer-seconds semantics if the raw value is a number.
 	config.MigrateIntegerSecondsDuration(raw, &cfg.SettlementCheckInterval, time.Second, "settlementCheckInterval")
 
-	migrateDuration(raw,
+	config.MigrateDurationFromInt(raw,
 		[]string{"deliveredTaskAckTimeoutSecs"}, []string{"deliveredTaskAckTimeout"},
 		&cfg.DeliveredTaskAckTimeout, int64(cfg.DeliveredTaskAckTimeoutSecs), time.Second)
-	migrateDuration(raw,
+	config.MigrateDurationFromInt(raw,
 		[]string{"service", "fileRetentionHours"}, []string{"service", "fileRetention"},
 		&cfg.Service.FileRetention, int64(cfg.Service.FileRetentionHours), time.Hour)
 
@@ -241,7 +224,7 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 			return fmt.Errorf("invalid config: both deprecated 'networks' and new 'network' are set in yaml; delete the 'networks' block to complete the migration")
 		}
 		config.WarnDeprecated("networks", "network")
-		picked, err := pickLegacyNetwork(cfg.Networks)
+		picked, err := config.PickLegacyNetwork(cfg.Networks) //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 		if err != nil {
 			return err
 		}
@@ -253,31 +236,6 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	}
 
 	return nil
-}
-
-// pickLegacyNetwork mirrors the inference helper of the same name — multi-entry
-// legacy Networks maps respect the pre-#507 NETWORK env var so dev/CI workflows
-// keep working during the deprecation window.
-func pickLegacyNetwork(networks config.Networks) (*config.NetworkConfig, error) { //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
-	if len(networks) == 0 {
-		return nil, fmt.Errorf("invalid config: 'networks' is set but empty")
-	}
-	if len(networks) == 1 {
-		for _, nc := range networks {
-			if nc == nil {
-				return nil, fmt.Errorf("invalid config: 'networks' entry has no value; either delete it or fill in url/chainID/privateKeys")
-			}
-			return nc, nil
-		}
-	}
-	wanted := "ethereum0g"
-	if os.Getenv("NETWORK") == "hardhat" {
-		wanted = "ethereumHardhat"
-	}
-	if nc, ok := networks[wanted]; ok && nc != nil {
-		return nc, nil
-	}
-	return nil, fmt.Errorf("invalid config: 'networks' contains %d entries; flatten to a single 'network' block (multi-network was never used in production)", len(networks))
 }
 
 func loadConfig(cfg *Config) error {
