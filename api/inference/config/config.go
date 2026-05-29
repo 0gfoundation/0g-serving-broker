@@ -305,7 +305,7 @@ type LoRAConfig struct {
 	OffloadAfter time.Duration `yaml:"offloadAfter" default:"60m"`
 	// OffloadAfterMinutes is the legacy integer-minutes form.
 	// Deprecated: use OffloadAfter. Removed after config.DeprecationRemovalDate.
-	OffloadAfterMinutes int `yaml:"offloadAfterMinutes,omitempty"`
+	OffloadAfterMinutes int `yaml:"offloadAfterMinutes,omitempty" deprecated:"true"`
 
 	EnableColdStorage      bool   `yaml:"enableColdStorage"`         // Enable offload to 0G Storage
 	FineTuningContractAddr string `yaml:"fineTuningContractAddress"` //nolint:revive
@@ -314,7 +314,7 @@ type LoRAConfig struct {
 	PollBlockInterval time.Duration `yaml:"pollBlockInterval" default:"5s"`
 	// PollBlockIntervalSeconds is the legacy integer-seconds form.
 	// Deprecated: use PollBlockInterval. Removed after config.DeprecationRemovalDate.
-	PollBlockIntervalSeconds int `yaml:"pollBlockIntervalSeconds,omitempty"`
+	PollBlockIntervalSeconds int `yaml:"pollBlockIntervalSeconds,omitempty" deprecated:"true"`
 
 	StorageIndexerUrl      string `yaml:"storageIndexerUrl"`      // 0G Storage indexer URL for downloading adapters
 	StorageTurbo           bool   `yaml:"storageTurbo"`           // Use turbo indexer for 0G Storage
@@ -332,7 +332,7 @@ type Config struct {
 		// Provider was the misleading legacy name for DSN ("Provider" is the
 		// project's GPU-side actor, not a database vendor).
 		// Deprecated: use DSN. Removed after config.DeprecationRemovalDate.
-		Provider string `yaml:"provider,omitempty"`
+		Provider string `yaml:"provider,omitempty" deprecated:"true"`
 	} `yaml:"database"`
 	Event struct {
 		// ListenAddr is the metrics HTTP server bind address used by the
@@ -341,7 +341,7 @@ type Config struct {
 		// ProviderAddr was the misleading legacy name (it is not a Provider
 		// address — it is a local listen address).
 		// Deprecated: use ListenAddr. Removed after config.DeprecationRemovalDate.
-		ProviderAddr string `yaml:"providerAddr,omitempty"`
+		ProviderAddr string `yaml:"providerAddr,omitempty" deprecated:"true"`
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice" default:"2000000007"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
@@ -376,7 +376,7 @@ type Config struct {
 	// Networks is the legacy multi-network map kept for backwards
 	// compatibility. Deprecated: use Network instead. Removed after
 	// config.DeprecationRemovalDate.
-	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty"` //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
+	Networks config.Networks `mapstructure:"networks" yaml:"networks,omitempty" deprecated:"true"` //nolint:staticcheck // intentional reference to deprecated Networks for the #507 fallback window
 	Monitor  struct {
 		Enable       bool   `yaml:"enable"`
 		EventAddress string `yaml:"eventAddress" default:"0g-serving-provider-event:3081"`
@@ -386,7 +386,7 @@ type Config struct {
 		URL string `yaml:"url" default:"nginx:3001"`
 		// Provider was the misleading legacy name for URL.
 		// Deprecated: use URL. Removed after config.DeprecationRemovalDate.
-		Provider      string `yaml:"provider,omitempty"`
+		Provider      string `yaml:"provider,omitempty" deprecated:"true"`
 		RequestLength int    `yaml:"requestLength" default:"40"`
 	} `yaml:"zk"`
 	ChatCacheExpiration time.Duration           `yaml:"chatCacheExpiration" default:"20m"`
@@ -426,17 +426,17 @@ type AsyncConfig struct {
 	// ResultTTL: how long to keep completed results.
 	ResultTTL time.Duration `yaml:"resultTTL" default:"30m"`
 	// Deprecated: use ResultTTL. Removed after config.DeprecationRemovalDate.
-	ResultTTLMinutes int `yaml:"resultTTLMinutes,omitempty"`
+	ResultTTLMinutes int `yaml:"resultTTLMinutes,omitempty" deprecated:"true"`
 
 	// CleanupInterval: interval for expired job cleanup.
 	CleanupInterval time.Duration `yaml:"cleanupInterval" default:"60s"`
 	// Deprecated: use CleanupInterval. Removed after config.DeprecationRemovalDate.
-	CleanupIntervalSeconds int `yaml:"cleanupIntervalSeconds,omitempty"`
+	CleanupIntervalSeconds int `yaml:"cleanupIntervalSeconds,omitempty" deprecated:"true"`
 
 	// JobTimeout: per-job HTTP request timeout.
 	JobTimeout time.Duration `yaml:"jobTimeout" default:"15m"`
 	// Deprecated: use JobTimeout. Removed after config.DeprecationRemovalDate.
-	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
+	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty" deprecated:"true"`
 }
 
 // ProviderHttpConfig defines HTTP client timeouts for broker→provider communication.
@@ -445,12 +445,12 @@ type ProviderHttpConfig struct {
 	// TotalTimeout: overall HTTP request timeout.
 	TotalTimeout time.Duration `yaml:"totalTimeout" default:"15m"`
 	// Deprecated: use TotalTimeout. Removed after config.DeprecationRemovalDate.
-	TotalTimeoutMinutes int `yaml:"totalTimeoutMinutes,omitempty"`
+	TotalTimeoutMinutes int `yaml:"totalTimeoutMinutes,omitempty" deprecated:"true"`
 
 	// ResponseHeaderTimeout: max time to wait for provider to start responding.
 	ResponseHeaderTimeout time.Duration `yaml:"responseHeaderTimeout" default:"15m"`
 	// Deprecated: use ResponseHeaderTimeout. Removed after config.DeprecationRemovalDate.
-	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty"`
+	ResponseHeaderTimeoutMinutes int `yaml:"responseHeaderTimeoutMinutes,omitempty" deprecated:"true"`
 }
 
 type LogPathsConfig struct {
@@ -686,23 +686,28 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	return nil
 }
 
-// unmarshalStrict parses a yaml document into cfg with the same strict-unknown-key
-// semantics that gopkg.in/yaml.v2.UnmarshalStrict provided. The parse path now
-// runs through koanf so that PR1 establishes the loading pipeline the env /
-// reflection-driven layers in the rest of this refactor build on, but the
-// observable behaviour (which keys are accepted, which raise errors) is
-// unchanged for PR1.
+// unmarshalLayered parses an (optional) yaml document and applies env-var
+// overrides on top of it, decoding the merged tree into cfg.
 //
-// Notes for downstream PRs:
-//   - The "yaml" tag is reused as the koanf path tag, so existing field tags
-//     don't need to be touched.
-//   - ErrorUnused mirrors yaml.UnmarshalStrict's "unknown key is an error".
-//   - StringToTimeDurationHookFunc preserves the time.Duration parsing yaml.v2
-//     handled natively (e.g. "1h", "30s").
-func unmarshalStrict(data []byte, cfg *Config) error {
+// Pipeline (matches the planned 3-layer loading order — defaults are applied
+// to cfg before this call):
+//
+//   1. yaml file → koanf store              (skipped when data is empty)
+//   2. BROKER_* + legacy env vars → koanf   (applyEnvOverrides)
+//   3. koanf store → cfg                    (mapstructure, ErrorUnused on)
+//
+// The strict semantics from yaml.UnmarshalStrict carry over via ErrorUnused
+// — unknown yaml keys still surface as an error. StringToTimeDurationHookFunc
+// preserves the "1h"/"30s" parsing yaml.v2 handled natively.
+func unmarshalLayered(data []byte, cfg *Config) error {
 	k := koanf.New(".")
-	if err := k.Load(rawbytes.Provider(data), koanfyaml.Parser()); err != nil {
-		return fmt.Errorf("parse yaml: %w", err)
+	if len(data) > 0 {
+		if err := k.Load(rawbytes.Provider(data), koanfyaml.Parser()); err != nil {
+			return fmt.Errorf("parse yaml: %w", err)
+		}
+	}
+	if err := applyEnvOverrides(k, cfg); err != nil {
+		return fmt.Errorf("env overrides: %w", err)
 	}
 	return k.UnmarshalWithConf("", cfg, koanf.UnmarshalConf{
 		Tag: "yaml",
@@ -717,6 +722,23 @@ func unmarshalStrict(data []byte, cfg *Config) error {
 			),
 		},
 	})
+}
+
+// hasBrokerEnv reports whether any BROKER_* (or recognised legacy) env var
+// is set in the current process. Used to preserve the pre-#452 "no yaml, no
+// validation" early-return path: if there is genuinely nothing to load, keep
+// returning a defaults-only Config; if the operator is feeding the broker
+// purely via env, fall through to the validation pipeline.
+func hasBrokerEnv() bool {
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, envPrefix) {
+			return true
+		}
+	}
+	if _, ok := os.LookupEnv("LORA_ECIES_PRIVATE_KEY"); ok {
+		return true
+	}
+	return false
 }
 
 func loadConfig(cfg *Config) error {
@@ -750,7 +772,15 @@ func loadConfig(cfg *Config) error {
 		return err
 	}
 	if missing {
-		return nil
+		// Preserve the pre-#452 "no yaml present → return defaults, skip
+		// validation" path: avoids breaking integration tests / dev
+		// workflows where the bootstrap step writes config later. If env
+		// vars are set, the operator is doing an env-only deployment so
+		// validation should run and surface any missing fields.
+		if !hasBrokerEnv() {
+			return nil
+		}
+		data = nil
 	}
 
 	// Two-phase parse: the raw map lets migration logic detect which keys
@@ -758,9 +788,13 @@ func loadConfig(cfg *Config) error {
 	// migrateDeprecated.
 	raw := config.RawYAMLKeys(data)
 
-	if err := unmarshalStrict(data, cfg); err != nil {
+	if err := unmarshalLayered(data, cfg); err != nil {
 		return err
 	}
+
+	// Secrets carrying yaml:"-" can't flow through koanf+mapstructure (the
+	// strict decoder rejects keys with no target). Apply them post-unmarshal.
+	applyEnvSecrets(cfg)
 
 	if err := migrateDeprecated(cfg, raw); err != nil {
 		return err
