@@ -148,9 +148,11 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 	cfg := &config.Config{
 		AllowOrigins: []string{"*"},
 		Database: struct {
-			Provider string `yaml:"provider"`
+			DSN string `yaml:"dsn"`
+			// Deprecated: kept while the #507 fallback window is open.
+			Provider string `yaml:"provider,omitempty"`
 		}{
-			Provider: sharedDSN,
+			DSN: sharedDSN,
 		},
 		Service: config.Service{
 			Type:            "video-generation",
@@ -158,12 +160,12 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 			TargetSeparated: true,
 		},
 		Interval: struct {
-			AutoSettleBufferTime    int `yaml:"autoSettleBufferTime"`
-			ForceSettlementProcessor int `yaml:"forceSettlementProcessor"`
-			SettlementProcessor      int `yaml:"settlementProcessor"`
-			ReconciliationProcessor  int `yaml:"reconciliationProcessor"`
+			AutoSettleBufferTime     time.Duration `yaml:"autoSettleBufferTime"`
+			ForceSettlementProcessor time.Duration `yaml:"forceSettlementProcessor"`
+			SettlementProcessor      time.Duration `yaml:"settlementProcessor"`
+			ReconciliationProcessor  time.Duration `yaml:"reconciliationProcessor"`
 		}{
-			AutoSettleBufferTime: 60,
+			AutoSettleBufferTime: 60 * time.Second,
 		},
 		ChatCacheExpiration: 20 * time.Minute,
 	}

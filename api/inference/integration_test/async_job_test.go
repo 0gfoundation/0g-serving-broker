@@ -78,9 +78,9 @@ func TestAsyncTextToImageFlow(t *testing.T) {
 			Enabled:                true,
 			MaxConcurrentJobs:      2,
 			MaxQueueSize:           10,
-			ResultTTLMinutes:       30,
-			CleanupIntervalSeconds: 3600, // long interval to avoid interference
-			JobTimeoutMinutes:      1,
+			ResultTTL:       30 * time.Minute,
+			CleanupInterval: time.Hour, // long interval to avoid interference
+			JobTimeout:      time.Minute,
 		}
 	})
 
@@ -235,9 +235,9 @@ func TestAsyncImageEditingFlow(t *testing.T) {
 			Enabled:                true,
 			MaxConcurrentJobs:      2,
 			MaxQueueSize:           10,
-			ResultTTLMinutes:       30,
-			CleanupIntervalSeconds: 3600,
-			JobTimeoutMinutes:      1,
+			ResultTTL:       30 * time.Minute,
+			CleanupInterval: time.Hour,
+			JobTimeout:      time.Minute,
 		}
 	})
 
@@ -347,9 +347,9 @@ func TestAsyncTextToImageFlow_ResponseFormatURL(t *testing.T) {
 			Enabled:                true,
 			MaxConcurrentJobs:      2,
 			MaxQueueSize:           10,
-			ResultTTLMinutes:       30,
-			CleanupIntervalSeconds: 3600,
-			JobTimeoutMinutes:      1,
+			ResultTTL:       30 * time.Minute,
+			CleanupInterval: time.Hour,
+			JobTimeout:      time.Minute,
 		}
 	})
 
@@ -502,9 +502,9 @@ func TestAsyncEndpoints_RequireAuth(t *testing.T) {
 			Enabled:                true,
 			MaxConcurrentJobs:      2,
 			MaxQueueSize:           10,
-			ResultTTLMinutes:       30,
-			CleanupIntervalSeconds: 3600,
-			JobTimeoutMinutes:      1,
+			ResultTTL:       30 * time.Minute,
+			CleanupInterval: time.Hour,
+			JobTimeout:      time.Minute,
 		}
 	})
 
@@ -561,9 +561,9 @@ func TestAsyncJob_OwnershipCheck(t *testing.T) {
 			Enabled:                true,
 			MaxConcurrentJobs:      2,
 			MaxQueueSize:           10,
-			ResultTTLMinutes:       30,
-			CleanupIntervalSeconds: 3600,
-			JobTimeoutMinutes:      1,
+			ResultTTL:       30 * time.Minute,
+			CleanupInterval: time.Hour,
+			JobTimeout:      time.Minute,
 		}
 	})
 
@@ -630,9 +630,9 @@ func TestAsyncJob_WhitelistUser(t *testing.T) {
 			Enabled:                true,
 			MaxConcurrentJobs:      2,
 			MaxQueueSize:           10,
-			ResultTTLMinutes:       30,
-			CleanupIntervalSeconds: 3600,
-			JobTimeoutMinutes:      1,
+			ResultTTL:       30 * time.Minute,
+			CleanupInterval: time.Hour,
+			JobTimeout:      time.Minute,
 		}
 	})
 

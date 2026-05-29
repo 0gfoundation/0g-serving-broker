@@ -195,7 +195,7 @@ func New(
 	}
 
 	p := &Ctrl{
-		autoSettleBufferTime: time.Duration(cfg.Interval.AutoSettleBufferTime) * time.Second,
+		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
 		minSettlementFee:     minSettlementFee,
 		db:                   db,
 		asyncDB:              db,
