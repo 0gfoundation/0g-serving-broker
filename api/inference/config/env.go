@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -218,7 +219,18 @@ func applyEnvOverrides(k *koanf.Koanf, cfg *Config) error {
 	// the unknown key.
 	registry["BROKER_LORA_ECIES_PRIVATE_KEY"] = envEntry{path: "", kind: envScalar}
 
-	for _, kv := range os.Environ() {
+	// Build a secret-path lookup once so the audit log can mask values
+	// without re-walking the struct for each env var.
+	secretPaths := secretPathSet()
+
+	// Sort the env iteration so the startup audit log is deterministic.
+	// os.Environ order varies between runs / TEE attestation snapshots;
+	// stable output makes diffs across deployments useful.
+	envs := os.Environ()
+	sort.Strings(envs)
+
+	applied := []string{}
+	for _, kv := range envs {
 		idx := strings.IndexByte(kv, '=')
 		if idx < 0 {
 			continue
@@ -233,7 +245,9 @@ func applyEnvOverrides(k *koanf.Koanf, cfg *Config) error {
 			continue
 		}
 		if entry.path == "" {
-			// Secret field handled out-of-band by applyEnvSecrets.
+			// Secret field handled out-of-band by applyEnvSecrets; still
+			// record the name in the audit log below.
+			applied = append(applied, auditEntry(name, rawVal, true))
 			continue
 		}
 		decoded, err := decodeEnvValue(rawVal, entry)
@@ -243,8 +257,38 @@ func applyEnvOverrides(k *koanf.Koanf, cfg *Config) error {
 		if err := k.Set(entry.path, decoded); err != nil {
 			return fmt.Errorf("env %s -> %s: %w", name, entry.path, err)
 		}
+		applied = append(applied, auditEntry(name, rawVal, secretPaths[entry.path]))
+	}
+	if len(applied) > 0 {
+		log.Printf("[CONFIG-ENV] applied %d env override(s): %s", len(applied), strings.Join(applied, ", "))
 	}
 	return nil
+}
+
+// auditEntry formats one env override for the startup audit log. Secret
+// values are masked to "***" so the log line is safe even if shipped to
+// log aggregation. Non-secret values are truncated for readability.
+func auditEntry(name, value string, secret bool) string {
+	if secret {
+		return name + "=***"
+	}
+	if len(value) > 40 {
+		return name + "=" + value[:37] + "..."
+	}
+	return name + "=" + value
+}
+
+// secretPathSet returns every koanf path whose field carries secret:"true".
+// Built lazily on first call via WalkConfigFields (which already walks the
+// schema for doc generation).
+func secretPathSet() map[string]bool {
+	out := map[string]bool{}
+	for _, d := range WalkConfigFields() {
+		if d.Secret {
+			out[d.Path] = true
+		}
+	}
+	return out
 }
 
 // applyEnvSecrets fills in fields that carry yaml:"-" (runtime-only secrets)

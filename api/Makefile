@@ -9,6 +9,18 @@ export CGO_ENABLED := 0
 lint:
 	golangci-lint run --timeout 10m -v --max-same-issues 0
 
+# Generate docs/CONFIG.md from the inference config struct tags. Idempotent;
+# CI runs `make check-docs` to fail when the committed file drifts from
+# what the current struct schema would produce.
+docs:
+	go run . 0g-inference-server --print-config-help --markdown > ../docs/CONFIG.md
+
+check-docs: docs
+	@if ! git diff --exit-code -- ../docs/CONFIG.md; then \
+		echo "docs/CONFIG.md is out of sync; run 'make docs' and commit the diff" >&2; \
+		exit 1; \
+	fi
+
 build: clean
 	for arch in $(ARCH); do \
 		mkdir -p ./build/$$arch; \

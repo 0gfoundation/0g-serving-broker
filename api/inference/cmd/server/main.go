@@ -42,6 +42,10 @@ import (
 //	@in				header
 
 func Main() {
+	// --print-config / --print-config-help short-circuit; the call exits
+	// inside HandleCLIFlagsOrExit if a flag was handled so server startup
+	// is skipped.
+	cfg.HandleCLIFlagsOrExit()
 	config := cfg.GetConfig()
 	logger, err := log.GetLogger(config.Logger)
 	if err != nil {

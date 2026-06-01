@@ -17,7 +17,7 @@ type Networks map[string]*NetworkConfig
 type NetworkConfig struct {
 	URL                 string   `mapstructure:"url" yaml:"url"`
 	ChainID             int64    `mapstructure:"chainID" yaml:"chainID"`
-	PrivateKeys         []string `mapstructure:"privateKeys" yaml:"privateKeys"`
+	PrivateKeys         []string `mapstructure:"privateKeys" yaml:"privateKeys" secret:"true"`
 	TransactionLimit    uint64   `mapstructure:"transactionLimit" yaml:"transactionLimit"`
 	GasEstimationBuffer uint64   `mapstructure:"gasEstimationBuffer" yaml:"gasEstimationBuffer"`
 	PrivateKeyStore     *PrivateKeyStore

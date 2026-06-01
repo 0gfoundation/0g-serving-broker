@@ -92,12 +92,12 @@ func (m *ModelInfo) Validate(serviceType string) error {
 }
 
 type Service struct {
-	ServingURL       string            `yaml:"servingUrl"`
-	TargetURL        string            `yaml:"targetUrl"`
-	InputPrice       string            `yaml:"inputPrice"`
-	OutputPrice      string            `yaml:"outputPrice"`
-	Type             string            `yaml:"type"`
-	ModelType        string            `yaml:"model"`
+	ServingURL       string            `yaml:"servingUrl" desc:"Public URL clients use to reach this broker (used in on-chain service registration)"`
+	TargetURL        string            `yaml:"targetUrl" desc:"Upstream inference backend URL (vLLM/SGLang/centralized API endpoint)"`
+	InputPrice       string            `yaml:"inputPrice" desc:"Input token price in wei (NATIVE denomination only)"`
+	OutputPrice      string            `yaml:"outputPrice" desc:"Output token price in wei (NATIVE denomination only)"`
+	Type             string            `yaml:"type" desc:"Service type: chatbot / text-to-image / image-editing / speech-to-text / video-generation"`
+	ModelType        string            `yaml:"model" desc:"Model identifier advertised on-chain and enforced on incoming requests"`
 	// UpstreamModel, when set, is the model identifier sent to the upstream targetUrl.
 	// ModelType remains the identifier advertised on-chain and enforced on incoming
 	// requests. Used to bridge a provider that wants to expose a stable public model
@@ -111,7 +111,7 @@ type Service struct {
 	// still rejected.
 	ModelAliases     []string          `yaml:"modelAliases"`
 	Verifiability    string            `yaml:"verifiability"`
-	AdditionalSecret map[string]string `yaml:"additionalSecret"`
+	AdditionalSecret map[string]string `yaml:"additionalSecret" secret:"true"`
 	VerifierURL      string            `yaml:"verifierUrl"`
 	TargetTeeAddress string            `yaml:"targetTeeAddress"`
 	TargetSeparated  bool              `yaml:"targetSeparated"`
@@ -130,15 +130,15 @@ type Service struct {
 	//   "NATIVE" (default): InputPrice/OutputPrice are wei amounts, written to chain as-is.
 	//   "USD":              InputPriceUSDPerMillionTokens/OutputPriceUSDPerMillionTokens are USD decimal strings.
 	//                       The PriceUpdateProcessor converts them to wei using a live rate.
-	PriceDenomination string `yaml:"priceDenomination"`
+	PriceDenomination string `yaml:"priceDenomination" desc:"Price denomination: NATIVE (wei, on-chain literal) or USD (converted via priceFeed)"`
 	// InputPriceUSDPerMillionTokens is the input-side price in USD per 1M
 	// tokens, as a decimal string (e.g. "0.50" = $0.50 per 1M input tokens,
 	// matching the convention used by OpenAI/Anthropic pricing tables).
 	// Required iff PriceDenomination == "USD".
-	InputPriceUSDPerMillionTokens string `yaml:"inputPriceUSDPerMillionTokens"`
+	InputPriceUSDPerMillionTokens string `yaml:"inputPriceUSDPerMillionTokens" desc:"Input price in USD per 1M tokens (USD denomination only, decimal string)"`
 	// OutputPriceUSDPerMillionTokens is the output-side price in USD per 1M
 	// tokens, decimal string.  Required iff PriceDenomination == "USD".
-	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
+	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens" desc:"Output price in USD per 1M tokens (USD denomination only, decimal string)"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -164,10 +164,10 @@ type PriceFeedConfig struct {
 	// Each source's 0G trading symbol is hardcoded in the pricefeed factory
 	// (see pricefeed.BuildSources); the symbols aren't an operator choice
 	// because this broker only ever prices 0G.
-	Sources []string `yaml:"sources"`
+	Sources []string `yaml:"sources" desc:"Price-feed source identifiers (e.g. coingecko, binance); aggregator returns the median"`
 	// UpdateInterval is how often the processor fetches a fresh rate and
 	// refreshes the in-memory wei price cache.
-	UpdateInterval time.Duration `yaml:"updateInterval"`
+	UpdateInterval time.Duration `yaml:"updateInterval" desc:"How often the price feed processor fetches a fresh rate (default 1h)"`
 	// StalenessThreshold rejects new requests (fail-closed) if the last
 	// successful cache refresh is older than this.  Must be >= UpdateInterval.
 	// Defaults to 3 × UpdateInterval when unset — three consecutive tick
@@ -197,7 +197,7 @@ type PriceFeedConfig struct {
 	// this key is a Demo (free) or Pro (paid) key is selected via
 	// CoinGeckoKeyType; the two key tiers use different endpoints and
 	// different request headers and are not interchangeable.
-	CoinGeckoAPIKey string `yaml:"coinGeckoApiKey"`
+	CoinGeckoAPIKey string `yaml:"coinGeckoApiKey" secret:"true" desc:"CoinGecko API key; strongly recommended in production to avoid anonymous-tier rate limits"`
 	// CoinGeckoKeyType selects which CoinGecko key tier CoinGeckoAPIKey
 	// belongs to.  Allowed values: "demo" (free tier — uses api.coingecko.com
 	// with x-cg-demo-api-key) or "pro" (paid tier — uses pro-api.coingecko.com
@@ -297,8 +297,8 @@ type WhitelistConfig struct {
 // via ServerlessLLM, with per-user access control and automatic adapter
 // lifecycle management driven by on-chain events.
 type LoRAConfig struct {
-	Enable         bool   `yaml:"enable"`
-	BaseModel      string `yaml:"baseModel"`                                          // Base model name (e.g., "Qwen2.5-7B")
+	Enable         bool   `yaml:"enable" desc:"Enable LoRA adapter serving for fine-tuned models"`
+	BaseModel      string `yaml:"baseModel" desc:"Base model name (e.g., Qwen2.5-7B)"`
 	LoraModulesDir string `yaml:"loraModulesDir" default:"/data/lora-modules"`        // Local directory for LoRA adapter files
 	SllmUrl        string `yaml:"sllmUrl" default:"http://sllm:8343"`                 // ServerlessLLM HTTP endpoint
 	// OffloadAfter is the idle time before offloading an adapter from ServerlessLLM.
@@ -407,14 +407,14 @@ type Config struct {
 // Global limit caps total in-flight requests to the backend (should match GPU capacity).
 // Per-user limit prevents a single user from monopolizing all slots.
 type ConcurrencyLimitConfig struct {
-	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent" default:"20"`  // Max total concurrent requests to backend
-	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent" default:"5"`  // Max concurrent requests per user (whitelisted users are exempt)
-	PerUserRPM           int `yaml:"perUserRPM" default:"30"`           // Max requests per minute per user (0 = disabled)
-	PerUserBurst         int `yaml:"perUserBurst" default:"5"`          // Max burst size for per-user rate limit
-	PerUserTPM           int `yaml:"perUserTPM"`           // Max tokens per minute per user (default: 0 = disabled, chatbot/speech-to-text)
-	PerUserTPMBurst      int `yaml:"perUserTPMBurst"`      // Max burst size for per-user TPM limit (default: 0)
-	PerUserIPM           int `yaml:"perUserIPM"`           // Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
-	PerUserIPMBurst      int `yaml:"perUserIPMBurst"`      // Max burst size for per-user IPM limit (default: 0)
+	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent" default:"20" desc:"Max total concurrent requests to backend (should match GPU capacity)"`
+	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent" default:"5" desc:"Max concurrent requests per user; whitelisted users are exempt"`
+	PerUserRPM           int `yaml:"perUserRPM" default:"30" desc:"Max requests per minute per user (0 = disabled)"`
+	PerUserBurst         int `yaml:"perUserBurst" default:"5" desc:"Burst size for per-user RPM limit"`
+	PerUserTPM           int `yaml:"perUserTPM" desc:"Max tokens per minute per user (0 = disabled; chatbot / speech-to-text only)"`
+	PerUserTPMBurst      int `yaml:"perUserTPMBurst" desc:"Burst size for per-user TPM limit"`
+	PerUserIPM           int `yaml:"perUserIPM" desc:"Max images per minute per user (0 = disabled; text-to-image / image-editing only)"`
+	PerUserIPMBurst      int `yaml:"perUserIPMBurst" desc:"Burst size for per-user IPM limit"`
 }
 
 // AsyncConfig defines configuration for async job processing.

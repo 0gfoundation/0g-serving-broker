@@ -21,6 +21,10 @@ import (
 )
 
 func Main() {
+	// --print-config / --print-config-help short-circuit; the call exits
+	// inside HandleCLIFlagsOrExit if a flag was handled so event startup
+	// is skipped.
+	config.HandleCLIFlagsOrExit()
 	conf := config.GetConfig()
 	logger, err := log.GetLogger(conf.Logger)
 	if err != nil {
