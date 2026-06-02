@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/andybalholm/brotli"
@@ -82,6 +83,39 @@ func TestEnforceConfiguredModel_AcceptsAlias(t *testing.T) {
 	}
 }
 
+// The configured CanonicalID should be accepted as a valid incoming model id
+// (in addition to ModelType and ModelAliases), and rewritten to the upstream id
+// — same behavior as an alias match, but driven by the router-catalog canonical.
+func TestEnforceConfiguredModel_AcceptsCanonical(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "zai-org/GLM-5.1-FP8", "z-ai/glm-5.1-fp8")
+	c.Service.CanonicalID = "glm-5.1"
+	body := []byte(`{"model":"glm-5.1","messages":[{"role":"user","content":"hi"}]}`)
+
+	got, err := c.EnforceConfiguredModel(body, "0xabc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if out["model"] != "z-ai/glm-5.1-fp8" {
+		t.Errorf("model = %q, want %q", out["model"], "z-ai/glm-5.1-fp8")
+	}
+}
+
+// An empty CanonicalID must not silently match an empty incoming model field —
+// the empty-canonical guard prevents collision with the empty string.
+func TestEnforceConfiguredModel_EmptyCanonicalDoesNotMatchEmpty(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "zai-org/GLM-5.1-FP8", "")
+	// CanonicalID intentionally left zero-value
+	body := []byte(`{"model":"","messages":[]}`)
+
+	if _, err := c.EnforceConfiguredModel(body, "0xabc"); err == nil {
+		t.Fatal("expected rejection for empty model with empty canonical, got nil")
+	}
+}
+
 // A model name that is neither ModelType nor an alias must still be rejected.
 func TestEnforceConfiguredModel_RejectsUnknownModel(t *testing.T) {
 	c := newTestCtrlForEnforceModel(t, "deepseek-v3.2", "", "deepseek/deepseek-chat-v3-0324")
@@ -89,6 +123,27 @@ func TestEnforceConfiguredModel_RejectsUnknownModel(t *testing.T) {
 
 	if _, err := c.EnforceConfiguredModel(body, "0xabc"); err == nil {
 		t.Fatal("expected rejection for unknown model, got nil")
+	}
+}
+
+// Rejection errors must surface the full set of accepted identifiers
+// (ModelType + CanonicalID + ModelAliases), not just ModelType — otherwise
+// users hit "only X is available" while the broker actually accepts more,
+// which is misleading during debug.
+func TestEnforceConfiguredModel_RejectionShowsAllAccepted(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "zai-org/GLM-5.1-FP8", "", "zai-org/GLM-5.1")
+	c.Service.CanonicalID = "glm-5.1"
+	body := []byte(`{"model":"gpt-4","messages":[]}`)
+
+	_, err := c.EnforceConfiguredModel(body, "0xabc")
+	if err == nil {
+		t.Fatal("expected rejection, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"zai-org/GLM-5.1-FP8", "glm-5.1", "zai-org/GLM-5.1"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message %q missing accepted id %q", msg, want)
+		}
 	}
 }
 
