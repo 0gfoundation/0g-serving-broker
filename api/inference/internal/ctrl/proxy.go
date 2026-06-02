@@ -50,9 +50,11 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 
 		// Enforce configured model when the service has asked for model
 		// validation/rewriting. TargetSeparated providers opt in for legacy
-		// reasons; UpstreamModel and ModelAliases each imply opt-in because
-		// they only make sense with this path running.
-		if c.Service.TargetSeparated || c.Service.UpstreamModel != "" || len(c.Service.ModelAliases) > 0 {
+		// reasons; UpstreamModel, ModelAliases and CanonicalID each imply
+		// opt-in because they only make sense with this path running (the
+		// canonical id must be rewritten to the chain/upstream name before
+		// being forwarded, or the upstream will reject it).
+		if c.Service.TargetSeparated || c.Service.UpstreamModel != "" || len(c.Service.ModelAliases) > 0 || c.Service.CanonicalID != "" {
 			userAddr, _ := ctx.Get("userAddress")
 			userAddrStr, _ := userAddr.(string)
 			modifiedBody, err = c.EnforceConfiguredModel(reqBody, userAddrStr)
@@ -549,7 +551,7 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		}
 
 		if requestModelStr != c.Service.ModelType &&
-			!(c.Service.CanonicalID != "" && requestModelStr == c.Service.CanonicalID) &&
+			(c.Service.CanonicalID == "" || requestModelStr != c.Service.CanonicalID) &&
 			!isModelAlias(requestModelStr, c.Service.ModelAliases) {
 			// Model mismatch detected - record in rate limiter and REJECT
 			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, configured=%s",

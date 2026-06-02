@@ -21,6 +21,19 @@ service:
   outputPrice: <Output Price>
   type: "chatbot"
   model: <Model>
+  # Optional: canonical model id used by the router catalog (e.g. "glm-5.1",
+  # "deepseek-v3"). Bare lowercase, no namespace. When set, it is exposed in
+  # GET /v1/models as canonical_id and also accepted as a valid value of the
+  # request "model" field (alongside `model` above and any `modelAliases`).
+  # Not written on-chain, so changing it does NOT invalidate user
+  # acknowledgements. Leave unset to let the router fall back to its own
+  # registry-based mapping from `model`.
+  # canonicalId: "glm-5.1"
+  # Optional: legacy model identifiers accepted on incoming requests in
+  # addition to `model`. Lets you rename the advertised model without
+  # breaking clients that still send the old name.
+  # modelAliases:
+  #   - "zai-org/GLM-5.1"
   verifiability: "TeeML"
   # Optional: organization name shown in the owned_by field of GET /v1/models
   # ownedBy: "0G Foundation"

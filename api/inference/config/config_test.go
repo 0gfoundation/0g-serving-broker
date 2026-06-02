@@ -147,6 +147,95 @@ service:
 	}
 }
 
+func TestLoadConfig_CanonicalID_Valid(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "zai-org/GLM-5.1-FP8"
+  canonicalId: "glm-5.1"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.Service.CanonicalID != "glm-5.1" {
+		t.Errorf("expected canonicalId 'glm-5.1', got %q", cfg.Service.CanonicalID)
+	}
+}
+
+func TestLoadConfig_CanonicalID_RejectsNamespaced(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "zai-org/GLM-5.1-FP8"
+  canonicalId: "zai-org/glm-5.1"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for namespaced canonicalId, got nil")
+	}
+	if !strings.Contains(err.Error(), "canonicalId") {
+		t.Errorf("error should mention canonicalId, got: %v", err)
+	}
+}
+
+func TestLoadConfig_CanonicalID_RejectsUppercase(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "zai-org/GLM-5.1-FP8"
+  canonicalId: "GLM-5.1"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err == nil {
+		t.Fatal("expected error for uppercase canonicalId, got nil")
+	}
+}
+
+func TestLoadConfig_CanonicalID_EmptyOK(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "zai-org/GLM-5.1-FP8"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.Service.CanonicalID != "" {
+		t.Errorf("expected empty canonicalId, got %q", cfg.Service.CanonicalID)
+	}
+}
+
 func TestLoadConfig_ProviderTypeCentralized(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
