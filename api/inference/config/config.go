@@ -18,6 +18,12 @@ import (
 // This prevents issues with the colon-delimited routing proof text format.
 var validProviderIdentity = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// validCanonicalID matches a bare lowercase canonical model identifier
+// (e.g. "glm-5.1", "deepseek-v3", "whisper-large-v3"). Disallows slashes
+// so namespaced names like "zai-org/GLM-5-FP8" cannot be set as canonical
+// — those belong in ModelType (the on-chain advertised name) instead.
+var validCanonicalID = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]*$`)
+
 // ModelArchitecture describes the model's input/output modalities.
 type ModelArchitecture struct {
 	Modality         string   `yaml:"modality" json:"modality"`                    // Required. e.g., "text->text", "text+image->text"
@@ -107,6 +113,14 @@ type Service struct {
 	// breaking clients that still send the old name. Out-of-set requests are
 	// still rejected.
 	ModelAliases     []string          `yaml:"modelAliases"`
+	// CanonicalID is the canonical model identifier this service maps to in the
+	// router's catalog (e.g. "glm-5.1", "deepseek-v3"). Bare lowercase, no
+	// namespace. Optional — when empty, the router falls back to its own
+	// registry-based mapping from ModelType. Also accepted as a valid model
+	// identifier on incoming requests (in addition to ModelType and ModelAliases).
+	// Not written on-chain, so changing it does not invalidate user
+	// acknowledgements.
+	CanonicalID      string            `yaml:"canonicalId"`
 	Verifiability    string            `yaml:"verifiability"`
 	AdditionalSecret map[string]string `yaml:"additionalSecret"`
 	VerifierURL      string            `yaml:"verifierUrl"`
@@ -717,6 +731,10 @@ func loadConfig(cfg *Config) error {
 		if err := cfg.Service.ModelInfo.Validate(cfg.Service.Type); err != nil {
 			return fmt.Errorf("invalid config: %w", err)
 		}
+	}
+
+	if cfg.Service.CanonicalID != "" && !validCanonicalID.MatchString(cfg.Service.CanonicalID) {
+		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
 	}
 
 	// Normalize and validate provider type

@@ -15,6 +15,7 @@ import (
 // ModelObject represents a single model in the OpenAI-compatible /v1/models response.
 type ModelObject struct {
 	ID                  string                    `json:"id"`
+	CanonicalID         string                    `json:"canonical_id,omitempty"`
 	Object              string                    `json:"object"`
 	Created             int64                     `json:"created"`
 	OwnedBy             string                    `json:"owned_by"`
@@ -119,6 +120,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	obj := ModelObject{
 		ID:            svc.ModelType,
+		CanonicalID:   cfg.CanonicalID,
 		Object:        "model",
 		OwnedBy:       cfg.OwnedBy,
 		Type:          svc.Type,

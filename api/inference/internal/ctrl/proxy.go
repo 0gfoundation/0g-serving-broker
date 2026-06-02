@@ -496,7 +496,11 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 // This function forcibly overwrites any "model" field in the request body with the
 // configured model from c.Service.ModelType, or c.Service.UpstreamModel if set.
 //
-// Incoming requests are validated against ModelType (the advertised/on-chain name).
+// Incoming requests are accepted if the "model" field matches any of:
+//   - c.Service.ModelType        (on-chain advertised name; required)
+//   - c.Service.CanonicalID      (router-catalog canonical, when set)
+//   - any entry in c.Service.ModelAliases  (legacy ids)
+//
 // The outgoing body uses UpstreamModel when non-empty, otherwise ModelType. This
 // lets a provider advertise a stable public model id while forwarding to an
 // upstream that uses a different id.
@@ -544,7 +548,9 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 			return nil, errors.New(fmt.Sprintf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType))
 		}
 
-		if requestModelStr != c.Service.ModelType && !isModelAlias(requestModelStr, c.Service.ModelAliases) {
+		if requestModelStr != c.Service.ModelType &&
+			!(c.Service.CanonicalID != "" && requestModelStr == c.Service.CanonicalID) &&
+			!isModelAlias(requestModelStr, c.Service.ModelAliases) {
 			// Model mismatch detected - record in rate limiter and REJECT
 			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, configured=%s",
 				userAddr, requestModelStr, c.Service.ModelType)
