@@ -499,7 +499,7 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 // configured model from c.Service.ModelType, or c.Service.UpstreamModel if set.
 //
 // Incoming requests are accepted if the "model" field matches any of:
-//   - c.Service.ModelType        (on-chain advertised name; required)
+//   - c.Service.ModelType        (on-chain advertised name; must be configured for enforcement to run)
 //   - c.Service.CanonicalID      (router-catalog canonical, when set)
 //   - any entry in c.Service.ModelAliases  (legacy ids)
 //
@@ -547,15 +547,16 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		requestModelStr, ok := requestModel.(string)
 		if !ok {
 			// Invalid model type, reject request
-			return nil, errors.New(fmt.Sprintf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType))
+			return nil, fmt.Errorf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType)
 		}
 
 		if requestModelStr != c.Service.ModelType &&
 			(c.Service.CanonicalID == "" || requestModelStr != c.Service.CanonicalID) &&
 			!isModelAlias(requestModelStr, c.Service.ModelAliases) {
 			// Model mismatch detected - record in rate limiter and REJECT
-			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, configured=%s",
-				userAddr, requestModelStr, c.Service.ModelType)
+			accepted := c.acceptedModelIDs()
+			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, accepted=%v",
+				userAddr, requestModelStr, accepted)
 
 			// Record this attempt in rate limiter if user address is available
 			if userAddr != "" {
@@ -567,8 +568,7 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 				}
 			}
 
-			return nil, errors.New(fmt.Sprintf("model not supported: requested '%s', only '%s' is available for this service",
-				requestModelStr, c.Service.ModelType))
+			return nil, fmt.Errorf("model not supported: requested %q, accepted: %q", requestModelStr, accepted)
 		}
 
 		// Match — rewrite to the upstream id (no-op when UpstreamModel is empty).
@@ -593,6 +593,20 @@ func isModelAlias(name string, aliases []string) bool {
 		}
 	}
 	return false
+}
+
+// acceptedModelIDs returns the full set of model identifiers a client may
+// use in the request "model" field for this service: ModelType, plus
+// CanonicalID when set, plus any ModelAliases.  Used for log and error
+// messages so operators see what was actually accepted, not just ModelType.
+func (c *Ctrl) acceptedModelIDs() []string {
+	out := make([]string, 0, 2+len(c.Service.ModelAliases))
+	out = append(out, c.Service.ModelType)
+	if c.Service.CanonicalID != "" {
+		out = append(out, c.Service.CanonicalID)
+	}
+	out = append(out, c.Service.ModelAliases...)
+	return out
 }
 
 // rewriteMultipartResponseFormat ensures the forwarded multipart body carries
