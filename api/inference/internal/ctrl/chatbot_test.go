@@ -904,3 +904,50 @@ func TestResponseMessage_UnmarshalStringContent(t *testing.T) {
 		t.Errorf("Message.Content = %q", chunk.Choices[0].Message.Content)
 	}
 }
+
+// TestGetTierMultipliers_NeverExceedsCeiling pins the overcharge-safe invariant
+// the multi-model design relies on: per-request billing selects a tier via
+// getTierMultipliers, while the on-chain advertised ceiling is sized by
+// config (*ModelPricingEntry).maxTierMultipliers = max over the tier set
+// (floored at 1). Billing only multiplies when the selected multiplier > 1
+// (see updateAccountWithUsage), so the EFFECTIVE billed multiplier must never
+// exceed the ceiling multiplier for any prompt-token count. If the two
+// tier-reduction copies ever drift, this fails.
+func TestGetTierMultipliers_NeverExceedsCeiling(t *testing.T) {
+	tierSets := [][]config.PricingTier{
+		{{MaxInputTokens: 1000, InputMultiplier: 1, OutputMultiplier: 1}, {MaxInputTokens: 0, InputMultiplier: 4, OutputMultiplier: 3}},
+		{{MaxInputTokens: 256000, InputMultiplier: 1, OutputMultiplier: 1}, {MaxInputTokens: 1000000, InputMultiplier: 2, OutputMultiplier: 2}, {MaxInputTokens: 0, InputMultiplier: 8, OutputMultiplier: 6}},
+		{{MaxInputTokens: 0, InputMultiplier: 1, OutputMultiplier: 1}},                                                                 // flat
+		{{MaxInputTokens: 500, InputMultiplier: 0, OutputMultiplier: 0}, {MaxInputTokens: 0, InputMultiplier: 3, OutputMultiplier: 5}}, // sub-1 first tier
+	}
+	// effMul mirrors updateAccountWithUsage: multipliers <= 1 are no-ops.
+	effMul := func(m int64) int64 {
+		if m <= 1 {
+			return 1
+		}
+		return m
+	}
+	for ti, tiers := range tierSets {
+		// Ceiling multiplier = max over the set, floored at 1 (same as
+		// (*ModelPricingEntry).maxTierMultipliers).
+		ceilIn, ceilOut := int64(1), int64(1)
+		for _, tr := range tiers {
+			if tr.InputMultiplier > ceilIn {
+				ceilIn = tr.InputMultiplier
+			}
+			if tr.OutputMultiplier > ceilOut {
+				ceilOut = tr.OutputMultiplier
+			}
+		}
+		// Sweep prompt-token counts across every boundary and beyond the last tier.
+		for tok := 0; tok <= 1_200_000; tok += 50_000 {
+			in, out := getTierMultipliers(tiers, tok)
+			if effMul(in) > ceilIn {
+				t.Errorf("set %d tok=%d: effective input mult %d exceeds ceiling %d", ti, tok, effMul(in), ceilIn)
+			}
+			if effMul(out) > ceilOut {
+				t.Errorf("set %d tok=%d: effective output mult %d exceeds ceiling %d", ti, tok, effMul(out), ceilOut)
+			}
+		}
+	}
+}

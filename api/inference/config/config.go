@@ -1206,6 +1206,13 @@ func loadConfig(cfg *Config) error {
 			if err := validatePricingTiers(fmt.Sprintf("service.modelPricing[%d].tiers", i), entry.Tiers); err != nil {
 				return err
 			}
+			// Tiered pricing is applied only on the chatbot billing path
+			// (getTierMultipliers over prompt tokens). Speech-to-text bills flat,
+			// so per-model tiers would be advertised in /v1/models + on-chain but
+			// never enforced — reject rather than silently diverge.
+			if len(entry.Tiers) > 0 && cfg.Service.Type == constant.ServiceTypeSpeechToText {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for service type '%s' (tiers are not applied to its billing)", i, constant.ServiceTypeSpeechToText)
+			}
 
 			if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].canonicalId %q must be bare lowercase (letters, digits, '-', '.') for model '%s'", i, entry.CanonicalID, entry.Model)

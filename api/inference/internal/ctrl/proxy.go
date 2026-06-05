@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -912,7 +913,11 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 // throttle clients that spam invalid model names) and returns an error. A
 // wildcard ("*") entry makes every model allowed.
 func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string) error {
-	if c.Service.IsModelAllowed(requestModel) {
+	// The wildcard "*" is a config sentinel for catch-all pricing, never a
+	// selectable model. A request literally asking for "*" would otherwise be an
+	// exact map hit (IsModelAllowed true) and get forwarded verbatim upstream;
+	// reject it like any other unsupported model.
+	if requestModel != config.ModelWildcard && c.Service.IsModelAllowed(requestModel) {
 		return nil
 	}
 	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)

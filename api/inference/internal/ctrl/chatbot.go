@@ -801,10 +801,19 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 				if err != nil {
 					return errors.Wrap(err, "get billing prices for stream response billing")
 				}
-				c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers)
+				if err := c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers); err != nil {
+					// Do not swallow: a failed billing write here means the user
+					// got the full stream unbilled — surface it (the LiteLLM path
+					// propagates the same way).
+					c.logger.Errorf("stream billing failed for request %s: %v", requestHash, err)
+					return err
+				}
 				break
 			}
-			c.finalizeResponse(ctx, *output, outputPrice, requestHash)
+			if err := c.finalizeResponse(ctx, *output, outputPrice, requestHash); err != nil {
+				c.logger.Errorf("stream finalize failed for request %s: %v", requestHash, err)
+				return err
+			}
 			break
 		}
 
