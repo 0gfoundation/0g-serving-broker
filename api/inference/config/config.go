@@ -133,27 +133,33 @@ type ModelPricingEntry struct {
 	Model       string `yaml:"model"`       // Model identifier (e.g., "qwen3-max", "gpt-4o")
 	InputPrice  string `yaml:"inputPrice"`  // Per-token input price in neuron
 	OutputPrice string `yaml:"outputPrice"` // Per-token output price in neuron
+	// CanonicalID is the bare-lowercase canonical model id this model maps to in
+	// the router catalog (same contract as Service.CanonicalID, but per-model so
+	// a multi-model provider can map each served model to its own canonical).
+	// Optional; empty means the router resolves the canonical from its registry
+	// by Model id instead. Surfaced per-model in GET /v1/models.
+	CanonicalID string `yaml:"canonicalId"`
 }
 
 type Service struct {
-	ServingURL       string            `yaml:"servingUrl"`
-	TargetURL        string            `yaml:"targetUrl"`
-	InputPrice       string            `yaml:"inputPrice"`
-	OutputPrice      string            `yaml:"outputPrice"`
-	Type             string            `yaml:"type"`
-	ModelType        string            `yaml:"model"`
+	ServingURL  string `yaml:"servingUrl"`
+	TargetURL   string `yaml:"targetUrl"`
+	InputPrice  string `yaml:"inputPrice"`
+	OutputPrice string `yaml:"outputPrice"`
+	Type        string `yaml:"type"`
+	ModelType   string `yaml:"model"`
 	// UpstreamModel, when set, is the model identifier sent to the upstream targetUrl.
 	// ModelType remains the identifier advertised on-chain and enforced on incoming
 	// requests. Used to bridge a provider that wants to expose a stable public model
 	// name while routing to an upstream that uses a different id (e.g. a
 	// fallback where the public name is "zai-org/GLM-5-FP8" but expects
 	// "z-ai/glm-5"). Empty means "send ModelType upstream as-is".
-	UpstreamModel    string            `yaml:"upstreamModel"`
+	UpstreamModel string `yaml:"upstreamModel"`
 	// ModelAliases are legacy model identifiers accepted on incoming requests in
 	// addition to ModelType. Allows changing the advertised model name without
 	// breaking clients that still send the old name. Out-of-set requests are
 	// still rejected.
-	ModelAliases     []string          `yaml:"modelAliases"`
+	ModelAliases []string `yaml:"modelAliases"`
 	// CanonicalID is the canonical model identifier this service maps to in the
 	// router's catalog (e.g. "glm-5.1", "deepseek-v3"). Bare lowercase, no
 	// namespace. Optional — when empty, the router falls back to its own
@@ -426,7 +432,7 @@ type LoRAConfig struct {
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
-	Database struct {
+	Database        struct {
 		// DSN is the MySQL connection string used by the broker process.
 		DSN string `yaml:"dsn"`
 		// Provider was the misleading legacy name for DSN ("Provider" is the
@@ -445,7 +451,7 @@ type Config struct {
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval struct {
+	Interval    struct {
 		// All four fields used to be integer seconds; they are now
 		// time.Duration (parsed from yaml strings like "60s" / "10m").
 		// loadConfig restores the legacy integer-seconds semantics when
@@ -972,6 +978,9 @@ func loadConfig(cfg *Config) error {
 			}
 			if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for model '%s'", i, entry.Model)
+			}
+			if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].canonicalId %q must be bare lowercase (letters, digits, '-', '.') for model '%s'", i, entry.CanonicalID, entry.Model)
 			}
 			if _, exists := pricingMap[entry.Model]; exists {
 				return fmt.Errorf("invalid config: duplicate model '%s' in service.modelPricing", entry.Model)

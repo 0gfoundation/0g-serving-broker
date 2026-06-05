@@ -170,6 +170,72 @@ service:
 	}
 }
 
+func TestLoadConfig_ModelPricing_PerModelCanonicalID(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "openai-proxy"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5.1-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      canonicalId: "glm-5.1"
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if got := cfg.Service.GetModelPricing("zai-org/GLM-5.1-FP8"); got == nil || got.CanonicalID != "glm-5.1" {
+		t.Errorf("expected per-model canonicalId 'glm-5.1', got %+v", got)
+	}
+	// Per-model canonicalId is optional — the second entry omits it.
+	if got := cfg.Service.GetModelPricing("gpt-4o"); got == nil || got.CanonicalID != "" {
+		t.Errorf("expected empty canonicalId for gpt-4o, got %+v", got)
+	}
+}
+
+func TestLoadConfig_ModelPricing_RejectsNamespacedCanonicalID(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "openai-proxy"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+      canonicalId: "openai/gpt-4o"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for namespaced per-model canonicalId, got nil")
+	}
+	if !strings.Contains(err.Error(), "canonicalId") {
+		t.Errorf("error should mention canonicalId, got: %v", err)
+	}
+}
+
 func TestLoadConfig_CanonicalID_RejectsNamespaced(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

@@ -37,7 +37,7 @@ type ModelObject struct {
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
 	ProviderType        string                    `json:"provider_type,omitempty"`
 	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
-	RateLimits          *ModelRateLimits           `json:"rate_limits,omitempty"`
+	RateLimits          *ModelRateLimits          `json:"rate_limits,omitempty"`
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
@@ -130,6 +130,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		for _, mp := range cfg.ModelPricing {
 			obj := ModelObject{
 				ID:            mp.Model,
+				CanonicalID:   mp.CanonicalID,
 				Object:        "model",
 				Created:       created,
 				OwnedBy:       cfg.OwnedBy,
