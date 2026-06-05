@@ -72,7 +72,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			}
 			reqBody = modifiedBody
 			// Set resolvedModel for unified billing
-			ctx.Set("resolvedModel", c.Service.ModelType)
+			ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 		}
 	}
 
@@ -833,12 +833,16 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 	}
 	return c.imageStore.ttl
 }
+
 // ValidateModelAllowlist checks that the requested model is in the configured allowlist
 // for centralized multi-model providers. Unlike EnforceConfiguredModel which overwrites
 // the model field, this validates and passes through the user's requested model.
-// Stores the resolved model name in the gin.Context as "resolvedModel".
+// Stores the resolved model name in the gin.Context under CtxKeyResolvedModel.
 func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
 	if len(body) == 0 {
+		// No body to inspect — bill at the configured default model (guaranteed to
+		// be in the allowlist by config validation), never leave resolvedModel unset.
+		ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 		return body, nil
 	}
 
@@ -854,7 +858,7 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		bodyMap["model"] = requestModel
 		modifiedBody, err := json.Marshal(bodyMap)
 		if err != nil {
-			return body, errors.Wrap(err, "failed to marshal modified JSON body")
+			return nil, errors.Wrap(err, "failed to marshal modified JSON body")
 		}
 		body = modifiedBody
 	}
@@ -874,8 +878,7 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
 
-	ctx.Set("resolvedModel", requestModel)
+	ctx.Set(CtxKeyResolvedModel, requestModel)
 	c.logger.Debugf("Model allowlist passed: requested=%s", requestModel)
 	return body, nil
 }
-

@@ -589,6 +589,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if req.ModelName == "" {
 		req.ModelName = p.ctrl.Service.ModelType
 	}
+	// model is a user-controlled, unbounded request field; cap it to the
+	// requests.model_name column width (varchar(255)) so an oversized value can't
+	// error the insert (strict mode) or be silently truncated by the driver.
+	if r := []rune(req.ModelName); len(r) > 255 {
+		req.ModelName = string(r[:255])
+	}
 
 	p.logger.Debugf("request saved: %v", req)
 	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {

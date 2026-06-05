@@ -127,10 +127,28 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			created = svc.CreatedAt.Unix()
 		}
 
+		// Per-user rate limits are provider-level (same for every served model);
+		// compute once and attach to each. Multi-model is chatbot-only (enforced in
+		// config validation), so RPM + TPM apply.
+		concurrencyLimits := h.modelsCtrl.GetConcurrencyLimitConfig()
+		var sharedLimits *ModelRateLimits
+		if concurrencyLimits.PerUserRPM > 0 || concurrencyLimits.PerUserTPM > 0 {
+			sharedLimits = &ModelRateLimits{
+				RequestsPerMinute: concurrencyLimits.PerUserRPM,
+				TokensPerMinute:   concurrencyLimits.PerUserTPM,
+			}
+		}
+
 		for _, mp := range cfg.ModelPricing {
+			// Per-model canonical wins; fall back to the service-level canonical so
+			// an operator who set only service.canonicalId still gets it applied.
+			canonicalID := mp.CanonicalID
+			if canonicalID == "" {
+				canonicalID = cfg.CanonicalID
+			}
 			obj := ModelObject{
 				ID:            mp.Model,
-				CanonicalID:   mp.CanonicalID,
+				CanonicalID:   canonicalID,
 				Object:        "model",
 				Created:       created,
 				OwnedBy:       cfg.OwnedBy,
@@ -144,6 +162,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				},
 				ProviderType:     cfg.ProviderType,
 				ProviderIdentity: cfg.ProviderIdentity,
+				RateLimits:       sharedLimits,
 			}
 			models = append(models, obj)
 		}

@@ -284,7 +284,11 @@ type PriceFeedConfig struct {
 
 // HasMultiModelPricing returns true if this service has per-model pricing configured.
 func (s *Service) HasMultiModelPricing() bool {
-	return len(s.ModelPricing) > 0
+	// Read the derived map (built in validate()), not the raw slice, so this
+	// predicate cannot disagree with GetModelPricing/IsModelAllowed: if the map
+	// is not built the service degrades to single-model (on-chain price) rather
+	// than rejecting every request.
+	return len(s.modelPricingMap) > 0
 }
 
 // GetModelPricing returns the pricing entry for a specific model, or nil if not found.
@@ -305,7 +309,11 @@ func (s *Service) IsModelAllowed(model string) bool {
 	return ok
 }
 
-// MaxModelPrices returns the maximum InputPrice and OutputPrice across all model pricing entries.
+// MaxModelPrices returns the maximum InputPrice and OutputPrice across all model
+// pricing entries. Precondition: every entry's prices have already been validated
+// as parseable integers (validate() enforces this before the only call site).
+// Unparseable entries are skipped; if that left no parseable entry it would
+// return "0", so callers MUST validate first rather than rely on this method.
 func (s *Service) MaxModelPrices() (maxInput, maxOutput string) {
 	maxIn := big.NewInt(0)
 	maxOut := big.NewInt(0)
@@ -960,6 +968,20 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.ProviderType != constant.ProviderTypeCentralized {
 			return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized'")
 		}
+		// Per-model billing is wired only on the chatbot request path (that is the
+		// only path that resolves the request model before billing). Allowing
+		// modelPricing on any other service type would silently bill every request
+		// at max(model prices) AND skip the model allowlist, so reject at load time.
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		// modelPricing carries native per-model neuron prices; USD denomination
+		// drives a single rate-fed wei price for the whole service. The two pricing
+		// systems would collide (which one a request gets depends on whether the
+		// model resolved), so they are mutually exclusive.
+		if cfg.Service.IsUSDDenominated() {
+			return fmt.Errorf("invalid config: service.modelPricing is not supported with priceDenomination '%s'", constant.PriceDenominationUSD)
+		}
 
 		pricingMap := make(map[string]*ModelPricingEntry, len(cfg.Service.ModelPricing))
 		for i := range cfg.Service.ModelPricing {
@@ -988,6 +1010,13 @@ func loadConfig(cfg *Config) error {
 			pricingMap[entry.Model] = entry
 		}
 		cfg.Service.modelPricingMap = pricingMap
+
+		// service.model is the default applied when a request omits the model field;
+		// it must itself be a priced/allowlisted model, or such requests would be
+		// rejected by the allowlist (and penalized by the mismatch rate limiter).
+		if _, ok := pricingMap[cfg.Service.ModelType]; !ok {
+			return fmt.Errorf("invalid config: service.model '%s' must be one of the service.modelPricing entries", cfg.Service.ModelType)
+		}
 
 		// Auto-set on-chain InputPrice/OutputPrice to max(model prices)
 		maxInput, maxOutput := cfg.Service.MaxModelPrices()

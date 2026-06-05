@@ -328,30 +328,46 @@ type BillingPrices struct {
 	OutputPrice string
 }
 
+// CtxKeyResolvedModel is the gin.Context key under which the request path stores
+// the validated request model id for per-model billing. Shared by the setter
+// (PrepareHTTPRequest / ValidateModelAllowlist) and the reader (GetBillingPrices)
+// so this billing-critical key cannot drift via a typo across files.
+const CtxKeyResolvedModel = "resolvedModel"
+
 // GetBillingPrices resolves the correct input and output prices for billing.
-// For centralized multi-model providers, reads "resolvedModel" from gin.Context
-// and returns model-specific prices. Otherwise falls back to on-chain service prices.
+// For centralized multi-model providers, reads the resolved model id from the
+// gin.Context and returns model-specific prices. Otherwise falls back to on-chain
+// service prices.
+//
+// Every fallback below is overcharge-safe (the on-chain price is max(model prices),
+// so it is >= any per-model price) but on a multi-model chatbot provider it should
+// never trigger — config validation restricts modelPricing to chatbot+NATIVE and
+// the request path always sets the resolved model. Each fallback therefore logs at
+// ERROR with enough context to diagnose the broken invariant, rather than silently
+// overbilling.
 func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 	if c.Service.HasMultiModelPricing() {
-		if ginCtx, ok := ctx.(*gin.Context); ok {
-			if modelVal, exists := ginCtx.Get("resolvedModel"); exists {
-				modelStr, ok := modelVal.(string)
-				if ok {
-					if entry := c.Service.GetModelPricing(modelStr); entry != nil {
-						return BillingPrices{
-							InputPrice:  entry.InputPrice,
-							OutputPrice: entry.OutputPrice,
-						}, nil
-					}
-				}
+		ginCtx, ok := ctx.(*gin.Context)
+		switch {
+		case !ok:
+			c.logger.Errorf("GetBillingPrices: expected *gin.Context for multi-model billing, got %T; billing at on-chain max price", ctx)
+		default:
+			if modelVal, exists := ginCtx.Get(CtxKeyResolvedModel); !exists {
+				c.logger.Error("GetBillingPrices: resolvedModel missing from context for multi-model provider; billing at on-chain max price")
+			} else if modelStr, ok := modelVal.(string); !ok {
+				c.logger.Errorf("GetBillingPrices: resolvedModel has unexpected type %T; billing at on-chain max price", modelVal)
+			} else if entry := c.Service.GetModelPricing(modelStr); entry == nil {
+				c.logger.Errorf("GetBillingPrices: resolvedModel %q passed the allowlist but has no pricing entry; billing at on-chain max price", modelStr)
+			} else {
+				return BillingPrices{
+					InputPrice:  entry.InputPrice,
+					OutputPrice: entry.OutputPrice,
+				}, nil
 			}
 		}
-		// Multi-model pricing configured but resolvedModel not in context.
-		// This means the request path did not set it (e.g., non-chatbot service type).
-		// Fall through to on-chain max prices which is safe (overcharges, not undercharges).
-		c.logger.Warn("Multi-model pricing configured but resolvedModel not found in context, falling back to on-chain max prices")
 	}
-	// Fallback: on-chain prices (decentralized or single-model centralized)
+	// Fallback: on-chain prices (decentralized, single-model centralized, or the
+	// invariant-violation cases above — always >= any per-model price).
 	svc, err := c.GetCachedService(ctx)
 	if err != nil {
 		return BillingPrices{}, errors.Wrap(err, "get billing prices")

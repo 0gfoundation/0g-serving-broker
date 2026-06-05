@@ -178,7 +178,7 @@ service:
   inputPrice: "1000"
   outputPrice: "2000"
   type: "chatbot"
-  model: "openai-proxy"
+  model: "gpt-4o"
   providerType: "centralized"
   providerIdentity: "openai"
   verifiability: "TeeML"
@@ -233,6 +233,80 @@ service:
 	}
 	if !strings.Contains(err.Error(), "canonicalId") {
 		t.Errorf("error should mention canonicalId, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_RejectsNonChatbot(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "speech-to-text"
+  model: "whisper-1"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "whisper-1"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "chatbot") {
+		t.Fatalf("expected chatbot-only error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_RejectsUSD(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "USD") {
+		t.Fatalf("expected USD-exclusion error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_RequiresModelInList(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "openai-proxy"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "service.model") {
+		t.Fatalf("expected service.model-membership error, got: %v", err)
 	}
 }
 
