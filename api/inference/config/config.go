@@ -1227,6 +1227,13 @@ func loadConfig(cfg *Config) error {
 			return fmt.Errorf("invalid config: %w", err)
 		}
 
+		// service.model is the default forwarded upstream (verbatim) for model-less
+		// requests, so it must be a concrete model id — never the "*" pricing
+		// sentinel, which checkModelAllowed rejects and which no upstream accepts.
+		if cfg.Service.ModelType == ModelWildcard {
+			return fmt.Errorf("invalid config: service.model must be a concrete model id, not the '%s' wildcard sentinel (the wildcard is a catch-all pricing entry only)", ModelWildcard)
+		}
+
 		// service.model is the default applied when a request omits the model
 		// field; unless a wildcard ("*") entry catches all models, it must itself
 		// be a priced/allowlisted model, or such requests would be rejected by the

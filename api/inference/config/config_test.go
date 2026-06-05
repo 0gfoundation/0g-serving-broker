@@ -399,6 +399,30 @@ service:
 	}
 }
 
+func TestLoadConfig_ModelPricing_RejectsWildcardDefaultModel(t *testing.T) {
+	// service.model is forwarded upstream verbatim for model-less requests, so it
+	// must be a concrete id, never the "*" pricing sentinel (which the allowlist
+	// rejects). A wildcard *entry* is still fine; a wildcard *default model* is not.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "*"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "*"
+      inputPrice: "200"
+      outputPrice: "800"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "service.model") {
+		t.Fatalf("expected rejection of wildcard service.model, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ModelPricing_PerModelTiersMax(t *testing.T) {
 	// Per-model tiers feed the on-chain max: the ceiling must reflect the highest
 	// tier multiplier so SDK pre-funding covers the worst-case tiered price.
