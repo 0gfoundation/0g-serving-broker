@@ -459,22 +459,36 @@ func TestVllmModelNames_SameBaseAndService(t *testing.T) {
 
 func TestExtractModelName(t *testing.T) {
 	tests := []struct {
-		body     string
-		expected string
+		name        string
+		body        string
+		contentType string
+		expected    string
 	}{
-		{`{"model":"Qwen2.5-7B","messages":[]}`, "Qwen2.5-7B"},
-		{`{"model":"ft-test","messages":[]}`, "ft-test"},
-		{`{"messages":[]}`, ""},
-		{`{}`, ""},
-		{``, ""},
-		{`not json`, ""},
+		{"json model", `{"model":"Qwen2.5-7B","messages":[]}`, "application/json", "Qwen2.5-7B"},
+		{"json ft", `{"model":"ft-test","messages":[]}`, "", "ft-test"},
+		{"json no model", `{"messages":[]}`, "application/json", ""},
+		{"json empty obj", `{}`, "", ""},
+		{"empty body", ``, "", ""},
+		{"not json", `not json`, "", ""},
+		{
+			name:        "multipart model field",
+			body:        "--BND\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n--BND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFFxxxx\r\n--BND--\r\n",
+			contentType: "multipart/form-data; boundary=BND",
+			expected:    "whisper-1",
+		},
+		{
+			name:        "multipart no model field",
+			body:        "--BND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\nRIFFxxxx\r\n--BND--\r\n",
+			contentType: "multipart/form-data; boundary=BND",
+			expected:    "",
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			got := ExtractModelName([]byte(tt.body))
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractModelName([]byte(tt.body), tt.contentType)
 			if got != tt.expected {
-				t.Errorf("ExtractModelName(%q) = %q, want %q", tt.body, got, tt.expected)
+				t.Errorf("ExtractModelName(%q, %q) = %q, want %q", tt.body, tt.contentType, got, tt.expected)
 			}
 		})
 	}

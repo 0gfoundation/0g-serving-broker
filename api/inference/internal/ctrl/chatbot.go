@@ -23,6 +23,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -459,7 +460,7 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice)
+		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers)
 	}
 
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
@@ -501,33 +502,40 @@ func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
 }
 
 // finalizeResponseWithUsage updates the account with accurate token counts from LLM
-func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
-	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice)
+func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier) error {
+	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers)
 }
 
 // getTierMultipliers returns the input and output price multipliers for the given prompt token count.
 // Tiers are matched in order; the first tier whose MaxInputTokens >= promptTokens (or MaxInputTokens == 0
 // for unbounded) is selected. If promptTokens exceeds all bounded tiers, the last tier is used as a
 // fallback (e.g., if the final tier has MaxInputTokens == 0, it always matches as the catch-all).
-// This function should only be called when len(c.tieredPricing.Tiers) > 0; config validation ensures
-// that enabled tiered pricing always has at least one tier with valid multipliers (>= 1).
-func (c *Ctrl) getTierMultipliers(promptTokens int) (int64, int64) {
-	for _, tier := range c.tieredPricing.Tiers {
+// This function should only be called when len(tiers) > 0; config validation ensures
+// that tier lists always have valid multipliers (>= 1).
+func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, int64) {
+	for _, tier := range tiers {
 		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
 			return tier.InputMultiplier, tier.OutputMultiplier
 		}
 	}
 	// Fallback: promptTokens exceeds all bounded tiers, use the last tier
-	last := c.tieredPricing.Tiers[len(c.tieredPricing.Tiers)-1]
+	last := tiers[len(tiers)-1]
 	return last.InputMultiplier, last.OutputMultiplier
 }
 
-// updateAccountWithUsage updates the request with accurate token counts from the LLM response
-func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
+// updateAccountWithUsage updates the request with accurate token counts from the LLM response.
+// tiers is the model-specific tier table (from per-model pricing); when empty the
+// service-level tieredPricing applies if enabled.
+func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier) error {
+	// Resolve the effective tier set: model-specific tiers win; otherwise fall
+	// back to the service-level tieredPricing when enabled.
+	if len(tiers) == 0 && c.tieredPricing.Enabled {
+		tiers = c.tieredPricing.Tiers
+	}
 	// Apply tiered pricing: adjust base prices by tier multiplier before any fee calculation.
 	// This ensures cache token billing and all other modifiers use the correct tiered price.
-	if c.tieredPricing.Enabled && len(c.tieredPricing.Tiers) > 0 {
-		inputMul, outputMul := c.getTierMultipliers(usage.PromptTokens)
+	if len(tiers) > 0 {
+		inputMul, outputMul := getTierMultipliers(tiers, usage.PromptTokens)
 		if inputMul > 1 {
 			base, ok := new(big.Int).SetString(inputPrice, 10)
 			if !ok {
@@ -793,7 +801,7 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 				if err != nil {
 					return errors.Wrap(err, "get billing prices for stream response billing")
 				}
-				c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice)
+				c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers)
 				break
 			}
 			c.finalizeResponse(ctx, *output, outputPrice, requestHash)

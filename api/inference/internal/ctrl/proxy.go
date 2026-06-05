@@ -76,6 +76,20 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
+	// Multi-model speech-to-text: resolve the requested model for per-model
+	// billing. Audio transcription posts multipart/form-data (or sometimes JSON),
+	// so we extract the model without rewriting the body — only record the
+	// resolved model so GetBillingPrices can price it. Single-model providers
+	// keep billing at the configured on-chain price (resolvedModel unset).
+	if svcType == "speech-to-text" && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+		userAddr, _ := ctx.Get("userAddress")
+		userAddrStr, _ := userAddr.(string)
+		if err := c.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddrStr); err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, errors.Wrap(err, "resolve speech-to-text model")
+		}
+	}
+
 	// For text-to-image and image-editing: store the original client body (used for
 	// signing) and rewrite response_format to b64_json so the broker always receives
 	// raw image bytes from the provider rather than LAN-inaccessible URLs.
@@ -834,10 +848,12 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 	return c.imageStore.ttl
 }
 
-// ValidateModelAllowlist checks that the requested model is in the configured allowlist
-// for centralized multi-model providers. Unlike EnforceConfiguredModel which overwrites
-// the model field, this validates and passes through the user's requested model.
-// Stores the resolved model name in the gin.Context under CtxKeyResolvedModel.
+// ValidateModelAllowlist checks that the requested model (JSON body) is in the
+// configured allowlist for centralized multi-model providers. Unlike
+// EnforceConfiguredModel which overwrites the model field, this validates and
+// passes through the user's requested model, injecting the default model when
+// the request omits one. Stores the resolved model name in the gin.Context under
+// CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
 func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
 	if len(body) == 0 {
 		// No body to inspect — bill at the configured default model (guaranteed to
@@ -863,22 +879,50 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		body = modifiedBody
 	}
 
-	if !c.Service.IsModelAllowed(requestModel) {
-		c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
-
-		if userAddr != "" {
-			rateLimiter := GetRateLimiter()
-			shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr)
-			if shouldBlock {
-				c.logger.Warnf("User will be blocked due to excessive invalid model requests: user=%s, blocked_until=%s",
-					userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
-			}
-		}
-
-		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
+	if err := c.checkModelAllowed(ctx, requestModel, userAddr); err != nil {
+		return nil, err
 	}
 
 	ctx.Set(CtxKeyResolvedModel, requestModel)
 	c.logger.Debugf("Model allowlist passed: requested=%s", requestModel)
 	return body, nil
+}
+
+// ResolveModelForBilling resolves the requested model for per-model billing
+// WITHOUT rewriting the request body. Used by non-JSON modalities (e.g.
+// speech-to-text, which posts multipart/form-data with an audio file) where the
+// body cannot be cheaply re-marshalled. Extracts the model from the body
+// (content-type aware), defaults to the configured model when absent, enforces
+// the allowlist, and records the resolved model under CtxKeyResolvedModel.
+func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType, userAddr string) error {
+	requestModel := ExtractModelName(body, contentType)
+	if requestModel == "" {
+		requestModel = c.Service.ModelType
+	}
+	if err := c.checkModelAllowed(ctx, requestModel, userAddr); err != nil {
+		return err
+	}
+	ctx.Set(CtxKeyResolvedModel, requestModel)
+	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s", requestModel)
+	return nil
+}
+
+// checkModelAllowed enforces the multi-model allowlist for a resolved model id.
+// On rejection it records a model-mismatch against the user's rate limiter (to
+// throttle clients that spam invalid model names) and returns an error. A
+// wildcard ("*") entry makes every model allowed.
+func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string) error {
+	if c.Service.IsModelAllowed(requestModel) {
+		return nil
+	}
+	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
+	if userAddr != "" {
+		rateLimiter := GetRateLimiter()
+		shouldBlock, blockedUntil := rateLimiter.RecordModelMismatch(userAddr)
+		if shouldBlock {
+			c.logger.Warnf("User will be blocked due to excessive invalid model requests: user=%s, blocked_until=%s",
+				userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
+		}
+	}
+	return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 }

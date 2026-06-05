@@ -236,13 +236,14 @@ service:
 	}
 }
 
-func TestLoadConfig_ModelPricing_RejectsNonChatbot(t *testing.T) {
+func TestLoadConfig_ModelPricing_AllowsSpeechToText(t *testing.T) {
+	// Multi-model pricing is no longer chatbot-only; token-based modalities like
+	// speech-to-text are supported (the request path resolves the model for all
+	// of them).
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
   targetUrl: "https://backend:8000"
-  inputPrice: "1000"
-  outputPrice: "2000"
   type: "speech-to-text"
   model: "whisper-1"
   providerType: "centralized"
@@ -254,12 +255,84 @@ service:
       outputPrice: "30"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
-	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "chatbot") {
-		t.Fatalf("expected chatbot-only error, got: %v", err)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("speech-to-text multi-model should be allowed, got: %v", err)
+	}
+	if !cfg.Service.HasMultiModelPricing() {
+		t.Fatal("expected multi-model pricing to be configured")
+	}
+	if cfg.Service.InputPrice != "10" || cfg.Service.OutputPrice != "30" {
+		t.Errorf("expected on-chain native max (10/30), got (%s/%s)", cfg.Service.InputPrice, cfg.Service.OutputPrice)
 	}
 }
 
-func TestLoadConfig_ModelPricing_RejectsUSD(t *testing.T) {
+func TestLoadConfig_ModelPricing_RejectsUnwiredModality(t *testing.T) {
+	// modelPricing is only honoured for chatbot / speech-to-text (the modalities
+	// whose request path resolves the per-model id). text-to-image must be rejected
+	// so the allowlist/per-model pricing aren't silently ignored.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "dall-e-3"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "service type") {
+		t.Fatalf("expected unwired-modality rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_USD(t *testing.T) {
+	// USD-denominated multi-model pricing: each entry carries USD-per-1M prices,
+	// and the service-level USD price is set to the max over models so the price
+	// feed advertises an on-chain ceiling covering every served model.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "qwen-plus"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  modelPricing:
+    - model: "qwen-max"
+      inputPriceUSDPerMillionTokens: "1.6"
+      outputPriceUSDPerMillionTokens: "6.4"
+    - model: "qwen-plus"
+      inputPriceUSDPerMillionTokens: "0.4"
+      outputPriceUSDPerMillionTokens: "1.2"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("USD multi-model should be allowed, got: %v", err)
+	}
+	if cfg.Service.InputPriceUSDPerMillionTokens != "1.6" || cfg.Service.OutputPriceUSDPerMillionTokens != "6.4" {
+		t.Errorf("expected service-level USD max (1.6/6.4), got (%s/%s)",
+			cfg.Service.InputPriceUSDPerMillionTokens, cfg.Service.OutputPriceUSDPerMillionTokens)
+	}
+	if got := cfg.Service.GetModelPricing("qwen-max"); got == nil || got.InputPriceUSDPerMillionTokens != "1.6" {
+		t.Errorf("expected qwen-max USD entry, got %+v", got)
+	}
+}
+
+func TestLoadConfig_ModelPricing_USDRejectsNativeFields(t *testing.T) {
+	// Under USD denomination, per-model entries must use the USD price fields.
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -270,8 +343,6 @@ service:
   providerIdentity: "openai"
   verifiability: "TeeML"
   priceDenomination: "USD"
-  inputPriceUSDPerMillionTokens: "0.50"
-  outputPriceUSDPerMillionTokens: "1.50"
   modelPricing:
     - model: "gpt-4o"
       inputPrice: "10"
@@ -282,8 +353,80 @@ priceFeed:
   stalenessThreshold: "2h"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
-	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "USD") {
-		t.Fatalf("expected USD-exclusion error, got: %v", err)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "USD price fields") {
+		t.Fatalf("expected 'USD price fields' error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_Wildcard(t *testing.T) {
+	// A wildcard ("*") entry serves any requested model; the default service.model
+	// need not be explicitly listed, and the on-chain native max covers "*".
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "qwen-plus"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "qwen-max"
+      inputPrice: "160"
+      outputPrice: "640"
+    - model: "*"
+      inputPrice: "200"
+      outputPrice: "800"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("wildcard multi-model should be allowed, got: %v", err)
+	}
+	if !cfg.Service.HasWildcardModel() {
+		t.Fatal("expected wildcard model to be detected")
+	}
+	// Unlisted models are allowed and resolve to the wildcard entry.
+	if !cfg.Service.IsModelAllowed("some-unlisted-model") {
+		t.Error("wildcard should allow unlisted models")
+	}
+	if got := cfg.Service.GetModelPricing("some-unlisted-model"); got == nil || got.InputPrice != "200" {
+		t.Errorf("unlisted model should resolve to wildcard pricing (200), got %+v", got)
+	}
+	// On-chain native max covers the wildcard ceiling.
+	if cfg.Service.InputPrice != "200" || cfg.Service.OutputPrice != "800" {
+		t.Errorf("expected on-chain max (200/800), got (%s/%s)", cfg.Service.InputPrice, cfg.Service.OutputPrice)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerModelTiersMax(t *testing.T) {
+	// Per-model tiers feed the on-chain max: the ceiling must reflect the highest
+	// tier multiplier so SDK pre-funding covers the worst-case tiered price.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "qwen-max"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "qwen-max"
+      inputPrice: "100"
+      outputPrice: "200"
+      tiers:
+        - { maxInputTokens: 32000, inputMultiplier: 1, outputMultiplier: 1 }
+        - { maxInputTokens: 0, inputMultiplier: 3, outputMultiplier: 2 }
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("per-model tiers should be allowed, got: %v", err)
+	}
+	// max input = 100 * 3, max output = 200 * 2
+	if cfg.Service.InputPrice != "300" || cfg.Service.OutputPrice != "400" {
+		t.Errorf("expected tier-adjusted on-chain max (300/400), got (%s/%s)", cfg.Service.InputPrice, cfg.Service.OutputPrice)
 	}
 }
 

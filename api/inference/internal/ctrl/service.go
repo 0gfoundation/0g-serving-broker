@@ -322,10 +322,17 @@ func (c *Ctrl) SyncServicePrices(ctx context.Context, inputWei, outputWei *big.I
 	return new(big.Int).Set(inputWei), new(big.Int).Set(outputWei), nil
 }
 
-// BillingPrices holds the resolved input and output prices for a request.
+// BillingPrices holds the resolved per-token input and output prices for a
+// request, plus the tier table that applies to them.
+//
+// InputPrice/OutputPrice are always in the on-chain unit (neuron == wei): for
+// USD-denominated services the per-model USD price has already been converted at
+// the live rate. Tiers is the model-specific tier table (nil → callers fall back
+// to the service-level tieredPricing).
 type BillingPrices struct {
 	InputPrice  string
 	OutputPrice string
+	Tiers       []config.PricingTier
 }
 
 // CtxKeyResolvedModel is the gin.Context key under which the request path stores
@@ -336,43 +343,100 @@ const CtxKeyResolvedModel = "resolvedModel"
 
 // GetBillingPrices resolves the correct input and output prices for billing.
 // For centralized multi-model providers, reads the resolved model id from the
-// gin.Context and returns model-specific prices. Otherwise falls back to on-chain
+// gin.Context and returns model-specific prices (converting USD→wei at the live
+// rate when the service is USD-denominated). Otherwise falls back to on-chain
 // service prices.
 //
-// Every fallback below is overcharge-safe (the on-chain price is max(model prices),
-// so it is >= any per-model price) but on a multi-model chatbot provider it should
-// never trigger — config validation restricts modelPricing to chatbot+NATIVE and
-// the request path always sets the resolved model. Each fallback therefore logs at
-// ERROR with enough context to diagnose the broken invariant, rather than silently
-// overbilling.
+// Every fallback below is overcharge-safe (the on-chain price is the tier-adjusted
+// max over all models, so it is >= any per-model price) but on a multi-model
+// provider it should never trigger — the request path always sets the resolved
+// model. Each fallback therefore logs at ERROR with enough context to diagnose
+// the broken invariant, rather than silently overbilling.
 func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 	if c.Service.HasMultiModelPricing() {
-		ginCtx, ok := ctx.(*gin.Context)
-		switch {
-		case !ok:
-			c.logger.Errorf("GetBillingPrices: expected *gin.Context for multi-model billing, got %T; billing at on-chain max price", ctx)
-		default:
-			if modelVal, exists := ginCtx.Get(CtxKeyResolvedModel); !exists {
-				c.logger.Error("GetBillingPrices: resolvedModel missing from context for multi-model provider; billing at on-chain max price")
-			} else if modelStr, ok := modelVal.(string); !ok {
-				c.logger.Errorf("GetBillingPrices: resolvedModel has unexpected type %T; billing at on-chain max price", modelVal)
-			} else if entry := c.Service.GetModelPricing(modelStr); entry == nil {
-				c.logger.Errorf("GetBillingPrices: resolvedModel %q passed the allowlist but has no pricing entry; billing at on-chain max price", modelStr)
-			} else {
-				return BillingPrices{
-					InputPrice:  entry.InputPrice,
-					OutputPrice: entry.OutputPrice,
-				}, nil
+		if entry := c.resolveModelPricing(ctx); entry != nil {
+			if c.Service.IsUSDDenominated() {
+				inputWei, outputWei, err := c.modelUSDPricesToWei(entry)
+				if err != nil {
+					return BillingPrices{}, errors.Wrap(err, "convert per-model USD price to wei")
+				}
+				return BillingPrices{InputPrice: inputWei, OutputPrice: outputWei, Tiers: entry.Tiers}, nil
 			}
+			return BillingPrices{InputPrice: entry.InputPrice, OutputPrice: entry.OutputPrice, Tiers: entry.Tiers}, nil
 		}
 	}
 	// Fallback: on-chain prices (decentralized, single-model centralized, or the
-	// invariant-violation cases above — always >= any per-model price).
+	// invariant-violation cases above — always >= any per-model price). For USD
+	// services GetCachedService overlays the live max wei price.
 	svc, err := c.GetCachedService(ctx)
 	if err != nil {
 		return BillingPrices{}, errors.Wrap(err, "get billing prices")
 	}
 	return BillingPrices{InputPrice: svc.InputPrice, OutputPrice: svc.OutputPrice}, nil
+}
+
+// resolveModelPricing reads the validated request model from the gin.Context and
+// returns its pricing entry, or nil (logging the broken invariant at ERROR) when
+// the context, key, type, or allowlist lookup is not as the request path
+// guarantees. A nil return makes GetBillingPrices fall back to the on-chain max.
+func (c *Ctrl) resolveModelPricing(ctx context.Context) *config.ModelPricingEntry {
+	ginCtx, ok := ctx.(*gin.Context)
+	if !ok {
+		c.logger.Errorf("GetBillingPrices: expected *gin.Context for multi-model billing, got %T; billing at on-chain max price", ctx)
+		return nil
+	}
+	modelVal, exists := ginCtx.Get(CtxKeyResolvedModel)
+	if !exists {
+		c.logger.Error("GetBillingPrices: resolvedModel missing from context for multi-model provider; billing at on-chain max price")
+		return nil
+	}
+	modelStr, ok := modelVal.(string)
+	if !ok {
+		c.logger.Errorf("GetBillingPrices: resolvedModel has unexpected type %T; billing at on-chain max price", modelVal)
+		return nil
+	}
+	entry := c.Service.GetModelPricing(modelStr)
+	if entry == nil {
+		c.logger.Errorf("GetBillingPrices: resolvedModel %q passed the allowlist but has no pricing entry; billing at on-chain max price", modelStr)
+	}
+	return entry
+}
+
+// modelUSDPricesToWei converts a USD-denominated model entry's per-1M-token
+// prices to wei per token using the current rate snapshot. Fails closed
+// (ErrPricingUnavailable) when the rate cache is unconfigured, unpopulated, or
+// stale — the same fail-closed contract as GetCachedService — so a request is
+// rejected rather than billed at an arbitrarily out-of-date rate. A single
+// snapshot is used for both prices so they share one consistent rate.
+func (c *Ctrl) modelUSDPricesToWei(entry *config.ModelPricingEntry) (inputWei, outputWei string, err error) {
+	if c.priceCache == nil {
+		return "", "", fmt.Errorf("%w: USD price cache not configured", ErrPricingUnavailable)
+	}
+	snap := c.priceCache.Get()
+	if !snap.Populated {
+		return "", "", fmt.Errorf("%w: USD price cache not yet populated", ErrPricingUnavailable)
+	}
+	if snap.IsStale(c.priceFeed.StalenessThreshold, time.Now()) {
+		return "", "", fmt.Errorf("%w: USD price cache is stale (last update %s ago, threshold %s)",
+			ErrPricingUnavailable, time.Since(snap.LastUpdate).Round(time.Second), c.priceFeed.StalenessThreshold)
+	}
+	inRat, err := pricefeed.ParseUSDPerMillion(entry.InputPriceUSDPerMillionTokens)
+	if err != nil {
+		return "", "", fmt.Errorf("parse model inputPriceUSDPerMillionTokens: %w", err)
+	}
+	outRat, err := pricefeed.ParseUSDPerMillion(entry.OutputPriceUSDPerMillionTokens)
+	if err != nil {
+		return "", "", fmt.Errorf("parse model outputPriceUSDPerMillionTokens: %w", err)
+	}
+	inWei, err := pricefeed.USDPerMillionToWeiPerToken(inRat, snap.RateUSDPerOG)
+	if err != nil {
+		return "", "", fmt.Errorf("convert model input USD to wei: %w", err)
+	}
+	outWei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, snap.RateUSDPerOG)
+	if err != nil {
+		return "", "", fmt.Errorf("convert model output USD to wei: %w", err)
+	}
+	return inWei.String(), outWei.String(), nil
 }
 
 func parseService(svc contract.Service) model.Service {

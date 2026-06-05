@@ -94,9 +94,44 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		}
 	}
 
-	// Flag multi-model providers so SDK/CLI can detect from on-chain data
+	// Publish the full per-model pricing table on-chain so SDK/CLI/users can read
+	// and verify exact per-model prices (same pattern as tieredPricing above; the
+	// structured on-chain inputPrice/outputPrice only carries the max-over-models
+	// ceiling). Prices are surfaced in the service's denomination; for USD the
+	// stable USD figures are published (the volatile wei lives in the structured
+	// price field, refreshed by the price feed). Wildcard ("*") entries are
+	// included so clients learn unlisted models are served at that catch-all price.
 	if service.HasMultiModelPricing() {
 		additionalInfo["MultiModel"] = true
+		additionalInfo["priceDenomination"] = service.PriceDenomination
+		models := make([]map[string]interface{}, 0, len(service.ModelPricing))
+		for i := range service.ModelPricing {
+			mp := &service.ModelPricing[i]
+			entry := map[string]interface{}{"model": mp.Model}
+			if service.IsUSDDenominated() {
+				entry["inputPriceUSDPerMillionTokens"] = mp.InputPriceUSDPerMillionTokens
+				entry["outputPriceUSDPerMillionTokens"] = mp.OutputPriceUSDPerMillionTokens
+			} else {
+				entry["inputPrice"] = mp.InputPrice
+				entry["outputPrice"] = mp.OutputPrice
+			}
+			if mp.CanonicalID != "" {
+				entry["canonicalId"] = mp.CanonicalID
+			}
+			if len(mp.Tiers) > 0 {
+				tiers := make([]map[string]interface{}, len(mp.Tiers))
+				for j, t := range mp.Tiers {
+					tiers[j] = map[string]interface{}{
+						"maxInputTokens":   t.MaxInputTokens,
+						"inputMultiplier":  t.InputMultiplier,
+						"outputMultiplier": t.OutputMultiplier,
+					}
+				}
+				entry["tiers"] = tiers
+			}
+			models = append(models, entry)
+		}
+		additionalInfo["modelPricing"] = models
 	}
 
 	additionalInfoJSON, err := json.Marshal(additionalInfo)

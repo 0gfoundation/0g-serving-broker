@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"time"
 
@@ -118,7 +119,8 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	cfg := h.modelsCtrl.GetServiceConfig()
 
-	// Multi-model: return one ModelObject per configured model
+	// Multi-model: return one ModelObject per configured model (including the
+	// wildcard "*" entry, so clients learn the catch-all price for unlisted models).
 	if cfg.HasMultiModelPricing() {
 		models := make([]ModelObject, 0, len(cfg.ModelPricing))
 		teeVerifier := parseTeeVerifier(svc.AdditionalInfo)
@@ -126,10 +128,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		if svc.CreatedAt != nil {
 			created = svc.CreatedAt.Unix()
 		}
+		isUSD := cfg.IsUSDDenominated()
 
 		// Per-user rate limits are provider-level (same for every served model);
-		// compute once and attach to each. Multi-model is chatbot-only (enforced in
-		// config validation), so RPM + TPM apply.
+		// compute once and attach to each. Multi-model serves token-based
+		// modalities (chatbot / speech-to-text), so RPM + TPM apply.
 		concurrencyLimits := h.modelsCtrl.GetConcurrencyLimitConfig()
 		var sharedLimits *ModelRateLimits
 		if concurrencyLimits.PerUserRPM > 0 || concurrencyLimits.PerUserTPM > 0 {
@@ -139,7 +142,38 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			}
 		}
 
-		for _, mp := range cfg.ModelPricing {
+		// Cache token billing is provider-level; surface it on every model.
+		cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
+		var sharedCacheBilling *ModelCacheTokenBilling
+		if cacheCfg.Enabled && cacheCfg.Divisor > 0 {
+			sharedCacheBilling = &ModelCacheTokenBilling{Divisor: cacheCfg.Divisor}
+		}
+
+		// For USD providers, fetch the rate snapshot once to convert each model's
+		// USD price to wei and to surface the shared price-feed state.
+		var priceFeedOut *PriceFeedState
+		var ratUSDPerOG *big.Rat
+		if isUSD {
+			if snap, threshold, updateInterval, ok := h.modelsCtrl.GetPriceFeedSnapshot(); ok && snap.Populated && snap.RateUSDPerOG != nil {
+				ratUSDPerOG = snap.RateUSDPerOG
+				priceFeedOut = &PriceFeedState{
+					RateUSDPerOG:   snap.RateUSDPerOG.FloatString(8),
+					UpdatedAt:      snap.LastUpdate,
+					NextUpdateTime: snap.LastUpdate.Add(updateInterval),
+					IsStale:        snap.IsStale(threshold, time.Now()),
+				}
+			}
+		}
+
+		for i := range cfg.ModelPricing {
+			mp := &cfg.ModelPricing[i]
+			// The wildcard ("*") is a billing catch-all, not a selectable model.
+			// Emitting it as a ModelObject.ID would break OpenAI-compatible clients
+			// that enumerate /v1/models and treat each id as a usable model. Its
+			// catch-all pricing is still published on-chain in additionalInfo.
+			if mp.Model == config.ModelWildcard {
+				continue
+			}
 			// Per-model canonical wins; fall back to the service-level canonical so
 			// an operator who set only service.canonicalId still gets it applied.
 			canonicalID := mp.CanonicalID
@@ -147,29 +181,83 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				canonicalID = cfg.CanonicalID
 			}
 			obj := ModelObject{
-				ID:            mp.Model,
-				CanonicalID:   canonicalID,
-				Object:        "model",
-				Created:       created,
-				OwnedBy:       cfg.OwnedBy,
-				Type:          svc.Type,
-				Verifiability: svc.Verifiability,
-				TeeAttested:   svc.TeeSignerAcknowledged,
-				TeeVerifier:   teeVerifier,
-				Pricing: &ModelPricing{
-					Prompt:     mp.InputPrice,
-					Completion: mp.OutputPrice,
-				},
+				ID:               mp.Model,
+				CanonicalID:      canonicalID,
+				Object:           "model",
+				Created:          created,
+				OwnedBy:          cfg.OwnedBy,
+				Type:             svc.Type,
+				Verifiability:    svc.Verifiability,
+				TeeAttested:      svc.TeeSignerAcknowledged,
+				TeeVerifier:      teeVerifier,
+				Pricing:          &ModelPricing{CacheTokenBilling: sharedCacheBilling},
 				ProviderType:     cfg.ProviderType,
 				ProviderIdentity: cfg.ProviderIdentity,
 				RateLimits:       sharedLimits,
 			}
+
+			if isUSD {
+				// Surface per-token USD (always) and the rate-converted wei price
+				// (when the feed is available) so clients see both views. Config
+				// validation already accepted these USD strings, so a conversion
+				// error here signals a regression — log it (matching the
+				// single-model path) rather than silently dropping PricingUSD.
+				prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(mp.InputPriceUSDPerMillionTokens)
+				completion, completionErr := pricefeed.USDPerMillionStringToPerToken(mp.OutputPriceUSDPerMillionTokens)
+				switch {
+				case promptErr != nil:
+					h.logger.Warnf("GetModels: derive per-token USD input price for model %q from %q failed (omitting PricingUSD): %v",
+						mp.Model, mp.InputPriceUSDPerMillionTokens, promptErr)
+				case completionErr != nil:
+					h.logger.Warnf("GetModels: derive per-token USD output price for model %q from %q failed (omitting PricingUSD): %v",
+						mp.Model, mp.OutputPriceUSDPerMillionTokens, completionErr)
+				default:
+					obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
+				}
+				if ratUSDPerOG != nil {
+					if inRat, err := pricefeed.ParseUSDPerMillion(mp.InputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(inRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Prompt = wei.String()
+						}
+					}
+					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Completion = wei.String()
+						}
+					}
+				}
+			} else {
+				obj.Pricing.Prompt = mp.InputPrice
+				obj.Pricing.Completion = mp.OutputPrice
+			}
+
+			// Per-model tiers; fall back to the service-level tieredPricing display
+			// so the surfaced tiers match what billing actually applies.
+			tiers := mp.Tiers
+			if len(tiers) == 0 {
+				if tc := h.modelsCtrl.GetTieredPricingConfig(); tc.Enabled {
+					tiers = tc.Tiers
+				}
+			}
+			if len(tiers) > 0 {
+				out := make([]ModelPricingTier, len(tiers))
+				for j, t := range tiers {
+					out[j] = ModelPricingTier{
+						MaxInputTokens:   t.MaxInputTokens,
+						InputMultiplier:  t.InputMultiplier,
+						OutputMultiplier: t.OutputMultiplier,
+					}
+				}
+				obj.Pricing.TieredPricing = out
+			}
+
 			models = append(models, obj)
 		}
 
 		ctx.JSON(http.StatusOK, ModelListResponse{
-			Object: "list",
-			Data:   models,
+			Object:    "list",
+			Data:      models,
+			PriceFeed: priceFeedOut,
 		})
 		return
 	}

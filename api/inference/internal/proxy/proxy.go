@@ -485,7 +485,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 
 	// LoRA owner check: for ft-* models, verify requester is the task owner
-	reqModelName := ctrl.ExtractModelName(reqBody)
+	reqModelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if err := p.ctrl.CheckLoRAOwnership(reqModelName, userAddress); err != nil {
 		ctx.Set("ignoreError", true)
 		p.handleBrokerError(ctx, err, "LoRA owner check")
@@ -512,7 +512,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			ServiceName:   svcType,
 		}
 		whitelistReq.RequestHash = whitelistReq.Nonce
-		whitelistReq.ModelName = ctrl.ExtractModelName(reqBody)
+		whitelistReq.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 		if whitelistReq.ModelName == "" {
 			whitelistReq.ModelName = p.ctrl.Service.ModelType
 		}
@@ -585,7 +585,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 	req.ServiceName = svcType
-	req.ModelName = ctrl.ExtractModelName(reqBody)
+	req.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if req.ModelName == "" {
 		req.ModelName = p.ctrl.Service.ModelType
 	}

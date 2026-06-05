@@ -127,18 +127,48 @@ func (m *ModelInfo) Validate(serviceType string) error {
 	return nil
 }
 
+// ModelWildcard is the catch-all model id in service.modelPricing. When an
+// entry uses this id, the broker serves ANY requested model (the allowlist
+// becomes "allow all") and bills models not matched by an exact entry at the
+// wildcard entry's price/tiers. Use it to proxy an upstream that serves many
+// models without enumerating every one.
+const ModelWildcard = "*"
+
 // ModelPricingEntry defines per-model pricing for centralized multi-model providers.
 // Each entry represents a model that the broker can serve with its own pricing.
+// Prices are expressed in the SERVICE's priceDenomination: NATIVE entries use
+// InputPrice/OutputPrice (neuron per token), USD entries use the USD-per-1M-token
+// fields. The two sets are mutually exclusive within a service.
 type ModelPricingEntry struct {
-	Model       string `yaml:"model"`       // Model identifier (e.g., "qwen3-max", "gpt-4o")
-	InputPrice  string `yaml:"inputPrice"`  // Per-token input price in neuron
-	OutputPrice string `yaml:"outputPrice"` // Per-token output price in neuron
+	Model string `yaml:"model"` // Model identifier (e.g., "qwen3-max"), or ModelWildcard ("*")
+
+	// NATIVE-denominated per-token prices in neuron. Required iff the service
+	// priceDenomination is NATIVE.
+	InputPrice  string `yaml:"inputPrice"`
+	OutputPrice string `yaml:"outputPrice"`
+
+	// USD-denominated prices in USD per 1M tokens (decimal string). Required iff
+	// the service priceDenomination is USD. Converted to wei per token at billing
+	// time using the live 0G/USD rate, exactly like the service-level USD price.
+	InputPriceUSDPerMillionTokens  string `yaml:"inputPriceUSDPerMillionTokens"`
+	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
+
+	// Tiers is optional per-model input-length tiered pricing. When empty, the
+	// service-level tieredPricing applies (if enabled). Same semantics and
+	// validation as TieredPricingConfig.Tiers.
+	Tiers []PricingTier `yaml:"tiers"`
+
 	// CanonicalID is the bare-lowercase canonical model id this model maps to in
 	// the router catalog (same contract as Service.CanonicalID, but per-model so
 	// a multi-model provider can map each served model to its own canonical).
 	// Optional; empty means the router resolves the canonical from its registry
 	// by Model id instead. Surfaced per-model in GET /v1/models.
 	CanonicalID string `yaml:"canonicalId"`
+
+	// Type optionally overrides the service modality for this model. Reserved for
+	// future single-process multi-modal serving; for now it must be empty or
+	// equal to the service Type.
+	Type string `yaml:"type"`
 }
 
 type Service struct {
@@ -291,41 +321,161 @@ func (s *Service) HasMultiModelPricing() bool {
 	return len(s.modelPricingMap) > 0
 }
 
-// GetModelPricing returns the pricing entry for a specific model, or nil if not found.
+// GetModelPricing returns the pricing entry for a specific model. Resolution
+// order: exact match first, then the wildcard ("*") entry if configured, else
+// nil. This mirrors IsModelAllowed so a model that passes the allowlist always
+// resolves to a pricing entry.
 func (s *Service) GetModelPricing(model string) *ModelPricingEntry {
 	if s.modelPricingMap == nil {
 		return nil
 	}
-	return s.modelPricingMap[model]
+	if entry, ok := s.modelPricingMap[model]; ok {
+		return entry
+	}
+	if entry, ok := s.modelPricingMap[ModelWildcard]; ok {
+		return entry
+	}
+	return nil
+}
+
+// BuildModelPricingMap rebuilds the derived per-model lookup map from the
+// ModelPricing slice and stores it on the Service, returning an error on
+// duplicate model ids. It is the single source of truth for the lookup map:
+// loadConfig calls it after per-entry validation, and tests use it to construct
+// a usable multi-model Service without a full config file.
+//
+// It does NOT validate prices/denomination/tiers — callers that rely on the
+// MaxModelPrices* helpers or on per-model billing must validate the entries
+// first (loadConfig does). The map stores pointers into the ModelPricing slice,
+// so the slice must not be reallocated after this call.
+func (s *Service) BuildModelPricingMap() error {
+	m := make(map[string]*ModelPricingEntry, len(s.ModelPricing))
+	for i := range s.ModelPricing {
+		entry := &s.ModelPricing[i]
+		if _, ok := m[entry.Model]; ok {
+			return fmt.Errorf("duplicate model %q in modelPricing", entry.Model)
+		}
+		m[entry.Model] = entry
+	}
+	s.modelPricingMap = m
+	return nil
+}
+
+// HasWildcardModel reports whether a catch-all ("*") pricing entry is configured.
+func (s *Service) HasWildcardModel() bool {
+	if s.modelPricingMap == nil {
+		return false
+	}
+	_, ok := s.modelPricingMap[ModelWildcard]
+	return ok
 }
 
 // IsModelAllowed returns true if the model is in the pricing allowlist.
-// Always returns true if multi-model pricing is not configured.
+// Always returns true if multi-model pricing is not configured, or if a
+// wildcard ("*") entry is present (serve-all mode).
 func (s *Service) IsModelAllowed(model string) bool {
 	if !s.HasMultiModelPricing() {
+		return true
+	}
+	if _, ok := s.modelPricingMap[ModelWildcard]; ok {
 		return true
 	}
 	_, ok := s.modelPricingMap[model]
 	return ok
 }
 
-// MaxModelPrices returns the maximum InputPrice and OutputPrice across all model
-// pricing entries. Precondition: every entry's prices have already been validated
-// as parseable integers (validate() enforces this before the only call site).
-// Unparseable entries are skipped; if that left no parseable entry it would
-// return "0", so callers MUST validate first rather than rely on this method.
-func (s *Service) MaxModelPrices() (maxInput, maxOutput string) {
+// maxTierMultipliers returns the highest input/output multipliers across the
+// effective tier set for this entry (the entry's own tiers, or serviceTiers
+// when the entry has none). Returns (1, 1) when no tiers apply. Used to size
+// the on-chain advertised ceiling so it covers the worst-case tiered price.
+func (e *ModelPricingEntry) maxTierMultipliers(serviceTiers []PricingTier) (int64, int64) {
+	tiers := e.Tiers
+	if len(tiers) == 0 {
+		tiers = serviceTiers
+	}
+	maxIn, maxOut := int64(1), int64(1)
+	for _, t := range tiers {
+		if t.InputMultiplier > maxIn {
+			maxIn = t.InputMultiplier
+		}
+		if t.OutputMultiplier > maxOut {
+			maxOut = t.OutputMultiplier
+		}
+	}
+	return maxIn, maxOut
+}
+
+// MaxModelPricesNative returns the maximum tier-adjusted InputPrice and
+// OutputPrice (neuron) across all NATIVE model pricing entries. serviceTiers is
+// the service-level tier fallback for entries without their own tiers.
+// Precondition: every entry's prices have already been validated as parseable
+// integers (validate() enforces this before the only call site).
+func (s *Service) MaxModelPricesNative(serviceTiers []PricingTier) (maxInput, maxOutput string) {
 	maxIn := big.NewInt(0)
 	maxOut := big.NewInt(0)
-	for _, entry := range s.ModelPricing {
-		if v, ok := new(big.Int).SetString(entry.InputPrice, 10); ok && v.Cmp(maxIn) > 0 {
-			maxIn = v
+	for i := range s.ModelPricing {
+		entry := &s.ModelPricing[i]
+		mulIn, mulOut := entry.maxTierMultipliers(serviceTiers)
+		if v, ok := new(big.Int).SetString(entry.InputPrice, 10); ok {
+			v.Mul(v, big.NewInt(mulIn))
+			if v.Cmp(maxIn) > 0 {
+				maxIn = v
+			}
 		}
-		if v, ok := new(big.Int).SetString(entry.OutputPrice, 10); ok && v.Cmp(maxOut) > 0 {
-			maxOut = v
+		if v, ok := new(big.Int).SetString(entry.OutputPrice, 10); ok {
+			v.Mul(v, big.NewInt(mulOut))
+			if v.Cmp(maxOut) > 0 {
+				maxOut = v
+			}
 		}
 	}
 	return maxIn.String(), maxOut.String()
+}
+
+// MaxModelUSDPrices returns the maximum tier-adjusted USD-per-1M-token input and
+// output prices (decimal strings) across all USD model pricing entries. Feeds
+// the service-level USD price so the existing price-feed machinery advertises an
+// on-chain ceiling covering every served model at its worst-case tier.
+// Precondition: every entry's USD prices have already been validated as
+// non-negative decimals (validate() enforces this before the only call site).
+func (s *Service) MaxModelUSDPrices(serviceTiers []PricingTier) (maxInput, maxOutput string) {
+	maxIn := new(big.Rat)
+	maxOut := new(big.Rat)
+	for i := range s.ModelPricing {
+		entry := &s.ModelPricing[i]
+		mulIn, mulOut := entry.maxTierMultipliers(serviceTiers)
+		if r, ok := new(big.Rat).SetString(entry.InputPriceUSDPerMillionTokens); ok {
+			r.Mul(r, new(big.Rat).SetInt64(mulIn))
+			if r.Cmp(maxIn) > 0 {
+				maxIn = r
+			}
+		}
+		if r, ok := new(big.Rat).SetString(entry.OutputPriceUSDPerMillionTokens); ok {
+			r.Mul(r, new(big.Rat).SetInt64(mulOut))
+			if r.Cmp(maxOut) > 0 {
+				maxOut = r
+			}
+		}
+	}
+	return ratToDecimalString(maxIn), ratToDecimalString(maxOut)
+}
+
+// ratToDecimalString formats a non-negative big.Rat as a decimal string with
+// trailing zeros trimmed (e.g. "1.6", "8"). 18 decimals of precision is more
+// than any sensible USD price carries, so the trimmed output is exact.
+func ratToDecimalString(r *big.Rat) string {
+	s := r.FloatString(18)
+	if !strings.ContainsRune(s, '.') {
+		return s
+	}
+	i := len(s)
+	for i > 0 && s[i-1] == '0' {
+		i--
+	}
+	if i > 0 && s[i-1] == '.' {
+		i--
+	}
+	return s[:i]
 }
 
 // DefaultVideoSizeRatios provides default cost multipliers based on pixel count
@@ -652,6 +802,37 @@ func validateUSDPriceString(field, value string) error {
 	return nil
 }
 
+// validatePricingTiers validates an ordered tier list: multipliers >= 1,
+// maxInputTokens >= 0, the unbounded (0) tier last, and strictly ascending
+// order. An empty slice is valid (no tiers). prefix labels errors (e.g.
+// "tieredPricing.tiers" or "service.modelPricing[0].tiers").
+func validatePricingTiers(prefix string, tiers []PricingTier) error {
+	for i, tier := range tiers {
+		if tier.InputMultiplier < 1 {
+			return fmt.Errorf("invalid config: %s[%d].inputMultiplier must be >= 1, got %d", prefix, i, tier.InputMultiplier)
+		}
+		if tier.OutputMultiplier < 1 {
+			return fmt.Errorf("invalid config: %s[%d].outputMultiplier must be >= 1, got %d", prefix, i, tier.OutputMultiplier)
+		}
+		if tier.MaxInputTokens < 0 {
+			return fmt.Errorf("invalid config: %s[%d].maxInputTokens must be >= 0, got %d", prefix, i, tier.MaxInputTokens)
+		}
+		// MaxInputTokens == 0 (unbounded) must be the last tier.
+		if tier.MaxInputTokens == 0 && i != len(tiers)-1 {
+			return fmt.Errorf("invalid config: %s[%d].maxInputTokens=0 (unbounded) must be the last tier", prefix, i)
+		}
+		// Ensure ascending order.
+		if i > 0 && tier.MaxInputTokens != 0 {
+			prev := tiers[i-1]
+			if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
+				return fmt.Errorf("invalid config: %s must be ordered by maxInputTokens ascending, %s[%d]=%d <= %s[%d]=%d",
+					prefix, prefix, i, tier.MaxInputTokens, prefix, i-1, prev.MaxInputTokens)
+			}
+		}
+	}
+	return nil
+}
+
 // validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
 // configuration. Only invoked when service.priceDenomination == "USD".
 func validatePriceFeedConfig(pf *PriceFeedConfig) error {
@@ -914,14 +1095,22 @@ func loadConfig(cfg *Config) error {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
 	case constant.PriceDenominationUSD:
-		if cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "" {
+		// With multi-model pricing the per-model entries carry the USD prices and
+		// the service-level USD fields are derived (max-over-models) later in this
+		// function, so they may legitimately be empty here.
+		multiModelUSD := len(cfg.Service.ModelPricing) > 0
+		if !multiModelUSD && (cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "") {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
-			return err
+		if cfg.Service.InputPriceUSDPerMillionTokens != "" {
+			if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
+				return err
+			}
 		}
-		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
-			return err
+		if cfg.Service.OutputPriceUSDPerMillionTokens != "" {
+			if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
+				return err
+			}
 		}
 		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
@@ -938,28 +1127,8 @@ func loadConfig(cfg *Config) error {
 		if len(cfg.TieredPricing.Tiers) == 0 {
 			return fmt.Errorf("invalid config: tieredPricing.tiers must not be empty when tieredPricing is enabled")
 		}
-		for i, tier := range cfg.TieredPricing.Tiers {
-			if tier.InputMultiplier < 1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %d", i, tier.InputMultiplier)
-			}
-			if tier.OutputMultiplier < 1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].outputMultiplier must be >= 1, got %d", i, tier.OutputMultiplier)
-			}
-			if tier.MaxInputTokens < 0 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens must be >= 0, got %d", i, tier.MaxInputTokens)
-			}
-			// MaxInputTokens == 0 (unbounded) must be the last tier
-			if tier.MaxInputTokens == 0 && i != len(cfg.TieredPricing.Tiers)-1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens=0 (unbounded) must be the last tier", i)
-			}
-			// Ensure ascending order
-			if i > 0 && tier.MaxInputTokens != 0 {
-				prev := cfg.TieredPricing.Tiers[i-1]
-				if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
-					return fmt.Errorf("invalid config: tieredPricing.tiers must be ordered by maxInputTokens ascending, tiers[%d]=%d <= tiers[%d]=%d",
-						i, tier.MaxInputTokens, i-1, prev.MaxInputTokens)
-				}
-			}
+		if err := validatePricingTiers("tieredPricing.tiers", cfg.TieredPricing.Tiers); err != nil {
+			return err
 		}
 	}
 
@@ -968,60 +1137,109 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.ProviderType != constant.ProviderTypeCentralized {
 			return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized'")
 		}
-		// Per-model billing is wired only on the chatbot request path (that is the
-		// only path that resolves the request model before billing). Allowing
-		// modelPricing on any other service type would silently bill every request
-		// at max(model prices) AND skip the model allowlist, so reject at load time.
-		if cfg.Service.Type != constant.ServiceTypeChatbot {
-			return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		// Per-model billing is wired only for the token-based modalities whose
+		// request path resolves the request model before billing (chatbot and
+		// speech-to-text). On other modalities the allowlist would never run and
+		// every request would silently fall back to the on-chain max price, so
+		// reject the configuration at load time rather than honour neither the
+		// allowlist nor the per-model prices.
+		if cfg.Service.Type != constant.ServiceTypeChatbot && cfg.Service.Type != constant.ServiceTypeSpeechToText {
+			return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s' or '%s', got '%s'", constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, cfg.Service.Type)
 		}
-		// modelPricing carries native per-model neuron prices; USD denomination
-		// drives a single rate-fed wei price for the whole service. The two pricing
-		// systems would collide (which one a request gets depends on whether the
-		// model resolved), so they are mutually exclusive.
-		if cfg.Service.IsUSDDenominated() {
-			return fmt.Errorf("invalid config: service.modelPricing is not supported with priceDenomination '%s'", constant.PriceDenominationUSD)
+		// service.model is the default billed (and forwarded-upstream) model for
+		// requests that omit the model field; it must be set.
+		if cfg.Service.ModelType == "" {
+			return fmt.Errorf("invalid config: service.model is required when service.modelPricing is configured")
 		}
+		isUSD := cfg.Service.IsUSDDenominated()
 
-		pricingMap := make(map[string]*ModelPricingEntry, len(cfg.Service.ModelPricing))
+		hasWildcard := false
 		for i := range cfg.Service.ModelPricing {
 			entry := &cfg.Service.ModelPricing[i]
 			if entry.Model == "" {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].model is required", i)
 			}
-			if entry.InputPrice == "" {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice is required for model '%s'", i, entry.Model)
+			if entry.Model == ModelWildcard {
+				hasWildcard = true
 			}
-			if entry.OutputPrice == "" {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice is required for model '%s'", i, entry.Model)
+			// Per-model modality (Type override) is reserved for future
+			// single-process multi-modal serving; for now it must match the
+			// service modality, otherwise billing would dispatch incorrectly.
+			if entry.Type != "" && entry.Type != cfg.Service.Type {
+				return fmt.Errorf("invalid config: service.modelPricing[%d].type %q must equal service.type %q (per-model modality is not yet supported)", i, entry.Type, cfg.Service.Type)
 			}
-			if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for model '%s'", i, entry.Model)
+
+			// Prices must be expressed in the service's denomination.
+			if isUSD {
+				if entry.InputPrice != "" || entry.OutputPrice != "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d] must use the USD price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationUSD, entry.Model)
+				}
+				if entry.InputPriceUSDPerMillionTokens == "" || entry.OutputPriceUSDPerMillionTokens == "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].inputPriceUSDPerMillionTokens / outputPriceUSDPerMillionTokens are required for model '%s'", i, entry.Model)
+				}
+				if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].inputPriceUSDPerMillionTokens", i), entry.InputPriceUSDPerMillionTokens); err != nil {
+					return err
+				}
+				if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerMillionTokens", i), entry.OutputPriceUSDPerMillionTokens); err != nil {
+					return err
+				}
+			} else {
+				if entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d] must use the native price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationNative, entry.Model)
+				}
+				if entry.InputPrice == "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice is required for model '%s'", i, entry.Model)
+				}
+				if entry.OutputPrice == "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice is required for model '%s'", i, entry.Model)
+				}
+				if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for model '%s'", i, entry.Model)
+				}
+				if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for model '%s'", i, entry.Model)
+				}
 			}
-			if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for model '%s'", i, entry.Model)
+
+			// Per-model tiers are optional; when present they must satisfy the
+			// same ordering/multiplier rules as service-level tiers.
+			if err := validatePricingTiers(fmt.Sprintf("service.modelPricing[%d].tiers", i), entry.Tiers); err != nil {
+				return err
 			}
+
 			if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].canonicalId %q must be bare lowercase (letters, digits, '-', '.') for model '%s'", i, entry.CanonicalID, entry.Model)
 			}
-			if _, exists := pricingMap[entry.Model]; exists {
-				return fmt.Errorf("invalid config: duplicate model '%s' in service.modelPricing", entry.Model)
-			}
-			pricingMap[entry.Model] = entry
-		}
-		cfg.Service.modelPricingMap = pricingMap
-
-		// service.model is the default applied when a request omits the model field;
-		// it must itself be a priced/allowlisted model, or such requests would be
-		// rejected by the allowlist (and penalized by the mismatch rate limiter).
-		if _, ok := pricingMap[cfg.Service.ModelType]; !ok {
-			return fmt.Errorf("invalid config: service.model '%s' must be one of the service.modelPricing entries", cfg.Service.ModelType)
 		}
 
-		// Auto-set on-chain InputPrice/OutputPrice to max(model prices)
-		maxInput, maxOutput := cfg.Service.MaxModelPrices()
-		cfg.Service.InputPrice = maxInput
-		cfg.Service.OutputPrice = maxOutput
+		// Build the derived lookup map (single source of truth; also detects
+		// duplicate model ids). The per-entry validation above establishes the
+		// precondition (denomination-correct, parseable prices) that the
+		// MaxModelPrices* helpers rely on.
+		if err := cfg.Service.BuildModelPricingMap(); err != nil {
+			return fmt.Errorf("invalid config: %w", err)
+		}
+
+		// service.model is the default applied when a request omits the model
+		// field; unless a wildcard ("*") entry catches all models, it must itself
+		// be a priced/allowlisted model, or such requests would be rejected by the
+		// allowlist (and penalized by the mismatch rate limiter).
+		if !hasWildcard && cfg.Service.GetModelPricing(cfg.Service.ModelType) == nil {
+			return fmt.Errorf("invalid config: service.model '%s' must be one of the service.modelPricing entries (or add a '%s' wildcard entry)", cfg.Service.ModelType, ModelWildcard)
+		}
+
+		// Auto-set the service-level on-chain price to the tier-adjusted max over
+		// all models, in the service's denomination. The existing single-price
+		// machinery (native registration, or the USD price feed) then advertises
+		// an on-chain ceiling that covers every served model at its worst-case
+		// tier — per-model billing always resolves to a price <= this ceiling.
+		if isUSD {
+			cfg.Service.InputPriceUSDPerMillionTokens, cfg.Service.OutputPriceUSDPerMillionTokens =
+				cfg.Service.MaxModelUSDPrices(cfg.TieredPricing.Tiers)
+		} else {
+			cfg.Service.InputPrice, cfg.Service.OutputPrice =
+				cfg.Service.MaxModelPricesNative(cfg.TieredPricing.Tiers)
+		}
 	}
 
 	return nil
