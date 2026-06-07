@@ -221,25 +221,35 @@ func TestResolveVideoBilling(t *testing.T) {
 		contentType string
 		wantSec     int64
 		wantSize    string
-		wantOK      bool
+		wantSource  string // "" means expect not-ok
 	}{
 		{
-			name:     "response has seconds and size (preferred)",
+			name:     "response has seconds and size (preferred, actual output)",
 			respBody: `{"seconds":8,"size":"1280x720"}`,
 			reqBody:  `{"seconds":5,"size":"832x480"}`,
-			wantSec:  8, wantSize: "1280x720", wantOK: true,
+			wantSec:  8, wantSize: "1280x720", wantSource: videoSourceResponse,
 		},
 		{
-			name:     "response lacks seconds, fall back to request (Wan2.7-style)",
+			// Bailian Wan2.7 via an OpenAI-compatible shim: actual duration is in
+			// usage.output_video_duration, not top-level seconds. We bill the ACTUAL
+			// output (5 from usage), size borrowed from the request — source=response.
+			name:     "response usage.output_video_duration is actual output",
 			respBody: `{"output":{"video_url":"https://x/y.mp4"},"usage":{"output_video_duration":5}}`,
-			reqBody:  `{"seconds":5,"size":"1024x1792"}`,
-			wantSec:  5, wantSize: "1024x1792", wantOK: true,
+			reqBody:  `{"seconds":9,"size":"1024x1792"}`,
+			wantSec:  5, wantSize: "1024x1792", wantSource: videoSourceResponse,
 		},
 		{
-			name:     "response not JSON, fall back to request",
+			// Upstream reports NO duration at all → degraded fallback to requested.
+			name:     "no response duration, fall back to requested (degraded)",
+			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:  `{"seconds":6,"size":"1280x720"}`,
+			wantSec:  6, wantSize: "1280x720", wantSource: videoSourceRequest,
+		},
+		{
+			name:     "response not JSON, fall back to requested (degraded)",
 			respBody: `not-json`,
 			reqBody:  `{"seconds":6,"size":"1280x720"}`,
-			wantSec:  6, wantSize: "1280x720", wantOK: true,
+			wantSec:  6, wantSize: "1280x720", wantSource: videoSourceRequest,
 		},
 		{
 			// Production transport: /v1/videos is multipart/form-data, NOT JSON.
@@ -249,14 +259,14 @@ func TestResolveVideoBilling(t *testing.T) {
 			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
 			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n8\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
 			contentType: mpCT,
-			wantSec:     8, wantSize: "1280x720", wantOK: true,
+			wantSec:     8, wantSize: "1280x720", wantSource: videoSourceRequest,
 		},
 		{
 			name:        "multipart request without seconds -> not ok (free-video guard)",
 			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
 			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwan2.7\r\n--bnd--\r\n",
 			contentType: mpCT,
-			wantOK:      false,
+			wantSource:  "",
 		},
 		{
 			// Security: a prompt value embedding a fake name="seconds" must NOT be
@@ -266,34 +276,34 @@ func TestResolveVideoBilling(t *testing.T) {
 			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
 			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na cat name=\"seconds\"\r\n\r\n1\r\n--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n60\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
 			contentType: mpCT,
-			wantSec:     60, wantSize: "1280x720", wantOK: true,
+			wantSec:     60, wantSize: "1280x720", wantSource: videoSourceRequest,
 		},
 		{
 			name:     "request omits size, borrow response size",
 			respBody: `{"size":"1792x1024"}`,
 			reqBody:  `{"seconds":4}`,
-			wantSec:  4, wantSize: "1792x1024", wantOK: true,
+			wantSec:  4, wantSize: "1792x1024", wantSource: videoSourceRequest,
 		},
 		{
-			name:     "neither has positive seconds -> not ok (free-video guard)",
-			respBody: `{"size":"1280x720"}`,
-			reqBody:  `{"prompt":"a cat"}`,
-			wantOK:   false,
+			name:       "neither has positive seconds -> not ok (free-video guard)",
+			respBody:   `{"size":"1280x720"}`,
+			reqBody:    `{"prompt":"a cat"}`,
+			wantSource: "",
 		},
 		{
-			name:     "zero seconds is not billable",
-			respBody: `{"seconds":0}`,
-			reqBody:  `{"seconds":0}`,
-			wantOK:   false,
+			name:       "zero seconds is not billable",
+			respBody:   `{"seconds":0}`,
+			reqBody:    `{"seconds":0}`,
+			wantSource: "",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sec, size, ok := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody), tt.contentType)
-			if ok != tt.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			sec, size, source := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody), tt.contentType)
+			if source != tt.wantSource {
+				t.Fatalf("source = %q, want %q", source, tt.wantSource)
 			}
-			if !ok {
+			if tt.wantSource == "" {
 				return
 			}
 			if sec != tt.wantSec {

@@ -54,44 +54,85 @@ func parseMultipartField(bodyStr, fieldName string) string {
 }
 
 // videoResponseFields holds the billing-relevant fields from a video generation
-// response. The same shape (seconds/size) is the broker's edge contract for the
-// request too, so it doubles as the request-fallback parse — see resolveVideoBilling.
+// response. seconds/size is the OpenAI-shaped top level; usage carries the
+// actual output duration the way an OpenAI-compatible shim in front of an async
+// vendor (e.g. Alibaba Wan2.7 → usage.output_video_duration) surfaces it. The
+// same seconds/size shape is also the broker's request edge contract, so the
+// struct doubles as the request-fallback parse — see resolveVideoBilling.
 type videoResponseFields struct {
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
+	Usage   *videoUsage `json:"usage"`
 }
 
-// resolveVideoBilling picks the billable (seconds, size) for a video request,
-// preferring the upstream response (actual generated output) and falling back to
-// the client request, which carries the same seconds/size the caller specified.
-// Many async video upstreams (e.g. Alibaba Wan2.7) return a 200 whose body does
-// NOT echo seconds/size in this shape — without the request fallback the caller
-// skips billing and serves the video for free. ok is false only when neither
-// source yields a positive duration.
-//
-// Limitation: the request fallback bills the REQUESTED duration, which can
-// exceed a partially-generated output. A per-providerIdentity response
-// normalizer (reading actual output + success) is the proper fix — see
-// docs/design/multimodal-billing.md.
-func resolveVideoBilling(respBody, reqBody []byte, contentType string) (seconds int64, size string, ok bool) {
-	// Response: the upstream returns JSON; prefer the actual generated output.
+// videoUsage is the optional usage block of a video response. output_video_duration
+// is the canonical actual-output field (Wan2.7 / DashScope-style); duration is a
+// common alias. Both are the ACTUAL generated length, which is what we bill on.
+type videoUsage struct {
+	OutputVideoDuration json.Number `json:"output_video_duration"`
+	Duration            json.Number `json:"duration"`
+}
+
+// actualSeconds returns the upstream-reported ACTUAL output duration from the
+// known response shapes (top-level seconds, then usage.output_video_duration,
+// then usage.duration), or 0 when none is present. This is the authoritative
+// billing basis — billing on the actual generated length, not the request.
+func (f videoResponseFields) actualSeconds() int64 {
+	if s, err := f.Seconds.Int64(); err == nil && s > 0 {
+		return s
+	}
+	if f.Usage != nil {
+		if s, err := f.Usage.OutputVideoDuration.Int64(); err == nil && s > 0 {
+			return s
+		}
+		if s, err := f.Usage.Duration.Int64(); err == nil && s > 0 {
+			return s
+		}
+	}
+	return 0
+}
+
+// Billing source for a resolved video duration. "response" is the upstream's
+// actual output (authoritative); "request" is the requested duration — a
+// DEGRADED fallback that can over-bill a partial generation, used only to avoid
+// serving free when the upstream reports no duration at all.
+const (
+	videoSourceResponse = "response"
+	videoSourceRequest  = "request"
+)
+
+// resolveVideoBilling picks the billable (seconds, size) for a video request and
+// reports its source. It prefers the upstream RESPONSE's actual output duration
+// (top-level seconds or a usage block — covering OpenAI-compatible shims over
+// async vendors like Wan2.7), satisfying "bill actual output". Only when the
+// upstream reports no duration does it fall back to the client request
+// (videoSourceRequest), which bills the REQUESTED duration — the caller logs
+// that as degraded. source is "" (and ok=false) only when neither yields a
+// positive duration, in which case the caller skips billing loudly.
+func resolveVideoBilling(respBody, reqBody []byte, contentType string) (seconds int64, size, source string) {
 	var rf videoResponseFields
 	_ = json.Unmarshal(respBody, &rf)
-	if s, err := rf.Seconds.Int64(); err == nil && s > 0 {
-		return s, rf.Size, true
+	// The request (multipart /v1/videos, occasionally JSON) supplies size when the
+	// response omits it, and the duration only as a last-resort fallback.
+	reqSec, reqSize := videoSecondsSizeFromRequest(reqBody, contentType)
+
+	// Resolution: response's own size wins; else the requested size (baseline 1.0
+	// when both empty). The resolution ratio is the same regardless of which
+	// duration source we bill on.
+	size = rf.Size
+	if size == "" {
+		size = reqSize
 	}
-	// Request fallback: the broker's video edge is multipart/form-data
-	// (OpenAI /v1/videos), occasionally JSON — read seconds/size from whichever
-	// shape the body actually is. JSON-only parsing here was a bug: it never
-	// matched the live multipart transport, so this fallback recovered nothing.
-	if s, reqSize := videoSecondsSizeFromRequest(reqBody, contentType); s > 0 {
-		sz := reqSize
-		if sz == "" {
-			sz = rf.Size // response size if the request omitted it (baseline ratio if both empty)
-		}
-		return s, sz, true
+
+	// Duration: the upstream's ACTUAL output (top-level seconds or usage) is
+	// authoritative; only when it reports nothing do we bill the requested length.
+	if s := rf.actualSeconds(); s > 0 {
+		return s, size, videoSourceResponse
 	}
-	return 0, "", false
+	if reqSec > 0 {
+		return reqSec, size, videoSourceRequest
+	}
+	return 0, "", ""
 }
 
 // videoSecondsSizeFromRequest extracts a positive integer `seconds` and the
@@ -207,7 +248,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	if reqModel.IsWhitelisted {
 		// Whitelist traffic is unbilled; record metrics only (same response→request fallback).
-		if sec, size, ok := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); ok {
+		if sec, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); source != "" {
 			outputCount := c.videoOutputUnits(ctx, sec, size)
 			monitor.RecordTokens("video-generation", 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", 0, outputCount)
@@ -219,13 +260,20 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	// Resolve billable seconds/size, preferring the upstream response (actual
 	// output) and falling back to the client request.
-	seconds, size, ok := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type"))
-	if !ok {
+	seconds, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type"))
+	if source == "" {
 		// Returning here would serve the video FREE — make it loud + metered,
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
 		c.logger.Errorf("video billing indeterminate: no positive seconds in response or request, NOT billing request %s (free output)", reqModel.RequestHash)
 		monitor.RecordVideoBillingSkipped()
 		return nil
+	}
+	if source == videoSourceRequest {
+		// Billed the REQUESTED duration because the upstream reported no actual
+		// output duration — this violates "bill actual output" and can over-bill a
+		// partial generation. Surface it so the operator fixes the upstream/shim to
+		// echo seconds (or usage.output_video_duration).
+		c.logger.Warnf("video billed on REQUESTED duration (upstream did not report actual output) for request %s; configure the upstream/shim to echo seconds or usage.output_video_duration", reqModel.RequestHash)
 	}
 
 	outputCount := c.videoOutputUnits(ctx, seconds, size)
