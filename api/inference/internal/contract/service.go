@@ -94,44 +94,19 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		}
 	}
 
-	// Publish the full per-model pricing table on-chain so SDK/CLI/users can read
-	// and verify exact per-model prices (same pattern as tieredPricing above; the
-	// structured on-chain inputPrice/outputPrice only carries the max-over-models
-	// ceiling). Prices are surfaced in the service's denomination; for USD the
-	// stable USD figures are published (the volatile wei lives in the structured
-	// price field, refreshed by the price feed). Wildcard ("*") entries are
-	// included so clients learn unlisted models are served at that catch-all price.
+	// Multi-model: publish only a compact summary on-chain — the MultiModel flag and
+	// the price denomination. The full per-model pricing table is intentionally NOT
+	// written to chain: it is served off-chain via GET /v1/models (the actual
+	// consumer, the router's catalog sync, reads pricing/canonical/tiers from there,
+	// never from chain — its on-chain ServiceAdditionalInfo struct doesn't even have
+	// a modelPricing field), and the structured on-chain inputPrice/outputPrice
+	// already carries the max-over-models ceiling that bounds the worst-case charge.
+	// Enumerating every model here would bloat contract storage (and gas) unboundedly
+	// for providers that proxy hundreds of models; this summary stays O(1) regardless
+	// of model count. Clients needing exact per-model prices read /v1/models.
 	if service.HasMultiModelPricing() {
 		additionalInfo["MultiModel"] = true
 		additionalInfo["priceDenomination"] = service.PriceDenomination
-		models := make([]map[string]interface{}, 0, len(service.ModelPricing))
-		for i := range service.ModelPricing {
-			mp := &service.ModelPricing[i]
-			entry := map[string]interface{}{"model": mp.Model}
-			if service.IsUSDDenominated() {
-				entry["inputPriceUSDPerMillionTokens"] = mp.InputPriceUSDPerMillionTokens
-				entry["outputPriceUSDPerMillionTokens"] = mp.OutputPriceUSDPerMillionTokens
-			} else {
-				entry["inputPrice"] = mp.InputPrice
-				entry["outputPrice"] = mp.OutputPrice
-			}
-			if mp.CanonicalID != "" {
-				entry["canonicalId"] = mp.CanonicalID
-			}
-			if len(mp.Tiers) > 0 {
-				tiers := make([]map[string]interface{}, len(mp.Tiers))
-				for j, t := range mp.Tiers {
-					tiers[j] = map[string]interface{}{
-						"maxInputTokens":   t.MaxInputTokens,
-						"inputMultiplier":  t.InputMultiplier,
-						"outputMultiplier": t.OutputMultiplier,
-					}
-				}
-				entry["tiers"] = tiers
-			}
-			models = append(models, entry)
-		}
-		additionalInfo["modelPricing"] = models
 	}
 
 	additionalInfoJSON, err := json.Marshal(additionalInfo)
