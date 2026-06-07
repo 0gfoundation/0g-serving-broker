@@ -1359,6 +1359,41 @@ priceFeed:
 	}
 }
 
+func TestLoadConfig_ModelPricing_Video_USDWhitespaceNoPanic(t *testing.T) {
+	// A whitespace-padded outputPriceUSDPerSecond (e.g. a YAML quoted/blocked
+	// scalar) passes validateUSDPriceString (which trims) but big.Rat.SetString
+	// rejects it verbatim. The normalization must parse the TRIMMED value, not
+	// panic on a nil rat. Here it should load cleanly and normalize to 20000.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  modelPricing:
+    - model: "wan2.7"
+      outputPriceUSDPerSecond: " 0.02 "
+      billing:
+        mode: "per_video_second"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("whitespace-padded USD/sec should load (trimmed), got: %v", err)
+	}
+	if got := cfg.Service.GetModelPricing("wan2.7"); got == nil || got.OutputPriceUSDPerMillionTokens != "20000" {
+		t.Errorf("expected normalized 20000 from trimmed 0.02, got %+v", got)
+	}
+}
+
 func TestLoadConfig_ModelPricing_Video_PerVideoSecond(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

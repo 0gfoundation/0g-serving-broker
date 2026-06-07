@@ -618,7 +618,13 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 		// Normalize per-second USD into the per-1M-unit representation the shared USD
 		// pipeline consumes: weiPerUnit = (usdPerSec*1e6)/1e6/rate*1e18 = usdPerSec/rate*1e18.
 		// The "unit" is the effective output second; input side is 0.
-		perSec, _ := new(big.Rat).SetString(entry.OutputPriceUSDPerSecond)
+		// Parse the TRIMMED value (validateUSDPriceString trims before validating, so
+		// a whitespace-padded string passes validation but big.Rat.SetString rejects
+		// it verbatim → nil); the ok-check turns that into a clear error, not a panic.
+		perSec, ok := new(big.Rat).SetString(strings.TrimSpace(entry.OutputPriceUSDPerSecond))
+		if !ok {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond %q is not a valid decimal for model '%s'", i, entry.OutputPriceUSDPerSecond, entry.Model)
+		}
 		entry.OutputPriceUSDPerMillionTokens = ratToDecimalString(new(big.Rat).Mul(perSec, big.NewRat(1_000_000, 1)))
 		entry.InputPriceUSDPerMillionTokens = "0"
 	} else {
