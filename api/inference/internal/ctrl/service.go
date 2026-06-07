@@ -350,7 +350,18 @@ const CtxKeyResolvedModel = "resolvedModel"
 // Every fallback below is overcharge-safe (the on-chain price is the tier-adjusted
 // max over all models, so it is >= any per-model price) but on a multi-model
 // provider it should never trigger — the request path always sets the resolved
-// model. Each fallback therefore logs at ERROR with enough context to diagnose
+// model.
+//
+// NOTE on units: for token modalities InputPrice/OutputPrice are per-token and
+// the fee is tokens × price, so the on-chain max is a true per-request ceiling.
+// For video-generation, OutputPrice is a per-EFFECTIVE-UNIT price (per second,
+// scaled by the resolution ratio) — the on-chain max bounds the per-unit price,
+// NOT the per-request fee, which scales with the requested duration/resolution.
+// Consumers must read the per-model billing shape (published in /v1/models) to
+// reconstruct the unit count; this matches single-model video, where OutputPrice
+// has always been per-effective-second.
+//
+// Each fallback therefore logs at ERROR with enough context to diagnose
 // the broken invariant, rather than silently overbilling.
 func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 	if c.Service.HasMultiModelPricing() {

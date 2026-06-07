@@ -213,13 +213,15 @@ func TestGetVideoSizeRatio(t *testing.T) {
 // reports ok=false only when neither source has a positive duration (the
 // caller then skips billing loudly + metered instead of serving free).
 func TestResolveVideoBilling(t *testing.T) {
+	const mpCT = "multipart/form-data; boundary=bnd"
 	tests := []struct {
-		name     string
-		respBody string
-		reqBody  string
-		wantSec  int64
-		wantSize string
-		wantOK   bool
+		name        string
+		respBody    string
+		reqBody     string
+		contentType string
+		wantSec     int64
+		wantSize    string
+		wantOK      bool
 	}{
 		{
 			name:     "response has seconds and size (preferred)",
@@ -243,16 +245,28 @@ func TestResolveVideoBilling(t *testing.T) {
 			// Production transport: /v1/videos is multipart/form-data, NOT JSON.
 			// The request fallback must parse multipart, else Wan2.7-style upstreams
 			// (200 without echoing seconds) bill nothing — the bug this guards.
-			name:     "multipart request fallback (live transport)",
-			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,
-			reqBody:  "--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n8\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
-			wantSec:  8, wantSize: "1280x720", wantOK: true,
+			name:        "multipart request fallback (live transport)",
+			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n8\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
+			contentType: mpCT,
+			wantSec:     8, wantSize: "1280x720", wantOK: true,
 		},
 		{
-			name:     "multipart request without seconds -> not ok (free-video guard)",
-			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,
-			reqBody:  "--bnd\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwan2.7\r\n--bnd--\r\n",
-			wantOK:   false,
+			name:        "multipart request without seconds -> not ok (free-video guard)",
+			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwan2.7\r\n--bnd--\r\n",
+			contentType: mpCT,
+			wantOK:      false,
+		},
+		{
+			// Security: a prompt value embedding a fake name="seconds" must NOT be
+			// mistaken for the real seconds field (substring-scan underbilling). The
+			// strict MIME parser reads the genuine field (60), not the injected 1.
+			name:        "multipart prompt-injection cannot spoof seconds",
+			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na cat name=\"seconds\"\r\n\r\n1\r\n--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n60\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
+			contentType: mpCT,
+			wantSec:     60, wantSize: "1280x720", wantOK: true,
 		},
 		{
 			name:     "request omits size, borrow response size",
@@ -275,7 +289,7 @@ func TestResolveVideoBilling(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sec, size, ok := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody))
+			sec, size, ok := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody), tt.contentType)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -342,5 +356,33 @@ func TestVideoOutputUnits_PerModelAndFallback(t *testing.T) {
 	cs := &Ctrl{logger: testLogger(), Service: config.Service{}}
 	if got := cs.videoOutputUnits(ginCtxWithResolvedModel(""), 5, "1024x1792"); got != 10 {
 		t.Errorf("single-model fallback units = %d, want 10", got)
+	}
+}
+
+// TestVideoOutputUnits_PerUnitTableMiss verifies a bucketed-model request for an
+// unlisted (resolution, duration) bills the table MAX, never the seconds×ratio
+// formula (which would underbill, and which a client could force by requesting
+// an untabled combo).
+func TestVideoOutputUnits_PerUnitTableMiss(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "minimax-hailuo",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 12}, // table max
+			},
+		},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo")}
+
+	// Exact bucket hit.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 6, "768P"); got != 6 {
+		t.Errorf("table hit (768P,6) = %d, want 6", got)
+	}
+	// Miss (duration 8 not tabled): must bill table-max (12), NOT ceil(8*1.0)=8.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 8, "768P"); got != 12 {
+		t.Errorf("table miss = %d, want table-max 12 (never the seconds-ratio underbill)", got)
 	}
 }

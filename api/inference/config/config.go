@@ -304,6 +304,20 @@ func scaledUnits(count int64, multiplier float64) (int64, error) {
 	return int64(v), nil
 }
 
+// MaxTableUnits returns the largest units value in a per_unit_table, or 0 when
+// the table is empty. Used as the conservative fee basis when a live
+// (resolution, duration) isn't in the table — bill the most expensive configured
+// bucket rather than undercharge below it.
+func (b *BillingConfig) MaxTableUnits() int64 {
+	var max int64
+	for _, t := range b.Table {
+		if t.Units > max {
+			max = t.Units
+		}
+	}
+	return max
+}
+
 // validBillingModeForType reports whether a billing mode is allowed for a
 // service type. per_token is valid everywhere (the default); the non-token modes
 // are restricted to the modality whose output they price.

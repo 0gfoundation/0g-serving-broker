@@ -73,7 +73,7 @@ type videoResponseFields struct {
 // exceed a partially-generated output. A per-providerIdentity response
 // normalizer (reading actual output + success) is the proper fix — see
 // docs/design/multimodal-billing.md.
-func resolveVideoBilling(respBody, reqBody []byte) (seconds int64, size string, ok bool) {
+func resolveVideoBilling(respBody, reqBody []byte, contentType string) (seconds int64, size string, ok bool) {
 	// Response: the upstream returns JSON; prefer the actual generated output.
 	var rf videoResponseFields
 	_ = json.Unmarshal(respBody, &rf)
@@ -84,7 +84,7 @@ func resolveVideoBilling(respBody, reqBody []byte) (seconds int64, size string, 
 	// (OpenAI /v1/videos), occasionally JSON — read seconds/size from whichever
 	// shape the body actually is. JSON-only parsing here was a bug: it never
 	// matched the live multipart transport, so this fallback recovered nothing.
-	if s, reqSize := videoSecondsSizeFromRequest(reqBody); s > 0 {
+	if s, reqSize := videoSecondsSizeFromRequest(reqBody, contentType); s > 0 {
 		sz := reqSize
 		if sz == "" {
 			sz = rf.Size // response size if the request omitted it (baseline ratio if both empty)
@@ -98,7 +98,11 @@ func resolveVideoBilling(respBody, reqBody []byte) (seconds int64, size string, 
 // `size` from a video request body, handling both JSON and multipart/form-data
 // (the live transport for /v1/videos). Returns (0, "") when no positive seconds
 // is present in either shape.
-func videoSecondsSizeFromRequest(reqBody []byte) (int64, string) {
+//
+// The multipart path uses a real MIME reader (multipartFormField), NOT a
+// substring scan: these fields drive the fee, and a substring scan would let a
+// client embed a fake name="seconds" inside the prompt value to underbill.
+func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, string) {
 	if len(reqBody) == 0 {
 		return 0, ""
 	}
@@ -109,9 +113,8 @@ func videoSecondsSizeFromRequest(reqBody []byte) (int64, string) {
 			return s, qf.Size
 		}
 	}
-	// multipart/form-data shape (same parser the model/wait fields use).
-	body := string(reqBody)
-	secStr := parseMultipartField(body, "seconds")
+	// multipart/form-data shape.
+	secStr := multipartFormField(reqBody, contentType, "seconds")
 	if secStr == "" {
 		return 0, ""
 	}
@@ -119,26 +122,39 @@ func videoSecondsSizeFromRequest(reqBody []byte) (int64, string) {
 	if err != nil || s <= 0 {
 		return 0, ""
 	}
-	return s, parseMultipartField(body, "size")
+	return s, multipartFormField(reqBody, contentType, "size")
 }
 
 // videoOutputCount converts (seconds, sizeRatio) into the billable effective
-// output count: ceil(seconds × ratio), floored at 1.
+// output count: ceil(seconds × ratio), floored at 1. Bounds the int64 conversion
+// (an absurd seconds × ratio only over-charges the abusive caller, never wraps).
 func videoOutputCount(seconds int64, sizeRatio float64) int64 {
-	count := int64(math.Ceil(float64(seconds) * sizeRatio))
-	if count < 1 {
-		count = 1
+	v := math.Ceil(float64(seconds) * sizeRatio)
+	switch {
+	case math.IsNaN(v) || v < 1:
+		return 1
+	case math.IsInf(v, 0) || v > float64(maxVideoOutputUnits):
+		return maxVideoOutputUnits
+	default:
+		return int64(v)
 	}
-	return count
 }
+
+// maxVideoOutputUnits bounds the legacy/fallback video unit count, mirroring the
+// engine's maxBillableUnits — far above any real clip (15s × 8 ratio = 120).
+const maxVideoOutputUnits = 1 << 40
 
 // videoOutputUnits computes the billable effective-output count for a video
 // request. For a multi-model provider whose resolved model carries a per-model
 // billing block, it uses that model's shape (per_video_second resolution ratios
 // / per_unit_table); otherwise it falls back to the service-level size-ratio
-// path (single-model — byte-for-byte unchanged). On a per-model billing error
-// (e.g. a per_unit_table miss or out-of-range product) it logs and falls back to
-// the service ratio so the request is still billed rather than served free.
+// path (single-model — byte-for-byte unchanged).
+//
+// On a per_unit_table miss (a live (resolution, duration) the operator didn't
+// table), it bills the table's MAX units — never the seconds×serviceRatio
+// formula, which uses an unrelated resolution vocabulary and would underbill the
+// bucket (a client could force this by requesting an unlisted combo). The miss
+// is logged loudly so the operator adds the row.
 func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string) int64 {
 	if c.Service.HasMultiModelPricing() {
 		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
@@ -146,7 +162,16 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 			if err == nil {
 				return units
 			}
-			c.logger.Errorf("video per-model OutputUnits failed (model billing misconfigured for this request), falling back to service size-ratio: %v", err)
+			// Bucketed (per_unit_table) miss: bill the most expensive configured
+			// bucket rather than dropping to the seconds-ratio formula (which would
+			// underbill). Conservative + loud, never below the table.
+			if e.Billing.Mode == config.BillingModePerUnitTable {
+				if mx := e.Billing.MaxTableUnits(); mx > 0 {
+					c.logger.Errorf("video per_unit_table miss (seconds=%d, size=%q): billing table-max %d units; operator should add this row: %v", seconds, size, mx, err)
+					return mx
+				}
+			}
+			c.logger.Errorf("video per-model OutputUnits failed (model billing misconfigured), falling back to service size-ratio: %v", err)
 		}
 	}
 	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
@@ -182,7 +207,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	if reqModel.IsWhitelisted {
 		// Whitelist traffic is unbilled; record metrics only (same response→request fallback).
-		if sec, size, ok := resolveVideoBilling(body, reqBody); ok {
+		if sec, size, ok := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); ok {
 			outputCount := c.videoOutputUnits(ctx, sec, size)
 			monitor.RecordTokens("video-generation", 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", 0, outputCount)
@@ -194,7 +219,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	// Resolve billable seconds/size, preferring the upstream response (actual
 	// output) and falling back to the client request.
-	seconds, size, ok := resolveVideoBilling(body, reqBody)
+	seconds, size, ok := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type"))
 	if !ok {
 		// Returning here would serve the video FREE — make it loud + metered,
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).

@@ -134,6 +134,17 @@ func ExtractModelName(body []byte, contentType string) string {
 // body. Returns "" if the boundary can't be parsed, the field is missing, or any
 // read error occurs — callers treat "" as "use the default model".
 func extractModelFromMultipart(body []byte, contentType string) string {
+	return multipartFormField(body, contentType, "model")
+}
+
+// multipartFormField returns the value of a named non-file form field from a
+// multipart/form-data body using a real MIME reader (NOT a substring scan), so
+// adversarial content in another field — e.g. a prompt body containing the
+// literal name="seconds" — cannot be mistaken for the field. Returns "" when the
+// content type isn't multipart, the boundary is missing, or the field is absent.
+// The read is capped so a mislabeled file part can't pull unbounded memory; used
+// for short scalar fields (model, seconds, size).
+func multipartFormField(body []byte, contentType, name string) string {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return ""
@@ -146,11 +157,9 @@ func extractModelFromMultipart(body []byte, contentType string) string {
 	for {
 		part, err := reader.NextPart()
 		if err != nil {
-			return "" // io.EOF (model field absent) or a malformed body
+			return "" // io.EOF (field absent) or a malformed body
 		}
-		if part.FormName() == "model" && part.FileName() == "" {
-			// Model names are short; cap the read so a mislabeled file part can't
-			// pull an unbounded amount into memory.
+		if part.FormName() == name && part.FileName() == "" {
 			val, _ := io.ReadAll(io.LimitReader(part, 1024))
 			part.Close()
 			return strings.TrimSpace(string(val))
