@@ -1151,6 +1151,21 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.ModelType == "" {
 			return fmt.Errorf("invalid config: service.model is required when service.modelPricing is configured")
 		}
+		// The multi-model request path (ValidateModelAllowlist) preserves and
+		// forwards the requested model verbatim; it never consults the
+		// single-model rewrite knobs (PrepareHTTPRequest's multi-model branch
+		// short-circuits before the ModelAliases / UpstreamModel branch). So a
+		// config that sets either alongside modelPricing would have it SILENTLY
+		// ignored — the worst kind of misconfiguration. Reject it at load time:
+		// per-model aliasing and incoming→upstream rewrite are not supported here
+		// (they are the router canonical-mapping layer's job, which rewrites to
+		// the exact advertised model id before the request reaches this broker).
+		if len(cfg.Service.ModelAliases) > 0 {
+			return fmt.Errorf("invalid config: service.modelAliases is not supported with service.modelPricing (the multi-model path forwards the requested model verbatim; per-model aliasing is the router's canonical-mapping job)")
+		}
+		if cfg.Service.UpstreamModel != "" {
+			return fmt.Errorf("invalid config: service.upstreamModel is not supported with service.modelPricing (the multi-model path forwards the requested model verbatim; per-model upstream rewrite is not implemented)")
+		}
 		isUSD := cfg.Service.IsUSDDenominated()
 
 		hasWildcard := false

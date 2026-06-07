@@ -477,6 +477,56 @@ service:
 	}
 }
 
+func TestLoadConfig_ModelPricing_RejectsModelAliases(t *testing.T) {
+	// modelAliases is a single-model rewrite knob the multi-model path never
+	// consults (it forwards the requested model verbatim). Configuring both must
+	// fail at load time rather than silently ignore the aliases.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  modelAliases: ["gpt4o-legacy"]
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "modelAliases") {
+		t.Fatalf("expected modelAliases-not-supported error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_RejectsUpstreamModel(t *testing.T) {
+	// upstreamModel rewrites incoming→upstream, which the multi-model path does
+	// not implement (no per-entry upstream rewrite). Configuring both must fail
+	// at load time rather than silently ignore the rewrite.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  upstreamModel: "openai/gpt-4o"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "upstreamModel") {
+		t.Fatalf("expected upstreamModel-not-supported error, got: %v", err)
+	}
+}
+
 func TestLoadConfig_CanonicalID_RejectsNamespaced(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
