@@ -50,14 +50,57 @@ func parseMultipartField(bodyStr, fieldName string) string {
 	return strings.TrimSpace(bodyStr[valueStart:end])
 }
 
-// videoResponseFields holds the billing-relevant fields from a video generation response.
+// videoResponseFields holds the billing-relevant fields from a video generation
+// response. The same shape (seconds/size) is the broker's edge contract for the
+// request too, so it doubles as the request-fallback parse — see resolveVideoBilling.
 type videoResponseFields struct {
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
 }
 
+// resolveVideoBilling picks the billable (seconds, size) for a video request,
+// preferring the upstream response (actual generated output) and falling back to
+// the client request, which carries the same seconds/size the caller specified.
+// Many async video upstreams (e.g. Alibaba Wan2.7) return a 200 whose body does
+// NOT echo seconds/size in this shape — without the request fallback the caller
+// skips billing and serves the video for free. ok is false only when neither
+// source yields a positive duration.
+//
+// Limitation: the request fallback bills the REQUESTED duration, which can
+// exceed a partially-generated output. A per-providerIdentity response
+// normalizer (reading actual output + success) is the proper fix — see
+// docs/design/multimodal-billing.md.
+func resolveVideoBilling(respBody, reqBody []byte) (seconds int64, size string, ok bool) {
+	var rf videoResponseFields
+	_ = json.Unmarshal(respBody, &rf)
+	if s, err := rf.Seconds.Int64(); err == nil && s > 0 {
+		return s, rf.Size, true
+	}
+	var qf videoResponseFields
+	_ = json.Unmarshal(reqBody, &qf)
+	if s, err := qf.Seconds.Int64(); err == nil && s > 0 {
+		sz := qf.Size
+		if sz == "" {
+			sz = rf.Size // response size if the request omitted it (baseline ratio if both empty)
+		}
+		return s, sz, true
+	}
+	return 0, "", false
+}
+
+// videoOutputCount converts (seconds, sizeRatio) into the billable effective
+// output count: ceil(seconds × ratio), floored at 1.
+func videoOutputCount(seconds int64, sizeRatio float64) int64 {
+	count := int64(math.Ceil(float64(seconds) * sizeRatio))
+	if count < 1 {
+		count = 1
+	}
+	return count
+}
+
 // handleVideoGenerationResponse handles the POST /videos response from the provider.
-// Billing is computed from the provider's response (actual seconds/size), not from the request.
+// Billing prefers the provider's response (actual seconds/size) and falls back to
+// the client request when the upstream doesn't echo them (see resolveVideoBilling).
 // Fee = ceil(seconds × sizeRatio) × outputPrice.
 func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
@@ -84,42 +127,30 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	}
 
 	if reqModel.IsWhitelisted {
-		// Parse seconds from response for whitelist traffic metrics
-		var wlFields videoResponseFields
-		if err := json.Unmarshal(body, &wlFields); err != nil {
-			c.logger.Warnf("whitelist video: failed to parse response for metrics: %v", err)
-		} else if sec, err := wlFields.Seconds.Int64(); err != nil {
-			c.logger.Warnf("whitelist video: failed to parse seconds field: %v", err)
-		} else if sec <= 0 {
-			c.logger.Warnf("whitelist video: invalid seconds value: %d", sec)
-		} else {
-			sizeRatio := c.Service.GetVideoSizeRatio(wlFields.Size)
-			outputCount := int64(math.Ceil(float64(sec) * sizeRatio))
+		// Whitelist traffic is unbilled; record metrics only (same response→request fallback).
+		if sec, size, ok := resolveVideoBilling(body, reqBody); ok {
+			outputCount := videoOutputCount(sec, c.Service.GetVideoSizeRatio(size))
 			monitor.RecordTokens("video-generation", 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", 0, outputCount)
+		} else {
+			c.logger.Warnf("whitelist video: no usable seconds in response or request, skipping metrics for %s", reqModel.RequestHash)
 		}
 		return nil
 	}
 
-	// Parse actual seconds and size from the provider's JSON response
-	var fields videoResponseFields
-	if err := json.Unmarshal(body, &fields); err != nil {
-		return errors.Wrap(err, "parse video generation response for billing")
-	}
-
-	seconds, err := fields.Seconds.Int64()
-	if err != nil || seconds <= 0 {
-		c.logger.Warnf("video response missing or invalid seconds field, skipping billing: %v", err)
+	// Resolve billable seconds/size, preferring the upstream response (actual
+	// output) and falling back to the client request.
+	seconds, size, ok := resolveVideoBilling(body, reqBody)
+	if !ok {
+		// Returning here would serve the video FREE — make it loud + metered,
+		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
+		c.logger.Errorf("video billing indeterminate: no positive seconds in response or request, NOT billing request %s (free output)", reqModel.RequestHash)
+		monitor.RecordVideoBillingSkipped()
 		return nil
 	}
 
-	sizeRatio := c.Service.GetVideoSizeRatio(fields.Size)
-
-	// Effective output count = ceil(seconds × sizeRatio)
-	outputCount := int64(math.Ceil(float64(seconds) * sizeRatio))
-	if outputCount < 1 {
-		outputCount = 1
-	}
+	sizeRatio := c.Service.GetVideoSizeRatio(size)
+	outputCount := videoOutputCount(seconds, sizeRatio)
 
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {

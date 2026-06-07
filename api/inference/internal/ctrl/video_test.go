@@ -206,3 +206,93 @@ func TestGetVideoSizeRatio(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveVideoBilling covers the P0 fix for video underbilling: billing
+// prefers the upstream response's seconds/size, falls back to the client
+// request when the upstream doesn't echo them (e.g. Alibaba Wan2.7), and
+// reports ok=false only when neither source has a positive duration (the
+// caller then skips billing loudly + metered instead of serving free).
+func TestResolveVideoBilling(t *testing.T) {
+	tests := []struct {
+		name     string
+		respBody string
+		reqBody  string
+		wantSec  int64
+		wantSize string
+		wantOK   bool
+	}{
+		{
+			name:     "response has seconds and size (preferred)",
+			respBody: `{"seconds":8,"size":"1280x720"}`,
+			reqBody:  `{"seconds":5,"size":"832x480"}`,
+			wantSec:  8, wantSize: "1280x720", wantOK: true,
+		},
+		{
+			name:     "response lacks seconds, fall back to request (Wan2.7-style)",
+			respBody: `{"output":{"video_url":"https://x/y.mp4"},"usage":{"output_video_duration":5}}`,
+			reqBody:  `{"seconds":5,"size":"1024x1792"}`,
+			wantSec:  5, wantSize: "1024x1792", wantOK: true,
+		},
+		{
+			name:     "response not JSON, fall back to request",
+			respBody: `not-json`,
+			reqBody:  `{"seconds":6,"size":"1280x720"}`,
+			wantSec:  6, wantSize: "1280x720", wantOK: true,
+		},
+		{
+			name:     "request omits size, borrow response size",
+			respBody: `{"size":"1792x1024"}`,
+			reqBody:  `{"seconds":4}`,
+			wantSec:  4, wantSize: "1792x1024", wantOK: true,
+		},
+		{
+			name:     "neither has positive seconds -> not ok (free-video guard)",
+			respBody: `{"size":"1280x720"}`,
+			reqBody:  `{"prompt":"a cat"}`,
+			wantOK:   false,
+		},
+		{
+			name:     "zero seconds is not billable",
+			respBody: `{"seconds":0}`,
+			reqBody:  `{"seconds":0}`,
+			wantOK:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sec, size, ok := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody))
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if sec != tt.wantSec {
+				t.Errorf("seconds = %d, want %d", sec, tt.wantSec)
+			}
+			if size != tt.wantSize {
+				t.Errorf("size = %q, want %q", size, tt.wantSize)
+			}
+		})
+	}
+}
+
+// TestVideoOutputCount pins the effective-count rounding (ceil, floored at 1).
+func TestVideoOutputCount(t *testing.T) {
+	cases := []struct {
+		seconds int64
+		ratio   float64
+		want    int64
+	}{
+		{5, 1.0, 5},
+		{5, 2.25, 12}, // ceil(11.25)
+		{8, 0.5, 4},
+		{1, 0.0, 1}, // floored at 1
+		{0, 2.0, 1}, // floored at 1
+	}
+	for _, c := range cases {
+		if got := videoOutputCount(c.seconds, c.ratio); got != c.want {
+			t.Errorf("videoOutputCount(%d, %v) = %d, want %d", c.seconds, c.ratio, got, c.want)
+		}
+	}
+}
