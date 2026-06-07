@@ -239,6 +239,21 @@ func TestResolveVideoBilling(t *testing.T) {
 			wantSec:  5, wantSize: "1024x1792", wantSource: videoSourceResponse,
 		},
 		{
+			// A shim may serialize the actual duration as a float ("7.5"). Int64()
+			// errors on those; we must still bill the actual output (ceil) via the
+			// response, not drop to the request.
+			name:     "float actual duration billed via response (ceil)",
+			respBody: `{"seconds":7.5,"size":"1280x720"}`,
+			reqBody:  `{"seconds":3,"size":"832x480"}`,
+			wantSec:  8, wantSize: "1280x720", wantSource: videoSourceResponse,
+		},
+		{
+			name:     "float usage.output_video_duration billed via response",
+			respBody: `{"usage":{"output_video_duration":5.0}}`,
+			reqBody:  `{"seconds":9,"size":"1024x1792"}`,
+			wantSec:  5, wantSize: "1024x1792", wantSource: videoSourceResponse,
+		},
+		{
 			// Upstream reports NO duration at all → degraded fallback to requested.
 			name:     "no response duration, fall back to requested (degraded)",
 			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,

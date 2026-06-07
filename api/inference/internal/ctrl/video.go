@@ -78,18 +78,32 @@ type videoUsage struct {
 // then usage.duration), or 0 when none is present. This is the authoritative
 // billing basis — billing on the actual generated length, not the request.
 func (f videoResponseFields) actualSeconds() int64 {
-	if s, err := f.Seconds.Int64(); err == nil && s > 0 {
+	if s, ok := ceilSeconds(f.Seconds); ok {
 		return s
 	}
 	if f.Usage != nil {
-		if s, err := f.Usage.OutputVideoDuration.Int64(); err == nil && s > 0 {
+		if s, ok := ceilSeconds(f.Usage.OutputVideoDuration); ok {
 			return s
 		}
-		if s, err := f.Usage.Duration.Int64(); err == nil && s > 0 {
+		if s, ok := ceilSeconds(f.Usage.Duration); ok {
 			return s
 		}
 	}
 	return 0
+}
+
+// ceilSeconds parses a duration json.Number that may be integer- OR float-encoded
+// (a JSON serializer / OpenAI-compatible shim may emit "5.0" or "7.5"), returning
+// ceil(value) for a strictly-positive, finite, in-range value. json.Number.Int64()
+// ERRORS on any float literal, which would silently drop a real actual-output
+// duration and mis-bill — so parse as float and round up. Out-of-range guards
+// against an absurd value overflowing the int64 conversion.
+func ceilSeconds(n json.Number) (int64, bool) {
+	f, err := n.Float64()
+	if err != nil || !(f > 0) || math.IsInf(f, 0) || f > float64(maxVideoOutputUnits) {
+		return 0, false
+	}
+	return int64(math.Ceil(f)), true
 }
 
 // Billing source for a resolved video duration. "response" is the upstream's
@@ -147,10 +161,10 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 	if len(reqBody) == 0 {
 		return 0, ""
 	}
-	// JSON shape.
+	// JSON shape (float-tolerant: a client may send "seconds": 5.0).
 	var qf videoResponseFields
 	if json.Unmarshal(reqBody, &qf) == nil {
-		if s, err := qf.Seconds.Int64(); err == nil && s > 0 {
+		if s, ok := ceilSeconds(qf.Seconds); ok {
 			return s, qf.Size
 		}
 	}
@@ -159,11 +173,11 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 	if secStr == "" {
 		return 0, ""
 	}
-	s, err := strconv.ParseInt(strings.TrimSpace(secStr), 10, 64)
-	if err != nil || s <= 0 {
+	f, err := strconv.ParseFloat(strings.TrimSpace(secStr), 64)
+	if err != nil || !(f > 0) || math.IsInf(f, 0) || f > float64(maxVideoOutputUnits) {
 		return 0, ""
 	}
-	return s, multipartFormField(reqBody, contentType, "size")
+	return int64(math.Ceil(f)), multipartFormField(reqBody, contentType, "size")
 }
 
 // videoOutputCount converts (seconds, sizeRatio) into the billable effective
