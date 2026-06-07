@@ -527,6 +527,88 @@ service:
 	}
 }
 
+func TestLoadConfig_ModelPricing_PerModelModelInfo(t *testing.T) {
+	// Per-model modelInfo is surfaced per entry; an entry without its own block
+	// falls back to the service-level modelInfo at render time (validated here:
+	// the per-entry block is stored on the entry, the bare entry keeps nil).
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelInfo:
+    name: "Service Default"
+    description: "service-level fallback"
+    contextLength: 8192
+    architecture:
+      modality: "text->text"
+      inputModalities: ["text"]
+      outputModalities: ["text"]
+    supportedParameters: ["temperature"]
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelInfo:
+        name: "GPT-4o"
+        description: "OpenAI flagship"
+        contextLength: 128000
+        architecture:
+          modality: "text->text"
+          inputModalities: ["text", "image"]
+          outputModalities: ["text"]
+        supportedParameters: ["temperature", "top_p"]
+    - model: "gpt-4o-mini"
+      inputPrice: "1"
+      outputPrice: "3"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("per-model modelInfo should be allowed, got: %v", err)
+	}
+	if got := cfg.Service.GetModelPricing("gpt-4o"); got == nil || got.ModelInfo == nil || got.ModelInfo.ContextLength != 128000 {
+		t.Errorf("expected gpt-4o to carry its own modelInfo (contextLength 128000), got %+v", got)
+	}
+	// The bare entry keeps nil; render falls back to service-level modelInfo.
+	if got := cfg.Service.GetModelPricing("gpt-4o-mini"); got == nil || got.ModelInfo != nil {
+		t.Errorf("expected gpt-4o-mini to have no per-model modelInfo (falls back at render), got %+v", got)
+	}
+}
+
+func TestLoadConfig_ModelPricing_RejectsIncompleteModelInfo(t *testing.T) {
+	// A per-model modelInfo that is present but missing a required field (here
+	// architecture) must fail at load time — a half-described model would
+	// advertise a misleading capability set in /v1/models.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelInfo:
+        name: "GPT-4o"
+        description: "missing architecture"
+        contextLength: 128000
+        supportedParameters: ["temperature"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "modelInfo") {
+		t.Fatalf("expected incomplete per-model modelInfo to be rejected, got: %v", err)
+	}
+}
+
 func TestLoadConfig_CanonicalID_RejectsNamespaced(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

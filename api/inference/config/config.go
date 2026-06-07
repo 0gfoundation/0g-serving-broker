@@ -169,6 +169,16 @@ type ModelPricingEntry struct {
 	// future single-process multi-modal serving; for now it must be empty or
 	// equal to the service Type.
 	Type string `yaml:"type"`
+
+	// ModelInfo is optional per-model metadata surfaced in GET /v1/models
+	// (architecture, context length, supported/default parameters, …). A
+	// multi-model provider is usually heterogeneous, so each model can carry its
+	// own metadata here. Resolution at render time: this entry's ModelInfo wins;
+	// when nil the service-level service.modelInfo is used as a fallback (covers
+	// a same-family catalog without repeating the block per entry). When set it
+	// must be COMPLETE — the same required fields as service.modelInfo — so a
+	// half-filled entry can never advertise a misleading capability set.
+	ModelInfo *ModelInfo `yaml:"modelInfo"`
 }
 
 type Service struct {
@@ -1231,6 +1241,17 @@ func loadConfig(cfg *Config) error {
 
 			if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].canonicalId %q must be bare lowercase (letters, digits, '-', '.') for model '%s'", i, entry.CanonicalID, entry.Model)
+			}
+
+			// Optional per-model metadata; if present it must be COMPLETE (same
+			// required fields as service.modelInfo) so /v1/models never advertises
+			// a half-described model. Validated against the service type — the only
+			// multi-model modalities are chatbot / speech-to-text, so contextLength
+			// is required (the video-generation exemption never applies here).
+			if entry.ModelInfo != nil {
+				if err := entry.ModelInfo.Validate(cfg.Service.Type); err != nil {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].modelInfo (model '%s'): %w", i, entry.Model, err)
+				}
 			}
 		}
 

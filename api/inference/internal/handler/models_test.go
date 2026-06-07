@@ -673,6 +673,99 @@ func TestGetModels_USDModeUnpopulatedCacheOmitsPriceFeed(t *testing.T) {
 	}
 }
 
+// TestGetModels_MultiModel_PerModelInfoAndFallback exercises the multi-model
+// render branch: an entry with its own modelInfo surfaces that metadata, while
+// an entry without one falls back to the service-level modelInfo. Without this,
+// multi-model /v1/models would drop architecture / context length / parameters.
+func TestGetModels_MultiModel_PerModelInfoAndFallback(t *testing.T) {
+	created := time.Unix(1700000000, 0)
+	svcCfg := config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "openai",
+		ModelType:        "gpt-4o",
+		Type:             "chatbot",
+		OwnedBy:          "0G Foundation",
+		// Service-level modelInfo — the fallback for entries without their own.
+		ModelInfo: &config.ModelInfo{
+			Name:                "Service Default",
+			Description:         "service-level fallback",
+			ContextLength:       8192,
+			SupportedParameters: []string{"temperature"},
+			Architecture: &config.ModelArchitecture{
+				Modality:         "text->text",
+				InputModalities:  []string{"text"},
+				OutputModalities: []string{"text"},
+			},
+		},
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model: "gpt-4o", InputPrice: "10", OutputPrice: "30",
+				ModelInfo: &config.ModelInfo{
+					Name:                "GPT-4o",
+					Description:         "OpenAI flagship",
+					ContextLength:       128000,
+					SupportedParameters: []string{"temperature", "top_p"},
+					Architecture: &config.ModelArchitecture{
+						Modality:         "text+image->text",
+						InputModalities:  []string{"text", "image"},
+						OutputModalities: []string{"text"},
+					},
+				},
+			},
+			{Model: "gpt-4o-mini", InputPrice: "1", OutputPrice: "3"}, // no per-model info → falls back
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{Model: model.Model{CreatedAt: &created}, ModelType: "gpt-4o", Type: "chatbot"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	byID := map[string]ModelObject{}
+	for _, m := range resp.Data {
+		byID[m.ID] = m
+	}
+	if len(byID) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(byID))
+	}
+
+	// Entry with its own modelInfo surfaces that metadata.
+	full := byID["gpt-4o"]
+	if full.ContextLength != 128000 {
+		t.Errorf("gpt-4o context_length = %d, want 128000 (per-model)", full.ContextLength)
+	}
+	if full.Architecture == nil || full.Architecture.Modality != "text+image->text" {
+		t.Errorf("gpt-4o architecture = %+v, want per-model multimodal", full.Architecture)
+	}
+	if len(full.SupportedParameters) != 2 {
+		t.Errorf("gpt-4o supported_parameters = %v, want per-model 2", full.SupportedParameters)
+	}
+
+	// Entry without its own modelInfo falls back to service-level.
+	mini := byID["gpt-4o-mini"]
+	if mini.ContextLength != 8192 {
+		t.Errorf("gpt-4o-mini context_length = %d, want 8192 (service fallback)", mini.ContextLength)
+	}
+	if mini.Description != "service-level fallback" {
+		t.Errorf("gpt-4o-mini description = %q, want service fallback", mini.Description)
+	}
+	if mini.Architecture == nil || mini.Architecture.Modality != "text->text" {
+		t.Errorf("gpt-4o-mini architecture = %+v, want service-level text->text", mini.Architecture)
+	}
+}
+
 func TestParseTeeVerifier(t *testing.T) {
 	tests := []struct {
 		name           string

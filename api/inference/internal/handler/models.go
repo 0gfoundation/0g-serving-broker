@@ -196,6 +196,29 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				RateLimits:       sharedLimits,
 			}
 
+			// Per-model metadata: the entry's own modelInfo wins; fall back to the
+			// service-level modelInfo so a same-family catalog needn't repeat the
+			// block per entry. Mirrors the single-model enrichment below. Config
+			// validation guarantees a non-nil entry.ModelInfo is complete.
+			mi := mp.ModelInfo
+			if mi == nil {
+				mi = cfg.ModelInfo
+			}
+			if mi != nil {
+				obj.Name = mi.Name
+				obj.Description = mi.Description
+				obj.ContextLength = mi.ContextLength
+				obj.MaxCompletionTokens = mi.MaxCompletionTokens
+				obj.Architecture = mi.Architecture
+				obj.SupportedParameters = mi.SupportedParameters
+				obj.SupportedFormats = mi.SupportedFormats
+				obj.DefaultParameters = mi.DefaultParameters
+				obj.ExpirationDate = mi.ExpirationDate
+				if obj.TeeType == "" {
+					obj.TeeType = mi.TeeType
+				}
+			}
+
 			if isUSD {
 				// Surface per-token USD (always) and the rate-converted wei price
 				// (when the feed is available) so clients see both views. Config
