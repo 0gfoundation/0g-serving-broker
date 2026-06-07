@@ -240,6 +240,21 @@ func TestResolveVideoBilling(t *testing.T) {
 			wantSec:  6, wantSize: "1280x720", wantOK: true,
 		},
 		{
+			// Production transport: /v1/videos is multipart/form-data, NOT JSON.
+			// The request fallback must parse multipart, else Wan2.7-style upstreams
+			// (200 without echoing seconds) bill nothing — the bug this guards.
+			name:     "multipart request fallback (live transport)",
+			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:  "--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n8\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
+			wantSec:  8, wantSize: "1280x720", wantOK: true,
+		},
+		{
+			name:     "multipart request without seconds -> not ok (free-video guard)",
+			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:  "--bnd\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwan2.7\r\n--bnd--\r\n",
+			wantOK:   false,
+		},
+		{
 			name:     "request omits size, borrow response size",
 			respBody: `{"size":"1792x1024"}`,
 			reqBody:  `{"seconds":4}`,

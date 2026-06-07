@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -71,21 +72,52 @@ type videoResponseFields struct {
 // normalizer (reading actual output + success) is the proper fix — see
 // docs/design/multimodal-billing.md.
 func resolveVideoBilling(respBody, reqBody []byte) (seconds int64, size string, ok bool) {
+	// Response: the upstream returns JSON; prefer the actual generated output.
 	var rf videoResponseFields
 	_ = json.Unmarshal(respBody, &rf)
 	if s, err := rf.Seconds.Int64(); err == nil && s > 0 {
 		return s, rf.Size, true
 	}
-	var qf videoResponseFields
-	_ = json.Unmarshal(reqBody, &qf)
-	if s, err := qf.Seconds.Int64(); err == nil && s > 0 {
-		sz := qf.Size
+	// Request fallback: the broker's video edge is multipart/form-data
+	// (OpenAI /v1/videos), occasionally JSON — read seconds/size from whichever
+	// shape the body actually is. JSON-only parsing here was a bug: it never
+	// matched the live multipart transport, so this fallback recovered nothing.
+	if s, reqSize := videoSecondsSizeFromRequest(reqBody); s > 0 {
+		sz := reqSize
 		if sz == "" {
 			sz = rf.Size // response size if the request omitted it (baseline ratio if both empty)
 		}
 		return s, sz, true
 	}
 	return 0, "", false
+}
+
+// videoSecondsSizeFromRequest extracts a positive integer `seconds` and the
+// `size` from a video request body, handling both JSON and multipart/form-data
+// (the live transport for /v1/videos). Returns (0, "") when no positive seconds
+// is present in either shape.
+func videoSecondsSizeFromRequest(reqBody []byte) (int64, string) {
+	if len(reqBody) == 0 {
+		return 0, ""
+	}
+	// JSON shape.
+	var qf videoResponseFields
+	if json.Unmarshal(reqBody, &qf) == nil {
+		if s, err := qf.Seconds.Int64(); err == nil && s > 0 {
+			return s, qf.Size
+		}
+	}
+	// multipart/form-data shape (same parser the model/wait fields use).
+	body := string(reqBody)
+	secStr := parseMultipartField(body, "seconds")
+	if secStr == "" {
+		return 0, ""
+	}
+	s, err := strconv.ParseInt(strings.TrimSpace(secStr), 10, 64)
+	if err != nil || s <= 0 {
+		return 0, ""
+	}
+	return s, parseMultipartField(body, "size")
 }
 
 // videoOutputCount converts (seconds, sizeRatio) into the billable effective
