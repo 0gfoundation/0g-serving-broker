@@ -311,3 +311,36 @@ func TestVideoOutputCount(t *testing.T) {
 		}
 	}
 }
+
+// TestVideoOutputUnits_PerModelAndFallback covers the multi-model video billing
+// wiring: a resolved model with a per_video_second billing block uses its own
+// resolution ratios, while a single-model service falls back to the legacy
+// service-level size-ratio path unchanged.
+func TestVideoOutputUnits_PerModelAndFallback(t *testing.T) {
+	videoEntry := config.ModelPricingEntry{
+		Model:       "wan2.7",
+		OutputPrice: "1000",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"1280x720": 1.0, "1920x1080": 2.25},
+		},
+	}
+	svc := newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{videoEntry}, "wan2.7")
+	c := &Ctrl{logger: testLogger(), Service: svc}
+
+	// Per-model ratio applies: ceil(5 * 2.25) = 12.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("wan2.7"), 5, "1920x1080"); got != 12 {
+		t.Errorf("per-model units (1080p) = %d, want 12", got)
+	}
+	// Unknown resolution → baseline 1.0 within the entry's billing.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("wan2.7"), 7, "unknown"); got != 7 {
+		t.Errorf("per-model units (unknown res) = %d, want 7", got)
+	}
+
+	// Single-model service → legacy service-ratio path (DefaultVideoSizeRatios:
+	// 1024x1792 = 2.0), byte-for-byte unchanged.
+	cs := &Ctrl{logger: testLogger(), Service: config.Service{}}
+	if got := cs.videoOutputUnits(ginCtxWithResolvedModel(""), 5, "1024x1792"); got != 10 {
+		t.Errorf("single-model fallback units = %d, want 10", got)
+	}
+}

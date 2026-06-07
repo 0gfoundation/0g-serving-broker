@@ -257,13 +257,19 @@ func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
 func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
 	switch b.Mode {
 	case BillingModePerImage:
-		units := int64(math.Ceil(float64(obs.ImageCount) * b.resolutionMultiplier(obs.Resolution)))
+		units, err := scaledUnits(obs.ImageCount, b.resolutionMultiplier(obs.Resolution))
+		if err != nil {
+			return 0, err
+		}
 		if units < 0 {
 			units = 0
 		}
 		return units, nil
 	case BillingModePerVideoSecond:
-		units := int64(math.Ceil(float64(obs.Seconds) * b.resolutionMultiplier(obs.Resolution)))
+		units, err := scaledUnits(obs.Seconds, b.resolutionMultiplier(obs.Resolution))
+		if err != nil {
+			return 0, err
+		}
 		if units < 1 {
 			units = 1
 		}
@@ -278,6 +284,24 @@ func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
 	default:
 		return 0, fmt.Errorf("OutputUnits is not defined for billing mode %q (per_token is billed by token count)", b.Mode)
 	}
+}
+
+// maxBillableUnits bounds the unit count any single request may produce. It is
+// far above any real video length × resolution multiplier (e.g. 15s × 8 = 120),
+// so it only ever trips on a garbage observable or multiplier — at which point
+// failing is correct (the alternative is an int64 overflow that wraps into a
+// nonsense, possibly negative, fee).
+const maxBillableUnits = 1 << 40 // ~1.1e12
+
+// scaledUnits computes ceil(count × multiplier) as an int64, failing closed on a
+// non-finite product or one exceeding maxBillableUnits rather than overflowing
+// the int64 conversion (which would wrap to a garbage value the post-clamps miss).
+func scaledUnits(count int64, multiplier float64) (int64, error) {
+	v := math.Ceil(float64(count) * multiplier)
+	if math.IsNaN(v) || math.IsInf(v, 0) || v > float64(maxBillableUnits) {
+		return 0, fmt.Errorf("billable units out of range (count=%d, multiplier=%v)", count, multiplier)
+	}
+	return int64(v), nil
 }
 
 // validBillingModeForType reports whether a billing mode is allowed for a
@@ -1305,14 +1329,18 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.ProviderType != constant.ProviderTypeCentralized {
 			return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized'")
 		}
-		// Per-model billing is wired only for the token-based modalities whose
-		// request path resolves the request model before billing (chatbot and
-		// speech-to-text). On other modalities the allowlist would never run and
-		// every request would silently fall back to the on-chain max price, so
-		// reject the configuration at load time rather than honour neither the
-		// allowlist nor the per-model prices.
-		if cfg.Service.Type != constant.ServiceTypeChatbot && cfg.Service.Type != constant.ServiceTypeSpeechToText {
-			return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s' or '%s', got '%s'", constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, cfg.Service.Type)
+		// Per-model billing is wired only for the modalities whose request path
+		// resolves the request model before billing: chatbot + speech-to-text
+		// (token billing) and video-generation (per-effective-second billing via
+		// the per-model `billing` block). On other modalities the allowlist would
+		// never run and every request would silently fall back to the on-chain max
+		// price, so reject the configuration at load time. (text-to-image /
+		// image-editing per-model billing is the next increment — see
+		// docs/design/multimodal-billing.md.)
+		switch cfg.Service.Type {
+		case constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeVideoGeneration:
+		default:
+			return fmt.Errorf("invalid config: service.modelPricing is only supported for service type '%s', '%s', or '%s', got '%s'", constant.ServiceTypeChatbot, constant.ServiceTypeSpeechToText, constant.ServiceTypeVideoGeneration, cfg.Service.Type)
 		}
 		// service.model is the default billed (and forwarded-upstream) model for
 		// requests that omit the model field; it must be set.
@@ -1352,49 +1380,80 @@ func loadConfig(cfg *Config) error {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].type %q must equal service.type %q (per-model modality is not yet supported)", i, entry.Type, cfg.Service.Type)
 			}
 
-			// Prices must be expressed in the service's denomination.
-			if isUSD {
-				if entry.InputPrice != "" || entry.OutputPrice != "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d] must use the USD price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationUSD, entry.Model)
-				}
-				if entry.InputPriceUSDPerMillionTokens == "" || entry.OutputPriceUSDPerMillionTokens == "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].inputPriceUSDPerMillionTokens / outputPriceUSDPerMillionTokens are required for model '%s'", i, entry.Model)
-				}
-				if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].inputPriceUSDPerMillionTokens", i), entry.InputPriceUSDPerMillionTokens); err != nil {
-					return err
-				}
-				if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerMillionTokens", i), entry.OutputPriceUSDPerMillionTokens); err != nil {
-					return err
-				}
-			} else {
-				if entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d] must use the native price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationNative, entry.Model)
-				}
-				if entry.InputPrice == "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice is required for model '%s'", i, entry.Model)
+			if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
+				// Video multi-model bills OutputUnits × OutputPrice, where
+				// OutputPrice is the per-effective-second price (native neuron) and
+				// units come from the per-model `billing` block (per_video_second /
+				// per_unit_table). Input tokens don't apply, so inputPrice is
+				// optional. USD video is not wired yet (the USD→wei path needs both
+				// input and output USD) — reject it for now.
+				if isUSD || entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d]: USD denomination is not yet supported for video-generation (model '%s')", i, entry.Model)
 				}
 				if entry.OutputPrice == "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice is required for model '%s'", i, entry.Model)
-				}
-				if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for model '%s'", i, entry.Model)
+					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice (per effective second) is required for video model '%s'", i, entry.Model)
 				}
 				if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for model '%s'", i, entry.Model)
+					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for video model '%s'", i, entry.Model)
 				}
-			}
+				if entry.InputPrice != "" {
+					if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for video model '%s'", i, entry.Model)
+					}
+				}
+				if entry.Billing == nil || (entry.Billing.Mode != BillingModePerVideoSecond && entry.Billing.Mode != BillingModePerUnitTable) {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].billing.mode must be '%s' or '%s' for video model '%s'", i, BillingModePerVideoSecond, BillingModePerUnitTable, entry.Model)
+				}
+				// Video uses billing.resolutionMultipliers, not token-length tiers.
+				if len(entry.Tiers) > 0 {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for video-generation (use billing.resolutionMultipliers) for model '%s'", i, entry.Model)
+				}
+			} else {
+				// Token modalities (chatbot / speech-to-text): prices must be
+				// expressed in the service's denomination.
+				if isUSD {
+					if entry.InputPrice != "" || entry.OutputPrice != "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d] must use the USD price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationUSD, entry.Model)
+					}
+					if entry.InputPriceUSDPerMillionTokens == "" || entry.OutputPriceUSDPerMillionTokens == "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].inputPriceUSDPerMillionTokens / outputPriceUSDPerMillionTokens are required for model '%s'", i, entry.Model)
+					}
+					if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].inputPriceUSDPerMillionTokens", i), entry.InputPriceUSDPerMillionTokens); err != nil {
+						return err
+					}
+					if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerMillionTokens", i), entry.OutputPriceUSDPerMillionTokens); err != nil {
+						return err
+					}
+				} else {
+					if entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d] must use the native price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationNative, entry.Model)
+					}
+					if entry.InputPrice == "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice is required for model '%s'", i, entry.Model)
+					}
+					if entry.OutputPrice == "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice is required for model '%s'", i, entry.Model)
+					}
+					if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for model '%s'", i, entry.Model)
+					}
+					if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for model '%s'", i, entry.Model)
+					}
+				}
 
-			// Per-model tiers are optional; when present they must satisfy the
-			// same ordering/multiplier rules as service-level tiers.
-			if err := validatePricingTiers(fmt.Sprintf("service.modelPricing[%d].tiers", i), entry.Tiers); err != nil {
-				return err
-			}
-			// Tiered pricing is applied only on the chatbot billing path
-			// (getTierMultipliers over prompt tokens). Speech-to-text bills flat,
-			// so per-model tiers would be advertised in /v1/models + on-chain but
-			// never enforced — reject rather than silently diverge.
-			if len(entry.Tiers) > 0 && cfg.Service.Type == constant.ServiceTypeSpeechToText {
-				return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for service type '%s' (tiers are not applied to its billing)", i, constant.ServiceTypeSpeechToText)
+				// Per-model tiers are optional; when present they must satisfy the
+				// same ordering/multiplier rules as service-level tiers.
+				if err := validatePricingTiers(fmt.Sprintf("service.modelPricing[%d].tiers", i), entry.Tiers); err != nil {
+					return err
+				}
+				// Tiered pricing is applied only on the chatbot billing path
+				// (getTierMultipliers over prompt tokens). Speech-to-text bills flat,
+				// so per-model tiers would be advertised in /v1/models + on-chain but
+				// never enforced — reject rather than silently diverge.
+				if len(entry.Tiers) > 0 && cfg.Service.Type == constant.ServiceTypeSpeechToText {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for service type '%s' (tiers are not applied to its billing)", i, constant.ServiceTypeSpeechToText)
+				}
 			}
 
 			if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {

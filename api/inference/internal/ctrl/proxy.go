@@ -77,17 +77,18 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
-	// Multi-model speech-to-text: resolve the requested model for per-model
-	// billing. Audio transcription posts multipart/form-data (or sometimes JSON),
+	// Multi-model speech-to-text / video-generation: resolve the requested model
+	// for per-model billing. Both post multipart/form-data (or sometimes JSON),
 	// so we extract the model without rewriting the body — only record the
-	// resolved model so GetBillingPrices can price it. Single-model providers
-	// keep billing at the configured on-chain price (resolvedModel unset).
-	if svcType == "speech-to-text" && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+	// resolved model so GetBillingPrices (and, for video, the per-model billing
+	// shape) can price it. Single-model providers keep billing at the configured
+	// on-chain price (resolvedModel unset).
+	if (svcType == "speech-to-text" || svcType == "video-generation") && c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
 		userAddr, _ := ctx.Get("userAddress")
 		userAddrStr, _ := userAddr.(string)
 		if err := c.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddrStr); err != nil {
 			ctx.Set("ignoreError", true)
-			return nil, errors.Wrap(err, "resolve speech-to-text model")
+			return nil, errors.Wrap(err, "resolve model for billing")
 		}
 	}
 

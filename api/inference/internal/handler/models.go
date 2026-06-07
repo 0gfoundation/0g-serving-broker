@@ -249,6 +249,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 						}
 					}
 				}
+			} else if svc.Type == constant.ServiceTypeVideoGeneration {
+				// Video bills per effective second via OutputPrice; surface it under
+				// `video` (not the token `completion` field, which would mislead
+				// OpenAI-compatible clients into a per-token reading).
+				obj.Pricing.Video = mp.OutputPrice
 			} else {
 				obj.Pricing.Prompt = mp.InputPrice
 				obj.Pricing.Completion = mp.OutputPrice

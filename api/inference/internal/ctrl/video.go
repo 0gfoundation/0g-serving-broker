@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"math"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -130,6 +132,26 @@ func videoOutputCount(seconds int64, sizeRatio float64) int64 {
 	return count
 }
 
+// videoOutputUnits computes the billable effective-output count for a video
+// request. For a multi-model provider whose resolved model carries a per-model
+// billing block, it uses that model's shape (per_video_second resolution ratios
+// / per_unit_table); otherwise it falls back to the service-level size-ratio
+// path (single-model — byte-for-byte unchanged). On a per-model billing error
+// (e.g. a per_unit_table miss or out-of-range product) it logs and falls back to
+// the service ratio so the request is still billed rather than served free.
+func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string) int64 {
+	if c.Service.HasMultiModelPricing() {
+		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
+			units, err := e.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size})
+			if err == nil {
+				return units
+			}
+			c.logger.Errorf("video per-model OutputUnits failed (model billing misconfigured for this request), falling back to service size-ratio: %v", err)
+		}
+	}
+	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
+}
+
 // handleVideoGenerationResponse handles the POST /videos response from the provider.
 // Billing prefers the provider's response (actual seconds/size) and falls back to
 // the client request when the upstream doesn't echo them (see resolveVideoBilling).
@@ -161,7 +183,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	if reqModel.IsWhitelisted {
 		// Whitelist traffic is unbilled; record metrics only (same response→request fallback).
 		if sec, size, ok := resolveVideoBilling(body, reqBody); ok {
-			outputCount := videoOutputCount(sec, c.Service.GetVideoSizeRatio(size))
+			outputCount := c.videoOutputUnits(ctx, sec, size)
 			monitor.RecordTokens("video-generation", 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", 0, outputCount)
 		} else {
@@ -181,8 +203,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return nil
 	}
 
-	sizeRatio := c.Service.GetVideoSizeRatio(size)
-	outputCount := videoOutputCount(seconds, sizeRatio)
+	outputCount := c.videoOutputUnits(ctx, seconds, size)
 
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {

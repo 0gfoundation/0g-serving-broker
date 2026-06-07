@@ -1299,3 +1299,162 @@ func TestValidateBillingConfig(t *testing.T) {
 		})
 	}
 }
+
+// ===================== Multi-model video (P1) =====================
+
+func TestLoadConfig_ModelPricing_Video_PerVideoSecond(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      billing:
+        mode: "per_video_second"
+        resolutionMultipliers:
+          "1280x720": 1.0
+          "1920x1080": 2.25
+    - model: "wan2.7-turbo"
+      outputPrice: "500"
+      billing:
+        mode: "per_video_second"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("video multi-model should be allowed, got: %v", err)
+	}
+	if !cfg.Service.HasMultiModelPricing() {
+		t.Fatal("expected multi-model pricing")
+	}
+	// On-chain native max = max over models' per-second OutputPrice (no tiers).
+	if cfg.Service.OutputPrice != "1000" {
+		t.Errorf("expected on-chain output max 1000, got %s", cfg.Service.OutputPrice)
+	}
+	got := cfg.Service.GetModelPricing("wan2.7")
+	if got == nil || got.Billing == nil || got.Billing.Mode != BillingModePerVideoSecond {
+		t.Fatalf("expected wan2.7 per_video_second billing, got %+v", got)
+	}
+	units, err := got.Billing.OutputUnits(BillingObservables{Seconds: 5, Resolution: "1920x1080"})
+	if err != nil || units != 12 { // ceil(5*2.25)
+		t.Errorf("OutputUnits(5,1080p) = %d, err %v; want 12", units, err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_Video_PerUnitTable(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "minimax-hailuo"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "minimax-hailuo"
+      outputPrice: "100"
+      billing:
+        mode: "per_unit_table"
+        table:
+          - {resolution: "768P", duration: 6, units: 6}
+          - {resolution: "768P", duration: 10, units: 10}
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("per_unit_table video should be allowed, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_Video_Rejections(t *testing.T) {
+	base := func(extra string) string {
+		return `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+` + extra
+	}
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string
+	}{
+		{
+			name: "missing billing block",
+			extra: `  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+`,
+			wantErr: "billing.mode must be",
+		},
+		{
+			name: "USD video not supported",
+			extra: `  priceDenomination: "USD"
+  modelPricing:
+    - model: "wan2.7"
+      outputPriceUSDPerMillionTokens: "5"
+      billing:
+        mode: "per_video_second"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`,
+			wantErr: "not yet supported for video",
+		},
+		{
+			name: "video rejects tiers",
+			extra: `  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      billing:
+        mode: "per_video_second"
+      tiers:
+        - { maxInputTokens: 0, inputMultiplier: 2, outputMultiplier: 2 }
+`,
+			wantErr: "tiers is not supported for video",
+		},
+		{
+			name: "wrong billing mode for video",
+			extra: `  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      billing:
+        mode: "per_image"
+`,
+			wantErr: "billing.mode must be",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := writeTestConfig(t, base(tt.extra))
+			t.Setenv("CONFIG_FILE", configPath)
+			err := loadConfig(&Config{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestScaledUnits_Overflow(t *testing.T) {
+	// A garbage multiplier must fail closed, not wrap the int64 conversion.
+	if _, err := scaledUnits(1<<40, 1e9); err == nil {
+		t.Error("expected out-of-range error for huge product, got nil")
+	}
+	if u, err := scaledUnits(5, 2.25); err != nil || u != 12 {
+		t.Errorf("scaledUnits(5,2.25) = %d, err %v; want 12", u, err)
+	}
+}
