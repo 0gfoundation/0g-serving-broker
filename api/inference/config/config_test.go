@@ -1302,6 +1302,63 @@ func TestValidateBillingConfig(t *testing.T) {
 
 // ===================== Multi-model video (P1) =====================
 
+func TestLoadConfig_ModelPricing_Video_USDPerSecond(t *testing.T) {
+	// USD video: operator gives outputPriceUSDPerSecond; loadConfig normalizes it
+	// into the per-1M-unit representation the shared USD pipeline consumes
+	// (×1e6), with input side 0. On-chain USD max = max over models' normalized
+	// output. The raw per-second value is preserved for display.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  modelPricing:
+    - model: "wan2.7"
+      outputPriceUSDPerSecond: "0.02"
+      billing:
+        mode: "per_video_second"
+        resolutionMultipliers:
+          "1280x720": 1.0
+          "1920x1080": 2.25
+    - model: "wan2.7-turbo"
+      outputPriceUSDPerSecond: "0.008"
+      billing:
+        mode: "per_video_second"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("USD video should be allowed, got: %v", err)
+	}
+	got := cfg.Service.GetModelPricing("wan2.7")
+	if got == nil {
+		t.Fatal("wan2.7 missing")
+	}
+	if got.OutputPriceUSDPerSecond != "0.02" {
+		t.Errorf("raw per-second preserved: got %q want 0.02", got.OutputPriceUSDPerSecond)
+	}
+	// 0.02 USD/sec × 1e6 = 20000 (normalized per-1M-unit); input side 0.
+	if got.OutputPriceUSDPerMillionTokens != "20000" {
+		t.Errorf("normalized output: got %q want 20000", got.OutputPriceUSDPerMillionTokens)
+	}
+	if got.InputPriceUSDPerMillionTokens != "0" {
+		t.Errorf("normalized input: got %q want 0", got.InputPriceUSDPerMillionTokens)
+	}
+	// On-chain USD max-over-models = max(20000, 8000) = 20000.
+	if cfg.Service.OutputPriceUSDPerMillionTokens != "20000" {
+		t.Errorf("on-chain USD output max: got %q want 20000", cfg.Service.OutputPriceUSDPerMillionTokens)
+	}
+}
+
 func TestLoadConfig_ModelPricing_Video_PerVideoSecond(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
@@ -1400,7 +1457,7 @@ service:
 			wantErr: "billing.mode must be",
 		},
 		{
-			name: "USD video not supported",
+			name: "USD video rejects per-1M-tokens fields",
 			extra: `  priceDenomination: "USD"
   modelPricing:
     - model: "wan2.7"
@@ -1412,7 +1469,48 @@ priceFeed:
   updateInterval: "1h"
   stalenessThreshold: "2h"
 `,
-			wantErr: "not yet supported for video",
+			wantErr: "not the per-1M-tokens USD fields",
+		},
+		{
+			name: "USD video requires outputPriceUSDPerSecond",
+			extra: `  priceDenomination: "USD"
+  modelPricing:
+    - model: "wan2.7"
+      billing:
+        mode: "per_video_second"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`,
+			wantErr: "outputPriceUSDPerSecond is required",
+		},
+		{
+			name: "USD video rejects native outputPrice",
+			extra: `  priceDenomination: "USD"
+  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      outputPriceUSDPerSecond: "0.02"
+      billing:
+        mode: "per_video_second"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`,
+			wantErr: "must use outputPriceUSDPerSecond",
+		},
+		{
+			name: "native video rejects outputPriceUSDPerSecond",
+			extra: `  modelPricing:
+    - model: "wan2.7"
+      outputPrice: "1000"
+      outputPriceUSDPerSecond: "0.02"
+      billing:
+        mode: "per_video_second"
+`,
+			wantErr: "only valid under USD",
 		},
 		{
 			name: "video rejects tiers",

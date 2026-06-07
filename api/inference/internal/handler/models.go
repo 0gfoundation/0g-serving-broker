@@ -78,6 +78,10 @@ type ModelPricing struct {
 type ModelPricingUSD struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
+	// Video is the USD price per effective output second for a USD-denominated
+	// video-generation model (decimal string). Mutually exclusive with the
+	// per-token prompt/completion fields above.
+	Video string `json:"video,omitempty"`
 }
 
 // PriceFeedState surfaces the live 0G/USD rate and its freshness.  Present
@@ -219,7 +223,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				}
 			}
 
-			if isUSD {
+			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
+				// USD video: bill unit is the effective output second, not a token.
+				// Surface the per-second USD (operator value) and, when the feed is
+				// up, the rate-converted wei-per-second under `video`. The bridged
+				// OutputPriceUSDPerMillionTokens (= perSec×1e6) converts back to
+				// wei-per-second via the shared ÷1e6 helper.
+				obj.PricingUSD = &ModelPricingUSD{Video: mp.OutputPriceUSDPerSecond}
+				if ratUSDPerOG != nil {
+					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Video = wei.String()
+						}
+					}
+				}
+			} else if isUSD {
 				// Surface per-token USD (always) and the rate-converted wei price
 				// (when the feed is available) so clients see both views. Config
 				// validation already accepted these USD strings, so a conversion

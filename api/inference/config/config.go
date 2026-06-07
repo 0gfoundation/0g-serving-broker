@@ -149,10 +149,27 @@ type ModelPricingEntry struct {
 	OutputPrice string `yaml:"outputPrice"`
 
 	// USD-denominated prices in USD per 1M tokens (decimal string). Required iff
-	// the service priceDenomination is USD. Converted to wei per token at billing
-	// time using the live 0G/USD rate, exactly like the service-level USD price.
+	// the service priceDenomination is USD AND the modality bills per token
+	// (chatbot / speech-to-text). Converted to wei per token at billing time using
+	// the live 0G/USD rate, exactly like the service-level USD price.
+	//
+	// NOTE: for a USD video-generation model these two fields are NOT set by the
+	// operator (video has no token unit) — they are DERIVED at config load from
+	// OutputPriceUSDPerSecond as the per-1M-unit normalization the shared USD
+	// pipeline (price feed, on-chain ceiling, per-model wei conversion) consumes;
+	// the "unit" is the effective output second and the pipeline's ÷1e6 quantum
+	// cancels the ×1e6 normalization to yield wei-per-second. See loadConfig.
 	InputPriceUSDPerMillionTokens  string `yaml:"inputPriceUSDPerMillionTokens"`
 	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
+
+	// OutputPriceUSDPerSecond is the USD price per effective output second for a
+	// USD-denominated video-generation model (decimal string). Required iff the
+	// service priceDenomination is USD and type is video-generation; forbidden
+	// otherwise. The effective output second already folds in the resolution
+	// multiplier (videoOutputUnits), so this is "USD per billed unit". At config
+	// load it is normalized into OutputPriceUSDPerMillionTokens (×1e6) so the
+	// existing token-shaped USD machinery prices and advertises it unchanged.
+	OutputPriceUSDPerSecond string `yaml:"outputPriceUSDPerSecond"`
 
 	// Tiers is optional per-model input-length tiered pricing. When empty, the
 	// service-level tieredPricing applies (if enabled). Same semantics and
@@ -1395,24 +1412,45 @@ func loadConfig(cfg *Config) error {
 			}
 
 			if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
-				// Video multi-model bills OutputUnits × OutputPrice, where
-				// OutputPrice is the per-effective-second price (native neuron) and
+				// Video multi-model bills OutputUnits × per-effective-second price;
 				// units come from the per-model `billing` block (per_video_second /
-				// per_unit_table). Input tokens don't apply, so inputPrice is
-				// optional. USD video is not wired yet (the USD→wei path needs both
-				// input and output USD) — reject it for now.
-				if isUSD || entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d]: USD denomination is not yet supported for video-generation (model '%s')", i, entry.Model)
+				// per_unit_table). Input tokens don't apply. The price is NATIVE
+				// (outputPrice, neuron) or USD (outputPriceUSDPerSecond), matching the
+				// service denomination — the per-token USD fields never apply directly.
+				if entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d]: video-generation uses outputPrice (NATIVE) or outputPriceUSDPerSecond (USD), not the per-1M-tokens USD fields (model '%s')", i, entry.Model)
 				}
-				if entry.OutputPrice == "" {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice (per effective second) is required for video model '%s'", i, entry.Model)
-				}
-				if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
-					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for video model '%s'", i, entry.Model)
-				}
-				if entry.InputPrice != "" {
-					if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
-						return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for video model '%s'", i, entry.Model)
+				if isUSD {
+					if entry.OutputPrice != "" || entry.InputPrice != "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d] must use outputPriceUSDPerSecond (priceDenomination is '%s') for video model '%s'", i, constant.PriceDenominationUSD, entry.Model)
+					}
+					if entry.OutputPriceUSDPerSecond == "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is required for USD video model '%s'", i, entry.Model)
+					}
+					if err := validateUSDPriceString(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerSecond", i), entry.OutputPriceUSDPerSecond); err != nil {
+						return err
+					}
+					// Normalize per-second USD into the per-1M-unit representation the
+					// shared USD pipeline (price feed, on-chain ceiling, modelUSDPricesToWei)
+					// consumes: weiPerUnit = (usdPerSec*1e6)/1e6/rate*1e18 = usdPerSec/rate*1e18.
+					// The "unit" here is the effective output second. Input side is 0.
+					perSec, _ := new(big.Rat).SetString(entry.OutputPriceUSDPerSecond)
+					entry.OutputPriceUSDPerMillionTokens = ratToDecimalString(new(big.Rat).Mul(perSec, big.NewRat(1_000_000, 1)))
+					entry.InputPriceUSDPerMillionTokens = "0"
+				} else {
+					if entry.OutputPriceUSDPerSecond != "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid under USD denomination (model '%s')", i, entry.Model)
+					}
+					if entry.OutputPrice == "" {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice (per effective second) is required for video model '%s'", i, entry.Model)
+					}
+					if _, ok := new(big.Int).SetString(entry.OutputPrice, 10); !ok {
+						return fmt.Errorf("invalid config: service.modelPricing[%d].outputPrice must be a valid integer for video model '%s'", i, entry.Model)
+					}
+					if entry.InputPrice != "" {
+						if _, ok := new(big.Int).SetString(entry.InputPrice, 10); !ok {
+							return fmt.Errorf("invalid config: service.modelPricing[%d].inputPrice must be a valid integer for video model '%s'", i, entry.Model)
+						}
 					}
 				}
 				if entry.Billing == nil || (entry.Billing.Mode != BillingModePerVideoSecond && entry.Billing.Mode != BillingModePerUnitTable) {
@@ -1424,7 +1462,11 @@ func loadConfig(cfg *Config) error {
 				}
 			} else {
 				// Token modalities (chatbot / speech-to-text): prices must be
-				// expressed in the service's denomination.
+				// expressed in the service's denomination. outputPriceUSDPerSecond
+				// is a video-only field.
+				if entry.OutputPriceUSDPerSecond != "" {
+					return fmt.Errorf("invalid config: service.modelPricing[%d].outputPriceUSDPerSecond is only valid for video-generation (model '%s')", i, entry.Model)
+				}
 				if isUSD {
 					if entry.InputPrice != "" || entry.OutputPrice != "" {
 						return fmt.Errorf("invalid config: service.modelPricing[%d] must use the USD price fields (priceDenomination is '%s') for model '%s'", i, constant.PriceDenominationUSD, entry.Model)

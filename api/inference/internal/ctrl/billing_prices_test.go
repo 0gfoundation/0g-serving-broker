@@ -139,3 +139,46 @@ func TestGetBillingPrices_USDFailsClosedWhenStale(t *testing.T) {
 		t.Fatal("expected stale-cache error, got nil")
 	}
 }
+
+// TestGetBillingPrices_USDVideoPerSecond verifies USD video billing: the entry
+// carries the normalized per-1M-unit output (perSec×1e6, as loadConfig produces)
+// with input 0, and GetBillingPrices converts it to wei per EFFECTIVE SECOND at
+// the live rate (the ÷1e6 quantum cancels the ×1e6 normalization).
+func TestGetBillingPrices_USDVideoPerSecond(t *testing.T) {
+	// operator configured 0.02 USD/sec → normalized output = 0.02*1e6 = 20000.
+	svc := newMultiModelService(t, "USD", []config.ModelPricingEntry{
+		{
+			Model:                          "wan2.7",
+			InputPriceUSDPerMillionTokens:  "0",
+			OutputPriceUSDPerMillionTokens: "20000",
+			OutputPriceUSDPerSecond:        "0.02",
+			Billing:                        &config.BillingConfig{Mode: config.BillingModePerVideoSecond},
+		},
+	}, "wan2.7")
+
+	cache := pricefeed.NewCache()
+	cache.Set(big.NewInt(0), big.NewInt(0), big.NewRat(2, 1), time.Now()) // rate = 2 USD/0G
+
+	c := &Ctrl{
+		logger:     testLogger(),
+		Service:    svc,
+		priceCache: cache,
+		priceFeed:  config.PriceFeedConfig{StalenessThreshold: time.Hour},
+	}
+
+	prices, err := c.GetBillingPrices(ginCtxWithResolvedModel("wan2.7"))
+	if err != nil {
+		t.Fatalf("GetBillingPrices: %v", err)
+	}
+	// wei per effective second = 0.02 USD/sec / 2 USD/0G * 1e18 = 1e16.
+	wantOut, _ := pricefeed.USDPerMillionToWeiPerToken(big.NewRat(20000, 1), big.NewRat(2, 1))
+	if prices.OutputPrice != wantOut.String() {
+		t.Errorf("USD video wei/sec: got %s want %s", prices.OutputPrice, wantOut)
+	}
+	if prices.OutputPrice != "10000000000000000" { // 1e16
+		t.Errorf("USD video wei/sec: got %s want 1e16", prices.OutputPrice)
+	}
+	if prices.InputPrice != "0" {
+		t.Errorf("USD video input wei: got %s want 0", prices.InputPrice)
+	}
+}
