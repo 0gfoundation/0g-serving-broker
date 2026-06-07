@@ -1177,3 +1177,125 @@ func TestTokenBilledSTTCanonicalName(t *testing.T) {
 		})
 	}
 }
+
+// ===================== Billing engine (P1) =====================
+
+func TestBillingConfig_OutputUnits_PerVideoSecond(t *testing.T) {
+	b := &BillingConfig{
+		Mode:                  BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"720P": 1.0, "1080P": 2.25},
+	}
+	cases := []struct {
+		seconds    int64
+		resolution string
+		want       int64
+	}{
+		{5, "720P", 5},
+		{5, "1080P", 12},  // ceil(11.25)
+		{8, "unknown", 8}, // unknown resolution → baseline 1.0
+		{0, "720P", 1},    // floored at 1 (a clip is always >=1 unit)
+	}
+	for _, c := range cases {
+		got, err := b.OutputUnits(BillingObservables{Seconds: c.seconds, Resolution: c.resolution})
+		if err != nil {
+			t.Fatalf("OutputUnits(%d,%q): %v", c.seconds, c.resolution, err)
+		}
+		if got != c.want {
+			t.Errorf("per_video_second(%d,%q) = %d, want %d", c.seconds, c.resolution, got, c.want)
+		}
+	}
+}
+
+func TestBillingConfig_OutputUnits_PerImage(t *testing.T) {
+	b := &BillingConfig{
+		Mode:                  BillingModePerImage,
+		ResolutionMultipliers: map[string]float64{"1024x1792": 1.5},
+	}
+	cases := []struct {
+		count      int64
+		resolution string
+		want       int64
+	}{
+		{4, "1024x1024", 4}, // baseline
+		{2, "1024x1792", 3}, // ceil(3.0)
+		{3, "1024x1792", 5}, // ceil(4.5)
+		{0, "1024x1024", 0}, // no images → no charge (not floored)
+	}
+	for _, c := range cases {
+		got, err := b.OutputUnits(BillingObservables{ImageCount: c.count, Resolution: c.resolution})
+		if err != nil {
+			t.Fatalf("OutputUnits(%d,%q): %v", c.count, c.resolution, err)
+		}
+		if got != c.want {
+			t.Errorf("per_image(%d,%q) = %d, want %d", c.count, c.resolution, got, c.want)
+		}
+	}
+}
+
+func TestBillingConfig_OutputUnits_PerUnitTable(t *testing.T) {
+	b := &BillingConfig{
+		Mode: BillingModePerUnitTable,
+		Table: []BillingUnitTier{
+			{Resolution: "768P", Duration: 6, Units: 6},
+			{Resolution: "768P", Duration: 10, Units: 10},
+			{Resolution: "1080P", Duration: 6, Units: 12},
+		},
+	}
+	got, err := b.OutputUnits(BillingObservables{Seconds: 10, Resolution: "768P"})
+	if err != nil || got != 10 {
+		t.Errorf("table hit (768P,10) = %d, err %v; want 10", got, err)
+	}
+	got, err = b.OutputUnits(BillingObservables{Seconds: 6, Resolution: "1080P"})
+	if err != nil || got != 12 {
+		t.Errorf("table hit (1080P,6) = %d, err %v; want 12", got, err)
+	}
+	// Miss → error (fail rather than mis-bill at an unknown bucket).
+	if _, err := b.OutputUnits(BillingObservables{Seconds: 99, Resolution: "768P"}); err == nil {
+		t.Error("expected error for unknown (resolution,duration) bucket, got nil")
+	}
+}
+
+func TestBillingConfig_OutputUnits_PerTokenIsError(t *testing.T) {
+	// per_token is billed by token count elsewhere; OutputUnits must reject it
+	// rather than silently return 0.
+	for _, mode := range []BillingMode{"", BillingModePerToken} {
+		b := &BillingConfig{Mode: mode}
+		if _, err := b.OutputUnits(BillingObservables{Seconds: 5}); err == nil {
+			t.Errorf("mode %q: expected OutputUnits error, got nil", mode)
+		}
+	}
+}
+
+func TestValidateBillingConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		b           *BillingConfig
+		serviceType string
+		wantErr     string // substring; "" means must pass
+	}{
+		{"video per_second ok", &BillingConfig{Mode: BillingModePerVideoSecond, ResolutionMultipliers: map[string]float64{"1080P": 2.25}}, "video-generation", ""},
+		{"image per_image ok", &BillingConfig{Mode: BillingModePerImage}, "text-to-image", ""},
+		{"per_video_second on chatbot rejected", &BillingConfig{Mode: BillingModePerVideoSecond}, "chatbot", "not supported for service type"},
+		{"per_image on video rejected", &BillingConfig{Mode: BillingModePerImage}, "video-generation", "not supported for service type"},
+		{"unknown mode rejected", &BillingConfig{Mode: "per_potato"}, "video-generation", "not a known billing mode"},
+		{"non-positive multiplier rejected", &BillingConfig{Mode: BillingModePerVideoSecond, ResolutionMultipliers: map[string]float64{"720P": 0}}, "video-generation", "must be > 0"},
+		{"unit_table empty rejected", &BillingConfig{Mode: BillingModePerUnitTable}, "video-generation", "table must not be empty"},
+		{"unit_table bad units rejected", &BillingConfig{Mode: BillingModePerUnitTable, Table: []BillingUnitTier{{Resolution: "768P", Duration: 6, Units: 0}}}, "video-generation", "units must be > 0"},
+		{"unit_table dup row rejected", &BillingConfig{Mode: BillingModePerUnitTable, Table: []BillingUnitTier{{Resolution: "768P", Duration: 6, Units: 6}, {Resolution: "768P", Duration: 6, Units: 7}}}, "video-generation", "duplicate"},
+		{"table on non-table mode rejected", &BillingConfig{Mode: BillingModePerVideoSecond, Table: []BillingUnitTier{{Resolution: "768P", Duration: 6, Units: 6}}}, "video-generation", "only valid for mode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBillingConfig("svc.billing", tt.b, tt.serviceType)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected pass, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}

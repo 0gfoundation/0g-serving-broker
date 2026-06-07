@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"regexp"
@@ -179,6 +180,163 @@ type ModelPricingEntry struct {
 	// must be COMPLETE — the same required fields as service.modelInfo — so a
 	// half-filled entry can never advertise a misleading capability set.
 	ModelInfo *ModelInfo `yaml:"modelInfo"`
+
+	// Billing optionally selects a non-token billing shape for this model
+	// (per-image / per-video-second / per-unit-table). Empty/nil means per_token
+	// (the existing chat/STT token billing). The fee is OutputUnits × OutputPrice
+	// (the entry's price, in the service denomination); see
+	// docs/design/multimodal-billing.md. NOTE (P1, incremental): the engine and
+	// schema below are validated and unit-tested, but image/video request paths
+	// are not yet wired — loadConfig still rejects modelPricing on those service
+	// types, so a Billing block only takes effect once that wiring lands.
+	Billing *BillingConfig `yaml:"billing"`
+}
+
+// BillingMode selects how a model's per-request fee is computed. Empty defaults
+// to per_token (existing chat/STT token billing). The others cover non-token
+// modalities — see docs/design/multimodal-billing.md.
+type BillingMode string
+
+const (
+	BillingModePerToken       BillingMode = "per_token"
+	BillingModePerImage       BillingMode = "per_image"
+	BillingModePerVideoSecond BillingMode = "per_video_second"
+	BillingModePerUnitTable   BillingMode = "per_unit_table"
+)
+
+// BillingUnitTier maps a (resolution, duration) combination to a fixed billable
+// unit count — used by per_unit_table mode for bucketed video pricing (e.g.
+// MiniMax: 768P×6s → 6 units, 768P×10s → 10 units, 1080P×6s → 12 units).
+type BillingUnitTier struct {
+	Resolution string `yaml:"resolution"`
+	Duration   int64  `yaml:"duration"`
+	Units      int64  `yaml:"units"`
+}
+
+// BillingConfig describes how to turn request/response observables into billable
+// OUTPUT units for a model; the final fee is OutputUnits × OutputPrice. Input
+// tokens are unaffected (they apply to per_token only). The unit math lives in
+// OutputUnits and is pure/testable; observable extraction (request vs response,
+// per-vendor response normalizers) is a separate layer.
+type BillingConfig struct {
+	Mode BillingMode `yaml:"mode"`
+
+	// ResolutionMultipliers maps a resolution token (e.g. "1080P" or "1280x720")
+	// to a cost multiplier, for per_image / per_video_second. A resolution not in
+	// the map bills at the baseline 1.0. Empty map → every resolution is 1.0.
+	ResolutionMultipliers map[string]float64 `yaml:"resolutionMultipliers"`
+
+	// Table is the (resolution, duration) → units lookup for per_unit_table.
+	Table []BillingUnitTier `yaml:"table"`
+}
+
+// BillingObservables are the resolved per-request inputs to the unit math.
+// Seconds is the (effective) video duration; ImageCount the number of images;
+// Resolution the resolution token used to pick a multiplier / table row.
+type BillingObservables struct {
+	Seconds    int64
+	ImageCount int64
+	Resolution string
+}
+
+// resolutionMultiplier returns the configured cost multiplier for a resolution,
+// or the baseline 1.0 when unset/unknown.
+func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
+	if m, ok := b.ResolutionMultipliers[resolution]; ok {
+		return m
+	}
+	return 1.0
+}
+
+// OutputUnits computes the billable output-unit count for the resolved
+// observables. per_video_second floors at 1 (a generated clip is always ≥1
+// effective unit); per_image returns the raw scaled count (0 images → 0 units,
+// so a failed/empty generation is not charged); per_unit_table looks up the
+// exact (resolution, duration) row and errors when absent (fail rather than
+// mis-bill). per_token is billed elsewhere and is not a valid input here.
+func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
+	switch b.Mode {
+	case BillingModePerImage:
+		units := int64(math.Ceil(float64(obs.ImageCount) * b.resolutionMultiplier(obs.Resolution)))
+		if units < 0 {
+			units = 0
+		}
+		return units, nil
+	case BillingModePerVideoSecond:
+		units := int64(math.Ceil(float64(obs.Seconds) * b.resolutionMultiplier(obs.Resolution)))
+		if units < 1 {
+			units = 1
+		}
+		return units, nil
+	case BillingModePerUnitTable:
+		for _, t := range b.Table {
+			if t.Resolution == obs.Resolution && t.Duration == obs.Seconds {
+				return t.Units, nil
+			}
+		}
+		return 0, fmt.Errorf("no per_unit_table billing row for resolution=%q duration=%d", obs.Resolution, obs.Seconds)
+	default:
+		return 0, fmt.Errorf("OutputUnits is not defined for billing mode %q (per_token is billed by token count)", b.Mode)
+	}
+}
+
+// validBillingModeForType reports whether a billing mode is allowed for a
+// service type. per_token is valid everywhere (the default); the non-token modes
+// are restricted to the modality whose output they price.
+func validBillingModeForType(mode BillingMode, serviceType string) bool {
+	switch mode {
+	case "", BillingModePerToken:
+		return true
+	case BillingModePerImage:
+		return serviceType == constant.ServiceTypeTextToImage || serviceType == constant.ServiceTypeImageEditing
+	case BillingModePerVideoSecond, BillingModePerUnitTable:
+		return serviceType == constant.ServiceTypeVideoGeneration
+	default:
+		return false
+	}
+}
+
+// validateBillingConfig validates a per-model billing block against its service
+// type. prefix labels errors (e.g. "service.modelPricing[0].billing").
+func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) error {
+	switch b.Mode {
+	case "", BillingModePerToken, BillingModePerImage, BillingModePerVideoSecond, BillingModePerUnitTable:
+	default:
+		return fmt.Errorf("invalid config: %s.mode %q is not a known billing mode", prefix, b.Mode)
+	}
+	if !validBillingModeForType(b.Mode, serviceType) {
+		return fmt.Errorf("invalid config: %s.mode %q is not supported for service type %q", prefix, b.Mode, serviceType)
+	}
+	for res, mult := range b.ResolutionMultipliers {
+		if mult <= 0 {
+			return fmt.Errorf("invalid config: %s.resolutionMultipliers[%q] must be > 0, got %v", prefix, res, mult)
+		}
+	}
+	if b.Mode == BillingModePerUnitTable {
+		if len(b.Table) == 0 {
+			return fmt.Errorf("invalid config: %s.table must not be empty for mode %q", prefix, BillingModePerUnitTable)
+		}
+		seen := make(map[string]struct{}, len(b.Table))
+		for i, t := range b.Table {
+			if t.Resolution == "" {
+				return fmt.Errorf("invalid config: %s.table[%d].resolution is required", prefix, i)
+			}
+			if t.Duration <= 0 {
+				return fmt.Errorf("invalid config: %s.table[%d].duration must be > 0, got %d", prefix, i, t.Duration)
+			}
+			if t.Units <= 0 {
+				return fmt.Errorf("invalid config: %s.table[%d].units must be > 0, got %d", prefix, i, t.Units)
+			}
+			key := t.Resolution + "\x00" + fmt.Sprint(t.Duration)
+			if _, dup := seen[key]; dup {
+				return fmt.Errorf("invalid config: %s.table has a duplicate (resolution=%q, duration=%d) row", prefix, t.Resolution, t.Duration)
+			}
+			seen[key] = struct{}{}
+		}
+	} else if len(b.Table) > 0 {
+		return fmt.Errorf("invalid config: %s.table is only valid for mode %q", prefix, BillingModePerUnitTable)
+	}
+	return nil
 }
 
 type Service struct {
@@ -1241,6 +1399,16 @@ func loadConfig(cfg *Config) error {
 
 			if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {
 				return fmt.Errorf("invalid config: service.modelPricing[%d].canonicalId %q must be bare lowercase (letters, digits, '-', '.') for model '%s'", i, entry.CanonicalID, entry.Model)
+			}
+
+			// Optional per-model billing shape (per_image / per_video_second /
+			// per_unit_table). Validated whenever present; the engine (OutputUnits)
+			// is wired into the image/video request paths in a later increment, at
+			// which point the service-type gate above is relaxed for those types.
+			if entry.Billing != nil {
+				if err := validateBillingConfig(fmt.Sprintf("service.modelPricing[%d].billing", i), entry.Billing, cfg.Service.Type); err != nil {
+					return err
+				}
 			}
 
 			// Optional per-model metadata; if present it must be COMPLETE (same
