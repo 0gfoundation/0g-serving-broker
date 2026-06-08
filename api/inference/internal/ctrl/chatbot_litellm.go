@@ -36,9 +36,58 @@ type LiteLLMContent struct {
 }
 
 type LiteLLMUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens,omitempty"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	TotalTokens              int `json:"total_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+}
+
+// toUsage converts an Anthropic/LiteLLM usage report into the broker's canonical
+// Usage struct.
+//
+// Anthropic reports input_tokens, cache_creation_input_tokens and
+// cache_read_input_tokens as three disjoint buckets: input_tokens EXCLUDES
+// cached tokens (unlike OpenAI's prompt_tokens, which is the total with cached
+// as a subset). The canonical prompt_tokens is therefore their sum. Only
+// cache_read tokens are eligible for the cached-token discount; freshly written
+// cache_creation tokens are billed at full input price (the broker's billing
+// model has no separate cache-write premium).
+//
+// Populating PromptTokensDetails is what lets cacheTokenBilling engage on the
+// Anthropic /v1/messages path (see updateAccountWithUsage / finalizeResponseWithUsage,
+// which gate the discount on usage.PromptTokensDetails != nil).
+func (u *LiteLLMUsage) toUsage() *Usage {
+	promptTokens := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	usage := &Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      promptTokens + u.OutputTokens,
+	}
+	if u.CacheReadInputTokens > 0 {
+		usage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
+	}
+	return usage
+}
+
+// mergeLiteLLMUsage folds a usage fragment from one Anthropic stream event into
+// an accumulator. Input/cache counts are reported in message_start and the
+// cumulative output count in message_delta, so each field is taken from
+// whichever event reports a non-zero value (a later zero never clears an
+// earlier count).
+func mergeLiteLLMUsage(acc, in *LiteLLMUsage) {
+	if in.InputTokens > 0 {
+		acc.InputTokens = in.InputTokens
+	}
+	if in.OutputTokens > 0 {
+		acc.OutputTokens = in.OutputTokens
+	}
+	if in.CacheReadInputTokens > 0 {
+		acc.CacheReadInputTokens = in.CacheReadInputTokens
+	}
+	if in.CacheCreationInputTokens > 0 {
+		acc.CacheCreationInputTokens = in.CacheCreationInputTokens
+	}
 }
 
 // LiteLLM stream event structures
@@ -87,19 +136,16 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 		}
 	}
 
-	// Convert LiteLLM usage to standard Usage format
+	// Convert LiteLLM usage to standard Usage format (sums input + cache buckets
+	// and surfaces cached tokens so cacheTokenBilling can discount them).
 	if response.Usage != nil {
-		*usage = &Usage{
-			PromptTokens:     response.Usage.InputTokens,
-			CompletionTokens: response.Usage.OutputTokens,
-			TotalTokens:      response.Usage.InputTokens + response.Usage.OutputTokens,
-		}
+		*usage = response.Usage.toUsage()
 
 		// Skip billing for whitelisted users, but still record token metrics
 		if isWhitelisted {
-			monitor.RecordTokens("chatbot", int64(response.Usage.InputTokens), int64(response.Usage.OutputTokens))
-			monitor.RecordWhitelistTokens("chatbot", int64(response.Usage.InputTokens), int64(response.Usage.OutputTokens))
-			monitor.RecordTPSFromContext(ctx, "chatbot", int64(response.Usage.OutputTokens))
+			monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+			monitor.RecordWhitelistTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
+			monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
 			return nil
 		}
 
@@ -121,6 +167,11 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 
 // processLiteLLMStream processes a streaming LiteLLM response
 func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string, isWhitelisted bool) error {
+	// Anthropic streams split usage across events: input/cache counts arrive in
+	// message_start, cumulative output counts in message_delta. Accumulate both
+	// and build the canonical Usage at message_stop.
+	var acc LiteLLMUsage
+	haveUsage := false
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 
@@ -154,6 +205,17 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 						*output += event.Delta.Text
 					}
 
+				case "message_start":
+					var event LiteLLMStreamEvent
+					if err := json.Unmarshal(dataJSON, &event); err != nil {
+						c.logger.Warnf("Failed to parse message_start: %v", err)
+						continue
+					}
+					if event.Message != nil && event.Message.Usage != nil {
+						mergeLiteLLMUsage(&acc, event.Message.Usage)
+						haveUsage = true
+					}
+
 				case "message_delta":
 					var event LiteLLMStreamEvent
 					if err := json.Unmarshal(dataJSON, &event); err != nil {
@@ -161,14 +223,15 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 						continue
 					}
 					if event.Usage != nil {
-						*usage = &Usage{
-							PromptTokens:     event.Usage.InputTokens,
-							CompletionTokens: event.Usage.OutputTokens,
-							TotalTokens:      event.Usage.InputTokens + event.Usage.OutputTokens,
-						}
+						mergeLiteLLMUsage(&acc, event.Usage)
+						haveUsage = true
 					}
 
 				case "message_stop":
+					if haveUsage {
+						*usage = acc.toUsage()
+					}
+
 					// Skip billing for whitelisted users, but still record token metrics
 					if isWhitelisted {
 						if *usage != nil {

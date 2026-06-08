@@ -169,6 +169,10 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	}
 
 	clientBody := c.rewriteResponseModel(ctx, respBody)
+	// Strip upstream identity/cost leak fields before forwarding (#184).
+	if stripped, changed := stripResponseLeakFields(clientBody); changed {
+		clientBody = stripped
+	}
 
 	// Attempt to write the response to the client. If the client has already
 	// disconnected (broken pipe, connection reset), log a warning but continue
@@ -231,23 +235,28 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 			// Only write to client if still connected
 			if !clientDisconnected {
-				clientLine := c.rewriteResponseModelLine(ctx, line)
-				_, streamErr = w.Write([]byte(clientLine))
-				if streamErr != nil {
-					// Check if this is a client disconnection error
-					if c.isClientDisconnectError(streamErr) {
-						// Mark as ignorable and continue reading silently for complete billing
-						ctx.Set("ignoreError", true)
-						clientDisconnected = true
-						c.logger.Warnf("Client disconnected, continuing to read from backend for accurate billing")
-						// Don't return false, continue reading
+				// Sanitize before forwarding: drop SSE keepalive/comment lines and
+				// strip upstream identity/cost leak fields (#184). The raw line is
+				// already captured in rawBody (via TeeReader) for billing/signing.
+				clientLine, forward := c.sanitizeStreamLine(ctx, line)
+				if forward {
+					_, streamErr = w.Write([]byte(clientLine))
+					if streamErr != nil {
+						// Check if this is a client disconnection error
+						if c.isClientDisconnectError(streamErr) {
+							// Mark as ignorable and continue reading silently for complete billing
+							ctx.Set("ignoreError", true)
+							clientDisconnected = true
+							c.logger.Warnf("Client disconnected, continuing to read from backend for accurate billing")
+							// Don't return false, continue reading
+						} else {
+							// For other errors, stop immediately
+							c.handleBrokerError(ctx, streamErr, "write to stream")
+							return false
+						}
 					} else {
-						// For other errors, stop immediately
-						c.handleBrokerError(ctx, streamErr, "write to stream")
-						return false
+						ctx.Writer.Flush()
 					}
-				} else {
-					ctx.Writer.Flush()
 				}
 			}
 
@@ -630,6 +639,96 @@ func isLineEmpty(line []byte) bool {
 // underlying provider to produce the first token.
 func isSSEComment(line []byte) bool {
 	return bytes.HasPrefix(line, []byte(":"))
+}
+
+// responseLeakFields are top-level response fields that disclose the upstream
+// provider's identity and must not be forwarded to the client (#184). They are
+// provider-agnostic: a vLLM/OpenAI upstream omits them so stripping is a no-op,
+// while aggregating upstreams (e.g. OpenRouter) populate them.
+var responseLeakFields = []string{"provider"}
+
+// usageLeakFields are fields inside "usage" that disclose the upstream's
+// wholesale cost. The broker meters and bills independently, so the client must
+// never see the upstream's cost.
+var usageLeakFields = []string{"cost", "cost_details"}
+
+// stripResponseLeakFields removes upstream identity/cost fields from a JSON
+// response object (a full chat completion or a single SSE chunk) before it is
+// forwarded to the client. It returns (body, false) unchanged when the body is
+// not a JSON object or nothing needed removing, so it is safe to call on every
+// chunk. Billing and TEE signing are unaffected: both operate on the raw
+// upstream bytes, not on this client-facing copy.
+func stripResponseLeakFields(body []byte) ([]byte, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, false
+	}
+
+	changed := false
+	for _, f := range responseLeakFields {
+		if _, ok := obj[f]; ok {
+			delete(obj, f)
+			changed = true
+		}
+	}
+
+	if usageRaw, ok := obj["usage"]; ok {
+		var usage map[string]json.RawMessage
+		if err := json.Unmarshal(usageRaw, &usage); err == nil {
+			usageChanged := false
+			for _, f := range usageLeakFields {
+				if _, ok := usage[f]; ok {
+					delete(usage, f)
+					usageChanged = true
+				}
+			}
+			if usageChanged {
+				if newUsage, err := json.Marshal(usage); err == nil {
+					obj["usage"] = newUsage
+					changed = true
+				}
+			}
+		}
+	}
+
+	if !changed {
+		return body, false
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+// sanitizeStreamLine prepares one SSE line for the client. It drops SSE
+// comment/keepalive lines (returns forward=false) — e.g. OpenRouter's
+// ": OPENROUTER PROCESSING", which leaks the upstream's identity and carries no
+// data — and, for "data: {json}" chunks, rewrites the model name (LoRA) and
+// strips identity/cost leak fields (#184). Non-JSON lines (e.g. "data: [DONE]")
+// pass through after the model rewrite. The raw upstream stream is still
+// captured separately for billing and TEE signing, so neither is affected.
+func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string) (string, bool) {
+	lead := strings.TrimSpace(line)
+	if lead == "" {
+		return line, true // preserve SSE event separators
+	}
+	if isSSEComment([]byte(lead)) {
+		return "", false
+	}
+
+	// Model rewrite first (LoRA); format-preserving string replace.
+	line = c.rewriteResponseModelLine(ctx, line)
+
+	if after, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
+		payload := strings.TrimSpace(after)
+		if strings.HasPrefix(payload, "{") {
+			if stripped, changed := stripResponseLeakFields([]byte(payload)); changed {
+				return "data: " + string(stripped) + "\n", true
+			}
+		}
+	}
+	return line, true
 }
 
 func isStream(body []byte) (bool, error) {
