@@ -288,13 +288,18 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 		return errors.Wrap(err, "get cached service for speech-to-text billing")
 	}
 
-	if usage.Type == "duration" {
+	// Route to duration billing when the provider says so, or when Seconds is
+	// populated and the type field is missing/unknown. A response that
+	// explicitly says type="tokens" stays on the tokens path even if it also
+	// carries a Seconds field — trust the explicit discriminator.
+	if usage.Type == "duration" || (usage.Type != "tokens" && usage.Seconds > 0) {
 		return c.billSpeechToTextByDuration(ctx, usage, service.InputPrice, requestHash)
 	}
 	return c.billSpeechToTextByTokens(ctx, usage, service.InputPrice, service.OutputPrice, requestHash)
 }
 
-// billSpeechToTextByDuration handles whisper-style {"type":"duration","seconds":N}.
+// billSpeechToTextByDuration handles whisper-style usage carrying a seconds
+// count (with or without an explicit "type":"duration" discriminator).
 // InputPrice is treated as price-per-second; OutputPrice is ignored.
 func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTextUsage, inputPrice, requestHash string) error {
 	seconds := int64(usage.Seconds)
@@ -304,8 +309,9 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 		return errors.Wrap(err, "calculate duration fee")
 	}
 
-	// Persist as input_count=seconds, output_count=0 so duration-billed rows
-	// can be distinguished from token-billed rows by output==0+input>0+type.
+	// Persist seconds in input_count and 0 in output_count. There is no
+	// per-row unit discriminator; operators identify duration-billed rows
+	// by the service the row belongs to (whisper services bill seconds).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), "0", inputFee.String(),
 		seconds, 0); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
