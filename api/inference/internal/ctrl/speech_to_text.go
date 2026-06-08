@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"math"
 	"net/http"
 
 	"github.com/andybalholm/brotli"
@@ -22,55 +21,19 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
-// SpeechToTextUsage represents the usage information from speech-to-text API.
-//
-// Transcription models report usage in one of two shapes:
-//   - token-metered (e.g. gpt-4o-transcribe): type "tokens" with input/output
-//     token counts (audio tokens may live only in input_token_details).
-//   - duration-metered (e.g. whisper-large-v3): type "duration" with a
-//     `seconds` field and no token counts.
-//
-// Billing must handle both; otherwise duration-metered audio is billed zero
-// (router#350).
+// SpeechToTextUsage represents the usage information from speech-to-text API
 type SpeechToTextUsage struct {
-	Type              string                   `json:"type"`
-	TotalTokens       int                      `json:"total_tokens"`
-	InputTokens       int                      `json:"input_tokens"`
-	InputTokenDetails SpeechToTextTokenDetails `json:"input_token_details"`
-	OutputTokens      int                      `json:"output_tokens"`
-	Seconds           json.Number              `json:"seconds"`
+	Type               string                    `json:"type"`
+	TotalTokens        int                       `json:"total_tokens"`
+	InputTokens        int                       `json:"input_tokens"`
+	InputTokenDetails  SpeechToTextTokenDetails  `json:"input_token_details"`
+	OutputTokens       int                       `json:"output_tokens"`
 }
 
 // SpeechToTextTokenDetails contains detailed token information
 type SpeechToTextTokenDetails struct {
 	TextTokens  int `json:"text_tokens"`
 	AudioTokens int `json:"audio_tokens"`
-}
-
-// billableInputTokens returns the input token count to bill. Some models leave
-// the top-level input_tokens at zero and report the audio count only in
-// input_token_details.audio_tokens; fall back to that so the input isn't dropped.
-func (u *SpeechToTextUsage) billableInputTokens() int64 {
-	if u.InputTokens > 0 {
-		return int64(u.InputTokens)
-	}
-	if u.InputTokenDetails.AudioTokens > 0 {
-		return int64(u.InputTokenDetails.AudioTokens)
-	}
-	return 0
-}
-
-// durationSeconds parses the `seconds` field of a duration-metered usage report,
-// rounding fractional seconds up to whole seconds. Returns 0 when absent/invalid.
-func (u *SpeechToTextUsage) durationSeconds() int64 {
-	if u.Seconds == "" {
-		return 0
-	}
-	f, err := u.Seconds.Float64()
-	if err != nil || f <= 0 {
-		return 0
-	}
-	return int64(math.Ceil(f))
 }
 
 // SpeechToTextResponse represents the transcription response
@@ -91,7 +54,7 @@ type SpeechToTextStreamChunk struct {
 func (c *Ctrl) handleSpeechToTextResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ string, reqBody []byte, reqModel model.Request) error {
 	// Check if request is for streaming by parsing the request body
 	isStream := c.isSpeechToTextStream(reqBody)
-
+	
 	if !isStream {
 		return c.handleNonStreamingSpeechToText(ctx, resp, reqBody, reqModel)
 	} else {
@@ -104,7 +67,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-
+	
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
@@ -174,7 +137,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Update billing with actual usage data
 	if transcriptionResp.Usage != nil {
-		return c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel)
+		return c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel.RequestHash)
 	}
 
 	// Fallback if no usage data
@@ -275,7 +238,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Update billing
 	if usage != nil {
-		return c.updateSpeechToTextWithUsage(ctx, usage, reqModel)
+		return c.updateSpeechToTextWithUsage(ctx, usage, reqModel.RequestHash)
 	}
 
 	// Fallback if no usage data
@@ -283,42 +246,20 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 }
 
 // updateSpeechToTextWithUsage updates the request with accurate token counts from the API response
-func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, reqModel model.Request) error {
-	requestHash := reqModel.RequestHash
-
+func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
 	// Get service price from cache/contract instead of config
 	service, err := c.GetCachedService(ctx)
 	if err != nil {
 		return errors.Wrap(err, "get cached service for speech-to-text billing")
 	}
 
-	inputTokens := usage.billableInputTokens()
-	outputTokens := int64(usage.OutputTokens)
-
-	// Duration-metered models (e.g. whisper-large-v3) report no token counts,
-	// only `seconds`. Bill by audio duration at the output price
-	// (ceil(seconds) × outputPrice), mirroring the video-generation billing
-	// model, so audio requests are never billed zero (router#350). A duration-
-	// metered service configures outputPrice as its per-second rate.
-	if inputTokens == 0 && outputTokens == 0 {
-		seconds := usage.durationSeconds()
-		if seconds <= 0 {
-			// Usage object was present but carried no tokens and no duration (an
-			// unrecognized shape). Fall back to the word-count estimate rather than
-			// billing zero — matches every other unknown-usage path in this file.
-			c.logger.Warnf("speech-to-text usage has neither tokens nor duration, falling back to estimated billing: %+v", usage)
-			return c.updateSpeechToTextFallback(ctx, reqModel, "")
-		}
-		return c.updateSpeechToTextWithDuration(ctx, service.OutputPrice, seconds, requestHash)
-	}
-
 	// Calculate actual fees based on API-provided token counts
-	inputFee, err := util.Multiply(service.InputPrice, inputTokens)
+	inputFee, err := util.Multiply(service.InputPrice, int64(usage.InputTokens))
 	if err != nil {
 		return errors.Wrap(err, "calculate input fee from actual tokens")
 	}
 
-	outputFee, err := util.Multiply(service.OutputPrice, outputTokens)
+	outputFee, err := util.Multiply(service.OutputPrice, int64(usage.OutputTokens))
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee from actual tokens")
 	}
@@ -330,17 +271,17 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 
 	// Update the request with accurate token counts and fees
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(),
-		inputTokens, outputTokens); err != nil {
+		int64(usage.InputTokens), int64(usage.OutputTokens)); err != nil {
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 
 	// Record token metrics
-	monitor.RecordTokens("speech_to_text", inputTokens, outputTokens)
-	monitor.RecordTPSFromContext(ctx, "speech_to_text", outputTokens)
+	monitor.RecordTokens("speech_to_text", int64(usage.InputTokens), int64(usage.OutputTokens))
+	monitor.RecordTPSFromContext(ctx, "speech_to_text", int64(usage.OutputTokens))
 
 	// Update TPM limiter with actual token consumption
 	if ginCtx, ok := ctx.(*gin.Context); ok {
-		totalTokens := int(inputTokens + outputTokens)
+		totalTokens := usage.InputTokens + usage.OutputTokens
 		userAddr, _ := ginCtx.Get("userAddress")
 		userStr, userOk := userAddr.(string)
 		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
@@ -350,30 +291,6 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 		}
 	}
 
-	return nil
-}
-
-// updateSpeechToTextWithDuration bills a duration-metered transcription by audio
-// seconds at the output price (seconds × outputPrice), recording the seconds as
-// the output count. Used for models that report `seconds` instead of tokens.
-func (c *Ctrl) updateSpeechToTextWithDuration(ctx context.Context, outputPrice string, seconds int64, requestHash string) error {
-	fee, err := util.Multiply(outputPrice, seconds)
-	if err != nil {
-		return errors.Wrap(err, "calculate duration-based fee for speech-to-text")
-	}
-
-	// No input tokens for duration billing; seconds are recorded as the output count.
-	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, "0", fee.String(), fee.String(), 0, seconds); err != nil {
-		return errors.Wrap(err, "update request with duration-based fee")
-	}
-
-	monitor.RecordTokens("speech_to_text", 0, seconds)
-	monitor.RecordTPSFromContext(ctx, "speech_to_text", seconds)
-
-	// Unlike the token-metered path, the TPM (tokens-per-minute) limiter is not
-	// post-consumed here: a duration-metered model reports no tokens, and feeding
-	// `seconds` into a token bucket would conflate units. Per-user RPM limiting
-	// still applies; TPM simply does not bind for tokenless audio billing.
 	return nil
 }
 
@@ -444,21 +361,21 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 func (c *Ctrl) isSpeechToTextStream(reqBody []byte) bool {
 	// Parse multipart body to find stream parameter
 	bodyStr := string(reqBody)
-
+	
 	// Look for stream parameter in multipart data
 	// Pattern: name="stream"\r\n\r\ntrue
-	isStream := contains(bodyStr, `name="stream"`) &&
+	isStream := contains(bodyStr, `name="stream"`) && 
 		(contains(bodyStr, "\r\n\r\ntrue") || contains(bodyStr, "\ntrue"))
-
+	
 	c.logger.Debugf("Is streaming request: %t", isStream)
 	return isStream
 }
 
 // contains is a simple helper to check if string contains substring
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr || len(s) > len(substr) &&
-			(hasSubstring(s, substr)))
+	return len(s) >= len(substr) && 
+		(s == substr || len(s) > len(substr) && 
+		(hasSubstring(s, substr)))
 }
 
 // hasSubstring checks if s contains substr
