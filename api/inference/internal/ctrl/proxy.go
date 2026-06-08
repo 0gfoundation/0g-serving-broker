@@ -271,7 +271,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 	}
 	clientBody := c.rewriteResponseModel(ctx, body)
 	// Strip upstream identity/cost leak fields before forwarding (#184).
-	if stripped, changed := stripResponseLeakFields(clientBody); changed {
+	if stripped, changed := c.stripResponseLeakFields(clientBody); changed {
 		clientBody = stripped
 	}
 	if _, err := ctx.Writer.Write(clientBody); err != nil {

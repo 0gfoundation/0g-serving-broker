@@ -8,9 +8,10 @@ import (
 )
 
 func TestStripResponseLeakFields(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
 	t.Run("strips provider", func(t *testing.T) {
 		in := []byte(`{"id":"x","provider":"DeepInfra","choices":[]}`)
-		out, changed := stripResponseLeakFields(in)
+		out, changed := c.stripResponseLeakFields(in)
 		if !changed {
 			t.Fatal("expected changed=true")
 		}
@@ -28,7 +29,7 @@ func TestStripResponseLeakFields(t *testing.T) {
 
 	t.Run("strips usage.cost", func(t *testing.T) {
 		in := []byte(`{"usage":{"prompt_tokens":10,"cost":0.0042,"cost_details":{"upstream":0.004}}}`)
-		out, changed := stripResponseLeakFields(in)
+		out, changed := c.stripResponseLeakFields(in)
 		if !changed {
 			t.Fatal("expected changed=true")
 		}
@@ -51,7 +52,7 @@ func TestStripResponseLeakFields(t *testing.T) {
 
 	t.Run("no-op on clean vLLM response", func(t *testing.T) {
 		in := []byte(`{"id":"x","model":"qwen","usage":{"prompt_tokens":10,"completion_tokens":5}}`)
-		out, changed := stripResponseLeakFields(in)
+		out, changed := c.stripResponseLeakFields(in)
 		if changed {
 			t.Errorf("expected changed=false, got modified output %s", out)
 		}
@@ -62,7 +63,7 @@ func TestStripResponseLeakFields(t *testing.T) {
 
 	t.Run("no-op on non-JSON", func(t *testing.T) {
 		in := []byte(`[DONE]`)
-		out, changed := stripResponseLeakFields(in)
+		out, changed := c.stripResponseLeakFields(in)
 		if changed || string(out) != string(in) {
 			t.Errorf("non-JSON should pass through unchanged")
 		}

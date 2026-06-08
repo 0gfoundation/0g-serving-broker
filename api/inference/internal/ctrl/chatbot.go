@@ -170,7 +170,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	clientBody := c.rewriteResponseModel(ctx, respBody)
 	// Strip upstream identity/cost leak fields before forwarding (#184).
-	if stripped, changed := stripResponseLeakFields(clientBody); changed {
+	if stripped, changed := c.stripResponseLeakFields(clientBody); changed {
 		clientBody = stripped
 	}
 
@@ -675,9 +675,16 @@ var usageLeakFields = []string{"cost", "cost_details"}
 // not a JSON object or nothing needed removing, so it is safe to call on every
 // chunk. Billing and TEE signing are unaffected: both operate on the raw
 // upstream bytes, not on this client-facing copy.
-func stripResponseLeakFields(body []byte) ([]byte, bool) {
+func (c *Ctrl) stripResponseLeakFields(body []byte) ([]byte, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
+		// Fail-open: a body we cannot parse (e.g. a compressed or fragmented
+		// chunk) is forwarded as-is. Log when it's non-empty so a leaky-but-
+		// unparseable response — where stripping silently no-ops — is observable
+		// rather than invisible (#184).
+		if len(bytes.TrimSpace(body)) > 0 {
+			c.logger.Debugf("stripResponseLeakFields: body not a JSON object, leak-field stripping skipped: %v", err)
+		}
 		return body, false
 	}
 
@@ -703,6 +710,11 @@ func stripResponseLeakFields(body []byte) ([]byte, bool) {
 				if newUsage, err := json.Marshal(usage); err == nil {
 					obj["usage"] = newUsage
 					changed = true
+				} else {
+					// Defensive: a re-marshal failure would leave usage.cost in the
+					// forwarded body. Practically unreachable (RawMessage round-trip),
+					// but surface it rather than silently leak the cost.
+					c.logger.Warnf("stripResponseLeakFields: failed to re-marshal stripped usage, cost fields not removed: %v", err)
 				}
 			}
 		}
@@ -740,7 +752,7 @@ func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string) (string, bool) 
 	if after, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
 		payload := strings.TrimSpace(after)
 		if strings.HasPrefix(payload, "{") {
-			if stripped, changed := stripResponseLeakFields([]byte(payload)); changed {
+			if stripped, changed := c.stripResponseLeakFields([]byte(payload)); changed {
 				return "data: " + string(stripped) + "\n", true
 			}
 		}
