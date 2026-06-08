@@ -35,6 +35,9 @@ var minPriceQuantumWei = big.NewInt(1e8)
 // of the price (grid <= price/100), clamped to [minPriceQuantumWei,
 // priceQuantumWei]. Expensive models keep the coarse 0.01 0G/M grid (stable,
 // low churn); cheap models get a finer grid so their price survives truncation.
+// The ~1% bound holds except right at the minPriceQuantumWei clamp (prices just
+// above 1e8 wei), where the forced 1e8 grid can leave a larger relative floor
+// error — still a floor, so it only ever under-charges, never over-charges.
 //
 // The grid only sizes the floor snap — it never changes the snap direction, so
 // floor-favours-user still holds. SyncService churn is unaffected: on-chain

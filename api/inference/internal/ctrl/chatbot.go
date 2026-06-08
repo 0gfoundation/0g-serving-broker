@@ -735,8 +735,9 @@ func (c *Ctrl) stripResponseLeakFields(body []byte) ([]byte, bool) {
 // ": OPENROUTER PROCESSING", which leaks the upstream's identity and carries no
 // data — and, for "data: {json}" chunks, rewrites the model name (LoRA) and
 // strips identity/cost leak fields (#184). Non-JSON lines (e.g. "data: [DONE]")
-// pass through after the model rewrite. The raw upstream stream is still
-// captured separately for billing and TEE signing, so neither is affected.
+// pass through after the model rewrite. The raw upstream stream is captured
+// separately (rawBody) for billing, so billing is unaffected; TEE signing
+// attests the sanitized bytes the client actually receives.
 func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string) (string, bool) {
 	lead := strings.TrimSpace(line)
 	if lead == "" {

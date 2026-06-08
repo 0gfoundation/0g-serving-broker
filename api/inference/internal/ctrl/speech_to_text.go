@@ -369,6 +369,11 @@ func (c *Ctrl) updateSpeechToTextWithDuration(ctx context.Context, outputPrice s
 
 	monitor.RecordTokens("speech_to_text", 0, seconds)
 	monitor.RecordTPSFromContext(ctx, "speech_to_text", seconds)
+
+	// Unlike the token-metered path, the TPM (tokens-per-minute) limiter is not
+	// post-consumed here: a duration-metered model reports no tokens, and feeding
+	// `seconds` into a token bucket would conflate units. Per-user RPM limiting
+	// still applies; TPM simply does not bind for tokenless audio billing.
 	return nil
 }
 
