@@ -187,8 +187,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		}
 	}
 
-	// Always process billing regardless of client connection state
-	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, chatKey); err != nil {
+	// Always process billing regardless of client connection state. Billing uses
+	// the raw respBody; signing uses clientBody (what the client received).
+	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, clientBody, chatKey); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
@@ -208,6 +209,10 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	}
 
 	var rawBody bytes.Buffer
+	// clientBody accumulates the sanitized bytes actually delivered to the client
+	// (comment lines dropped, leak fields stripped, model rewritten), so the TEE
+	// signature attests what the client can verify rather than the raw upstream.
+	var clientBody bytes.Buffer
 
 	var streamErr error = nil
 	var responseChunk []byte = nil
@@ -233,30 +238,33 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				responseChunk = []byte(strings.TrimSpace(strings.TrimPrefix(line, "data: ")))
 			}
 
+			// Sanitize before forwarding: drop SSE keepalive/comment lines and strip
+			// upstream identity/cost leak fields (#184). The raw line is captured in
+			// rawBody (via TeeReader) for billing; the sanitized line is accumulated
+			// in clientBody so the signature attests what the client receives.
+			clientLine, forward := c.sanitizeStreamLine(ctx, line)
+			if forward {
+				clientBody.WriteString(clientLine)
+			}
+
 			// Only write to client if still connected
-			if !clientDisconnected {
-				// Sanitize before forwarding: drop SSE keepalive/comment lines and
-				// strip upstream identity/cost leak fields (#184). The raw line is
-				// already captured in rawBody (via TeeReader) for billing/signing.
-				clientLine, forward := c.sanitizeStreamLine(ctx, line)
-				if forward {
-					_, streamErr = w.Write([]byte(clientLine))
-					if streamErr != nil {
-						// Check if this is a client disconnection error
-						if c.isClientDisconnectError(streamErr) {
-							// Mark as ignorable and continue reading silently for complete billing
-							ctx.Set("ignoreError", true)
-							clientDisconnected = true
-							c.logger.Warnf("Client disconnected, continuing to read from backend for accurate billing")
-							// Don't return false, continue reading
-						} else {
-							// For other errors, stop immediately
-							c.handleBrokerError(ctx, streamErr, "write to stream")
-							return false
-						}
+			if !clientDisconnected && forward {
+				_, streamErr = w.Write([]byte(clientLine))
+				if streamErr != nil {
+					// Check if this is a client disconnection error
+					if c.isClientDisconnectError(streamErr) {
+						// Mark as ignorable and continue reading silently for complete billing
+						ctx.Set("ignoreError", true)
+						clientDisconnected = true
+						c.logger.Warnf("Client disconnected, continuing to read from backend for accurate billing")
+						// Don't return false, continue reading
 					} else {
-						ctx.Writer.Flush()
+						// For other errors, stop immediately
+						c.handleBrokerError(ctx, streamErr, "write to stream")
+						return false
 					}
+				} else {
+					ctx.Writer.Flush()
 				}
 			}
 
@@ -283,7 +291,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			}
 		}
 
-		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, chatKey); err != nil {
+		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, clientBody.Bytes(), chatKey); err != nil {
 			c.logger.Errorf("Failed to process response for billing: %v", err)
 			// If we had a stream error, return it; otherwise return the decode error
 			if streamErr != nil {
@@ -301,7 +309,16 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, chatKey string) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, signData []byte, chatKey string) error {
+	// signData is the exact byte stream delivered to the client (after model
+	// rewrite / leak-field stripping). The TEE signature must attest what the
+	// client can verify, not the raw upstream — billing below still uses raw `data`.
+	// Falls back to raw data when the caller supplies nothing (e.g. a stream with
+	// no forwarded content), preserving the legacy behaviour.
+	if len(signData) == 0 {
+		signData = data
+	}
+
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -369,12 +386,12 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		// complete at this point.  Without a cached signature the SDK will get
 		// a 404 on /v1/proxy/signature/{chatID}, which is more honest than a
 		// TEE-signed proof that lacks TLS evidence.
-		if err := c.signCentralizedRoutingProof(reqBody, data, chatKey, tlsState); err != nil {
+		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, tlsState); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
-		if err := c.signChatWithKey(reqBody, data, chatKey); err != nil {
+		if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
 			return err
 		}
 	}

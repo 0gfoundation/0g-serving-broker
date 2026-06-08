@@ -174,7 +174,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Update billing with actual usage data
 	if transcriptionResp.Usage != nil {
-		return c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel.RequestHash)
+		return c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel)
 	}
 
 	// Fallback if no usage data
@@ -275,7 +275,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Update billing
 	if usage != nil {
-		return c.updateSpeechToTextWithUsage(ctx, usage, reqModel.RequestHash)
+		return c.updateSpeechToTextWithUsage(ctx, usage, reqModel)
 	}
 
 	// Fallback if no usage data
@@ -283,7 +283,9 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 }
 
 // updateSpeechToTextWithUsage updates the request with accurate token counts from the API response
-func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
+func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, reqModel model.Request) error {
+	requestHash := reqModel.RequestHash
+
 	// Get service price from cache/contract instead of config
 	service, err := c.GetCachedService(ctx)
 	if err != nil {
@@ -301,8 +303,11 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 	if inputTokens == 0 && outputTokens == 0 {
 		seconds := usage.durationSeconds()
 		if seconds <= 0 {
-			c.logger.Warnf("speech-to-text usage has neither tokens nor duration, skipping accurate billing: %+v", usage)
-			return nil
+			// Usage object was present but carried no tokens and no duration (an
+			// unrecognized shape). Fall back to the word-count estimate rather than
+			// billing zero — matches every other unknown-usage path in this file.
+			c.logger.Warnf("speech-to-text usage has neither tokens nor duration, falling back to estimated billing: %+v", usage)
+			return c.updateSpeechToTextFallback(ctx, reqModel, "")
 		}
 		return c.updateSpeechToTextWithDuration(ctx, service.OutputPrice, seconds, requestHash)
 	}
