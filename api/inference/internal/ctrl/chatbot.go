@@ -793,13 +793,19 @@ const openrouterLeakPrefix = "openrouter."
 // beginning with the vendor prefix), NOT merely on type=="redacted_thinking",
 // so a genuine Anthropic redacted_thinking block — an opaque encrypted blob with
 // no vendor prefix — is never touched.
+//
+// The prefix test is case-folded and leading-whitespace-trimmed: this is a
+// fail-open security control (a missed match re-leaks the vendor identity to the
+// client, #373), so we harden it against trivial upstream serialization drift
+// (" openrouter.", "Openrouter.") rather than matching one exact literal. Only
+// the comparison is folded — the original `data` bytes are untouched.
 func isLeakedRedactedThinking(v interface{}) bool {
 	m, ok := v.(map[string]interface{})
 	if !ok {
 		return false
 	}
 	data, ok := m["data"].(string)
-	return ok && strings.HasPrefix(data, openrouterLeakPrefix)
+	return ok && strings.HasPrefix(strings.ToLower(strings.TrimSpace(data)), openrouterLeakPrefix)
 }
 
 // stripUpstreamReasoningBlocks removes the synthesized openrouter.reasoning
@@ -839,6 +845,10 @@ func stripUpstreamReasoningBlocks(v interface{}) bool {
 					if len(kept) != len(arr) {
 						t["content"] = kept
 					}
+					// DO NOT mirror this drop onto the streaming path: blanking
+					// `data` in place (above) is deliberate. Dropping a streamed
+					// content_block would desync the content_block_start/delta/stop
+					// index sequence the client reassembles by index.
 					continue // content elements are leaves; do not recurse further
 				}
 			}

@@ -386,6 +386,20 @@ func TestSanitizeResponseBody_StripsUpstreamReasoningLeak(t *testing.T) {
 			t.Error("block envelope/type should be preserved to keep stream indices in sync")
 		}
 	})
+
+	t.Run("matcher tolerates case/whitespace drift in the vendor prefix", func(t *testing.T) {
+		for _, data := range []string{"Openrouter.reasoning:eyJ4Ijoid", " openrouter.reasoning:eyJ4Ijoid", "OPENROUTER.reasoning:x"} {
+			in := []byte(`{"content":[{"type":"text","text":"ok"},{"type":"redacted_thinking","data":"` + data + `"}]}`)
+			out, changed := c.sanitizeResponseBody(in, "")
+			if !changed {
+				t.Errorf("data %q: expected the leak to be detected and dropped", data)
+				continue
+			}
+			if bytes.Contains(bytes.ToLower(out), []byte("openrouter")) {
+				t.Errorf("data %q: vendor marker survived: %s", data, out)
+			}
+		}
+	})
 }
 
 // router #374: the reasoning/thinking token subset must never exceed the
