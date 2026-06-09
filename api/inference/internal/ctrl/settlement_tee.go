@@ -783,6 +783,12 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 	// Pass the broker's configured service type so STT rows (where input_count
 	// is seconds, not tokens) skip the token-named columns in daily_stat.
 	// See AccumulateAndDeleteRequests doc + #530.
+	//
+	// Assumption: a single broker process proxies exactly one service type
+	// (cfg.Service is a singular struct, not a list). Every row in `requests`
+	// at settlement time therefore shares c.Service.Type, so a function-wide
+	// skip is safe. If we ever multiplex services in one broker, this needs
+	// to partition `requests` by per-row service type instead — track in #530.
 	if err := c.db.AccumulateAndDeleteRequests(requests, c.Service.Type); err != nil {
 		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err

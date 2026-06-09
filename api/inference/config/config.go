@@ -420,6 +420,11 @@ type Config struct {
 	// corrupt any aggregate query against requests.input_count. Set to
 	// true only after reading #530 and accepting the analytics risk for
 	// the deployment window.
+	//
+	// TODO(#530): a broker-wide flag is awkward — the unit conflation is
+	// per-service. Once the schema discriminator lands, derive this from
+	// the registered service's billing_unit instead of asking operators to
+	// flip a global flag.
 	AllowTokenBilledSpeechToText bool `yaml:"allowTokenBilledSpeechToText"`
 }
 

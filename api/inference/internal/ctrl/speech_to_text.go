@@ -25,8 +25,8 @@ import (
 
 // ErrTokenBilledSpeechToTextGated is returned by billSpeechToTextByTokens when
 // cfg.AllowTokenBilledSpeechToText is false. Callers detect it with errors.Is
-// and degrade to the word-count fallback so the operator still captures
-// something for a request the user already received a response for. Tied to
+// and degrade to billGatedTokenSTT, which bills against the real upstream
+// usage (not an estimate) so the operator doesn't ship free GPU. Tied to
 // issue #530 — when the schema discriminator lands, the gate (and this
 // sentinel) get removed.
 var ErrTokenBilledSpeechToTextGated = stderrors.New("token-billed speech-to-text disabled pending #530")
@@ -231,8 +231,10 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	if hasBillableUsage(transcriptionResp.Usage) {
 		err := c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel.RequestHash)
 		if stderrors.Is(err, ErrTokenBilledSpeechToTextGated) {
-			c.logger.Warnf("token-billed STT gated (#530), falling back to word-count estimation for request %s", reqModel.RequestHash)
-			return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
+			if billErr := c.billGatedTokenSTT(ctx, transcriptionResp.Usage, reqModel.RequestHash); billErr != nil {
+				return billErr
+			}
+			return nil
 		}
 		return err
 	}
@@ -324,6 +326,13 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 		_ = c.signChatWithKey(reqBody, rawBody.Bytes(), chatKey)
 	}
 
+	// streamErr (set inside ctx.Stream above) is intentionally NOT returned
+	// here. If the upstream read or client write failed mid-stream, the user
+	// has whatever bytes we managed to ship — bill for whatever usage we
+	// extracted before the failure rather than handing them free output.
+	// handleBrokerError was already called inside the loop for visibility.
+	_ = streamErr
+
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(usage)
@@ -334,8 +343,10 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	if hasBillableUsage(usage) {
 		err := c.updateSpeechToTextWithUsage(ctx, usage, reqModel.RequestHash)
 		if stderrors.Is(err, ErrTokenBilledSpeechToTextGated) {
-			c.logger.Warnf("token-billed STT gated (#530), falling back to word-count estimation for request %s", reqModel.RequestHash)
-			return c.updateSpeechToTextFallback(ctx, reqModel, rawBody.String())
+			if billErr := c.billGatedTokenSTT(ctx, usage, reqModel.RequestHash); billErr != nil {
+				return billErr
+			}
+			return nil
 		}
 		return err
 	}
@@ -403,7 +414,7 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 	// tokens-per-second concept (the whole transcript is delivered as one
 	// shot, not as a generation stream). A seconds/second metric would be
 	// nonsensical and would pollute the chatbot TPS dashboard.
-	consumeSpeechToTextLimiter(ctx, seconds)
+	c.consumeSpeechToTextLimiter(ctx, seconds)
 	return nil
 }
 
@@ -419,13 +430,49 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToTextUsage, inputPrice, outputPrice, requestHash string) error {
 	if !c.allowTokenBilledSTT {
 		// Sentinel error so callers can detect the gate-fired case and route
-		// to the word-count fallback. Billing here is post-response: the
-		// transcription has already streamed to the user, so refusing to bill
-		// at all means free GPU. Falling back to the estimator captures
-		// something against OutputPrice; the operator gets a warning log and
-		// can flip the flag once they've reviewed #530's trade-off.
+		// to billSpeechToTextByTokensCore directly. Billing here is
+		// post-response: the transcription has already streamed to the user,
+		// so refusing to bill would be free GPU. The handler logs a warning
+		// and bills against the real upstream usage anyway — daily_stat
+		// archive contamination is prevented by the separate STT skip in
+		// AccumulateAndDeleteRequests, so writing real values to
+		// requests.input_count is safe within the single-service-per-broker
+		// assumption. See #530.
 		return ErrTokenBilledSpeechToTextGated
 	}
+	return c.billSpeechToTextByTokensCore(ctx, usage, inputPrice, outputPrice, requestHash)
+}
+
+// billGatedTokenSTT bills a gate-tripped token-STT request against the real
+// upstream usage. Reviewer pointed out that routing the gate to the generic
+// word-count fallback bills `OutputPrice × estimate` — and gpt-4o-transcribe
+// operators typically set OutputPrice=0 (output_tokens is always 0 upstream),
+// so that path silently bills 0 again. The gate's structural protection
+// (preventing daily_stat archive contamination) is provided by the separate
+// STT skip in AccumulateAndDeleteRequests, so writing the real values to
+// requests.input_count is safe within the single-service-per-broker
+// assumption. Logs a warning loud enough that the operator can find it and
+// flip cfg.AllowTokenBilledSpeechToText after reading #530.
+func (c *Ctrl) billGatedTokenSTT(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
+	c.logger.Warnf(
+		"token-billed STT gated (cfg.AllowTokenBilledSpeechToText=false, see #530) but transcription already shipped to user; "+
+			"billing against upstream usage (input_tokens=%d, output_tokens=%d) to avoid free GPU. "+
+			"Flip the config flag to silence this warning after reviewing the analytics trade-off. request=%s",
+		usage.InputTokens, usage.OutputTokens, requestHash,
+	)
+	service, err := c.GetCachedService(ctx)
+	if err != nil {
+		return errors.Wrap(err, "get cached service for gated token-stt billing")
+	}
+	return c.billSpeechToTextByTokensCore(ctx, usage, service.InputPrice, service.OutputPrice, requestHash)
+}
+
+// billSpeechToTextByTokensCore is the gate-less token-billing math. Called
+// directly by handler paths when the gate trips and we need to bill the
+// in-flight request against the real upstream usage rather than a fallback
+// estimate that may evaluate to 0 (gpt-4o-transcribe operators typically set
+// OutputPrice=0 since output_tokens is always 0).
+func (c *Ctrl) billSpeechToTextByTokensCore(ctx context.Context, usage *SpeechToTextUsage, inputPrice, outputPrice, requestHash string) error {
 	inputFeeStr, outputFeeStr, totalFeeStr, err := calcTokenFees(inputPrice, outputPrice, usage.InputTokens, usage.OutputTokens)
 	if err != nil {
 		return err
@@ -437,8 +484,13 @@ func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToText
 	}
 
 	monitor.RecordTokens(speechToTextMetricLabel, int64(usage.InputTokens), int64(usage.OutputTokens))
+	// RecordTPSFromContext early-returns when outputTokens <= 0, so gpt-4o-transcribe
+	// (output_tokens always 0 upstream) emits no observation rather than recording a
+	// misleading 0 — verified in monitor.RecordTPSFromContext. Kept for forward
+	// compatibility with any future token-billed STT model that does emit
+	// non-zero output_tokens.
 	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, int64(usage.OutputTokens))
-	consumeSpeechToTextLimiter(ctx, usage.InputTokens+usage.OutputTokens)
+	c.consumeSpeechToTextLimiter(ctx, usage.InputTokens+usage.OutputTokens)
 	return nil
 }
 
@@ -474,25 +526,35 @@ func calcTokenFees(inputPrice, outputPrice string, inputTokens, outputTokens int
 // unit count (tokens or seconds, depending on the billing mode the caller
 // chose). The bucket is configured per-service so the unit conflation is
 // already implicit in the operator's RPM/TPM choice for whisper vs gpt-4o.
-func consumeSpeechToTextLimiter(ctx context.Context, units int) {
+//
+// Each "limiter missing" branch logs at debug level. These paths are not
+// errors (some tests / internal calls drive Ctrl without a gin context), but
+// if a production code path ever stopped wiring tpmLimiter through, rate
+// limiting would silently disable for STT — the debug logs let operators
+// discover that by toggling log level without us having to add a metric.
+func (c *Ctrl) consumeSpeechToTextLimiter(ctx context.Context, units int) {
 	if units <= 0 {
 		return
 	}
 	ginCtx, ok := ctx.(*gin.Context)
 	if !ok {
+		c.logger.Debugf("consumeSpeechToTextLimiter: ctx is not *gin.Context (units=%d), limiter skipped", units)
 		return
 	}
 	userAddr, _ := ginCtx.Get("userAddress")
 	userStr, userOk := userAddr.(string)
 	if !userOk {
+		c.logger.Debugf("consumeSpeechToTextLimiter: userAddress missing from gin.Context (units=%d), limiter skipped", units)
 		return
 	}
 	tpmLimiter, exists := ginCtx.Get("tpmLimiter")
 	if !exists {
+		c.logger.Debugf("consumeSpeechToTextLimiter: tpmLimiter missing from gin.Context user=%s (units=%d), limiter skipped", userStr, units)
 		return
 	}
 	limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter)
 	if !ok {
+		c.logger.Debugf("consumeSpeechToTextLimiter: tpmLimiter has unexpected type %T user=%s (units=%d), limiter skipped", tpmLimiter, userStr, units)
 		return
 	}
 	limiter.ConsumeTokens(userStr, units)
@@ -590,16 +652,8 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	monitor.RecordTokens(speechToTextMetricLabel, 0, estimatedOutputTokens)
 	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, estimatedOutputTokens)
 
-	// Update TPM limiter with estimated token consumption (fallback path)
-	if ginCtx, ok := ctx.(*gin.Context); ok {
-		userAddr, _ := ginCtx.Get("userAddress")
-		userStr, userOk := userAddr.(string)
-		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
-			if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
-				limiter.ConsumeTokens(userStr, int(estimatedOutputTokens))
-			}
-		}
-	}
+	// Update TPM limiter with estimated token consumption (fallback path).
+	c.consumeSpeechToTextLimiter(ctx, int(estimatedOutputTokens))
 
 	return nil
 }
