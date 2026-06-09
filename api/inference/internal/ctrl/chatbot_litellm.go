@@ -248,9 +248,20 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 						if err != nil {
 							return errors.Wrap(err, "get billing prices for LiteLLM stream response billing")
 						}
-						return c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers)
+						if err := c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers); err != nil {
+							// Mirror the OpenAI stream path (chatbot.go): a failed billing
+							// write here means the user got the full stream unbilled — log it
+							// at ERROR with the request hash, don't propagate it silently.
+							c.logger.Errorf("LiteLLM stream billing failed for request %s: %v", requestHash, err)
+							return err
+						}
+						return nil
 					}
-					return c.finalizeResponse(ctx, *output, outputPrice, requestHash)
+					if err := c.finalizeResponse(ctx, *output, outputPrice, requestHash); err != nil {
+						c.logger.Errorf("LiteLLM stream finalize failed for request %s: %v", requestHash, err)
+						return err
+					}
+					return nil
 				}
 			}
 		}

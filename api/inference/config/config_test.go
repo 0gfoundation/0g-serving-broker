@@ -1300,6 +1300,61 @@ func TestValidateBillingConfig(t *testing.T) {
 	}
 }
 
+func TestBillingConfig_OutputUnits_ResolutionCaseInsensitive(t *testing.T) {
+	// A casing/whitespace mismatch between the configured key and the
+	// upstream/client-reported resolution must NOT silently fall through to the
+	// 1.0 baseline (which would underbill). "1080P" config must match "1080p",
+	// " 1080P ", etc.
+	perSec := &BillingConfig{
+		Mode:                  BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"1080P": 2.25},
+	}
+	for _, res := range []string{"1080p", "1080P", " 1080p ", "1080P\t"} {
+		got, err := perSec.OutputUnits(BillingObservables{Seconds: 5, Resolution: res})
+		if err != nil {
+			t.Fatalf("per_video_second %q: %v", res, err)
+		}
+		if got != 12 { // ceil(5 * 2.25)
+			t.Errorf("per_video_second %q = %d, want 12 (must match 1080P key)", res, got)
+		}
+	}
+
+	perTable := &BillingConfig{
+		Mode:  BillingModePerUnitTable,
+		Table: []BillingUnitTier{{Resolution: "768P", Duration: 6, Units: 6}},
+	}
+	got, err := perTable.OutputUnits(BillingObservables{Seconds: 6, Resolution: "768p"})
+	if err != nil || got != 6 {
+		t.Errorf("per_unit_table case-insensitive hit (768p,6) = %d, err %v; want 6", got, err)
+	}
+}
+
+func TestValidateBillingConfig_RejectsResolutionCaseCollision(t *testing.T) {
+	// Keys that collide case/whitespace-insensitively would make the matched
+	// multiplier depend on map iteration order — reject at load.
+	b := &BillingConfig{
+		Mode:                  BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"1080P": 2.0, "1080p": 4.0},
+	}
+	if err := validateBillingConfig("svc.billing", b, "video-generation"); err == nil ||
+		!strings.Contains(err.Error(), "collide") {
+		t.Fatalf("expected case-collision error, got: %v", err)
+	}
+
+	// per_unit_table rows that collide on normalized resolution + duration.
+	tbl := &BillingConfig{
+		Mode: BillingModePerUnitTable,
+		Table: []BillingUnitTier{
+			{Resolution: "768P", Duration: 6, Units: 6},
+			{Resolution: "768p", Duration: 6, Units: 7},
+		},
+	}
+	if err := validateBillingConfig("svc.billing", tbl, "video-generation"); err == nil ||
+		!strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected table duplicate error on case collision, got: %v", err)
+	}
+}
+
 // ===================== Multi-model video (P1) =====================
 
 func TestLoadConfig_ModelPricing_Video_USDPerSecond(t *testing.T) {

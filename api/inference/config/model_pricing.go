@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"strings"
@@ -137,11 +138,27 @@ type BillingObservables struct {
 	Resolution string
 }
 
+// normalizeResolution canonicalizes a resolution token for case- and
+// whitespace-insensitive matching, so an operator's "1080P" multiplier key
+// matches an upstream/client-reported "1080p" (or " 1080p "). Without this a
+// trivial casing mismatch silently falls through to the 1.0 baseline and
+// UNDERBILLS. Orientation is deliberately NOT canonicalized: "1280x720"
+// (landscape) and "720x1280" (portrait) are distinct resolutions that may
+// legitimately carry different multipliers.
+func normalizeResolution(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 // resolutionMultiplier returns the configured cost multiplier for a resolution,
-// or the baseline 1.0 when unset/unknown.
+// or the baseline 1.0 when unset/unknown. Matching is case/whitespace
+// insensitive (see normalizeResolution); validateBillingConfig rejects keys
+// that collide under that normalization, so the first match is unambiguous.
 func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
-	if m, ok := b.ResolutionMultipliers[resolution]; ok {
-		return m
+	res := normalizeResolution(resolution)
+	for k, m := range b.ResolutionMultipliers {
+		if normalizeResolution(k) == res {
+			return m
+		}
 	}
 	return 1.0
 }
@@ -173,8 +190,9 @@ func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
 		}
 		return units, nil
 	case BillingModePerUnitTable:
+		obsRes := normalizeResolution(obs.Resolution)
 		for _, t := range b.Table {
-			if t.Resolution == obs.Resolution && t.Duration == obs.Seconds {
+			if normalizeResolution(t.Resolution) == obsRes && t.Duration == obs.Seconds {
 				return t.Units, nil
 			}
 		}
@@ -243,10 +261,18 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	if !validBillingModeForType(b.Mode, serviceType) {
 		return fmt.Errorf("invalid config: %s.mode %q is not supported for service type %q", prefix, b.Mode, serviceType)
 	}
+	seenRes := make(map[string]string, len(b.ResolutionMultipliers))
 	for res, mult := range b.ResolutionMultipliers {
 		if mult <= 0 {
 			return fmt.Errorf("invalid config: %s.resolutionMultipliers[%q] must be > 0, got %v", prefix, res, mult)
 		}
+		// Lookup is case/whitespace-insensitive; colliding keys would make the
+		// matched multiplier depend on map iteration order, so reject at load.
+		norm := normalizeResolution(res)
+		if prev, dup := seenRes[norm]; dup {
+			return fmt.Errorf("invalid config: %s.resolutionMultipliers has keys %q and %q that collide case/whitespace-insensitively", prefix, prev, res)
+		}
+		seenRes[norm] = res
 	}
 	if b.Mode == BillingModePerUnitTable {
 		if len(b.Table) == 0 {
@@ -263,9 +289,9 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 			if t.Units <= 0 {
 				return fmt.Errorf("invalid config: %s.table[%d].units must be > 0, got %d", prefix, i, t.Units)
 			}
-			key := t.Resolution + "\x00" + fmt.Sprint(t.Duration)
+			key := normalizeResolution(t.Resolution) + "\x00" + fmt.Sprint(t.Duration)
 			if _, dup := seen[key]; dup {
-				return fmt.Errorf("invalid config: %s.table has a duplicate (resolution=%q, duration=%d) row", prefix, t.Resolution, t.Duration)
+				return fmt.Errorf("invalid config: %s.table has a duplicate (resolution=%q, duration=%d) row (resolution matched case/whitespace-insensitively)", prefix, t.Resolution, t.Duration)
 			}
 			seen[key] = struct{}{}
 		}
@@ -331,6 +357,21 @@ func (s *Service) HasWildcardModel() bool {
 	}
 	_, ok := s.modelPricingMap[ModelWildcard]
 	return ok
+}
+
+// ServedViaWildcard reports whether `model` is allowed ONLY because a wildcard
+// ("*") catch-all entry is configured — i.e. it has no explicit per-model
+// entry. Callers use it to surface wildcard-priced traffic for operator audit
+// (the wildcard price is applied to a model the operator never enumerated).
+func (s *Service) ServedViaWildcard(model string) bool {
+	if s.modelPricingMap == nil {
+		return false
+	}
+	if _, exact := s.modelPricingMap[model]; exact {
+		return false
+	}
+	_, wild := s.modelPricingMap[ModelWildcard]
+	return wild
 }
 
 // IsModelAllowed returns true if the model is in the pricing allowlist.
@@ -524,6 +565,15 @@ func validateModelPricing(cfg *Config) error {
 		if entry.Model == ModelWildcard {
 			hasWildcard = true
 		}
+	}
+
+	// A wildcard entry silently turns the allowlist into serve-all: every model
+	// the upstream can answer is reachable and billed at the wildcard price.
+	// Warn loudly at load so an operator who added "*" expecting a default price
+	// for their listed models realizes they opened the service to all models.
+	// (stdlib log: the structured logger isn't initialized at config-load time.)
+	if hasWildcard {
+		log.Printf("[CONFIG] service.modelPricing has a wildcard %q entry: the model allowlist is DISABLED — every model this upstream can serve is reachable and billed at the wildcard entry's price. Ensure that price covers the most expensive model you expose.", ModelWildcard)
 	}
 
 	// Build the derived lookup map (single source of truth; also detects duplicate

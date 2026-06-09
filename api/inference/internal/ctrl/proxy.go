@@ -919,6 +919,12 @@ func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string
 	// exact map hit (IsModelAllowed true) and get forwarded verbatim upstream;
 	// reject it like any other unsupported model.
 	if requestModel != config.ModelWildcard && c.Service.IsModelAllowed(requestModel) {
+		// Audit trail: when a request is served via the catch-all wildcard rather
+		// than an explicit allowlist entry, surface the actual model so operators
+		// can see exactly what the wildcard price is being applied to.
+		if c.Service.ServedViaWildcard(requestModel) {
+			c.logger.Infof("Model served via wildcard catch-all pricing: requested=%s (no explicit modelPricing entry)", requestModel)
+		}
 		return nil
 	}
 	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
