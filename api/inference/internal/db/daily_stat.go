@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"gorm.io/gorm"
 )
@@ -31,7 +32,7 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, serviceType 
 	// speech-to-text writes seconds into input_count for whisper rows. Token
 	// accumulation would silently corrupt daily_stat.input_tokens, so skip
 	// it until #530 lands a dedicated audio_seconds column.
-	skipTokenAccumulation := serviceType == "speech-to-text"
+	skipTokenAccumulation := serviceType == constant.ServiceTypeSpeechToText
 
 	for _, req := range requests {
 		totalRequests++

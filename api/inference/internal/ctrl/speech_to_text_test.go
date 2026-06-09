@@ -3,7 +3,7 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	stderrors "errors"
 	"testing"
 )
 
@@ -19,13 +19,12 @@ func TestBillSpeechToTextByTokens_GatedByDefault(t *testing.T) {
 	c := &Ctrl{allowTokenBilledSTT: false}
 	usage := &SpeechToTextUsage{Type: "tokens", InputTokens: 100}
 	err := c.billSpeechToTextByTokens(context.Background(), usage, "1", "1", "hash")
-	if err == nil {
-		t.Fatal("expected gated error when allowTokenBilledSTT is false, got nil")
-	}
-	// The error message must mention the issue so anyone hitting it in
-	// the wild can find the schema-discriminator work without digging.
-	if !strings.Contains(err.Error(), "#530") {
-		t.Errorf("error message must reference issue #530, got: %v", err)
+	// Sentinel so callers can branch via errors.Is rather than substring-match.
+	// Handler paths use this to route gated requests into the word-count fallback
+	// (we already streamed the transcription to the user — refusing to bill at
+	// all would be free GPU time for the operator).
+	if !stderrors.Is(err, ErrTokenBilledSpeechToTextGated) {
+		t.Errorf("expected ErrTokenBilledSpeechToTextGated, got: %v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"io"
 	"math"
 	"net/http"
@@ -21,6 +22,21 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
+
+// ErrTokenBilledSpeechToTextGated is returned by billSpeechToTextByTokens when
+// cfg.AllowTokenBilledSpeechToText is false. Callers detect it with errors.Is
+// and degrade to the word-count fallback so the operator still captures
+// something for a request the user already received a response for. Tied to
+// issue #530 — when the schema discriminator lands, the gate (and this
+// sentinel) get removed.
+var ErrTokenBilledSpeechToTextGated = stderrors.New("token-billed speech-to-text disabled pending #530")
+
+// speechToTextMetricLabel is the Prometheus service_type label value for the
+// speech-to-text family. Note: different from constant.ServiceTypeSpeechToText
+// ("speech-to-text" with a hyphen) — Prometheus label values use underscores
+// by convention across the broker, while broker-internal service-type strings
+// use hyphens.
+const speechToTextMetricLabel = "speech_to_text"
 
 // SpeechToTextUsage represents the usage information from speech-to-text API.
 //
@@ -213,7 +229,12 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Update billing with actual usage data
 	if hasBillableUsage(transcriptionResp.Usage) {
-		return c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel.RequestHash)
+		err := c.updateSpeechToTextWithUsage(ctx, transcriptionResp.Usage, reqModel.RequestHash)
+		if stderrors.Is(err, ErrTokenBilledSpeechToTextGated) {
+			c.logger.Warnf("token-billed STT gated (#530), falling back to word-count estimation for request %s", reqModel.RequestHash)
+			return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
+		}
+		return err
 	}
 
 	// Fallback if no usage data
@@ -311,7 +332,12 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Update billing
 	if hasBillableUsage(usage) {
-		return c.updateSpeechToTextWithUsage(ctx, usage, reqModel.RequestHash)
+		err := c.updateSpeechToTextWithUsage(ctx, usage, reqModel.RequestHash)
+		if stderrors.Is(err, ErrTokenBilledSpeechToTextGated) {
+			c.logger.Warnf("token-billed STT gated (#530), falling back to word-count estimation for request %s", reqModel.RequestHash)
+			return c.updateSpeechToTextFallback(ctx, reqModel, rawBody.String())
+		}
+		return err
 	}
 
 	// Fallback if no usage data
@@ -372,7 +398,7 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
-	monitor.RecordAudioSeconds("speech_to_text", int64(seconds))
+	monitor.RecordAudioSeconds(speechToTextMetricLabel, int64(seconds))
 	// No RecordTPSFromContext for duration mode: whisper has no
 	// tokens-per-second concept (the whole transcript is delivered as one
 	// shot, not as a generation stream). A seconds/second metric would be
@@ -392,7 +418,13 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 // risk for that window. See #530 for the schema work + acceptance criteria.
 func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToTextUsage, inputPrice, outputPrice, requestHash string) error {
 	if !c.allowTokenBilledSTT {
-		return errors.New("token-billed speech-to-text is gated behind cfg.allowTokenBilledSpeechToText pending the per-row billing-unit discriminator in issue #530; set the flag to enable after reviewing the analytics trade-off")
+		// Sentinel error so callers can detect the gate-fired case and route
+		// to the word-count fallback. Billing here is post-response: the
+		// transcription has already streamed to the user, so refusing to bill
+		// at all means free GPU. Falling back to the estimator captures
+		// something against OutputPrice; the operator gets a warning log and
+		// can flip the flag once they've reviewed #530's trade-off.
+		return ErrTokenBilledSpeechToTextGated
 	}
 	inputFeeStr, outputFeeStr, totalFeeStr, err := calcTokenFees(inputPrice, outputPrice, usage.InputTokens, usage.OutputTokens)
 	if err != nil {
@@ -404,8 +436,8 @@ func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToText
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 
-	monitor.RecordTokens("speech_to_text", int64(usage.InputTokens), int64(usage.OutputTokens))
-	monitor.RecordTPSFromContext(ctx, "speech_to_text", int64(usage.OutputTokens))
+	monitor.RecordTokens(speechToTextMetricLabel, int64(usage.InputTokens), int64(usage.OutputTokens))
+	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, int64(usage.OutputTokens))
 	consumeSpeechToTextLimiter(ctx, usage.InputTokens+usage.OutputTokens)
 	return nil
 }
@@ -499,14 +531,13 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 // with the billing dispatch.
 func recordWhitelistUsageMetrics(u *SpeechToTextUsage) {
 	seconds, in, out := classifyUsageForMetrics(u)
-	const svc = "speech_to_text"
 	if seconds > 0 {
-		monitor.RecordAudioSeconds(svc, seconds)
-		monitor.RecordWhitelistAudioSeconds(svc, seconds)
+		monitor.RecordAudioSeconds(speechToTextMetricLabel, seconds)
+		monitor.RecordWhitelistAudioSeconds(speechToTextMetricLabel, seconds)
 	}
 	if in > 0 || out > 0 {
-		monitor.RecordTokens(svc, in, out)
-		monitor.RecordWhitelistTokens(svc, in, out)
+		monitor.RecordTokens(speechToTextMetricLabel, in, out)
+		monitor.RecordWhitelistTokens(speechToTextMetricLabel, in, out)
 	}
 }
 
@@ -556,8 +587,8 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	}
 
 	// Record token metrics (estimated output tokens only, no input token data in fallback path)
-	monitor.RecordTokens("speech_to_text", 0, estimatedOutputTokens)
-	monitor.RecordTPSFromContext(ctx, "speech_to_text", estimatedOutputTokens)
+	monitor.RecordTokens(speechToTextMetricLabel, 0, estimatedOutputTokens)
+	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, estimatedOutputTokens)
 
 	// Update TPM limiter with estimated token consumption (fallback path)
 	if ginCtx, ok := ctx.(*gin.Context); ok {
