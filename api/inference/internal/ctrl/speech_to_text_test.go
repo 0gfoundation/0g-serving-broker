@@ -1,9 +1,33 @@
 package ctrl
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+// ==========================================================================
+// billSpeechToTextByTokens gate
+//
+// Until issue #530 lands a per-row billing-unit discriminator, the tokens
+// path is fail-closed behind cfg.AllowTokenBilledSpeechToText. Operators
+// who flip this flag accept the analytics-corruption risk knowingly.
+// ==========================================================================
+
+func TestBillSpeechToTextByTokens_GatedByDefault(t *testing.T) {
+	c := &Ctrl{allowTokenBilledSTT: false}
+	usage := &SpeechToTextUsage{Type: "tokens", InputTokens: 100}
+	err := c.billSpeechToTextByTokens(context.Background(), usage, "1", "1", "hash")
+	if err == nil {
+		t.Fatal("expected gated error when allowTokenBilledSTT is false, got nil")
+	}
+	// The error message must mention the issue so anyone hitting it in
+	// the wild can find the schema-discriminator work without digging.
+	if !strings.Contains(err.Error(), "#530") {
+		t.Errorf("error message must reference issue #530, got: %v", err)
+	}
+}
 
 // ==========================================================================
 // SpeechToTextUsage JSON decoding

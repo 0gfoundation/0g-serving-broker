@@ -52,6 +52,12 @@ type Ctrl struct {
 	priceFeed         config.PriceFeedConfig
 	concurrencyLimit  config.ConcurrencyLimitConfig
 
+	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
+	// because the requests.input_count column conflates seconds (whisper)
+	// and tokens (gpt-4o-transcribe) until issue #530 lands. See
+	// updateSpeechToTextWithUsage docstring and #530 for the trade-off.
+	allowTokenBilledSTT bool
+
 	// priceCache holds the latest wei prices derived from the live 0G/USD
 	// rate.  Non-nil only when Service.PriceDenomination == "USD".  Written
 	// by the PriceUpdateProcessor, read by GetCachedService to overlay
@@ -205,6 +211,7 @@ func New(
 		tieredPricing:        cfg.TieredPricing,
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
+		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,
 		teeService:           teeService,

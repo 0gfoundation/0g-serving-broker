@@ -412,6 +412,15 @@ type Config struct {
 	Async               AsyncConfig             `yaml:"async"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
+	// AllowTokenBilledSpeechToText opens the billing path for token-billed
+	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
+	// Defaults to false: until issue #530 lands a per-row billing-unit
+	// discriminator on the requests table, allowing both whisper (seconds)
+	// and gpt-4o-transcribe (tokens) services to coexist would silently
+	// corrupt any aggregate query against requests.input_count. Set to
+	// true only after reading #530 and accepting the analytics risk for
+	// the deployment window.
+	AllowTokenBilledSpeechToText bool `yaml:"allowTokenBilledSpeechToText"`
 }
 
 // ConcurrencyLimitConfig defines concurrency limiting for backend protection.

@@ -334,9 +334,13 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 // Pointing a whisper service at a per-token price (or vice versa) silently
 // over- or under-charges by orders of magnitude. Operators must keep the
 // service's registered InputPrice consistent with the upstream model's usage
-// shape (whisper → per-second, gpt-4o-transcribe → per-token). A future on-chain
-// `BillingUnit` field would let this dispatch reject mismatches; tracked as a
-// follow-up to PR #523.
+// shape (whisper → per-second, gpt-4o-transcribe → per-token).
+//
+// Token-billed speech-to-text (gpt-4o-transcribe family) is gated behind
+// cfg.AllowTokenBilledSpeechToText and fails closed by default until the
+// per-row billing-unit discriminator from #530 lands. Without that
+// discriminator, mixing whisper and gpt-4o-transcribe traffic on the same
+// service_type silently corrupts requests.input_count aggregates.
 func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
 	service, err := c.GetCachedService(ctx)
 	if err != nil {
@@ -378,7 +382,18 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 }
 
 // billSpeechToTextByTokens handles gpt-4o-transcribe-style token usage.
+//
+// Fail-closed: gated behind cfg.AllowTokenBilledSpeechToText (default false).
+// Until issue #530 adds a per-row billing-unit discriminator to the requests
+// table, mixing whisper (seconds) and gpt-4o-transcribe (tokens) rows under
+// the same service_type silently corrupts any aggregate query against
+// requests.input_count. An operator who needs to deploy token-billed STT
+// before #530 lands must flip the flag explicitly and accept the analytics
+// risk for that window. See #530 for the schema work + acceptance criteria.
 func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToTextUsage, inputPrice, outputPrice, requestHash string) error {
+	if !c.allowTokenBilledSTT {
+		return errors.New("token-billed speech-to-text is gated behind cfg.allowTokenBilledSpeechToText pending the per-row billing-unit discriminator in issue #530; set the flag to enable after reviewing the analytics trade-off")
+	}
 	inputFeeStr, outputFeeStr, totalFeeStr, err := calcTokenFees(inputPrice, outputPrice, usage.InputTokens, usage.OutputTokens)
 	if err != nil {
 		return err
