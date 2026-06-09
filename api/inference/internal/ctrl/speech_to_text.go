@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 
 	"github.com/andybalholm/brotli"
@@ -30,13 +31,33 @@ import (
 //
 // For the token shape, output_tokens is always 0 upstream — transcription is
 // treated as input-side processing, not generation.
+//
+// Seconds is float64 rather than int because Go's encoding/json refuses to
+// decode JSON numbers with a decimal point into integer fields — even
+// "207.0". A non-conforming provider (or a JSON encoder that always emits
+// floats, e.g. Python's json.dumps on a float) would otherwise fail the
+// whole struct unmarshal, fall through to the word-count estimator, and
+// silently bill 0 for whisper services where OutputPrice is 0. Use
+// billableSeconds() to get the rounded integer used for fee math /
+// persistence / metrics.
 type SpeechToTextUsage struct {
 	Type              string                   `json:"type"`
 	TotalTokens       int                      `json:"total_tokens"`
 	InputTokens       int                      `json:"input_tokens"`
 	InputTokenDetails SpeechToTextTokenDetails `json:"input_token_details"`
 	OutputTokens      int                      `json:"output_tokens"`
-	Seconds           int                      `json:"seconds"`
+	Seconds           float64                  `json:"seconds"`
+}
+
+// billableSeconds returns the integer second count used for billing, metrics,
+// and rate limiting. Rounds to the nearest whole second to match OpenAI's
+// documented "billed to the nearest second" semantic, and clamps negatives
+// to 0 so a non-conforming provider can never produce a credit-billing row.
+func billableSeconds(u *SpeechToTextUsage) int {
+	if u == nil || u.Seconds <= 0 {
+		return 0
+	}
+	return int(math.Round(u.Seconds))
 }
 
 // isDurationUsage classifies a usage object as duration-billed (whisper-style)
@@ -325,7 +346,9 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 // count (with or without an explicit "type":"duration" discriminator).
 // InputPrice is treated as price-per-second; OutputPrice is ignored.
 func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTextUsage, inputPrice, requestHash string) error {
-	feeStr, err := calcDurationFee(inputPrice, usage.Seconds)
+	seconds := billableSeconds(usage)
+
+	feeStr, err := calcDurationFee(inputPrice, seconds)
 	if err != nil {
 		return errors.Wrap(err, "calculate duration fee")
 	}
@@ -334,16 +357,16 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 	// per-row unit discriminator; operators identify duration-billed rows
 	// by the service the row belongs to (whisper services bill seconds).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
-		int64(usage.Seconds), 0); err != nil {
+		int64(seconds), 0); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
-	monitor.RecordAudioSeconds("speech_to_text", int64(usage.Seconds))
+	monitor.RecordAudioSeconds("speech_to_text", int64(seconds))
 	// No RecordTPSFromContext for duration mode: whisper has no
 	// tokens-per-second concept (the whole transcript is delivered as one
 	// shot, not as a generation stream). A seconds/second metric would be
 	// nonsensical and would pollute the chatbot TPS dashboard.
-	consumeSpeechToTextLimiter(ctx, usage.Seconds)
+	consumeSpeechToTextLimiter(ctx, seconds)
 	return nil
 }
 
@@ -440,7 +463,7 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 		return 0, 0, 0
 	}
 	if isDurationUsage(u) {
-		return int64(u.Seconds), 0, 0
+		return int64(billableSeconds(u)), 0, 0
 	}
 	return 0, int64(u.InputTokens), int64(u.OutputTokens)
 }

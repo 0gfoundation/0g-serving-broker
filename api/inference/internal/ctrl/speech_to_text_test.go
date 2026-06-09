@@ -27,10 +27,71 @@ func TestSpeechToTextUsage_DecodeWhisperShape(t *testing.T) {
 		t.Errorf("Type = %q, want %q", u.Type, "duration")
 	}
 	if u.Seconds != 207 {
-		t.Errorf("Seconds = %d, want 207", u.Seconds)
+		t.Errorf("Seconds = %v, want 207", u.Seconds)
 	}
 	if u.InputTokens != 0 || u.OutputTokens != 0 {
 		t.Errorf("token counts = (%d, %d), want (0, 0)", u.InputTokens, u.OutputTokens)
+	}
+}
+
+// TestSpeechToTextUsage_DecodeFractionalSeconds is a regression guard.
+// The original struct typed Seconds as int, so Go's encoding/json rejected
+// any JSON number with a decimal point ("207.5" or even "207.0") and the
+// whole response failed to decode, sending the request down the word-count
+// fallback path — which silently billed 0 for whisper services (OutputPrice
+// is typically 0). Switching to float64 lets us accept either shape and
+// round at the bill site.
+func TestSpeechToTextUsage_DecodeFractionalSeconds(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantSeconds float64
+	}{
+		{"integer seconds", `{"type":"duration","seconds":207}`, 207},
+		{"fractional seconds", `{"type":"duration","seconds":207.5}`, 207.5},
+		// Python's json.dumps(207.0) emits this — Go's int field rejected it.
+		{"whole-number float", `{"type":"duration","seconds":207.0}`, 207},
+		{"sub-second", `{"type":"duration","seconds":0.4}`, 0.4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var u SpeechToTextUsage
+			if err := json.Unmarshal([]byte(tt.raw), &u); err != nil {
+				t.Fatalf("unmarshal %s: %v", tt.raw, err)
+			}
+			if u.Seconds != tt.wantSeconds {
+				t.Errorf("Seconds = %v, want %v", u.Seconds, tt.wantSeconds)
+			}
+		})
+	}
+}
+
+// TestBillableSeconds covers the round-to-nearest-second helper used by
+// every billing/metric/limiting call site. Matches OpenAI's documented
+// "billed to the nearest second" semantic.
+func TestBillableSeconds(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage *SpeechToTextUsage
+		want  int
+	}{
+		{"nil", nil, 0},
+		{"zero", &SpeechToTextUsage{Seconds: 0}, 0},
+		{"negative clamped to zero", &SpeechToTextUsage{Seconds: -5}, 0},
+		{"whole second", &SpeechToTextUsage{Seconds: 207}, 207},
+		{"rounds down", &SpeechToTextUsage{Seconds: 207.4}, 207},
+		{"rounds up", &SpeechToTextUsage{Seconds: 207.5}, 208},
+		{"sub-second rounds to zero", &SpeechToTextUsage{Seconds: 0.4}, 0},
+		{"sub-second rounds to one", &SpeechToTextUsage{Seconds: 0.5}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := billableSeconds(tt.usage); got != tt.want {
+				t.Errorf("billableSeconds(%+v) = %d, want %d", tt.usage, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -291,9 +352,10 @@ func TestClassifyUsageForMetrics_AgreesWithIsDurationUsage(t *testing.T) {
 			t.Errorf("double-counted %+v: classified = (s=%d, in=%d, out=%d) populates both lanes", u, seconds, in, out)
 		}
 		if isDurationUsage(u) {
-			if seconds != int64(u.Seconds) || in != 0 || out != 0 {
+			wantSeconds := int64(billableSeconds(u))
+			if seconds != wantSeconds || in != 0 || out != 0 {
 				t.Errorf("duration-classified %+v: got (s=%d, in=%d, out=%d), want (s=%d, 0, 0)",
-					u, seconds, in, out, u.Seconds)
+					u, seconds, in, out, wantSeconds)
 			}
 		} else {
 			if in != int64(u.InputTokens) || out != int64(u.OutputTokens) || seconds != 0 {
