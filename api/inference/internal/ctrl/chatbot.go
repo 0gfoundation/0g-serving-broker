@@ -169,9 +169,10 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	}
 
 	clientBody := c.rewriteResponseModel(ctx, respBody)
-	// Strip upstream identity/cost leak fields before forwarding (#184).
-	if stripped, changed := c.stripResponseLeakFields(clientBody); changed {
-		clientBody = stripped
+	// Strip upstream identity/cost/fingerprint fields and rewrite the upstream id
+	// to a broker-issued one before forwarding (#184).
+	if sanitized, changed := c.sanitizeResponseBody(clientBody, "chatcmpl-"+chatKey); changed {
+		clientBody = sanitized
 	}
 
 	// Attempt to write the response to the client. If the client has already
@@ -242,7 +243,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			// upstream identity/cost leak fields (#184). The raw line is captured in
 			// rawBody (via TeeReader) for billing; the sanitized line is accumulated
 			// in clientBody so the signature attests what the client receives.
-			clientLine, forward := c.sanitizeStreamLine(ctx, line)
+			clientLine, forward := c.sanitizeStreamLine(ctx, line, "chatcmpl-"+chatKey)
 			if forward {
 				clientBody.WriteString(clientLine)
 			}
@@ -658,87 +659,135 @@ func isSSEComment(line []byte) bool {
 	return bytes.HasPrefix(line, []byte(":"))
 }
 
-// responseLeakFields are top-level response fields that disclose the upstream
-// provider's identity and must not be forwarded to the client (#184). They are
-// provider-agnostic: a vLLM/OpenAI upstream omits them so stripping is a no-op,
-// while aggregating upstreams (e.g. OpenRouter) populate them.
-var responseLeakFields = []string{"provider"}
+// leakKeysAlways are response fields that disclose the upstream aggregator's
+// identity, wholesale cost, or schema, and are removed wherever they appear in
+// the response tree (#184). They are provider-agnostic: a vLLM/OpenAI upstream
+// omits them so stripping is a no-op, while aggregating upstreams (e.g.
+// OpenRouter) populate them.
+//
+//   - provider, is_byok                       → aggregator identity
+//   - cost, cost_details                       → upstream wholesale cost / margin
+//   - native_finish_reason, reasoning_details  → aggregator schema fingerprints
+var leakKeysAlways = map[string]bool{
+	"provider":             true,
+	"is_byok":              true,
+	"cost":                 true,
+	"cost_details":         true,
+	"native_finish_reason": true,
+	"reasoning_details":    true,
+}
 
-// usageLeakFields are fields inside "usage" that disclose the upstream's
-// wholesale cost. The broker meters and bills independently, so the client must
-// never see the upstream's cost.
-var usageLeakFields = []string{"cost", "cost_details"}
+// leakKeysIfZero are standard OpenAI token-detail sub-fields that an aggregator
+// emits pre-normalised to zero; their mere presence fingerprints the upstream
+// normaliser, so they are removed only when zero (a non-zero value is real
+// usage and is kept). cached_tokens and reasoning_tokens are intentionally NOT
+// listed — they carry real information and must survive.
+var leakKeysIfZero = map[string]bool{
+	"audio_tokens":       true,
+	"video_tokens":       true,
+	"image_tokens":       true,
+	"cache_write_tokens": true,
+}
 
-// stripResponseLeakFields removes upstream identity/cost fields from a JSON
-// response object (a full chat completion or a single SSE chunk) before it is
-// forwarded to the client. It returns (body, false) unchanged when the body is
-// not a JSON object or nothing needed removing, so it is safe to call on every
-// chunk. Billing and TEE signing are unaffected: both operate on the raw
-// upstream bytes, not on this client-facing copy.
-func (c *Ctrl) stripResponseLeakFields(body []byte) ([]byte, bool) {
-	var obj map[string]json.RawMessage
+// stripLeakKeys recursively removes leak fields from a decoded JSON value
+// (object or array), descending into nested objects/arrays so fields buried in
+// choices[].message / usage.*_tokens_details are caught. Returns whether
+// anything changed.
+func stripLeakKeys(v interface{}) bool {
+	changed := false
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if leakKeysAlways[k] {
+				delete(t, k)
+				changed = true
+				continue
+			}
+			if leakKeysIfZero[k] && isZeroNumber(val) {
+				delete(t, k)
+				changed = true
+				continue
+			}
+			if stripLeakKeys(val) {
+				changed = true
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			if stripLeakKeys(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// isZeroNumber reports whether a decoded JSON value is the number 0.
+func isZeroNumber(v interface{}) bool {
+	f, ok := v.(float64)
+	return ok && f == 0
+}
+
+// sanitizeResponseBody removes upstream identity/cost/fingerprint fields from a
+// JSON response object (a full chat completion or a single SSE chunk) before it
+// is forwarded to the client (#184), and — when newID is non-empty — rewrites
+// the top-level "id" to a broker-issued value so the upstream's id format (e.g.
+// OpenRouter's "gen-...") cannot fingerprint the provider.
+//
+// It returns (body, false) unchanged when the body is not a JSON object or
+// nothing needed changing, so it is safe to call on every chunk. Billing and
+// TEE signing are unaffected: billing reads the raw upstream bytes, and signing
+// attests this client-facing copy.
+func (c *Ctrl) sanitizeResponseBody(body []byte, newID string) ([]byte, bool) {
+	var obj map[string]interface{}
 	if err := json.Unmarshal(body, &obj); err != nil {
-		// Fail-open: a body we cannot parse (e.g. a compressed or fragmented
-		// chunk) is forwarded as-is. Log when it's non-empty so a leaky-but-
-		// unparseable response — where stripping silently no-ops — is observable
-		// rather than invisible (#184).
+		// Fail-open: a body we cannot parse (e.g. a fragmented chunk) is
+		// forwarded as-is. Log when non-empty so a leaky-but-unparseable response
+		// — where stripping silently no-ops — is observable. Upstream responses
+		// are requested with Accept-Encoding: identity (see PrepareHTTPRequest),
+		// so this should not be hit merely because a body was compressed.
 		if len(bytes.TrimSpace(body)) > 0 {
-			c.logger.Debugf("stripResponseLeakFields: body not a JSON object, leak-field stripping skipped: %v", err)
+			c.logger.Debugf("sanitizeResponseBody: body not a JSON object, leak-field stripping skipped: %v", err)
 		}
 		return body, false
 	}
 
-	changed := false
-	for _, f := range responseLeakFields {
-		if _, ok := obj[f]; ok {
-			delete(obj, f)
-			changed = true
-		}
-	}
+	changed := stripLeakKeys(obj)
 
-	if usageRaw, ok := obj["usage"]; ok {
-		var usage map[string]json.RawMessage
-		if err := json.Unmarshal(usageRaw, &usage); err == nil {
-			usageChanged := false
-			for _, f := range usageLeakFields {
-				if _, ok := usage[f]; ok {
-					delete(usage, f)
-					usageChanged = true
-				}
-			}
-			if usageChanged {
-				if newUsage, err := json.Marshal(usage); err == nil {
-					obj["usage"] = newUsage
-					changed = true
-				} else {
-					// Defensive: a re-marshal failure would leave usage.cost in the
-					// forwarded body. Practically unreachable (RawMessage round-trip),
-					// but surface it rather than silently leak the cost.
-					c.logger.Warnf("stripResponseLeakFields: failed to re-marshal stripped usage, cost fields not removed: %v", err)
-				}
-			}
+	if newID != "" {
+		if _, ok := obj["id"]; ok {
+			obj["id"] = newID
+			changed = true
 		}
 	}
 
 	if !changed {
 		return body, false
 	}
-	out, err := json.Marshal(obj)
-	if err != nil {
+
+	// Encode with HTML escaping disabled so message content with <, >, & is not
+	// rewritten to < etc. (preserves byte-fidelity of the assistant text).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
 		return body, false
 	}
-	return out, true
+	// Encoder.Encode appends a trailing newline; drop it.
+	return bytes.TrimRight(buf.Bytes(), "\n"), true
 }
 
 // sanitizeStreamLine prepares one SSE line for the client. It drops SSE
 // comment/keepalive lines (returns forward=false) — e.g. OpenRouter's
 // ": OPENROUTER PROCESSING", which leaks the upstream's identity and carries no
 // data — and, for "data: {json}" chunks, rewrites the model name (LoRA) and
-// strips identity/cost leak fields (#184). Non-JSON lines (e.g. "data: [DONE]")
-// pass through after the model rewrite. The raw upstream stream is captured
-// separately (rawBody) for billing, so billing is unaffected; TEE signing
-// attests the sanitized bytes the client actually receives.
-func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string) (string, bool) {
+// strips identity/cost/fingerprint leak fields and rewrites the chunk id to
+// idRewrite (#184). Non-JSON lines (e.g. "data: [DONE]") pass through after the
+// model rewrite. idRewrite must be stable across a stream so every chunk carries
+// the same id. The raw upstream stream is captured separately (rawBody) for
+// billing, so billing is unaffected; TEE signing attests the sanitized bytes the
+// client actually receives.
+func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string, idRewrite string) (string, bool) {
 	lead := strings.TrimSpace(line)
 	if lead == "" {
 		return line, true // preserve SSE event separators
@@ -753,8 +802,8 @@ func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string) (string, bool) 
 	if after, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
 		payload := strings.TrimSpace(after)
 		if strings.HasPrefix(payload, "{") {
-			if stripped, changed := c.stripResponseLeakFields([]byte(payload)); changed {
-				return "data: " + string(stripped) + "\n", true
+			if sanitized, changed := c.sanitizeResponseBody([]byte(payload), idRewrite); changed {
+				return "data: " + string(sanitized) + "\n", true
 			}
 		}
 	}
