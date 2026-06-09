@@ -146,12 +146,9 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			}
 		}
 
-		// Cache token billing is provider-level; surface it on every model.
+		// Cache token billing: service-level default, overridable per-model below
+		// (matches billing's per-model resolution in GetBillingPrices).
 		cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
-		var sharedCacheBilling *ModelCacheTokenBilling
-		if cacheCfg.Enabled && cacheCfg.Divisor > 0 {
-			sharedCacheBilling = &ModelCacheTokenBilling{Divisor: cacheCfg.Divisor}
-		}
 
 		// For USD providers, fetch the rate snapshot once to convert each model's
 		// USD price to wei and to surface the shared price-feed state.
@@ -184,6 +181,16 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			if canonicalID == "" {
 				canonicalID = cfg.CanonicalID
 			}
+			// Per-model cache discount: the entry's override wins; else the
+			// service-level default — same resolution billing uses.
+			effCache := cacheCfg
+			if mp.CacheTokenBilling != nil {
+				effCache = *mp.CacheTokenBilling
+			}
+			var modelCacheBilling *ModelCacheTokenBilling
+			if effCache.Enabled && effCache.Divisor > 0 {
+				modelCacheBilling = &ModelCacheTokenBilling{Divisor: effCache.Divisor}
+			}
 			obj := ModelObject{
 				ID:               mp.Model,
 				CanonicalID:      canonicalID,
@@ -194,7 +201,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				Verifiability:    svc.Verifiability,
 				TeeAttested:      svc.TeeSignerAcknowledged,
 				TeeVerifier:      teeVerifier,
-				Pricing:          &ModelPricing{CacheTokenBilling: sharedCacheBilling},
+				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
 				ProviderType:     cfg.ProviderType,
 				ProviderIdentity: cfg.ProviderIdentity,
 				RateLimits:       sharedLimits,

@@ -460,7 +460,7 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers)
+		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling)
 	}
 
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
@@ -502,8 +502,8 @@ func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
 }
 
 // finalizeResponseWithUsage updates the account with accurate token counts from LLM
-func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier) error {
-	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers)
+func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
+	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers, cacheBilling)
 }
 
 // getTierMultipliers returns the input and output price multipliers for the given prompt token count.
@@ -526,7 +526,7 @@ func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, in
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response.
 // tiers is the model-specific tier table (from per-model pricing); when empty the
 // service-level tieredPricing applies if enabled.
-func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier) error {
+func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
 	// Resolve the effective tier set: model-specific tiers win; otherwise fall
 	// back to the service-level tieredPricing when enabled.
 	if len(tiers) == 0 && c.tieredPricing.Enabled {
@@ -561,7 +561,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	// apply discounted pricing for cached input tokens.
 	var inputFee *big.Int
 	cachedTokens := 0
-	if c.cacheTokenBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+	if cacheBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
 		cachedTokens = usage.PromptTokensDetails.CachedTokens
 		if cachedTokens > usage.PromptTokens {
 			cachedTokens = usage.PromptTokens
@@ -580,7 +580,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		if err != nil {
 			return errors.Wrap(err, "Error calculating cached input fee")
 		}
-		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(c.cacheTokenBilling.Divisor))
+		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(cacheBilling.Divisor))
 
 		inputFee, err = util.Add(nonCachedFee, cachedFee)
 		if err != nil {
@@ -588,7 +588,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		}
 
 		c.logger.Infof("Cache token billing: prompt_tokens=%d, cached_tokens=%d, non_cached=%d, divisor=%d, inputFee=%s",
-			usage.PromptTokens, cachedTokens, nonCachedTokens, c.cacheTokenBilling.Divisor, inputFee.String())
+			usage.PromptTokens, cachedTokens, nonCachedTokens, cacheBilling.Divisor, inputFee.String())
 	} else {
 		var err error
 		inputFee, err = util.Multiply(inputPrice, int64(usage.PromptTokens))
@@ -806,7 +806,7 @@ func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usa
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for stream response billing")
 		}
-		if err := c.finalizeResponseWithUsage(ctx, usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers); err != nil {
+		if err := c.finalizeResponseWithUsage(ctx, usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling); err != nil {
 			c.logger.Errorf("stream billing failed for request %s: %v", requestHash, err)
 			return err
 		}

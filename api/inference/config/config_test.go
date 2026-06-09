@@ -1355,6 +1355,39 @@ func TestValidateBillingConfig_RejectsResolutionCaseCollision(t *testing.T) {
 	}
 }
 
+func TestValidateCacheTokenBilling(t *testing.T) {
+	tests := []struct {
+		name    string
+		c       CacheTokenBillingConfig
+		wantErr bool
+	}{
+		{"enabled divisor 4 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 4}, false},
+		{"enabled divisor 1 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 1}, false},
+		{"enabled divisor 0 rejected (would divide-by-zero)", CacheTokenBillingConfig{Enabled: true, Divisor: 0}, true},
+		{"enabled negative divisor rejected", CacheTokenBillingConfig{Enabled: true, Divisor: -2}, true},
+		{"disabled divisor 0 ignored", CacheTokenBillingConfig{Enabled: false, Divisor: 0}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCacheTokenBilling("cacheTokenBilling", &tt.c)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateCacheTokenBilling=%v, wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateModelPricingEntry_RejectsBadPerModelCacheDivisor(t *testing.T) {
+	entry := &ModelPricingEntry{
+		Model: "claude", InputPrice: "300", OutputPrice: "1500",
+		CacheTokenBilling: &CacheTokenBillingConfig{Enabled: true, Divisor: 0},
+	}
+	if err := validateModelPricingEntry(0, entry, "chatbot", false); err == nil ||
+		!strings.Contains(err.Error(), "divisor must be >= 1") {
+		t.Fatalf("expected per-model cache divisor error, got: %v", err)
+	}
+}
+
 // ===================== Multi-model video (P1) =====================
 
 func TestLoadConfig_ModelPricing_Video_USDPerSecond(t *testing.T) {

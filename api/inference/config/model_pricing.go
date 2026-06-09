@@ -89,6 +89,15 @@ type ModelPricingEntry struct {
 	// are not yet wired — loadConfig still rejects modelPricing on those service
 	// types, so a Billing block only takes effect once that wiring lands.
 	Billing *BillingConfig `yaml:"billing"`
+
+	// CacheTokenBilling optionally overrides the service-level cacheTokenBilling
+	// discount for THIS model. nil falls back to the service-level config (so a
+	// homogeneous catalog needs no per-model block). Lets a heterogeneous
+	// multi-vendor provider apply each model's own cache-read discount (e.g.
+	// Anthropic ~10% vs OpenAI ~25–50% of the input price). Surfaced per-model in
+	// GET /v1/models. Same validation as the service-level block: divisor >= 1
+	// when enabled.
+	CacheTokenBilling *CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
@@ -641,6 +650,13 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	if entry.ModelInfo != nil {
 		if err := entry.ModelInfo.Validate(serviceType); err != nil {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].modelInfo (model '%s'): %w", i, entry.Model, err)
+		}
+	}
+	// Optional per-model cache-discount override; same divisor rule as the
+	// service-level block (a 0 divisor would divide-by-zero panic at billing).
+	if entry.CacheTokenBilling != nil {
+		if err := validateCacheTokenBilling(fmt.Sprintf("service.modelPricing[%d].cacheTokenBilling", i), entry.CacheTokenBilling); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -333,6 +333,11 @@ type BillingPrices struct {
 	InputPrice  string
 	OutputPrice string
 	Tiers       []config.PricingTier
+	// CacheTokenBilling is the cache-discount config resolved for this request:
+	// the per-model override when set, else the service-level default. Resolved
+	// once here so billing reads a single source (never c.cacheTokenBilling
+	// directly on the multi-model path).
+	CacheTokenBilling config.CacheTokenBillingConfig
 }
 
 // CtxKeyResolvedModel is the gin.Context key under which the request path stores
@@ -366,14 +371,19 @@ const CtxKeyResolvedModel = "resolvedModel"
 func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 	if c.Service.HasMultiModelPricing() {
 		if entry := c.resolveModelPricing(ctx); entry != nil {
+			// Per-model cache-discount override wins; else the service-level default.
+			cache := c.cacheTokenBilling
+			if entry.CacheTokenBilling != nil {
+				cache = *entry.CacheTokenBilling
+			}
 			if c.Service.IsUSDDenominated() {
 				inputWei, outputWei, err := c.modelUSDPricesToWei(entry)
 				if err != nil {
 					return BillingPrices{}, errors.Wrap(err, "convert per-model USD price to wei")
 				}
-				return BillingPrices{InputPrice: inputWei, OutputPrice: outputWei, Tiers: entry.Tiers}, nil
+				return BillingPrices{InputPrice: inputWei, OutputPrice: outputWei, Tiers: entry.Tiers, CacheTokenBilling: cache}, nil
 			}
-			return BillingPrices{InputPrice: entry.InputPrice, OutputPrice: entry.OutputPrice, Tiers: entry.Tiers}, nil
+			return BillingPrices{InputPrice: entry.InputPrice, OutputPrice: entry.OutputPrice, Tiers: entry.Tiers, CacheTokenBilling: cache}, nil
 		}
 	}
 	// Fallback: on-chain prices (decentralized, single-model centralized, or the
@@ -383,7 +393,7 @@ func (c *Ctrl) GetBillingPrices(ctx context.Context) (BillingPrices, error) {
 	if err != nil {
 		return BillingPrices{}, errors.Wrap(err, "get billing prices")
 	}
-	return BillingPrices{InputPrice: svc.InputPrice, OutputPrice: svc.OutputPrice}, nil
+	return BillingPrices{InputPrice: svc.InputPrice, OutputPrice: svc.OutputPrice, CacheTokenBilling: c.cacheTokenBilling}, nil
 }
 
 // resolveModelPricing reads the validated request model from the gin.Context and

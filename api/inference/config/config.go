@@ -276,6 +276,17 @@ type CacheTokenBillingConfig struct {
 	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
 }
 
+// validateCacheTokenBilling rejects a divisor < 1 when caching is enabled: a 0
+// divisor would divide-by-zero panic at billing time (fee = price*tokens/divisor)
+// and a negative one would produce a garbage/negative discount. prefix labels the
+// source (service-level "cacheTokenBilling" or a per-model entry).
+func validateCacheTokenBilling(prefix string, c *CacheTokenBillingConfig) error {
+	if c.Enabled && c.Divisor < 1 {
+		return fmt.Errorf("invalid config: %s.divisor must be >= 1 when enabled, got %d", prefix, c.Divisor)
+	}
+	return nil
+}
+
 // TieredPricingConfig defines input-length-based tiered pricing.
 // Some models (e.g., Qwen) charge different rates based on input token count.
 // The service is registered on-chain at the base (lowest tier) price.
@@ -884,6 +895,11 @@ func loadConfig(cfg *Config) error {
 		if err := validatePricingTiers("tieredPricing.tiers", cfg.TieredPricing.Tiers); err != nil {
 			return err
 		}
+	}
+
+	// Service-level cache-discount divisor (also covers the single-model path).
+	if err := validateCacheTokenBilling("cacheTokenBilling", &cfg.CacheTokenBilling); err != nil {
+		return err
 	}
 
 	// Validate per-model pricing, build the lookup map, and set the on-chain

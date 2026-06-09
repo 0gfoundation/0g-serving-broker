@@ -153,7 +153,7 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for LiteLLM single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers)
+		return c.updateAccountWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling)
 	}
 
 	// Skip billing for whitelisted users

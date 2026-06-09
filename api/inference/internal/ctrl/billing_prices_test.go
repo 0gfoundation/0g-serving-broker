@@ -90,6 +90,37 @@ func TestGetBillingPrices_WildcardFallsBackToCatchAll(t *testing.T) {
 	}
 }
 
+func TestGetBillingPrices_PerModelCacheOverride(t *testing.T) {
+	const svcDivisor, modelDivisor = int64(4), int64(10)
+	c := &Ctrl{
+		logger:            testLogger(),
+		cacheTokenBilling: config.CacheTokenBillingConfig{Enabled: true, Divisor: svcDivisor},
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{
+			// no per-model override → inherits the service-level divisor
+			{Model: "qwen-max", InputPrice: "160", OutputPrice: "640"},
+			// per-model override → its own (e.g. Anthropic-style 1/10) discount
+			{Model: "claude", InputPrice: "300", OutputPrice: "1500",
+				CacheTokenBilling: &config.CacheTokenBillingConfig{Enabled: true, Divisor: modelDivisor}},
+		}, "qwen-max"),
+	}
+
+	p, err := c.GetBillingPrices(ginCtxWithResolvedModel("qwen-max"))
+	if err != nil {
+		t.Fatalf("GetBillingPrices(qwen-max): %v", err)
+	}
+	if !p.CacheTokenBilling.Enabled || p.CacheTokenBilling.Divisor != svcDivisor {
+		t.Errorf("qwen-max cache: got %+v, want service-level divisor %d", p.CacheTokenBilling, svcDivisor)
+	}
+
+	p, err = c.GetBillingPrices(ginCtxWithResolvedModel("claude"))
+	if err != nil {
+		t.Fatalf("GetBillingPrices(claude): %v", err)
+	}
+	if p.CacheTokenBilling.Divisor != modelDivisor {
+		t.Errorf("claude cache: got divisor %d, want per-model override %d", p.CacheTokenBilling.Divisor, modelDivisor)
+	}
+}
+
 func TestGetBillingPrices_USDMultiModel(t *testing.T) {
 	svc := newMultiModelService(t, "USD", []config.ModelPricingEntry{
 		{Model: "qwen-max", InputPriceUSDPerMillionTokens: "2", OutputPriceUSDPerMillionTokens: "8"},
