@@ -231,41 +231,21 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 					if haveUsage {
 						*usage = acc.toUsage()
 					}
-
-					// Skip billing for whitelisted users, but still record token metrics
-					if isWhitelisted {
-						if *usage != nil {
-							monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-							monitor.RecordWhitelistTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-							monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
-						}
-						return nil
-					}
-
-					// Stream finished
-					if *usage != nil {
-						prices, err := c.GetBillingPrices(ctx)
-						if err != nil {
-							return errors.Wrap(err, "get billing prices for LiteLLM stream response billing")
-						}
-						if err := c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers); err != nil {
-							// Mirror the OpenAI stream path (chatbot.go): a failed billing
-							// write here means the user got the full stream unbilled — log it
-							// at ERROR with the request hash, don't propagate it silently.
-							c.logger.Errorf("LiteLLM stream billing failed for request %s: %v", requestHash, err)
-							return err
-						}
-						return nil
-					}
-					if err := c.finalizeResponse(ctx, *output, outputPrice, requestHash); err != nil {
-						c.logger.Errorf("LiteLLM stream finalize failed for request %s: %v", requestHash, err)
-						return err
-					}
-					return nil
+					// Stream finished — bill via the shared finalizer (same path as
+					// the OpenAI [DONE] handler in chatbot.go).
+					return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 				}
 			}
 		}
 	}
 
-	return nil
+	// No message_stop event — the stream was truncated/dropped or an
+	// OpenAI-compatible shim omitted the terminal Anthropic event. The client
+	// already received the accumulated output, so bill it rather than serving
+	// free, logging loudly. haveUsage may be true from message_start/message_delta.
+	if haveUsage {
+		*usage = acc.toUsage()
+	}
+	c.logger.Errorf("LiteLLM stream ended without a message_stop event for request %s; finalizing on accumulated usage/output (haveUsage=%t)", requestHash, haveUsage)
+	return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 }

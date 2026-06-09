@@ -780,41 +780,51 @@ func (c *Ctrl) isClientDisconnectError(err error) bool {
 		strings.Contains(errMsg, "http: request body too large")
 }
 
+// finalizeChatStream performs end-of-stream billing for a chatbot streaming
+// response (OpenAI [DONE] or LiteLLM message_stop). It bills on the parsed
+// usage when present, else on the accumulated raw output; whitelisted traffic
+// records token metrics only. A failed billing write is logged at ERROR with
+// the request hash (the client already received the full stream) and
+// propagated, never swallowed.
+//
+// Shared by processOpenAIStream / processLiteLLMStream AND their
+// missing-terminal-marker fallbacks, so a truncated stream (no [DONE] / no
+// message_stop) is still billed rather than served free.
+func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usage, outputPrice, requestHash string, isWhitelisted bool) error {
+	// Skip billing for whitelisted users, but still record token metrics.
+	if isWhitelisted {
+		if usage != nil {
+			monitor.RecordTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
+			monitor.RecordWhitelistTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
+			monitor.RecordTPSFromContext(ctx, "chatbot", int64(usage.CompletionTokens))
+		}
+		return nil
+	}
+	if usage != nil {
+		// Get billing prices (model-specific for multi-model, on-chain for single-model).
+		prices, err := c.GetBillingPrices(ctx)
+		if err != nil {
+			return errors.Wrap(err, "get billing prices for stream response billing")
+		}
+		if err := c.finalizeResponseWithUsage(ctx, usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers); err != nil {
+			c.logger.Errorf("stream billing failed for request %s: %v", requestHash, err)
+			return err
+		}
+		return nil
+	}
+	if err := c.finalizeResponse(ctx, output, outputPrice, requestHash); err != nil {
+		c.logger.Errorf("stream finalize failed for request %s: %v", requestHash, err)
+		return err
+	}
+	return nil
+}
+
 // processOpenAIStream processes OpenAI-format streaming responses
 func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string, isWhitelisted bool) error {
 	for _, line := range lines {
 		if isStreamDone(line) {
-			// Skip billing for whitelisted users, but still record token metrics
-			if isWhitelisted {
-				if *usage != nil {
-					monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-					monitor.RecordWhitelistTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-					monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
-				}
-				break
-			}
-
-			// For stream responses, usage info comes before [DONE]
-			if *usage != nil {
-				// Get billing prices (model-specific for multi-model, on-chain for single-model)
-				prices, err := c.GetBillingPrices(ctx)
-				if err != nil {
-					return errors.Wrap(err, "get billing prices for stream response billing")
-				}
-				if err := c.finalizeResponseWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers); err != nil {
-					// Do not swallow: a failed billing write here means the user
-					// got the full stream unbilled — surface it (the LiteLLM path
-					// propagates the same way).
-					c.logger.Errorf("stream billing failed for request %s: %v", requestHash, err)
-					return err
-				}
-				break
-			}
-			if err := c.finalizeResponse(ctx, *output, outputPrice, requestHash); err != nil {
-				c.logger.Errorf("stream finalize failed for request %s: %v", requestHash, err)
-				return err
-			}
-			break
+			// For stream responses, usage info comes before [DONE].
+			return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 		}
 
 		// Skip empty lines
@@ -842,5 +852,9 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 		*output += chunkOutput
 	}
 
-	return nil
+	// No [DONE] marker — the stream was truncated/dropped or the upstream omitted
+	// it. The client already received the accumulated output, so bill it rather
+	// than serving free, logging loudly so the missing terminator is diagnosable.
+	c.logger.Errorf("OpenAI stream ended without a [DONE] marker for request %s; finalizing on accumulated usage/output", requestHash)
+	return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 }
