@@ -3,6 +3,7 @@ package ctrl
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
 	"testing"
 
@@ -43,6 +44,21 @@ func TestDecodeBody(t *testing.T) {
 		out, err := decodeBody(gzipBytes(t, plain), "GZIP")
 		if err != nil || !bytes.Equal(out, plain) {
 			t.Errorf("GZIP: out=%s err=%v", out, err)
+		}
+	})
+
+	t.Run("zlib-wrapped deflate decodes", func(t *testing.T) {
+		var buf bytes.Buffer
+		zw := zlib.NewWriter(&buf)
+		if _, err := zw.Write(plain); err != nil {
+			t.Fatalf("zlib write: %v", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("zlib close: %v", err)
+		}
+		out, err := decodeBody(buf.Bytes(), "deflate")
+		if err != nil || !bytes.Equal(out, plain) {
+			t.Errorf("deflate(zlib): out=%s err=%v", out, err)
 		}
 	})
 

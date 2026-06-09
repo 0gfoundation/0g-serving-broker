@@ -14,6 +14,7 @@ import (
 
 	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 
 	"github.com/google/uuid"
 
@@ -213,6 +214,16 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
+
+	// The stream path sanitizes raw SSE lines and cannot transparently decode a
+	// compressed stream (sanitizeStreamLine works line-by-line). We force
+	// Accept-Encoding: identity upstream, so a compressed SSE response means the
+	// upstream ignored that — surface it: leak sanitization (#184) would no-op on
+	// compressed bytes. (SSE is virtually never compressed since it defeats
+	// incremental flushing.)
+	if isCompressedEncoding(resp.Header.Get("Content-Encoding")) {
+		c.logger.Warnf("streaming response has Content-Encoding %q despite identity request; SSE leak sanitization may be skipped", resp.Header.Get("Content-Encoding"))
+	}
 
 	chatKey := uuid.NewString()
 
@@ -852,6 +863,12 @@ func decodeBody(body []byte, encoding string) ([]byte, error) {
 		defer r.Close()
 		return io.ReadAll(r)
 	case "deflate":
+		// HTTP "deflate" is ambiguous: some servers send zlib-wrapped (RFC 1950),
+		// others raw (RFC 1951). Try zlib first, fall back to raw flate.
+		if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			defer zr.Close()
+			return io.ReadAll(zr)
+		}
 		r := flate.NewReader(bytes.NewReader(body))
 		defer r.Close()
 		return io.ReadAll(r)
