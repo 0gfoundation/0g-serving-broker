@@ -58,6 +58,15 @@ func isDurationUsage(u *SpeechToTextUsage) bool {
 // actually settle against. A non-nil Usage with all zero counters (e.g. a
 // whisper response decoded into a token-only struct, or an empty {} block)
 // would otherwise silently bill zero.
+//
+// Strict-by-type rationale: when "type" is explicitly "duration" or "tokens"
+// we only honour the matching field. A mismatched response (e.g.
+// {type:"duration", input_tokens:100, seconds:0}) is treated as un-billable
+// and falls through to the word-count fallback. Routing it to the matching-
+// type bill function instead would silently charge 0 (the populated field
+// belongs to the other lane). Real OpenAI providers never emit mismatched
+// shapes; a non-conforming provider that does is best caught by the
+// fallback's estimator, which has a chance of producing a non-zero charge.
 func hasBillableUsage(u *SpeechToTextUsage) bool {
 	if u == nil {
 		return false
@@ -170,11 +179,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		if hasBillableUsage(transcriptionResp.Usage) {
-			in, out := usageMetricCounts(transcriptionResp.Usage)
-			monitor.RecordTokens("speech_to_text", in, out)
-			monitor.RecordWhitelistTokens("speech_to_text", in, out)
-		}
+		recordUsageMetrics(transcriptionResp.Usage, true)
 		return nil
 	}
 
@@ -272,11 +277,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		if hasBillableUsage(usage) {
-			in, out := usageMetricCounts(usage)
-			monitor.RecordTokens("speech_to_text", in, out)
-			monitor.RecordWhitelistTokens("speech_to_text", in, out)
-		}
+		recordUsageMetrics(usage, true)
 		return nil
 	}
 
@@ -324,9 +325,7 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 // count (with or without an explicit "type":"duration" discriminator).
 // InputPrice is treated as price-per-second; OutputPrice is ignored.
 func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTextUsage, inputPrice, requestHash string) error {
-	seconds := usage.Seconds
-
-	inputFee, err := util.Multiply(inputPrice, int64(seconds))
+	feeStr, err := calcDurationFee(inputPrice, usage.Seconds)
 	if err != nil {
 		return errors.Wrap(err, "calculate duration fee")
 	}
@@ -334,39 +333,28 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 	// Persist seconds in input_count and 0 in output_count. There is no
 	// per-row unit discriminator; operators identify duration-billed rows
 	// by the service the row belongs to (whisper services bill seconds).
-	feeStr := inputFee.String()
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
-		int64(seconds), 0); err != nil {
+		int64(usage.Seconds), 0); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
-	monitor.RecordTokens("speech_to_text", int64(seconds), 0)
+	monitor.RecordAudioSeconds("speech_to_text", int64(usage.Seconds))
 	// No RecordTPSFromContext for duration mode: whisper has no
 	// tokens-per-second concept (the whole transcript is delivered as one
 	// shot, not as a generation stream). A seconds/second metric would be
 	// nonsensical and would pollute the chatbot TPS dashboard.
-	consumeSpeechToTextLimiter(ctx, seconds)
+	consumeSpeechToTextLimiter(ctx, usage.Seconds)
 	return nil
 }
 
 // billSpeechToTextByTokens handles gpt-4o-transcribe-style token usage.
 func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToTextUsage, inputPrice, outputPrice, requestHash string) error {
-	inputFee, err := util.Multiply(inputPrice, int64(usage.InputTokens))
+	inputFeeStr, outputFeeStr, totalFeeStr, err := calcTokenFees(inputPrice, outputPrice, usage.InputTokens, usage.OutputTokens)
 	if err != nil {
-		return errors.Wrap(err, "calculate input fee from actual tokens")
+		return err
 	}
 
-	outputFee, err := util.Multiply(outputPrice, int64(usage.OutputTokens))
-	if err != nil {
-		return errors.Wrap(err, "calculate output fee from actual tokens")
-	}
-
-	totalFee, err := util.Add(inputFee, outputFee)
-	if err != nil {
-		return errors.Wrap(err, "calculate total fee")
-	}
-
-	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(),
+	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFeeStr, outputFeeStr, totalFeeStr,
 		int64(usage.InputTokens), int64(usage.OutputTokens)); err != nil {
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
@@ -375,6 +363,34 @@ func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToText
 	monitor.RecordTPSFromContext(ctx, "speech_to_text", int64(usage.OutputTokens))
 	consumeSpeechToTextLimiter(ctx, usage.InputTokens+usage.OutputTokens)
 	return nil
+}
+
+// calcDurationFee is the pure fee arithmetic for duration-mode billing.
+// Extracted so unit tests can cover the math without mocking DB/monitor/limiter.
+func calcDurationFee(inputPrice string, seconds int) (string, error) {
+	fee, err := util.Multiply(inputPrice, int64(seconds))
+	if err != nil {
+		return "", err
+	}
+	return fee.String(), nil
+}
+
+// calcTokenFees is the pure fee arithmetic for token-mode billing. Returns
+// (inputFee, outputFee, totalFee) as decimal strings ready for DB persistence.
+func calcTokenFees(inputPrice, outputPrice string, inputTokens, outputTokens int) (string, string, string, error) {
+	inputFee, err := util.Multiply(inputPrice, int64(inputTokens))
+	if err != nil {
+		return "", "", "", errors.Wrap(err, "calculate input fee from actual tokens")
+	}
+	outputFee, err := util.Multiply(outputPrice, int64(outputTokens))
+	if err != nil {
+		return "", "", "", errors.Wrap(err, "calculate output fee from actual tokens")
+	}
+	totalFee, err := util.Add(inputFee, outputFee)
+	if err != nil {
+		return "", "", "", errors.Wrap(err, "calculate total fee")
+	}
+	return inputFee.String(), outputFee.String(), totalFee.String(), nil
 }
 
 // consumeSpeechToTextLimiter feeds the post-consume TPM bucket with the actual
@@ -405,19 +421,49 @@ func consumeSpeechToTextLimiter(ctx context.Context, units int) {
 	limiter.ConsumeTokens(userStr, units)
 }
 
-// usageMetricCounts returns the (input, output) values to feed into
-// monitor.RecordTokens for a given usage object. For duration mode the seconds
-// count is reported in the input position to stay aligned with what InputPrice
-// settled against. Must use the same classifier as the billing dispatch so
-// the whitelist metrics lane never diverges from the settlement lane.
-func usageMetricCounts(u *SpeechToTextUsage) (int64, int64) {
-	if u == nil {
-		return 0, 0
+// classifyUsageForMetrics splits a usage object into the values destined for
+// each Prometheus counter family. Pure function — exposed so unit tests can
+// pin the routing rule without spinning up a real Prometheus registry.
+//
+// Returned tuple semantics:
+//   - seconds > 0: duration mode, route to AudioSecondsTotal
+//   - inputTokens or outputTokens > 0: tokens mode, route to InputTokensTotal /
+//     OutputTokensTotal
+//   - all zero: caller should not record anything (the usage carried no
+//     billable signal)
+//
+// Routes through isDurationUsage so the metrics lane and the billing dispatch
+// classify identically — divergence between these two paths is exactly the
+// bug PR #523's review caught.
+func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, outputTokens int64) {
+	if !hasBillableUsage(u) {
+		return 0, 0, 0
 	}
 	if isDurationUsage(u) {
-		return int64(u.Seconds), 0
+		return int64(u.Seconds), 0, 0
 	}
-	return int64(u.InputTokens), int64(u.OutputTokens)
+	return 0, int64(u.InputTokens), int64(u.OutputTokens)
+}
+
+// recordUsageMetrics writes a usage object to the appropriate Prometheus
+// counters. whitelisted=true additionally mirrors the values into the
+// whitelist-only counter family so operators can split traffic by
+// exempt-vs-paid users.
+func recordUsageMetrics(u *SpeechToTextUsage, whitelisted bool) {
+	seconds, in, out := classifyUsageForMetrics(u)
+	const svc = "speech_to_text"
+	if seconds > 0 {
+		monitor.RecordAudioSeconds(svc, seconds)
+		if whitelisted {
+			monitor.RecordWhitelistAudioSeconds(svc, seconds)
+		}
+	}
+	if in > 0 || out > 0 {
+		monitor.RecordTokens(svc, in, out)
+		if whitelisted {
+			monitor.RecordWhitelistTokens(svc, in, out)
+		}
+	}
 }
 
 /*
