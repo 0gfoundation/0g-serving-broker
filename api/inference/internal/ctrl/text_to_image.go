@@ -45,6 +45,26 @@ type imageResponseEnvelope struct {
 	Data    []imageResponseData `json:"data"`
 }
 
+// billableImageCount returns the number of images to bill for.
+//
+// A provider may return fewer images than requested — e.g. it silently clamps
+// `n` to its per-model maximum (z-image caps at 2; router#354). Billing the
+// requested count in that case over-charges the user for images they never
+// received. When the response decoded cleanly we therefore bill the actual
+// delivered count; extractB64Images already caps it at the request's
+// OutputCount, so this is always <= requested and never over-charges.
+//
+// When the response was not decodable b64 (extractErr != nil, e.g. a multipart
+// provider quirk) we cannot count delivered images, so fall back to the
+// requested count rather than billing zero — otherwise an unparseable response
+// would be served free.
+func billableImageCount(requested int64, decoded int, extractErr error) int64 {
+	if extractErr == nil && decoded > 0 {
+		return int64(decoded)
+	}
+	return requested
+}
+
 // GetTextToImageInputFeeAndImageNum gets input fee and imageNum for text-to-image generation
 func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64, error) {
 	var request map[string]interface{}
@@ -182,15 +202,17 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		}
 	}
 
+	// Bill by the number of images actually delivered, not the requested count,
+	// so a provider that returns fewer than requested (silent n clamp) does not
+	// over-charge the user (router#354).
+	imageNum := billableImageCount(reqModel.OutputCount, len(images), extractErr)
+
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		monitor.RecordTokens("text-to-image", 0, reqModel.OutputCount)
-		monitor.RecordWhitelistTokens("text-to-image", 0, reqModel.OutputCount)
+		monitor.RecordTokens("text-to-image", 0, imageNum)
+		monitor.RecordWhitelistTokens("text-to-image", 0, imageNum)
 		return nil
 	}
-
-	// Get imageNum from request for billing
-	imageNum := reqModel.OutputCount // previously stored imageNum count
 
 	// Calculate output fee: imageNum × price per image
 	outputFee, err := util.Multiply(outputPrice, imageNum)

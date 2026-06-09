@@ -12,6 +12,33 @@ import (
 )
 
 // ==========================================================================
+// billableImageCount
+// ==========================================================================
+
+func TestBillableImageCount(t *testing.T) {
+	cases := []struct {
+		name       string
+		requested  int64
+		decoded    int
+		extractErr error
+		want       int64
+	}{
+		{"clamp: provider returns fewer than requested", 5, 2, nil, 2}, // router#354 overcharge fix
+		{"exact: delivered equals requested", 2, 2, nil, 2},
+		{"single image", 1, 1, nil, 1},
+		{"extraction failed: fall back to requested (no free inference)", 5, 0, io.ErrUnexpectedEOF, 5},
+		{"decoded zero but no error: fall back to requested", 3, 0, nil, 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := billableImageCount(c.requested, c.decoded, c.extractErr); got != c.want {
+				t.Errorf("billableImageCount(%d, %d, %v) = %d, want %d", c.requested, c.decoded, c.extractErr, got, c.want)
+			}
+		})
+	}
+}
+
+// ==========================================================================
 // extractB64Images
 // ==========================================================================
 
