@@ -68,8 +68,11 @@ func TestSpeechToTextUsage_DecodeFractionalSeconds(t *testing.T) {
 }
 
 // TestBillableSeconds covers the round-to-nearest-second helper used by
-// every billing/metric/limiting call site. Matches OpenAI's documented
-// "billed to the nearest second" semantic.
+// every billing/metric/limiting call site. Round-to-nearest matches OpenAI's
+// "billed to the nearest second" semantic, with a 1-second floor for any
+// positive input — without that floor, a 0.4s clip would pass
+// hasBillableUsage (Seconds > 0) and then bill 0, recreating the zero-fee
+// bug class this PR exists to fix.
 func TestBillableSeconds(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -82,8 +85,11 @@ func TestBillableSeconds(t *testing.T) {
 		{"whole second", &SpeechToTextUsage{Seconds: 207}, 207},
 		{"rounds down", &SpeechToTextUsage{Seconds: 207.4}, 207},
 		{"rounds up", &SpeechToTextUsage{Seconds: 207.5}, 208},
-		{"sub-second rounds to zero", &SpeechToTextUsage{Seconds: 0.4}, 0},
-		{"sub-second rounds to one", &SpeechToTextUsage{Seconds: 0.5}, 1},
+		// Floor-positive — anything > 0 bills at least 1 second so the
+		// admission gate and the math agree on billability.
+		{"sub-half-second floored to 1", &SpeechToTextUsage{Seconds: 0.4}, 1},
+		{"barely above zero floored to 1", &SpeechToTextUsage{Seconds: 0.001}, 1},
+		{"half-second rounds to 1", &SpeechToTextUsage{Seconds: 0.5}, 1},
 	}
 
 	for _, tt := range tests {
@@ -92,6 +98,32 @@ func TestBillableSeconds(t *testing.T) {
 				t.Errorf("billableSeconds(%+v) = %d, want %d", tt.usage, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestBillableSeconds_NeverZeroWhenGateAdmitsDuration is the structural
+// guard against the regression class this PR exists to fix. The admission
+// gate (hasBillableUsage) and the math (billableSeconds) must agree on
+// billability: if the gate says "yes, this is billable" for a duration
+// usage, the math must produce a non-zero second count, or else we silently
+// write a fee=0 row through the accurate-billing path.
+//
+// The reviewer flagged 0 < seconds < 0.5 as a hole: the gate passes (any
+// Seconds > 0), but math.Round produces 0 without the floor.
+func TestBillableSeconds_NeverZeroWhenGateAdmitsDuration(t *testing.T) {
+	// Span the gap the reviewer flagged and the boundary just above zero.
+	subSecondInputs := []float64{0.001, 0.1, 0.4, 0.49, 0.5, 0.51, 0.9, 1.0}
+	for _, sec := range subSecondInputs {
+		u := &SpeechToTextUsage{Type: "duration", Seconds: sec}
+		if !hasBillableUsage(u) {
+			t.Fatalf("hasBillableUsage(seconds=%v) = false, want true (regression in admission gate)", sec)
+		}
+		if !isDurationUsage(u) {
+			t.Fatalf("isDurationUsage(seconds=%v) = false, want true", sec)
+		}
+		if got := billableSeconds(u); got <= 0 {
+			t.Errorf("billableSeconds(seconds=%v) = %d, want > 0 (gate admitted but math zero-bills)", sec, got)
+		}
 	}
 }
 

@@ -50,14 +50,21 @@ type SpeechToTextUsage struct {
 }
 
 // billableSeconds returns the integer second count used for billing, metrics,
-// and rate limiting. Rounds to the nearest whole second to match OpenAI's
-// documented "billed to the nearest second" semantic, and clamps negatives
-// to 0 so a non-conforming provider can never produce a credit-billing row.
+// and rate limiting. Rounds to the nearest whole second, then applies a
+// 1-second floor for any positive input so a sub-half-second clip
+// (e.g. 0.4s) cannot pass hasBillableUsage and then collapse to a 0-fee row
+// — that would be the same zero-billing class of bug this PR exists to fix.
+// Non-positive inputs (zero or negative) return 0 so the caller can decline
+// to bill at all.
 func billableSeconds(u *SpeechToTextUsage) int {
 	if u == nil || u.Seconds <= 0 {
 		return 0
 	}
-	return int(math.Round(u.Seconds))
+	rounded := int(math.Round(u.Seconds))
+	if rounded < 1 {
+		return 1
+	}
+	return rounded
 }
 
 // isDurationUsage classifies a usage object as duration-billed (whisper-style)
