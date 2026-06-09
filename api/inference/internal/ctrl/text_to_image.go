@@ -199,10 +199,14 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	case !c.Service.TargetSeparated:
 		c.logger.Debug("LLM server in the same network, signing text-to-image content")
 		if extractErr == nil && len(images) > 0 {
-			_ = c.signImageResponse(sigReqBody, images, chatKey)
+			if err := c.signImageResponse(sigReqBody, images, chatKey); err != nil {
+				c.logger.Errorf("image content signature not created (TEE verification will be unavailable): %v", err)
+			}
 		} else {
 			c.logger.Warnf("No b64 images extracted, falling back to full-body signature: %v", extractErr)
-			_ = c.signChatWithKey(sigReqBody, body, chatKey)
+			if err := c.signChatWithKey(sigReqBody, body, chatKey); err != nil {
+				c.logger.Errorf("image full-body signature not created (TEE verification will be unavailable): %v", err)
+			}
 		}
 	}
 

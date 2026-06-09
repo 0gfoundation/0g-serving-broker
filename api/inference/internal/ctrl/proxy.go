@@ -309,7 +309,7 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 			clientBody = decoded
 			ctx.Writer.Header().Del("Content-Encoding")
 		} else {
-			c.logger.Warnf("failed to decode %s response for sanitization, leak-field stripping skipped: %v", enc, derr)
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s response; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
 		}
 	}
 

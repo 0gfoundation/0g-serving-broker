@@ -178,7 +178,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 			clientBody = decoded
 			ctx.Writer.Header().Del("Content-Encoding")
 		} else {
-			c.logger.Warnf("failed to decode %s response for sanitization, leak-field stripping skipped: %v", enc, derr)
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s response; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
 		}
 	}
 
@@ -330,6 +330,12 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// If there was a stream error but no data, return the error
 	if streamErr != nil && rawBody.Len() == 0 {
 		return streamErr
+	}
+
+	// A clean 200 with an empty body bills nothing — surface it so a silently
+	// free upstream response leaves a breadcrumb rather than vanishing.
+	if streamErr == nil && rawBody.Len() == 0 {
+		c.logger.Warnf("streaming response completed with empty body; nothing to bill")
 	}
 
 	return nil
