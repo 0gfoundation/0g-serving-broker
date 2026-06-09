@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -146,6 +147,44 @@ func TestSanitizeResponseBody(t *testing.T) {
 			t.Errorf("non-JSON should pass through unchanged")
 		}
 	})
+
+	t.Run("preserves large integers (no float64 precision loss)", func(t *testing.T) {
+		// 9007199254740993 = 2^53 + 1, not representable as float64.
+		in := []byte(`{"id":"gen-1","provider":"x","created":9007199254740993,"usage":{"total_tokens":12345678901234567}}`)
+		out, changed := c.sanitizeResponseBody(in, "")
+		if !changed {
+			t.Fatal("expected provider strip → changed")
+		}
+		// Compare the raw number bytes survive (json.Number round-trip).
+		if !bytes.Contains(out, []byte(`9007199254740993`)) {
+			t.Errorf("created lost precision: %s", out)
+		}
+		if !bytes.Contains(out, []byte(`12345678901234567`)) {
+			t.Errorf("total_tokens lost precision: %s", out)
+		}
+	})
+
+	t.Run("does not descend into structured message.content", func(t *testing.T) {
+		// A structured content part literally named "cost"/"provider" is user data
+		// and must survive; only response-metadata leak fields are stripped.
+		in := []byte(`{"id":"gen-1","provider":"DeepInfra",` +
+			`"choices":[{"message":{"role":"assistant","content":[{"type":"text","provider":"keep-me","cost":42}]}}]}`)
+		out, changed := c.sanitizeResponseBody(in, "")
+		if !changed {
+			t.Fatal("top-level provider should still be stripped")
+		}
+		obj := decode(t, out)
+		if _, ok := obj["provider"]; ok {
+			t.Error("top-level provider must be stripped")
+		}
+		part := obj["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+		if part["provider"] != "keep-me" {
+			t.Errorf("structured content provider field was wrongly stripped: %v", part)
+		}
+		if part["cost"].(float64) != 42 {
+			t.Errorf("structured content cost field was wrongly stripped: %v", part)
+		}
+	})
 }
 
 func TestSanitizeStreamLine(t *testing.T) {
@@ -204,6 +243,11 @@ func TestIsUpstreamLeakHeader(t *testing.T) {
 		{"Openrouter-Processing-Ms", true},
 		{"X-Or-Cost", true},
 		{"Provider", true},
+		{"Server", true},
+		{"Via", true},
+		{"X-Powered-By", true},
+		{"X-Ratelimit-Remaining", true},
+		{"X-Clerk-Auth", true},
 		{"Content-Type", false},
 		{"Content-Encoding", false},
 		{"ZG-Res-Key", false},

@@ -59,9 +59,13 @@ type imageResponseEnvelope struct {
 // requested count rather than billing zero — otherwise an unparseable response
 // would be served free.
 func billableImageCount(requested int64, decoded int, extractErr error) int64 {
-	if extractErr == nil && decoded > 0 {
+	if extractErr == nil {
+		// Clean parse: bill exactly what was delivered, including 0 — a valid
+		// response with no images must not be charged the requested count.
 		return int64(decoded)
 	}
+	// Could not decode/count the response: fall back to the requested count
+	// rather than billing zero, otherwise an unparseable response is free.
 	return requested
 }
 

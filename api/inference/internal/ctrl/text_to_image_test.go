@@ -27,7 +27,7 @@ func TestBillableImageCount(t *testing.T) {
 		{"exact: delivered equals requested", 2, 2, nil, 2},
 		{"single image", 1, 1, nil, 1},
 		{"extraction failed: fall back to requested (no free inference)", 5, 0, io.ErrUnexpectedEOF, 5},
-		{"decoded zero but no error: fall back to requested", 3, 0, nil, 3},
+		{"clean parse, zero images delivered: bill zero (not requested)", 3, 0, nil, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

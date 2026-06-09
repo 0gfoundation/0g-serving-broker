@@ -168,7 +168,20 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		return err
 	}
 
-	clientBody := c.rewriteResponseModel(ctx, respBody)
+	// Decode before sanitizing so leak-field stripping runs on inspectable JSON
+	// even if the upstream compressed despite our identity request (#184). When
+	// we decode, serve identity and drop the now-stale Content-Encoding header.
+	clientBody := respBody
+	if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+		if decoded, derr := decodeBody(respBody, enc); derr == nil {
+			clientBody = decoded
+			ctx.Writer.Header().Del("Content-Encoding")
+		} else {
+			c.logger.Warnf("failed to decode %s response for sanitization, leak-field stripping skipped: %v", enc, derr)
+		}
+	}
+
+	clientBody = c.rewriteResponseModel(ctx, clientBody)
 	// Strip upstream identity/cost/fingerprint fields and rewrite the upstream id
 	// to a broker-issued one before forwarding (#184).
 	if sanitized, changed := c.sanitizeResponseBody(clientBody, "chatcmpl-"+chatKey); changed {
@@ -689,6 +702,16 @@ var leakKeysIfZero = map[string]bool{
 	"cache_write_tokens": true,
 }
 
+// stripLeakKeysContainers are object keys whose values are opaque user/tool
+// payloads (assistant content, tool-call arguments). stripLeakKeys never
+// descends into them: a structured payload could legitimately contain a field
+// literally named "cost"/"provider", and stripping it would corrupt the user's
+// data. Leak fields live in response metadata, not inside these.
+var stripLeakKeysContainers = map[string]bool{
+	"content":   true,
+	"arguments": true,
+}
+
 // stripLeakKeys recursively removes leak fields from a decoded JSON value
 // (object or array), descending into nested objects/arrays so fields buried in
 // choices[].message / usage.*_tokens_details are caught. Returns whether
@@ -708,6 +731,9 @@ func stripLeakKeys(v interface{}) bool {
 				changed = true
 				continue
 			}
+			if stripLeakKeysContainers[k] {
+				continue // opaque user/tool payload — never descend (avoid corrupting it)
+			}
 			if stripLeakKeys(val) {
 				changed = true
 			}
@@ -722,10 +748,17 @@ func stripLeakKeys(v interface{}) bool {
 	return changed
 }
 
-// isZeroNumber reports whether a decoded JSON value is the number 0.
+// isZeroNumber reports whether a decoded JSON value is the number 0. Handles
+// both json.Number (UseNumber decoding) and float64.
 func isZeroNumber(v interface{}) bool {
-	f, ok := v.(float64)
-	return ok && f == 0
+	switch n := v.(type) {
+	case json.Number:
+		f, err := n.Float64()
+		return err == nil && f == 0
+	case float64:
+		return n == 0
+	}
+	return false
 }
 
 // sanitizeResponseBody removes upstream identity/cost/fingerprint fields from a
@@ -739,15 +772,20 @@ func isZeroNumber(v interface{}) bool {
 // TEE signing are unaffected: billing reads the raw upstream bytes, and signing
 // attests this client-facing copy.
 func (c *Ctrl) sanitizeResponseBody(body []byte, newID string) ([]byte, bool) {
+	// UseNumber so integer fields (token counts, created, ids) round-trip without
+	// the float64 precision loss / scientific-notation reshaping of a plain
+	// interface{} decode.
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]interface{}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		// Fail-open: a body we cannot parse (e.g. a fragmented chunk) is
-		// forwarded as-is. Log when non-empty so a leaky-but-unparseable response
-		// — where stripping silently no-ops — is observable. Upstream responses
-		// are requested with Accept-Encoding: identity (see PrepareHTTPRequest),
-		// so this should not be hit merely because a body was compressed.
+	if err := dec.Decode(&obj); err != nil {
+		// Fail-open: a body we cannot parse is forwarded as-is. #184 is a security
+		// control, so log at Warn (not Debug) — a leaky-but-unparseable response
+		// means stripping silently no-opped and must be visible in production.
+		// Callers decode compressed bodies first (see decodeBody) and upstream is
+		// requested with Accept-Encoding: identity, so this should be rare.
 		if len(bytes.TrimSpace(body)) > 0 {
-			c.logger.Debugf("sanitizeResponseBody: body not a JSON object, leak-field stripping skipped: %v", err)
+			c.logger.Warnf("sanitizeResponseBody: body not a JSON object, leak-field stripping skipped (forwarded unsanitized): %v", err)
 		}
 		return body, false
 	}
@@ -771,10 +809,32 @@ func (c *Ctrl) sanitizeResponseBody(body []byte, newID string) ([]byte, bool) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(obj); err != nil {
+		// We parsed and stripped leak fields but cannot re-encode; returning the
+		// original would re-leak. Practically unreachable for JSON-decoded data,
+		// but surface it loudly rather than silently forwarding the leaky body.
+		c.logger.Errorf("sanitizeResponseBody: failed to re-encode sanitized body, forwarding original unsanitized: %v", err)
 		return body, false
 	}
 	// Encoder.Encode appends a trailing newline; drop it.
 	return bytes.TrimRight(buf.Bytes(), "\n"), true
+}
+
+// isCompressedEncoding reports whether a Content-Encoding value denotes a
+// compressed body that must be decoded before JSON sanitization.
+func isCompressedEncoding(enc string) bool {
+	switch strings.ToLower(strings.TrimSpace(enc)) {
+	case "", "identity":
+		return false
+	default:
+		return true
+	}
+}
+
+// decodeBody decompresses a response body per its Content-Encoding so leak-field
+// sanitization can run on inspectable JSON even when an upstream compressed
+// despite the identity request (#184).
+func decodeBody(body []byte, encoding string) ([]byte, error) {
+	return io.ReadAll(initializeReader(bytes.NewReader(body), encoding))
 }
 
 // sanitizeStreamLine prepares one SSE line for the client. It drops SSE

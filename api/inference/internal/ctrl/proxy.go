@@ -283,10 +283,15 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 // reveals the aggregator/provider identity and must not be forwarded (#184).
 func isUpstreamLeakHeader(key string) bool {
 	k := strings.ToLower(key)
+	switch k {
+	case "provider", "server", "via", "x-powered-by":
+		return true
+	}
 	return strings.HasPrefix(k, "x-openrouter") ||
 		strings.HasPrefix(k, "openrouter") ||
 		strings.HasPrefix(k, "x-or-") ||
-		k == "provider"
+		strings.HasPrefix(k, "x-ratelimit") ||
+		strings.HasPrefix(k, "x-clerk")
 }
 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
@@ -295,7 +300,20 @@ func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
-	clientBody := c.rewriteResponseModel(ctx, body)
+	// Decode before sanitizing so leak-field stripping runs on inspectable JSON
+	// even if the upstream compressed despite the identity request (#184); serve
+	// identity and drop the stale Content-Encoding header when decoded.
+	clientBody := body
+	if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+		if decoded, derr := decodeBody(body, enc); derr == nil {
+			clientBody = decoded
+			ctx.Writer.Header().Del("Content-Encoding")
+		} else {
+			c.logger.Warnf("failed to decode %s response for sanitization, leak-field stripping skipped: %v", enc, derr)
+		}
+	}
+
+	clientBody = c.rewriteResponseModel(ctx, clientBody)
 	// Strip upstream identity/cost/fingerprint leak fields before forwarding
 	// (#184). No id rewrite here: this generic proxy path has no per-response
 	// chat key to derive a stable replacement id from.
