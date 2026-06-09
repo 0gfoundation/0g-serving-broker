@@ -39,6 +39,21 @@ type SpeechToTextUsage struct {
 	Seconds           int                      `json:"seconds"`
 }
 
+// isDurationUsage classifies a usage object as duration-billed (whisper-style)
+// vs token-billed (gpt-4o-transcribe-style). This is the single source of
+// truth — billing dispatch, whitelist metrics, and any future consumer must
+// route through this so the same input never lands in two different lanes.
+//
+// Rules: trust an explicit type discriminator when present; otherwise infer
+// from which counter the provider populated. A response that explicitly says
+// type="tokens" stays on the tokens path even if it also carries Seconds.
+func isDurationUsage(u *SpeechToTextUsage) bool {
+	if u == nil {
+		return false
+	}
+	return u.Type == "duration" || (u.Type != "tokens" && u.Seconds > 0)
+}
+
 // hasBillableUsage reports whether a parsed usage object carries data we can
 // actually settle against. A non-nil Usage with all zero counters (e.g. a
 // whisper response decoded into a token-only struct, or an empty {} block)
@@ -275,24 +290,31 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 }
 
 // updateSpeechToTextWithUsage updates the request with accurate usage from the
-// API response. Dispatches on usage.Type:
-//   - "duration": bill Seconds × InputPrice (whisper family). InputPrice is
+// API response. Dispatches via isDurationUsage:
+//   - duration mode: bill Seconds × InputPrice (whisper family). InputPrice is
 //     interpreted as price-per-second by convention; OutputPrice is unused
 //     because whisper has no generation-side cost.
-//   - "tokens" (or unknown but with token counts): bill input_tokens × InputPrice
-//     + output_tokens × OutputPrice. For gpt-4o-transcribe, output_tokens is
-//     always 0 upstream, so this collapses to input-only billing.
+//   - tokens mode: bill input_tokens × InputPrice + output_tokens × OutputPrice.
+//     For gpt-4o-transcribe, output_tokens is always 0 upstream, so this
+//     collapses to input-only billing.
+//
+// WARNING — InputPrice is semantically overloaded across speech-to-text
+// services: whisper-* services reuse it as price-per-second, gpt-4o-transcribe-*
+// services use it as price-per-token. There is no schema-level discriminator;
+// the unit is implied by which model the service is registered to proxy.
+// Pointing a whisper service at a per-token price (or vice versa) silently
+// over- or under-charges by orders of magnitude. Operators must keep the
+// service's registered InputPrice consistent with the upstream model's usage
+// shape (whisper → per-second, gpt-4o-transcribe → per-token). A future on-chain
+// `BillingUnit` field would let this dispatch reject mismatches; tracked as a
+// follow-up to PR #523.
 func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToTextUsage, requestHash string) error {
 	service, err := c.GetCachedService(ctx)
 	if err != nil {
 		return errors.Wrap(err, "get cached service for speech-to-text billing")
 	}
 
-	// Route to duration billing when the provider says so, or when Seconds is
-	// populated and the type field is missing/unknown. A response that
-	// explicitly says type="tokens" stays on the tokens path even if it also
-	// carries a Seconds field — trust the explicit discriminator.
-	if usage.Type == "duration" || (usage.Type != "tokens" && usage.Seconds > 0) {
+	if isDurationUsage(usage) {
 		return c.billSpeechToTextByDuration(ctx, usage, service.InputPrice, requestHash)
 	}
 	return c.billSpeechToTextByTokens(ctx, usage, service.InputPrice, service.OutputPrice, requestHash)
@@ -302,9 +324,9 @@ func (c *Ctrl) updateSpeechToTextWithUsage(ctx context.Context, usage *SpeechToT
 // count (with or without an explicit "type":"duration" discriminator).
 // InputPrice is treated as price-per-second; OutputPrice is ignored.
 func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTextUsage, inputPrice, requestHash string) error {
-	seconds := int64(usage.Seconds)
+	seconds := usage.Seconds
 
-	inputFee, err := util.Multiply(inputPrice, seconds)
+	inputFee, err := util.Multiply(inputPrice, int64(seconds))
 	if err != nil {
 		return errors.Wrap(err, "calculate duration fee")
 	}
@@ -312,13 +334,18 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 	// Persist seconds in input_count and 0 in output_count. There is no
 	// per-row unit discriminator; operators identify duration-billed rows
 	// by the service the row belongs to (whisper services bill seconds).
-	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), "0", inputFee.String(),
-		seconds, 0); err != nil {
+	feeStr := inputFee.String()
+	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
+		int64(seconds), 0); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
-	monitor.RecordTokens("speech_to_text", seconds, 0)
-	consumeSpeechToTextLimiter(ctx, int(seconds))
+	monitor.RecordTokens("speech_to_text", int64(seconds), 0)
+	// No RecordTPSFromContext for duration mode: whisper has no
+	// tokens-per-second concept (the whole transcript is delivered as one
+	// shot, not as a generation stream). A seconds/second metric would be
+	// nonsensical and would pollute the chatbot TPS dashboard.
+	consumeSpeechToTextLimiter(ctx, seconds)
 	return nil
 }
 
@@ -381,12 +408,13 @@ func consumeSpeechToTextLimiter(ctx context.Context, units int) {
 // usageMetricCounts returns the (input, output) values to feed into
 // monitor.RecordTokens for a given usage object. For duration mode the seconds
 // count is reported in the input position to stay aligned with what InputPrice
-// settled against.
+// settled against. Must use the same classifier as the billing dispatch so
+// the whitelist metrics lane never diverges from the settlement lane.
 func usageMetricCounts(u *SpeechToTextUsage) (int64, int64) {
 	if u == nil {
 		return 0, 0
 	}
-	if u.Type == "duration" {
+	if isDurationUsage(u) {
 		return int64(u.Seconds), 0
 	}
 	return int64(u.InputTokens), int64(u.OutputTokens)
