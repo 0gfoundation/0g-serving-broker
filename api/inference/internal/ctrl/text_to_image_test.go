@@ -12,6 +12,33 @@ import (
 )
 
 // ==========================================================================
+// billableImageCount
+// ==========================================================================
+
+func TestBillableImageCount(t *testing.T) {
+	cases := []struct {
+		name       string
+		requested  int64
+		decoded    int
+		extractErr error
+		want       int64
+	}{
+		{"clamp: provider returns fewer than requested", 5, 2, nil, 2}, // router#354 overcharge fix
+		{"exact: delivered equals requested", 2, 2, nil, 2},
+		{"single image", 1, 1, nil, 1},
+		{"extraction failed: fall back to requested (no free inference)", 5, 0, io.ErrUnexpectedEOF, 5},
+		{"clean parse, zero images delivered: bill zero (not requested)", 3, 0, nil, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := billableImageCount(c.requested, c.decoded, c.extractErr); got != c.want {
+				t.Errorf("billableImageCount(%d, %d, %v) = %d, want %d", c.requested, c.decoded, c.extractErr, got, c.want)
+			}
+		})
+	}
+}
+
+// ==========================================================================
 // extractB64Images
 // ==========================================================================
 
@@ -66,8 +93,15 @@ func TestExtractB64Images_URLOnly_ReturnsError(t *testing.T) {
 }
 
 func TestExtractB64Images_EmptyData(t *testing.T) {
-	if _, err := extractB64Images([]byte(`{"created":1,"data":[]}`), 1); err == nil {
-		t.Error("expected error for empty data array")
+	// Empty data is a clean "0 images delivered" result, not a decode error, so
+	// billing can charge 0 (see billableImageCount) and url-format requests can
+	// refuse on len==0.
+	images, err := extractB64Images([]byte(`{"created":1,"data":[]}`), 1)
+	if err != nil {
+		t.Errorf("empty data should not error, got %v", err)
+	}
+	if len(images) != 0 {
+		t.Errorf("expected 0 images, got %d", len(images))
 	}
 }
 

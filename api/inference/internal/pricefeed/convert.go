@@ -13,7 +13,7 @@ var weiPerOG = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 // tokensPerMillion is the denominator for "USD per 1M tokens" pricing.
 var tokensPerMillion = big.NewInt(1_000_000)
 
-// priceQuantumWei is the granularity we snap wei-per-token prices to.
+// priceQuantumWei is the coarsest granularity we snap wei-per-token prices to.
 // 1e10 wei/token == 0.01 0G per million tokens — two decimal places in 0G/M
 // space.  Floor-quantising here buys stable, human-readable on-chain prices
 // across small rate wobbles and reduces SyncService churn, at the cost of
@@ -21,6 +21,60 @@ var tokensPerMillion = big.NewInt(1_000_000)
 // MinOnChainUpdateBps).  Floor favours the user: the broker can never
 // accidentally charge more than the unquantised conversion would yield.
 var priceQuantumWei = big.NewInt(1e10)
+
+// minPriceQuantumWei is the finest grid quantumFor will step down to.
+// 1e8 wei/token == 0.0001 0G per million tokens — four decimals in 0G/M space,
+// still human-readable. Cheap models (sub-1 0G/M) need a finer grid than the
+// coarse default, otherwise truncation loses a large fraction of their price:
+// e.g. qwen3-vl at 0.065 0G/M snapped to the 0.01 grid becomes 0.06, a ~7.5%
+// under-charge (router#332).
+var minPriceQuantumWei = big.NewInt(1e8)
+
+// quantumFor returns the floor-snap grid for an unquantised wei-per-token price.
+// It picks the largest power-of-ten grid that keeps the snap error within ~1%
+// of the price (grid <= price/100), clamped to [minPriceQuantumWei,
+// priceQuantumWei]. Expensive models keep the coarse 0.01 0G/M grid (stable,
+// low churn); cheap models get a finer grid so their price survives truncation.
+// The ~1% bound holds except right at the minPriceQuantumWei clamp (prices just
+// above 1e8 wei), where the forced 1e8 grid can leave a larger relative floor
+// error — still a floor, so it only ever under-charges, never over-charges.
+//
+// The grid only sizes the floor snap — it never changes the snap direction, so
+// floor-favours-user still holds. SyncService churn is unaffected: on-chain
+// updates remain gated by MinOnChainUpdateBps, which suppresses sub-threshold
+// price moves regardless of grid resolution; a finer grid only makes the value
+// that eventually syncs more precise.
+func quantumFor(wei *big.Int) *big.Int {
+	if wei.Sign() <= 0 {
+		return new(big.Int).Set(priceQuantumWei)
+	}
+	target := new(big.Int).Quo(wei, big.NewInt(100))
+	q := floorPowerOfTen(target)
+	if q.Cmp(minPriceQuantumWei) < 0 {
+		return new(big.Int).Set(minPriceQuantumWei)
+	}
+	if q.Cmp(priceQuantumWei) > 0 {
+		return new(big.Int).Set(priceQuantumWei)
+	}
+	return q
+}
+
+// floorPowerOfTen returns the largest power of ten (10^k, k>=0) that is <= n.
+// For n < 1 it returns 1.
+func floorPowerOfTen(n *big.Int) *big.Int {
+	p := big.NewInt(1)
+	if n.Sign() <= 0 {
+		return p
+	}
+	ten := big.NewInt(10)
+	for {
+		next := new(big.Int).Mul(p, ten)
+		if next.Cmp(n) > 0 {
+			return p
+		}
+		p = next
+	}
+}
 
 // ParseUSDPerMillion parses a USD-per-million-tokens decimal string into a
 // big.Rat.  Accepts plain decimal notation (e.g. "0.50", "1.234567").
@@ -76,8 +130,10 @@ func USDPerMillionToWeiPerToken(priceUSDPerMillion, rateUSDPerOG *big.Rat) (*big
 		wei.SetInt64(0)
 	}
 
-	// Floor-snap to priceQuantumWei: wei = (wei / Q) * Q.
-	wei.Quo(wei, priceQuantumWei).Mul(wei, priceQuantumWei)
+	// Floor-snap to an adaptive power-of-ten grid sized to the price, so cheap
+	// models keep enough significant digits (see quantumFor): wei = (wei / Q) * Q.
+	q := quantumFor(wei)
+	wei.Quo(wei, q).Mul(wei, q)
 	return wei, nil
 }
 

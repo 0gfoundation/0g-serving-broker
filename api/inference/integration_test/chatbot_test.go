@@ -138,8 +138,12 @@ func TestChatbotFlow_NonStream(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("parse response: %v", err)
 	}
-	if resp["id"] != "chatcmpl-001" {
-		t.Errorf("expected id=chatcmpl-001, got %v", resp["id"])
+	// The broker rewrites the upstream id to its own chatcmpl-<chatKey> so the
+	// upstream id format cannot fingerprint the provider (#184). The original
+	// upstream id ("chatcmpl-001") must NOT leak through.
+	id, _ := resp["id"].(string)
+	if id == "chatcmpl-001" || !strings.HasPrefix(id, "chatcmpl-") {
+		t.Errorf("expected upstream id rewritten to a broker chatcmpl- id, got %v", resp["id"])
 	}
 
 	// Verify billing headers
@@ -299,8 +303,10 @@ func TestCentralizedProvider_NonStream(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("parse response: %v", err)
 	}
-	if resp["id"] != "chatcmpl-001" {
-		t.Errorf("expected id=chatcmpl-001, got %v", resp["id"])
+	// The broker rewrites the upstream id to chatcmpl-<chatKey> (#184); for a
+	// signed path chatKey == ZG-Res-Key, so the body id is exactly that.
+	if resp["id"] != "chatcmpl-"+chatID {
+		t.Errorf("expected id=chatcmpl-%s (broker-issued), got %v", chatID, resp["id"])
 	}
 
 	// Verify routing proof is retrievable via /signature/{chatID}

@@ -145,6 +145,15 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
+	// Force identity encoding upstream. If we forwarded the client's
+	// "Accept-Encoding: gzip", Go's transport would NOT auto-decompress (it only
+	// does so for the gzip header it adds itself), and the broker would receive a
+	// compressed body. Leak-field stripping (#184) parses the body as JSON, so a
+	// compressed response would silently fail to parse and forward upstream
+	// identity/cost fields unsanitized. Requesting identity keeps the body
+	// inspectable; the broker serves it to the client uncompressed.
+	req.Header.Set("Accept-Encoding", "identity")
+
 	// may need additional secret to access the target service
 	if additionalSecret := c.Service.AdditionalSecret; additionalSecret != nil {
 		for k, v := range additionalSecret {
@@ -194,6 +203,13 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	for k, v := range resp.Header {
 		if k == "Content-Length" {
+			continue
+		}
+		// Drop upstream identity-revealing headers (#184): OpenRouter-style
+		// x-openrouter-*/openrouter-* banners, and the upstream's own "Provider"
+		// header (the broker sets its own provider header below — forwarding the
+		// upstream's would both leak the aggregator and duplicate the field).
+		if isUpstreamLeakHeader(k) {
 			continue
 		}
 		ctx.Writer.Header()[k] = v
@@ -263,13 +279,47 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	return &chatSignature, nil
 }
 
+// isUpstreamLeakHeader reports whether a response header from the upstream
+// reveals the aggregator/provider identity and must not be forwarded (#184).
+func isUpstreamLeakHeader(key string) bool {
+	k := strings.ToLower(key)
+	switch k {
+	case "provider", "server", "via", "x-powered-by":
+		return true
+	}
+	return strings.HasPrefix(k, "x-openrouter") ||
+		strings.HasPrefix(k, "openrouter") ||
+		strings.HasPrefix(k, "x-or-") ||
+		strings.HasPrefix(k, "x-ratelimit") ||
+		strings.HasPrefix(k, "x-clerk")
+}
+
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read from body")
 		return err
 	}
-	clientBody := c.rewriteResponseModel(ctx, body)
+	// Decode before sanitizing so leak-field stripping runs on inspectable JSON
+	// even if the upstream compressed despite the identity request (#184); serve
+	// identity and drop the stale Content-Encoding header when decoded.
+	clientBody := body
+	if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+		if decoded, derr := decodeBody(body, enc); derr == nil {
+			clientBody = decoded
+			ctx.Writer.Header().Del("Content-Encoding")
+		} else {
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s response; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
+		}
+	}
+
+	clientBody = c.rewriteResponseModel(ctx, clientBody)
+	// Strip upstream identity/cost/fingerprint leak fields before forwarding
+	// (#184). No id rewrite here: this generic proxy path has no per-response
+	// chat key to derive a stable replacement id from.
+	if sanitized, changed := c.sanitizeResponseBody(clientBody, ""); changed {
+		clientBody = sanitized
+	}
 	if _, err := ctx.Writer.Write(clientBody); err != nil {
 		c.handleBrokerError(ctx, err, "write response body")
 		return err
@@ -492,8 +542,8 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 // - Provider advertises a specific model in the service configuration
 // - Pricing is based on that specific model
 // - Allowing users to change the model could result in:
-//   1. Provider paying more to backend service than they charge users
-//   2. Users getting access to premium models at cheaper prices
+//  1. Provider paying more to backend service than they charge users
+//  2. Users getting access to premium models at cheaper prices
 //
 // This function forcibly overwrites any "model" field in the request body with the
 // configured model from c.Service.ModelType, or c.Service.UpstreamModel if set.

@@ -45,6 +45,30 @@ type imageResponseEnvelope struct {
 	Data    []imageResponseData `json:"data"`
 }
 
+// billableImageCount returns the number of images to bill for.
+//
+// A provider may return fewer images than requested — e.g. it silently clamps
+// `n` to its per-model maximum (z-image caps at 2; router#354). Billing the
+// requested count in that case over-charges the user for images they never
+// received. When the response decoded cleanly we therefore bill the actual
+// delivered count; extractB64Images already caps it at the request's
+// OutputCount, so this is always <= requested and never over-charges.
+//
+// When the response was not decodable b64 (extractErr != nil, e.g. a multipart
+// provider quirk) we cannot count delivered images, so fall back to the
+// requested count rather than billing zero — otherwise an unparseable response
+// would be served free.
+func billableImageCount(requested int64, decoded int, extractErr error) int64 {
+	if extractErr == nil {
+		// Clean parse: bill exactly what was delivered, including 0 — a valid
+		// response with no images must not be charged the requested count.
+		return int64(decoded)
+	}
+	// Could not decode/count the response: fall back to the requested count
+	// rather than billing zero, otherwise an unparseable response is free.
+	return requested
+}
+
 // GetTextToImageInputFeeAndImageNum gets input fee and imageNum for text-to-image generation
 func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64, error) {
 	var request map[string]interface{}
@@ -175,22 +199,28 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	case !c.Service.TargetSeparated:
 		c.logger.Debug("LLM server in the same network, signing text-to-image content")
 		if extractErr == nil && len(images) > 0 {
-			_ = c.signImageResponse(sigReqBody, images, chatKey)
+			if err := c.signImageResponse(sigReqBody, images, chatKey); err != nil {
+				c.logger.Errorf("image content signature not created (TEE verification will be unavailable): %v", err)
+			}
 		} else {
 			c.logger.Warnf("No b64 images extracted, falling back to full-body signature: %v", extractErr)
-			_ = c.signChatWithKey(sigReqBody, body, chatKey)
+			if err := c.signChatWithKey(sigReqBody, body, chatKey); err != nil {
+				c.logger.Errorf("image full-body signature not created (TEE verification will be unavailable): %v", err)
+			}
 		}
 	}
 
+	// Bill by the number of images actually delivered, not the requested count,
+	// so a provider that returns fewer than requested (silent n clamp) does not
+	// over-charge the user (router#354).
+	imageNum := billableImageCount(reqModel.OutputCount, len(images), extractErr)
+
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		monitor.RecordTokens("text-to-image", 0, reqModel.OutputCount)
-		monitor.RecordWhitelistTokens("text-to-image", 0, reqModel.OutputCount)
+		monitor.RecordTokens("text-to-image", 0, imageNum)
+		monitor.RecordWhitelistTokens("text-to-image", 0, imageNum)
 		return nil
 	}
-
-	// Get imageNum from request for billing
-	imageNum := reqModel.OutputCount // previously stored imageNum count
 
 	// Calculate output fee: imageNum × price per image
 	outputFee, err := util.Multiply(outputPrice, imageNum)
@@ -228,7 +258,11 @@ func extractB64Images(body []byte, maxImages int) ([][]byte, error) {
 		return nil, fmt.Errorf("unmarshal image response: %w", err)
 	}
 	if len(envelope.Data) == 0 {
-		return nil, fmt.Errorf("image response has empty data array")
+		// A cleanly-parsed response that delivered no images: return an empty
+		// (non-nil) slice with no error so callers can distinguish "0 delivered"
+		// (bill 0, refuse a url-format request) from "couldn't decode". Billing
+		// must not charge the requested count for images that never arrived.
+		return [][]byte{}, nil
 	}
 	if maxImages > 0 && len(envelope.Data) > maxImages {
 		return nil, fmt.Errorf("image response has %d entries, exceeds declared output count %d", len(envelope.Data), maxImages)

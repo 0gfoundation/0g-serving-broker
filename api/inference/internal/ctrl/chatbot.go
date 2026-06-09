@@ -14,6 +14,7 @@ import (
 
 	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 
 	"github.com/google/uuid"
 
@@ -168,7 +169,25 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		return err
 	}
 
-	clientBody := c.rewriteResponseModel(ctx, respBody)
+	// Decode before sanitizing so leak-field stripping runs on inspectable JSON
+	// even if the upstream compressed despite our identity request (#184). When
+	// we decode, serve identity and drop the now-stale Content-Encoding header.
+	clientBody := respBody
+	if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+		if decoded, derr := decodeBody(respBody, enc); derr == nil {
+			clientBody = decoded
+			ctx.Writer.Header().Del("Content-Encoding")
+		} else {
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s response; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
+		}
+	}
+
+	clientBody = c.rewriteResponseModel(ctx, clientBody)
+	// Strip upstream identity/cost/fingerprint fields and rewrite the upstream id
+	// to a broker-issued one before forwarding (#184).
+	if sanitized, changed := c.sanitizeResponseBody(clientBody, "chatcmpl-"+chatKey); changed {
+		clientBody = sanitized
+	}
 
 	// Attempt to write the response to the client. If the client has already
 	// disconnected (broken pipe, connection reset), log a warning but continue
@@ -183,8 +202,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		}
 	}
 
-	// Always process billing regardless of client connection state
-	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, chatKey); err != nil {
+	// Always process billing regardless of client connection state. Billing uses
+	// the raw respBody; signing uses clientBody (what the client received).
+	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, clientBody, chatKey); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
@@ -195,6 +215,16 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	// The stream path sanitizes raw SSE lines and cannot transparently decode a
+	// compressed stream (sanitizeStreamLine works line-by-line). We force
+	// Accept-Encoding: identity upstream, so a compressed SSE response means the
+	// upstream ignored that — surface it: leak sanitization (#184) would no-op on
+	// compressed bytes. (SSE is virtually never compressed since it defeats
+	// incremental flushing.)
+	if isCompressedEncoding(resp.Header.Get("Content-Encoding")) {
+		c.logger.Warnf("streaming response has Content-Encoding %q despite identity request; SSE leak sanitization may be skipped", resp.Header.Get("Content-Encoding"))
+	}
+
 	chatKey := uuid.NewString()
 
 	// Set ZG-Res-Key for broker-signed responses (see handleChargingResponse for details)
@@ -204,6 +234,10 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	}
 
 	var rawBody bytes.Buffer
+	// clientBody accumulates the sanitized bytes actually delivered to the client
+	// (comment lines dropped, leak fields stripped, model rewritten), so the TEE
+	// signature attests what the client can verify rather than the raw upstream.
+	var clientBody bytes.Buffer
 
 	var streamErr error = nil
 	var responseChunk []byte = nil
@@ -229,9 +263,17 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				responseChunk = []byte(strings.TrimSpace(strings.TrimPrefix(line, "data: ")))
 			}
 
+			// Sanitize before forwarding: drop SSE keepalive/comment lines and strip
+			// upstream identity/cost leak fields (#184). The raw line is captured in
+			// rawBody (via TeeReader) for billing; the sanitized line is accumulated
+			// in clientBody so the signature attests what the client receives.
+			clientLine, forward := c.sanitizeStreamLine(ctx, line, "chatcmpl-"+chatKey)
+			if forward {
+				clientBody.WriteString(clientLine)
+			}
+
 			// Only write to client if still connected
-			if !clientDisconnected {
-				clientLine := c.rewriteResponseModelLine(ctx, line)
+			if !clientDisconnected && forward {
 				_, streamErr = w.Write([]byte(clientLine))
 				if streamErr != nil {
 					// Check if this is a client disconnection error
@@ -274,7 +316,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			}
 		}
 
-		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, chatKey); err != nil {
+		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, clientBody.Bytes(), chatKey); err != nil {
 			c.logger.Errorf("Failed to process response for billing: %v", err)
 			// If we had a stream error, return it; otherwise return the decode error
 			if streamErr != nil {
@@ -290,9 +332,24 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 		return streamErr
 	}
 
+	// A clean 200 with an empty body bills nothing — surface it so a silently
+	// free upstream response leaves a breadcrumb rather than vanishing.
+	if streamErr == nil && rawBody.Len() == 0 {
+		c.logger.Warnf("streaming response completed with empty body; nothing to bill")
+	}
+
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, chatKey string) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, signData []byte, chatKey string) error {
+	// signData is the exact byte stream delivered to the client (after model
+	// rewrite / leak-field stripping). The TEE signature must attest what the
+	// client can verify, not the raw upstream — billing below still uses raw `data`.
+	// Falls back to raw data when the caller supplies nothing (e.g. a stream with
+	// no forwarded content), preserving the legacy behaviour.
+	if len(signData) == 0 {
+		signData = data
+	}
+
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -360,12 +417,12 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		// complete at this point.  Without a cached signature the SDK will get
 		// a 404 on /v1/proxy/signature/{chatID}, which is more honest than a
 		// TEE-signed proof that lacks TLS evidence.
-		if err := c.signCentralizedRoutingProof(reqBody, data, chatKey, tlsState); err != nil {
+		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, tlsState); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
-		if err := c.signChatWithKey(reqBody, data, chatKey); err != nil {
+		if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
 			return err
 		}
 	}
@@ -630,6 +687,235 @@ func isLineEmpty(line []byte) bool {
 // underlying provider to produce the first token.
 func isSSEComment(line []byte) bool {
 	return bytes.HasPrefix(line, []byte(":"))
+}
+
+// leakKeysAlways are response fields that disclose the upstream aggregator's
+// identity, wholesale cost, or schema, and are removed wherever they appear in
+// the response tree (#184). They are provider-agnostic: a vLLM/OpenAI upstream
+// omits them so stripping is a no-op, while aggregating upstreams (e.g.
+// OpenRouter) populate them.
+//
+//   - provider, is_byok                       → aggregator identity
+//   - cost, cost_details                       → upstream wholesale cost / margin
+//   - native_finish_reason, reasoning_details  → aggregator schema fingerprints
+var leakKeysAlways = map[string]bool{
+	"provider":             true,
+	"is_byok":              true,
+	"cost":                 true,
+	"cost_details":         true,
+	"native_finish_reason": true,
+	"reasoning_details":    true,
+}
+
+// leakKeysIfZero are standard OpenAI token-detail sub-fields that an aggregator
+// emits pre-normalised to zero; their mere presence fingerprints the upstream
+// normaliser, so they are removed only when zero (a non-zero value is real
+// usage and is kept). cached_tokens and reasoning_tokens are intentionally NOT
+// listed — they carry real information and must survive.
+var leakKeysIfZero = map[string]bool{
+	"audio_tokens":       true,
+	"video_tokens":       true,
+	"image_tokens":       true,
+	"cache_write_tokens": true,
+}
+
+// stripLeakKeysContainers are object keys whose values are opaque user/tool
+// payloads (assistant content, tool-call arguments). stripLeakKeys never
+// descends into them: a structured payload could legitimately contain a field
+// literally named "cost"/"provider", and stripping it would corrupt the user's
+// data. Leak fields live in response metadata, not inside these.
+var stripLeakKeysContainers = map[string]bool{
+	"content":   true,
+	"arguments": true,
+}
+
+// stripLeakKeys recursively removes leak fields from a decoded JSON value
+// (object or array), descending into nested objects/arrays so fields buried in
+// choices[].message / usage.*_tokens_details are caught. Returns whether
+// anything changed.
+func stripLeakKeys(v interface{}) bool {
+	changed := false
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if leakKeysAlways[k] {
+				delete(t, k)
+				changed = true
+				continue
+			}
+			if leakKeysIfZero[k] && isZeroNumber(val) {
+				delete(t, k)
+				changed = true
+				continue
+			}
+			if stripLeakKeysContainers[k] {
+				continue // opaque user/tool payload — never descend (avoid corrupting it)
+			}
+			if stripLeakKeys(val) {
+				changed = true
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			if stripLeakKeys(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// isZeroNumber reports whether a decoded JSON value is the number 0. Handles
+// both json.Number (UseNumber decoding) and float64.
+func isZeroNumber(v interface{}) bool {
+	switch n := v.(type) {
+	case json.Number:
+		f, err := n.Float64()
+		return err == nil && f == 0
+	case float64:
+		return n == 0
+	}
+	return false
+}
+
+// sanitizeResponseBody removes upstream identity/cost/fingerprint fields from a
+// JSON response object (a full chat completion or a single SSE chunk) before it
+// is forwarded to the client (#184), and — when newID is non-empty — rewrites
+// the top-level "id" to a broker-issued value so the upstream's id format (e.g.
+// OpenRouter's "gen-...") cannot fingerprint the provider.
+//
+// It returns (body, false) unchanged when the body is not a JSON object or
+// nothing needed changing, so it is safe to call on every chunk. Billing and
+// TEE signing are unaffected: billing reads the raw upstream bytes, and signing
+// attests this client-facing copy.
+func (c *Ctrl) sanitizeResponseBody(body []byte, newID string) ([]byte, bool) {
+	// UseNumber so integer fields (token counts, created, ids) round-trip without
+	// the float64 precision loss / scientific-notation reshaping of a plain
+	// interface{} decode.
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var obj map[string]interface{}
+	if err := dec.Decode(&obj); err != nil {
+		// Fail-open: a body we cannot parse is forwarded as-is. #184 is a security
+		// control, so log at Warn (not Debug) — a leaky-but-unparseable response
+		// means stripping silently no-opped and must be visible in production.
+		// Callers decode compressed bodies first (see decodeBody) and upstream is
+		// requested with Accept-Encoding: identity, so this should be rare.
+		if len(bytes.TrimSpace(body)) > 0 {
+			c.logger.Warnf("sanitizeResponseBody: body not a JSON object, leak-field stripping skipped (forwarded unsanitized): %v", err)
+		}
+		return body, false
+	}
+
+	changed := stripLeakKeys(obj)
+
+	if newID != "" {
+		if _, ok := obj["id"]; ok {
+			obj["id"] = newID
+			changed = true
+		}
+	}
+
+	if !changed {
+		return body, false
+	}
+
+	// Encode with HTML escaping disabled so message content with <, >, & is not
+	// rewritten to < etc. (preserves byte-fidelity of the assistant text).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
+		// We parsed and stripped leak fields but cannot re-encode; returning the
+		// original would re-leak. Practically unreachable for JSON-decoded data,
+		// but surface it loudly rather than silently forwarding the leaky body.
+		c.logger.Errorf("sanitizeResponseBody: failed to re-encode sanitized body, forwarding original unsanitized: %v", err)
+		return body, false
+	}
+	// Encoder.Encode appends a trailing newline; drop it.
+	return bytes.TrimRight(buf.Bytes(), "\n"), true
+}
+
+// isCompressedEncoding reports whether a Content-Encoding value denotes a
+// compressed body that must be decoded before JSON sanitization.
+func isCompressedEncoding(enc string) bool {
+	switch strings.ToLower(strings.TrimSpace(enc)) {
+	case "", "identity":
+		return false
+	default:
+		return true
+	}
+}
+
+// decodeBody decompresses a response body per its Content-Encoding so leak-field
+// sanitization can run on inspectable JSON even when an upstream compressed
+// despite the identity request (#184).
+//
+// Unlike initializeReader (which silently returns the raw, still-compressed
+// reader for unknown encodings or a bad gzip header), decodeBody returns an
+// explicit error in those cases. That distinction matters: the caller deletes
+// Content-Encoding on success, so a silent raw passthrough would ship compressed
+// bytes labelled as identity — a broken, still-leaky response. On error the
+// caller keeps the original body and header untouched.
+func decodeBody(body []byte, encoding string) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body, nil
+	case "gzip":
+		r, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer r.Close()
+		return io.ReadAll(r)
+	case "deflate":
+		// HTTP "deflate" is ambiguous: some servers send zlib-wrapped (RFC 1950),
+		// others raw (RFC 1951). Try zlib first, fall back to raw flate.
+		if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			defer zr.Close()
+			return io.ReadAll(zr)
+		}
+		r := flate.NewReader(bytes.NewReader(body))
+		defer r.Close()
+		return io.ReadAll(r)
+	case "br":
+		return io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
+	default:
+		return nil, fmt.Errorf("unsupported content-encoding %q", encoding)
+	}
+}
+
+// sanitizeStreamLine prepares one SSE line for the client. It drops SSE
+// comment/keepalive lines (returns forward=false) — e.g. OpenRouter's
+// ": OPENROUTER PROCESSING", which leaks the upstream's identity and carries no
+// data — and, for "data: {json}" chunks, rewrites the model name (LoRA) and
+// strips identity/cost/fingerprint leak fields and rewrites the chunk id to
+// idRewrite (#184). Non-JSON lines (e.g. "data: [DONE]") pass through after the
+// model rewrite. idRewrite must be stable across a stream so every chunk carries
+// the same id. The raw upstream stream is captured separately (rawBody) for
+// billing, so billing is unaffected; TEE signing attests the sanitized bytes the
+// client actually receives.
+func (c *Ctrl) sanitizeStreamLine(ctx *gin.Context, line string, idRewrite string) (string, bool) {
+	lead := strings.TrimSpace(line)
+	if lead == "" {
+		return line, true // preserve SSE event separators
+	}
+	if isSSEComment([]byte(lead)) {
+		return "", false
+	}
+
+	// Model rewrite first (LoRA); format-preserving string replace.
+	line = c.rewriteResponseModelLine(ctx, line)
+
+	if after, ok := strings.CutPrefix(strings.TrimSpace(line), "data:"); ok {
+		payload := strings.TrimSpace(after)
+		if strings.HasPrefix(payload, "{") {
+			if sanitized, changed := c.sanitizeResponseBody([]byte(payload), idRewrite); changed {
+				return "data: " + string(sanitized) + "\n", true
+			}
+		}
+	}
+	return line, true
 }
 
 func isStream(body []byte) (bool, error) {

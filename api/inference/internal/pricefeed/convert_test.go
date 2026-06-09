@@ -99,6 +99,61 @@ func TestUSDPerMillionToWeiPerToken_FloorQuantizes(t *testing.T) {
 	}
 }
 
+func TestQuantumFor(t *testing.T) {
+	// wei/token → 0G/M:  wei * 1e6 / 1e18 = wei * 1e-12.
+	cases := []struct {
+		name string
+		wei  string // unquantised wei/token
+		want string // expected grid
+	}{
+		{"qwen3-vl 0.065 0G/M", "65000000000", "100000000"},          // 6.5e10 → 1e8
+		{"whisper 0.082 0G/M", "82000000000", "100000000"},           // 8.2e10 → 1e8
+		{"0.5 0G/M", "500000000000", "1000000000"},                   // 5e11   → 1e9
+		{"1 0G/M keeps coarse grid", "1000000000000", "10000000000"}, // 1e12 → 1e10
+		{"expensive 166 0G/M", "166666666666666", "10000000000"},     // → 1e10 (clamped)
+		{"ultra cheap clamps to min", "1000000000", "100000000"},     // 1e9 → 1e8 (min)
+		{"zero", "0", "10000000000"},
+	}
+	for _, c := range cases {
+		wei, _ := new(big.Int).SetString(c.wei, 10)
+		want, _ := new(big.Int).SetString(c.want, 10)
+		if got := quantumFor(wei); got.Cmp(want) != 0 {
+			t.Errorf("%s: quantumFor(%s) = %s, want %s", c.name, c.wei, got.String(), c.want)
+		}
+	}
+}
+
+func TestUSDPerMillionToWeiPerToken_CheapModelKeepsPrecision(t *testing.T) {
+	// Regression for router#332: a cheap model (qwen3-vl ≈ 0.065 0G/M) must not
+	// be truncated to the coarse 0.01 0G/M grid (which would yield 0.06, a ~7.5%
+	// under-charge). price $0.065/1M at rate $1/0G → 6.5e10 wei/token exactly.
+	price := mustRat(t, "0.065")
+	rate := mustRat(t, "1")
+	got, err := USDPerMillionToWeiPerToken(price, rate)
+	if err != nil {
+		t.Fatalf("USDPerMillionToWeiPerToken: %v", err)
+	}
+
+	want, _ := new(big.Int).SetString("65000000000", 10) // 0.065 0G/M retained
+	if got.Cmp(want) != 0 {
+		t.Errorf("cheap price wei = %s, want %s (0.065 0G/M)", got.String(), want.String())
+	}
+
+	// The old coarse 0.01 grid would have produced 6e10 (0.06 0G/M); confirm the
+	// result is no longer snapped to that grid.
+	if new(big.Int).Mod(got, priceQuantumWei).Sign() == 0 {
+		t.Errorf("cheap price wei %s is still on the coarse 0.01 grid — finer grid not applied", got.String())
+	}
+
+	// Floor must still hold: quantised value never exceeds the exact conversion.
+	exact := new(big.Rat).Quo(price, new(big.Rat).SetInt(tokensPerMillion))
+	exact.Quo(exact, rate)
+	exact.Mul(exact, new(big.Rat).SetInt(weiPerOG))
+	if new(big.Rat).SetInt(got).Cmp(exact) > 0 {
+		t.Errorf("quantised wei %s exceeds exact %s — floor violated", got.String(), exact.FloatString(6))
+	}
+}
+
 func TestUSDPerMillionToWeiPerToken_RateScales(t *testing.T) {
 	price := mustRat(t, "1.0")
 	// Rate doubles => wei should halve.
