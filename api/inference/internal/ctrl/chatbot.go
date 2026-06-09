@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"compress/flate"
@@ -778,6 +779,149 @@ func isZeroNumber(v interface{}) bool {
 	return false
 }
 
+// openrouterLeakPrefix marks a synthesized redacted_thinking block whose `data`
+// is the upstream aggregator's reasoning (base64 of plaintext, carrying a vendor
+// prefix) rather than Anthropic's own opaque encrypted blob. Such a block leaks
+// the upstream vendor (OpenRouter/LiteLLM), duplicates the reasoning already
+// present in the proper `thinking` block, and violates the Anthropic spec — a
+// real redacted_thinking carries an encrypted payload, so a client that
+// round-trips this one back to Anthropic sends garbage. See router #373.
+const openrouterLeakPrefix = "openrouter."
+
+// isLeakedRedactedThinking reports whether a decoded content block is a
+// synthesized redacted_thinking leak. It keys on the `data` value (a string
+// beginning with the vendor prefix), NOT merely on type=="redacted_thinking",
+// so a genuine Anthropic redacted_thinking block — an opaque encrypted blob with
+// no vendor prefix — is never touched.
+func isLeakedRedactedThinking(v interface{}) bool {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	data, ok := m["data"].(string)
+	return ok && strings.HasPrefix(data, openrouterLeakPrefix)
+}
+
+// stripUpstreamReasoningBlocks removes the synthesized openrouter.reasoning
+// redacted_thinking leak from an Anthropic response (router #373), handling both
+// response shapes that sanitizeResponseBody sees:
+//
+//   - Non-stream: the leak is an element of the top-level `content[]` array; the
+//     whole block is dropped (this also removes the duplicate reasoning).
+//   - Stream: the leak rides on a `content_block` object of a content_block_start
+//     event. We cannot drop the surrounding event:/data: line pair from inside
+//     the JSON sanitizer without desyncing the stream, so the leaky `data` is
+//     blanked in place — the block becomes opaque and carries no vendor marker
+//     or plaintext, which the spec explicitly permits for redacted_thinking.
+//
+// Returns whether anything changed.
+func stripUpstreamReasoningBlocks(v interface{}) bool {
+	changed := false
+	switch t := v.(type) {
+	case map[string]interface{}:
+		// Streaming content_block envelope (or any nested map that is itself a
+		// leak block): neutralize the vendor data in place.
+		if isLeakedRedactedThinking(t) {
+			t["data"] = ""
+			changed = true
+		}
+		for k, val := range t {
+			if k == "content" {
+				if arr, ok := val.([]interface{}); ok {
+					kept := make([]interface{}, 0, len(arr))
+					for _, el := range arr {
+						if isLeakedRedactedThinking(el) {
+							changed = true
+							continue // drop the leak block from content[]
+						}
+						kept = append(kept, el)
+					}
+					if len(kept) != len(arr) {
+						t["content"] = kept
+					}
+					continue // content elements are leaves; do not recurse further
+				}
+			}
+			if stripUpstreamReasoningBlocks(val) {
+				changed = true
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			if stripUpstreamReasoningBlocks(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// clampReasoningTokenDetails enforces the invariant that the reasoning/thinking
+// token subset reported in *_details never exceeds the corresponding total
+// (router #374). Some aggregating upstreams (OpenRouter/LiteLLM for glm-5) report
+// a reasoning/thinking count larger than the completion/output total, which is
+// arithmetically impossible (a subset cannot exceed the whole) and makes
+// downstream `text = total - reasoning` go negative. Billing is unaffected: it
+// reads the total (the lower, correct number), not these detail fields, and from
+// the raw upstream bytes rather than this client-facing copy. We clamp the
+// reported detail down to the total. Returns whether anything changed.
+func clampReasoningTokenDetails(obj map[string]interface{}) bool {
+	usage, ok := obj["usage"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	changed := false
+	// OpenAI surface: completion_tokens_details.reasoning_tokens <= completion_tokens
+	if clampTokenDetail(usage, "completion_tokens", "completion_tokens_details", "reasoning_tokens") {
+		changed = true
+	}
+	// Anthropic surface: output_tokens_details.thinking_tokens <= output_tokens
+	if clampTokenDetail(usage, "output_tokens", "output_tokens_details", "thinking_tokens") {
+		changed = true
+	}
+	return changed
+}
+
+// clampTokenDetail clamps usage[detailsKey][subKey] down to usage[totalKey] when
+// it exceeds it. No-op when either value is absent or unparseable, or when the
+// subset is already within bounds. The clamped value is re-encoded as a
+// json.Number so it round-trips as an integer (UseNumber decoding).
+func clampTokenDetail(usage map[string]interface{}, totalKey, detailsKey, subKey string) bool {
+	total, ok := jsonNumberToInt(usage[totalKey])
+	if !ok {
+		return false
+	}
+	details, ok := usage[detailsKey].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	sub, ok := jsonNumberToInt(details[subKey])
+	if !ok || sub <= total {
+		return false
+	}
+	details[subKey] = json.Number(strconv.Itoa(total))
+	return true
+}
+
+// jsonNumberToInt extracts an integer from a decoded JSON value, handling both
+// json.Number (UseNumber decoding, the path sanitizeResponseBody uses) and
+// float64 (plain decoding). Returns ok=false for any other type.
+func jsonNumberToInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+		if f, err := n.Float64(); err == nil {
+			return int(f), true
+		}
+		return 0, false
+	case float64:
+		return int(n), true
+	}
+	return 0, false
+}
+
 // sanitizeResponseBody removes upstream identity/cost/fingerprint fields from a
 // JSON response object (a full chat completion or a single SSE chunk) before it
 // is forwarded to the client (#184), and — when newID is non-empty — rewrites
@@ -808,6 +952,18 @@ func (c *Ctrl) sanitizeResponseBody(body []byte, newID string) ([]byte, bool) {
 	}
 
 	changed := stripLeakKeys(obj)
+
+	// Drop the synthesized openrouter.reasoning redacted_thinking block leaked by
+	// aggregating upstreams on the Anthropic surface (router #373).
+	if stripUpstreamReasoningBlocks(obj) {
+		changed = true
+	}
+
+	// Clamp the reasoning/thinking token subset so it never exceeds the
+	// completion/output total (router #374).
+	if clampReasoningTokenDetails(obj) {
+		changed = true
+	}
 
 	if newID != "" {
 		if _, ok := obj["id"]; ok {
