@@ -326,3 +326,116 @@ func TestIsUpstreamLeakHeader(t *testing.T) {
 		}
 	}
 }
+
+// router #373: the synthesized openrouter.reasoning redacted_thinking block must
+// not reach the client on the Anthropic surface.
+func TestSanitizeResponseBody_StripsUpstreamReasoningLeak(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+
+	t.Run("non-stream: drops leaked redacted_thinking block from content[]", func(t *testing.T) {
+		in := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[` +
+			`{"type":"thinking","signature":"","thinking":"reasoning here"},` +
+			`{"type":"text","text":"ANTHROPIC_OK"},` +
+			`{"type":"redacted_thinking","data":"openrouter.reasoning:eyJ4Ijoid"}` +
+			`],"usage":{"input_tokens":5,"output_tokens":3}}`)
+		out, changed := c.sanitizeResponseBody(in, "")
+		if !changed {
+			t.Fatal("expected changed=true")
+		}
+		content := decode(t, out)["content"].([]interface{})
+		if len(content) != 2 {
+			t.Fatalf("expected 2 content blocks after dropping the leak, got %d", len(content))
+		}
+		for _, b := range content {
+			m := b.(map[string]interface{})
+			if m["type"] == "redacted_thinking" {
+				t.Error("leaked redacted_thinking block was not dropped")
+			}
+		}
+		if !bytes.Contains(out, []byte("ANTHROPIC_OK")) {
+			t.Error("text block must be preserved")
+		}
+		if bytes.Contains(out, []byte("openrouter")) {
+			t.Error("openrouter marker must not survive")
+		}
+	})
+
+	t.Run("non-stream: preserves a genuine (non-vendor) redacted_thinking block", func(t *testing.T) {
+		in := []byte(`{"content":[{"type":"redacted_thinking","data":"EncRyptedAnthropicBlob=="}]}`)
+		_, changed := c.sanitizeResponseBody(in, "")
+		if changed {
+			t.Error("a genuine redacted_thinking block (no vendor prefix) must be left untouched")
+		}
+	})
+
+	t.Run("stream: blanks leaked data on content_block_start envelope", func(t *testing.T) {
+		in := []byte(`{"type":"content_block_start","index":2,"content_block":` +
+			`{"type":"redacted_thinking","data":"openrouter.reasoning:eyJ4Ijoid"}}`)
+		out, changed := c.sanitizeResponseBody(in, "")
+		if !changed {
+			t.Fatal("expected changed=true")
+		}
+		if bytes.Contains(out, []byte("openrouter")) {
+			t.Error("openrouter marker must not survive in the streamed content_block")
+		}
+		cb := decode(t, out)["content_block"].(map[string]interface{})
+		if cb["data"] != "" {
+			t.Errorf("leaked data must be blanked, got %v", cb["data"])
+		}
+		if cb["type"] != "redacted_thinking" {
+			t.Error("block envelope/type should be preserved to keep stream indices in sync")
+		}
+	})
+
+	t.Run("matcher tolerates case/whitespace drift in the vendor prefix", func(t *testing.T) {
+		for _, data := range []string{"Openrouter.reasoning:eyJ4Ijoid", " openrouter.reasoning:eyJ4Ijoid", "OPENROUTER.reasoning:x"} {
+			in := []byte(`{"content":[{"type":"text","text":"ok"},{"type":"redacted_thinking","data":"` + data + `"}]}`)
+			out, changed := c.sanitizeResponseBody(in, "")
+			if !changed {
+				t.Errorf("data %q: expected the leak to be detected and dropped", data)
+				continue
+			}
+			if bytes.Contains(bytes.ToLower(out), []byte("openrouter")) {
+				t.Errorf("data %q: vendor marker survived: %s", data, out)
+			}
+		}
+	})
+}
+
+// router #374: the reasoning/thinking token subset must never exceed the
+// completion/output total it is a part of.
+func TestSanitizeResponseBody_ClampsReasoningTokenDetails(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+
+	t.Run("OpenAI: reasoning_tokens clamped down to completion_tokens", func(t *testing.T) {
+		in := []byte(`{"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":43}}}`)
+		out, changed := c.sanitizeResponseBody(in, "")
+		if !changed {
+			t.Fatal("expected changed=true")
+		}
+		ctd := decode(t, out)["usage"].(map[string]interface{})["completion_tokens_details"].(map[string]interface{})
+		if ctd["reasoning_tokens"].(float64) != 40 {
+			t.Errorf("reasoning_tokens should clamp to 40, got %v", ctd["reasoning_tokens"])
+		}
+	})
+
+	t.Run("Anthropic: thinking_tokens clamped down to output_tokens", func(t *testing.T) {
+		in := []byte(`{"usage":{"output_tokens":54,"output_tokens_details":{"thinking_tokens":59}}}`)
+		out, changed := c.sanitizeResponseBody(in, "")
+		if !changed {
+			t.Fatal("expected changed=true")
+		}
+		otd := decode(t, out)["usage"].(map[string]interface{})["output_tokens_details"].(map[string]interface{})
+		if otd["thinking_tokens"].(float64) != 54 {
+			t.Errorf("thinking_tokens should clamp to 54, got %v", otd["thinking_tokens"])
+		}
+	})
+
+	t.Run("within bounds: reasoning_tokens <= completion_tokens is left untouched", func(t *testing.T) {
+		in := []byte(`{"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":30}}}`)
+		_, changed := c.sanitizeResponseBody(in, "")
+		if changed {
+			t.Error("a consistent (subset <= total) detail must not be modified")
+		}
+	})
+}
