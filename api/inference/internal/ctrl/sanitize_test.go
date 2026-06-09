@@ -2,11 +2,62 @@ package ctrl
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 )
+
+func gzipBytes(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(b); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestDecodeBody(t *testing.T) {
+	plain := []byte(`{"id":"x","choices":[]}`)
+
+	t.Run("identity passthrough", func(t *testing.T) {
+		out, err := decodeBody(plain, "")
+		if err != nil || !bytes.Equal(out, plain) {
+			t.Errorf("identity: out=%s err=%v", out, err)
+		}
+	})
+
+	t.Run("gzip decodes", func(t *testing.T) {
+		out, err := decodeBody(gzipBytes(t, plain), "gzip")
+		if err != nil || !bytes.Equal(out, plain) {
+			t.Errorf("gzip: out=%s err=%v", out, err)
+		}
+	})
+
+	t.Run("case-insensitive encoding", func(t *testing.T) {
+		out, err := decodeBody(gzipBytes(t, plain), "GZIP")
+		if err != nil || !bytes.Equal(out, plain) {
+			t.Errorf("GZIP: out=%s err=%v", out, err)
+		}
+	})
+
+	t.Run("corrupt gzip errors (no silent raw passthrough)", func(t *testing.T) {
+		if _, err := decodeBody([]byte("not-gzip-at-all"), "gzip"); err == nil {
+			t.Error("expected error for corrupt gzip body")
+		}
+	})
+
+	t.Run("unsupported encoding errors", func(t *testing.T) {
+		if _, err := decodeBody(plain, "zstd"); err == nil {
+			t.Error("expected error for unsupported encoding zstd")
+		}
+	})
+}
 
 // decode is a small helper to parse sanitized output back into a generic map.
 func decode(t *testing.T, b []byte) map[string]interface{} {

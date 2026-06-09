@@ -833,8 +833,33 @@ func isCompressedEncoding(enc string) bool {
 // decodeBody decompresses a response body per its Content-Encoding so leak-field
 // sanitization can run on inspectable JSON even when an upstream compressed
 // despite the identity request (#184).
+//
+// Unlike initializeReader (which silently returns the raw, still-compressed
+// reader for unknown encodings or a bad gzip header), decodeBody returns an
+// explicit error in those cases. That distinction matters: the caller deletes
+// Content-Encoding on success, so a silent raw passthrough would ship compressed
+// bytes labelled as identity — a broken, still-leaky response. On error the
+// caller keeps the original body and header untouched.
 func decodeBody(body []byte, encoding string) ([]byte, error) {
-	return io.ReadAll(initializeReader(bytes.NewReader(body), encoding))
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body, nil
+	case "gzip":
+		r, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer r.Close()
+		return io.ReadAll(r)
+	case "deflate":
+		r := flate.NewReader(bytes.NewReader(body))
+		defer r.Close()
+		return io.ReadAll(r)
+	case "br":
+		return io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
+	default:
+		return nil, fmt.Errorf("unsupported content-encoding %q", encoding)
+	}
 }
 
 // sanitizeStreamLine prepares one SSE line for the client. It drops SSE

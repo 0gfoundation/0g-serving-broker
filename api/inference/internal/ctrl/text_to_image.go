@@ -254,7 +254,11 @@ func extractB64Images(body []byte, maxImages int) ([][]byte, error) {
 		return nil, fmt.Errorf("unmarshal image response: %w", err)
 	}
 	if len(envelope.Data) == 0 {
-		return nil, fmt.Errorf("image response has empty data array")
+		// A cleanly-parsed response that delivered no images: return an empty
+		// (non-nil) slice with no error so callers can distinguish "0 delivered"
+		// (bill 0, refuse a url-format request) from "couldn't decode". Billing
+		// must not charge the requested count for images that never arrived.
+		return [][]byte{}, nil
 	}
 	if maxImages > 0 && len(envelope.Data) > maxImages {
 		return nil, fmt.Errorf("image response has %d entries, exceeds declared output count %d", len(envelope.Data), maxImages)
