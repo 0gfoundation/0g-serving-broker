@@ -179,7 +179,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		recordUsageMetrics(transcriptionResp.Usage, true)
+		recordWhitelistUsageMetrics(transcriptionResp.Usage)
 		return nil
 	}
 
@@ -277,7 +277,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		recordUsageMetrics(usage, true)
+		recordWhitelistUsageMetrics(usage)
 		return nil
 	}
 
@@ -445,24 +445,23 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 	return 0, int64(u.InputTokens), int64(u.OutputTokens)
 }
 
-// recordUsageMetrics writes a usage object to the appropriate Prometheus
-// counters. whitelisted=true additionally mirrors the values into the
-// whitelist-only counter family so operators can split traffic by
-// exempt-vs-paid users.
-func recordUsageMetrics(u *SpeechToTextUsage, whitelisted bool) {
+// recordWhitelistUsageMetrics writes a usage object into both the general and
+// the whitelist Prometheus counter families. Used on the IsWhitelisted code
+// path where billing is skipped but operators still want to see traffic from
+// internal/exempt users (double-counted into the general counter so dashboards
+// stay accurate, plus broken out into the whitelist counter so the share is
+// inspectable). Routes via classifyUsageForMetrics so it stays in lockstep
+// with the billing dispatch.
+func recordWhitelistUsageMetrics(u *SpeechToTextUsage) {
 	seconds, in, out := classifyUsageForMetrics(u)
 	const svc = "speech_to_text"
 	if seconds > 0 {
 		monitor.RecordAudioSeconds(svc, seconds)
-		if whitelisted {
-			monitor.RecordWhitelistAudioSeconds(svc, seconds)
-		}
+		monitor.RecordWhitelistAudioSeconds(svc, seconds)
 	}
 	if in > 0 || out > 0 {
 		monitor.RecordTokens(svc, in, out)
-		if whitelisted {
-			monitor.RecordWhitelistTokens(svc, in, out)
-		}
+		monitor.RecordWhitelistTokens(svc, in, out)
 	}
 }
 
