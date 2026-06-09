@@ -779,8 +779,11 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 	}
 
 	// Atomically accumulate stats and delete requests in a single transaction
-	// to prevent double-counting if deletion fails after accumulation
-	if err := c.db.AccumulateAndDeleteRequests(requests); err != nil {
+	// to prevent double-counting if deletion fails after accumulation.
+	// Pass the broker's configured service type so STT rows (where input_count
+	// is seconds, not tokens) skip the token-named columns in daily_stat.
+	// See AccumulateAndDeleteRequests doc + #530.
+	if err := c.db.AccumulateAndDeleteRequests(requests, c.Service.Type); err != nil {
 		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err
 	}
