@@ -600,3 +600,141 @@ func TestService_IsCentralized(t *testing.T) {
 		})
 	}
 }
+
+// ==========================================================================
+// AllowTokenBilledSpeechToText startup gate
+//
+// Boot-time guard for the #530 schema-discriminator window: deploying a
+// known token-billed STT model without explicit operator opt-in is fail-stop
+// at loadConfig, not a per-request log line.
+// ==========================================================================
+
+func TestLoadConfig_TokenBilledSTT_BlockedByDefault(t *testing.T) {
+	for _, model := range []string{"gpt-4o-transcribe", "gpt-4o-mini-transcribe", "openai/gpt-4o-transcribe"} {
+		t.Run(model, func(t *testing.T) {
+			configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "speech-to-text"
+  model: "`+model+`"
+  verifiability: "TeeML"
+`)
+			t.Setenv("CONFIG_FILE", configPath)
+
+			cfg := &Config{}
+			err := loadConfig(cfg)
+			if err == nil {
+				t.Fatal("expected token-billed STT to be blocked by default, got nil")
+			}
+			// Error must name the issue so the operator can find the schema
+			// work without grepping the codebase.
+			if !strings.Contains(err.Error(), "#530") {
+				t.Errorf("error should reference #530, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), "allowTokenBilledSpeechToText") {
+				t.Errorf("error should name the config flag operators have to flip, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_TokenBilledSTT_AllowedWhenFlagSet(t *testing.T) {
+	configPath := writeTestConfig(t, `
+allowTokenBilledSpeechToText: true
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "speech-to-text"
+  model: "gpt-4o-transcribe"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig with allowTokenBilledSpeechToText=true should pass, got: %v", err)
+	}
+	if !cfg.AllowTokenBilledSpeechToText {
+		t.Error("AllowTokenBilledSpeechToText should be true after parse")
+	}
+}
+
+func TestLoadConfig_WhisperSTT_NeverGated(t *testing.T) {
+	// Whisper services should never trip the gate regardless of flag value,
+	// since they don't emit token-shape usage.
+	for _, model := range []string{"whisper-1", "whisper-large-v3", "openai/whisper-large-v3"} {
+		t.Run(model, func(t *testing.T) {
+			configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "speech-to-text"
+  model: "`+model+`"
+  verifiability: "TeeML"
+`)
+			t.Setenv("CONFIG_FILE", configPath)
+
+			cfg := &Config{}
+			if err := loadConfig(cfg); err != nil {
+				t.Fatalf("whisper STT should not be gated, got error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_TokenBilledModel_OutsideSTTService_NotGated(t *testing.T) {
+	// The gate is scoped to service.type=="speech-to-text". A non-STT service
+	// (e.g. chatbot) running a model with a name that happens to look like an
+	// STT model should not trip the gate — the conflation we're protecting
+	// against is specifically requests.input_count in the speech_to_text lane.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4o-transcribe"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("non-STT service should not trip the STT gate, got: %v", err)
+	}
+}
+
+func TestTokenBilledSTTCanonicalName(t *testing.T) {
+	tests := []struct {
+		name string
+		svc  *Service
+		want string
+	}{
+		{"empty", &Service{}, ""},
+		{"whisper model", &Service{ModelType: "whisper-large-v3"}, ""},
+		{"bare gpt-4o-transcribe", &Service{ModelType: "gpt-4o-transcribe"}, "gpt-4o-transcribe"},
+		{"namespaced gpt-4o-transcribe", &Service{ModelType: "openai/gpt-4o-transcribe"}, "gpt-4o-transcribe"},
+		{"gpt-4o-mini-transcribe", &Service{ModelType: "gpt-4o-mini-transcribe"}, "gpt-4o-mini-transcribe"},
+		// Token model name appearing only in canonicalId is still caught.
+		{"canonical-id only", &Service{ModelType: "openai/some-renamed-model", CanonicalID: "gpt-4o-transcribe"}, "gpt-4o-transcribe"},
+		// Token model name appearing only in alias is still caught.
+		{"alias only", &Service{ModelType: "rebranded-stt", ModelAliases: []string{"gpt-4o-mini-transcribe"}}, "gpt-4o-mini-transcribe"},
+		// Substring of a known name shouldn't match — exact list, not pattern.
+		{"unrelated gpt-4o", &Service{ModelType: "gpt-4o"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tokenBilledSTTCanonicalName(tt.svc); got != tt.want {
+				t.Errorf("tokenBilledSTTCanonicalName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

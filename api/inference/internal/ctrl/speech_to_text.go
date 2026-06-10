@@ -420,13 +420,18 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 
 // billSpeechToTextByTokens handles gpt-4o-transcribe-style token usage.
 //
-// Fail-closed: gated behind cfg.AllowTokenBilledSpeechToText (default false).
-// Until issue #530 adds a per-row billing-unit discriminator to the requests
-// table, mixing whisper (seconds) and gpt-4o-transcribe (tokens) rows under
-// the same service_type silently corrupts any aggregate query against
-// requests.input_count. An operator who needs to deploy token-billed STT
-// before #530 lands must flip the flag explicitly and accept the analytics
-// risk for that window. See #530 for the schema work + acceptance criteria.
+// The primary gate against accidental token-billed-STT deployment lives in
+// config.loadConfig: if a known token-billed model (gpt-4o-transcribe family)
+// is registered with cfg.AllowTokenBilledSpeechToText=false, the broker
+// refuses to boot. By the time a request lands in this function the operator
+// has already passed that check.
+//
+// This runtime gate is defense-in-depth for the edge case where an unknown
+// model (not in the startup gate's whitelist) ends up emitting a token-shape
+// usage response. Rather than silently writing tokens to requests.input_count
+// against an unprepared operator, we return ErrTokenBilledSpeechToTextGated;
+// the caller routes to billGatedTokenSTT which bills against the real
+// upstream usage and logs loudly. See #530.
 func (c *Ctrl) billSpeechToTextByTokens(ctx context.Context, usage *SpeechToTextUsage, inputPrice, outputPrice, requestHash string) error {
 	if !c.allowTokenBilledSTT {
 		// Sentinel error so callers can detect the gate-fired case and route
