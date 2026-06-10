@@ -23,6 +23,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -454,12 +455,12 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	// For non-stream responses, usage info is in the same response
 	if chunk.Usage != nil {
 		*usage = chunk.Usage
-		// Get service price from cache/contract instead of config
-		service, err := c.GetCachedService(ctx)
+		// Get billing prices (model-specific for multi-model, on-chain for single-model)
+		prices, err := c.GetBillingPrices(ctx)
 		if err != nil {
-			return errors.Wrap(err, "get cached service for single response billing")
+			return errors.Wrap(err, "get billing prices for single response billing")
 		}
-		return c.updateAccountWithUsage(ctx, chunk.Usage, service.OutputPrice, requestHash, service.InputPrice)
+		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling)
 	}
 
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
@@ -501,33 +502,40 @@ func (c *Ctrl) extractUsageFromLine(line []byte) *Usage {
 }
 
 // finalizeResponseWithUsage updates the account with accurate token counts from LLM
-func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
-	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice)
+func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
+	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers, cacheBilling)
 }
 
 // getTierMultipliers returns the input and output price multipliers for the given prompt token count.
 // Tiers are matched in order; the first tier whose MaxInputTokens >= promptTokens (or MaxInputTokens == 0
 // for unbounded) is selected. If promptTokens exceeds all bounded tiers, the last tier is used as a
 // fallback (e.g., if the final tier has MaxInputTokens == 0, it always matches as the catch-all).
-// This function should only be called when len(c.tieredPricing.Tiers) > 0; config validation ensures
-// that enabled tiered pricing always has at least one tier with valid multipliers (>= 1).
-func (c *Ctrl) getTierMultipliers(promptTokens int) (int64, int64) {
-	for _, tier := range c.tieredPricing.Tiers {
+// This function should only be called when len(tiers) > 0; config validation ensures
+// that tier lists always have valid multipliers (>= 1).
+func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, int64) {
+	for _, tier := range tiers {
 		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
 			return tier.InputMultiplier, tier.OutputMultiplier
 		}
 	}
 	// Fallback: promptTokens exceeds all bounded tiers, use the last tier
-	last := c.tieredPricing.Tiers[len(c.tieredPricing.Tiers)-1]
+	last := tiers[len(tiers)-1]
 	return last.InputMultiplier, last.OutputMultiplier
 }
 
-// updateAccountWithUsage updates the request with accurate token counts from the LLM response
-func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string) error {
+// updateAccountWithUsage updates the request with accurate token counts from the LLM response.
+// tiers is the model-specific tier table (from per-model pricing); when empty the
+// service-level tieredPricing applies if enabled.
+func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
+	// Resolve the effective tier set: model-specific tiers win; otherwise fall
+	// back to the service-level tieredPricing when enabled.
+	if len(tiers) == 0 && c.tieredPricing.Enabled {
+		tiers = c.tieredPricing.Tiers
+	}
 	// Apply tiered pricing: adjust base prices by tier multiplier before any fee calculation.
 	// This ensures cache token billing and all other modifiers use the correct tiered price.
-	if c.tieredPricing.Enabled && len(c.tieredPricing.Tiers) > 0 {
-		inputMul, outputMul := c.getTierMultipliers(usage.PromptTokens)
+	if len(tiers) > 0 {
+		inputMul, outputMul := getTierMultipliers(tiers, usage.PromptTokens)
 		if inputMul > 1 {
 			base, ok := new(big.Int).SetString(inputPrice, 10)
 			if !ok {
@@ -553,7 +561,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	// apply discounted pricing for cached input tokens.
 	var inputFee *big.Int
 	cachedTokens := 0
-	if c.cacheTokenBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+	if cacheBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
 		cachedTokens = usage.PromptTokensDetails.CachedTokens
 		if cachedTokens > usage.PromptTokens {
 			cachedTokens = usage.PromptTokens
@@ -572,7 +580,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		if err != nil {
 			return errors.Wrap(err, "Error calculating cached input fee")
 		}
-		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(c.cacheTokenBilling.Divisor))
+		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(cacheBilling.Divisor))
 
 		inputFee, err = util.Add(nonCachedFee, cachedFee)
 		if err != nil {
@@ -580,7 +588,7 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		}
 
 		c.logger.Infof("Cache token billing: prompt_tokens=%d, cached_tokens=%d, non_cached=%d, divisor=%d, inputFee=%s",
-			usage.PromptTokens, cachedTokens, nonCachedTokens, c.cacheTokenBilling.Divisor, inputFee.String())
+			usage.PromptTokens, cachedTokens, nonCachedTokens, cacheBilling.Divisor, inputFee.String())
 	} else {
 		var err error
 		inputFee, err = util.Multiply(inputPrice, int64(usage.PromptTokens))
@@ -772,32 +780,51 @@ func (c *Ctrl) isClientDisconnectError(err error) bool {
 		strings.Contains(errMsg, "http: request body too large")
 }
 
+// finalizeChatStream performs end-of-stream billing for a chatbot streaming
+// response (OpenAI [DONE] or LiteLLM message_stop). It bills on the parsed
+// usage when present, else on the accumulated raw output; whitelisted traffic
+// records token metrics only. A failed billing write is logged at ERROR with
+// the request hash (the client already received the full stream) and
+// propagated, never swallowed.
+//
+// Shared by processOpenAIStream / processLiteLLMStream AND their
+// missing-terminal-marker fallbacks, so a truncated stream (no [DONE] / no
+// message_stop) is still billed rather than served free.
+func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usage, outputPrice, requestHash string, isWhitelisted bool) error {
+	// Skip billing for whitelisted users, but still record token metrics.
+	if isWhitelisted {
+		if usage != nil {
+			monitor.RecordTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
+			monitor.RecordWhitelistTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
+			monitor.RecordTPSFromContext(ctx, "chatbot", int64(usage.CompletionTokens))
+		}
+		return nil
+	}
+	if usage != nil {
+		// Get billing prices (model-specific for multi-model, on-chain for single-model).
+		prices, err := c.GetBillingPrices(ctx)
+		if err != nil {
+			return errors.Wrap(err, "get billing prices for stream response billing")
+		}
+		if err := c.finalizeResponseWithUsage(ctx, usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling); err != nil {
+			c.logger.Errorf("stream billing failed for request %s: %v", requestHash, err)
+			return err
+		}
+		return nil
+	}
+	if err := c.finalizeResponse(ctx, output, outputPrice, requestHash); err != nil {
+		c.logger.Errorf("stream finalize failed for request %s: %v", requestHash, err)
+		return err
+	}
+	return nil
+}
+
 // processOpenAIStream processes OpenAI-format streaming responses
 func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPrice string, output *string, usage **Usage, requestHash string, isWhitelisted bool) error {
 	for _, line := range lines {
 		if isStreamDone(line) {
-			// Skip billing for whitelisted users, but still record token metrics
-			if isWhitelisted {
-				if *usage != nil {
-					monitor.RecordTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-					monitor.RecordWhitelistTokens("chatbot", int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
-					monitor.RecordTPSFromContext(ctx, "chatbot", int64((*usage).CompletionTokens))
-				}
-				break
-			}
-
-			// For stream responses, usage info comes before [DONE]
-			if *usage != nil {
-				// Get service price from cache/contract instead of config
-				service, err := c.GetCachedService(ctx)
-				if err != nil {
-					return errors.Wrap(err, "get cached service for stream response billing")
-				}
-				c.finalizeResponseWithUsage(ctx, *usage, service.OutputPrice, requestHash, service.InputPrice)
-				break
-			}
-			c.finalizeResponse(ctx, *output, outputPrice, requestHash)
-			break
+			// For stream responses, usage info comes before [DONE].
+			return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 		}
 
 		// Skip empty lines
@@ -825,5 +852,9 @@ func (c *Ctrl) processOpenAIStream(ctx context.Context, lines [][]byte, outputPr
 		*output += chunkOutput
 	}
 
-	return nil
+	// No [DONE] marker — the stream was truncated/dropped or the upstream omitted
+	// it. The client already received the accumulated output, so bill it rather
+	// than serving free, logging loudly so the missing terminator is diagnosable.
+	c.logger.Errorf("OpenAI stream ended without a [DONE] marker for request %s; finalizing on accumulated usage/output", requestHash)
+	return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 }

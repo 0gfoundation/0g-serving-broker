@@ -1,8 +1,12 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -106,10 +110,17 @@ func (c *Ctrl) GetAdapterKey(taskID string) (*model.AdapterKey, error) {
 	return c.db.GetAdapterKeyByTaskID(taskID)
 }
 
-// ExtractModelName extracts the "model" field from a JSON request body.
-func ExtractModelName(body []byte) string {
+// ExtractModelName extracts the requested "model" from a request body. Handles
+// JSON bodies and multipart/form-data (used by audio endpoints, where "model" is
+// a form field). Returns "" when the model is absent or the body is unparseable.
+// contentType is the request Content-Type header; an empty/non-multipart value
+// is treated as JSON.
+func ExtractModelName(body []byte, contentType string) string {
 	if len(body) == 0 {
 		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
+		return extractModelFromMultipart(body, contentType)
 	}
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
@@ -117,6 +128,44 @@ func ExtractModelName(body []byte) string {
 	}
 	modelName, _ := bodyMap["model"].(string)
 	return modelName
+}
+
+// extractModelFromMultipart reads the "model" form field from a multipart/form-data
+// body. Returns "" if the boundary can't be parsed, the field is missing, or any
+// read error occurs — callers treat "" as "use the default model".
+func extractModelFromMultipart(body []byte, contentType string) string {
+	return multipartFormField(body, contentType, "model")
+}
+
+// multipartFormField returns the value of a named non-file form field from a
+// multipart/form-data body using a real MIME reader (NOT a substring scan), so
+// adversarial content in another field — e.g. a prompt body containing the
+// literal name="seconds" — cannot be mistaken for the field. Returns "" when the
+// content type isn't multipart, the boundary is missing, or the field is absent.
+// The read is capped so a mislabeled file part can't pull unbounded memory; used
+// for short scalar fields (model, seconds, size).
+func multipartFormField(body []byte, contentType, name string) string {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	boundary, ok := params["boundary"]
+	if !ok {
+		return ""
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return "" // io.EOF (field absent) or a malformed body
+		}
+		if part.FormName() == name && part.FileName() == "" {
+			val, _ := io.ReadAll(io.LimitReader(part, 1024))
+			part.Close()
+			return strings.TrimSpace(string(val))
+		}
+		part.Close()
+	}
 }
 
 // rewriteResponseModel patches the "model" field in a non-streaming JSON response

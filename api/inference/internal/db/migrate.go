@@ -263,6 +263,15 @@ func (d *DB) Migrate() error {
 				return nil
 			},
 		},
+		{
+			ID: "add-model-name-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					ModelName string `gorm:"type:varchar(255);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

@@ -94,6 +94,21 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		}
 	}
 
+	// Multi-model: publish only a compact summary on-chain — the MultiModel flag and
+	// the price denomination. The full per-model pricing table is intentionally NOT
+	// written to chain: it is served off-chain via GET /v1/models (the actual
+	// consumer, the router's catalog sync, reads pricing/canonical/tiers from there,
+	// never from chain — its on-chain ServiceAdditionalInfo struct doesn't even have
+	// a modelPricing field), and the structured on-chain inputPrice/outputPrice
+	// already carries the max-over-models ceiling that bounds the worst-case charge.
+	// Enumerating every model here would bloat contract storage (and gas) unboundedly
+	// for providers that proxy hundreds of models; this summary stays O(1) regardless
+	// of model count. Clients needing exact per-model prices read /v1/models.
+	if service.HasMultiModelPricing() {
+		additionalInfo["MultiModel"] = true
+		additionalInfo["priceDenomination"] = service.PriceDenomination
+	}
+
 	additionalInfoJSON, err := json.Marshal(additionalInfo)
 	if err != nil {
 		return "", errors.Wrap(err, "marshal additional info")
@@ -221,6 +236,10 @@ func (c *ProviderContract) GetService(ctx context.Context) (*contract.Service, e
 }
 
 func (c *ProviderContract) SyncService(ctx context.Context, new config.Service, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) error {
+	if new.HasMultiModelPricing() {
+		c.logger.Infof("[SyncService] Multi-model pricing configured (%d models), on-chain prices set to max(inputPrice=%s, outputPrice=%s)",
+			len(new.ModelPricing), new.InputPrice, new.OutputPrice)
+	}
 	c.logger.Infof("[SyncService] Starting to sync service - provider=%s, newURL=%s, newModel=%s, newType=%s, inputPrice=%s, outputPrice=%s",
 		c.ProviderAddress, new.ServingURL, new.ModelType, new.Type, new.InputPrice, new.OutputPrice)
 

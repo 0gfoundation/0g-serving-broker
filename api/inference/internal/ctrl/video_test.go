@@ -206,3 +206,208 @@ func TestGetVideoSizeRatio(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveVideoBilling covers the P0 fix for video underbilling: billing
+// prefers the upstream response's seconds/size, falls back to the client
+// request when the upstream doesn't echo them (e.g. Alibaba Wan2.7), and
+// reports ok=false only when neither source has a positive duration (the
+// caller then skips billing loudly + metered instead of serving free).
+func TestResolveVideoBilling(t *testing.T) {
+	const mpCT = "multipart/form-data; boundary=bnd"
+	tests := []struct {
+		name        string
+		respBody    string
+		reqBody     string
+		contentType string
+		wantSec     int64
+		wantSize    string
+		wantSource  string // "" means expect not-ok
+	}{
+		{
+			name:     "response has seconds and size (preferred, actual output)",
+			respBody: `{"seconds":8,"size":"1280x720"}`,
+			reqBody:  `{"seconds":5,"size":"832x480"}`,
+			wantSec:  8, wantSize: "1280x720", wantSource: videoSourceResponse,
+		},
+		{
+			// Bailian Wan2.7 via an OpenAI-compatible shim: actual duration is in
+			// usage.output_video_duration, not top-level seconds. We bill the ACTUAL
+			// output (5 from usage), size borrowed from the request — source=response.
+			name:     "response usage.output_video_duration is actual output",
+			respBody: `{"output":{"video_url":"https://x/y.mp4"},"usage":{"output_video_duration":5}}`,
+			reqBody:  `{"seconds":9,"size":"1024x1792"}`,
+			wantSec:  5, wantSize: "1024x1792", wantSource: videoSourceResponse,
+		},
+		{
+			// A shim may serialize the actual duration as a float ("7.5"). Int64()
+			// errors on those; we must still bill the actual output (ceil) via the
+			// response, not drop to the request.
+			name:     "float actual duration billed via response (ceil)",
+			respBody: `{"seconds":7.5,"size":"1280x720"}`,
+			reqBody:  `{"seconds":3,"size":"832x480"}`,
+			wantSec:  8, wantSize: "1280x720", wantSource: videoSourceResponse,
+		},
+		{
+			name:     "float usage.output_video_duration billed via response",
+			respBody: `{"usage":{"output_video_duration":5.0}}`,
+			reqBody:  `{"seconds":9,"size":"1024x1792"}`,
+			wantSec:  5, wantSize: "1024x1792", wantSource: videoSourceResponse,
+		},
+		{
+			// Upstream reports NO duration at all → degraded fallback to requested.
+			name:     "no response duration, fall back to requested (degraded)",
+			respBody: `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:  `{"seconds":6,"size":"1280x720"}`,
+			wantSec:  6, wantSize: "1280x720", wantSource: videoSourceRequest,
+		},
+		{
+			name:     "response not JSON, fall back to requested (degraded)",
+			respBody: `not-json`,
+			reqBody:  `{"seconds":6,"size":"1280x720"}`,
+			wantSec:  6, wantSize: "1280x720", wantSource: videoSourceRequest,
+		},
+		{
+			// Production transport: /v1/videos is multipart/form-data, NOT JSON.
+			// The request fallback must parse multipart, else Wan2.7-style upstreams
+			// (200 without echoing seconds) bill nothing — the bug this guards.
+			name:        "multipart request fallback (live transport)",
+			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n8\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
+			contentType: mpCT,
+			wantSec:     8, wantSize: "1280x720", wantSource: videoSourceRequest,
+		},
+		{
+			name:        "multipart request without seconds -> not ok (free-video guard)",
+			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwan2.7\r\n--bnd--\r\n",
+			contentType: mpCT,
+			wantSource:  "",
+		},
+		{
+			// Security: a prompt value embedding a fake name="seconds" must NOT be
+			// mistaken for the real seconds field (substring-scan underbilling). The
+			// strict MIME parser reads the genuine field (60), not the injected 1.
+			name:        "multipart prompt-injection cannot spoof seconds",
+			respBody:    `{"output":{"video_url":"https://x/y.mp4"}}`,
+			reqBody:     "--bnd\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na cat name=\"seconds\"\r\n\r\n1\r\n--bnd\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n60\r\n--bnd\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n--bnd--\r\n",
+			contentType: mpCT,
+			wantSec:     60, wantSize: "1280x720", wantSource: videoSourceRequest,
+		},
+		{
+			name:     "request omits size, borrow response size",
+			respBody: `{"size":"1792x1024"}`,
+			reqBody:  `{"seconds":4}`,
+			wantSec:  4, wantSize: "1792x1024", wantSource: videoSourceRequest,
+		},
+		{
+			name:       "neither has positive seconds -> not ok (free-video guard)",
+			respBody:   `{"size":"1280x720"}`,
+			reqBody:    `{"prompt":"a cat"}`,
+			wantSource: "",
+		},
+		{
+			name:       "zero seconds is not billable",
+			respBody:   `{"seconds":0}`,
+			reqBody:    `{"seconds":0}`,
+			wantSource: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sec, size, source := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody), tt.contentType)
+			if source != tt.wantSource {
+				t.Fatalf("source = %q, want %q", source, tt.wantSource)
+			}
+			if tt.wantSource == "" {
+				return
+			}
+			if sec != tt.wantSec {
+				t.Errorf("seconds = %d, want %d", sec, tt.wantSec)
+			}
+			if size != tt.wantSize {
+				t.Errorf("size = %q, want %q", size, tt.wantSize)
+			}
+		})
+	}
+}
+
+// TestVideoOutputCount pins the effective-count rounding (ceil, floored at 1).
+func TestVideoOutputCount(t *testing.T) {
+	cases := []struct {
+		seconds int64
+		ratio   float64
+		want    int64
+	}{
+		{5, 1.0, 5},
+		{5, 2.25, 12}, // ceil(11.25)
+		{8, 0.5, 4},
+		{1, 0.0, 1}, // floored at 1
+		{0, 2.0, 1}, // floored at 1
+	}
+	for _, c := range cases {
+		if got := videoOutputCount(c.seconds, c.ratio); got != c.want {
+			t.Errorf("videoOutputCount(%d, %v) = %d, want %d", c.seconds, c.ratio, got, c.want)
+		}
+	}
+}
+
+// TestVideoOutputUnits_PerModelAndFallback covers the multi-model video billing
+// wiring: a resolved model with a per_video_second billing block uses its own
+// resolution ratios, while a single-model service falls back to the legacy
+// service-level size-ratio path unchanged.
+func TestVideoOutputUnits_PerModelAndFallback(t *testing.T) {
+	videoEntry := config.ModelPricingEntry{
+		Model:       "wan2.7",
+		OutputPrice: "1000",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"1280x720": 1.0, "1920x1080": 2.25},
+		},
+	}
+	svc := newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{videoEntry}, "wan2.7")
+	c := &Ctrl{logger: testLogger(), Service: svc}
+
+	// Per-model ratio applies: ceil(5 * 2.25) = 12.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("wan2.7"), 5, "1920x1080"); got != 12 {
+		t.Errorf("per-model units (1080p) = %d, want 12", got)
+	}
+	// Unknown resolution → baseline 1.0 within the entry's billing.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("wan2.7"), 7, "unknown"); got != 7 {
+		t.Errorf("per-model units (unknown res) = %d, want 7", got)
+	}
+
+	// Single-model service → legacy service-ratio path (DefaultVideoSizeRatios:
+	// 1024x1792 = 2.0), byte-for-byte unchanged.
+	cs := &Ctrl{logger: testLogger(), Service: config.Service{}}
+	if got := cs.videoOutputUnits(ginCtxWithResolvedModel(""), 5, "1024x1792"); got != 10 {
+		t.Errorf("single-model fallback units = %d, want 10", got)
+	}
+}
+
+// TestVideoOutputUnits_PerUnitTableMiss verifies a bucketed-model request for an
+// unlisted (resolution, duration) bills the table MAX, never the seconds×ratio
+// formula (which would underbill, and which a client could force by requesting
+// an untabled combo).
+func TestVideoOutputUnits_PerUnitTableMiss(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "minimax-hailuo",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 12}, // table max
+			},
+		},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo")}
+
+	// Exact bucket hit.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 6, "768P"); got != 6 {
+		t.Errorf("table hit (768P,6) = %d, want 6", got)
+	}
+	// Miss (duration 8 not tabled): must bill table-max (12), NOT ceil(8*1.0)=8.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 8, "768P"); got != 12 {
+		t.Errorf("table miss = %d, want table-max 12 (never the seconds-ratio underbill)", got)
+	}
+}

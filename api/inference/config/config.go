@@ -128,24 +128,24 @@ func (m *ModelInfo) Validate(serviceType string) error {
 }
 
 type Service struct {
-	ServingURL       string            `yaml:"servingUrl"`
-	TargetURL        string            `yaml:"targetUrl"`
-	InputPrice       string            `yaml:"inputPrice"`
-	OutputPrice      string            `yaml:"outputPrice"`
-	Type             string            `yaml:"type"`
-	ModelType        string            `yaml:"model"`
+	ServingURL  string `yaml:"servingUrl"`
+	TargetURL   string `yaml:"targetUrl"`
+	InputPrice  string `yaml:"inputPrice"`
+	OutputPrice string `yaml:"outputPrice"`
+	Type        string `yaml:"type"`
+	ModelType   string `yaml:"model"`
 	// UpstreamModel, when set, is the model identifier sent to the upstream targetUrl.
 	// ModelType remains the identifier advertised on-chain and enforced on incoming
 	// requests. Used to bridge a provider that wants to expose a stable public model
 	// name while routing to an upstream that uses a different id (e.g. a
 	// fallback where the public name is "zai-org/GLM-5-FP8" but expects
 	// "z-ai/glm-5"). Empty means "send ModelType upstream as-is".
-	UpstreamModel    string            `yaml:"upstreamModel"`
+	UpstreamModel string `yaml:"upstreamModel"`
 	// ModelAliases are legacy model identifiers accepted on incoming requests in
 	// addition to ModelType. Allows changing the advertised model name without
 	// breaking clients that still send the old name. Out-of-set requests are
 	// still rejected.
-	ModelAliases     []string          `yaml:"modelAliases"`
+	ModelAliases []string `yaml:"modelAliases"`
 	// CanonicalID is the canonical model identifier this service maps to in the
 	// router's catalog (e.g. "glm-5.1", "deepseek-v3"). Bare lowercase, no
 	// namespace. Optional — when empty, the router falls back to its own
@@ -183,6 +183,16 @@ type Service struct {
 	// OutputPriceUSDPerMillionTokens is the output-side price in USD per 1M
 	// tokens, decimal string.  Required iff PriceDenomination == "USD".
 	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
+
+	// ModelPricing defines per-model pricing for centralized providers that serve multiple models.
+	// When configured, the broker validates requested models against this allowlist
+	// and bills at model-specific rates instead of the single on-chain price.
+	// On-chain registration uses max(model prices) as InputPrice/OutputPrice.
+	// Only used when ProviderType is "centralized".
+	ModelPricing []ModelPricingEntry `yaml:"modelPricing"`
+
+	// modelPricingMap is a derived lookup map built during config validation.
+	modelPricingMap map[string]*ModelPricingEntry `yaml:"-"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -258,48 +268,23 @@ type PriceFeedConfig struct {
 	HTTPTimeout time.Duration `yaml:"httpTimeout"`
 }
 
-// DefaultVideoSizeRatios provides default cost multipliers based on pixel count
-// relative to the baseline 720x1280 (921,600 pixels).
-//
-//	832x480   = 399,360 px → 0.5
-//	480x832   = 399,360 px → 0.5
-//	720x1280  = 921,600 px → 1.0 (baseline)
-//	1280x720  = 921,600 px → 1.0
-//	1024x1792 = 1,835,008 px → 2.0
-//	1792x1024 = 1,835,008 px → 2.0
-var DefaultVideoSizeRatios = map[string]float64{
-	"832x480":   0.5,
-	"480x832":   0.5,
-	"720x1280":  1.0,
-	"1280x720":  1.0,
-	"1024x1792": 2.0,
-	"1792x1024": 2.0,
-}
-
-// GetVideoSizeRatio returns the cost multiplier for a given resolution.
-// Falls back to DefaultVideoSizeRatios if ModelInfo is nil or has no custom ratios.
-// Returns the default resolution ratio (720x1280 = 1.0) if the size is unknown.
-func (s *Service) GetVideoSizeRatio(size string) float64 {
-	var ratios map[string]float64
-	if s.ModelInfo != nil {
-		ratios = s.ModelInfo.VideoSizeRatios
-	}
-	if len(ratios) == 0 {
-		ratios = DefaultVideoSizeRatios
-	}
-	if ratio, ok := ratios[size]; ok {
-		return ratio
-	}
-	// Unknown size: fall back to baseline ratio
-	return 1.0
-}
-
 // CacheTokenBillingConfig defines configuration for cached token discount billing.
 // When enabled, cached input tokens (reported by the LLM via prompt_tokens_details.cached_tokens)
 // are billed at a discounted rate: inputPrice / Divisor.
 type CacheTokenBillingConfig struct {
 	Enabled bool  `yaml:"enabled"` // Enable cached token discount billing (default: false)
 	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
+}
+
+// validateCacheTokenBilling rejects a divisor < 1 when caching is enabled: a 0
+// divisor would divide-by-zero panic at billing time (fee = price*tokens/divisor)
+// and a negative one would produce a garbage/negative discount. prefix labels the
+// source (service-level "cacheTokenBilling" or a per-model entry).
+func validateCacheTokenBilling(prefix string, c *CacheTokenBillingConfig) error {
+	if c.Enabled && c.Divisor < 1 {
+		return fmt.Errorf("invalid config: %s.divisor must be >= 1 when enabled, got %d", prefix, c.Divisor)
+	}
+	return nil
 }
 
 // TieredPricingConfig defines input-length-based tiered pricing.
@@ -370,7 +355,7 @@ type LoRAConfig struct {
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins"`
 	ContractAddress string   `yaml:"contractAddress"`
-	Database struct {
+	Database        struct {
 		// DSN is the MySQL connection string used by the broker process.
 		DSN string `yaml:"dsn"`
 		// Provider was the misleading legacy name for DSN ("Provider" is the
@@ -389,7 +374,7 @@ type Config struct {
 	} `yaml:"event"`
 	GasPrice    string `yaml:"gasPrice"`
 	MaxGasPrice string `yaml:"maxGasPrice"`
-	Interval struct {
+	Interval    struct {
 		// All four fields used to be integer seconds; they are now
 		// time.Duration (parsed from yaml strings like "60s" / "10m").
 		// loadConfig restores the legacy integer-seconds semantics when
@@ -578,6 +563,37 @@ func validateUSDPriceString(field, value string) error {
 	}
 	if r.Sign() < 0 {
 		return fmt.Errorf("invalid config: %s=%q must be non-negative", field, value)
+	}
+	return nil
+}
+
+// validatePricingTiers validates an ordered tier list: multipliers >= 1,
+// maxInputTokens >= 0, the unbounded (0) tier last, and strictly ascending
+// order. An empty slice is valid (no tiers). prefix labels errors (e.g.
+// "tieredPricing.tiers" or "service.modelPricing[0].tiers").
+func validatePricingTiers(prefix string, tiers []PricingTier) error {
+	for i, tier := range tiers {
+		if tier.InputMultiplier < 1 {
+			return fmt.Errorf("invalid config: %s[%d].inputMultiplier must be >= 1, got %d", prefix, i, tier.InputMultiplier)
+		}
+		if tier.OutputMultiplier < 1 {
+			return fmt.Errorf("invalid config: %s[%d].outputMultiplier must be >= 1, got %d", prefix, i, tier.OutputMultiplier)
+		}
+		if tier.MaxInputTokens < 0 {
+			return fmt.Errorf("invalid config: %s[%d].maxInputTokens must be >= 0, got %d", prefix, i, tier.MaxInputTokens)
+		}
+		// MaxInputTokens == 0 (unbounded) must be the last tier.
+		if tier.MaxInputTokens == 0 && i != len(tiers)-1 {
+			return fmt.Errorf("invalid config: %s[%d].maxInputTokens=0 (unbounded) must be the last tier", prefix, i)
+		}
+		// Ensure ascending order.
+		if i > 0 && tier.MaxInputTokens != 0 {
+			prev := tiers[i-1]
+			if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
+				return fmt.Errorf("invalid config: %s must be ordered by maxInputTokens ascending, %s[%d]=%d <= %s[%d]=%d",
+					prefix, prefix, i, tier.MaxInputTokens, prefix, i-1, prev.MaxInputTokens)
+			}
+		}
 	}
 	return nil
 }
@@ -844,14 +860,22 @@ func loadConfig(cfg *Config) error {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
 	case constant.PriceDenominationUSD:
-		if cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "" {
+		// With multi-model pricing the per-model entries carry the USD prices and
+		// the service-level USD fields are derived (max-over-models) later in this
+		// function, so they may legitimately be empty here.
+		multiModelUSD := len(cfg.Service.ModelPricing) > 0
+		if !multiModelUSD && (cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "") {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
-		if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
-			return err
+		if cfg.Service.InputPriceUSDPerMillionTokens != "" {
+			if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
+				return err
+			}
 		}
-		if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
-			return err
+		if cfg.Service.OutputPriceUSDPerMillionTokens != "" {
+			if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
+				return err
+			}
 		}
 		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
@@ -868,29 +892,20 @@ func loadConfig(cfg *Config) error {
 		if len(cfg.TieredPricing.Tiers) == 0 {
 			return fmt.Errorf("invalid config: tieredPricing.tiers must not be empty when tieredPricing is enabled")
 		}
-		for i, tier := range cfg.TieredPricing.Tiers {
-			if tier.InputMultiplier < 1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].inputMultiplier must be >= 1, got %d", i, tier.InputMultiplier)
-			}
-			if tier.OutputMultiplier < 1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].outputMultiplier must be >= 1, got %d", i, tier.OutputMultiplier)
-			}
-			if tier.MaxInputTokens < 0 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens must be >= 0, got %d", i, tier.MaxInputTokens)
-			}
-			// MaxInputTokens == 0 (unbounded) must be the last tier
-			if tier.MaxInputTokens == 0 && i != len(cfg.TieredPricing.Tiers)-1 {
-				return fmt.Errorf("invalid config: tieredPricing.tiers[%d].maxInputTokens=0 (unbounded) must be the last tier", i)
-			}
-			// Ensure ascending order
-			if i > 0 && tier.MaxInputTokens != 0 {
-				prev := cfg.TieredPricing.Tiers[i-1]
-				if prev.MaxInputTokens != 0 && tier.MaxInputTokens <= prev.MaxInputTokens {
-					return fmt.Errorf("invalid config: tieredPricing.tiers must be ordered by maxInputTokens ascending, tiers[%d]=%d <= tiers[%d]=%d",
-						i, tier.MaxInputTokens, i-1, prev.MaxInputTokens)
-				}
-			}
+		if err := validatePricingTiers("tieredPricing.tiers", cfg.TieredPricing.Tiers); err != nil {
+			return err
 		}
+	}
+
+	// Service-level cache-discount divisor (also covers the single-model path).
+	if err := validateCacheTokenBilling("cacheTokenBilling", &cfg.CacheTokenBilling); err != nil {
+		return err
+	}
+
+	// Validate per-model pricing, build the lookup map, and set the on-chain
+	// ceiling — see model_pricing.go.
+	if err := validateModelPricing(cfg); err != nil {
+		return err
 	}
 
 	return nil

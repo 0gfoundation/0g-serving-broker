@@ -113,8 +113,23 @@ func TestImageStore_DiskFilesRemovedAfterEviction(t *testing.T) {
 	time.Sleep(ttl * 2)
 	store.cache.DeleteExpired()
 
-	if _, err := os.Stat(imgPath); !os.IsNotExist(err) {
-		t.Errorf("OnEvicted should have removed %s after TTL; stat err: %v", imgPath, err)
+	// Poll for the dir to disappear rather than asserting immediately. The
+	// go-cache janitor (cleanup interval ttl/2) runs concurrently and can delete
+	// the entry from the map just before its OnEvicted→RemoveAll finishes — that
+	// races our manual DeleteExpired, which then finds the item already gone and
+	// skips OnEvicted. Either eviction removes the dir; under CI load the
+	// RemoveAll may lag the map delete by a few ms, so wait for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(imgPath); os.IsNotExist(err) {
+			break // removed — success
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("OnEvicted should have removed %s after TTL (waited 2s)", imgPath)
+			break
+		}
+		store.cache.DeleteExpired()
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -202,21 +217,21 @@ func TestImageStore_KeyAllowlist(t *testing.T) {
 	}
 
 	reject := []string{
-		"",                       // empty
-		"..",                     // traversal
-		"../escape",              // traversal
-		"a/../b",                 // traversal
-		"foo/bar",                // slash
-		`foo\bar`,                // backslash (Windows path sep)
-		"nul\x00byte",            // NUL
-		".",                      // current-dir alias
-		".hidden",                // leading dot (Unix hidden file)
-		"trailing.",              // trailing dot (Windows eats this)
-		"has:colon",              // reserved on Windows + NTFS ADS
-		"with space",             // space
-		"tab\there",              // control char
+		"",                      // empty
+		"..",                    // traversal
+		"../escape",             // traversal
+		"a/../b",                // traversal
+		"foo/bar",               // slash
+		`foo\bar`,               // backslash (Windows path sep)
+		"nul\x00byte",           // NUL
+		".",                     // current-dir alias
+		".hidden",               // leading dot (Unix hidden file)
+		"trailing.",             // trailing dot (Windows eats this)
+		"has:colon",             // reserved on Windows + NTFS ADS
+		"with space",            // space
+		"tab\there",             // control char
 		"新",                     // non-ASCII
-		strings.Repeat("a", 65),  // over length cap
+		strings.Repeat("a", 65), // over length cap
 	}
 	for _, k := range reject {
 		k := k
@@ -233,10 +248,10 @@ func TestImageStore_KeyAllowlist(t *testing.T) {
 	}
 
 	accept := []string{
-		"a",                             // single char at lower bound
-		"abcDEF-123_xyz",                // mixed charset
+		"a",                                    // single char at lower bound
+		"abcDEF-123_xyz",                       // mixed charset
 		"f47ac10b-58cc-4372-a567-0e02b2c3d479", // canonical UUID
-		strings.Repeat("a", 64),         // exactly at length cap
+		strings.Repeat("a", 64),                // exactly at length cap
 	}
 	for _, k := range accept {
 		k := k

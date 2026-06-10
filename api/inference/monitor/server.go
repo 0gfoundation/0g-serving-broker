@@ -43,6 +43,14 @@ var (
 	WhitelistOutputTokensTotal *prometheus.CounterVec
 	// WhitelistAudioSecondsTotal mirrors AudioSecondsTotal for whitelisted users.
 	WhitelistAudioSecondsTotal *prometheus.CounterVec
+
+	// VideoBillingSkippedTotal counts video-generation requests that returned
+	// 200 but for which no positive duration could be resolved from either the
+	// upstream response or the client request — i.e. the video was served
+	// WITHOUT being billed. A non-zero value means an upstream's response shape
+	// isn't being parsed (e.g. an async provider that doesn't echo seconds), so
+	// it must be alertable rather than a silent skip.
+	VideoBillingSkippedTotal prometheus.Counter
 )
 
 func PrometheusInit(serverName string) {
@@ -195,10 +203,19 @@ func PrometheusInit(serverName string) {
 	prometheus.MustRegister(AllTimeInputTokens)
 	prometheus.MustRegister(AllTimeOutputTokens)
 	prometheus.MustRegister(AllTimeUniqueUsers)
+	VideoBillingSkippedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "broker_video_billing_skipped_total",
+			Help:        "Video-generation requests served without billing (no positive duration resolvable from response or request).",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+	)
+
 	prometheus.MustRegister(WhitelistRequestsTotal)
 	prometheus.MustRegister(WhitelistInputTokensTotal)
 	prometheus.MustRegister(WhitelistOutputTokensTotal)
 	prometheus.MustRegister(WhitelistAudioSecondsTotal)
+	prometheus.MustRegister(VideoBillingSkippedTotal)
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database
@@ -330,6 +347,17 @@ func RecordWhitelistAudioSeconds(serviceType string, seconds int64) {
 	}
 	WhitelistAudioSecondsTotal.WithLabelValues(serviceType).Add(float64(seconds))
 }
+
+// RecordVideoBillingSkipped increments the counter of video requests served
+// without billing because no duration could be resolved (alertable signal that
+// an upstream response shape is unparsed).
+func RecordVideoBillingSkipped() {
+	if VideoBillingSkippedTotal == nil {
+		return
+	}
+	VideoBillingSkippedTotal.Inc()
+}
+
 
 // RecordWhitelistRequest increments the whitelist request counter for the given service type.
 func RecordWhitelistRequest(serviceType string) {

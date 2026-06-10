@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"time"
 
@@ -37,7 +38,7 @@ type ModelObject struct {
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
 	ProviderType        string                    `json:"provider_type,omitempty"`
 	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
-	RateLimits          *ModelRateLimits           `json:"rate_limits,omitempty"`
+	RateLimits          *ModelRateLimits          `json:"rate_limits,omitempty"`
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
@@ -77,6 +78,10 @@ type ModelPricing struct {
 type ModelPricingUSD struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
+	// Video is the USD price per effective output second for a USD-denominated
+	// video-generation model (decimal string). Mutually exclusive with the
+	// per-token prompt/completion fields above.
+	Video string `json:"video,omitempty"`
 }
 
 // PriceFeedState surfaces the live 0G/USD rate and its freshness.  Present
@@ -118,6 +123,199 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 	cfg := h.modelsCtrl.GetServiceConfig()
 
+	// Multi-model: return one ModelObject per configured model (including the
+	// wildcard "*" entry, so clients learn the catch-all price for unlisted models).
+	if cfg.HasMultiModelPricing() {
+		models := make([]ModelObject, 0, len(cfg.ModelPricing))
+		teeVerifier := parseTeeVerifier(svc.AdditionalInfo)
+		var created int64
+		if svc.CreatedAt != nil {
+			created = svc.CreatedAt.Unix()
+		}
+		isUSD := cfg.IsUSDDenominated()
+
+		// Per-user rate limits are provider-level (same for every served model);
+		// compute once and attach to each. Multi-model serves token-based
+		// modalities (chatbot / speech-to-text), so RPM + TPM apply.
+		concurrencyLimits := h.modelsCtrl.GetConcurrencyLimitConfig()
+		var sharedLimits *ModelRateLimits
+		if concurrencyLimits.PerUserRPM > 0 || concurrencyLimits.PerUserTPM > 0 {
+			sharedLimits = &ModelRateLimits{
+				RequestsPerMinute: concurrencyLimits.PerUserRPM,
+				TokensPerMinute:   concurrencyLimits.PerUserTPM,
+			}
+		}
+
+		// Cache token billing: service-level default, overridable per-model below
+		// (matches billing's per-model resolution in GetBillingPrices).
+		cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
+
+		// For USD providers, fetch the rate snapshot once to convert each model's
+		// USD price to wei and to surface the shared price-feed state.
+		var priceFeedOut *PriceFeedState
+		var ratUSDPerOG *big.Rat
+		if isUSD {
+			if snap, threshold, updateInterval, ok := h.modelsCtrl.GetPriceFeedSnapshot(); ok && snap.Populated && snap.RateUSDPerOG != nil {
+				ratUSDPerOG = snap.RateUSDPerOG
+				priceFeedOut = &PriceFeedState{
+					RateUSDPerOG:   snap.RateUSDPerOG.FloatString(8),
+					UpdatedAt:      snap.LastUpdate,
+					NextUpdateTime: snap.LastUpdate.Add(updateInterval),
+					IsStale:        snap.IsStale(threshold, time.Now()),
+				}
+			}
+		}
+
+		for i := range cfg.ModelPricing {
+			mp := &cfg.ModelPricing[i]
+			// The wildcard ("*") is a billing catch-all, not a selectable model.
+			// Emitting it as a ModelObject.ID would break OpenAI-compatible clients
+			// that enumerate /v1/models and treat each id as a usable model. Its
+			// catch-all pricing is still published on-chain in additionalInfo.
+			if mp.Model == config.ModelWildcard {
+				continue
+			}
+			// Per-model canonical wins; fall back to the service-level canonical so
+			// an operator who set only service.canonicalId still gets it applied.
+			canonicalID := mp.CanonicalID
+			if canonicalID == "" {
+				canonicalID = cfg.CanonicalID
+			}
+			// Per-model cache discount: the entry's override wins; else the
+			// service-level default — same resolution billing uses.
+			effCache := cacheCfg
+			if mp.CacheTokenBilling != nil {
+				effCache = *mp.CacheTokenBilling
+			}
+			var modelCacheBilling *ModelCacheTokenBilling
+			if effCache.Enabled && effCache.Divisor > 0 {
+				modelCacheBilling = &ModelCacheTokenBilling{Divisor: effCache.Divisor}
+			}
+			obj := ModelObject{
+				ID:               mp.Model,
+				CanonicalID:      canonicalID,
+				Object:           "model",
+				Created:          created,
+				OwnedBy:          cfg.OwnedBy,
+				Type:             svc.Type,
+				Verifiability:    svc.Verifiability,
+				TeeAttested:      svc.TeeSignerAcknowledged,
+				TeeVerifier:      teeVerifier,
+				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
+				ProviderType:     cfg.ProviderType,
+				ProviderIdentity: cfg.ProviderIdentity,
+				RateLimits:       sharedLimits,
+			}
+
+			// Per-model metadata: the entry's own modelInfo wins; fall back to the
+			// service-level modelInfo so a same-family catalog needn't repeat the
+			// block per entry. Mirrors the single-model enrichment below. Config
+			// validation guarantees a non-nil entry.ModelInfo is complete.
+			mi := mp.ModelInfo
+			if mi == nil {
+				mi = cfg.ModelInfo
+			}
+			if mi != nil {
+				obj.Name = mi.Name
+				obj.Description = mi.Description
+				obj.ContextLength = mi.ContextLength
+				obj.MaxCompletionTokens = mi.MaxCompletionTokens
+				obj.Architecture = mi.Architecture
+				obj.SupportedParameters = mi.SupportedParameters
+				obj.SupportedFormats = mi.SupportedFormats
+				obj.DefaultParameters = mi.DefaultParameters
+				obj.ExpirationDate = mi.ExpirationDate
+				if obj.TeeType == "" {
+					obj.TeeType = mi.TeeType
+				}
+			}
+
+			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
+				// USD video: bill unit is the effective output second, not a token.
+				// Surface the per-second USD (operator value) and, when the feed is
+				// up, the rate-converted wei-per-second under `video`. The bridged
+				// OutputPriceUSDPerMillionTokens (= perSec×1e6) converts back to
+				// wei-per-second via the shared ÷1e6 helper.
+				obj.PricingUSD = &ModelPricingUSD{Video: mp.OutputPriceUSDPerSecond}
+				if ratUSDPerOG != nil {
+					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Video = wei.String()
+						}
+					}
+				}
+			} else if isUSD {
+				// Surface per-token USD (always) and the rate-converted wei price
+				// (when the feed is available) so clients see both views. Config
+				// validation already accepted these USD strings, so a conversion
+				// error here signals a regression — log it (matching the
+				// single-model path) rather than silently dropping PricingUSD.
+				prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(mp.InputPriceUSDPerMillionTokens)
+				completion, completionErr := pricefeed.USDPerMillionStringToPerToken(mp.OutputPriceUSDPerMillionTokens)
+				switch {
+				case promptErr != nil:
+					h.logger.Warnf("GetModels: derive per-token USD input price for model %q from %q failed (omitting PricingUSD): %v",
+						mp.Model, mp.InputPriceUSDPerMillionTokens, promptErr)
+				case completionErr != nil:
+					h.logger.Warnf("GetModels: derive per-token USD output price for model %q from %q failed (omitting PricingUSD): %v",
+						mp.Model, mp.OutputPriceUSDPerMillionTokens, completionErr)
+				default:
+					obj.PricingUSD = &ModelPricingUSD{Prompt: prompt, Completion: completion}
+				}
+				if ratUSDPerOG != nil {
+					if inRat, err := pricefeed.ParseUSDPerMillion(mp.InputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(inRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Prompt = wei.String()
+						}
+					}
+					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
+						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
+							obj.Pricing.Completion = wei.String()
+						}
+					}
+				}
+			} else if svc.Type == constant.ServiceTypeVideoGeneration {
+				// Video bills per effective second via OutputPrice; surface it under
+				// `video` (not the token `completion` field, which would mislead
+				// OpenAI-compatible clients into a per-token reading).
+				obj.Pricing.Video = mp.OutputPrice
+			} else {
+				obj.Pricing.Prompt = mp.InputPrice
+				obj.Pricing.Completion = mp.OutputPrice
+			}
+
+			// Per-model tiers; fall back to the service-level tieredPricing display
+			// so the surfaced tiers match what billing actually applies.
+			tiers := mp.Tiers
+			if len(tiers) == 0 {
+				if tc := h.modelsCtrl.GetTieredPricingConfig(); tc.Enabled {
+					tiers = tc.Tiers
+				}
+			}
+			if len(tiers) > 0 {
+				out := make([]ModelPricingTier, len(tiers))
+				for j, t := range tiers {
+					out[j] = ModelPricingTier{
+						MaxInputTokens:   t.MaxInputTokens,
+						InputMultiplier:  t.InputMultiplier,
+						OutputMultiplier: t.OutputMultiplier,
+					}
+				}
+				obj.Pricing.TieredPricing = out
+			}
+
+			models = append(models, obj)
+		}
+
+		ctx.JSON(http.StatusOK, ModelListResponse{
+			Object:    "list",
+			Data:      models,
+			PriceFeed: priceFeedOut,
+		})
+		return
+	}
+
+	// Single-model: existing behavior
 	obj := ModelObject{
 		ID:            svc.ModelType,
 		CanonicalID:   cfg.CanonicalID,
