@@ -135,9 +135,28 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type"},
 	)
 
+	AudioSecondsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_audio_seconds_total",
+			Help:        "Audio seconds.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_audio_seconds_total",
+			Help:        "Whitelist audio seconds.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
 	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
 		RequestCount, ErrorCount, RequestDuration,
-		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal)
+		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal,
+		AudioSecondsTotal, WhitelistAudioSecondsTotal)
 
 	return registry
 }
@@ -268,6 +287,76 @@ func TestRecordTokensNilMetrics(t *testing.T) {
 
 	// Should not panic
 	RecordTokens("chatbot", 100, 50)
+}
+
+// TestRecordAudioSeconds verifies the duration counter increments for positive
+// values and no-ops for non-positive values. The counter is intentionally
+// separate from RecordTokens so dashboards don't mix seconds and tokens on the
+// same axis — that's the bug PR #523 review caught.
+func TestRecordAudioSeconds(t *testing.T) {
+	setupTestMetrics(t)
+
+	tests := []struct {
+		name        string
+		serviceType string
+		seconds     int64
+		want        float64
+	}{
+		{"positive seconds", "speech_to_text", 207, 207},
+		{"zero seconds is no-op", "speech_to_text", 0, 0},
+		{"negative seconds is no-op", "speech_to_text", -5, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := getCounterValue(AudioSecondsTotal, tt.serviceType)
+			RecordAudioSeconds(tt.serviceType, tt.seconds)
+			delta := getCounterValue(AudioSecondsTotal, tt.serviceType) - before
+			if delta != tt.want {
+				t.Errorf("audio seconds delta = %v, want %v", delta, tt.want)
+			}
+		})
+	}
+}
+
+// TestRecordAudioSecondsNilMetrics verifies the helper is a safe no-op when
+// the counter hasn't been initialised (e.g. tests that don't call PrometheusInit).
+func TestRecordAudioSecondsNilMetrics(t *testing.T) {
+	saved := AudioSecondsTotal
+	AudioSecondsTotal = nil
+	defer func() { AudioSecondsTotal = saved }()
+
+	// Should not panic
+	RecordAudioSeconds("speech_to_text", 100)
+}
+
+// TestRecordWhitelistAudioSeconds mirrors TestRecordAudioSeconds for the
+// whitelist counter family.
+func TestRecordWhitelistAudioSeconds(t *testing.T) {
+	setupTestMetrics(t)
+
+	before := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text")
+	RecordWhitelistAudioSeconds("speech_to_text", 207)
+	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text") - before; delta != 207 {
+		t.Errorf("whitelist audio seconds delta = %v, want 207", delta)
+	}
+
+	// Zero/negative no-op
+	before = getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text")
+	RecordWhitelistAudioSeconds("speech_to_text", 0)
+	RecordWhitelistAudioSeconds("speech_to_text", -10)
+	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text") - before; delta != 0 {
+		t.Errorf("whitelist audio seconds should not increment on non-positive, got delta=%v", delta)
+	}
+}
+
+func TestRecordWhitelistAudioSecondsNilMetrics(t *testing.T) {
+	saved := WhitelistAudioSecondsTotal
+	WhitelistAudioSecondsTotal = nil
+	defer func() { WhitelistAudioSecondsTotal = saved }()
+
+	// Should not panic
+	RecordWhitelistAudioSeconds("speech_to_text", 100)
 }
 
 // TestRecordTPS verifies TPS histogram recording for various inputs.

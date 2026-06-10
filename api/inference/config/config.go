@@ -24,6 +24,39 @@ var validProviderIdentity = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 // — those belong in ModelType (the on-chain advertised name) instead.
 var validCanonicalID = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]*$`)
 
+// knownTokenBilledSTTModels enumerates the bare canonical names of STT
+// models whose usage upstream is shaped as input/output tokens (rather than
+// duration seconds). The list is intentionally exhaustive — pattern matching
+// against a substring like "gpt-4o" would catch unrelated multimodal models.
+// When OpenAI ships a new token-billed transcription model, add it here.
+var knownTokenBilledSTTModels = map[string]struct{}{
+	"gpt-4o-transcribe":      {},
+	"gpt-4o-mini-transcribe": {},
+}
+
+// tokenBilledSTTCanonicalName returns the recognized bare canonical name if
+// the given STT service is configured against a known token-billed model, or
+// "" otherwise. Checks every field that might carry a model identifier
+// (ModelType, UpstreamModel, CanonicalID, ModelAliases) and strips any
+// "org/" namespace prefix so e.g. "openai/gpt-4o-transcribe" matches.
+func tokenBilledSTTCanonicalName(svc *Service) string {
+	candidates := []string{svc.ModelType, svc.UpstreamModel, svc.CanonicalID}
+	candidates = append(candidates, svc.ModelAliases...)
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		bare := c
+		if i := strings.LastIndex(c, "/"); i >= 0 {
+			bare = c[i+1:]
+		}
+		if _, ok := knownTokenBilledSTTModels[bare]; ok {
+			return bare
+		}
+	}
+	return ""
+}
+
 // ModelArchitecture describes the model's input/output modalities.
 type ModelArchitecture struct {
 	Modality         string   `yaml:"modality" json:"modality"`                    // Required. e.g., "text->text", "text+image->text"
@@ -412,6 +445,28 @@ type Config struct {
 	Async               AsyncConfig             `yaml:"async"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
+	// AllowTokenBilledSpeechToText opens the billing path for token-billed
+	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
+	// Defaults to false.
+	//
+	// Enforced at startup: loadConfig refuses to boot the broker if
+	// service.type=="speech-to-text" is registered against a known token-
+	// billed model and this flag is false. Operators must consciously
+	// acknowledge the analytics trade-off (see #530) before deploying such
+	// a service — the failure mode is fail-stop at boot, not a per-request
+	// log line that gets lost in production.
+	//
+	// Also gates billSpeechToTextByTokens at runtime as defense-in-depth:
+	// if an unknown model proxies an unexpected token-shape response, the
+	// broker bills against real upstream usage anyway (refusing would mean
+	// free GPU since the response has already shipped) but logs a loud
+	// warning naming #530 so the operator can investigate.
+	//
+	// TODO(#530): a broker-wide flag is awkward — the unit conflation is
+	// per-service. Once the schema discriminator lands, derive this from
+	// the registered service's billing_unit instead of asking operators to
+	// flip a global flag.
+	AllowTokenBilledSpeechToText bool `yaml:"allowTokenBilledSpeechToText"`
 }
 
 // ConcurrencyLimitConfig defines concurrency limiting for backend protection.
@@ -735,6 +790,23 @@ func loadConfig(cfg *Config) error {
 
 	if cfg.Service.CanonicalID != "" && !validCanonicalID.MatchString(cfg.Service.CanonicalID) {
 		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
+	}
+
+	// Token-billed STT startup gate. Until #530 lands a per-row billing-unit
+	// discriminator, deploying a known token-billed STT model without
+	// explicit operator opt-in would silently mix seconds (whisper) and
+	// tokens (gpt-4o-transcribe) under the same analytics aggregates. Refuse
+	// to boot rather than emit a per-request warning that operators are
+	// likely to overlook in production logs.
+	if cfg.Service.Type == constant.ServiceTypeSpeechToText && !cfg.AllowTokenBilledSpeechToText {
+		if model := tokenBilledSTTCanonicalName(&cfg.Service); model != "" {
+			return fmt.Errorf(
+				"invalid config: service.type=%q is registered against token-billed model %q but cfg.allowTokenBilledSpeechToText is false. "+
+					"Token-billed STT (gpt-4o-transcribe family) is gated until #530 lands a per-row billing-unit discriminator — "+
+					"set allowTokenBilledSpeechToText: true to acknowledge the analytics trade-off and proceed",
+				cfg.Service.Type, model,
+			)
+		}
 	}
 
 	// Normalize and validate provider type

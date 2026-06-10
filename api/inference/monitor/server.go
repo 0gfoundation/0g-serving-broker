@@ -22,6 +22,10 @@ var (
 	InputTokensTotal *prometheus.CounterVec
 	// OutputTokensTotal tracks cumulative output token count, labeled by service_type.
 	OutputTokensTotal *prometheus.CounterVec
+	// AudioSecondsTotal tracks cumulative audio duration (in seconds) for
+	// duration-billed services like whisper. Kept separate from token counters
+	// so dashboards/alerts don't mix orders of magnitude across units.
+	AudioSecondsTotal *prometheus.CounterVec
 	// TokensPerSecond records per-request output token generation rate as a histogram, labeled by service_type.
 	TokensPerSecond *prometheus.HistogramVec
 
@@ -37,6 +41,8 @@ var (
 	WhitelistRequestsTotal  *prometheus.CounterVec
 	WhitelistInputTokensTotal  *prometheus.CounterVec
 	WhitelistOutputTokensTotal *prometheus.CounterVec
+	// WhitelistAudioSecondsTotal mirrors AudioSecondsTotal for whitelisted users.
+	WhitelistAudioSecondsTotal *prometheus.CounterVec
 )
 
 func PrometheusInit(serverName string) {
@@ -93,6 +99,15 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
 			Help:        "Cumulative output token count.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
+	AudioSecondsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_audio_seconds_total",
+			Help:        "Cumulative input audio duration in seconds for duration-billed services (e.g. whisper).",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
 		[]string{"service_type"},
@@ -159,12 +174,22 @@ func PrometheusInit(serverName string) {
 		[]string{"service_type"},
 	)
 
+	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_whitelist_audio_seconds_total",
+			Help:        "Cumulative input audio duration in seconds from whitelisted (internal) users.",
+			ConstLabels: prometheus.Labels{"server": serverName},
+		},
+		[]string{"service_type"},
+	)
+
 	prometheus.MustRegister(RequestCount)
 	prometheus.MustRegister(ErrorCount)
 	prometheus.MustRegister(RequestDuration)
 	prometheus.MustRegister(UniqueUsersTotal)
 	prometheus.MustRegister(InputTokensTotal)
 	prometheus.MustRegister(OutputTokensTotal)
+	prometheus.MustRegister(AudioSecondsTotal)
 	prometheus.MustRegister(TokensPerSecond)
 	prometheus.MustRegister(AllTimeRequests)
 	prometheus.MustRegister(AllTimeInputTokens)
@@ -173,6 +198,7 @@ func PrometheusInit(serverName string) {
 	prometheus.MustRegister(WhitelistRequestsTotal)
 	prometheus.MustRegister(WhitelistInputTokensTotal)
 	prometheus.MustRegister(WhitelistOutputTokensTotal)
+	prometheus.MustRegister(WhitelistAudioSecondsTotal)
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database
@@ -284,6 +310,25 @@ func RecordTokens(serviceType string, inputTokens, outputTokens int64) {
 	if outputTokens > 0 {
 		OutputTokensTotal.WithLabelValues(serviceType).Add(float64(outputTokens))
 	}
+}
+
+// RecordAudioSeconds increments the cumulative audio-seconds counter for
+// duration-billed services. This is intentionally separate from RecordTokens —
+// accumulating seconds into broker_input_tokens_total would skew the metric
+// by orders of magnitude versus token-billed services on the same dashboard.
+func RecordAudioSeconds(serviceType string, seconds int64) {
+	if AudioSecondsTotal == nil || seconds <= 0 {
+		return
+	}
+	AudioSecondsTotal.WithLabelValues(serviceType).Add(float64(seconds))
+}
+
+// RecordWhitelistAudioSeconds mirrors RecordAudioSeconds for whitelisted users.
+func RecordWhitelistAudioSeconds(serviceType string, seconds int64) {
+	if WhitelistAudioSecondsTotal == nil || seconds <= 0 {
+		return
+	}
+	WhitelistAudioSecondsTotal.WithLabelValues(serviceType).Add(float64(seconds))
 }
 
 // RecordWhitelistRequest increments the whitelist request counter for the given service type.
