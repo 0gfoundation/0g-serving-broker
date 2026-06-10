@@ -84,8 +84,13 @@ func TestImageStore_GetExpired(t *testing.T) {
 // eviction deterministically by sleeping past TTL and then calling
 // DeleteExpired ourselves — relying on the go-cache janitor's ttl/2 tick would
 // leave the test racing against scheduler noise.
+//
+// TTL is set generously (100ms) so the sleep-then-DeleteExpired sequence
+// remains robust under loaded CI runners. A previous 10ms value flaked under
+// the integration-test job's concurrency, where scheduler quantum delayed
+// time.Now() advancement past the cache entry's expiration timestamp.
 func TestImageStore_DiskFilesRemovedAfterEviction(t *testing.T) {
-	const ttl = 10 * time.Millisecond
+	const ttl = 100 * time.Millisecond
 	dir := t.TempDir()
 	store, err := newImageStore(dir, ttl)
 	if err != nil {
