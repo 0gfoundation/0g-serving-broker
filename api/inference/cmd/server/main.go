@@ -93,7 +93,8 @@ func Main() {
 	// Metrics are initialised after the contract client so every series can
 	// carry the provider's on-chain address as a const label (it is derived
 	// from the network wallet, which the contract client owns). Nothing
-	// before this point serves traffic: engine.Run is at the end of Main.
+	// before this point serves traffic: srv.ListenAndServe runs at the end
+	// of Main, and every metric-recording goroutine starts after this block.
 	if config.Monitor.Enable {
 		monitor.PrometheusInit(config.Service.ServingURL, contract.ProviderAddress)
 		monitor.StartDAUUpdater(monitorCtx, db.CountUniqueUsersLast24h, 1*time.Minute, logger)

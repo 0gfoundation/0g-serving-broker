@@ -19,14 +19,15 @@ Usage metrics additionally carry a **dynamic `model` label**, set per request:
 
 | metric family | model value source |
 |---|---|
-| `broker_requests_total` | `CtxKeyResolvedModel` read in `TrackMetrics` after the handler ran ("" on non-inference paths) |
-| `broker_{input,output}_tokens_total`, `broker_audio_seconds_total`, `broker_tokens_per_second`, whitelist counters | `ctrl.metricModel`: the validated resolved model (multi-model allowlist hit / single-model rewrite), falling back to the configured `Service.ModelType` |
-| whitelist request counters (sync proxy + async submit) | extracted from the request body (these sites run before model resolution) |
+| `broker_requests_total` | `CtxKeyResolvedModel` read in `TrackMetrics` after the handler ran. `PrepareHTTPRequest` defaults the key to `Service.ModelType` on inference paths that don't resolve one, so inference requests always carry a label; "" remains only on non-inference paths |
+| `broker_{input,output}_tokens_total`, `broker_audio_seconds_total`, `broker_tokens_per_second`, whitelist token counters | `ctrl.metricModel`: the validated resolved model (multi-model allowlist hit / single-model rewrite), falling back to the configured `Service.ModelType`. A missing resolved model on a multi-model provider is logged at Error (same broken invariant the billing path reports) |
+| whitelist request counters (sync proxy + async submit) | `ctrl.WhitelistMetricModel` (these sites run before model resolution): the body-extracted model only when it is an operator-enumerated pricing entry, `"*"` when only the wildcard admits it, else `Service.ModelType` — a BOUNDED set, never the raw body string |
+| `broker_requests_errors_total`, `broker_request_duration_seconds` | intentionally NO model label (path/status ops metrics; histogram cardinality). Per-model error rates can be derived from `broker_requests_total{status>=400}` |
 
 Two properties to preserve when touching this code:
 
-- **Label values are on-chain model ids, never slugged.** The router joins them against `providers.model_id` verbatim.
-- **Only validated ids reach the label** (allowlist / configured model). Never label with raw user input on a non-whitelisted path — that's an unbounded-cardinality vector.
+- **Label values are on-chain model ids, never slugged.** The router joins them against `providers.model_id` verbatim. The one non-id value is the `"*"` sentinel: on wildcard (serve-all) deployments, user strings admitted by the wildcard collapse to it — in `metricModel` and `WhitelistMetricModel` both — so callers can never mint unbounded series.
+- **Only bounded values reach the label**: enumerated pricing ids, the configured `ModelType`, or `"*"`. Never raw user input, on any path.
 
 ## `external_labels` model: legacy shim only
 

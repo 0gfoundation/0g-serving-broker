@@ -353,11 +353,47 @@ const CtxKeyResolvedModel = monitor.CtxKeyResolvedModel
 // under CtxKeyResolvedModel (multi-model allowlist / single-model rewrite),
 // else the service's configured model. Both forms are on-chain model ids, the
 // same namespace the router's providers catalog is keyed by.
+//
+// Cardinality bound: on a wildcard (serve-all) deployment the allowlist
+// admits ARBITRARY user strings into CtxKeyResolvedModel; those collapse to
+// the "*" label so users can never mint unbounded series. Only
+// operator-enumerated ids pass through verbatim.
 func (c *Ctrl) metricModel(ctx context.Context) string {
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		if v, exists := ginCtx.Get(CtxKeyResolvedModel); exists {
 			if s, ok := v.(string); ok && s != "" {
-				return s
+				if !c.Service.HasMultiModelPricing() || c.Service.HasExactModelPricing(s) {
+					return s
+				}
+				return config.ModelWildcard
+			}
+		}
+	}
+	// Missing resolvedModel on a multi-model provider is the same broken
+	// invariant resolveModelPricing reports for billing — mislabeling to the
+	// default model must not be silent.
+	if c.Service.HasMultiModelPricing() {
+		c.logger.Errorf("metricModel: resolvedModel missing from context (%T) on a multi-model provider; labeling metrics with default model %q", ctx, c.Service.ModelType)
+	}
+	return c.Service.ModelType
+}
+
+// WhitelistMetricModel derives a BOUNDED model label for the whitelist
+// request counters, which record before model resolution runs: the
+// body-extracted model when it is an operator-enumerated pricing entry, "*"
+// when only the wildcard admits it, else the configured on-chain model
+// (single-model providers always label with the configured model, matching
+// what metricModel yields for the same request's token counters). Raw user
+// input must never reach a label value — bounded set: enumerated ids, "*",
+// ModelType.
+func (c *Ctrl) WhitelistMetricModel(reqBody []byte, contentType string) string {
+	if c.Service.HasMultiModelPricing() {
+		if m := ExtractModelName(reqBody, contentType); m != "" {
+			if c.Service.HasExactModelPricing(m) {
+				return m
+			}
+			if c.Service.IsModelAllowed(m) {
+				return config.ModelWildcard
 			}
 		}
 	}

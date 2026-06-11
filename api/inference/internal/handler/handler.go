@@ -25,6 +25,7 @@ type asyncCtrl interface {
 	IsAsyncEnabled() bool
 	ValidateSession(ctx *gin.Context) (string, error)
 	IsWhitelistedUser(userAddress string) bool
+	WhitelistMetricModel(reqBody []byte, contentType string) string
 	SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, reqHeaders, reqBody []byte, isWhitelisted bool) (string, error)
 	GetAsyncJob(jobID string) (model.AsyncJob, error)
 }
@@ -105,8 +106,8 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/user/:userAddress/unsettledfee", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetUnsettledFee)
 
 	// Provider-only endpoints for log management
-	group.GET("/logs", corsMiddleware(), h.ListLogs)                           // List all log files
-	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile)    // Download specific log file
+	group.GET("/logs", corsMiddleware(), h.ListLogs)                        // List all log files
+	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile) // Download specific log file
 
 	// Async job endpoints (OpenAI-style paths)
 	asyncGroup := group.Group("/async")
@@ -178,4 +179,3 @@ func handleBrokerError(ctx *gin.Context, err error, context string) {
 	}
 	errors.Response(ctx, err)
 }
-

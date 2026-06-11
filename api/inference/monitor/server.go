@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -67,6 +68,13 @@ var (
 func PrometheusInit(serverName, providerAddress string) {
 	if serverName == "" {
 		panic("server name must be provided")
+	}
+	// The address label is the PR's whole point (URL-reuse-proof identity);
+	// an empty or malformed value would silently void it on every series.
+	// The format check also catches swapped arguments (a ServingURL never
+	// matches). Wallet-derived addresses always satisfy this.
+	if !providerAddressRe.MatchString(providerAddress) {
+		panic("provider address must be a 0x-prefixed 40-hex-char address, got: " + providerAddress)
 	}
 	constLabels := prometheus.Labels{"server": serverName, "provider_address": providerAddress}
 
@@ -300,6 +308,10 @@ func StartAllTimeStatsUpdater(ctx context.Context, queryFunc func() (TotalStatsR
 		}
 	}()
 }
+
+// providerAddressRe validates the provider_address const label at init: a
+// 0x-prefixed 20-byte hex address (checksummed or not).
+var providerAddressRe = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
 // RequestStartTimeKey is the gin context key for the request start time.
 const RequestStartTimeKey = "requestStartTime"

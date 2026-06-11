@@ -92,6 +92,16 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
+	// Default the resolved model for inference paths that don't set one
+	// (plain single-model providers without rewrite triggers, single-model
+	// STT/video/image): TrackMetrics and the token counters then agree on
+	// one label value per request instead of requests_total carrying
+	// model="" while tokens carry the configured model. Billing-neutral —
+	// the single-model GetBillingPrices path never reads the key.
+	if _, exists := ctx.Get(CtxKeyResolvedModel); !exists {
+		ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
+	}
+
 	// For text-to-image and image-editing: store the original client body (used for
 	// signing) and rewrite response_format to b64_json so the broker always receives
 	// raw image bytes from the provider rather than LAN-inaccessible URLs.

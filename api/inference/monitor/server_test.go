@@ -199,7 +199,24 @@ func TestPrometheusInitPanicsOnEmptyName(t *testing.T) {
 			t.Error("PrometheusInit(\"\") did not panic")
 		}
 	}()
-	PrometheusInit("", "0xprovider")
+	PrometheusInit("", "0x1234567890abcdef1234567890abcdef12345678")
+}
+
+// TestPrometheusInitPanicsOnBadAddress verifies the provider_address format
+// guard: an empty or malformed address (or swapped arguments — a ServingURL
+// never matches) must panic rather than silently voiding the address label
+// on every series.
+func TestPrometheusInitPanicsOnBadAddress(t *testing.T) {
+	for _, addr := range []string{"", "not-an-address", "https://compute-network-1.example.com", "0x123"} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("PrometheusInit with address %q did not panic", addr)
+				}
+			}()
+			PrometheusInit(t.Name(), addr)
+		}()
+	}
 }
 
 // TestRecordTokens verifies token counter increments for various inputs.
