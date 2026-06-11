@@ -199,7 +199,7 @@ func TestPrometheusInitPanicsOnEmptyName(t *testing.T) {
 			t.Error("PrometheusInit(\"\") did not panic")
 		}
 	}()
-	PrometheusInit("")
+	PrometheusInit("", "0xprovider")
 }
 
 // TestRecordTokens verifies token counter increments for various inputs.

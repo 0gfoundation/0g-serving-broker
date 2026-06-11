@@ -53,16 +53,22 @@ var (
 	VideoBillingSkippedTotal prometheus.Counter
 )
 
-func PrometheusInit(serverName string) {
+// PrometheusInit registers all broker metrics. serverName (the ServingURL)
+// and providerAddress (the provider's on-chain address, as registered in the
+// serving contract) are stamped on every series as const labels, so a series
+// is identified by (provider, server, ...) — the same (address, endpoint)
+// identity the router's providers catalog is keyed by, immune to URL reuse.
+func PrometheusInit(serverName, providerAddress string) {
 	if serverName == "" {
 		panic("server name must be provided")
 	}
+	constLabels := prometheus.Labels{"server": serverName, "provider": providerAddress}
 
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
 			Help:        "Total number of HTTP requests processed, labeled by path, status and model.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path", "status", "model"},
 	)
@@ -71,7 +77,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_requests_errors_total",
 			Help:        "Total number of error requests processed by the broker server.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path", "status"},
 	)
@@ -81,7 +87,7 @@ func PrometheusInit(serverName string) {
 			Name:        "broker_request_duration_seconds",
 			Help:        "Histogram of request latencies.",
 			Buckets:     prometheus.DefBuckets, // or customize the buckets according to your needs
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path"},
 	)
@@ -90,7 +96,7 @@ func PrometheusInit(serverName string) {
 		prometheus.GaugeOpts{
 			Name:        "broker_unique_users_total",
 			Help:        "Number of unique users in the last 24 hours (queried from database).",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 	)
 
@@ -98,7 +104,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_input_tokens_total",
 			Help:        "Cumulative input token count.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -107,7 +113,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
 			Help:        "Cumulative output token count.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -116,7 +122,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_audio_seconds_total",
 			Help:        "Cumulative input audio duration in seconds for duration-billed services (e.g. whisper).",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -126,7 +132,7 @@ func PrometheusInit(serverName string) {
 			Name:        "broker_tokens_per_second",
 			Help:        "Per-request output token generation rate (output_tokens / request_duration_seconds).",
 			Buckets:     []float64{1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500},
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -134,32 +140,32 @@ func PrometheusInit(serverName string) {
 	AllTimeRequests = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_requests_total",
 		Help:        "All-time total number of requests (from database).",
-		ConstLabels: prometheus.Labels{"server": serverName},
+		ConstLabels: constLabels,
 	})
 
 	AllTimeInputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_input_tokens_total",
 		Help:        "All-time total input token count (from database).",
-		ConstLabels: prometheus.Labels{"server": serverName},
+		ConstLabels: constLabels,
 	})
 
 	AllTimeOutputTokens = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_output_tokens_total",
 		Help:        "All-time total output token count (from database).",
-		ConstLabels: prometheus.Labels{"server": serverName},
+		ConstLabels: constLabels,
 	})
 
 	AllTimeUniqueUsers = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "broker_alltime_unique_users_total",
 		Help:        "All-time total unique users (from database).",
-		ConstLabels: prometheus.Labels{"server": serverName},
+		ConstLabels: constLabels,
 	})
 
 	WhitelistRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
 			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type and model.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -168,7 +174,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_input_tokens_total",
 			Help:        "Cumulative input token count from whitelisted (internal) users.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -177,7 +183,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_output_tokens_total",
 			Help:        "Cumulative output token count from whitelisted (internal) users.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -186,7 +192,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_audio_seconds_total",
 			Help:        "Cumulative input audio duration in seconds from whitelisted (internal) users.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -207,7 +213,7 @@ func PrometheusInit(serverName string) {
 		prometheus.CounterOpts{
 			Name:        "broker_video_billing_skipped_total",
 			Help:        "Video-generation requests served without billing (no positive duration resolvable from response or request).",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 	)
 
