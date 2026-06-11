@@ -240,13 +240,15 @@ func (c *Ctrl) processLiteLLMStream(ctx context.Context, lines [][]byte, outputP
 		}
 	}
 
-	// No message_stop event — the stream was truncated/dropped or an
+	// No message_stop event — the stream was truncated/dropped, or an
 	// OpenAI-compatible shim omitted the terminal Anthropic event. The client
-	// already received the accumulated output, so bill it rather than serving
-	// free, logging loudly. haveUsage may be true from message_start/message_delta.
+	// already received the accumulated output and we finalize billing on it below,
+	// so this is not an error — log at WARN to stay diagnosable without drowning
+	// genuine errors in the error stream. haveUsage may be true from
+	// message_start/message_delta.
 	if haveUsage {
 		*usage = acc.toUsage()
 	}
-	c.logger.Errorf("LiteLLM stream ended without a message_stop event for request %s; finalizing on accumulated usage/output (haveUsage=%t)", requestHash, haveUsage)
+	c.logger.Warnf("LiteLLM stream ended without a message_stop event for request %s; finalizing on accumulated usage/output (haveUsage=%t)", requestHash, haveUsage)
 	return c.finalizeChatStream(ctx, *output, *usage, outputPrice, requestHash, isWhitelisted)
 }
