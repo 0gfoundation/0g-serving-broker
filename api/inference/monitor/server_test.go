@@ -51,12 +51,17 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 	registry := prometheus.NewRegistry()
 
 	serverName := t.Name()
+	// Mirror production: PrometheusInit stamps both server and
+	// provider_address as const labels. Keep the helper in lockstep so tests
+	// exercise the same series identity (and so a future label change is
+	// caught here, not only at runtime).
+	constLabels := prometheus.Labels{"server": serverName, "provider_address": "0x" + "0000000000000000000000000000000000000001"}
 
 	InputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_input_tokens_total",
 			Help:        "Cumulative input token count.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -65,7 +70,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
 			Help:        "Cumulative output token count.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -75,7 +80,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 			Name:        "broker_tokens_per_second",
 			Help:        "Per-request output token generation rate.",
 			Buckets:     []float64{1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500},
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -84,7 +89,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
 			Help:        "Total number of HTTP requests.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path", "status", "model"},
 	)
@@ -93,7 +98,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_requests_errors_total",
 			Help:        "Total number of error requests.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path", "status"},
 	)
@@ -103,7 +108,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 			Name:        "broker_request_duration_seconds",
 			Help:        "Histogram of request latencies.",
 			Buckets:     prometheus.DefBuckets,
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path"},
 	)
@@ -112,7 +117,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
 			Help:        "Total whitelist requests.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -121,7 +126,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_input_tokens_total",
 			Help:        "Whitelist input tokens.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -130,7 +135,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_output_tokens_total",
 			Help:        "Whitelist output tokens.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -139,7 +144,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_audio_seconds_total",
 			Help:        "Audio seconds.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
@@ -148,7 +153,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_audio_seconds_total",
 			Help:        "Whitelist audio seconds.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"service_type", "model"},
 	)
