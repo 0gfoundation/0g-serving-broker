@@ -36,6 +36,7 @@ func TestMetricModel(t *testing.T) {
 		{"multi-model missing key falls back to default (logged)", multi, "", "qwen-max"},
 		{"wildcard-admitted user string collapses to *", wild, "totally/made-up-model", "*"},
 		{"wildcard deployment, enumerated id still verbatim", wild, "qwen-max", "qwen-max"},
+		{"wildcard deployment, configured default model never collapses to *", wild, "qwen-max", "qwen-max"},
 		{"single-model resolved value passes through", single, "glm-5", "glm-5"},
 		{"single-model missing key falls back to configured", single, "", "glm-5"},
 	}
@@ -51,6 +52,25 @@ func TestMetricModel(t *testing.T) {
 	// Non-gin context: fallback, never panic.
 	if got := single.metricModel(context.Background()); got != "glm-5" {
 		t.Errorf("non-gin ctx: got %q, want glm-5", got)
+	}
+
+	// Wildcard-ONLY deployment (config permits the configured model to be
+	// admitted solely via "*"): the default model must keep its own label,
+	// not collapse to the sentinel.
+	wildOnly := &Ctrl{
+		logger: testLogger(),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{
+			{Model: "*", InputPrice: "200", OutputPrice: "800"},
+		}, "qwen-default"),
+	}
+	if got := wildOnly.metricModel(ginCtxWithResolvedModel("qwen-default")); got != "qwen-default" {
+		t.Errorf("wildcard-only: configured model = %q, want qwen-default", got)
+	}
+	if got := wildOnly.metricModel(ginCtxWithResolvedModel("random-user-string")); got != "*" {
+		t.Errorf("wildcard-only: user string = %q, want *", got)
+	}
+	if got := wildOnly.WhitelistMetricModel([]byte(`{"model":"qwen-default"}`), "application/json"); got != "qwen-default" {
+		t.Errorf("wildcard-only whitelist: configured model = %q, want qwen-default", got)
 	}
 }
 

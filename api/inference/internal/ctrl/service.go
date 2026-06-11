@@ -362,7 +362,11 @@ func (c *Ctrl) metricModel(ctx context.Context) string {
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		if v, exists := ginCtx.Get(CtxKeyResolvedModel); exists {
 			if s, ok := v.(string); ok && s != "" {
-				if !c.Service.HasMultiModelPricing() || c.Service.HasExactModelPricing(s) {
+				// The configured model is always part of the bounded set even
+				// when it is admitted only via the wildcard entry (config
+				// permits that) — collapsing the deployment's own default
+				// model to "*" would lose its attribution for no gain.
+				if !c.Service.HasMultiModelPricing() || s == c.Service.ModelType || c.Service.HasExactModelPricing(s) {
 					return s
 				}
 				return config.ModelWildcard
@@ -389,7 +393,7 @@ func (c *Ctrl) metricModel(ctx context.Context) string {
 func (c *Ctrl) WhitelistMetricModel(reqBody []byte, contentType string) string {
 	if c.Service.HasMultiModelPricing() {
 		if m := ExtractModelName(reqBody, contentType); m != "" {
-			if c.Service.HasExactModelPricing(m) {
+			if m == c.Service.ModelType || c.Service.HasExactModelPricing(m) {
 				return m
 			}
 			if c.Service.IsModelAllowed(m) {

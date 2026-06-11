@@ -318,18 +318,28 @@ const RequestStartTimeKey = "requestStartTime"
 
 // CtxKeyResolvedModel is the gin context key under which the request path
 // stores the VALIDATED per-request model id (multi-model allowlist hit or
-// single-model configured rewrite). It lives in this package so both the
-// setter (ctrl) and the readers (ctrl billing, TrackMetrics below) share one
-// definition without an import cycle; ctrl re-exports it. Only validated ids
-// land under this key, so using it as a metric label is cardinality-safe.
+// single-model configured rewrite). It lives in this package so the setter
+// (ctrl) and the billing reader share one definition without an import
+// cycle; ctrl re-exports it. NOTE: "validated" is NOT "bounded" — on a
+// wildcard (serve-all) deployment the allowlist admits arbitrary user
+// strings, so this key must NEVER be used as a metric label value directly;
+// metrics read CtxKeyMetricModel instead.
 const CtxKeyResolvedModel = "resolvedModel"
 
-// modelFromGinContext returns the validated request model recorded under
-// CtxKeyResolvedModel, or "" when the request path didn't resolve one. An
-// empty label value is dropped by Prometheus, letting a deployment-level
-// external_labels `model` (the legacy single-model convention) backfill it.
+// CtxKeyMetricModel carries the BOUNDED metric label value for the request:
+// ctrl computes it (enumerated pricing id / configured model / "*" wildcard
+// sentinel — see ctrl.metricModel) and stores it in PrepareHTTPRequest, so
+// the monitor package can label without access to the pricing config and
+// raw user strings can never mint series.
+const CtxKeyMetricModel = "metricModel"
+
+// modelFromGinContext returns the bounded metric model recorded under
+// CtxKeyMetricModel, or "" when the request path didn't set one (paths that
+// never reach PrepareHTTPRequest). An empty label value is dropped by
+// Prometheus, letting a deployment-level external_labels `model` (the legacy
+// single-model convention) backfill it.
 func modelFromGinContext(c *gin.Context) string {
-	if v, exists := c.Get(CtxKeyResolvedModel); exists {
+	if v, exists := c.Get(CtxKeyMetricModel); exists {
 		if s, ok := v.(string); ok {
 			return s
 		}

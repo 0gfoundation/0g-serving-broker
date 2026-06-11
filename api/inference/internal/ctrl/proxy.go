@@ -23,6 +23,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []byte, svcType string) (*http.Request, error) {
@@ -92,15 +93,23 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
-	// Default the resolved model for inference paths that don't set one
-	// (plain single-model providers without rewrite triggers, single-model
-	// STT/video/image): TrackMetrics and the token counters then agree on
-	// one label value per request instead of requests_total carrying
-	// model="" while tokens carry the configured model. Billing-neutral —
-	// the single-model GetBillingPrices path never reads the key.
+	// Default the resolved model for paths that don't set one (plain
+	// single-model providers without rewrite triggers, single-model
+	// STT/video/image, non-billed proxied endpoints): the token counters
+	// then agree with requests_total on one label value per request.
+	// Billing-neutral for single-model providers (GetBillingPrices ignores
+	// the key) and for multi-model ones (only the unbillable empty-body
+	// edge reaches it, resolving to the default model — same as
+	// ValidateModelAllowlist's own empty-body branch).
 	if _, exists := ctx.Get(CtxKeyResolvedModel); !exists {
 		ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 	}
+
+	// Stamp the BOUNDED metric label for TrackMetrics: the monitor package
+	// has no pricing-config access, and CtxKeyResolvedModel holds RAW user
+	// strings on wildcard deployments — they must never become label values
+	// (unbounded series). metricModel folds them to "*".
+	ctx.Set(monitor.CtxKeyMetricModel, c.metricModel(ctx))
 
 	// For text-to-image and image-editing: store the original client body (used for
 	// signing) and rewrite response_format to b64_json so the broker always receives

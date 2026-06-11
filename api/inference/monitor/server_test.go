@@ -650,9 +650,9 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("request counter carries the resolved model", func(t *testing.T) {
+	t.Run("request counter carries the bounded metric model", func(t *testing.T) {
 		engine.GET("/api/model", func(c *gin.Context) {
-			c.Set(CtxKeyResolvedModel, "glm-5")
+			c.Set(CtxKeyMetricModel, "glm-5")
 			c.Status(http.StatusOK)
 		})
 
@@ -663,7 +663,31 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 		engine.ServeHTTP(w, req)
 
 		if delta := getCounterValue(RequestCount, "/api/model", "OK", "glm-5") - before; delta != 1 {
-			t.Errorf("request count delta for resolved model = %v, want 1", delta)
+			t.Errorf("request count delta for bounded model = %v, want 1", delta)
+		}
+	})
+
+	t.Run("raw resolvedModel never reaches the request counter label", func(t *testing.T) {
+		// On wildcard deployments CtxKeyResolvedModel carries RAW user
+		// strings; TrackMetrics must read only the bounded CtxKeyMetricModel
+		// (here deliberately unset -> empty label), never the raw key.
+		engine.GET("/api/raw", func(c *gin.Context) {
+			c.Set(CtxKeyResolvedModel, "attacker/minted-model-string")
+			c.Status(http.StatusOK)
+		})
+
+		beforeRaw := getCounterValue(RequestCount, "/api/raw", "OK", "attacker/minted-model-string")
+		beforeEmpty := getCounterValue(RequestCount, "/api/raw", "OK", "")
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/raw", nil)
+		engine.ServeHTTP(w, req)
+
+		if delta := getCounterValue(RequestCount, "/api/raw", "OK", "attacker/minted-model-string") - beforeRaw; delta != 0 {
+			t.Errorf("raw resolvedModel leaked into the request counter label (delta=%v)", delta)
+		}
+		if delta := getCounterValue(RequestCount, "/api/raw", "OK", "") - beforeEmpty; delta != 1 {
+			t.Errorf("expected the empty bounded label, delta = %v, want 1", delta)
 		}
 	})
 
