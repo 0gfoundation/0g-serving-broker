@@ -15,6 +15,7 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // ErrPricingUnavailable is returned by GetCachedService when the provider is
@@ -342,9 +343,26 @@ type BillingPrices struct {
 
 // CtxKeyResolvedModel is the gin.Context key under which the request path stores
 // the validated request model id for per-model billing. Shared by the setter
-// (PrepareHTTPRequest / ValidateModelAllowlist) and the reader (GetBillingPrices)
-// so this billing-critical key cannot drift via a typo across files.
-const CtxKeyResolvedModel = "resolvedModel"
+// (PrepareHTTPRequest / ValidateModelAllowlist) and the readers (GetBillingPrices,
+// monitor.TrackMetrics) so this billing-critical key cannot drift via a typo
+// across files. The definition lives in monitor (the lowest common package).
+const CtxKeyResolvedModel = monitor.CtxKeyResolvedModel
+
+// metricModel returns the model id to attach to Prometheus metrics for this
+// request: the validated per-request model when the request path recorded one
+// under CtxKeyResolvedModel (multi-model allowlist / single-model rewrite),
+// else the service's configured model. Both forms are on-chain model ids, the
+// same namespace the router's providers catalog is keyed by.
+func (c *Ctrl) metricModel(ctx context.Context) string {
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		if v, exists := ginCtx.Get(CtxKeyResolvedModel); exists {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return c.Service.ModelType
+}
 
 // GetBillingPrices resolves the correct input and output prices for billing.
 // For centralized multi-model providers, reads the resolved model id from the

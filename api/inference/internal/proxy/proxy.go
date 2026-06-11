@@ -501,7 +501,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			logPath = logPath[:idx]
 		}
 		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
-		monitor.RecordWhitelistRequest(svcType)
+		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
+		if modelName == "" {
+			modelName = p.ctrl.Service.ModelType
+		}
+		monitor.RecordWhitelistRequest(svcType, modelName)
 
 		// Create a minimal request model for whitelist user
 		// IsWhitelisted flag will skip billing but preserve response processing (stream handling, signing, etc.)
@@ -512,10 +516,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			ServiceName:   svcType,
 		}
 		whitelistReq.RequestHash = whitelistReq.Nonce
-		whitelistReq.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
-		if whitelistReq.ModelName == "" {
-			whitelistReq.ModelName = p.ctrl.Service.ModelType
-		}
+		whitelistReq.ModelName = modelName
 
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {

@@ -217,8 +217,9 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		monitor.RecordTokens("text-to-image", 0, imageNum)
-		monitor.RecordWhitelistTokens("text-to-image", 0, imageNum)
+		metricModel := c.metricModel(ctx)
+		monitor.RecordTokens("text-to-image", metricModel, 0, imageNum)
+		monitor.RecordWhitelistTokens("text-to-image", metricModel, 0, imageNum)
 		return nil
 	}
 
@@ -232,7 +233,7 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
-	monitor.RecordTokens("text-to-image", 0, imageNum)
+	monitor.RecordTokens("text-to-image", c.metricModel(ctx), 0, imageNum)
 
 	// Update IPM limiter with actual image consumption
 	if ipmLimiter, exists := ctx.Get("ipmLimiter"); exists {

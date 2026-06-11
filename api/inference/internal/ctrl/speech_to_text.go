@@ -149,7 +149,7 @@ type SpeechToTextStreamChunk struct {
 func (c *Ctrl) handleSpeechToTextResponse(ctx *gin.Context, resp *http.Response, _ model.User, _ string, reqBody []byte, reqModel model.Request) error {
 	// Check if request is for streaming by parsing the request body
 	isStream := c.isSpeechToTextStream(reqBody)
-	
+
 	if !isStream {
 		return c.handleNonStreamingSpeechToText(ctx, resp, reqBody, reqModel)
 	} else {
@@ -162,7 +162,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	defer resp.Body.Close()
 
 	chatKey := uuid.NewString()
-	
+
 	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, setting ZG-Res-Key header")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
@@ -223,7 +223,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		recordWhitelistUsageMetrics(transcriptionResp.Usage)
+		recordWhitelistUsageMetrics(transcriptionResp.Usage, c.metricModel(ctx))
 		return nil
 	}
 
@@ -335,7 +335,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
-		recordWhitelistUsageMetrics(usage)
+		recordWhitelistUsageMetrics(usage, c.metricModel(ctx))
 		return nil
 	}
 
@@ -410,7 +410,7 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
-	monitor.RecordAudioSeconds(speechToTextMetricLabel, int64(seconds))
+	monitor.RecordAudioSeconds(speechToTextMetricLabel, c.metricModel(ctx), int64(seconds))
 	// No RecordTPSFromContext for duration mode: whisper has no
 	// tokens-per-second concept (the whole transcript is delivered as one
 	// shot, not as a generation stream). A seconds/second metric would be
@@ -489,13 +489,14 @@ func (c *Ctrl) billSpeechToTextByTokensCore(ctx context.Context, usage *SpeechTo
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 
-	monitor.RecordTokens(speechToTextMetricLabel, int64(usage.InputTokens), int64(usage.OutputTokens))
+	metricModel := c.metricModel(ctx)
+	monitor.RecordTokens(speechToTextMetricLabel, metricModel, int64(usage.InputTokens), int64(usage.OutputTokens))
 	// RecordTPSFromContext early-returns when outputTokens <= 0, so gpt-4o-transcribe
 	// (output_tokens always 0 upstream) emits no observation rather than recording a
 	// misleading 0 — verified in monitor.RecordTPSFromContext. Kept for forward
 	// compatibility with any future token-billed STT model that does emit
 	// non-zero output_tokens.
-	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, int64(usage.OutputTokens))
+	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, metricModel, int64(usage.OutputTokens))
 	c.consumeSpeechToTextLimiter(ctx, usage.InputTokens+usage.OutputTokens)
 	return nil
 }
@@ -597,15 +598,15 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 // stay accurate, plus broken out into the whitelist counter so the share is
 // inspectable). Routes via classifyUsageForMetrics so it stays in lockstep
 // with the billing dispatch.
-func recordWhitelistUsageMetrics(u *SpeechToTextUsage) {
+func recordWhitelistUsageMetrics(u *SpeechToTextUsage, model string) {
 	seconds, in, out := classifyUsageForMetrics(u)
 	if seconds > 0 {
-		monitor.RecordAudioSeconds(speechToTextMetricLabel, seconds)
-		monitor.RecordWhitelistAudioSeconds(speechToTextMetricLabel, seconds)
+		monitor.RecordAudioSeconds(speechToTextMetricLabel, model, seconds)
+		monitor.RecordWhitelistAudioSeconds(speechToTextMetricLabel, model, seconds)
 	}
 	if in > 0 || out > 0 {
-		monitor.RecordTokens(speechToTextMetricLabel, in, out)
-		monitor.RecordWhitelistTokens(speechToTextMetricLabel, in, out)
+		monitor.RecordTokens(speechToTextMetricLabel, model, in, out)
+		monitor.RecordWhitelistTokens(speechToTextMetricLabel, model, in, out)
 	}
 }
 
@@ -655,8 +656,9 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	}
 
 	// Record token metrics (estimated output tokens only, no input token data in fallback path)
-	monitor.RecordTokens(speechToTextMetricLabel, 0, estimatedOutputTokens)
-	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, estimatedOutputTokens)
+	metricModel := c.metricModel(ctx)
+	monitor.RecordTokens(speechToTextMetricLabel, metricModel, 0, estimatedOutputTokens)
+	monitor.RecordTPSFromContext(ctx, speechToTextMetricLabel, metricModel, estimatedOutputTokens)
 
 	// Update TPM limiter with estimated token consumption (fallback path).
 	c.consumeSpeechToTextLimiter(ctx, int(estimatedOutputTokens))
@@ -668,21 +670,21 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 func (c *Ctrl) isSpeechToTextStream(reqBody []byte) bool {
 	// Parse multipart body to find stream parameter
 	bodyStr := string(reqBody)
-	
+
 	// Look for stream parameter in multipart data
 	// Pattern: name="stream"\r\n\r\ntrue
-	isStream := contains(bodyStr, `name="stream"`) && 
+	isStream := contains(bodyStr, `name="stream"`) &&
 		(contains(bodyStr, "\r\n\r\ntrue") || contains(bodyStr, "\ntrue"))
-	
+
 	c.logger.Debugf("Is streaming request: %t", isStream)
 	return isStream
 }
 
 // contains is a simple helper to check if string contains substring
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		(s == substr || len(s) > len(substr) && 
-		(hasSubstring(s, substr)))
+	return len(s) >= len(substr) &&
+		(s == substr || len(s) > len(substr) &&
+			(hasSubstring(s, substr)))
 }
 
 // hasSubstring checks if s contains substr

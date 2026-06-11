@@ -30,15 +30,15 @@ var (
 	TokensPerSecond *prometheus.HistogramVec
 
 	// All-time cumulative gauges (queried from database, survive restarts)
-	AllTimeRequests    prometheus.Gauge
-	AllTimeInputTokens prometheus.Gauge
+	AllTimeRequests     prometheus.Gauge
+	AllTimeInputTokens  prometheus.Gauge
 	AllTimeOutputTokens prometheus.Gauge
-	AllTimeUniqueUsers prometheus.Gauge
+	AllTimeUniqueUsers  prometheus.Gauge
 
 	// Whitelist traffic metrics — track requests and tokens from whitelisted
 	// (internal/exempt) users so operators can gauge their share of total traffic
 	// and set appropriate RPM/TPM limits for the provider.
-	WhitelistRequestsTotal  *prometheus.CounterVec
+	WhitelistRequestsTotal     *prometheus.CounterVec
 	WhitelistInputTokensTotal  *prometheus.CounterVec
 	WhitelistOutputTokensTotal *prometheus.CounterVec
 	// WhitelistAudioSecondsTotal mirrors AudioSecondsTotal for whitelisted users.
@@ -61,10 +61,10 @@ func PrometheusInit(serverName string) {
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
-			Help:        "Total number of HTTP requests processed, labeled by path and status.",
+			Help:        "Total number of HTTP requests processed, labeled by path, status and model.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"path", "status"},
+		[]string{"path", "status", "model"},
 	)
 
 	ErrorCount = prometheus.NewCounterVec(
@@ -100,7 +100,7 @@ func PrometheusInit(serverName string) {
 			Help:        "Cumulative input token count.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	OutputTokensTotal = prometheus.NewCounterVec(
@@ -109,7 +109,7 @@ func PrometheusInit(serverName string) {
 			Help:        "Cumulative output token count.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	AudioSecondsTotal = prometheus.NewCounterVec(
@@ -118,7 +118,7 @@ func PrometheusInit(serverName string) {
 			Help:        "Cumulative input audio duration in seconds for duration-billed services (e.g. whisper).",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	TokensPerSecond = prometheus.NewHistogramVec(
@@ -128,7 +128,7 @@ func PrometheusInit(serverName string) {
 			Buckets:     []float64{1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500},
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	AllTimeRequests = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -158,10 +158,10 @@ func PrometheusInit(serverName string) {
 	WhitelistRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
-			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type.",
+			Help:        "Total number of requests from whitelisted (internal) users, labeled by service_type and model.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	WhitelistInputTokensTotal = prometheus.NewCounterVec(
@@ -170,7 +170,7 @@ func PrometheusInit(serverName string) {
 			Help:        "Cumulative input token count from whitelisted (internal) users.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
@@ -179,7 +179,7 @@ func PrometheusInit(serverName string) {
 			Help:        "Cumulative output token count from whitelisted (internal) users.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
@@ -188,7 +188,7 @@ func PrometheusInit(serverName string) {
 			Help:        "Cumulative input audio duration in seconds from whitelisted (internal) users.",
 			ConstLabels: prometheus.Labels{"server": serverName},
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	prometheus.MustRegister(RequestCount)
@@ -292,6 +292,27 @@ func StartAllTimeStatsUpdater(ctx context.Context, queryFunc func() (TotalStatsR
 // RequestStartTimeKey is the gin context key for the request start time.
 const RequestStartTimeKey = "requestStartTime"
 
+// CtxKeyResolvedModel is the gin context key under which the request path
+// stores the VALIDATED per-request model id (multi-model allowlist hit or
+// single-model configured rewrite). It lives in this package so both the
+// setter (ctrl) and the readers (ctrl billing, TrackMetrics below) share one
+// definition without an import cycle; ctrl re-exports it. Only validated ids
+// land under this key, so using it as a metric label is cardinality-safe.
+const CtxKeyResolvedModel = "resolvedModel"
+
+// modelFromGinContext returns the validated request model recorded under
+// CtxKeyResolvedModel, or "" when the request path didn't resolve one. An
+// empty label value is dropped by Prometheus, letting a deployment-level
+// external_labels `model` (the legacy single-model convention) backfill it.
+func modelFromGinContext(c *gin.Context) string {
+	if v, exists := c.Get(CtxKeyResolvedModel); exists {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // TrackMetrics is a Gin middleware that tracks request metrics.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -307,9 +328,11 @@ func TrackMetrics() gin.HandlerFunc {
 		duration := time.Since(startTime).Seconds()
 		RequestDuration.WithLabelValues(path).Observe(duration)
 
-		// Track request count and errors
+		// Track request count and errors. The model label is read AFTER c.Next(),
+		// so it carries whatever the request path resolved ("" for non-inference
+		// paths and unresolved requests).
 		status := c.Writer.Status()
-		RequestCount.WithLabelValues(path, http.StatusText(status)).Inc()
+		RequestCount.WithLabelValues(path, http.StatusText(status), modelFromGinContext(c)).Inc()
 		if !ignoreError && status >= 400 {
 			ErrorCount.WithLabelValues(path, http.StatusText(status)).Inc()
 		}
@@ -317,15 +340,17 @@ func TrackMetrics() gin.HandlerFunc {
 }
 
 // RecordTokens increments the cumulative input and output token counters.
-func RecordTokens(serviceType string, inputTokens, outputTokens int64) {
+// model is the per-request model id ("" lets a deployment-level external
+// label backfill — see CtxKeyResolvedModel).
+func RecordTokens(serviceType, model string, inputTokens, outputTokens int64) {
 	if InputTokensTotal == nil || OutputTokensTotal == nil {
 		return
 	}
 	if inputTokens > 0 {
-		InputTokensTotal.WithLabelValues(serviceType).Add(float64(inputTokens))
+		InputTokensTotal.WithLabelValues(serviceType, model).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		OutputTokensTotal.WithLabelValues(serviceType).Add(float64(outputTokens))
+		OutputTokensTotal.WithLabelValues(serviceType, model).Add(float64(outputTokens))
 	}
 }
 
@@ -333,19 +358,19 @@ func RecordTokens(serviceType string, inputTokens, outputTokens int64) {
 // duration-billed services. This is intentionally separate from RecordTokens —
 // accumulating seconds into broker_input_tokens_total would skew the metric
 // by orders of magnitude versus token-billed services on the same dashboard.
-func RecordAudioSeconds(serviceType string, seconds int64) {
+func RecordAudioSeconds(serviceType, model string, seconds int64) {
 	if AudioSecondsTotal == nil || seconds <= 0 {
 		return
 	}
-	AudioSecondsTotal.WithLabelValues(serviceType).Add(float64(seconds))
+	AudioSecondsTotal.WithLabelValues(serviceType, model).Add(float64(seconds))
 }
 
 // RecordWhitelistAudioSeconds mirrors RecordAudioSeconds for whitelisted users.
-func RecordWhitelistAudioSeconds(serviceType string, seconds int64) {
+func RecordWhitelistAudioSeconds(serviceType, model string, seconds int64) {
 	if WhitelistAudioSecondsTotal == nil || seconds <= 0 {
 		return
 	}
-	WhitelistAudioSecondsTotal.WithLabelValues(serviceType).Add(float64(seconds))
+	WhitelistAudioSecondsTotal.WithLabelValues(serviceType, model).Add(float64(seconds))
 }
 
 // RecordVideoBillingSkipped increments the counter of video requests served
@@ -358,40 +383,40 @@ func RecordVideoBillingSkipped() {
 	VideoBillingSkippedTotal.Inc()
 }
 
-
-// RecordWhitelistRequest increments the whitelist request counter for the given service type.
-func RecordWhitelistRequest(serviceType string) {
+// RecordWhitelistRequest increments the whitelist request counter for the given
+// service type and model.
+func RecordWhitelistRequest(serviceType, model string) {
 	if WhitelistRequestsTotal == nil {
 		return
 	}
-	WhitelistRequestsTotal.WithLabelValues(serviceType).Inc()
+	WhitelistRequestsTotal.WithLabelValues(serviceType, model).Inc()
 }
 
 // RecordWhitelistTokens increments the whitelist input and output token counters.
-func RecordWhitelistTokens(serviceType string, inputTokens, outputTokens int64) {
+func RecordWhitelistTokens(serviceType, model string, inputTokens, outputTokens int64) {
 	if WhitelistInputTokensTotal == nil || WhitelistOutputTokensTotal == nil {
 		return
 	}
 	if inputTokens > 0 {
-		WhitelistInputTokensTotal.WithLabelValues(serviceType).Add(float64(inputTokens))
+		WhitelistInputTokensTotal.WithLabelValues(serviceType, model).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		WhitelistOutputTokensTotal.WithLabelValues(serviceType).Add(float64(outputTokens))
+		WhitelistOutputTokensTotal.WithLabelValues(serviceType, model).Add(float64(outputTokens))
 	}
 }
 
 // RecordTPS records the per-request output tokens per second as a histogram observation.
-func RecordTPS(serviceType string, tps float64) {
+func RecordTPS(serviceType, model string, tps float64) {
 	if TokensPerSecond == nil || tps <= 0 {
 		return
 	}
-	TokensPerSecond.WithLabelValues(serviceType).Observe(tps)
+	TokensPerSecond.WithLabelValues(serviceType, model).Observe(tps)
 }
 
 // RecordTPSFromContext calculates TPS from the request start time stored in context
 // and records it. This is a convenience wrapper combining start-time extraction,
 // duration calculation, and TPS recording.
-func RecordTPSFromContext(ctx context.Context, serviceType string, outputTokens int64) {
+func RecordTPSFromContext(ctx context.Context, serviceType, model string, outputTokens int64) {
 	if outputTokens <= 0 {
 		return
 	}
@@ -401,6 +426,6 @@ func RecordTPSFromContext(ctx context.Context, serviceType string, outputTokens 
 	}
 	duration := time.Since(startTime).Seconds()
 	if duration > 0 {
-		RecordTPS(serviceType, float64(outputTokens)/duration)
+		RecordTPS(serviceType, model, float64(outputTokens)/duration)
 	}
 }
