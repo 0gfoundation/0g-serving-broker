@@ -56,13 +56,19 @@ var (
 // PrometheusInit registers all broker metrics. serverName (the ServingURL)
 // and providerAddress (the provider's on-chain address, as registered in the
 // serving contract) are stamped on every series as const labels, so a series
-// is identified by (provider, server, ...) — the same (address, endpoint)
-// identity the router's providers catalog is keyed by, immune to URL reuse.
+// is identified by (provider_address, server, ...) — the same
+// (address, endpoint) identity the router's providers catalog is keyed by,
+// immune to URL reuse.
+//
+// The label is provider_address, NOT provider: deployments already attach a
+// `provider` external label carrying the human-readable deployment nickname
+// (deploy/phala/*/your-prometheus.yml), and a series-level label with the
+// same name would override it and break provider-grouped ops dashboards.
 func PrometheusInit(serverName, providerAddress string) {
 	if serverName == "" {
 		panic("server name must be provided")
 	}
-	constLabels := prometheus.Labels{"server": serverName, "provider": providerAddress}
+	constLabels := prometheus.Labels{"server": serverName, "provider_address": providerAddress}
 
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{

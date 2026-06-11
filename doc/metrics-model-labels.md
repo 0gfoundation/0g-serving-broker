@@ -9,9 +9,11 @@ Every metric carries two **const labels** stamped at startup (`monitor.Prometheu
 | label | value | source |
 |---|---|---|
 | `server` | ServingURL | `config.Service.ServingURL` |
-| `provider` | provider's on-chain address | wallet-derived (`contract.ProviderAddress`) |
+| `provider_address` | provider's on-chain address | wallet-derived (`contract.ProviderAddress`) |
 
-`(provider, server)` mirrors the `(address, endpoint)` identity the router's providers catalog is keyed by, so attribution survives URL reuse/re-pointing (which has corrupted URL-only attribution before).
+`(provider_address, server)` mirrors the `(address, endpoint)` identity the router's providers catalog is keyed by, so attribution survives URL reuse/re-pointing (which has corrupted URL-only attribution before).
+
+The label is deliberately NOT named `provider`: deployments already attach a `provider` **external label** carrying the human-readable deployment nickname (`deploy/phala/*/your-prometheus.yml`, e.g. `glm-openrouter`), used by provider-grouped ops dashboards. A series-level label with the same name would silently override it.
 
 Usage metrics additionally carry a **dynamic `model` label**, set per request:
 
@@ -46,4 +48,4 @@ Note the upgrade itself switches single-model deployments' series label value fr
 | Multi-model provider renames one allowlist model id | `modelPricing` entry update; metrics switch automatically | Same as above |
 | Broker-declared `canonical_id` changes (service-level or per-model) | config update; router's `providers.canonical_id` follows on its next sync | **Must ship together with the matching router `models.yaml` entry.** The broker-declared canonical is preferred over the router's own resolution, so a canonical the router registry doesn't know produces a dangling id with no `/v1/models` metadata |
 
-The `provider` const label is what keeps renames auditable: old and new series share `(provider, server)`, so token totals can be reconciled across the rename without relying on the name.
+The `provider_address` const label is what keeps renames auditable: old and new series share `(provider_address, server)`, so token totals can be reconciled across the rename without relying on the name.
