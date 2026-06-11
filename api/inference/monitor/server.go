@@ -374,8 +374,8 @@ func TrackMetrics() gin.HandlerFunc {
 }
 
 // RecordTokens increments the cumulative input and output token counters.
-// model is the per-request model id ("" lets a deployment-level external
-// label backfill — see CtxKeyResolvedModel).
+// model is the per-request BOUNDED model label ("" lets a deployment-level
+// external label backfill — see CtxKeyMetricModel).
 func RecordTokens(serviceType, model string, inputTokens, outputTokens int64) {
 	if InputTokensTotal == nil || OutputTokensTotal == nil {
 		return

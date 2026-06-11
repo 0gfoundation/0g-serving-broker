@@ -348,28 +348,50 @@ type BillingPrices struct {
 // across files. The definition lives in monitor (the lowest common package).
 const CtxKeyResolvedModel = monitor.CtxKeyResolvedModel
 
-// metricModel returns the model id to attach to Prometheus metrics for this
-// request: the validated per-request model when the request path recorded one
-// under CtxKeyResolvedModel (multi-model allowlist / single-model rewrite),
-// else the service's configured model. Both forms are on-chain model ids, the
-// same namespace the router's providers catalog is keyed by.
-//
-// Cardinality bound: on a wildcard (serve-all) deployment the allowlist
-// admits ARBITRARY user strings into CtxKeyResolvedModel; those collapse to
-// the "*" label so users can never mint unbounded series. Only
-// operator-enumerated ids pass through verbatim.
+// boundedModelLabel folds a model id into the bounded metric-label set —
+// {enumerated pricing ids} ∪ {configured ModelType, "*"} — the SINGLE place
+// the bound is defined; metricModel and WhitelistMetricModel both delegate
+// here so the request counter and the token counters can never disagree on
+// what the bound is. validated says the id already passed allowlist
+// validation (resolved-model path); unvalidated ids nothing admits fold to
+// the configured model (the request will be rejected).
+func (c *Ctrl) boundedModelLabel(m string, validated bool) string {
+	if !c.Service.HasMultiModelPricing() {
+		// Single-model deployment: exactly one model exists. The resolved
+		// value is always ModelType today; anything else would be a bug
+		// upstream — fold it rather than mint a series.
+		return c.Service.ModelType
+	}
+	// The configured model is always part of the bounded set even when it
+	// is admitted only via the wildcard entry (config permits that) —
+	// collapsing the deployment's own default model to "*" loses its
+	// attribution for no gain.
+	if m == c.Service.ModelType || c.Service.HasExactModelPricing(m) {
+		return m
+	}
+	if m != "" && (validated || c.Service.IsModelAllowed(m)) {
+		return config.ModelWildcard
+	}
+	return c.Service.ModelType
+}
+
+// metricModel returns the BOUNDED model label for this request's metrics.
+// After PrepareHTTPRequest stamps monitor.CtxKeyMetricModel, that value is
+// authoritative (memoized): every reader — TrackMetrics and all Record*
+// sites — shares ONE value, so a hypothetical post-stamp mutation of
+// CtxKeyResolvedModel can never desync requests_total from the token
+// counters. Before the stamp (or on a bare context) it derives the label
+// from the validated CtxKeyResolvedModel via boundedModelLabel.
 func (c *Ctrl) metricModel(ctx context.Context) string {
 	if ginCtx, ok := ctx.(*gin.Context); ok {
+		if v, exists := ginCtx.Get(monitor.CtxKeyMetricModel); exists {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
 		if v, exists := ginCtx.Get(CtxKeyResolvedModel); exists {
 			if s, ok := v.(string); ok && s != "" {
-				// The configured model is always part of the bounded set even
-				// when it is admitted only via the wildcard entry (config
-				// permits that) — collapsing the deployment's own default
-				// model to "*" would lose its attribution for no gain.
-				if !c.Service.HasMultiModelPricing() || s == c.Service.ModelType || c.Service.HasExactModelPricing(s) {
-					return s
-				}
-				return config.ModelWildcard
+				return c.boundedModelLabel(s, true)
 			}
 		}
 	}
@@ -382,26 +404,14 @@ func (c *Ctrl) metricModel(ctx context.Context) string {
 	return c.Service.ModelType
 }
 
-// WhitelistMetricModel derives a BOUNDED model label for the whitelist
-// request counters, which record before model resolution runs: the
-// body-extracted model when it is an operator-enumerated pricing entry, "*"
-// when only the wildcard admits it, else the configured on-chain model
-// (single-model providers always label with the configured model, matching
-// what metricModel yields for the same request's token counters). Raw user
-// input must never reach a label value — bounded set: enumerated ids, "*",
-// ModelType.
+// WhitelistMetricModel derives the bounded label for the whitelist request
+// counters, which record before model resolution runs: body-extracted model
+// folded through boundedModelLabel (unvalidated). Raw user input must never
+// reach a label value. NOTE: requests later rejected by the allowlist are
+// still counted, folded to the configured model — documented in
+// doc/metrics-model-labels.md.
 func (c *Ctrl) WhitelistMetricModel(reqBody []byte, contentType string) string {
-	if c.Service.HasMultiModelPricing() {
-		if m := ExtractModelName(reqBody, contentType); m != "" {
-			if m == c.Service.ModelType || c.Service.HasExactModelPricing(m) {
-				return m
-			}
-			if c.Service.IsModelAllowed(m) {
-				return config.ModelWildcard
-			}
-		}
-	}
-	return c.Service.ModelType
+	return c.boundedModelLabel(ExtractModelName(reqBody, contentType), false)
 }
 
 // GetBillingPrices resolves the correct input and output prices for billing.

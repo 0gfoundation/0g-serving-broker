@@ -102,6 +102,14 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// edge reaches it, resolving to the default model — same as
 	// ValidateModelAllowlist's own empty-body branch).
 	if _, exists := ctx.Get(CtxKeyResolvedModel); !exists {
+		// On a multi-model provider every non-empty-body request should have
+		// been resolved or rejected above — reaching the default there means
+		// a modality is missing its resolution path. Keep the tripwire loud:
+		// pre-default this condition produced a per-request ERROR (billing
+		// at on-chain max); the default must not convert it to silence.
+		if c.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+			c.logger.Errorf("PrepareHTTPRequest: resolvedModel unset on a multi-model provider (svcType=%s); defaulting to %q — this service type may be missing a resolution path", svcType, c.Service.ModelType)
+		}
 		ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 	}
 

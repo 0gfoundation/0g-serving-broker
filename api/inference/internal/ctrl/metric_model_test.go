@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // TestMetricModel locks the metric-label resolution chain and its cardinality
@@ -71,6 +72,57 @@ func TestMetricModel(t *testing.T) {
 	}
 	if got := wildOnly.WhitelistMetricModel([]byte(`{"model":"qwen-default"}`), "application/json"); got != "qwen-default" {
 		t.Errorf("wildcard-only whitelist: configured model = %q, want qwen-default", got)
+	}
+}
+
+// TestMetricModel_MemoizesStampedKey: after PrepareHTTPRequest stamps
+// monitor.CtxKeyMetricModel, that value is authoritative — a later mutation
+// of CtxKeyResolvedModel must not desync the label.
+func TestMetricModel_MemoizesStampedKey(t *testing.T) {
+	c := &Ctrl{
+		logger: testLogger(),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{
+			{Model: "qwen-max", InputPrice: "160", OutputPrice: "640"},
+		}, "qwen-max"),
+	}
+	ctx := ginCtxWithResolvedModel("qwen-max")
+	ctx.Set(monitor.CtxKeyMetricModel, "stamped-value")
+	if got := c.metricModel(ctx); got != "stamped-value" {
+		t.Errorf("metricModel = %q, want the stamped value", got)
+	}
+}
+
+// TestBoundedModelLabel locks the single fold definition both helpers share.
+func TestBoundedModelLabel(t *testing.T) {
+	multi := &Ctrl{
+		logger: testLogger(),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{
+			{Model: "qwen-max", InputPrice: "160", OutputPrice: "640"},
+			{Model: "*", InputPrice: "200", OutputPrice: "800"},
+		}, "qwen-default"),
+	}
+	single := &Ctrl{logger: testLogger(), Service: config.Service{ModelType: "glm-5"}}
+
+	cases := []struct {
+		name      string
+		c         *Ctrl
+		m         string
+		validated bool
+		want      string
+	}{
+		{"single-model always folds to configured (even junk)", single, "junk-value", true, "glm-5"},
+		{"enumerated id verbatim", multi, "qwen-max", true, "qwen-max"},
+		{"configured model exempt from collapse", multi, "qwen-default", true, "qwen-default"},
+		{"validated wildcard-admitted folds to *", multi, "user/string", true, "*"},
+		{"unvalidated wildcard-admitted folds to *", multi, "user/string", false, "*"},
+		{"empty folds to configured", multi, "", false, "qwen-default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.c.boundedModelLabel(tc.m, tc.validated); got != tc.want {
+				t.Errorf("boundedModelLabel(%q, %v) = %q, want %q", tc.m, tc.validated, got, tc.want)
+			}
+		})
 	}
 }
 

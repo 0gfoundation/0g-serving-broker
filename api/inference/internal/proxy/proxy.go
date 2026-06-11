@@ -505,6 +505,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// these counters record before allowlist validation, and raw user
 		// strings as label values are an unbounded-cardinality vector.
 		monitor.RecordWhitelistRequest(svcType, p.ctrl.WhitelistMetricModel(reqBody, ctx.Request.Header.Get("Content-Type")))
+		// Raw on purpose: the DB row records the user-requested id verbatim;
+		// only the metric label above goes through the bounded fold.
 		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 		if modelName == "" {
 			modelName = p.ctrl.Service.ModelType
