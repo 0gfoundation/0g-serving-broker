@@ -383,6 +383,19 @@ func (s *Service) ServedViaWildcard(model string) bool {
 	return wild
 }
 
+// HasExactModelPricing reports whether model has its OWN enumerated pricing
+// entry — the wildcard ("*") entry does NOT count. Metrics use this to keep
+// label values bounded to operator-enumerated ids: on a serve-all (wildcard)
+// deployment IsModelAllowed admits arbitrary user strings, which must never
+// become Prometheus label values (unbounded series).
+func (s *Service) HasExactModelPricing(model string) bool {
+	if model == ModelWildcard {
+		return false
+	}
+	_, ok := s.modelPricingMap[model]
+	return ok
+}
+
 // IsModelAllowed returns true if the model is in the pricing allowlist.
 // Always returns true if multi-model pricing is not configured, or if a
 // wildcard ("*") entry is present (serve-all mode).

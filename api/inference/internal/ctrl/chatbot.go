@@ -445,9 +445,10 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	if isWhitelisted {
 		if chunk.Usage != nil {
 			*usage = chunk.Usage
-			monitor.RecordTokens("chatbot", int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
-			monitor.RecordWhitelistTokens("chatbot", int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
-			monitor.RecordTPSFromContext(ctx, "chatbot", int64(chunk.Usage.CompletionTokens))
+			metricModel := c.metricModel(ctx)
+			monitor.RecordTokens("chatbot", metricModel, int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
+			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
+			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(chunk.Usage.CompletionTokens))
 		}
 		return nil
 	}
@@ -614,8 +615,9 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	}
 
 	// Record token metrics
-	monitor.RecordTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
-	monitor.RecordTPSFromContext(ctx, "chatbot", int64(usage.CompletionTokens))
+	metricModel := c.metricModel(ctx)
+	monitor.RecordTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
+	monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(usage.CompletionTokens))
 
 	// Update TPM limiter with actual token consumption
 	if ginCtx, ok := ctx.(*gin.Context); ok {
@@ -661,8 +663,9 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 	}
 
 	// Record token metrics (estimated output tokens only, no input token data in fallback path)
-	monitor.RecordTokens("chatbot", 0, outputCount)
-	monitor.RecordTPSFromContext(ctx, "chatbot", outputCount)
+	metricModel := c.metricModel(ctx)
+	monitor.RecordTokens("chatbot", metricModel, 0, outputCount)
+	monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, outputCount)
 
 	// Update TPM limiter with estimated token consumption (fallback path)
 	if ginCtx, ok := ctx.(*gin.Context); ok {
@@ -794,9 +797,10 @@ func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usa
 	// Skip billing for whitelisted users, but still record token metrics.
 	if isWhitelisted {
 		if usage != nil {
-			monitor.RecordTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
-			monitor.RecordWhitelistTokens("chatbot", int64(usage.PromptTokens), int64(usage.CompletionTokens))
-			monitor.RecordTPSFromContext(ctx, "chatbot", int64(usage.CompletionTokens))
+			metricModel := c.metricModel(ctx)
+			monitor.RecordTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
+			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
+			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(usage.CompletionTokens))
 		}
 		return nil
 	}

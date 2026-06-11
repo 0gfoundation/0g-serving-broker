@@ -264,8 +264,9 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// Whitelist traffic is unbilled; record metrics only (same response→request fallback).
 		if sec, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); source != "" {
 			outputCount := c.videoOutputUnits(ctx, sec, size)
-			monitor.RecordTokens("video-generation", 0, outputCount)
-			monitor.RecordWhitelistTokens("video-generation", 0, outputCount)
+			metricModel := c.metricModel(ctx)
+			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
+			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
 		} else {
 			c.logger.Warnf("whitelist video: no usable seconds in response or request, skipping metrics for %s", reqModel.RequestHash)
 		}
@@ -301,7 +302,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return errors.Wrap(err, "update request fees and count in database")
 	}
 
-	monitor.RecordTokens("video-generation", 0, outputCount)
+	monitor.RecordTokens("video-generation", c.metricModel(ctx), 0, outputCount)
 	return nil
 }
 

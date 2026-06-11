@@ -60,24 +60,6 @@ func Main() {
 
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 
-	if config.Monitor.Enable {
-		monitor.PrometheusInit(config.Service.ServingURL)
-		monitor.StartDAUUpdater(monitorCtx, db.CountUniqueUsersLast24h, 1*time.Minute, logger)
-		monitor.StartAllTimeStatsUpdater(monitorCtx, func() (monitor.TotalStatsResult, error) {
-			s, err := db.GetCombinedTotalStats()
-			if err != nil {
-				return monitor.TotalStatsResult{}, err
-			}
-			return monitor.TotalStatsResult{
-				TotalRequests:     s.TotalRequests,
-				TotalInputTokens:  s.TotalInputTokens,
-				TotalOutputTokens: s.TotalOutputTokens,
-				TotalUniqueUsers:  s.TotalUniqueUsers,
-			}, nil
-		}, 1*time.Minute, logger)
-		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
-	}
-
 	svcCache := cache.New(5*time.Minute, 10*time.Minute)
 
 	var teeClientType tee.ClientType
@@ -107,6 +89,29 @@ func Main() {
 		panic(err)
 	}
 	defer contract.Close()
+
+	// Metrics are initialised after the contract client so every series can
+	// carry the provider's on-chain address as a const label (it is derived
+	// from the network wallet, which the contract client owns). Nothing
+	// before this point serves traffic: srv.ListenAndServe runs at the end
+	// of Main, and every metric-recording goroutine starts after this block.
+	if config.Monitor.Enable {
+		monitor.PrometheusInit(config.Service.ServingURL, contract.ProviderAddress)
+		monitor.StartDAUUpdater(monitorCtx, db.CountUniqueUsersLast24h, 1*time.Minute, logger)
+		monitor.StartAllTimeStatsUpdater(monitorCtx, func() (monitor.TotalStatsResult, error) {
+			s, err := db.GetCombinedTotalStats()
+			if err != nil {
+				return monitor.TotalStatsResult{}, err
+			}
+			return monitor.TotalStatsResult{
+				TotalRequests:     s.TotalRequests,
+				TotalInputTokens:  s.TotalInputTokens,
+				TotalOutputTokens: s.TotalOutputTokens,
+				TotalUniqueUsers:  s.TotalUniqueUsers,
+			}, nil
+		}, 1*time.Minute, logger)
+		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
 
 	// Build the USD price-feed stack (cache + aggregator) when the provider
 	// is USD-denominated.  The cache is constructed early so Ctrl can hold a

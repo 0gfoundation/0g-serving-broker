@@ -15,6 +15,7 @@ import (
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // ErrPricingUnavailable is returned by GetCachedService when the provider is
@@ -342,9 +343,76 @@ type BillingPrices struct {
 
 // CtxKeyResolvedModel is the gin.Context key under which the request path stores
 // the validated request model id for per-model billing. Shared by the setter
-// (PrepareHTTPRequest / ValidateModelAllowlist) and the reader (GetBillingPrices)
-// so this billing-critical key cannot drift via a typo across files.
-const CtxKeyResolvedModel = "resolvedModel"
+// (PrepareHTTPRequest / ValidateModelAllowlist) and the readers (GetBillingPrices,
+// monitor.TrackMetrics) so this billing-critical key cannot drift via a typo
+// across files. The definition lives in monitor (the lowest common package).
+const CtxKeyResolvedModel = monitor.CtxKeyResolvedModel
+
+// boundedModelLabel folds a model id into the bounded metric-label set —
+// {enumerated pricing ids} ∪ {configured ModelType, "*"} — the SINGLE place
+// the bound is defined; metricModel and WhitelistMetricModel both delegate
+// here so the request counter and the token counters can never disagree on
+// what the bound is. validated says the id already passed allowlist
+// validation (resolved-model path); unvalidated ids nothing admits fold to
+// the configured model (the request will be rejected).
+func (c *Ctrl) boundedModelLabel(m string, validated bool) string {
+	if !c.Service.HasMultiModelPricing() {
+		// Single-model deployment: exactly one model exists. The resolved
+		// value is always ModelType today; anything else would be a bug
+		// upstream — fold it rather than mint a series.
+		return c.Service.ModelType
+	}
+	// The configured model is always part of the bounded set even when it
+	// is admitted only via the wildcard entry (config permits that) —
+	// collapsing the deployment's own default model to "*" loses its
+	// attribution for no gain.
+	if m == c.Service.ModelType || c.Service.HasExactModelPricing(m) {
+		return m
+	}
+	if m != "" && (validated || c.Service.IsModelAllowed(m)) {
+		return config.ModelWildcard
+	}
+	return c.Service.ModelType
+}
+
+// metricModel returns the BOUNDED model label for this request's metrics.
+// After PrepareHTTPRequest stamps monitor.CtxKeyMetricModel, that value is
+// authoritative (memoized): every reader — TrackMetrics and all Record*
+// sites — shares ONE value, so a hypothetical post-stamp mutation of
+// CtxKeyResolvedModel can never desync requests_total from the token
+// counters. Before the stamp (or on a bare context) it derives the label
+// from the validated CtxKeyResolvedModel via boundedModelLabel.
+func (c *Ctrl) metricModel(ctx context.Context) string {
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		if v, exists := ginCtx.Get(monitor.CtxKeyMetricModel); exists {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+		if v, exists := ginCtx.Get(CtxKeyResolvedModel); exists {
+			if s, ok := v.(string); ok && s != "" {
+				return c.boundedModelLabel(s, true)
+			}
+		}
+	}
+	// Missing resolvedModel on a multi-model provider is the same broken
+	// invariant resolveModelPricing reports for billing — mislabeling to the
+	// default model must not be silent.
+	if c.Service.HasMultiModelPricing() {
+		c.logger.Errorf("metricModel: resolvedModel missing from context (%T) on a multi-model provider; labeling metrics with default model %q", ctx, c.Service.ModelType)
+	}
+	return c.Service.ModelType
+}
+
+// WhitelistMetricModel derives the bounded label for the whitelist request
+// counters, which record before model resolution runs: body-extracted model
+// folded through boundedModelLabel (unvalidated). Raw user input must never
+// reach a label value. NOTE: requests later rejected by the allowlist are
+// still counted, folded to the configured model — documented in
+// doc/metrics-model-labels.md.
+func (c *Ctrl) WhitelistMetricModel(reqBody []byte, contentType string) string {
+	return c.boundedModelLabel(ExtractModelName(reqBody, contentType), false)
+}
 
 // GetBillingPrices resolves the correct input and output prices for billing.
 // For centralized multi-model providers, reads the resolved model id from the

@@ -501,7 +501,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			logPath = logPath[:idx]
 		}
 		p.logger.Infof("Whitelist user request: user=%s, service=%s, path=%s", userAddress, svcType, logPath)
-		monitor.RecordWhitelistRequest(svcType)
+		// Label from the BOUNDED whitelist helper, never the raw body value:
+		// these counters record before allowlist validation, and raw user
+		// strings as label values are an unbounded-cardinality vector.
+		monitor.RecordWhitelistRequest(svcType, p.ctrl.WhitelistMetricModel(reqBody, ctx.Request.Header.Get("Content-Type")))
+		// Raw on purpose: the DB row records the user-requested id verbatim;
+		// only the metric label above goes through the bounded fold.
+		modelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
+		if modelName == "" {
+			modelName = p.ctrl.Service.ModelType
+		}
 
 		// Create a minimal request model for whitelist user
 		// IsWhitelisted flag will skip billing but preserve response processing (stream handling, signing, etc.)
@@ -512,10 +521,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			ServiceName:   svcType,
 		}
 		whitelistReq.RequestHash = whitelistReq.Nonce
-		whitelistReq.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
-		if whitelistReq.ModelName == "" {
-			whitelistReq.ModelName = p.ctrl.Service.ModelType
-		}
+		whitelistReq.ModelName = modelName
 
 		httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 		if err != nil {

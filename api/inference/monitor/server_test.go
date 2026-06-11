@@ -17,30 +17,30 @@ import (
 // testLogger is a no-op logger for testing.
 type testLogger struct{}
 
-func (testLogger) Debugf(string, ...interface{})   {}
-func (testLogger) Infof(string, ...interface{})     {}
-func (testLogger) Printf(string, ...interface{})    {}
-func (testLogger) Warnf(string, ...interface{})     {}
-func (testLogger) Warningf(string, ...interface{})  {}
-func (testLogger) Errorf(string, ...interface{})    {}
-func (testLogger) Fatalf(string, ...interface{})    {}
-func (testLogger) Panicf(string, ...interface{})    {}
-func (testLogger) Debug(...interface{})             {}
-func (testLogger) Info(...interface{})              {}
-func (testLogger) Print(...interface{})             {}
-func (testLogger) Warn(...interface{})              {}
-func (testLogger) Warning(...interface{})           {}
-func (testLogger) Error(...interface{})             {}
-func (testLogger) Fatal(...interface{})             {}
-func (testLogger) Panic(...interface{})             {}
-func (testLogger) Debugln(...interface{})           {}
-func (testLogger) Infoln(...interface{})            {}
-func (testLogger) Println(...interface{})           {}
-func (testLogger) Warnln(...interface{})            {}
-func (testLogger) Warningln(...interface{})         {}
-func (testLogger) Errorln(...interface{})           {}
-func (testLogger) Fatalln(...interface{})           {}
-func (testLogger) Panicln(...interface{})           {}
+func (testLogger) Debugf(string, ...interface{})       {}
+func (testLogger) Infof(string, ...interface{})        {}
+func (testLogger) Printf(string, ...interface{})       {}
+func (testLogger) Warnf(string, ...interface{})        {}
+func (testLogger) Warningf(string, ...interface{})     {}
+func (testLogger) Errorf(string, ...interface{})       {}
+func (testLogger) Fatalf(string, ...interface{})       {}
+func (testLogger) Panicf(string, ...interface{})       {}
+func (testLogger) Debug(...interface{})                {}
+func (testLogger) Info(...interface{})                 {}
+func (testLogger) Print(...interface{})                {}
+func (testLogger) Warn(...interface{})                 {}
+func (testLogger) Warning(...interface{})              {}
+func (testLogger) Error(...interface{})                {}
+func (testLogger) Fatal(...interface{})                {}
+func (testLogger) Panic(...interface{})                {}
+func (testLogger) Debugln(...interface{})              {}
+func (testLogger) Infoln(...interface{})               {}
+func (testLogger) Println(...interface{})              {}
+func (testLogger) Warnln(...interface{})               {}
+func (testLogger) Warningln(...interface{})            {}
+func (testLogger) Errorln(...interface{})              {}
+func (testLogger) Fatalln(...interface{})              {}
+func (testLogger) Panicln(...interface{})              {}
 func (testLogger) WithFields(logrus.Fields) log.Logger { return testLogger{} }
 func (testLogger) InnerLogger() *logrus.Logger         { return logrus.New() }
 
@@ -51,23 +51,28 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 	registry := prometheus.NewRegistry()
 
 	serverName := t.Name()
+	// Mirror production: PrometheusInit stamps both server and
+	// provider_address as const labels. Keep the helper in lockstep so tests
+	// exercise the same series identity (and so a future label change is
+	// caught here, not only at runtime).
+	constLabels := prometheus.Labels{"server": serverName, "provider_address": "0x" + "0000000000000000000000000000000000000001"}
 
 	InputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_input_tokens_total",
 			Help:        "Cumulative input token count.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	OutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_output_tokens_total",
 			Help:        "Cumulative output token count.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	TokensPerSecond = prometheus.NewHistogramVec(
@@ -75,25 +80,25 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 			Name:        "broker_tokens_per_second",
 			Help:        "Per-request output token generation rate.",
 			Buckets:     []float64{1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500},
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	RequestCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_total",
 			Help:        "Total number of HTTP requests.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"path", "status"},
+		[]string{"path", "status", "model"},
 	)
 
 	ErrorCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_errors_total",
 			Help:        "Total number of error requests.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path", "status"},
 	)
@@ -103,7 +108,7 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 			Name:        "broker_request_duration_seconds",
 			Help:        "Histogram of request latencies.",
 			Buckets:     prometheus.DefBuckets,
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
 		[]string{"path"},
 	)
@@ -112,45 +117,45 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_requests_total",
 			Help:        "Total whitelist requests.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	WhitelistInputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_input_tokens_total",
 			Help:        "Whitelist input tokens.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	WhitelistOutputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_output_tokens_total",
 			Help:        "Whitelist output tokens.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	AudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_audio_seconds_total",
 			Help:        "Audio seconds.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	WhitelistAudioSecondsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_whitelist_audio_seconds_total",
 			Help:        "Whitelist audio seconds.",
-			ConstLabels: prometheus.Labels{"server": serverName},
+			ConstLabels: constLabels,
 		},
-		[]string{"service_type"},
+		[]string{"service_type", "model"},
 	)
 
 	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
@@ -199,7 +204,24 @@ func TestPrometheusInitPanicsOnEmptyName(t *testing.T) {
 			t.Error("PrometheusInit(\"\") did not panic")
 		}
 	}()
-	PrometheusInit("")
+	PrometheusInit("", "0x1234567890abcdef1234567890abcdef12345678")
+}
+
+// TestPrometheusInitPanicsOnBadAddress verifies the provider_address format
+// guard: an empty or malformed address (or swapped arguments — a ServingURL
+// never matches) must panic rather than silently voiding the address label
+// on every series.
+func TestPrometheusInitPanicsOnBadAddress(t *testing.T) {
+	for _, addr := range []string{"", "not-an-address", "https://compute-network-1.example.com", "0x123"} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("PrometheusInit with address %q did not panic", addr)
+				}
+			}()
+			PrometheusInit(t.Name(), addr)
+		}()
+	}
 }
 
 // TestRecordTokens verifies token counter increments for various inputs.
@@ -258,13 +280,13 @@ func TestRecordTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeInput := getCounterValue(InputTokensTotal, tt.serviceType)
-			beforeOutput := getCounterValue(OutputTokensTotal, tt.serviceType)
+			beforeInput := getCounterValue(InputTokensTotal, tt.serviceType, "glm-5")
+			beforeOutput := getCounterValue(OutputTokensTotal, tt.serviceType, "glm-5")
 
-			RecordTokens(tt.serviceType, tt.inputTokens, tt.outputTokens)
+			RecordTokens(tt.serviceType, "glm-5", tt.inputTokens, tt.outputTokens)
 
-			afterInput := getCounterValue(InputTokensTotal, tt.serviceType)
-			afterOutput := getCounterValue(OutputTokensTotal, tt.serviceType)
+			afterInput := getCounterValue(InputTokensTotal, tt.serviceType, "glm-5")
+			afterOutput := getCounterValue(OutputTokensTotal, tt.serviceType, "glm-5")
 
 			inputDelta := afterInput - beforeInput
 			outputDelta := afterOutput - beforeOutput
@@ -286,7 +308,7 @@ func TestRecordTokensNilMetrics(t *testing.T) {
 	defer func() { InputTokensTotal = saved }()
 
 	// Should not panic
-	RecordTokens("chatbot", 100, 50)
+	RecordTokens("chatbot", "glm-5", 100, 50)
 }
 
 // TestRecordAudioSeconds verifies the duration counter increments for positive
@@ -309,9 +331,9 @@ func TestRecordAudioSeconds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			before := getCounterValue(AudioSecondsTotal, tt.serviceType)
-			RecordAudioSeconds(tt.serviceType, tt.seconds)
-			delta := getCounterValue(AudioSecondsTotal, tt.serviceType) - before
+			before := getCounterValue(AudioSecondsTotal, tt.serviceType, "whisper-large-v3")
+			RecordAudioSeconds(tt.serviceType, "whisper-large-v3", tt.seconds)
+			delta := getCounterValue(AudioSecondsTotal, tt.serviceType, "whisper-large-v3") - before
 			if delta != tt.want {
 				t.Errorf("audio seconds delta = %v, want %v", delta, tt.want)
 			}
@@ -327,7 +349,7 @@ func TestRecordAudioSecondsNilMetrics(t *testing.T) {
 	defer func() { AudioSecondsTotal = saved }()
 
 	// Should not panic
-	RecordAudioSeconds("speech_to_text", 100)
+	RecordAudioSeconds("speech_to_text", "whisper-large-v3", 100)
 }
 
 // TestRecordWhitelistAudioSeconds mirrors TestRecordAudioSeconds for the
@@ -335,17 +357,17 @@ func TestRecordAudioSecondsNilMetrics(t *testing.T) {
 func TestRecordWhitelistAudioSeconds(t *testing.T) {
 	setupTestMetrics(t)
 
-	before := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text")
-	RecordWhitelistAudioSeconds("speech_to_text", 207)
-	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text") - before; delta != 207 {
+	before := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3")
+	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", 207)
+	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3") - before; delta != 207 {
 		t.Errorf("whitelist audio seconds delta = %v, want 207", delta)
 	}
 
 	// Zero/negative no-op
-	before = getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text")
-	RecordWhitelistAudioSeconds("speech_to_text", 0)
-	RecordWhitelistAudioSeconds("speech_to_text", -10)
-	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text") - before; delta != 0 {
+	before = getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3")
+	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", 0)
+	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", -10)
+	if delta := getCounterValue(WhitelistAudioSecondsTotal, "speech_to_text", "whisper-large-v3") - before; delta != 0 {
 		t.Errorf("whitelist audio seconds should not increment on non-positive, got delta=%v", delta)
 	}
 }
@@ -356,7 +378,7 @@ func TestRecordWhitelistAudioSecondsNilMetrics(t *testing.T) {
 	defer func() { WhitelistAudioSecondsTotal = saved }()
 
 	// Should not panic
-	RecordWhitelistAudioSeconds("speech_to_text", 100)
+	RecordWhitelistAudioSeconds("speech_to_text", "whisper-large-v3", 100)
 }
 
 // TestRecordTPS verifies TPS histogram recording for various inputs.
@@ -391,11 +413,11 @@ func TestRecordTPS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeCount := getHistogramCount(TokensPerSecond, tt.serviceType)
+			beforeCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5")
 
-			RecordTPS(tt.serviceType, tt.tps)
+			RecordTPS(tt.serviceType, "glm-5", tt.tps)
 
-			afterCount := getHistogramCount(TokensPerSecond, tt.serviceType)
+			afterCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5")
 			recorded := afterCount > beforeCount
 
 			if recorded != tt.wantRecord {
@@ -412,7 +434,7 @@ func TestRecordTPSNilMetrics(t *testing.T) {
 	defer func() { TokensPerSecond = saved }()
 
 	// Should not panic
-	RecordTPS("chatbot", 42.5)
+	RecordTPS("chatbot", "glm-5", 42.5)
 }
 
 // TestRecordTPSFromContext verifies TPS calculation from context start time.
@@ -488,12 +510,12 @@ func TestRecordTPSFromContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeCount := getHistogramCount(TokensPerSecond, tt.serviceType)
+			beforeCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5")
 
 			ctx := tt.setupCtx()
-			RecordTPSFromContext(ctx, tt.serviceType, tt.outputTokens)
+			RecordTPSFromContext(ctx, tt.serviceType, "glm-5", tt.outputTokens)
 
-			afterCount := getHistogramCount(TokensPerSecond, tt.serviceType)
+			afterCount := getHistogramCount(TokensPerSecond, tt.serviceType, "glm-5")
 			recorded := afterCount > beforeCount
 
 			if recorded != tt.wantRecord {
@@ -514,11 +536,11 @@ func TestRecordTPSFromContextCalculation(t *testing.T) {
 	// Set start time 2 seconds ago
 	c.Set(RequestStartTimeKey, time.Now().Add(-2*time.Second))
 
-	beforeSum := getHistogramSum(TokensPerSecond, "chatbot")
+	beforeSum := getHistogramSum(TokensPerSecond, "chatbot", "glm-5")
 
-	RecordTPSFromContext(c, "chatbot", 100)
+	RecordTPSFromContext(c, "chatbot", "glm-5", 100)
 
-	afterSum := getHistogramSum(TokensPerSecond, "chatbot")
+	afterSum := getHistogramSum(TokensPerSecond, "chatbot", "glm-5")
 	observedTPS := afterSum - beforeSum
 
 	// With 100 tokens over ~2 seconds, TPS should be approximately 50
@@ -608,13 +630,13 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 	})
 
 	t.Run("successful request increments counter", func(t *testing.T) {
-		beforeCount := getCounterValue(RequestCount, "/api/test", "OK")
+		beforeCount := getCounterValue(RequestCount, "/api/test", "OK", "")
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		engine.ServeHTTP(w, req)
 
-		afterCount := getCounterValue(RequestCount, "/api/test", "OK")
+		afterCount := getCounterValue(RequestCount, "/api/test", "OK", "")
 		if afterCount-beforeCount != 1 {
 			t.Errorf("request count delta = %v, want 1", afterCount-beforeCount)
 		}
@@ -630,6 +652,47 @@ func TestTrackMetricsRecordsRequestMetrics(t *testing.T) {
 		afterCount := getCounterValue(ErrorCount, "/api/error", "Internal Server Error")
 		if afterCount-beforeCount != 1 {
 			t.Errorf("error count delta = %v, want 1", afterCount-beforeCount)
+		}
+	})
+
+	t.Run("request counter carries the bounded metric model", func(t *testing.T) {
+		engine.GET("/api/model", func(c *gin.Context) {
+			c.Set(CtxKeyMetricModel, "glm-5")
+			c.Status(http.StatusOK)
+		})
+
+		before := getCounterValue(RequestCount, "/api/model", "OK", "glm-5")
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/model", nil)
+		engine.ServeHTTP(w, req)
+
+		if delta := getCounterValue(RequestCount, "/api/model", "OK", "glm-5") - before; delta != 1 {
+			t.Errorf("request count delta for bounded model = %v, want 1", delta)
+		}
+	})
+
+	t.Run("raw resolvedModel never reaches the request counter label", func(t *testing.T) {
+		// On wildcard deployments CtxKeyResolvedModel carries RAW user
+		// strings; TrackMetrics must read only the bounded CtxKeyMetricModel
+		// (here deliberately unset -> empty label), never the raw key.
+		engine.GET("/api/raw", func(c *gin.Context) {
+			c.Set(CtxKeyResolvedModel, "attacker/minted-model-string")
+			c.Status(http.StatusOK)
+		})
+
+		beforeRaw := getCounterValue(RequestCount, "/api/raw", "OK", "attacker/minted-model-string")
+		beforeEmpty := getCounterValue(RequestCount, "/api/raw", "OK", "")
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/raw", nil)
+		engine.ServeHTTP(w, req)
+
+		if delta := getCounterValue(RequestCount, "/api/raw", "OK", "attacker/minted-model-string") - beforeRaw; delta != 0 {
+			t.Errorf("raw resolvedModel leaked into the request counter label (delta=%v)", delta)
+		}
+		if delta := getCounterValue(RequestCount, "/api/raw", "OK", "") - beforeEmpty; delta != 1 {
+			t.Errorf("expected the empty bounded label, delta = %v, want 1", delta)
 		}
 	})
 
@@ -698,11 +761,11 @@ func TestRecordWhitelistRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			before := getCounterValue(WhitelistRequestsTotal, tt.serviceType)
+			before := getCounterValue(WhitelistRequestsTotal, tt.serviceType, "glm-5")
 			for i := 0; i < tt.calls; i++ {
-				RecordWhitelistRequest(tt.serviceType)
+				RecordWhitelistRequest(tt.serviceType, "glm-5")
 			}
-			after := getCounterValue(WhitelistRequestsTotal, tt.serviceType)
+			after := getCounterValue(WhitelistRequestsTotal, tt.serviceType, "glm-5")
 			if delta := after - before; delta != tt.wantDelta {
 				t.Errorf("whitelist requests delta = %v, want %v", delta, tt.wantDelta)
 			}
@@ -716,7 +779,7 @@ func TestRecordWhitelistRequestNilMetrics(t *testing.T) {
 	WhitelistRequestsTotal = nil
 	defer func() { WhitelistRequestsTotal = saved }()
 
-	RecordWhitelistRequest("chatbot") // should not panic
+	RecordWhitelistRequest("chatbot", "glm-5") // should not panic
 }
 
 // TestRecordWhitelistTokens verifies the whitelist token counters.
@@ -767,13 +830,13 @@ func TestRecordWhitelistTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			beforeInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType)
-			beforeOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType)
+			beforeInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType, "glm-5")
+			beforeOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType, "glm-5")
 
-			RecordWhitelistTokens(tt.serviceType, tt.inputTokens, tt.outputTokens)
+			RecordWhitelistTokens(tt.serviceType, "glm-5", tt.inputTokens, tt.outputTokens)
 
-			afterInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType)
-			afterOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType)
+			afterInput := getCounterValue(WhitelistInputTokensTotal, tt.serviceType, "glm-5")
+			afterOutput := getCounterValue(WhitelistOutputTokensTotal, tt.serviceType, "glm-5")
 
 			if delta := afterInput - beforeInput; delta != tt.wantInputIncrement {
 				t.Errorf("whitelist input tokens delta = %v, want %v", delta, tt.wantInputIncrement)
@@ -791,5 +854,5 @@ func TestRecordWhitelistTokensNilMetrics(t *testing.T) {
 	WhitelistInputTokensTotal = nil
 	defer func() { WhitelistInputTokensTotal = saved }()
 
-	RecordWhitelistTokens("chatbot", 100, 50) // should not panic
+	RecordWhitelistTokens("chatbot", "glm-5", 100, 50) // should not panic
 }

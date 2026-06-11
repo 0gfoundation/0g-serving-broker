@@ -46,6 +46,10 @@ func (m *mockAsyncCtrl) ValidateSession(ctx *gin.Context) (string, error) {
 	return m.sessionUser, m.sessionErr
 }
 
+func (m *mockAsyncCtrl) WhitelistMetricModel(reqBody []byte, contentType string) string {
+	return "mock-model"
+}
+
 func (m *mockAsyncCtrl) IsWhitelistedUser(userAddress string) bool {
 	return m.whitelistUser
 }
