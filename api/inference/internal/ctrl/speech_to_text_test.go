@@ -533,6 +533,189 @@ func TestCalcTokenFees_BadPrice(t *testing.T) {
 }
 
 // ==========================================================================
+// Non-JSON / usage-less response_format recovery
+//
+// whisper supports response_format=json/verbose_json/text/srt/vtt, but only
+// json reliably carries a usage block. Before this recovery existed,
+// verbose_json (usage absent on some providers), srt, vtt and text all fell
+// through to the word-count fallback, which bills OutputPrice × estimate —
+// 0 for whisper services, whose per-second price lives in InputPrice. srt
+// and vtt carry a timeline, verbose_json carries a top-level duration field;
+// both are recovered into a duration usage. Plain text stays on the
+// fallback (no timing signal).
+// ==========================================================================
+
+func TestSubtitleDurationSeconds(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantSeconds float64
+		wantOK      bool
+	}{
+		{
+			"srt two cues",
+			"1\r\n00:00:00,000 --> 00:00:04,000\r\nHello there.\r\n\r\n2\r\n00:00:04,500 --> 00:03:27,250\r\nGeneral Kenobi.\r\n",
+			207.25, true,
+		},
+		{
+			"vtt with header",
+			"WEBVTT\n\n00:00.000 --> 00:04.000\nHello there.\n\n00:04.500 --> 03:27.500\nGeneral Kenobi.\n",
+			207.5, true,
+		},
+		{
+			"vtt hour form with cue settings",
+			"WEBVTT\n\n01:00:00.000 --> 01:00:05.000 align:start position:0%\nstill going\n",
+			3605, true,
+		},
+		{"plain text", "Hello there. General Kenobi.", 0, false},
+		{"empty", "", 0, false},
+		{
+			// A transcript that merely mentions an arrow must not bill: the
+			// text after "-->" is not a parseable timestamp.
+			"arrow in prose",
+			"the sign said exit --> turn left here",
+			0, false,
+		},
+		{
+			// Malformed cue line: parser rejects rather than guessing.
+			"garbage timestamp",
+			"1\n00:00:00,000 --> not:a:time\nwords\n",
+			0, false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := subtitleDurationSeconds(tt.body)
+			if ok != tt.wantOK || got != tt.wantSeconds {
+				t.Errorf("subtitleDurationSeconds() = (%v, %v), want (%v, %v)",
+					got, ok, tt.wantSeconds, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestParseSubtitleTimestamp(t *testing.T) {
+	tests := []struct {
+		name        string
+		ts          string
+		wantSeconds float64
+		wantOK      bool
+	}{
+		{"srt comma millis", "00:03:27,250", 207.25, true},
+		{"vtt dot millis", "00:03:27.250", 207.25, true},
+		{"vtt short form", "03:27.500", 207.5, true},
+		{"hours", "01:00:05.000", 3605, true},
+		{"zero is not billable", "00:00:00,000", 0, false},
+		{"single component", "207", 0, false},
+		{"four components", "01:02:03:04", 0, false},
+		{"negative component", "00:-1:00", 0, false},
+		// strconv.ParseFloat accepts "Inf"/"NaN"; the parser must not let a
+		// non-finite component reach billableSeconds' int conversion.
+		{"infinite component", "00:00:Inf", 0, false},
+		{"nan component", "00:NaN:00", 0, false},
+		{"empty", "", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseSubtitleTimestamp(tt.ts)
+			if ok != tt.wantOK || got != tt.wantSeconds {
+				t.Errorf("parseSubtitleTimestamp(%q) = (%v, %v), want (%v, %v)",
+					tt.ts, got, ok, tt.wantSeconds, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestEffectiveUsage pins the verbose_json recovery rule: a billable usage
+// block always wins; otherwise the top-level duration field is promoted to
+// a synthetic duration usage; with neither, the original (possibly nil)
+// usage passes through so hasBillableUsage routes to the fallback.
+func TestEffectiveUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		resp SpeechToTextResponse
+		want *SpeechToTextUsage
+	}{
+		{
+			"billable usage wins over duration field",
+			SpeechToTextResponse{
+				Duration: 99,
+				Usage:    &SpeechToTextUsage{Type: "duration", Seconds: 207},
+			},
+			&SpeechToTextUsage{Type: "duration", Seconds: 207},
+		},
+		{
+			"token usage wins over duration field",
+			SpeechToTextResponse{
+				Duration: 99,
+				Usage:    &SpeechToTextUsage{Type: "tokens", InputTokens: 149},
+			},
+			&SpeechToTextUsage{Type: "tokens", InputTokens: 149},
+		},
+		{
+			"verbose_json without usage promotes duration",
+			SpeechToTextResponse{Duration: 207.25},
+			&SpeechToTextUsage{Type: "duration", Seconds: 207.25},
+		},
+		{
+			"unbillable usage with duration field promotes duration",
+			SpeechToTextResponse{Duration: 30, Usage: &SpeechToTextUsage{Type: "duration"}},
+			&SpeechToTextUsage{Type: "duration", Seconds: 30},
+		},
+		{
+			"nothing billable passes through",
+			SpeechToTextResponse{Text: "hello"},
+			nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := effectiveUsage(&tt.resp)
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("effectiveUsage() = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil || *got != *tt.want {
+				t.Errorf("effectiveUsage() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSpeechToTextResponse_DecodeVerboseJSON guards the Duration JSON tag.
+// verbose_json carries duration at the top level (a float, e.g. 8.47), not
+// inside usage — if the tag drifts, verbose_json responses without a usage
+// block quietly return to the 0-fee fallback.
+func TestSpeechToTextResponse_DecodeVerboseJSON(t *testing.T) {
+	raw := []byte(`{
+		"task": "transcribe",
+		"language": "english",
+		"duration": 8.47,
+		"text": "Hello there.",
+		"segments": [{"id": 0, "start": 0.0, "end": 8.47, "text": "Hello there."}]
+	}`)
+	var resp SpeechToTextResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal verbose_json response: %v", err)
+	}
+	if resp.Duration != 8.47 {
+		t.Errorf("Duration = %v, want 8.47", resp.Duration)
+	}
+	if resp.Usage != nil {
+		t.Errorf("Usage = %+v, want nil", resp.Usage)
+	}
+	got := effectiveUsage(&resp)
+	if got == nil || !isDurationUsage(got) || got.Seconds != 8.47 {
+		t.Errorf("effectiveUsage() = %+v, want duration usage with Seconds=8.47", got)
+	}
+}
+
+// ==========================================================================
 // isSpeechToTextStream
 //
 // Driven entirely off the raw multipart request body — must not confuse

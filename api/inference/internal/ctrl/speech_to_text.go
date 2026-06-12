@@ -11,6 +11,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
@@ -131,10 +133,32 @@ type SpeechToTextTokenDetails struct {
 	AudioTokens int `json:"audio_tokens"`
 }
 
-// SpeechToTextResponse represents the transcription response
+// SpeechToTextResponse represents the transcription response.
+//
+// Duration is the top-level audio length in seconds that verbose_json
+// responses (whisper family) carry alongside text/segments. Some providers
+// emit verbose_json without a usage block at all, so Duration is the only
+// billing signal in that shape — see effectiveUsage.
 type SpeechToTextResponse struct {
-	Text  string             `json:"text"`
-	Usage *SpeechToTextUsage `json:"usage,omitempty"`
+	Text     string             `json:"text"`
+	Duration float64            `json:"duration"`
+	Usage    *SpeechToTextUsage `json:"usage,omitempty"`
+}
+
+// effectiveUsage returns the usage block to bill against. When the response
+// carries no billable usage but verbose_json's top-level duration field is
+// populated, synthesizes a duration usage from it so the request doesn't
+// fall through to the word-count fallback — which bills
+// OutputPrice × estimate, i.e. 0 for whisper services where the per-second
+// price lives in InputPrice.
+func effectiveUsage(resp *SpeechToTextResponse) *SpeechToTextUsage {
+	if hasBillableUsage(resp.Usage) {
+		return resp.Usage
+	}
+	if resp.Duration > 0 {
+		return &SpeechToTextUsage{Type: "duration", Seconds: resp.Duration}
+	}
+	return resp.Usage
 }
 
 // SpeechToTextStreamChunk represents a streaming transcription chunk
@@ -209,11 +233,26 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// Parse response to extract usage
 	var transcriptionResp SpeechToTextResponse
 	if err := json.Unmarshal(decompressedBody, &transcriptionResp); err != nil {
-		c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
-		c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
-		// Fallback to estimated billing if parsing fails
-		return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
+		// Non-JSON body: response_format=text/srt/vtt returns plain text.
+		// srt/vtt carry a timeline, so recover the audio duration from the
+		// last cue's end timestamp and bill it like a {type:"duration"}
+		// usage block. Falling through to the word-count fallback instead
+		// would bill OutputPrice × estimate — 0 for whisper services, whose
+		// per-second price lives in InputPrice.
+		seconds, ok := subtitleDurationSeconds(string(decompressedBody))
+		if !ok {
+			c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
+			c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
+			// Plain text carries no timing signal — fall back to estimated billing
+			return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
+		}
+		transcriptionResp.Usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
 	}
+
+	// verbose_json may carry the audio length only in the top-level duration
+	// field; synthesize a duration usage from it when the usage block is
+	// absent or unbillable.
+	transcriptionResp.Usage = effectiveUsage(&transcriptionResp)
 
 	// Sign response if needed
 	if !c.Service.TargetSeparated {
@@ -664,6 +703,60 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	c.consumeSpeechToTextLimiter(ctx, int(estimatedOutputTokens))
 
 	return nil
+}
+
+// subtitleDurationSeconds recovers the audio duration from an SRT or WebVTT
+// transcript (response_format=srt/vtt) by taking the end timestamp of the
+// last cue line ("HH:MM:SS,mmm --> HH:MM:SS,mmm"). The last cue's end time
+// is a tight lower bound on the audio length — whisper emits cues covering
+// the full transcribed span — so it is the per-second billing source when
+// the provider returns subtitles instead of JSON.
+//
+// Returns ok=false when the body contains no parseable cue line (e.g.
+// response_format=text), in which case the caller falls back to the
+// word-count estimator.
+func subtitleDurationSeconds(body string) (float64, bool) {
+	var lastEnd string
+	for _, line := range strings.Split(body, "\n") {
+		idx := strings.Index(line, "-->")
+		if idx < 0 {
+			continue
+		}
+		end := strings.TrimSpace(line[idx+len("-->"):])
+		// WebVTT cue settings may trail the end timestamp,
+		// e.g. "00:00:04.000 align:start position:0%".
+		if sp := strings.IndexAny(end, " \t"); sp >= 0 {
+			end = end[:sp]
+		}
+		if end != "" {
+			lastEnd = end
+		}
+	}
+	if lastEnd == "" {
+		return 0, false
+	}
+	return parseSubtitleTimestamp(lastEnd)
+}
+
+// parseSubtitleTimestamp parses an SRT ("HH:MM:SS,mmm") or WebVTT
+// ("HH:MM:SS.mmm", "MM:SS.mmm") timestamp into seconds. Rejects malformed
+// or non-finite components so a garbage line containing "-->" cannot
+// produce a bogus charge.
+func parseSubtitleTimestamp(ts string) (float64, bool) {
+	ts = strings.ReplaceAll(ts, ",", ".")
+	parts := strings.Split(ts, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	total := 0.0
+	for _, p := range parts {
+		v, err := strconv.ParseFloat(p, 64)
+		if err != nil || v < 0 || math.IsInf(v, 0) || math.IsNaN(v) {
+			return 0, false
+		}
+		total = total*60 + v
+	}
+	return total, total > 0
 }
 
 // isSpeechToTextStream checks if the request body contains stream parameter
