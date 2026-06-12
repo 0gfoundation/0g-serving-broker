@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	stderrors "errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -50,8 +51,8 @@ const speechToTextMetricLabel = "speech_to_text"
 // For the token shape, output_tokens is always 0 upstream — transcription is
 // treated as input-side processing, not generation.
 //
-// Seconds is float64 rather than int because Go's encoding/json refuses to
-// decode JSON numbers with a decimal point into integer fields — even
+// Seconds is flexFloat64 rather than int because Go's encoding/json refuses
+// to decode JSON numbers with a decimal point into integer fields — even
 // "207.0". A non-conforming provider (or a JSON encoder that always emits
 // floats, e.g. Python's json.dumps on a float) would otherwise fail the
 // whole struct unmarshal, fall through to the word-count estimator, and
@@ -64,7 +65,58 @@ type SpeechToTextUsage struct {
 	InputTokens       int                      `json:"input_tokens"`
 	InputTokenDetails SpeechToTextTokenDetails `json:"input_token_details"`
 	OutputTokens      int                      `json:"output_tokens"`
-	Seconds           float64                  `json:"seconds"`
+	Seconds           flexFloat64              `json:"seconds"`
+}
+
+// flexFloat64 is a float64 that decodes from either a JSON number or a JSON
+// string holding a number ("206.34125" as well as 206.34125). Observed in
+// the wild: a whisper backend emitting verbose_json's top-level duration as
+// a quoted string — with a plain float64 field that single value fails the
+// whole struct unmarshal and the request falls through to the word-count
+// fallback, billing 0 for whisper services (the per-second price lives in
+// InputPrice). Same zero-billing bug class as the fractional-seconds issue
+// documented on SpeechToTextUsage.Seconds.
+//
+// JSON null and the empty string decode to 0 (un-billable, same as the field
+// being absent). A non-numeric or non-finite string ("abc", "Inf", "NaN")
+// returns an error so the response routes through the existing parse-failure
+// recovery (subtitle timeline, then the estimator fallback) — accepting
+// "+Inf" would instead clamp to maxBillableSeconds and bill 99 hours from a
+// garbage value.
+type flexFloat64 float64
+
+func (f *flexFloat64) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" {
+		*f = 0
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return errors.Wrap(err, "decode string-encoded float")
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*f = 0
+			return nil
+		}
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return errors.Wrapf(err, "parse %q as float", s)
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("non-finite float value %q", s)
+		}
+		*f = flexFloat64(v)
+		return nil
+	}
+	var v float64
+	if err := json.Unmarshal(data, &v); err != nil {
+		return errors.Wrap(err, "decode float")
+	}
+	*f = flexFloat64(v)
+	return nil
 }
 
 // maxBillableSeconds caps a single transcription's billable duration at the
@@ -92,7 +144,7 @@ func billableSeconds(u *SpeechToTextUsage) int {
 	if u == nil || u.Seconds <= 0 {
 		return 0
 	}
-	rounded := int(math.Round(math.Min(u.Seconds, maxBillableSeconds)))
+	rounded := int(math.Round(math.Min(float64(u.Seconds), maxBillableSeconds)))
 	if rounded < 1 {
 		return 1
 	}
@@ -152,10 +204,11 @@ type SpeechToTextTokenDetails struct {
 // Duration is the top-level audio length in seconds that verbose_json
 // responses (whisper family) carry alongside text/segments. Some providers
 // emit verbose_json without a usage block at all, so Duration is the only
-// billing signal in that shape — see effectiveUsage.
+// billing signal in that shape — see effectiveUsage. flexFloat64 because
+// some providers quote the value ("206.34125") — see flexFloat64.
 type SpeechToTextResponse struct {
 	Text     string             `json:"text"`
-	Duration float64            `json:"duration"`
+	Duration flexFloat64        `json:"duration"`
 	Usage    *SpeechToTextUsage `json:"usage,omitempty"`
 }
 
@@ -266,7 +319,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		// emit non-JSON shapes (the signal the parse-failure Warnf carried
 		// before recovery existed).
 		c.logger.Infof("recovered speech-to-text duration from subtitle timeline: %.3fs request=%s", seconds, reqModel.RequestHash)
-		transcriptionResp.Usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
+		transcriptionResp.Usage = &SpeechToTextUsage{Type: "duration", Seconds: flexFloat64(seconds)}
 	}
 
 	// verbose_json may carry the audio length only in the top-level duration
@@ -403,7 +456,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 			// captured stream body, not from a provider usage chunk — see
 			// the non-streaming recovery site for rationale.
 			c.logger.Infof("recovered streaming speech-to-text duration from subtitle timeline: %.3fs request=%s", seconds, reqModel.RequestHash)
-			usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
+			usage = &SpeechToTextUsage{Type: "duration", Seconds: flexFloat64(seconds)}
 		}
 	}
 
