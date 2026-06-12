@@ -67,18 +67,32 @@ type SpeechToTextUsage struct {
 	Seconds           float64                  `json:"seconds"`
 }
 
+// maxBillableSeconds caps a single transcription's billable duration at the
+// same 99 hours the subtitle-recovery lane enforces via its two-digit hours
+// cap (parseSubtitleTimestamp). No real transcription approaches 100 hours;
+// without a cap, one anomalous duration value — a provider-reported
+// usage.seconds, a verbose_json top-level duration, either malicious or
+// corrupted — could bill a fee large enough to drain the user's whole
+// locked balance. Centralized here so every duration source is covered.
+const maxBillableSeconds = 99 * 3600
+
 // billableSeconds returns the integer second count used for billing, metrics,
-// and rate limiting. Rounds to the nearest whole second, then applies a
-// 1-second floor for any positive input so a sub-half-second clip
-// (e.g. 0.4s) cannot pass hasBillableUsage and then collapse to a 0-fee row
-// — that would be the same zero-billing class of bug this PR exists to fix.
-// Non-positive inputs (zero or negative) return 0 so the caller can decline
-// to bill at all.
+// and rate limiting. Clamps to maxBillableSeconds, rounds to the nearest
+// whole second, then applies a 1-second floor for any positive input so a
+// sub-half-second clip (e.g. 0.4s) cannot pass hasBillableUsage and then
+// collapse to a 0-fee row — that would be the same zero-billing class of bug
+// this PR exists to fix. Non-positive inputs (zero or negative) return 0 so
+// the caller can decline to bill at all.
+//
+// The clamp also removes a float→int edge: converting a float64 beyond the
+// int64 range (e.g. Seconds=1e308) is platform-dependent in Go — on amd64
+// it produces a negative value, which the 1-second floor would then turn
+// into a near-free request.
 func billableSeconds(u *SpeechToTextUsage) int {
 	if u == nil || u.Seconds <= 0 {
 		return 0
 	}
-	rounded := int(math.Round(u.Seconds))
+	rounded := int(math.Round(math.Min(u.Seconds, maxBillableSeconds)))
 	if rounded < 1 {
 		return 1
 	}

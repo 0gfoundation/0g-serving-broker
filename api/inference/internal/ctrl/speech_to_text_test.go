@@ -113,6 +113,15 @@ func TestBillableSeconds(t *testing.T) {
 		{"sub-half-second floored to 1", &SpeechToTextUsage{Seconds: 0.4}, 1},
 		{"barely above zero floored to 1", &SpeechToTextUsage{Seconds: 0.001}, 1},
 		{"half-second rounds to 1", &SpeechToTextUsage{Seconds: 0.5}, 1},
+		// 99-hour cap, aligned with the subtitle lane's two-digit hours
+		// limit: an anomalous provider-reported duration (usage.seconds or
+		// verbose_json's duration field) must not bill an unbounded fee.
+		{"at the cap", &SpeechToTextUsage{Seconds: 99 * 3600}, 99 * 3600},
+		{"above the cap clamped", &SpeechToTextUsage{Seconds: 1e12}, 99 * 3600},
+		// Pre-clamp, float→int of a value beyond int64 range was
+		// platform-dependent (negative on amd64 → floored to 1 second, a
+		// near-free request instead of an overcharge).
+		{"extreme float clamped", &SpeechToTextUsage{Seconds: 1e308}, 99 * 3600},
 	}
 
 	for _, tt := range tests {
