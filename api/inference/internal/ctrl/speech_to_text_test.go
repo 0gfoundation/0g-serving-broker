@@ -75,6 +75,13 @@ func TestSpeechToTextUsage_DecodeFractionalSeconds(t *testing.T) {
 		// Python's json.dumps(207.0) emits this — Go's int field rejected it.
 		{"whole-number float", `{"type":"duration","seconds":207.0}`, 207},
 		{"sub-second", `{"type":"duration","seconds":0.4}`, 0.4},
+		// String-encoded numbers — observed from a whisper backend that
+		// quotes verbose_json's duration; accept the same shape here so a
+		// provider quoting usage.seconds doesn't kill the struct unmarshal.
+		{"string seconds", `{"type":"duration","seconds":"207"}`, 207},
+		{"string fractional seconds", `{"type":"duration","seconds":"206.34125"}`, 206.34125},
+		{"empty string is zero", `{"type":"duration","seconds":""}`, 0},
+		{"null is zero", `{"type":"duration","seconds":null}`, 0},
 	}
 
 	for _, tt := range tests {
@@ -83,10 +90,30 @@ func TestSpeechToTextUsage_DecodeFractionalSeconds(t *testing.T) {
 			if err := json.Unmarshal([]byte(tt.raw), &u); err != nil {
 				t.Fatalf("unmarshal %s: %v", tt.raw, err)
 			}
-			if u.Seconds != tt.wantSeconds {
+			if float64(u.Seconds) != tt.wantSeconds {
 				t.Errorf("Seconds = %v, want %v", u.Seconds, tt.wantSeconds)
 			}
 		})
+	}
+}
+
+// TestFlexFloat64_RejectsGarbage pins the fail-closed side of flexFloat64:
+// a non-numeric or non-finite string must error so the response routes
+// through the parse-failure recovery (subtitle timeline → estimator) rather
+// than decoding to a bogus value. "+Inf" in particular would otherwise pass
+// hasBillableUsage and clamp to the 99-hour cap — a max-fee charge from a
+// garbage value.
+func TestFlexFloat64_RejectsGarbage(t *testing.T) {
+	for _, raw := range []string{
+		`{"seconds":"abc"}`,
+		`{"seconds":"+Inf"}`,
+		`{"seconds":"NaN"}`,
+		`{"seconds":true}`,
+	} {
+		var u SpeechToTextUsage
+		if err := json.Unmarshal([]byte(raw), &u); err == nil {
+			t.Errorf("unmarshal %s: expected error, got Seconds=%v", raw, u.Seconds)
+		}
 	}
 }
 
@@ -146,7 +173,7 @@ func TestBillableSeconds_NeverZeroWhenGateAdmitsDuration(t *testing.T) {
 	// Span the gap the reviewer flagged and the boundary just above zero.
 	subSecondInputs := []float64{0.001, 0.1, 0.4, 0.49, 0.5, 0.51, 0.9, 1.0}
 	for _, sec := range subSecondInputs {
-		u := &SpeechToTextUsage{Type: "duration", Seconds: sec}
+		u := &SpeechToTextUsage{Type: "duration", Seconds: flexFloat64(sec)}
 		if !hasBillableUsage(u) {
 			t.Fatalf("hasBillableUsage(seconds=%v) = false, want true (regression in admission gate)", sec)
 		}
@@ -780,6 +807,30 @@ func TestSpeechToTextResponse_DecodeVerboseJSON(t *testing.T) {
 	got := effectiveUsage(&resp)
 	if got == nil || !isDurationUsage(got) || got.Seconds != 8.47 {
 		t.Errorf("effectiveUsage() = %+v, want duration usage with Seconds=8.47", got)
+	}
+}
+
+// TestSpeechToTextResponse_DecodeStringDuration covers the originally
+// reported provider shape: verbose_json with the top-level duration quoted
+// as a string ("206.34125"). Before flexFloat64 this failed the whole
+// struct unmarshal and the request fell to the word-count fallback, billing
+// 0 for whisper services.
+func TestSpeechToTextResponse_DecodeStringDuration(t *testing.T) {
+	raw := []byte(`{
+		"task": "transcribe",
+		"duration": "206.34125",
+		"text": "Hello there."
+	}`)
+	var resp SpeechToTextResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal string-duration response: %v", err)
+	}
+	if resp.Duration != 206.34125 {
+		t.Errorf("Duration = %v, want 206.34125", resp.Duration)
+	}
+	got := effectiveUsage(&resp)
+	if got == nil || !isDurationUsage(got) || got.Seconds != 206.34125 {
+		t.Errorf("effectiveUsage() = %+v, want duration usage with Seconds=206.34125", got)
 	}
 }
 
