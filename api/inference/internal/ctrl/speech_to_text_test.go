@@ -577,9 +577,46 @@ func TestSubtitleDurationSeconds(t *testing.T) {
 			0, false,
 		},
 		{
+			// Reviewer probe: prose mentioning a full "T1 --> T2" range must
+			// not bill either — the start side is validated as a timestamp
+			// at the head of the line, and "skip from 01:02.000" is not one.
+			"timestamp range in prose",
+			"skip from 01:02.000 --> 03:27.250 in the video",
+			0, false,
+		},
+		{
+			// Reviewer probe: the streaming path runs recovery over bodies
+			// of JSON chunks whenever no usage arrived; a delta whose text
+			// mentions a cue range must not synthesize a charge (the JSON
+			// prefix before the arrow fails the start-timestamp check).
+			"timestamp range inside JSON delta",
+			`{"type":"transcript.text.delta","delta":"see 01:02.500 --> 03:27.250 in the clip"}`,
+			0, false,
+		},
+		{
 			// Malformed cue line: parser rejects rather than guessing.
 			"garbage timestamp",
 			"1\n00:00:00,000 --> not:a:time\nwords\n",
+			0, false,
+		},
+		{
+			// Reviewer regression: a trailing prose "-->" line must not void
+			// the valid cue before it — max parsed end wins, not last line.
+			"prose arrow after valid cue",
+			"1\n00:00:00,000 --> 00:03:27,250\nthe sign said exit --> turn left\n",
+			207.25, true,
+		},
+		{
+			// Reordered/corrupted tail: max end wins over a later, smaller cue.
+			"out-of-order cues take max",
+			"1\n00:00:00,000 --> 00:03:27,250\nlate\n\n2\n00:00:00,000 --> 00:01:00,000\nearly\n",
+			207.25, true,
+		},
+		{
+			// A single zero-length cue is well-formed but carries no
+			// billable duration.
+			"zero-length cue not billable",
+			"1\n00:00:00,000 --> 00:00:00,000\nblip\n",
 			0, false,
 		},
 	}
@@ -606,7 +643,10 @@ func TestParseSubtitleTimestamp(t *testing.T) {
 		{"vtt dot millis", "00:03:27.250", 207.25, true},
 		{"vtt short form", "03:27.500", 207.5, true},
 		{"hours", "01:00:05.000", 3605, true},
-		{"zero is not billable", "00:00:00,000", 0, false},
+		// ok reports well-formedness only: cue start times legitimately
+		// begin at zero, so the parser accepts it; subtitleDurationSeconds
+		// enforces billability (> 0) on the recovered end time.
+		{"zero is well-formed", "00:00:00,000", 0, true},
 		{"single component", "207", 0, false},
 		{"four components", "01:02:03:04", 0, false},
 		{"negative component", "00:-1:00", 0, false},

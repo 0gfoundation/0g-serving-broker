@@ -717,20 +717,28 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 }
 
 // subtitleDurationSeconds recovers the audio duration from an SRT or WebVTT
-// transcript (response_format=srt/vtt) by taking the end timestamp of the
-// last cue line ("HH:MM:SS,mmm --> HH:MM:SS,mmm"). The last cue's end time
-// is a tight lower bound on the audio length — whisper emits cues covering
-// the full transcribed span — so it is the per-second billing source when
-// the provider returns subtitles instead of JSON.
+// transcript (response_format=srt/vtt) by taking the largest cue end
+// timestamp. Only full cue lines count — "T1 --> T2 [settings]" with a
+// well-formed timestamp on BOTH sides of the arrow — so prose or JSON delta
+// text that merely mentions a "T1 --> T2" range inside surrounding words
+// cannot synthesize a charge. Taking the max (rather than the last
+// arrow-bearing line) means one trailing unparseable "-->" line cannot void
+// an earlier valid cue and re-open the 0-bill, and a truncated or reordered
+// tail stays harmless.
 //
-// Returns ok=false when the body contains no parseable cue line (e.g.
+// Returns ok=false when the body contains no billable cue (e.g.
 // response_format=text), in which case the caller falls back to the
 // word-count estimator.
 func subtitleDurationSeconds(body string) (float64, bool) {
-	var lastEnd string
+	var maxEnd float64
 	for _, line := range strings.Split(body, "\n") {
 		idx := strings.Index(line, "-->")
 		if idx < 0 {
+			continue
+		}
+		// The start side must itself be a timestamp (zero is fine — the
+		// first cue of a real transcript starts at 00:00:00,000).
+		if _, ok := parseSubtitleTimestamp(strings.TrimSpace(line[:idx])); !ok {
 			continue
 		}
 		end := strings.TrimSpace(line[idx+len("-->"):])
@@ -739,18 +747,18 @@ func subtitleDurationSeconds(body string) (float64, bool) {
 		if sp := strings.IndexAny(end, " \t"); sp >= 0 {
 			end = end[:sp]
 		}
-		if end != "" {
-			lastEnd = end
+		if secs, ok := parseSubtitleTimestamp(end); ok && secs > maxEnd {
+			maxEnd = secs
 		}
 	}
-	if lastEnd == "" {
-		return 0, false
-	}
-	return parseSubtitleTimestamp(lastEnd)
+	return maxEnd, maxEnd > 0
 }
 
 // parseSubtitleTimestamp parses an SRT ("HH:MM:SS,mmm") or WebVTT
-// ("HH:MM:SS.mmm", "MM:SS.mmm") timestamp into seconds.
+// ("HH:MM:SS.mmm", "MM:SS.mmm") timestamp into seconds. ok reports
+// well-formedness only — a zero timestamp is ok=true with seconds=0, since
+// cue START times legitimately begin at 00:00:00,000; billability (> 0) is
+// the caller's concern.
 //
 // Components must be plain decimal digits, with a fractional part permitted
 // only on the seconds (last) component, and every component except the hours
@@ -788,7 +796,7 @@ func parseSubtitleTimestamp(ts string) (float64, bool) {
 		}
 		total = total*60 + v
 	}
-	return total, total > 0
+	return total, true
 }
 
 // isSubtitleComponent reports whether p is a well-formed timestamp component:
