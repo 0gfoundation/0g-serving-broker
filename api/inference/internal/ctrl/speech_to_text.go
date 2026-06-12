@@ -11,6 +11,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
@@ -65,18 +67,32 @@ type SpeechToTextUsage struct {
 	Seconds           float64                  `json:"seconds"`
 }
 
+// maxBillableSeconds caps a single transcription's billable duration at the
+// same 99 hours the subtitle-recovery lane enforces via its two-digit hours
+// cap (parseSubtitleTimestamp). No real transcription approaches 100 hours;
+// without a cap, one anomalous duration value — a provider-reported
+// usage.seconds, a verbose_json top-level duration, either malicious or
+// corrupted — could bill a fee large enough to drain the user's whole
+// locked balance. Centralized here so every duration source is covered.
+const maxBillableSeconds = 99 * 3600
+
 // billableSeconds returns the integer second count used for billing, metrics,
-// and rate limiting. Rounds to the nearest whole second, then applies a
-// 1-second floor for any positive input so a sub-half-second clip
-// (e.g. 0.4s) cannot pass hasBillableUsage and then collapse to a 0-fee row
-// — that would be the same zero-billing class of bug this PR exists to fix.
-// Non-positive inputs (zero or negative) return 0 so the caller can decline
-// to bill at all.
+// and rate limiting. Clamps to maxBillableSeconds, rounds to the nearest
+// whole second, then applies a 1-second floor for any positive input so a
+// sub-half-second clip (e.g. 0.4s) cannot pass hasBillableUsage and then
+// collapse to a 0-fee row — that would be the same zero-billing class of bug
+// this PR exists to fix. Non-positive inputs (zero or negative) return 0 so
+// the caller can decline to bill at all.
+//
+// The clamp also removes a float→int edge: converting a float64 beyond the
+// int64 range (e.g. Seconds=1e308) is platform-dependent in Go — on amd64
+// it produces a negative value, which the 1-second floor would then turn
+// into a near-free request.
 func billableSeconds(u *SpeechToTextUsage) int {
 	if u == nil || u.Seconds <= 0 {
 		return 0
 	}
-	rounded := int(math.Round(u.Seconds))
+	rounded := int(math.Round(math.Min(u.Seconds, maxBillableSeconds)))
 	if rounded < 1 {
 		return 1
 	}
@@ -131,10 +147,32 @@ type SpeechToTextTokenDetails struct {
 	AudioTokens int `json:"audio_tokens"`
 }
 
-// SpeechToTextResponse represents the transcription response
+// SpeechToTextResponse represents the transcription response.
+//
+// Duration is the top-level audio length in seconds that verbose_json
+// responses (whisper family) carry alongside text/segments. Some providers
+// emit verbose_json without a usage block at all, so Duration is the only
+// billing signal in that shape — see effectiveUsage.
 type SpeechToTextResponse struct {
-	Text  string             `json:"text"`
-	Usage *SpeechToTextUsage `json:"usage,omitempty"`
+	Text     string             `json:"text"`
+	Duration float64            `json:"duration"`
+	Usage    *SpeechToTextUsage `json:"usage,omitempty"`
+}
+
+// effectiveUsage returns the usage block to bill against. When the response
+// carries no billable usage but verbose_json's top-level duration field is
+// populated, synthesizes a duration usage from it so the request doesn't
+// fall through to the word-count fallback — which bills
+// OutputPrice × estimate, i.e. 0 for whisper services where the per-second
+// price lives in InputPrice.
+func effectiveUsage(resp *SpeechToTextResponse) *SpeechToTextUsage {
+	if hasBillableUsage(resp.Usage) {
+		return resp.Usage
+	}
+	if resp.Duration > 0 {
+		return &SpeechToTextUsage{Type: "duration", Seconds: resp.Duration}
+	}
+	return resp.Usage
 }
 
 // SpeechToTextStreamChunk represents a streaming transcription chunk
@@ -209,11 +247,32 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// Parse response to extract usage
 	var transcriptionResp SpeechToTextResponse
 	if err := json.Unmarshal(decompressedBody, &transcriptionResp); err != nil {
-		c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
-		c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
-		// Fallback to estimated billing if parsing fails
-		return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
+		// Non-JSON body: response_format=text/srt/vtt returns plain text.
+		// srt/vtt carry a timeline, so recover the audio duration from the
+		// last cue's end timestamp and bill it like a {type:"duration"}
+		// usage block. Falling through to the word-count fallback instead
+		// would bill OutputPrice × estimate — 0 for whisper services, whose
+		// per-second price lives in InputPrice.
+		seconds, ok := subtitleDurationSeconds(string(decompressedBody))
+		if !ok {
+			c.logger.Warnf("Failed to parse speech-to-text response for usage extraction: %v", err)
+			c.logger.Debugf("Raw response causing parse error: %s", string(decompressedBody))
+			// Plain text carries no timing signal — fall back to estimated billing
+			return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
+		}
+		// Audit trail: the charge below is synthesized from a heuristic parse
+		// of a non-JSON body, not from a provider usage block. Logged at info
+		// so operators can answer billing disputes and spot providers that
+		// emit non-JSON shapes (the signal the parse-failure Warnf carried
+		// before recovery existed).
+		c.logger.Infof("recovered speech-to-text duration from subtitle timeline: %.3fs request=%s", seconds, reqModel.RequestHash)
+		transcriptionResp.Usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
 	}
+
+	// verbose_json may carry the audio length only in the top-level duration
+	// field; synthesize a duration usage from it when the usage block is
+	// absent or unbillable.
+	transcriptionResp.Usage = effectiveUsage(&transcriptionResp)
 
 	// Sign response if needed
 	if !c.Service.TargetSeparated {
@@ -332,6 +391,21 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	// extracted before the failure rather than handing them free output.
 	// handleBrokerError was already called inside the loop for visibility.
 	_ = streamErr
+
+	// Symmetry with the non-streaming path: a non-conforming provider that
+	// accepts stream=true for response_format=srt/vtt delivers subtitle
+	// lines that never carry a usage chunk. Recover the duration from the
+	// captured stream body rather than falling to the word-count fallback,
+	// which bills OutputPrice × estimate — 0 for whisper services.
+	if !hasBillableUsage(usage) {
+		if seconds, ok := subtitleDurationSeconds(rawBody.String()); ok {
+			// Audit trail: charge synthesized from a heuristic parse of the
+			// captured stream body, not from a provider usage chunk — see
+			// the non-streaming recovery site for rationale.
+			c.logger.Infof("recovered streaming speech-to-text duration from subtitle timeline: %.3fs request=%s", seconds, reqModel.RequestHash)
+			usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
+		}
+	}
 
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
@@ -664,6 +738,112 @@ func (c *Ctrl) updateSpeechToTextFallback(ctx context.Context, reqModel model.Re
 	c.consumeSpeechToTextLimiter(ctx, int(estimatedOutputTokens))
 
 	return nil
+}
+
+// subtitleDurationSeconds recovers the audio duration from an SRT or WebVTT
+// transcript (response_format=srt/vtt) by taking the largest cue end
+// timestamp. Only full cue lines count — "T1 --> T2 [settings]" with a
+// well-formed timestamp on BOTH sides of the arrow — so prose or JSON delta
+// text that merely mentions a "T1 --> T2" range inside surrounding words
+// cannot synthesize a charge. Taking the max (rather than the last
+// arrow-bearing line) means one trailing unparseable "-->" line cannot void
+// an earlier valid cue and re-open the 0-bill, and a truncated or reordered
+// tail stays harmless.
+//
+// Returns ok=false when the body contains no billable cue (e.g.
+// response_format=text), in which case the caller falls back to the
+// word-count estimator.
+func subtitleDurationSeconds(body string) (float64, bool) {
+	var maxEnd float64
+	for _, line := range strings.Split(body, "\n") {
+		idx := strings.Index(line, "-->")
+		if idx < 0 {
+			continue
+		}
+		// The start side must itself be a timestamp (zero is fine — the
+		// first cue of a real transcript starts at 00:00:00,000).
+		if _, ok := parseSubtitleTimestamp(strings.TrimSpace(line[:idx])); !ok {
+			continue
+		}
+		end := strings.TrimSpace(line[idx+len("-->"):])
+		// WebVTT cue settings may trail the end timestamp,
+		// e.g. "00:00:04.000 align:start position:0%".
+		if sp := strings.IndexAny(end, " \t"); sp >= 0 {
+			end = end[:sp]
+		}
+		if secs, ok := parseSubtitleTimestamp(end); ok && secs > maxEnd {
+			maxEnd = secs
+		}
+	}
+	return maxEnd, maxEnd > 0
+}
+
+// parseSubtitleTimestamp parses an SRT ("HH:MM:SS,mmm") or WebVTT
+// ("HH:MM:SS.mmm", "MM:SS.mmm") timestamp into seconds. ok reports
+// well-formedness only — a zero timestamp is ok=true with seconds=0, since
+// cue START times legitimately begin at 00:00:00,000; billability (> 0) is
+// the caller's concern.
+//
+// Components must be plain decimal digits, with a fractional part permitted
+// only on the seconds (last) component, and every component except the hours
+// of an HH:MM:SS form must be < 60 — per the SRT/WebVTT grammars. This is
+// deliberately stricter than strconv.ParseFloat alone, which accepts signs
+// and scientific notation: a garbage line containing "-->" must not parse
+// "12:1e9" into a billion-second charge.
+func parseSubtitleTimestamp(ts string) (float64, bool) {
+	ts = strings.ReplaceAll(ts, ",", ".")
+	parts := strings.Split(ts, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	total := 0.0
+	for i, p := range parts {
+		if !isSubtitleComponent(p, i == len(parts)-1) {
+			return 0, false
+		}
+		v, err := strconv.ParseFloat(p, 64)
+		if err != nil {
+			return 0, false
+		}
+		// Only the hours of an HH:MM:SS form may reach 60; the leading
+		// component of the short MM:SS form is minutes and stays < 60.
+		// Hours are capped at two digits (the SRT grammar's "HH"): no real
+		// transcription approaches 100 hours, and an uncapped component
+		// would let one corrupted cue line ("999999999:00:00,000") bill a
+		// fee large enough to drain the user's whole locked balance.
+		isHours := i == 0 && len(parts) == 3
+		if isHours && v > 99 {
+			return 0, false
+		}
+		if !isHours && v >= 60 {
+			return 0, false
+		}
+		total = total*60 + v
+	}
+	return total, true
+}
+
+// isSubtitleComponent reports whether p is a well-formed timestamp component:
+// decimal digits only, with one interior fractional dot permitted when
+// allowFraction is set (the seconds component).
+func isSubtitleComponent(p string, allowFraction bool) bool {
+	if p == "" {
+		return false
+	}
+	seenDot := false
+	for i, r := range p {
+		if r == '.' {
+			if !allowFraction || seenDot || i == 0 || i == len(p)-1 {
+				return false
+			}
+			seenDot = true
+			continue
+		}
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isSpeechToTextStream checks if the request body contains stream parameter

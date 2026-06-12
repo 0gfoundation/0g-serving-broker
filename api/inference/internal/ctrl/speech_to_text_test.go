@@ -113,6 +113,15 @@ func TestBillableSeconds(t *testing.T) {
 		{"sub-half-second floored to 1", &SpeechToTextUsage{Seconds: 0.4}, 1},
 		{"barely above zero floored to 1", &SpeechToTextUsage{Seconds: 0.001}, 1},
 		{"half-second rounds to 1", &SpeechToTextUsage{Seconds: 0.5}, 1},
+		// 99-hour cap, aligned with the subtitle lane's two-digit hours
+		// limit: an anomalous provider-reported duration (usage.seconds or
+		// verbose_json's duration field) must not bill an unbounded fee.
+		{"at the cap", &SpeechToTextUsage{Seconds: 99 * 3600}, 99 * 3600},
+		{"above the cap clamped", &SpeechToTextUsage{Seconds: 1e12}, 99 * 3600},
+		// Pre-clamp, float→int of a value beyond int64 range was
+		// platform-dependent (negative on amd64 → floored to 1 second, a
+		// near-free request instead of an overcharge).
+		{"extreme float clamped", &SpeechToTextUsage{Seconds: 1e308}, 99 * 3600},
 	}
 
 	for _, tt := range tests {
@@ -529,6 +538,248 @@ func TestCalcTokenFees_BadPrice(t *testing.T) {
 	}
 	if _, _, _, err := calcTokenFees("100", "bad", 10, 20); err == nil {
 		t.Error("expected error for non-numeric output price")
+	}
+}
+
+// ==========================================================================
+// Non-JSON / usage-less response_format recovery
+//
+// whisper supports response_format=json/verbose_json/text/srt/vtt, but only
+// json reliably carries a usage block. Before this recovery existed,
+// verbose_json (usage absent on some providers), srt, vtt and text all fell
+// through to the word-count fallback, which bills OutputPrice × estimate —
+// 0 for whisper services, whose per-second price lives in InputPrice. srt
+// and vtt carry a timeline, verbose_json carries a top-level duration field;
+// both are recovered into a duration usage. Plain text stays on the
+// fallback (no timing signal).
+// ==========================================================================
+
+func TestSubtitleDurationSeconds(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantSeconds float64
+		wantOK      bool
+	}{
+		{
+			"srt two cues",
+			"1\r\n00:00:00,000 --> 00:00:04,000\r\nHello there.\r\n\r\n2\r\n00:00:04,500 --> 00:03:27,250\r\nGeneral Kenobi.\r\n",
+			207.25, true,
+		},
+		{
+			"vtt with header",
+			"WEBVTT\n\n00:00.000 --> 00:04.000\nHello there.\n\n00:04.500 --> 03:27.500\nGeneral Kenobi.\n",
+			207.5, true,
+		},
+		{
+			"vtt hour form with cue settings",
+			"WEBVTT\n\n01:00:00.000 --> 01:00:05.000 align:start position:0%\nstill going\n",
+			3605, true,
+		},
+		{"plain text", "Hello there. General Kenobi.", 0, false},
+		{"empty", "", 0, false},
+		{
+			// A transcript that merely mentions an arrow must not bill: the
+			// text after "-->" is not a parseable timestamp.
+			"arrow in prose",
+			"the sign said exit --> turn left here",
+			0, false,
+		},
+		{
+			// Reviewer probe: prose mentioning a full "T1 --> T2" range must
+			// not bill either — the start side is validated as a timestamp
+			// at the head of the line, and "skip from 01:02.000" is not one.
+			"timestamp range in prose",
+			"skip from 01:02.000 --> 03:27.250 in the video",
+			0, false,
+		},
+		{
+			// Reviewer probe: the streaming path runs recovery over bodies
+			// of JSON chunks whenever no usage arrived; a delta whose text
+			// mentions a cue range must not synthesize a charge (the JSON
+			// prefix before the arrow fails the start-timestamp check).
+			"timestamp range inside JSON delta",
+			`{"type":"transcript.text.delta","delta":"see 01:02.500 --> 03:27.250 in the clip"}`,
+			0, false,
+		},
+		{
+			// Malformed cue line: parser rejects rather than guessing.
+			"garbage timestamp",
+			"1\n00:00:00,000 --> not:a:time\nwords\n",
+			0, false,
+		},
+		{
+			// Reviewer regression: a trailing prose "-->" line must not void
+			// the valid cue before it — max parsed end wins, not last line.
+			"prose arrow after valid cue",
+			"1\n00:00:00,000 --> 00:03:27,250\nthe sign said exit --> turn left\n",
+			207.25, true,
+		},
+		{
+			// Reordered/corrupted tail: max end wins over a later, smaller cue.
+			"out-of-order cues take max",
+			"1\n00:00:00,000 --> 00:03:27,250\nlate\n\n2\n00:00:00,000 --> 00:01:00,000\nearly\n",
+			207.25, true,
+		},
+		{
+			// A single zero-length cue is well-formed but carries no
+			// billable duration.
+			"zero-length cue not billable",
+			"1\n00:00:00,000 --> 00:00:00,000\nblip\n",
+			0, false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := subtitleDurationSeconds(tt.body)
+			if ok != tt.wantOK || got != tt.wantSeconds {
+				t.Errorf("subtitleDurationSeconds() = (%v, %v), want (%v, %v)",
+					got, ok, tt.wantSeconds, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestParseSubtitleTimestamp(t *testing.T) {
+	tests := []struct {
+		name        string
+		ts          string
+		wantSeconds float64
+		wantOK      bool
+	}{
+		{"srt comma millis", "00:03:27,250", 207.25, true},
+		{"vtt dot millis", "00:03:27.250", 207.25, true},
+		{"vtt short form", "03:27.500", 207.5, true},
+		{"hours", "01:00:05.000", 3605, true},
+		// ok reports well-formedness only: cue start times legitimately
+		// begin at zero, so the parser accepts it; subtitleDurationSeconds
+		// enforces billability (> 0) on the recovered end time.
+		{"zero is well-formed", "00:00:00,000", 0, true},
+		{"single component", "207", 0, false},
+		{"four components", "01:02:03:04", 0, false},
+		{"negative component", "00:-1:00", 0, false},
+		// strconv.ParseFloat alone accepts all of these; the digit-only
+		// component check must reject them so a garbage line containing
+		// "-->" cannot produce a bogus (potentially huge) charge.
+		{"scientific notation", "12:1e9", 0, false},
+		{"explicit plus sign", "00:+1:00", 0, false},
+		{"infinite component", "00:00:Inf", 0, false},
+		{"nan component", "00:NaN:00", 0, false},
+		{"hex prefix", "0x1:00", 0, false},
+		// Grammar bounds: minutes/seconds < 60 (hours of HH:MM:SS exempt),
+		// fraction only on the seconds component, dot needs digits both sides.
+		{"seconds component over 59", "00:00:75,000", 0, false},
+		{"minutes component over 59", "00:75:00,000", 0, false},
+		{"short form minutes over 59", "75:00.000", 0, false},
+		{"hours over 59 allowed", "60:00:00,000", 216000, true},
+		{"two digit hours allowed", "99:00:00,000", 356400, true},
+		// Hours cap: one corrupted cue line must not be able to bill a fee
+		// that drains the user's whole locked balance.
+		{"three digit hours rejected", "100:00:00,000", 0, false},
+		{"absurd hours rejected", "999999999:00:00,000", 0, false},
+		{"fraction on minutes component", "00:1.5:00", 0, false},
+		{"bare leading dot", "00:00:.5", 0, false},
+		{"bare trailing dot", "00:00:5.", 0, false},
+		{"empty component", "00::05", 0, false},
+		{"empty", "", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseSubtitleTimestamp(tt.ts)
+			if ok != tt.wantOK || got != tt.wantSeconds {
+				t.Errorf("parseSubtitleTimestamp(%q) = (%v, %v), want (%v, %v)",
+					tt.ts, got, ok, tt.wantSeconds, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestEffectiveUsage pins the verbose_json recovery rule: a billable usage
+// block always wins; otherwise the top-level duration field is promoted to
+// a synthetic duration usage; with neither, the original (possibly nil)
+// usage passes through so hasBillableUsage routes to the fallback.
+func TestEffectiveUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		resp SpeechToTextResponse
+		want *SpeechToTextUsage
+	}{
+		{
+			"billable usage wins over duration field",
+			SpeechToTextResponse{
+				Duration: 99,
+				Usage:    &SpeechToTextUsage{Type: "duration", Seconds: 207},
+			},
+			&SpeechToTextUsage{Type: "duration", Seconds: 207},
+		},
+		{
+			"token usage wins over duration field",
+			SpeechToTextResponse{
+				Duration: 99,
+				Usage:    &SpeechToTextUsage{Type: "tokens", InputTokens: 149},
+			},
+			&SpeechToTextUsage{Type: "tokens", InputTokens: 149},
+		},
+		{
+			"verbose_json without usage promotes duration",
+			SpeechToTextResponse{Duration: 207.25},
+			&SpeechToTextUsage{Type: "duration", Seconds: 207.25},
+		},
+		{
+			"unbillable usage with duration field promotes duration",
+			SpeechToTextResponse{Duration: 30, Usage: &SpeechToTextUsage{Type: "duration"}},
+			&SpeechToTextUsage{Type: "duration", Seconds: 30},
+		},
+		{
+			"nothing billable passes through",
+			SpeechToTextResponse{Text: "hello"},
+			nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := effectiveUsage(&tt.resp)
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("effectiveUsage() = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil || *got != *tt.want {
+				t.Errorf("effectiveUsage() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSpeechToTextResponse_DecodeVerboseJSON guards the Duration JSON tag.
+// verbose_json carries duration at the top level (a float, e.g. 8.47), not
+// inside usage — if the tag drifts, verbose_json responses without a usage
+// block quietly return to the 0-fee fallback.
+func TestSpeechToTextResponse_DecodeVerboseJSON(t *testing.T) {
+	raw := []byte(`{
+		"task": "transcribe",
+		"language": "english",
+		"duration": 8.47,
+		"text": "Hello there.",
+		"segments": [{"id": 0, "start": 0.0, "end": 8.47, "text": "Hello there."}]
+	}`)
+	var resp SpeechToTextResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal verbose_json response: %v", err)
+	}
+	if resp.Duration != 8.47 {
+		t.Errorf("Duration = %v, want 8.47", resp.Duration)
+	}
+	if resp.Usage != nil {
+		t.Errorf("Usage = %+v, want nil", resp.Usage)
+	}
+	got := effectiveUsage(&resp)
+	if got == nil || !isDurationUsage(got) || got.Seconds != 8.47 {
+		t.Errorf("effectiveUsage() = %+v, want duration usage with Seconds=8.47", got)
 	}
 }
 
