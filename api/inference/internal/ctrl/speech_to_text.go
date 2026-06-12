@@ -246,6 +246,12 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 			// Plain text carries no timing signal — fall back to estimated billing
 			return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
 		}
+		// Audit trail: the charge below is synthesized from a heuristic parse
+		// of a non-JSON body, not from a provider usage block. Logged at info
+		// so operators can answer billing disputes and spot providers that
+		// emit non-JSON shapes (the signal the parse-failure Warnf carried
+		// before recovery existed).
+		c.logger.Infof("recovered speech-to-text duration from subtitle timeline: %.3fs request=%s", seconds, reqModel.RequestHash)
 		transcriptionResp.Usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
 	}
 
@@ -379,6 +385,10 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	// which bills OutputPrice × estimate — 0 for whisper services.
 	if !hasBillableUsage(usage) {
 		if seconds, ok := subtitleDurationSeconds(rawBody.String()); ok {
+			// Audit trail: charge synthesized from a heuristic parse of the
+			// captured stream body, not from a provider usage chunk — see
+			// the non-streaming recovery site for rationale.
+			c.logger.Infof("recovered streaming speech-to-text duration from subtitle timeline: %.3fs request=%s", seconds, reqModel.RequestHash)
 			usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
 		}
 	}
