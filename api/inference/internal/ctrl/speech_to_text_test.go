@@ -610,10 +610,29 @@ func TestParseSubtitleTimestamp(t *testing.T) {
 		{"single component", "207", 0, false},
 		{"four components", "01:02:03:04", 0, false},
 		{"negative component", "00:-1:00", 0, false},
-		// strconv.ParseFloat accepts "Inf"/"NaN"; the parser must not let a
-		// non-finite component reach billableSeconds' int conversion.
+		// strconv.ParseFloat alone accepts all of these; the digit-only
+		// component check must reject them so a garbage line containing
+		// "-->" cannot produce a bogus (potentially huge) charge.
+		{"scientific notation", "12:1e9", 0, false},
+		{"explicit plus sign", "00:+1:00", 0, false},
 		{"infinite component", "00:00:Inf", 0, false},
 		{"nan component", "00:NaN:00", 0, false},
+		{"hex prefix", "0x1:00", 0, false},
+		// Grammar bounds: minutes/seconds < 60 (hours of HH:MM:SS exempt),
+		// fraction only on the seconds component, dot needs digits both sides.
+		{"seconds component over 59", "00:00:75,000", 0, false},
+		{"minutes component over 59", "00:75:00,000", 0, false},
+		{"short form minutes over 59", "75:00.000", 0, false},
+		{"hours over 59 allowed", "60:00:00,000", 216000, true},
+		{"two digit hours allowed", "99:00:00,000", 356400, true},
+		// Hours cap: one corrupted cue line must not be able to bill a fee
+		// that drains the user's whole locked balance.
+		{"three digit hours rejected", "100:00:00,000", 0, false},
+		{"absurd hours rejected", "999999999:00:00,000", 0, false},
+		{"fraction on minutes component", "00:1.5:00", 0, false},
+		{"bare leading dot", "00:00:.5", 0, false},
+		{"bare trailing dot", "00:00:5.", 0, false},
+		{"empty component", "00::05", 0, false},
 		{"empty", "", 0, false},
 	}
 

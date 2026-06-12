@@ -372,6 +372,17 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	// handleBrokerError was already called inside the loop for visibility.
 	_ = streamErr
 
+	// Symmetry with the non-streaming path: a non-conforming provider that
+	// accepts stream=true for response_format=srt/vtt delivers subtitle
+	// lines that never carry a usage chunk. Recover the duration from the
+	// captured stream body rather than falling to the word-count fallback,
+	// which bills OutputPrice × estimate — 0 for whisper services.
+	if !hasBillableUsage(usage) {
+		if seconds, ok := subtitleDurationSeconds(rawBody.String()); ok {
+			usage = &SpeechToTextUsage{Type: "duration", Seconds: seconds}
+		}
+	}
+
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(usage, c.metricModel(ctx))
@@ -739,9 +750,14 @@ func subtitleDurationSeconds(body string) (float64, bool) {
 }
 
 // parseSubtitleTimestamp parses an SRT ("HH:MM:SS,mmm") or WebVTT
-// ("HH:MM:SS.mmm", "MM:SS.mmm") timestamp into seconds. Rejects malformed
-// or non-finite components so a garbage line containing "-->" cannot
-// produce a bogus charge.
+// ("HH:MM:SS.mmm", "MM:SS.mmm") timestamp into seconds.
+//
+// Components must be plain decimal digits, with a fractional part permitted
+// only on the seconds (last) component, and every component except the hours
+// of an HH:MM:SS form must be < 60 — per the SRT/WebVTT grammars. This is
+// deliberately stricter than strconv.ParseFloat alone, which accepts signs
+// and scientific notation: a garbage line containing "-->" must not parse
+// "12:1e9" into a billion-second charge.
 func parseSubtitleTimestamp(ts string) (float64, bool) {
 	ts = strings.ReplaceAll(ts, ",", ".")
 	parts := strings.Split(ts, ":")
@@ -749,14 +765,53 @@ func parseSubtitleTimestamp(ts string) (float64, bool) {
 		return 0, false
 	}
 	total := 0.0
-	for _, p := range parts {
+	for i, p := range parts {
+		if !isSubtitleComponent(p, i == len(parts)-1) {
+			return 0, false
+		}
 		v, err := strconv.ParseFloat(p, 64)
-		if err != nil || v < 0 || math.IsInf(v, 0) || math.IsNaN(v) {
+		if err != nil {
+			return 0, false
+		}
+		// Only the hours of an HH:MM:SS form may reach 60; the leading
+		// component of the short MM:SS form is minutes and stays < 60.
+		// Hours are capped at two digits (the SRT grammar's "HH"): no real
+		// transcription approaches 100 hours, and an uncapped component
+		// would let one corrupted cue line ("999999999:00:00,000") bill a
+		// fee large enough to drain the user's whole locked balance.
+		isHours := i == 0 && len(parts) == 3
+		if isHours && v > 99 {
+			return 0, false
+		}
+		if !isHours && v >= 60 {
 			return 0, false
 		}
 		total = total*60 + v
 	}
 	return total, total > 0
+}
+
+// isSubtitleComponent reports whether p is a well-formed timestamp component:
+// decimal digits only, with one interior fractional dot permitted when
+// allowFraction is set (the seconds component).
+func isSubtitleComponent(p string, allowFraction bool) bool {
+	if p == "" {
+		return false
+	}
+	seenDot := false
+	for i, r := range p {
+		if r == '.' {
+			if !allowFraction || seenDot || i == 0 || i == len(p)-1 {
+				return false
+			}
+			seenDot = true
+			continue
+		}
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isSpeechToTextStream checks if the request body contains stream parameter
