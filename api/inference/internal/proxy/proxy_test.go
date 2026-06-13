@@ -64,13 +64,13 @@ func TestTargetRoute_VideoSubpathsNotInTargetRoute(t *testing.T) {
 
 func TestAuthRequiredPrefixes_MatchesVideoSubpaths(t *testing.T) {
 	tests := []struct {
-		path      string
+		path        string
 		shouldMatch bool
 	}{
 		{"/videos/video-123", true},
 		{"/videos/video-123/content", true},
 		{"/videos/", true},
-		{"/videos", false},           // exact /videos goes through TargetRoute
+		{"/videos", false},             // exact /videos goes through TargetRoute
 		{"/attestation/report", false}, // should NOT match auth prefix
 		{"/images/generations", false}, // should NOT match auth prefix
 	}
@@ -142,22 +142,22 @@ func (noopLogger) Warningf(string, ...interface{}) {}
 func (noopLogger) Errorf(string, ...interface{})   {}
 func (noopLogger) Fatalf(string, ...interface{})   {}
 func (noopLogger) Panicf(string, ...interface{})   {}
-func (noopLogger) Debug(...interface{})             {}
-func (noopLogger) Info(...interface{})              {}
-func (noopLogger) Print(...interface{})             {}
-func (noopLogger) Warn(...interface{})              {}
-func (noopLogger) Warning(...interface{})           {}
-func (noopLogger) Error(...interface{})             {}
-func (noopLogger) Fatal(...interface{})             {}
-func (noopLogger) Panic(...interface{})             {}
-func (noopLogger) Debugln(...interface{})           {}
-func (noopLogger) Infoln(...interface{})            {}
-func (noopLogger) Println(...interface{})           {}
-func (noopLogger) Warnln(...interface{})            {}
-func (noopLogger) Warningln(...interface{})         {}
-func (noopLogger) Errorln(...interface{})           {}
-func (noopLogger) Fatalln(...interface{})           {}
-func (noopLogger) Panicln(...interface{})           {}
+func (noopLogger) Debug(...interface{})            {}
+func (noopLogger) Info(...interface{})             {}
+func (noopLogger) Print(...interface{})            {}
+func (noopLogger) Warn(...interface{})             {}
+func (noopLogger) Warning(...interface{})          {}
+func (noopLogger) Error(...interface{})            {}
+func (noopLogger) Fatal(...interface{})            {}
+func (noopLogger) Panic(...interface{})            {}
+func (noopLogger) Debugln(...interface{})          {}
+func (noopLogger) Infoln(...interface{})           {}
+func (noopLogger) Println(...interface{})          {}
+func (noopLogger) Warnln(...interface{})           {}
+func (noopLogger) Warningln(...interface{})        {}
+func (noopLogger) Errorln(...interface{})          {}
+func (noopLogger) Fatalln(...interface{})          {}
+func (noopLogger) Panicln(...interface{})          {}
 
 func (n noopLogger) WithFields(_ logrus.Fields) log.Logger { return n }
 func (noopLogger) InnerLogger() *logrus.Logger             { return logrus.New() }
@@ -285,7 +285,7 @@ func TestHandleImageServeRoute_ShapeFailDoesNotConsumeRateLimit(t *testing.T) {
 	// Budget of 1 per "minute" at 60 RPM, burst 1 — simulates a drained bucket
 	// if the shape-fail path consumed a token. Using PerUserRateLimiter so we
 	// depend on the production primitive, not a test fake.
-	p.imageServeLimiter = middleware.NewPerUserRateLimiter(60, 1)
+	p.imageServeLimiter = middleware.NewPerUserRateLimiter(60, 1, nil)
 
 	// 3 shape-fail requests with the same RemoteAddr. Each SHOULD return false
 	// (unhandled) without touching the limiter.
