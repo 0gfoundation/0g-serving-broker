@@ -21,34 +21,54 @@ import (
 // actual token count. If a large request drives the bucket deeply negative,
 // subsequent checks fail until enough time passes to refill.
 type PerUserTPMLimiter struct {
-	limiters map[string]*rate.Limiter
-	mu       sync.Mutex
-	rate     rate.Limit // tokens per second
-	burst    int        // max burst size (token count)
-	tpm      int        // original TPM value for display
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	limiters  map[string]*rate.Limiter
+	mu        sync.Mutex
+	rate      rate.Limit              // tokens per second
+	burst     int                     // max burst size (token count)
+	tpm       int                     // original TPM value for display
+	overrides map[string]RateOverride // normalized address -> override; nil if none
+	stopCh    chan struct{}
+	stopOnce  sync.Once
 }
 
 // NewPerUserTPMLimiter creates a per-user token rate limiter.
-// tpm: maximum tokens per minute per user.
-// burst: maximum burst size (tokens allowed in a short spike).
-func NewPerUserTPMLimiter(tpm int, burst int) *PerUserTPMLimiter {
+// tpm: default maximum tokens per minute per user.
+// burst: default maximum burst size (tokens allowed in a short spike).
+// overrides: optional per-address rate/burst; keys are lowercased internally so
+// any casing matches. Pass nil for none.
+func NewPerUserTPMLimiter(tpm int, burst int, overrides map[string]RateOverride) *PerUserTPMLimiter {
 	if burst <= 0 {
 		burst = 1 // minimum burst of 1 token to prevent infinite loop in ConsumeTokens
 	}
 
 	rl := &PerUserTPMLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		rate:     rate.Limit(float64(tpm) / 60.0), // convert TPM to per-second
-		burst:    burst,
-		tpm:      tpm,
-		stopCh:   make(chan struct{}),
+		limiters:  make(map[string]*rate.Limiter),
+		rate:      rate.Limit(float64(tpm) / 60.0), // convert TPM to per-second
+		burst:     burst,
+		tpm:       tpm,
+		overrides: normalizeOverrideKeys(overrides),
+		stopCh:    make(chan struct{}),
 	}
 
 	go rl.cleanup()
 
 	return rl
+}
+
+// limitsFor returns the effective rate and burst for a user, applying any
+// per-address override on top of the defaults. The returned burst is always
+// >= 1 so ConsumeTokens never loops forever.
+func (rl *PerUserTPMLimiter) limitsFor(userID string) (rate.Limit, int) {
+	r, b := rl.rate, rl.burst
+	if ov, ok := rl.overrides[userID]; ok {
+		if ov.Rate > 0 {
+			r = rate.Limit(float64(ov.Rate) / 60.0)
+		}
+		if ov.Burst > 0 {
+			b = ov.Burst
+		}
+	}
+	return r, b
 }
 
 // Stop gracefully shuts down the cleanup goroutine. Safe to call multiple times.
@@ -68,8 +88,10 @@ func (rl *PerUserTPMLimiter) cleanup() {
 		case <-ticker.C:
 			rl.mu.Lock()
 			for userID, limiter := range rl.limiters {
-				// Remove users whose bucket is full (idle)
-				if limiter.Tokens() >= float64(rl.burst) {
+				// Remove users whose bucket is full (idle). Compare against the
+				// limiter's own burst so overridden users (which may carry a
+				// larger burst) are not evicted prematurely.
+				if limiter.Tokens() >= float64(limiter.Burst()) {
 					delete(rl.limiters, userID)
 				}
 			}
@@ -82,10 +104,12 @@ func (rl *PerUserTPMLimiter) cleanup() {
 
 // getLimiter returns the rate limiter for a user, creating one if needed.
 func (rl *PerUserTPMLimiter) getLimiter(userID string) *rate.Limiter {
+	userID = normalizeUserID(userID)
 	rl.mu.Lock()
 	limiter, exists := rl.limiters[userID]
 	if !exists {
-		limiter = rate.NewLimiter(rl.rate, rl.burst)
+		r, b := rl.limitsFor(userID)
+		limiter = rate.NewLimiter(r, b)
 		rl.limiters[userID] = limiter
 	}
 	rl.mu.Unlock()
@@ -107,12 +131,13 @@ func (rl *PerUserTPMLimiter) ConsumeTokens(userID string, tokens int) {
 		return
 	}
 	limiter := rl.getLimiter(userID)
+	burst := limiter.Burst() // may differ from rl.burst for overridden users
 	now := time.Now()
 	remaining := tokens
 	for remaining > 0 {
 		n := remaining
-		if n > rl.burst {
-			n = rl.burst
+		if n > burst {
+			n = burst
 		}
 		limiter.ReserveN(now, n)
 		remaining -= n
@@ -122,23 +147,36 @@ func (rl *PerUserTPMLimiter) ConsumeTokens(userID string, tokens int) {
 // GetRemaining returns the remaining token budget and estimated reset time for a user.
 // This is a read-only operation that does not create a limiter entry for unknown users.
 func (rl *PerUserTPMLimiter) GetRemaining(userID string) (remaining int, resetSeconds float64) {
+	userID = normalizeUserID(userID)
 	rl.mu.Lock()
 	limiter, exists := rl.limiters[userID]
 	rl.mu.Unlock()
 	if !exists {
-		return rl.burst, 0
+		_, b := rl.limitsFor(userID)
+		return b, 0
 	}
 	tokens := limiter.Tokens()
 	if tokens < 0 {
-		resetSeconds = math.Abs(tokens) / float64(rl.rate)
+		resetSeconds = math.Abs(tokens) / float64(limiter.Limit())
 		return 0, resetSeconds
 	}
 	return int(tokens), 0
 }
 
-// TPM returns the configured tokens-per-minute value.
-func (rl *PerUserTPMLimiter) TPM() int {
+// DefaultTPM returns the configured default per-minute value (tokens for a TPM
+// limiter, images for an IPM limiter) — the cap for users without an override.
+// For the limit actually enforced on a specific user, use EffectiveTPM.
+func (rl *PerUserTPMLimiter) DefaultTPM() int {
 	return rl.tpm
+}
+
+// EffectiveTPM returns the per-minute limit in force for a user (tokens for a
+// TPM limiter, images for an IPM limiter), accounting for any per-address
+// override, so client-facing messages report the enforced limit rather than the
+// shared default.
+func (rl *PerUserTPMLimiter) EffectiveTPM(userID string) int {
+	r, _ := rl.limitsFor(normalizeUserID(userID))
+	return int(math.Round(float64(r) * 60))
 }
 
 // CheckPerUserTPMLimit checks per-user TPM limit for token-based services (chatbot, speech-to-text).
@@ -160,14 +198,14 @@ func CheckPerUserTPMLimit(limiter *PerUserTPMLimiter, c *gin.Context, userAddres
 				"type": "error",
 				"error": gin.H{
 					"type":    "rate_limit_error",
-					"message": fmt.Sprintf("Token rate limit exceeded. Please wait %.0f seconds (limit: %d tokens/min).", resetSecs, limiter.tpm),
+					"message": fmt.Sprintf("Token rate limit exceeded. Please wait %.0f seconds (limit: %d tokens/min).", resetSecs, limiter.EffectiveTPM(userAddress)),
 				},
 			})
 		} else {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
 					"type":    "rate_limit_error",
-					"message": fmt.Sprintf("Token rate limit exceeded. Please wait %.0f seconds (limit: %d tokens/min).", resetSecs, limiter.tpm),
+					"message": fmt.Sprintf("Token rate limit exceeded. Please wait %.0f seconds (limit: %d tokens/min).", resetSecs, limiter.EffectiveTPM(userAddress)),
 				},
 			})
 		}
@@ -196,14 +234,14 @@ func CheckPerUserIPMLimit(limiter *PerUserTPMLimiter, c *gin.Context, userAddres
 				"type": "error",
 				"error": gin.H{
 					"type":    "rate_limit_error",
-					"message": fmt.Sprintf("Image rate limit exceeded. Please wait %.0f seconds (limit: %d images/min).", resetSecs, limiter.tpm),
+					"message": fmt.Sprintf("Image rate limit exceeded. Please wait %.0f seconds (limit: %d images/min).", resetSecs, limiter.EffectiveTPM(userAddress)),
 				},
 			})
 		} else {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
 					"type":    "rate_limit_error",
-					"message": fmt.Sprintf("Image rate limit exceeded. Please wait %.0f seconds (limit: %d images/min).", resetSecs, limiter.tpm),
+					"message": fmt.Sprintf("Image rate limit exceeded. Please wait %.0f seconds (limit: %d images/min).", resetSecs, limiter.EffectiveTPM(userAddress)),
 				},
 			})
 		}

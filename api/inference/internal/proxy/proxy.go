@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/gin-contrib/cors"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
@@ -63,6 +64,16 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		concurrencyConfig.MaxPerUserConcurrent = 5
 	}
 
+	// Resolve per-address overrides into one map per limiter dimension. Keys are
+	// lowercase addresses; only dimensions whose global limiter is enabled below
+	// will actually consult these maps.
+	contextLength := 0
+	if ctrl.Service.ModelInfo != nil {
+		contextLength = ctrl.Service.ModelInfo.ContextLength
+	}
+	concOverrides, rpmOverrides, tpmOverrides, ipmOverrides := buildPerUserOverrides(
+		concurrencyConfig.PerUserOverrides, contextLength, logger)
+
 	p := &Proxy{
 		allowOrigins: allowOrigins,
 		ctrl:         ctrl,
@@ -72,7 +83,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		rateLimiter: middleware.NewRateLimiter(rate.Limit(15), 20),
 		// Configure concurrency limiter to match backend GPU capacity
 		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
-		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent),
+		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent, concOverrides),
 	}
 
 	// Initialize per-user rate limiter if configured
@@ -81,7 +92,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		if burst <= 0 {
 			burst = 10
 		}
-		p.perUserRateLimiter = middleware.NewPerUserRateLimiter(concurrencyConfig.PerUserRPM, burst)
+		p.perUserRateLimiter = middleware.NewPerUserRateLimiter(concurrencyConfig.PerUserRPM, burst, rpmOverrides)
 		logger.Infof("Per-user rate limit: %d RPM, burst=%d", concurrencyConfig.PerUserRPM, burst)
 	}
 
@@ -96,12 +107,12 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		}
 		// Ensure burst >= context_length so a single max-context request doesn't
 		// drive the bucket deeply negative and cause excessive lockout.
-		if ctrl.Service.ModelInfo != nil && ctrl.Service.ModelInfo.ContextLength > tpmBurst {
+		if contextLength > tpmBurst {
 			logger.Infof("TPM burst %d < context_length %d, raising burst to context_length",
-				tpmBurst, ctrl.Service.ModelInfo.ContextLength)
-			tpmBurst = ctrl.Service.ModelInfo.ContextLength
+				tpmBurst, contextLength)
+			tpmBurst = contextLength
 		}
-		p.perUserTPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserTPM, tpmBurst)
+		p.perUserTPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserTPM, tpmBurst, tpmOverrides)
 		logger.Infof("Per-user token limit: %d TPM, burst=%d", concurrencyConfig.PerUserTPM, tpmBurst)
 	}
 
@@ -114,8 +125,22 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 				ipmBurst = 1
 			}
 		}
-		p.perUserIPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserIPM, ipmBurst)
+		p.perUserIPMLimiter = middleware.NewPerUserTPMLimiter(concurrencyConfig.PerUserIPM, ipmBurst, ipmOverrides)
 		logger.Infof("Per-user image limit: %d IPM, burst=%d", concurrencyConfig.PerUserIPM, ipmBurst)
+	}
+
+	// Warn about overrides that target a globally-disabled dimension: they were
+	// parsed and Info-logged, but no limiter consults them, so they silently take
+	// no effect. Surfacing this prevents an operator from believing a partner was
+	// uplifted when the corresponding global limit is off.
+	if len(rpmOverrides) > 0 && p.perUserRateLimiter == nil {
+		logger.Warnf("PerUserOverride: %d RPM override(s) set but perUserRPM is disabled (0); they will NOT take effect", len(rpmOverrides))
+	}
+	if len(tpmOverrides) > 0 && p.perUserTPMLimiter == nil {
+		logger.Warnf("PerUserOverride: %d TPM override(s) set but perUserTPM is disabled (0); they will NOT take effect", len(tpmOverrides))
+	}
+	if len(ipmOverrides) > 0 && p.perUserIPMLimiter == nil {
+		logger.Warnf("PerUserOverride: %d IPM override(s) set but perUserIPM is disabled (0); they will NOT take effect", len(ipmOverrides))
 	}
 
 	// Per-IP limit for the unauthenticated image-serve route. Chosen loose so
@@ -124,7 +149,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// 120 * image_size per IP per minute; tighten via config if ever needed.
 	// Keyed by client IP; the IP field lives outside the per-user keyspace so
 	// it never starves user-scoped limits.
-	p.imageServeLimiter = middleware.NewPerUserRateLimiter(120, 30)
+	p.imageServeLimiter = middleware.NewPerUserRateLimiter(120, 30, nil)
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
 		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
@@ -178,6 +203,94 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	}
 
 	return p
+}
+
+// buildPerUserOverrides converts the operator-supplied per-address override
+// list into one map per limiter dimension, keyed by lowercase address. A zero
+// field in an entry means "inherit the global default", so it is simply not
+// written into that dimension's map. TPM bursts are floored to context_length
+// (matching the default-burst logic) so a single max-context request from an
+// overridden user does not drive their bucket deeply negative.
+//
+// Entries are still recorded for dimensions that may be globally disabled; the
+// caller only wires a map into a limiter that it actually constructs, so an
+// override for a disabled dimension is harmlessly ignored.
+func buildPerUserOverrides(overrides []config.PerUserLimitOverride, contextLength int, logger log.Logger) (
+	conc map[string]int,
+	rpm, tpm, ipm map[string]middleware.RateOverride,
+) {
+	if len(overrides) == 0 {
+		return nil, nil, nil, nil
+	}
+
+	conc = make(map[string]int)
+	rpm = make(map[string]middleware.RateOverride)
+	tpm = make(map[string]middleware.RateOverride)
+	ipm = make(map[string]middleware.RateOverride)
+
+	seen := make(map[string]struct{})
+	for _, o := range overrides {
+		raw := strings.TrimSpace(o.UserAddress)
+		// Validate the address format the same way the whitelist path does, so a
+		// typo'd / malformed address is rejected with an operator-visible warning
+		// rather than being silently stored under a key no real user can match.
+		if !ethcommon.IsHexAddress(raw) {
+			logger.Warnf("PerUserOverride: invalid address format %q, skipping", o.UserAddress)
+			continue
+		}
+		addr := strings.ToLower(raw)
+		if _, dup := seen[addr]; dup {
+			logger.Warnf("PerUserOverride: duplicate entry for %s, later entry overrides earlier", truncateAddr(addr))
+		}
+		seen[addr] = struct{}{}
+
+		// A negative value is never a valid "inherit" request (0 means inherit);
+		// surface it so a templating bug producing -1 doesn't silently degrade a
+		// partner to the default limits.
+		if o.MaxConcurrent < 0 || o.RPM < 0 || o.Burst < 0 || o.TPM < 0 || o.TPMBurst < 0 || o.IPM < 0 || o.IPMBurst < 0 {
+			logger.Warnf("PerUserOverride %s: negative value(s) treated as inherit-default", truncateAddr(addr))
+		}
+
+		applied := false
+		if o.MaxConcurrent > 0 {
+			conc[addr] = o.MaxConcurrent
+			applied = true
+		}
+		if o.RPM > 0 || o.Burst > 0 {
+			rpm[addr] = middleware.RateOverride{Rate: o.RPM, Burst: o.Burst}
+			applied = true
+		}
+		if o.TPM > 0 || o.TPMBurst > 0 {
+			tpmBurst := o.TPMBurst
+			if tpmBurst > 0 && contextLength > tpmBurst {
+				tpmBurst = contextLength
+			}
+			tpm[addr] = middleware.RateOverride{Rate: o.TPM, Burst: tpmBurst}
+			applied = true
+		}
+		if o.IPM > 0 || o.IPMBurst > 0 {
+			ipm[addr] = middleware.RateOverride{Rate: o.IPM, Burst: o.IPMBurst}
+			applied = true
+		}
+		if !applied {
+			logger.Warnf("PerUserOverride %s: no positive limits set, entry is a no-op (check for typo'd field names)", truncateAddr(addr))
+			continue
+		}
+		logger.Infof("PerUserOverride: %s concurrent=%d rpm=%d/%d tpm=%d/%d ipm=%d/%d",
+			truncateAddr(addr), o.MaxConcurrent, o.RPM, o.Burst, o.TPM, o.TPMBurst, o.IPM, o.IPMBurst)
+	}
+
+	return conc, rpm, tpm, ipm
+}
+
+// truncateAddr shortens an Ethereum address for logging (first 6 + last 4
+// characters), following the CLAUDE.md guidance to avoid logging full
+// addresses. Short or empty inputs are returned unchanged.
+func truncateAddr(addr string) string {
+	if len(addr) <= 12 {
+		return addr
+	}
+	return addr[:6] + "…" + addr[len(addr)-4:]
 }
 
 // Close releases resources held by the Proxy (e.g., background goroutines).
@@ -436,7 +549,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		if p.perUserRateLimiter != nil {
 			remaining, resetSecs := p.perUserRateLimiter.GetRemainingWithReset(userAddress)
 			rpmInfo = &middleware.RateLimitInfo{
-				Limit:     p.perUserRateLimiter.RPM(),
+				// Effective (override-aware) limit so the X-RateLimit-Limit header
+				// stays consistent with the override-aware Remaining below; otherwise
+				// an uplifted user could see Remaining > Limit.
+				Limit:     p.perUserRateLimiter.EffectiveRPM(userAddress),
 				Remaining: remaining,
 				ResetSecs: resetSecs,
 			}
@@ -449,7 +565,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			if p.perUserTPMLimiter != nil {
 				remaining, resetSecs := p.perUserTPMLimiter.GetRemaining(userAddress)
 				resourceInfo = &middleware.RateLimitInfo{
-					Limit:     p.perUserTPMLimiter.TPM(),
+					Limit:     p.perUserTPMLimiter.EffectiveTPM(userAddress),
 					Remaining: remaining,
 					ResetSecs: resetSecs,
 				}
@@ -459,7 +575,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			if p.perUserIPMLimiter != nil {
 				remaining, resetSecs := p.perUserIPMLimiter.GetRemaining(userAddress)
 				resourceInfo = &middleware.RateLimitInfo{
-					Limit:     p.perUserIPMLimiter.TPM(),
+					Limit:     p.perUserIPMLimiter.EffectiveTPM(userAddress),
 					Remaining: remaining,
 					ResetSecs: resetSecs,
 				}

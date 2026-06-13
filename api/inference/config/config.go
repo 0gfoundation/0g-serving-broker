@@ -466,6 +466,34 @@ type ConcurrencyLimitConfig struct {
 	PerUserTPMBurst      int `yaml:"perUserTPMBurst"`      // Max burst size for per-user TPM limit (default: 0)
 	PerUserIPM           int `yaml:"perUserIPM"`           // Max images per minute per user (default: 0 = disabled, text-to-image/image-editing)
 	PerUserIPMBurst      int `yaml:"perUserIPMBurst"`      // Max burst size for per-user IPM limit (default: 0)
+
+	// PerUserOverrides grants specific addresses different per-user limits than
+	// the shared defaults above, without changing the limit for everyone else.
+	// Intended for heavy partners who legitimately need more headroom. Overrides
+	// only take effect for dimensions that are globally enabled (e.g. an RPM
+	// override is ignored when PerUserRPM == 0). Overrides never raise the global
+	// concurrency cap (MaxGlobalConcurrent), so a single user still cannot exceed
+	// total backend capacity.
+	PerUserOverrides []PerUserLimitOverride `yaml:"perUserOverrides"`
+}
+
+// PerUserLimitOverride sets the per-user limits for a single address. A zero
+// field inherits the corresponding global default, so an operator can override
+// only the dimension they care about (e.g. just MaxConcurrent). A positive
+// value below the default lowers the cap for that user; because 0 means
+// inherit, a limit cannot be set to exactly 0 (to throttle hard, use a small
+// positive value). Negative values are invalid and treated as inherit (with a
+// startup warning). Addresses are matched case-insensitively; a malformed
+// address is rejected at startup with a warning.
+type PerUserLimitOverride struct {
+	UserAddress   string `yaml:"userAddress"`   // Address this override applies to (case-insensitive)
+	MaxConcurrent int    `yaml:"maxConcurrent"` // Per-user concurrency cap (0 = inherit MaxPerUserConcurrent)
+	RPM           int    `yaml:"rpm"`           // Requests per minute (0 = inherit PerUserRPM)
+	Burst         int    `yaml:"burst"`         // RPM burst size (0 = inherit PerUserBurst)
+	TPM           int    `yaml:"tpm"`           // Tokens per minute (0 = inherit PerUserTPM)
+	TPMBurst      int    `yaml:"tpmBurst"`      // TPM burst size (0 = inherit PerUserTPMBurst)
+	IPM           int    `yaml:"ipm"`           // Images per minute (0 = inherit PerUserIPM)
+	IPMBurst      int    `yaml:"ipmBurst"`      // IPM burst size (0 = inherit PerUserIPMBurst)
 }
 
 // AsyncConfig defines configuration for async job processing.
@@ -1036,6 +1064,7 @@ func GetConfig() *Config {
 				PerUserTPMBurst:      0,
 				PerUserIPM:           0, // disabled by default
 				PerUserIPMBurst:      0,
+				PerUserOverrides:     nil,
 			},
 			Async: AsyncConfig{
 				Enabled:           true,
