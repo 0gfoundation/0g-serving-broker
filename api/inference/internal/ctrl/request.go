@@ -19,6 +19,7 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // EphemeralTokenId is the special token ID reserved for ephemeral tokens.
@@ -281,6 +282,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
 		if err != nil {
 			ctx.Set("ignoreError", true)
+			ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionAccountNotExist)
 			return errors.Wrap(err, "get account from contract, account not exist")
 		}
 		contractAccount = &fetchedAccount
@@ -292,6 +294,7 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	if contractAccount.Acknowledged == false {
 		// User-caused error: user hasn't acknowledged the provider
 		ctx.Set("ignoreError", true)
+		ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionNotAcknowledged)
 		return errors.New("user not acknowledge the provider, please use acknowledgeProviderSigner function in sdk first, it will take effect in 2 minutes")
 	}
 
@@ -419,6 +422,7 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return nil
 	}
 	ctx.Set("ignoreError", true)
+	ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionInsufficientBal)
 
 	// Convert neuron to 0G for display (1 0G = 10^18 neuron)
 	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
