@@ -62,9 +62,14 @@ type ModelCacheTokenBilling struct {
 }
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
+//
+// Prompt/Completion carry omitempty so per-unit modalities (image generation /
+// image editing) can omit the per-token fields entirely and advertise only the
+// modality they actually bill (image), rather than surfacing a per-token price
+// an OpenAI-compatible client would misread.
 type ModelPricing struct {
-	Prompt            string                  `json:"prompt"`
-	Completion        string                  `json:"completion"`
+	Prompt            string                  `json:"prompt,omitempty"`
+	Completion        string                  `json:"completion,omitempty"`
 	Image             string                  `json:"image,omitempty"`
 	Video             string                  `json:"video,omitempty"`
 	TieredPricing     []ModelPricingTier      `json:"tiered_pricing,omitempty"`
@@ -76,8 +81,14 @@ type ModelPricing struct {
 // Values are derived from the configured USD-per-1M-tokens by exact big.Rat
 // division — no float precision loss.
 type ModelPricingUSD struct {
-	Prompt     string `json:"prompt"`
-	Completion string `json:"completion"`
+	Prompt     string `json:"prompt,omitempty"`
+	Completion string `json:"completion,omitempty"`
+	// Image is the USD price per generated image for a USD-denominated
+	// image-generation / image-editing model (decimal string). Mutually
+	// exclusive with the per-token prompt/completion fields above; derived from
+	// OutputPriceUSDPerMillionTokens with the same ÷1e6 the wei conversion uses,
+	// so it stays consistent with the native pricing.image value.
+	Image string `json:"image,omitempty"`
 	// Video is the USD price per effective output second for a USD-denominated
 	// video-generation model (decimal string). Mutually exclusive with the
 	// per-token prompt/completion fields above.
@@ -324,10 +335,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		Type:          svc.Type,
 		Verifiability: svc.Verifiability,
 		TeeAttested:   svc.TeeSignerAcknowledged,
-		Pricing: &ModelPricing{
-			Prompt:     svc.InputPrice,
-			Completion: svc.OutputPrice,
-		},
+		Pricing:       &ModelPricing{},
 	}
 
 	if svc.CreatedAt != nil {
@@ -348,14 +356,22 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ExpirationDate = cfg.ModelInfo.ExpirationDate
 	}
 
-	// Set image pricing from output price for image service types
-	if svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing {
+	// Native per-unit pricing keyed by modality. Image generation / editing bill
+	// per generated image (OutputPrice is the per-image price), surfaced under
+	// `image` only — the per-token prompt/completion fields are left empty so an
+	// OpenAI-compatible client doesn't misread a per-token rate. Video keeps its
+	// existing shape (prompt/completion plus the per-second `video`). Token
+	// modalities use prompt/completion.
+	switch svc.Type {
+	case constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing:
 		obj.Pricing.Image = svc.OutputPrice
-	}
-
-	// Set video pricing from output price for video service type
-	if svc.Type == constant.ServiceTypeVideoGeneration {
+	case constant.ServiceTypeVideoGeneration:
+		obj.Pricing.Prompt = svc.InputPrice
+		obj.Pricing.Completion = svc.OutputPrice
 		obj.Pricing.Video = svc.OutputPrice
+	default:
+		obj.Pricing.Prompt = svc.InputPrice
+		obj.Pricing.Completion = svc.OutputPrice
 	}
 
 	// Populate tiered pricing from config
@@ -424,7 +440,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// list — but the log signal prevents "PricingUSD silently missing"
 	// from going undiagnosed.
 	var priceFeedOut *PriceFeedState
-	if svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "" {
+	isImageType := svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing
+	switch {
+	case isImageType && svc.OutputPriceUSDPerMillionTokens != "":
+		// Image bills per generated image, not per token: surface the per-image
+		// USD under `image` only (mirrors the native pricing.image), omitting the
+		// per-token prompt/completion fields. Deriving with the same ÷1e6 used by
+		// the wei conversion keeps pricing_usd.image consistent with pricing.image.
+		image, imageErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
+		if imageErr != nil {
+			h.logger.Warnf("GetModels: derive per-image USD price from %q failed (omitting PricingUSD block): %v",
+				svc.OutputPriceUSDPerMillionTokens, imageErr)
+		} else {
+			obj.PricingUSD = &ModelPricingUSD{Image: image}
+		}
+	case svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "":
 		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)
 		completion, completionErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
 		switch {
