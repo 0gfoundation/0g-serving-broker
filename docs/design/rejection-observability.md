@@ -50,8 +50,15 @@ broker_requests_rejected_total{reason="insufficient_balance"}
 broker_requests_rejected_total{reason="not_acknowledged"}
 broker_requests_rejected_total{reason="account_not_exist"}
 broker_requests_rejected_total{reason="upstream_error"}   # unclassified server-side validation failure
-broker_requests_rejected_total{reason="client_canceled"}
 ```
+
+> `account_not_exist` is recorded whenever the contract account lookup
+> (`GetUserAccount`) fails. That lookup logs the underlying error at `error`
+> level in the contract layer regardless of `ignoreError`, so a genuine
+> RPC/node outage is never silent — but it does count under `account_not_exist`
+> rather than a transport-error reason. A sustained spike there with healthy
+> chain RPC means real not-yet-funded accounts; correlate with the contract-layer
+> error log to rule out an RPC outage.
 
 The counter is incremented **even when `ignoreError` suppresses the per-request log**,
 so observability is decoupled from HTTP-error verbosity. With it, "high RPS + zero

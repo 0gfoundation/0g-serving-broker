@@ -71,8 +71,10 @@ var (
 // strings ever passed to RecordRejection, keeping the metric's cardinality
 // bounded. Group: admission gates (rate/tpm/ipm/concurrency/model_mismatch),
 // billing gates (insufficient_balance/not_acknowledged/account_not_exist), and
-// catch-alls (upstream_error/client_canceled) for paths whose specific cause
-// isn't classified.
+// the upstream_error catch-all for validation failures whose specific cause
+// isn't classified. Every constant here has a live emit site — a reason is not
+// declared until it is actually recorded, so the metric's label set never
+// advertises a value that can't appear.
 const (
 	RejectionRateLimit       = "rate_limit"
 	RejectionTPMLimit        = "tpm_limit"
@@ -83,7 +85,6 @@ const (
 	RejectionNotAcknowledged = "not_acknowledged"
 	RejectionAccountNotExist = "account_not_exist"
 	RejectionUpstreamError   = "upstream_error"
-	RejectionClientCanceled  = "client_canceled"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
@@ -274,7 +275,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
-			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error, client_canceled).",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error).",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},

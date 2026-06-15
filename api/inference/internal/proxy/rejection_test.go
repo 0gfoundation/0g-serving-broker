@@ -125,6 +125,32 @@ func TestTopUsers_EmptyIsNA(t *testing.T) {
 	}
 }
 
+func TestRejectionAggregator_NilReceiverRecordDoesNotPanic(t *testing.T) {
+	// A Proxy built outside New() (e.g. the test helper) has a nil aggregator.
+	// record must still fire the metric without panicking.
+	var a *rejectionAggregator
+	a.record(monitor.RejectionRateLimit, "0x4870000000000000000000000000000000a4E9")
+}
+
+func TestRejectionAggregator_StopIsIdempotent(t *testing.T) {
+	a := newRejectionAggregator(&captureLogger{}, time.Hour)
+	a.stop()
+	a.stop() // second call must not panic on a closed channel
+}
+
+func TestRejectionAggregator_DistinctTruncationCollisionsCountedSeparately(t *testing.T) {
+	logger := &captureLogger{}
+	a := newTestAggregator(logger)
+	// Two addresses that share the 6+4 truncation prefix but differ in the
+	// middle must be counted as two distinct users, not merged.
+	a.record(monitor.RejectionRateLimit, "0x4870aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4E9")
+	a.record(monitor.RejectionRateLimit, "0x4870bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4E9")
+	b := a.buckets[monitor.RejectionRateLimit]
+	if got := len(b.users); got != 2 {
+		t.Fatalf("expected 2 distinct users despite shared truncation prefix, got %d", got)
+	}
+}
+
 // addrForIndex produces a distinct, well-formed 40-hex-char address per index.
 func addrForIndex(i int) string {
 	const hexDigits = "0123456789abcdef"

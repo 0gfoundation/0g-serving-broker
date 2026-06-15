@@ -42,7 +42,7 @@ const maxRejectionUsersPerReason = 256
 // reasonBucket accumulates rejections for one reason between flushes.
 type reasonBucket struct {
 	total    int64
-	users    map[string]int64 // truncated address -> count, capped at maxRejectionUsersPerReason
+	users    map[string]int64 // full lowercase address -> count, capped at maxRejectionUsersPerReason
 	overflow int64            // count for addresses not tracked because the cap was hit
 }
 
@@ -60,9 +60,10 @@ type rejectionAggregator struct {
 	mu      sync.Mutex
 	buckets map[string]*reasonBucket
 
-	ticker *time.Ticker
-	done   chan struct{}
-	wg     sync.WaitGroup
+	ticker   *time.Ticker
+	done     chan struct{}
+	wg       sync.WaitGroup
+	stopOnce sync.Once
 }
 
 func newRejectionAggregator(logger log.Logger, interval time.Duration) *rejectionAggregator {
@@ -79,12 +80,19 @@ func newRejectionAggregator(logger log.Logger, interval time.Duration) *rejectio
 }
 
 // record increments both the Prometheus counter (real-time, per-reason) and the
-// in-memory aggregate used for periodic logging. user is the raw address; it is
-// truncated before being stored so full addresses never reach the logs
-// (CLAUDE.md logging guidance). An empty user is recorded against the reason
-// total only.
+// in-memory aggregate used for periodic logging. The counter is incremented even
+// on a nil receiver so a Proxy built outside New() (e.g. the test helper, which
+// omits the aggregator) still records the metric without panicking — matching
+// the nil-tolerance the sibling limiter fields already rely on. Addresses are
+// stored in full but only ever emitted truncated (see topUsers), keeping full
+// addresses out of the logs per CLAUDE.md while avoiding the distinct-user
+// undercount that truncating-as-key would cause when two wallets share the
+// 6+4-char prefix. An empty user is recorded against the reason total only.
 func (a *rejectionAggregator) record(reason, user string) {
 	monitor.RecordRejection(reason)
+	if a == nil {
+		return
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -98,7 +106,7 @@ func (a *rejectionAggregator) record(reason, user string) {
 	if user == "" {
 		return
 	}
-	key := truncateAddr(strings.ToLower(user))
+	key := strings.ToLower(user)
 	if _, tracked := b.users[key]; tracked {
 		b.users[key]++
 		return
@@ -148,7 +156,9 @@ func overflowSuffix(overflow int64) string {
 }
 
 // topUsers returns up to n "addr=count" pairs sorted by count descending, for
-// the rejection summary line. Ties are broken by address for stable output.
+// the rejection summary line. Addresses are truncated here (at emit) so full
+// addresses never reach the logs while the map keeps full addresses for an
+// accurate distinct count. Ties are broken by address for stable output.
 func topUsers(users map[string]int64, n int) string {
 	if len(users) == 0 {
 		return "n/a"
@@ -172,14 +182,18 @@ func topUsers(users map[string]int64, n int) string {
 	}
 	parts := make([]string, len(pairs))
 	for i, p := range pairs {
-		parts[i] = fmt.Sprintf("%s=%d", p.addr, p.count)
+		parts[i] = fmt.Sprintf("%s=%d", truncateAddr(p.addr), p.count)
 	}
 	return strings.Join(parts, ", ")
 }
 
 // stop halts the background flush goroutine after emitting a final summary.
+// Guarded by sync.Once so a double Close() (or a test calling stop twice) can't
+// panic on "close of closed channel" — matching PerUserTPMLimiter.Stop().
 func (a *rejectionAggregator) stop() {
-	a.ticker.Stop()
-	close(a.done)
-	a.wg.Wait()
+	a.stopOnce.Do(func() {
+		a.ticker.Stop()
+		close(a.done)
+		a.wg.Wait()
+	})
 }
