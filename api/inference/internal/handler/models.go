@@ -359,7 +359,10 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// prompt/completion.
 	switch svc.Type {
 	case constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing:
-		obj.Pricing.Prompt = svc.InputPrice
+		// Image bills per generated image (under `image`); there is no per-token
+		// charge — the input fee is fixed at 0 in the request path — so report both
+		// prompt and completion as 0 rather than a misleading per-token rate.
+		obj.Pricing.Prompt = "0"
 		obj.Pricing.Completion = "0"
 		obj.Pricing.Image = svc.OutputPrice
 	case constant.ServiceTypeVideoGeneration:
