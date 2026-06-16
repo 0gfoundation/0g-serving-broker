@@ -52,7 +52,48 @@ var (
 	// isn't being parsed (e.g. an async provider that doesn't echo seconds), so
 	// it must be alertable rather than a silent skip.
 	VideoBillingSkippedTotal prometheus.Counter
+
+	// RequestRejectedTotal counts requests rejected before they reach the
+	// upstream, labeled by a low-cardinality `reason` (see the Rejection*
+	// constants). This is the primary signal for the "high RPS, near-zero
+	// revenue" failure mode: a flood of admission/billing-gate rejections that
+	// otherwise produce no log line shows up here within scrape interval, e.g.
+	// broker_requests_rejected_total{reason="insufficient_balance"} climbing
+	// while broker_requests_total stays flat. The reason label is sourced only
+	// from the bounded constant set below — never from raw user/error strings —
+	// so cardinality stays fixed. A per-user breakdown is deliberately NOT a
+	// label here (that would be unbounded); operators get top-N offenders from
+	// the periodic aggregated rejection log instead.
+	RequestRejectedTotal *prometheus.CounterVec
 )
+
+// Rejection reason label values for RequestRejectedTotal. These are the only
+// strings ever passed to RecordRejection, keeping the metric's cardinality
+// bounded. Group: admission gates (rate/tpm/ipm/concurrency/model_mismatch),
+// billing gates (insufficient_balance/not_acknowledged/account_not_exist), and
+// the upstream_error catch-all for validation failures whose specific cause
+// isn't classified. Every constant here has a live emit site — a reason is not
+// declared until it is actually recorded, so the metric's label set never
+// advertises a value that can't appear.
+const (
+	RejectionRateLimit       = "rate_limit"
+	RejectionTPMLimit        = "tpm_limit"
+	RejectionIPMLimit        = "ipm_limit"
+	RejectionConcurrency     = "concurrency"
+	RejectionModelMismatch   = "model_mismatch"
+	RejectionInsufficientBal = "insufficient_balance"
+	RejectionNotAcknowledged = "not_acknowledged"
+	RejectionAccountNotExist = "account_not_exist"
+	RejectionUpstreamError   = "upstream_error"
+)
+
+// CtxKeyRejectionReason is the gin context key under which a request handler
+// records WHY a request was rejected, using one of the Rejection* constants.
+// The billing/validation gate lives in the ctrl package but its caller (the
+// proxy) owns rejection recording, so the reason is passed across that boundary
+// via the context rather than by threading a return value through several
+// signatures. An unset key means "not a classified rejection".
+const CtxKeyRejectionReason = "rejectionReason"
 
 // PrometheusInit registers all broker metrics. serverName (the ServingURL)
 // and providerAddress (the provider's on-chain address, as registered in the
@@ -231,11 +272,21 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	RequestRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_requests_rejected_total",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error).",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	prometheus.MustRegister(WhitelistRequestsTotal)
 	prometheus.MustRegister(WhitelistInputTokensTotal)
 	prometheus.MustRegister(WhitelistOutputTokensTotal)
 	prometheus.MustRegister(WhitelistAudioSecondsTotal)
 	prometheus.MustRegister(VideoBillingSkippedTotal)
+	prometheus.MustRegister(RequestRejectedTotal)
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database
@@ -415,6 +466,16 @@ func RecordVideoBillingSkipped() {
 		return
 	}
 	VideoBillingSkippedTotal.Inc()
+}
+
+// RecordRejection increments the rejected-request counter for the given reason.
+// reason must be one of the Rejection* constants so the metric stays bounded.
+// Safe to call before PrometheusInit (no-op when monitoring is disabled).
+func RecordRejection(reason string) {
+	if RequestRejectedTotal == nil {
+		return
+	}
+	RequestRejectedTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordWhitelistRequest increments the whitelist request counter for the given

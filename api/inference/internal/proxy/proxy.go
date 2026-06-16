@@ -48,6 +48,12 @@ type Proxy struct {
 	// caller hammering a single chatKey. Reuses PerUserRateLimiter with IP as
 	// the key — see handleImageServeRoute.
 	imageServeLimiter *middleware.PerUserRateLimiter
+
+	// rejections records and periodically summarizes rejected requests. It
+	// replaces the per-request rejection warnings (one log line per rejection,
+	// unbounded under a flood) with a Prometheus counter plus a bounded
+	// periodic summary log. See rejection.go.
+	rejections *rejectionAggregator
 }
 
 func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonitor bool, concurrencyConfig config.ConcurrencyLimitConfig, logger log.Logger) *Proxy {
@@ -150,6 +156,8 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	// Keyed by client IP; the IP field lives outside the per-user keyspace so
 	// it never starves user-scoped limits.
 	p.imageServeLimiter = middleware.NewPerUserRateLimiter(120, 30, nil)
+
+	p.rejections = newRejectionAggregator(logger, rejectionFlushInterval)
 
 	logger.Infof("Concurrency limits: global=%d, per-user=%d",
 		concurrencyConfig.MaxGlobalConcurrent, concurrencyConfig.MaxPerUserConcurrent)
@@ -301,6 +309,9 @@ func (p *Proxy) Close() {
 	}
 	if p.perUserIPMLimiter != nil {
 		p.perUserIPMLimiter.Stop()
+	}
+	if p.rejections != nil {
+		p.rejections.stop()
 	}
 }
 
@@ -506,21 +517,24 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// blocking critical operations, but still subject to the global limit.
 	// Rate limit is checked first (cheap, no slot to release) before concurrency.
 	if !isWhitelisted {
+		// Per-event rejection logging was removed here: under a sustained
+		// rate-limit flood it produced one log line per request (the 150k-line
+		// log-amplification vector in #542). Rejections are now recorded to the
+		// Prometheus counter and summarized periodically by p.rejections.
 		if !middleware.CheckPerUserRateLimit(p.perUserRateLimiter, ctx, userAddress) {
-			p.logger.Warnf("Per-user rate limit exceeded: user=%s", userAddress)
+			p.rejections.record(monitor.RejectionRateLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserTPMLimit(p.perUserTPMLimiter, ctx, userAddress, svcType) {
-			p.logger.Warnf("Per-user TPM limit exceeded: user=%s", userAddress)
+			p.rejections.record(monitor.RejectionTPMLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserIPMLimit(p.perUserIPMLimiter, ctx, userAddress, svcType) {
-			p.logger.Warnf("Per-user IPM limit exceeded: user=%s", userAddress)
+			p.rejections.record(monitor.RejectionIPMLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserConcurrency(p.perUserConcurrencyLimiter, ctx, userAddress) {
-			p.logger.Warnf("Per-user concurrency limit reached: user=%s, active=%d",
-				userAddress, p.perUserConcurrencyLimiter.GetActiveForUser(userAddress))
+			p.rejections.record(monitor.RejectionConcurrency, userAddress)
 			return
 		}
 		defer p.perUserConcurrencyLimiter.Release(userAddress)
@@ -588,11 +602,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Check if user is rate-limited due to excessive model mismatch attempts
 	rateLimiter := ctrl.GetRateLimiter()
 	if blocked, blockedUntil := rateLimiter.IsBlocked(userAddress); blocked {
-		// User is blocked - return error immediately without processing
+		// User is blocked - return error immediately without processing.
+		// Recorded (not per-event logged) because a blocked client that keeps
+		// retrying would otherwise emit one warning per request until the block
+		// expires — the same unbounded-log concern as the rate-limit gate.
 		ctx.Set("ignoreError", true)
 		remainingTime := blockedUntil.Sub(time.Now())
-		p.logger.Warnf("User blocked due to excessive model mismatch attempts: user=%s, blocked_until=%s, remaining=%v",
-			userAddress, blockedUntil.Format(time.RFC3339), remainingTime)
+		p.rejections.record(monitor.RejectionModelMismatch, userAddress)
 
 		ctx.JSON(http.StatusTooManyRequests, gin.H{
 			"error": fmt.Sprintf("Rate limit exceeded: too many invalid model requests. Please try again in %v", remainingTime.Round(time.Minute)),
@@ -720,6 +736,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	p.logger.Debugf("request saved: %v", req)
 	if err := p.ctrl.ValidateRequestWithEstimatedFee(ctx, req, expectedInputFee); err != nil {
+		// The billing/validation gate is where "high RPS, zero revenue" requests
+		// silently die: ValidateRequestWithEstimatedFee sets ignoreError on the
+		// user-caused paths (insufficient balance, not acknowledged, account not
+		// exist), so handleBrokerError logs nothing. Record the classified reason
+		// it stashed in the context (defaulting to upstream_error for unclassified
+		// server-side failures) so these rejections are observable again.
+		p.rejections.record(rejectionReasonFromContext(ctx), userAddress)
 		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}
