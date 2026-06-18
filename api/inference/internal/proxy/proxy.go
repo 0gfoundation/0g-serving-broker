@@ -624,6 +624,24 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		return
 	}
 
+	// Reject requests for an expired model before any further processing. This
+	// runs ahead of the whitelist branch on purpose: an expired model is
+	// unavailable to everyone, including whitelisted users.
+	modelForExpiry := reqModelName
+	if modelForExpiry == "" {
+		modelForExpiry = p.ctrl.Service.ModelType
+	}
+	if exp, ok := p.ctrl.Service.ModelExpiration(modelForExpiry); ok && time.Now().After(exp) {
+		ctx.Set("ignoreError", true)
+		ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionModelExpired)
+		p.rejections.record(monitor.RejectionModelExpired, userAddress)
+		ctx.JSON(http.StatusGone, gin.H{
+			"error": fmt.Sprintf("model %q is no longer available (expired at %s)",
+				modelForExpiry, exp.Format(time.RFC3339)),
+		})
+		return
+	}
+
 	// Whitelisted users bypass billing but still need normal response processing
 	if isWhitelisted {
 		// Sanitize path for logging - never log query parameters that may contain sensitive data

@@ -1679,3 +1679,114 @@ func TestScaledUnits_Overflow(t *testing.T) {
 		t.Errorf("scaledUnits(5,2.25) = %d, err %v; want 12", u, err)
 	}
 }
+
+func TestModelInfo_Validate_ExpirationDate(t *testing.T) {
+	t.Run("valid RFC3339 parses into expiresAt", func(t *testing.T) {
+		m := validModelInfo()
+		m.ExpirationDate = "2026-12-31T00:00:00Z"
+		if err := m.Validate("chatbot"); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		want, _ := time.Parse(time.RFC3339, "2026-12-31T00:00:00Z")
+		if !m.expiresAt.Equal(want) {
+			t.Errorf("expiresAt = %v, want %v", m.expiresAt, want)
+		}
+	})
+
+	t.Run("empty leaves expiresAt zero", func(t *testing.T) {
+		m := validModelInfo()
+		if err := m.Validate("chatbot"); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if !m.expiresAt.IsZero() {
+			t.Errorf("expiresAt = %v, want zero", m.expiresAt)
+		}
+	})
+
+	t.Run("malformed date is rejected", func(t *testing.T) {
+		m := validModelInfo()
+		m.ExpirationDate = "2026-12-31" // missing time + zone
+		err := m.Validate("chatbot")
+		if err == nil || !strings.Contains(err.Error(), "expirationDate") {
+			t.Errorf("expected expirationDate error, got %v", err)
+		}
+	})
+}
+
+func TestService_ModelExpiration(t *testing.T) {
+	exp := "2026-12-31T00:00:00Z"
+	wantTime, _ := time.Parse(time.RFC3339, exp)
+
+	t.Run("no expiration configured", func(t *testing.T) {
+		s := &Service{ModelInfo: validModelInfo()}
+		if err := s.ModelInfo.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := s.ModelExpiration("anything"); ok {
+			t.Error("expected ok=false when no expiration configured")
+		}
+	})
+
+	t.Run("single-model service-level expiration", func(t *testing.T) {
+		mi := validModelInfo()
+		mi.ExpirationDate = exp
+		if err := mi.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{ModelType: "m1", ModelInfo: mi}
+		got, ok := s.ModelExpiration("m1")
+		if !ok || !got.Equal(wantTime) {
+			t.Errorf("ModelExpiration = %v, ok=%v; want %v, true", got, ok, wantTime)
+		}
+	})
+
+	t.Run("multi-model per-entry expiration wins over service-level", func(t *testing.T) {
+		entryMI := validModelInfo()
+		entryMI.ExpirationDate = exp
+		if err := entryMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		svcMI := validModelInfo() // no expiration
+		if err := svcMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{
+			ModelInfo: svcMI,
+			ModelPricing: []ModelPricingEntry{
+				{Model: "expired", ModelInfo: entryMI},
+				{Model: "fresh", ModelInfo: svcMI},
+			},
+		}
+		if err := s.BuildModelPricingMap(); err != nil {
+			t.Fatal(err)
+		}
+		// Entry with its own ModelInfo (no expiry) does NOT inherit service-level —
+		// matches /v1/models resolution where per-entry ModelInfo wins wholesale.
+		if _, ok := s.ModelExpiration("fresh"); ok {
+			t.Error("expected ok=false for entry whose ModelInfo has no expiration")
+		}
+		got, ok := s.ModelExpiration("expired")
+		if !ok || !got.Equal(wantTime) {
+			t.Errorf("ModelExpiration(expired) = %v, ok=%v; want %v, true", got, ok, wantTime)
+		}
+	})
+
+	t.Run("multi-model entry without ModelInfo falls back to service-level", func(t *testing.T) {
+		svcMI := validModelInfo()
+		svcMI.ExpirationDate = exp
+		if err := svcMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{
+			ModelInfo:    svcMI,
+			ModelPricing: []ModelPricingEntry{{Model: "m1"}},
+		}
+		if err := s.BuildModelPricingMap(); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := s.ModelExpiration("m1")
+		if !ok || !got.Equal(wantTime) {
+			t.Errorf("ModelExpiration(m1) = %v, ok=%v; want %v, true", got, ok, wantTime)
+		}
+	})
+}

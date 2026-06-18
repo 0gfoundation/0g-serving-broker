@@ -85,6 +85,7 @@ const (
 	RejectionNotAcknowledged = "not_acknowledged"
 	RejectionAccountNotExist = "account_not_exist"
 	RejectionUpstreamError   = "upstream_error"
+	RejectionModelExpired    = "model_expired"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
