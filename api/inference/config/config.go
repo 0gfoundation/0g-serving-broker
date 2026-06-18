@@ -146,10 +146,22 @@ func (m *ModelInfo) Validate(serviceType string) error {
 // returning false when none is configured. Resolution mirrors /v1/models
 // metadata: a per-model pricing entry's own ModelInfo wins wholesale (no
 // field-level fallback), otherwise the service-level ModelInfo applies.
+//
+// In multi-model mode a model that resolves to no pricing entry (unknown, with
+// no wildcard) returns false rather than inheriting the service-level
+// expiration — such a request is not one this service serves, so it is left to
+// the allowlist to reject as "not supported" instead of being mislabeled
+// "expired".
 func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 	mi := s.ModelInfo
-	if mp := s.GetModelPricing(model); mp != nil && mp.ModelInfo != nil {
-		mi = mp.ModelInfo
+	if s.HasMultiModelPricing() {
+		mp := s.GetModelPricing(model)
+		if mp == nil {
+			return time.Time{}, false
+		}
+		if mp.ModelInfo != nil {
+			mi = mp.ModelInfo
+		}
 	}
 	if mi != nil && !mi.expiresAt.IsZero() {
 		return mi.expiresAt, true

@@ -1789,4 +1789,43 @@ func TestService_ModelExpiration(t *testing.T) {
 			t.Errorf("ModelExpiration(m1) = %v, ok=%v; want %v, true", got, ok, wantTime)
 		}
 	})
+
+	t.Run("multi-model unknown model does not inherit service-level expiration", func(t *testing.T) {
+		svcMI := validModelInfo()
+		svcMI.ExpirationDate = exp
+		if err := svcMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{
+			ModelInfo:    svcMI,
+			ModelPricing: []ModelPricingEntry{{Model: "m1"}},
+		}
+		if err := s.BuildModelPricingMap(); err != nil {
+			t.Fatal(err)
+		}
+		// "unknown" has no entry and there is no wildcard; it is not served by
+		// this broker, so expiration must defer to the allowlist (ok=false)
+		// rather than mislabel it as expired via the service-level fallback.
+		if _, ok := s.ModelExpiration("unknown"); ok {
+			t.Error("expected ok=false for an unknown model in multi-model mode")
+		}
+	})
+
+	t.Run("multi-model wildcard expiration applies to any served model", func(t *testing.T) {
+		wildMI := validModelInfo()
+		wildMI.ExpirationDate = exp
+		if err := wildMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{
+			ModelPricing: []ModelPricingEntry{{Model: ModelWildcard, ModelInfo: wildMI}},
+		}
+		if err := s.BuildModelPricingMap(); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := s.ModelExpiration("any-model-name")
+		if !ok || !got.Equal(wantTime) {
+			t.Errorf("ModelExpiration(any-model-name) = %v, ok=%v; want %v, true", got, ok, wantTime)
+		}
+	})
 }
