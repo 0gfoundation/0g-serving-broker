@@ -635,6 +635,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		ctx.Set("ignoreError", true)
 		ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionModelExpired)
 		p.rejections.record(monitor.RejectionModelExpired, userAddress)
+		// 410 is cacheable by default; an operator can re-enable the model by
+		// extending expirationDate and restarting, so forbid caching to ensure
+		// the rejection never outlives the config that produced it.
+		ctx.Header("Cache-Control", "no-store")
 		ctx.JSON(http.StatusGone, gin.H{
 			"error": fmt.Sprintf("model %q is no longer available (expired at %s)",
 				modelForExpiry, exp.Format(time.RFC3339)),
