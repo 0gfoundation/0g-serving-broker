@@ -185,6 +185,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 			return errors.Wrap(err, "list request from db")
 		}
 		
+		// Assay: drop requests the verifier flagged REJECT before they enter the
+		// TEE-signed settlement batch — the provider does not bill for inferences
+		// that failed LDD verification.
+		reqs = c.filterRejectedRequests(reqs)
+
 		if len(reqs) == 0 {
 			c.logger.Infof("No more requests to settle after %d rounds", round)
 			return nil
@@ -668,6 +673,43 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 			c.logger.Infof("User %s: temporary failure %s", outcome.User.Hex(), outcome.Status.String())
 		}
 	}
+}
+
+// filterRejectedRequests removes requests the Assay verifier flagged REJECT
+// (recorded from the ZG-Verdict header) so they are excluded from the
+// TEE-signed settlement batch — the provider does not bill for inferences that
+// failed LDD verification. Rejected rows are parked via skip_until (retained in
+// the DB as audit evidence, not deleted) and re-evaluated on a later cycle.
+// No-op when the Assay integration is disabled; fail-open for PASS/UNVERIFIED
+// and for requests with no recorded verdict.
+func (c *Ctrl) filterRejectedRequests(reqs []model.Request) []model.Request {
+	if !c.assayVerdictFilter {
+		return reqs
+	}
+	kept, rejected := splitRejectedRequests(reqs)
+	if len(rejected) > 0 {
+		c.logger.Warnf("Assay: excluding %d REJECT'd request(s) from settlement", len(rejected))
+		if err := c.markRequestsWithSkipUntil(rejected, constant.SkipUntilDuration); err != nil {
+			c.logger.Warnf("Assay: failed to park rejected requests: %v", err)
+		}
+	}
+	return kept
+}
+
+// splitRejectedRequests partitions reqs into the ones to keep (verdict not
+// REJECT — i.e. PASS, UNVERIFIED, or unrecorded) and the request hashes of the
+// REJECT'd ones, preserving input order. Pure (no DB); the side effects live in
+// filterRejectedRequests.
+func splitRejectedRequests(reqs []model.Request) (kept []model.Request, rejectedHashes []string) {
+	kept = reqs[:0]
+	for _, req := range reqs {
+		if req.Verdict == constant.AssayVerdictReject {
+			rejectedHashes = append(rejectedHashes, req.RequestHash)
+			continue
+		}
+		kept = append(kept, req)
+	}
+	return kept, rejectedHashes
 }
 
 // Helper functions (simplified and consolidated)

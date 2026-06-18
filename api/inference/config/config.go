@@ -393,6 +393,13 @@ type Config struct {
 		// Set to "0" to disable per-user filtering.
 		MinSettlementFee string `yaml:"minSettlementFee"`
 	} `yaml:"settlement"`
+	// Assay gates the Immaculate/LDD verifiable-inference integration. When
+	// Enabled, the broker records the verifier's ZG-Verdict per request and
+	// excludes REJECT'd requests from settlement. Fail-open: a missing or
+	// non-REJECT verdict is treated as settleable.
+	Assay struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"assay"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`
 		ReserveAmount string        `yaml:"reserveAmount"`

@@ -38,6 +38,19 @@ const (
 	PriceDenominationUSD    = "USD"
 )
 
+// Assay (Immaculate/LDD) verifiable-inference integration.
+const (
+	// HeaderZGVerdict is the response header the Assay verifier sets with the
+	// per-request LDD audit result (one of the AssayVerdict* values below).
+	HeaderZGVerdict = "ZG-Verdict"
+
+	// Assay verdict values reported via HeaderZGVerdict. UNVERIFIED means the
+	// request was sampled out of auditing; only REJECT is acted on at settlement.
+	AssayVerdictPass       = "PASS"
+	AssayVerdictReject     = "REJECT"
+	AssayVerdictUnverified = "UNVERIFIED"
+)
+
 // KnownCentralizedProviderURLs maps provider identity to their default API base URLs.
 var KnownCentralizedProviderURLs = map[string]string{
 	CentralizedProviderOpenAI:    "https://api.openai.com",

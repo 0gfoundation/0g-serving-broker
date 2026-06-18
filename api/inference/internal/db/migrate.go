@@ -272,6 +272,15 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "add-verdict-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Verdict string `gorm:"type:varchar(16);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
