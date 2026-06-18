@@ -303,6 +303,15 @@ func (d *DB) Migrate() error {
 			},
 		},
 		{
+			ID: "add-verdict-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Verdict string `gorm:"type:varchar(16);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
 			ID: "create-hourly-usage-stat",
 			Migrate: func(tx *gorm.DB) error {
 				// Retained hourly rollup for broker↔provider reconciliation. Bucketed
