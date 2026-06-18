@@ -94,7 +94,7 @@ service:
   #     temperature: 0.7
   #     top_p: 0.9
   #   teeType: "TDX"
-  #   expirationDate: "2026-12-31T00:00:00Z"
+  #   expirationDate: "2026-12-31T00:00:00Z"  # After this instant, requests for the model are rejected with HTTP 410.
 
 # Network configuration for blockchain connection (0G testnet)
 network:

@@ -93,12 +93,17 @@ type ModelInfo struct {
 	SupportedFormats    []string               `yaml:"supportedFormats"`    // Optional. API formats this model supports, e.g., ["openai", "anthropic"]. Defaults to ["openai"] if omitted.
 	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
 	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
-	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z"
+	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z". After this instant the broker rejects requests for the model with HTTP 410.
 
 	// VideoSizeRatios maps output resolution (e.g., "1280x720") to a cost multiplier.
 	// Used for video generation billing: fee = seconds × sizeRatio × outputPrice.
 	// Defaults are applied if not configured (see DefaultVideoSizeRatios).
 	VideoSizeRatios map[string]float64 `yaml:"videoSizeRatios"`
+
+	// expiresAt is the parsed form of ExpirationDate, populated by Validate at
+	// load time so request-path expiration checks never re-parse the string.
+	// Zero value means no expiration is configured.
+	expiresAt time.Time `yaml:"-"`
 }
 
 // Validate checks that all required ModelInfo fields are set.
@@ -124,7 +129,44 @@ func (m *ModelInfo) Validate(serviceType string) error {
 	if len(m.SupportedParameters) == 0 {
 		return fmt.Errorf("service.modelInfo.supportedParameters is required")
 	}
+	// Parse the optional expiration once at load time so the request path never
+	// re-parses it. An unparseable value is a config error (fail fast) rather
+	// than a silently ignored string.
+	if m.ExpirationDate != "" {
+		t, err := time.Parse(time.RFC3339, m.ExpirationDate)
+		if err != nil {
+			return fmt.Errorf("service.modelInfo.expirationDate %q is not valid RFC3339 (e.g. \"2026-12-31T00:00:00Z\"): %w", m.ExpirationDate, err)
+		}
+		m.expiresAt = t
+	}
 	return nil
+}
+
+// ModelExpiration resolves the availability expiration for the given model,
+// returning false when none is configured. Resolution mirrors /v1/models
+// metadata: a per-model pricing entry's own ModelInfo wins wholesale (no
+// field-level fallback), otherwise the service-level ModelInfo applies.
+//
+// In multi-model mode a model that resolves to no pricing entry (unknown, with
+// no wildcard) returns false rather than inheriting the service-level
+// expiration — such a request is not one this service serves, so it is left to
+// the allowlist to reject as "not supported" instead of being mislabeled
+// "expired".
+func (s *Service) ModelExpiration(model string) (time.Time, bool) {
+	mi := s.ModelInfo
+	if s.HasMultiModelPricing() {
+		mp := s.GetModelPricing(model)
+		if mp == nil {
+			return time.Time{}, false
+		}
+		if mp.ModelInfo != nil {
+			mi = mp.ModelInfo
+		}
+	}
+	if mi != nil && !mi.expiresAt.IsZero() {
+		return mi.expiresAt, true
+	}
+	return time.Time{}, false
 }
 
 type Service struct {
