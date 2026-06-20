@@ -46,9 +46,9 @@ func TestRejectionAggregator_FlushSummarizesPerReason(t *testing.T) {
 
 	// 5 rejections for one user, 2 reasons.
 	for i := 0; i < 5; i++ {
-		a.record(monitor.RejectionInsufficientBal, "0x4870000000000000000000000000000000a4E9")
+		a.record(nil, monitor.RejectionInsufficientBal, "0x4870000000000000000000000000000000a4E9")
 	}
-	a.record(monitor.RejectionRateLimit, "0x1111000000000000000000000000000000002222")
+	a.record(nil, monitor.RejectionRateLimit, "0x1111000000000000000000000000000000002222")
 
 	a.flush()
 
@@ -79,7 +79,7 @@ func TestRejectionAggregator_BoundsTrackedUsers(t *testing.T) {
 	// not grow without bound; the excess is folded into the overflow tally.
 	total := maxRejectionUsersPerReason + 50
 	for i := 0; i < total; i++ {
-		a.record(monitor.RejectionRateLimit, addrForIndex(i))
+		a.record(nil, monitor.RejectionRateLimit, addrForIndex(i))
 	}
 
 	b := a.buckets[monitor.RejectionRateLimit]
@@ -129,7 +129,7 @@ func TestRejectionAggregator_NilReceiverRecordDoesNotPanic(t *testing.T) {
 	// A Proxy built outside New() (e.g. the test helper) has a nil aggregator.
 	// record must still fire the metric without panicking.
 	var a *rejectionAggregator
-	a.record(monitor.RejectionRateLimit, "0x4870000000000000000000000000000000a4E9")
+	a.record(nil, monitor.RejectionRateLimit, "0x4870000000000000000000000000000000a4E9")
 }
 
 func TestRejectionAggregator_StopIsIdempotent(t *testing.T) {
@@ -143,8 +143,8 @@ func TestRejectionAggregator_DistinctTruncationCollisionsCountedSeparately(t *te
 	a := newTestAggregator(logger)
 	// Two addresses that share the 6+4 truncation prefix but differ in the
 	// middle must be counted as two distinct users, not merged.
-	a.record(monitor.RejectionRateLimit, "0x4870aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4E9")
-	a.record(monitor.RejectionRateLimit, "0x4870bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4E9")
+	a.record(nil, monitor.RejectionRateLimit, "0x4870aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4E9")
+	a.record(nil, monitor.RejectionRateLimit, "0x4870bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4E9")
 	b := a.buckets[monitor.RejectionRateLimit]
 	if got := len(b.users); got != 2 {
 		t.Fatalf("expected 2 distinct users despite shared truncation prefix, got %d", got)

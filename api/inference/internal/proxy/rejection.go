@@ -88,8 +88,18 @@ func newRejectionAggregator(logger log.Logger, interval time.Duration) *rejectio
 // addresses out of the logs per CLAUDE.md while avoiding the distinct-user
 // undercount that truncating-as-key would cause when two wallets share the
 // 6+4-char prefix. An empty user is recorded against the reason total only.
-func (a *rejectionAggregator) record(reason, user string) {
+//
+// ctx may be nil (tests, non-gin callers); when set, the reason is stamped under
+// monitor.CtxKeyRejectionReason so TrackMetrics' single emit site can label the
+// unified failure counter (broker_request_failures_total) with this code. Doing
+// it here means every rejection — context-classified or recorded inline (rate
+// limit, concurrency, …) — surfaces its code without each call site repeating
+// the Set.
+func (a *rejectionAggregator) record(ctx *gin.Context, reason, user string) {
 	monitor.RecordRejection(reason)
+	if ctx != nil {
+		ctx.Set(monitor.CtxKeyRejectionReason, reason)
+	}
 	if a == nil {
 		return
 	}

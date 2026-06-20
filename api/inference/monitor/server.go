@@ -65,7 +65,52 @@ var (
 	// label here (that would be unbounded); operators get top-N offenders from
 	// the periodic aggregated rejection log instead.
 	RequestRejectedTotal *prometheus.CounterVec
+
+	// FailureCount is the unified failure-attribution counter. Every request
+	// that ends in failure (HTTP status >= 400 — whether the broker rejected it
+	// before forwarding or the upstream provider returned a non-2xx we proxied
+	// back) increments it exactly once, labeled so a single query answers
+	// "whose fault, which model, what code". Coverage is every failure that
+	// flows through a synchronous request handler under TrackMetrics; the known
+	// gaps are: (1) a handler that panics without writing a status (the engine
+	// runs without gin.Recovery(), so a panic-induced 500 surfaces as a
+	// process-level crash/log, not here); (2) cross-origin requests rejected by
+	// cors with 403 (cors is registered before TrackMetrics so preflight isn't
+	// counted as traffic); and (3) failures inside the async background worker
+	// (see ctrl/async.go), which runs off the request lifecycle on
+	// context.Background() — its upstream non-2xx is recorded to the job's DB
+	// status, not to this counter.
+	//
+	//   - source: "broker" (admission/billing/auth/TEE/internal) vs "upstream"
+	//     (the provider returned the non-2xx that was proxied back).
+	//   - code:   the bounded classification — a Rejection* reason for broker
+	//     rejections; empty for broker/upstream errors that carry no classified
+	//     reason (the status label then carries the granularity).
+	//   - model:  the bounded metric model (see CtxKeyMetricModel); "" when the
+	//     request failed before model resolution (e.g. an early rate-limit gate).
+	//   - status: HTTP status text.
+	//
+	// It supersedes broker_requests_errors_total (which has no source/model and
+	// drops client-caused 4xx via ignoreError) and complements
+	// broker_requests_rejected_total (broker-only, no status/model); both remain
+	// for dashboard back-compat. The provider_address const label is on every
+	// series, so provider attribution needs no extra label here.
+	FailureCount *prometheus.CounterVec
 )
+
+// Failure source label values for FailureCount. Bounded to two values so the
+// "broker vs upstream" cut never grows cardinality.
+const (
+	FailureSourceBroker   = "broker"
+	FailureSourceUpstream = "upstream"
+)
+
+// CtxKeyFailureSource lets a handler override the failure source TrackMetrics
+// attributes to a >=400 response. Unset means FailureSourceBroker (the default
+// for any broker-side failure); the upstream proxy error path sets it to
+// FailureSourceUpstream so a provider's non-2xx is never misattributed to the
+// broker.
+const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
 // strings ever passed to RecordRejection, keeping the metric's cardinality
@@ -282,12 +327,22 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
+	FailureCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_request_failures_total",
+			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream), code (Rejection* reason or empty), model, and status. Unified failure-attribution counter; see FailureCount doc.",
+			ConstLabels: constLabels,
+		},
+		[]string{"source", "code", "model", "status"},
+	)
+
 	prometheus.MustRegister(WhitelistRequestsTotal)
 	prometheus.MustRegister(WhitelistInputTokensTotal)
 	prometheus.MustRegister(WhitelistOutputTokensTotal)
 	prometheus.MustRegister(WhitelistAudioSecondsTotal)
 	prometheus.MustRegister(VideoBillingSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
+	prometheus.MustRegister(FailureCount)
 }
 
 // StartDAUUpdater starts a background goroutine that periodically queries the database
@@ -399,6 +454,30 @@ func modelFromGinContext(c *gin.Context) string {
 	return ""
 }
 
+// failureSourceFromGinContext returns the failure source a handler stamped under
+// CtxKeyFailureSource, defaulting to FailureSourceBroker. A broker-side failure
+// never needs to set the key; only the upstream proxy path opts into "upstream".
+func failureSourceFromGinContext(c *gin.Context) string {
+	if v, exists := c.Get(CtxKeyFailureSource); exists {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return FailureSourceBroker
+}
+
+// failureCodeFromGinContext returns the bounded classification stamped under
+// CtxKeyRejectionReason (one of the Rejection* constants), or "" when the
+// failure carried no classified reason — the status label then distinguishes it.
+func failureCodeFromGinContext(c *gin.Context) string {
+	if v, exists := c.Get(CtxKeyRejectionReason); exists {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // TrackMetrics is a Gin middleware that tracks request metrics.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -418,9 +497,18 @@ func TrackMetrics() gin.HandlerFunc {
 		// so it carries whatever the request path resolved ("" for non-inference
 		// paths and unresolved requests).
 		status := c.Writer.Status()
-		RequestCount.WithLabelValues(path, http.StatusText(status), modelFromGinContext(c)).Inc()
+		statusText := http.StatusText(status)
+		model := modelFromGinContext(c)
+		RequestCount.WithLabelValues(path, statusText, model).Inc()
 		if !ignoreError && status >= 400 {
-			ErrorCount.WithLabelValues(path, http.StatusText(status)).Inc()
+			ErrorCount.WithLabelValues(path, statusText).Inc()
+		}
+		// Unified failure attribution: count EVERY >=400 (including client-caused
+		// rejections that ErrorCount drops via ignoreError) exactly once, split by
+		// source/code/model so "broker vs upstream, which model, what reason" is a
+		// single query. Source defaults to broker; the upstream proxy path opts in.
+		if status >= 400 {
+			RecordFailure(failureSourceFromGinContext(c), failureCodeFromGinContext(c), model, statusText)
 		}
 	}
 }
@@ -477,6 +565,17 @@ func RecordRejection(reason string) {
 		return
 	}
 	RequestRejectedTotal.WithLabelValues(reason).Inc()
+}
+
+// RecordFailure increments the unified failure counter. source must be a
+// FailureSource* constant and code a Rejection* constant or "" so the metric
+// stays bounded. Safe to call before PrometheusInit (no-op when monitoring is
+// disabled). Normally called only from TrackMetrics' single emit site.
+func RecordFailure(source, code, model, status string) {
+	if FailureCount == nil {
+		return
+	}
+	FailureCount.WithLabelValues(source, code, model, status).Inc()
 }
 
 // RecordWhitelistRequest increments the whitelist request counter for the given
