@@ -434,6 +434,10 @@ func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
 }
 
 func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
+	// Attribute this failure to the provider, not the broker, in the unified
+	// failure metric (broker_request_failures_total). Set before any early
+	// return so even an unreadable upstream body is counted as upstream.
+	ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
 	statusCode := resp.StatusCode
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

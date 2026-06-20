@@ -522,19 +522,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// log-amplification vector in #542). Rejections are now recorded to the
 		// Prometheus counter and summarized periodically by p.rejections.
 		if !middleware.CheckPerUserRateLimit(p.perUserRateLimiter, ctx, userAddress) {
-			p.rejections.record(monitor.RejectionRateLimit, userAddress)
+			p.rejections.record(ctx, monitor.RejectionRateLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserTPMLimit(p.perUserTPMLimiter, ctx, userAddress, svcType) {
-			p.rejections.record(monitor.RejectionTPMLimit, userAddress)
+			p.rejections.record(ctx, monitor.RejectionTPMLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserIPMLimit(p.perUserIPMLimiter, ctx, userAddress, svcType) {
-			p.rejections.record(monitor.RejectionIPMLimit, userAddress)
+			p.rejections.record(ctx, monitor.RejectionIPMLimit, userAddress)
 			return
 		}
 		if !middleware.CheckPerUserConcurrency(p.perUserConcurrencyLimiter, ctx, userAddress) {
-			p.rejections.record(monitor.RejectionConcurrency, userAddress)
+			p.rejections.record(ctx, monitor.RejectionConcurrency, userAddress)
 			return
 		}
 		defer p.perUserConcurrencyLimiter.Release(userAddress)
@@ -608,7 +608,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// expires — the same unbounded-log concern as the rate-limit gate.
 		ctx.Set("ignoreError", true)
 		remainingTime := blockedUntil.Sub(time.Now())
-		p.rejections.record(monitor.RejectionModelMismatch, userAddress)
+		p.rejections.record(ctx, monitor.RejectionModelMismatch, userAddress)
 
 		ctx.JSON(http.StatusTooManyRequests, gin.H{
 			"error": fmt.Sprintf("Rate limit exceeded: too many invalid model requests. Please try again in %v", remainingTime.Round(time.Minute)),
@@ -633,8 +633,8 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 	if exp, ok := p.ctrl.Service.ModelExpiration(modelForExpiry); ok && time.Now().After(exp) {
 		ctx.Set("ignoreError", true)
-		ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionModelExpired)
-		p.rejections.record(monitor.RejectionModelExpired, userAddress)
+		// record stamps CtxKeyRejectionReason for the unified failure metric.
+		p.rejections.record(ctx, monitor.RejectionModelExpired, userAddress)
 		// 410 is cacheable by default; an operator can re-enable the model by
 		// extending expirationDate and restarting, so forbid caching to ensure
 		// the rejection never outlives the config that produced it.
@@ -764,7 +764,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// exist), so handleBrokerError logs nothing. Record the classified reason
 		// it stashed in the context (defaulting to upstream_error for unclassified
 		// server-side failures) so these rejections are observable again.
-		p.rejections.record(rejectionReasonFromContext(ctx), userAddress)
+		p.rejections.record(ctx, rejectionReasonFromContext(ctx), userAddress)
 		p.handleBrokerError(ctx, err, "validate request")
 		return
 	}
