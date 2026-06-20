@@ -195,6 +195,23 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	p.serviceGroup.Use(cors.New(corsConfig))
 
+	// TrackMetrics is registered BEFORE the admission middlewares below so its
+	// post-c.Next() recording wraps them. The concrete case this fixes is the
+	// global concurrency limiter: it aborts with 503 at the middleware level
+	// (before the handler), so on the old ordering — TrackMetrics last — that
+	// 503 never reached the metrics and the broker looked failure-free precisely
+	// while shedding the most load. Now the abort unwinds back through
+	// TrackMetrics, which counts it (source=broker, status="Service
+	// Unavailable"). This also makes the concurrency limiter's ignoreError flag
+	// live again: it keeps the 503 out of ErrorCount while FailureCount still
+	// records it. (RateLimitMiddleware is a no-op; the size limit 413 and the
+	// per-user 429s are emitted inside the handler, so those were already
+	// wrapped regardless of order.) Registered AFTER cors so cross-origin
+	// preflight OPTIONS that cors short-circuits are not counted as traffic.
+	if enableMonitor {
+		p.serviceGroup.Use(monitor.TrackMetrics())
+	}
+
 	// Apply rate limiting middleware
 	p.serviceGroup.Use(middleware.RateLimitMiddleware(p.rateLimiter))
 
@@ -205,10 +222,6 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 
 	// Apply request size limit middleware (32MB)
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
-
-	if enableMonitor {
-		p.serviceGroup.Use(monitor.TrackMetrics())
-	}
 
 	return p
 }

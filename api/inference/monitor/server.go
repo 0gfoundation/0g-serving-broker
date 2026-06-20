@@ -70,7 +70,16 @@ var (
 	// that ends in failure (HTTP status >= 400 — whether the broker rejected it
 	// before forwarding or the upstream provider returned a non-2xx we proxied
 	// back) increments it exactly once, labeled so a single query answers
-	// "whose fault, which model, what code":
+	// "whose fault, which model, what code". Coverage is every failure that
+	// flows through a synchronous request handler under TrackMetrics; the known
+	// gaps are: (1) a handler that panics without writing a status (the engine
+	// runs without gin.Recovery(), so a panic-induced 500 surfaces as a
+	// process-level crash/log, not here); (2) cross-origin requests rejected by
+	// cors with 403 (cors is registered before TrackMetrics so preflight isn't
+	// counted as traffic); and (3) failures inside the async background worker
+	// (see ctrl/async.go), which runs off the request lifecycle on
+	// context.Background() — its upstream non-2xx is recorded to the job's DB
+	// status, not to this counter.
 	//
 	//   - source: "broker" (admission/billing/auth/TEE/internal) vs "upstream"
 	//     (the provider returned the non-2xx that was proxied back).
