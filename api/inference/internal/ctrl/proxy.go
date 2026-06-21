@@ -234,23 +234,27 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// Skip error logging for telemetry endpoints to reduce noise
 		if strings.Contains(ctx.Request.RequestURI, "/api/event_logging/batch") {
+			// Telemetry-sink forwarding failures are fire-and-forget noise, not a
+			// fault worth paging on. Suppress the log and flag them client-caused
+			// so they land in neither the broker nor the upstream fault bucket.
 			ctx.Set("ignoreError", true)
-		}
-		// With server-side context, context canceled errors should only occur
-		// on HTTP client timeout, not client disconnection.
-		if strings.Contains(err.Error(), "context canceled") {
-			ctx.Set("ignoreError", true)
-			// The client hung up mid-request: neither the broker nor the
-			// provider is at fault.
 			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceClient)
 		} else {
-			// We never reached the provider (TLS handshake timeout, connection
-			// refused, EOF in flight). That is an upstream/infra fault, not a
-			// broker bug — attribute it to upstream so it trips the upstream
-			// alert, not the broker 5xx alert.
+			// A failed Do means the broker never got a usable response from the
+			// provider — a dial/TLS failure, connection refused, EOF in flight,
+			// or the broker's own Client.Timeout firing against a slow provider
+			// (which surfaces as "context deadline exceeded"). The client cannot
+			// cause this: the outbound request uses context.Background() (above),
+			// so a client disconnect never cancels it. Attribute it to upstream so
+			// it trips the upstream/infra alert, not the broker 5xx alert.
 			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+			if strings.Contains(err.Error(), "context canceled") {
+				// Not expected on a background-context request, so if it ever
+				// surfaces (a transport-internal cancellation) treat it as noise
+				// rather than a broker bug and skip the error log.
+				ctx.Set("ignoreError", true)
+			}
 		}
 		c.handleBrokerError(ctx, err, "call proxied service")
 		return err

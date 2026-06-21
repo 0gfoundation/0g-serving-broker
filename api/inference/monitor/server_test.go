@@ -747,32 +747,40 @@ func TestTrackMetricsIgnoreError(t *testing.T) {
 
 // TestTrackMetricsFailureSource verifies the three-way fault attribution of the
 // unified failure counter: a handler's explicit CtxKeyFailureSource override
-// wins, and an un-overridden failure is derived from the status (broker 4xx ->
-// client, except the upstream_error fallback; everything else -> broker).
+// wins, and an un-overridden failure is derived from the ignoreError flag and
+// status — a client-flagged 4xx is "client" (except the upstream_error
+// fallback), while an un-flagged failure (including a broker-fault 4xx that
+// errors.Response defaulted to 400) stays "broker".
 func TestTrackMetricsFailureSource(t *testing.T) {
 	setupTestMetrics(t)
 
 	gin.SetMode(gin.TestMode)
 
 	cases := []struct {
-		name       string
-		status     int
-		setSource  string // explicit CtxKeyFailureSource override, "" for none
-		code       string // CtxKeyRejectionReason, "" for none
-		wantSource string
-		wantStatus string
+		name        string
+		status      int
+		setSource   string // explicit CtxKeyFailureSource override, "" for none
+		code        string // CtxKeyRejectionReason, "" for none
+		ignoreError bool   // handler flagged the failure client-caused
+		wantSource  string
+		wantStatus  string
 	}{
-		// No override: status-derived.
-		{"broker 5xx -> broker", http.StatusInternalServerError, "", "", FailureSourceBroker, "Internal Server Error"},
-		{"broker 4xx -> client", http.StatusUnauthorized, "", "", FailureSourceClient, "Unauthorized"},
-		{"broker rejection 4xx -> client", http.StatusTooManyRequests, "", RejectionRateLimit, FailureSourceClient, "Too Many Requests"},
-		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, FailureSourceBroker, "Service Unavailable"},
-		// upstream_error fallback stays broker even on a 4xx.
-		{"upstream_error 4xx -> broker", http.StatusBadRequest, "", RejectionUpstreamError, FailureSourceBroker, "Bad Request"},
-		// Explicit overrides always win.
-		{"upstream 5xx override", http.StatusBadGateway, FailureSourceUpstream, "", FailureSourceUpstream, "Bad Gateway"},
-		{"upstream 429 override", http.StatusTooManyRequests, FailureSourceUpstream, "", FailureSourceUpstream, "Too Many Requests"},
-		{"client 4xx override (upstream rejected)", http.StatusBadRequest, FailureSourceClient, "", FailureSourceClient, "Bad Request"},
+		// No override: derived from ignoreError + status.
+		{"broker 5xx -> broker", http.StatusInternalServerError, "", "", false, FailureSourceBroker, "Internal Server Error"},
+		// A broker-fault 4xx (errors.Response default-400, no ignoreError) must
+		// stay broker — it must not be hidden in the client bucket.
+		{"broker 4xx (unflagged) -> broker", http.StatusBadRequest, "", "", false, FailureSourceBroker, "Bad Request"},
+		// A client-caused 4xx the handler flagged with ignoreError -> client.
+		{"client 4xx (flagged) -> client", http.StatusUnauthorized, "", "", true, FailureSourceClient, "Unauthorized"},
+		{"client rejection 4xx (flagged) -> client", http.StatusTooManyRequests, "", RejectionRateLimit, true, FailureSourceClient, "Too Many Requests"},
+		// concurrency is a 503: 5xx never derives to client even if flagged.
+		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, false, FailureSourceBroker, "Service Unavailable"},
+		// upstream_error fallback stays broker even on a flagged 4xx.
+		{"upstream_error 4xx -> broker", http.StatusBadRequest, "", RejectionUpstreamError, true, FailureSourceBroker, "Bad Request"},
+		// Explicit overrides always win, regardless of ignoreError/status.
+		{"upstream 5xx override", http.StatusBadGateway, FailureSourceUpstream, "", false, FailureSourceUpstream, "Bad Gateway"},
+		{"upstream 429 override", http.StatusTooManyRequests, FailureSourceUpstream, "", false, FailureSourceUpstream, "Too Many Requests"},
+		{"client 4xx override (upstream rejected)", http.StatusBadRequest, FailureSourceClient, "", true, FailureSourceClient, "Bad Request"},
 	}
 
 	engine := gin.New()
@@ -780,6 +788,9 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 	for i, tc := range cases {
 		tc := tc
 		engine.GET(fmt.Sprintf("/fs/%d", i), func(c *gin.Context) {
+			if tc.ignoreError {
+				c.Set("ignoreError", true)
+			}
 			if tc.setSource != "" {
 				c.Set(CtxKeyFailureSource, tc.setSource)
 			}
