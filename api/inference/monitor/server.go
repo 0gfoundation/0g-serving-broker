@@ -81,8 +81,14 @@ var (
 	// context.Background() — its upstream non-2xx is recorded to the job's DB
 	// status, not to this counter.
 	//
-	//   - source: "broker" (admission/billing/auth/TEE/internal) vs "upstream"
-	//     (the provider returned the non-2xx that was proxied back).
+	//   - source: "broker" (the broker's own fault — internal 5xx, TEE/signing,
+	//     settlement, or an unclassified server-side validation failure), "upstream"
+	//     (the provider's fault — it returned a 5xx/429 we proxied back, or the
+	//     broker could not reach it: TLS timeout, connection refused, EOF), or
+	//     "client" (the request itself was invalid — any 4xx except 429, whether
+	//     the upstream rejected it or the broker did, plus a mid-request client
+	//     disconnect). The three-way cut lets the upstream/broker alerts fire only
+	//     on real faults while client-caused noise lands in its own bucket.
 	//   - code:   the bounded classification — a Rejection* reason for broker
 	//     rejections; empty for broker/upstream errors that carry no classified
 	//     reason (the status label then carries the granularity).
@@ -98,18 +104,26 @@ var (
 	FailureCount *prometheus.CounterVec
 )
 
-// Failure source label values for FailureCount. Bounded to two values so the
-// "broker vs upstream" cut never grows cardinality.
+// Failure source label values for FailureCount. Bounded to three values so the
+// "whose fault" cut never grows cardinality.
 const (
 	FailureSourceBroker   = "broker"
 	FailureSourceUpstream = "upstream"
+	// FailureSourceClient marks a failure caused by an invalid client request
+	// (any 4xx except 429, plus a mid-request client disconnect). Neither the
+	// broker nor the upstream is at fault, so these must not inflate either
+	// fault alert.
+	FailureSourceClient = "client"
 )
 
 // CtxKeyFailureSource lets a handler override the failure source TrackMetrics
-// attributes to a >=400 response. Unset means FailureSourceBroker (the default
-// for any broker-side failure); the upstream proxy error path sets it to
-// FailureSourceUpstream so a provider's non-2xx is never misattributed to the
-// broker.
+// attributes to a >=400 response. When unset, resolveFailureSource derives it
+// from the status: a broker-produced 4xx (other than the upstream_error
+// fallback) is the client's fault, everything else is the broker's. Handlers
+// set it explicitly only when they know better than the status alone — the
+// upstream proxy path sets FailureSourceUpstream for a provider non-2xx /
+// unreachable provider, and FailureSourceClient for an upstream 4xx or a client
+// disconnect.
 const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
@@ -330,7 +344,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	FailureCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_request_failures_total",
-			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream), code (Rejection* reason or empty), model, and status. Unified failure-attribution counter; see FailureCount doc.",
+			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream|client), code (Rejection* reason or empty), model, and status. Unified failure-attribution counter; see FailureCount doc.",
 			ConstLabels: constLabels,
 		},
 		[]string{"source", "code", "model", "status"},
@@ -454,14 +468,29 @@ func modelFromGinContext(c *gin.Context) string {
 	return ""
 }
 
-// failureSourceFromGinContext returns the failure source a handler stamped under
-// CtxKeyFailureSource, defaulting to FailureSourceBroker. A broker-side failure
-// never needs to set the key; only the upstream proxy path opts into "upstream".
-func failureSourceFromGinContext(c *gin.Context) string {
+// resolveFailureSource decides the fault attribution for a >=400 response.
+//
+// An explicit override stamped under CtxKeyFailureSource always wins — the
+// upstream proxy path uses it to mark a provider non-2xx / unreachable provider
+// as "upstream" and an upstream 4xx (or a client disconnect) as "client",
+// because there the status alone can't tell whose fault it is.
+//
+// With no override the failure was produced by the broker itself. The broker
+// only emits a 4xx when it rejects the client's request for a client-side
+// reason (bad auth, unknown model, malformed body, insufficient balance, rate
+// limit) — never for its own bugs, which surface as 5xx. So an un-overridden
+// 4xx is the client's fault and is attributed to "client", with one exception:
+// the upstream_error fallback (see proxy/rejection.go) marks a server-side,
+// unclassified validation failure that must stay attributable to the broker.
+// Everything else (5xx, concurrency 503) stays "broker".
+func resolveFailureSource(c *gin.Context, status int, code string) string {
 	if v, exists := c.Get(CtxKeyFailureSource); exists {
 		if s, ok := v.(string); ok && s != "" {
 			return s
 		}
+	}
+	if status >= 400 && status < 500 && code != RejectionUpstreamError {
+		return FailureSourceClient
 	}
 	return FailureSourceBroker
 }
@@ -505,10 +534,12 @@ func TrackMetrics() gin.HandlerFunc {
 		}
 		// Unified failure attribution: count EVERY >=400 (including client-caused
 		// rejections that ErrorCount drops via ignoreError) exactly once, split by
-		// source/code/model so "broker vs upstream, which model, what reason" is a
-		// single query. Source defaults to broker; the upstream proxy path opts in.
+		// source/code/model so "broker vs upstream vs client, which model, what
+		// reason" is a single query. resolveFailureSource derives the source from
+		// the status unless a handler stamped an explicit override.
 		if status >= 400 {
-			RecordFailure(failureSourceFromGinContext(c), failureCodeFromGinContext(c), model, statusText)
+			code := failureCodeFromGinContext(c)
+			RecordFailure(resolveFailureSource(c, status, code), code, model, statusText)
 		}
 	}
 }

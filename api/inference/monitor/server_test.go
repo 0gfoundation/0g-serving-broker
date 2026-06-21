@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -158,10 +159,19 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model"},
 	)
 
+	FailureCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_request_failures_total",
+			Help:        "Total failed requests.",
+			ConstLabels: constLabels,
+		},
+		[]string{"source", "code", "model", "status"},
+	)
+
 	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
 		RequestCount, ErrorCount, RequestDuration,
 		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal,
-		AudioSecondsTotal, WhitelistAudioSecondsTotal)
+		AudioSecondsTotal, WhitelistAudioSecondsTotal, FailureCount)
 
 	return registry
 }
@@ -732,6 +742,67 @@ func TestTrackMetricsIgnoreError(t *testing.T) {
 	afterCount := getCounterValue(ErrorCount, "/api/ignored", "Bad Request")
 	if afterCount != beforeCount {
 		t.Errorf("error count delta = %v, want 0 (ignoreError was set)", afterCount-beforeCount)
+	}
+}
+
+// TestTrackMetricsFailureSource verifies the three-way fault attribution of the
+// unified failure counter: a handler's explicit CtxKeyFailureSource override
+// wins, and an un-overridden failure is derived from the status (broker 4xx ->
+// client, except the upstream_error fallback; everything else -> broker).
+func TestTrackMetricsFailureSource(t *testing.T) {
+	setupTestMetrics(t)
+
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name       string
+		status     int
+		setSource  string // explicit CtxKeyFailureSource override, "" for none
+		code       string // CtxKeyRejectionReason, "" for none
+		wantSource string
+		wantStatus string
+	}{
+		// No override: status-derived.
+		{"broker 5xx -> broker", http.StatusInternalServerError, "", "", FailureSourceBroker, "Internal Server Error"},
+		{"broker 4xx -> client", http.StatusUnauthorized, "", "", FailureSourceClient, "Unauthorized"},
+		{"broker rejection 4xx -> client", http.StatusTooManyRequests, "", RejectionRateLimit, FailureSourceClient, "Too Many Requests"},
+		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, FailureSourceBroker, "Service Unavailable"},
+		// upstream_error fallback stays broker even on a 4xx.
+		{"upstream_error 4xx -> broker", http.StatusBadRequest, "", RejectionUpstreamError, FailureSourceBroker, "Bad Request"},
+		// Explicit overrides always win.
+		{"upstream 5xx override", http.StatusBadGateway, FailureSourceUpstream, "", FailureSourceUpstream, "Bad Gateway"},
+		{"upstream 429 override", http.StatusTooManyRequests, FailureSourceUpstream, "", FailureSourceUpstream, "Too Many Requests"},
+		{"client 4xx override (upstream rejected)", http.StatusBadRequest, FailureSourceClient, "", FailureSourceClient, "Bad Request"},
+	}
+
+	engine := gin.New()
+	engine.Use(TrackMetrics())
+	for i, tc := range cases {
+		tc := tc
+		engine.GET(fmt.Sprintf("/fs/%d", i), func(c *gin.Context) {
+			if tc.setSource != "" {
+				c.Set(CtxKeyFailureSource, tc.setSource)
+			}
+			if tc.code != "" {
+				c.Set(CtxKeyRejectionReason, tc.code)
+			}
+			c.Status(tc.status)
+		})
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := getCounterValue(FailureCount, tc.wantSource, tc.code, "", tc.wantStatus)
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/fs/%d", i), nil)
+			engine.ServeHTTP(w, req)
+
+			if delta := getCounterValue(FailureCount, tc.wantSource, tc.code, "", tc.wantStatus) - before; delta != 1 {
+				t.Errorf("failure[source=%s code=%q status=%s] delta = %v, want 1",
+					tc.wantSource, tc.code, tc.wantStatus, delta)
+			}
+		})
 	}
 }
 

@@ -242,6 +242,15 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		// on HTTP client timeout, not client disconnection.
 		if strings.Contains(err.Error(), "context canceled") {
 			ctx.Set("ignoreError", true)
+			// The client hung up mid-request: neither the broker nor the
+			// provider is at fault.
+			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceClient)
+		} else {
+			// We never reached the provider (TLS handshake timeout, connection
+			// refused, EOF in flight). That is an upstream/infra fault, not a
+			// broker bug — attribute it to upstream so it trips the upstream
+			// alert, not the broker 5xx alert.
+			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
 		}
 		c.handleBrokerError(ctx, err, "call proxied service")
 		return err
@@ -458,9 +467,18 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 		statusCode = http.StatusBadRequest
 	}
 
-	// 4xx errors are client-caused, skip error tracking
+	// 4xx errors are client-caused, skip error tracking. Re-attribute them to the
+	// client in the unified failure metric too: an upstream 4xx (bad image URL,
+	// max_tokens out of range, content moderation, context-length) means the
+	// provider correctly rejected a malformed request — it is healthy, so this
+	// must not inflate the upstream-fault alert. 429 is the exception: it is the
+	// provider throttling us (a capacity signal), so it stays attributed to
+	// upstream (set above).
 	if statusCode >= 400 && statusCode < 500 {
 		ctx.Set("ignoreError", true)
+		if statusCode != http.StatusTooManyRequests {
+			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceClient)
+		}
 	}
 
 	// Log the actual service error content for debugging
