@@ -817,6 +817,53 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 	}
 }
 
+// TestFailureSourceHeader verifies the X-ZG-Failure-Source response header: it
+// carries the same attribution as the metric on every >=400 response, and is
+// absent on a 2xx (including when a proxied upstream tried to forge it).
+func TestFailureSourceHeader(t *testing.T) {
+	setupTestMetrics(t)
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(TrackMetrics())
+	engine.GET("/broker5xx", func(c *gin.Context) { c.JSON(http.StatusInternalServerError, gin.H{"error": "x"}) })
+	engine.GET("/broker4xx", func(c *gin.Context) { c.JSON(http.StatusBadRequest, gin.H{"error": "x"}) }) // unflagged -> broker
+	engine.GET("/client4xx", func(c *gin.Context) {
+		c.Set("ignoreError", true)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "x"})
+	})
+	engine.GET("/upstream", func(c *gin.Context) {
+		c.Set(CtxKeyFailureSource, FailureSourceUpstream)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "x"})
+	})
+	engine.GET("/ok", func(c *gin.Context) {
+		// Simulate a forwarded upstream attempt to forge the header on a 2xx.
+		c.Header(FailureSourceHeader, "upstream")
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	cases := []struct {
+		path string
+		want string // expected header value, "" means must be absent
+	}{
+		{"/broker5xx", FailureSourceBroker},
+		{"/broker4xx", FailureSourceBroker},
+		{"/client4xx", FailureSourceClient},
+		{"/upstream", FailureSourceUpstream},
+		{"/ok", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			engine.ServeHTTP(w, req)
+			if got := w.Header().Get(FailureSourceHeader); got != tc.want {
+				t.Errorf("%s: header = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRecordWhitelistRequest verifies the whitelist request counter.
 func TestRecordWhitelistRequest(t *testing.T) {
 	setupTestMetrics(t)

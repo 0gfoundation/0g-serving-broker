@@ -119,6 +119,19 @@ const (
 	FailureSourceClient = "client"
 )
 
+// FailureSourceHeader is the response header the broker stamps on every >=400
+// response with the fault attribution (broker|upstream|client) — the same value
+// recorded to FailureCount. It lets a programmatic caller (the 0G router)
+// consume the broker's authoritative "whose fault" verdict instead of
+// re-deriving it from the HTTP status. Additive and advisory: existing clients
+// ignore it. The broker owns the header exclusively — any value a proxied
+// upstream sets is overwritten on a >=400 response and removed on a <400 one,
+// so it cannot be forged end-to-end. HTTP header names are case-insensitive.
+//
+// The name and value set are a cross-service contract with the router; see
+// docs/design/failure-attribution-contract.md before changing them.
+const FailureSourceHeader = "X-ZG-Failure-Source"
+
 // CtxKeyFailureSource lets a handler override the failure source TrackMetrics
 // attributes to a >=400 response. When unset, resolveFailureSource derives it:
 // a client-caused 4xx (one the handler flagged with "ignoreError", excluding
@@ -518,11 +531,67 @@ func failureCodeFromGinContext(c *gin.Context) string {
 	return ""
 }
 
+// failureSourceWriter wraps the gin ResponseWriter to stamp FailureSourceHeader
+// on the first write of a response, deriving the value exactly as the failure
+// metric does. Wrapping (rather than setting the header in each handler) means
+// every error response — however and wherever it is written — carries the
+// attribution once, set into the header map before it flushes. TrackMetrics'
+// own post-c.Next() code cannot do this: by then the handler has already
+// flushed the headers.
+type failureSourceWriter struct {
+	gin.ResponseWriter
+	ctx     *gin.Context
+	stamped bool
+}
+
+// stamp sets (>=400) or clears (<400) FailureSourceHeader exactly once, before
+// the headers flush. Clearing on success denies a proxied upstream the chance
+// to forge the attribution on a 2xx we pass through.
+func (w *failureSourceWriter) stamp() {
+	if w.stamped {
+		return
+	}
+	w.stamped = true
+	status := w.ResponseWriter.Status()
+	if status >= 400 {
+		source := resolveFailureSource(w.ctx, status, failureCodeFromGinContext(w.ctx), w.ctx.GetBool("ignoreError"))
+		w.ResponseWriter.Header().Set(FailureSourceHeader, source)
+		return
+	}
+	w.ResponseWriter.Header().Del(FailureSourceHeader)
+}
+
+func (w *failureSourceWriter) WriteHeader(code int) {
+	w.ResponseWriter.WriteHeader(code)
+	w.stamp()
+}
+
+func (w *failureSourceWriter) WriteHeaderNow() {
+	w.stamp()
+	w.ResponseWriter.WriteHeaderNow()
+}
+
+func (w *failureSourceWriter) Write(b []byte) (int, error) {
+	w.stamp()
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *failureSourceWriter) WriteString(s string) (int, error) {
+	w.stamp()
+	return w.ResponseWriter.WriteString(s)
+}
+
 // TrackMetrics is a Gin middleware that tracks request metrics.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
 		c.Set(RequestStartTimeKey, startTime)
+
+		// Wrap the writer so every >=400 response carries the X-ZG-Failure-Source
+		// header. It must be set before the handler flushes its headers, which the
+		// post-c.Next() code below is too late to do; the wrapper stamps it at the
+		// first write instead.
+		c.Writer = &failureSourceWriter{ResponseWriter: c.Writer, ctx: c}
 
 		path := c.Request.URL.Path
 		c.Next() // Process the request
