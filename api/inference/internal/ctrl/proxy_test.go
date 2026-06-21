@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -213,6 +215,39 @@ func TestDecodeErrorBody(t *testing.T) {
 			got := decodeErrorBody(tt.body, tt.encoding)
 			if got != tt.want {
 				t.Errorf("decodeErrorBody() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// fakeNetErr is a net.Error with a configurable Timeout(), used to exercise the
+// timeout-vs-hard-failure split in isUpstreamTimeout.
+type fakeNetErr struct{ timeout bool }
+
+func (e fakeNetErr) Error() string   { return "fake net error" }
+func (e fakeNetErr) Timeout() bool   { return e.timeout }
+func (e fakeNetErr) Temporary() bool { return false }
+
+// TestIsUpstreamTimeout verifies the 504-vs-502 selector: a context deadline or
+// a net.Error timeout (the broker's Client.Timeout firing) maps to "timeout";
+// a hard connection failure (refused/reset/EOF) does not.
+func TestIsUpstreamTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"context deadline", context.DeadlineExceeded, true},
+		{"wrapped context deadline", fmt.Errorf("call proxied service: %w", context.DeadlineExceeded), true},
+		{"net.Error timeout", fakeNetErr{timeout: true}, true},
+		{"wrapped net.Error timeout", fmt.Errorf("dial: %w", fakeNetErr{timeout: true}), true},
+		{"net.Error non-timeout (refused)", fakeNetErr{timeout: false}, false},
+		{"plain connection error", fmt.Errorf("connection refused"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isUpstreamTimeout(tc.err); got != tc.want {
+				t.Errorf("isUpstreamTimeout(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

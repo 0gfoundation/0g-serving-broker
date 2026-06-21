@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -240,23 +241,32 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 			// so they land in neither the broker nor the upstream fault bucket.
 			ctx.Set("ignoreError", true)
 			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceClient)
-		} else {
-			// A failed Do means the broker never got a usable response from the
-			// provider — a dial/TLS failure, connection refused, EOF in flight,
-			// or the broker's own Client.Timeout firing against a slow provider
-			// (which surfaces as "context deadline exceeded"). The client cannot
-			// cause this: the outbound request uses context.Background() (above),
-			// so a client disconnect never cancels it. Attribute it to upstream so
-			// it trips the upstream/infra alert, not the broker 5xx alert.
-			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
-			if strings.Contains(err.Error(), "context canceled") {
-				// Not expected on a background-context request, so if it ever
-				// surfaces (a transport-internal cancellation) treat it as noise
-				// rather than a broker bug and skip the error log.
-				ctx.Set("ignoreError", true)
-			}
+			c.handleBrokerError(ctx, err, "call proxied service")
+			return err
 		}
-		c.handleBrokerError(ctx, err, "call proxied service")
+		// A failed Do means the broker never got a usable response from the
+		// provider: a dial/TLS failure, connection refused, EOF in flight, or the
+		// broker's own Client.Timeout firing against a slow provider. The client
+		// cannot cause this — the outbound request uses context.Background()
+		// (above), so a client disconnect never cancels it.
+		//
+		// Surface it as a 5xx GATEWAY status, NOT the 400 errors.Response defaults
+		// to. A 400 here misleads every consumer: the 0G router classifies a
+		// provider 4xx as a user fault (no failover, no provider-health penalty,
+		// the error bounced back to the user), and a direct caller thinks its own
+		// request was malformed. 502/504 tells both "the provider is the problem,
+		// retrying / failing over is sane" — and lets the router's existing
+		// status-based classifier reach the right verdict with no extra signal.
+		ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
+		// Log the real cause (which can include the upstream host) for operators,
+		// then return a sanitized message so the broker's upstream identity is not
+		// leaked in the error body (cf. #184 upstream-header stripping).
+		c.logger.Errorf("call proxied service failed (provider unreachable): %v", err)
+		status, msg := http.StatusBadGateway, "upstream provider unreachable"
+		if isUpstreamTimeout(err) {
+			status, msg = http.StatusGatewayTimeout, "upstream provider timed out"
+		}
+		errors.Response(ctx, errors.NewHTTPError(status, errors.New(msg)))
 		return err
 	}
 	defer resp.Body.Close()
@@ -421,6 +431,21 @@ func (c *Ctrl) addExposeHeaders(ctx *gin.Context) {
 		newHeaders = strings.Join(exposeHeaders, ",")
 	}
 	ctx.Writer.Header().Set("Access-Control-Expose-Headers", newHeaders)
+}
+
+// isUpstreamTimeout reports whether err is a timeout reaching the provider — the
+// broker's own http.Client.Timeout / ResponseHeaderTimeout firing, or a context
+// deadline — as opposed to a hard connection failure (refused, reset, EOF). It
+// selects 504 Gateway Timeout vs 502 Bad Gateway for an unreachable provider.
+func isUpstreamTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return false
 }
 
 func (c *Ctrl) handleBrokerError(ctx *gin.Context, err error, context string) {
