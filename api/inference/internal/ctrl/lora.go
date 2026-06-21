@@ -16,6 +16,16 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
+// ErrLoRAUnavailable marks a LoRA ownership-check failure caused by the broker's
+// own adapter lifecycle or configuration — serving disabled, the adapter still
+// loading or restoring, a failed deploy, or an unknown state — rather than by
+// the client. The proxy uses errors.Is(err, ErrLoRAUnavailable) to attribute
+// these to the broker (not the client) in the unified failure metric, so a
+// broken LoRA backend still trips the broker-fault alert instead of hiding in
+// the client bucket. Client-caused branches (unknown ft model, not the owner,
+// adapter downloaded-but-not-deployed) are returned unwrapped.
+var ErrLoRAUnavailable = errors.New("lora unavailable")
+
 // SetLoRAManager injects the LoRA manager into the Ctrl.
 func (c *Ctrl) SetLoRAManager(m *lora.Manager) {
 	c.loraManager = m
@@ -34,7 +44,8 @@ func (c *Ctrl) CheckLoRAOwnership(modelName, userAddress string) error {
 	}
 
 	if c.loraManager == nil {
-		return errors.New("LoRA serving not enabled")
+		// Broker config fault: LoRA serving isn't enabled on this broker.
+		return fmt.Errorf("%w: LoRA serving not enabled", ErrLoRAUnavailable)
 	}
 
 	adapter := c.loraManager.GetAdapter(modelName)
@@ -46,7 +57,10 @@ func (c *Ctrl) CheckLoRAOwnership(modelName, userAddress string) error {
 		return fmt.Errorf("access denied: you are not the owner of model %s", modelName)
 	}
 
-	// Check adapter state
+	// Check adapter state. Active/Ready are client-resolvable; the remaining
+	// states are broker-side adapter lifecycle (loading/restoring/failed/unknown)
+	// and are wrapped in ErrLoRAUnavailable so the proxy attributes them to the
+	// broker rather than the client.
 	switch adapter.State {
 	case model.AdapterStateActive:
 		c.loraManager.RecordAccess(modelName)
@@ -54,14 +68,14 @@ func (c *Ctrl) CheckLoRAOwnership(modelName, userAddress string) error {
 	case model.AdapterStateReady:
 		return fmt.Errorf("model %s is downloaded but not deployed; call deploy-adapter first", modelName)
 	case model.AdapterStateLoading:
-		return fmt.Errorf("model %s is still loading, please retry later", modelName)
+		return fmt.Errorf("%w: model %s is still loading, please retry later", ErrLoRAUnavailable, modelName)
 	case model.AdapterStateOffloaded, model.AdapterStateArchived:
 		go c.loraManager.RestoreAdapter(modelName)
-		return fmt.Errorf("model %s is restoring, please retry in 30 seconds", modelName)
+		return fmt.Errorf("%w: model %s is restoring, please retry in 30 seconds", ErrLoRAUnavailable, modelName)
 	case model.AdapterStateFailed:
-		return fmt.Errorf("model %s failed to deploy", modelName)
+		return fmt.Errorf("%w: model %s failed to deploy", ErrLoRAUnavailable, modelName)
 	default:
-		return fmt.Errorf("model %s is in unknown state: %s", modelName, adapter.State)
+		return fmt.Errorf("%w: model %s is in unknown state: %s", ErrLoRAUnavailable, modelName, adapter.State)
 	}
 }
 
