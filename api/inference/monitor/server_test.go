@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -158,10 +159,19 @@ func setupTestMetrics(t *testing.T) *prometheus.Registry {
 		[]string{"service_type", "model"},
 	)
 
+	FailureCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_request_failures_total",
+			Help:        "Total failed requests.",
+			ConstLabels: constLabels,
+		},
+		[]string{"source", "code", "model", "status"},
+	)
+
 	registry.MustRegister(InputTokensTotal, OutputTokensTotal, TokensPerSecond,
 		RequestCount, ErrorCount, RequestDuration,
 		WhitelistRequestsTotal, WhitelistInputTokensTotal, WhitelistOutputTokensTotal,
-		AudioSecondsTotal, WhitelistAudioSecondsTotal)
+		AudioSecondsTotal, WhitelistAudioSecondsTotal, FailureCount)
 
 	return registry
 }
@@ -732,6 +742,125 @@ func TestTrackMetricsIgnoreError(t *testing.T) {
 	afterCount := getCounterValue(ErrorCount, "/api/ignored", "Bad Request")
 	if afterCount != beforeCount {
 		t.Errorf("error count delta = %v, want 0 (ignoreError was set)", afterCount-beforeCount)
+	}
+}
+
+// TestTrackMetricsFailureSource verifies the three-way fault attribution of the
+// unified failure counter: a handler's explicit CtxKeyFailureSource override
+// wins, and an un-overridden failure is derived from the ignoreError flag and
+// status — a client-flagged 4xx is "client" (except the upstream_error
+// fallback), while an un-flagged failure (including a broker-fault 4xx that
+// errors.Response defaulted to 400) stays "broker".
+func TestTrackMetricsFailureSource(t *testing.T) {
+	setupTestMetrics(t)
+
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name        string
+		status      int
+		setSource   string // explicit CtxKeyFailureSource override, "" for none
+		code        string // CtxKeyRejectionReason, "" for none
+		ignoreError bool   // handler flagged the failure client-caused
+		wantSource  string
+		wantStatus  string
+	}{
+		// No override: derived from ignoreError + status.
+		{"broker 5xx -> broker", http.StatusInternalServerError, "", "", false, FailureSourceBroker, "Internal Server Error"},
+		// A broker-fault 4xx (errors.Response default-400, no ignoreError) must
+		// stay broker — it must not be hidden in the client bucket.
+		{"broker 4xx (unflagged) -> broker", http.StatusBadRequest, "", "", false, FailureSourceBroker, "Bad Request"},
+		// A client-caused 4xx the handler flagged with ignoreError -> client.
+		{"client 4xx (flagged) -> client", http.StatusUnauthorized, "", "", true, FailureSourceClient, "Unauthorized"},
+		{"client rejection 4xx (flagged) -> client", http.StatusTooManyRequests, "", RejectionRateLimit, true, FailureSourceClient, "Too Many Requests"},
+		// concurrency is a 503: 5xx never derives to client even if flagged.
+		{"concurrency 503 -> broker", http.StatusServiceUnavailable, "", RejectionConcurrency, false, FailureSourceBroker, "Service Unavailable"},
+		// upstream_error fallback stays broker even on a flagged 4xx.
+		{"upstream_error 4xx -> broker", http.StatusBadRequest, "", RejectionUpstreamError, true, FailureSourceBroker, "Bad Request"},
+		// Explicit overrides always win, regardless of ignoreError/status.
+		{"upstream 5xx override", http.StatusBadGateway, FailureSourceUpstream, "", false, FailureSourceUpstream, "Bad Gateway"},
+		{"upstream 429 override", http.StatusTooManyRequests, FailureSourceUpstream, "", false, FailureSourceUpstream, "Too Many Requests"},
+		{"client 4xx override (upstream rejected)", http.StatusBadRequest, FailureSourceClient, "", true, FailureSourceClient, "Bad Request"},
+	}
+
+	engine := gin.New()
+	engine.Use(TrackMetrics())
+	for i, tc := range cases {
+		tc := tc
+		engine.GET(fmt.Sprintf("/fs/%d", i), func(c *gin.Context) {
+			if tc.ignoreError {
+				c.Set("ignoreError", true)
+			}
+			if tc.setSource != "" {
+				c.Set(CtxKeyFailureSource, tc.setSource)
+			}
+			if tc.code != "" {
+				c.Set(CtxKeyRejectionReason, tc.code)
+			}
+			c.Status(tc.status)
+		})
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := getCounterValue(FailureCount, tc.wantSource, tc.code, "", tc.wantStatus)
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/fs/%d", i), nil)
+			engine.ServeHTTP(w, req)
+
+			if delta := getCounterValue(FailureCount, tc.wantSource, tc.code, "", tc.wantStatus) - before; delta != 1 {
+				t.Errorf("failure[source=%s code=%q status=%s] delta = %v, want 1",
+					tc.wantSource, tc.code, tc.wantStatus, delta)
+			}
+		})
+	}
+}
+
+// TestFailureSourceHeader verifies the ZG-Failure-Source response header: it
+// carries the same attribution as the metric on every >=400 response, and is
+// absent on a 2xx (including when a proxied upstream tried to forge it).
+func TestFailureSourceHeader(t *testing.T) {
+	setupTestMetrics(t)
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(TrackMetrics())
+	engine.GET("/broker5xx", func(c *gin.Context) { c.JSON(http.StatusInternalServerError, gin.H{"error": "x"}) })
+	engine.GET("/broker4xx", func(c *gin.Context) { c.JSON(http.StatusBadRequest, gin.H{"error": "x"}) }) // unflagged -> broker
+	engine.GET("/client4xx", func(c *gin.Context) {
+		c.Set("ignoreError", true)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "x"})
+	})
+	engine.GET("/upstream", func(c *gin.Context) {
+		c.Set(CtxKeyFailureSource, FailureSourceUpstream)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "x"})
+	})
+	engine.GET("/ok", func(c *gin.Context) {
+		// Simulate a forwarded upstream attempt to forge the header on a 2xx.
+		c.Header(FailureSourceHeader, "upstream")
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	cases := []struct {
+		path string
+		want string // expected header value, "" means must be absent
+	}{
+		{"/broker5xx", FailureSourceBroker},
+		{"/broker4xx", FailureSourceBroker},
+		{"/client4xx", FailureSourceClient},
+		{"/upstream", FailureSourceUpstream},
+		{"/ok", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			engine.ServeHTTP(w, req)
+			if got := w.Header().Get(FailureSourceHeader); got != tc.want {
+				t.Errorf("%s: header = %q, want %q", tc.path, got, tc.want)
+			}
+		})
 	}
 }
 

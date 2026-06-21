@@ -172,6 +172,10 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	// passing provider bytes through — they may contain LAN-private URLs.
 	if wantURL && (extractErr != nil || len(images) == 0) {
 		ctx.Set("ignoreError", true)
+		// Provider misbehaviour (200 with an undecodable envelope), not a client
+		// error — attribute to upstream so it trips the upstream-fault alert. See
+		// handleTextToImageResponse.
+		ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceUpstream)
 		err := fmt.Errorf("provider returned non-b64 image response, refusing to forward (may contain LAN-private URLs): %w", extractErr)
 		c.handleBrokerError(ctx, err, "image-editing response for response_format=url")
 		return err
@@ -180,6 +184,9 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	// URL requested but store disabled — fail-closed, see handleTextToImageResponse.
 	if wantURL && c.imageStore == nil {
 		ctx.Set("ignoreError", true)
+		// Disabled image store is a broker config failure, not a client error —
+		// keep it in the broker bucket. See handleTextToImageResponse.
+		ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceBroker)
 		err := fmt.Errorf("response_format=url requested but image store is disabled (check startup logs for newImageStore error)")
 		c.logger.Errorf("image-editing URL request while imageStore is nil")
 		c.handleBrokerError(ctx, err, "image-editing response for response_format=url")

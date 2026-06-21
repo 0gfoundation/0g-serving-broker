@@ -81,8 +81,15 @@ var (
 	// context.Background() — its upstream non-2xx is recorded to the job's DB
 	// status, not to this counter.
 	//
-	//   - source: "broker" (admission/billing/auth/TEE/internal) vs "upstream"
-	//     (the provider returned the non-2xx that was proxied back).
+	//   - source: "broker" (the broker's own fault — internal 5xx, TEE/signing,
+	//     settlement, or an unclassified server-side validation failure), "upstream"
+	//     (the provider's fault — it returned a 5xx/429 we proxied back, or the
+	//     broker could not reach it: TLS timeout, connection refused, EOF), or
+	//     "client" (the request itself was invalid — a client-caused 4xx the broker
+	//     flagged with ignoreError, e.g. bad auth, unknown model, malformed body,
+	//     insufficient balance, rate limit; or an upstream 4xx the provider rejected
+	//     as malformed). The three-way cut lets the upstream/broker alerts fire only
+	//     on real faults while client-caused noise lands in its own bucket.
 	//   - code:   the bounded classification — a Rejection* reason for broker
 	//     rejections; empty for broker/upstream errors that carry no classified
 	//     reason (the status label then carries the granularity).
@@ -98,18 +105,43 @@ var (
 	FailureCount *prometheus.CounterVec
 )
 
-// Failure source label values for FailureCount. Bounded to two values so the
-// "broker vs upstream" cut never grows cardinality.
+// Failure source label values for FailureCount. Bounded to three values so the
+// "whose fault" cut never grows cardinality.
 const (
 	FailureSourceBroker   = "broker"
 	FailureSourceUpstream = "upstream"
+	// FailureSourceClient marks a failure caused by an invalid client request —
+	// a client-caused 4xx the broker flagged with "ignoreError" (bad auth,
+	// unknown model, malformed body, insufficient balance, rate limit, oversized
+	// body, unsupported endpoint), or an upstream 4xx the provider rejected as
+	// malformed. Neither the broker nor the upstream is at fault, so these must
+	// not inflate either fault alert.
+	FailureSourceClient = "client"
 )
 
+// FailureSourceHeader is the response header the broker stamps on every >=400
+// response with the fault attribution (broker|upstream|client) — the same value
+// recorded to FailureCount. It lets a programmatic caller (the 0G router)
+// consume the broker's authoritative "whose fault" verdict instead of
+// re-deriving it from the HTTP status. Additive and advisory: existing clients
+// ignore it. The broker owns the header exclusively — any value a proxied
+// upstream sets is overwritten on a >=400 response and removed on a <400 one,
+// so it cannot be forged end-to-end. HTTP header names are case-insensitive.
+//
+// The name follows the existing ZG-* convention (cf. ZG-Res-Key); no X- prefix
+// (RFC 6648 deprecates it). The name and value set are a cross-service contract
+// with the router; see docs/design/failure-attribution-contract.md before
+// changing them.
+const FailureSourceHeader = "ZG-Failure-Source"
+
 // CtxKeyFailureSource lets a handler override the failure source TrackMetrics
-// attributes to a >=400 response. Unset means FailureSourceBroker (the default
-// for any broker-side failure); the upstream proxy error path sets it to
-// FailureSourceUpstream so a provider's non-2xx is never misattributed to the
-// broker.
+// attributes to a >=400 response. When unset, resolveFailureSource derives it:
+// a client-caused 4xx (one the handler flagged with "ignoreError", excluding
+// the upstream_error fallback) is the client's fault, everything else is the
+// broker's. Handlers set it explicitly only when they know better than the
+// status — the upstream proxy path sets FailureSourceUpstream for a provider
+// non-2xx / unreachable provider, and FailureSourceClient for a proxied
+// upstream 4xx.
 const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
@@ -330,7 +362,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	FailureCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_request_failures_total",
-			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream), code (Rejection* reason or empty), model, and status. Unified failure-attribution counter; see FailureCount doc.",
+			Help:        "Total failed requests (HTTP status >= 400), labeled by source (broker|upstream|client), code (Rejection* reason or empty), model, and status. Unified failure-attribution counter; see FailureCount doc.",
 			ConstLabels: constLabels,
 		},
 		[]string{"source", "code", "model", "status"},
@@ -454,14 +486,37 @@ func modelFromGinContext(c *gin.Context) string {
 	return ""
 }
 
-// failureSourceFromGinContext returns the failure source a handler stamped under
-// CtxKeyFailureSource, defaulting to FailureSourceBroker. A broker-side failure
-// never needs to set the key; only the upstream proxy path opts into "upstream".
-func failureSourceFromGinContext(c *gin.Context) string {
+// resolveFailureSource decides the fault attribution for a >=400 response.
+//
+// An explicit override stamped under CtxKeyFailureSource always wins — the
+// upstream proxy path uses it to mark a provider non-2xx / unreachable provider
+// as "upstream" (and a proxied upstream 4xx as "client"), because there the
+// status alone can't tell whose fault it is.
+//
+// With no override the failure was produced by the broker itself, and the
+// attribution turns on clientCaused — the handler's "ignoreError" flag, the
+// same marker ErrorCount uses to drop user-caused failures. The broker sets it
+// whenever it rejects a request for a client-side reason (bad auth, unknown
+// model, malformed body, insufficient balance, rate limit, oversized body,
+// unsupported endpoint). A 4xx carrying that flag is the client's fault →
+// "client".
+//
+// Everything else stays "broker" — crucially including an un-flagged 4xx:
+// errors.Response defaults any unclassified internal error to 400, so a DB /
+// TEE / billing / request-prep failure surfaces as a 400 with no ignoreError.
+// Deriving from status alone would hide those genuine broker faults in the
+// "client" bucket; gating on the flag keeps them attributed to the broker so
+// the broker alert still fires. The status<500 guard keeps a client-flagged
+// 5xx out of "client", and the upstream_error fallback (proxy/rejection.go) —
+// the broker's own unclassified-validation reason — is pinned to "broker" too.
+func resolveFailureSource(c *gin.Context, status int, code string, clientCaused bool) string {
 	if v, exists := c.Get(CtxKeyFailureSource); exists {
 		if s, ok := v.(string); ok && s != "" {
 			return s
 		}
+	}
+	if clientCaused && status >= 400 && status < 500 && code != RejectionUpstreamError {
+		return FailureSourceClient
 	}
 	return FailureSourceBroker
 }
@@ -478,11 +533,67 @@ func failureCodeFromGinContext(c *gin.Context) string {
 	return ""
 }
 
+// failureSourceWriter wraps the gin ResponseWriter to stamp FailureSourceHeader
+// on the first write of a response, deriving the value exactly as the failure
+// metric does. Wrapping (rather than setting the header in each handler) means
+// every error response — however and wherever it is written — carries the
+// attribution once, set into the header map before it flushes. TrackMetrics'
+// own post-c.Next() code cannot do this: by then the handler has already
+// flushed the headers.
+type failureSourceWriter struct {
+	gin.ResponseWriter
+	ctx     *gin.Context
+	stamped bool
+}
+
+// stamp sets (>=400) or clears (<400) FailureSourceHeader exactly once, before
+// the headers flush. Clearing on success denies a proxied upstream the chance
+// to forge the attribution on a 2xx we pass through.
+func (w *failureSourceWriter) stamp() {
+	if w.stamped {
+		return
+	}
+	w.stamped = true
+	status := w.ResponseWriter.Status()
+	if status >= 400 {
+		source := resolveFailureSource(w.ctx, status, failureCodeFromGinContext(w.ctx), w.ctx.GetBool("ignoreError"))
+		w.ResponseWriter.Header().Set(FailureSourceHeader, source)
+		return
+	}
+	w.ResponseWriter.Header().Del(FailureSourceHeader)
+}
+
+func (w *failureSourceWriter) WriteHeader(code int) {
+	w.ResponseWriter.WriteHeader(code)
+	w.stamp()
+}
+
+func (w *failureSourceWriter) WriteHeaderNow() {
+	w.stamp()
+	w.ResponseWriter.WriteHeaderNow()
+}
+
+func (w *failureSourceWriter) Write(b []byte) (int, error) {
+	w.stamp()
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *failureSourceWriter) WriteString(s string) (int, error) {
+	w.stamp()
+	return w.ResponseWriter.WriteString(s)
+}
+
 // TrackMetrics is a Gin middleware that tracks request metrics.
 func TrackMetrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
 		c.Set(RequestStartTimeKey, startTime)
+
+		// Wrap the writer so every >=400 response carries the ZG-Failure-Source
+		// header. It must be set before the handler flushes its headers, which the
+		// post-c.Next() code below is too late to do; the wrapper stamps it at the
+		// first write instead.
+		c.Writer = &failureSourceWriter{ResponseWriter: c.Writer, ctx: c}
 
 		path := c.Request.URL.Path
 		c.Next() // Process the request
@@ -505,10 +616,13 @@ func TrackMetrics() gin.HandlerFunc {
 		}
 		// Unified failure attribution: count EVERY >=400 (including client-caused
 		// rejections that ErrorCount drops via ignoreError) exactly once, split by
-		// source/code/model so "broker vs upstream, which model, what reason" is a
-		// single query. Source defaults to broker; the upstream proxy path opts in.
+		// source/code/model so "broker vs upstream vs client, which model, what
+		// reason" is a single query. resolveFailureSource uses an explicit handler
+		// override when present, else derives the source from the ignoreError flag
+		// and status.
 		if status >= 400 {
-			RecordFailure(failureSourceFromGinContext(c), failureCodeFromGinContext(c), model, statusText)
+			code := failureCodeFromGinContext(c)
+			RecordFailure(resolveFailureSource(c, status, code, ignoreError), code, model, statusText)
 		}
 	}
 }

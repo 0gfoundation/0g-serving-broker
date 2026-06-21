@@ -7,6 +7,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
+	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/ethereum/go-ethereum/common"
@@ -29,8 +30,15 @@ func (c *Ctrl) GetOrCreateAccount(ctx *gin.Context, userAddress string) (model.U
 
 	contractAccount, err := c.contract.GetUserAccount(ctx, common.HexToAddress(userAddress))
 	if err != nil {
-		// User-caused error: user account not found in contract
-		ctx.Set("ignoreError", true)
+		if errors.Is(err, providercontract.ErrAccountNotExists) {
+			// A not-yet-funded user (no account on the contract) is client-caused:
+			// suppress it so it doesn't count as a broker error.
+			ctx.Set("ignoreError", true)
+		}
+		// Any other failure is an RPC/chain transport fault — broker-side infra.
+		// Leaving it unflagged keeps it attributed to source=broker in the unified
+		// failure metric (so the broker-fault alert fires) instead of being hidden
+		// in the client bucket.
 		return model.User{}, errors.Wrap(err, "get account from contract")
 	}
 

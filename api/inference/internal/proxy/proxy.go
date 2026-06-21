@@ -633,6 +633,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	reqModelName := ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if err := p.ctrl.CheckLoRAOwnership(reqModelName, userAddress); err != nil {
 		ctx.Set("ignoreError", true)
+		if errors.Is(err, ctrl.ErrLoRAUnavailable) {
+			// Broker-side LoRA state (serving disabled, adapter loading/restoring,
+			// deploy failed, unknown) — a broker fault, not the client's. Pin it to
+			// the broker bucket so the broker-fault alert fires; ignoreError stays
+			// set so a transient state doesn't spam ErrorCount/logs.
+			ctx.Set(monitor.CtxKeyFailureSource, monitor.FailureSourceBroker)
+		}
 		p.handleBrokerError(ctx, err, "LoRA owner check")
 		return
 	}

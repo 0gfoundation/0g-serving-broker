@@ -18,6 +18,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/util"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
+	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -281,14 +282,20 @@ func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Reque
 	if contractAccount == nil {
 		fetchedAccount, err := c.contract.GetUserAccount(ctx, userAddress)
 		if err != nil {
-			// Any GetUserAccount failure is labeled account_not_exist (the
-			// dominant cause — a not-yet-funded user). A transport/RPC failure
-			// would also land here, but GetUserAccount already logs the
-			// underlying error at error level regardless of ignoreError, so it
-			// is not silenced — see docs/design/rejection-observability.md.
-			ctx.Set("ignoreError", true)
-			ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionAccountNotExist)
-			return errors.Wrap(err, "get account from contract, account not exist")
+			if errors.Is(err, providercontract.ErrAccountNotExists) {
+				// A not-yet-funded user (no account on the contract) is the
+				// dominant, client-caused case: suppress it and classify the
+				// rejection so it lands in the client bucket, not the broker alert.
+				ctx.Set("ignoreError", true)
+				ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionAccountNotExist)
+				return errors.Wrap(err, "get account from contract, account not exist")
+			}
+			// Otherwise this is an RPC/chain transport failure — a broker-side
+			// infra fault. Leave it unflagged (no ignoreError, no rejection code)
+			// so the unified failure metric attributes it to source=broker and the
+			// broker-fault alert fires; GetUserAccount already logged the cause at
+			// error level (see docs/design/rejection-observability.md).
+			return errors.Wrap(err, "get account from contract")
 		}
 		contractAccount = &fetchedAccount
 

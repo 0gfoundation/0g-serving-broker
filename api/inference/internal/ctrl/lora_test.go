@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	commonConfig "github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
@@ -277,6 +278,85 @@ func TestCheckLoRAOwnership_NilManager(t *testing.T) {
 
 func strContains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+// TestCheckLoRAOwnership_ErrLoRAUnavailableClassification locks the broker-vs-client
+// split the proxy relies on: broker-side adapter-lifecycle/config states are wrapped
+// in ErrLoRAUnavailable (so the proxy stamps source=broker), while client-caused
+// states are returned unwrapped (so they stay in the client bucket). Without this
+// classification a broken LoRA backend would be hidden in the client bucket.
+func TestCheckLoRAOwnership_ErrLoRAUnavailableClassification(t *testing.T) {
+	brokerStates := []struct {
+		name  string
+		model string
+		state model.AdapterState
+	}{
+		{"loading", "ft-loading", model.AdapterStateLoading},
+		{"offloaded", "ft-offloaded", model.AdapterStateOffloaded},
+		{"archived", "ft-archived", model.AdapterStateArchived},
+		{"failed", "ft-failed", model.AdapterStateFailed},
+		{"unknown", "ft-unknown", model.AdapterState("bogus-state")},
+	}
+	for _, tc := range brokerStates {
+		t.Run("broker/"+tc.name, func(t *testing.T) {
+			c := newTestCtrlWithLoRA(t)
+			c.loraManager.InjectTestAdapter(tc.model, &lora.AdapterInfo{
+				TaskID:      "task",
+				UserAddress: "0xOwnerA",
+				AdapterName: tc.model,
+				State:       tc.state,
+			})
+			err := c.CheckLoRAOwnership(tc.model, "0xOwnerA")
+			if err == nil {
+				t.Fatalf("expected error for state %s", tc.state)
+			}
+			if !errors.Is(err, ErrLoRAUnavailable) {
+				t.Errorf("state %s: errors.Is(err, ErrLoRAUnavailable) = false, want true (err=%v)", tc.state, err)
+			}
+		})
+	}
+
+	// nil manager: LoRA serving disabled is a broker config fault.
+	t.Run("broker/nil-manager", func(t *testing.T) {
+		c := &Ctrl{
+			Service:        config.Service{ModelType: "Qwen2.5-7B"},
+			logger:         testLogger(),
+			whitelistUsers: make(map[string]struct{}),
+		}
+		err := c.CheckLoRAOwnership("ft-x", "0xOwnerA")
+		if err == nil || !errors.Is(err, ErrLoRAUnavailable) {
+			t.Errorf("nil manager: want ErrLoRAUnavailable, got %v", err)
+		}
+	})
+
+	// Client-caused branches must NOT be wrapped (they belong in the client bucket).
+	t.Run("client/not-found", func(t *testing.T) {
+		c := newTestCtrlWithLoRA(t)
+		err := c.CheckLoRAOwnership("ft-missing", "0xOwnerA")
+		if err == nil || errors.Is(err, ErrLoRAUnavailable) {
+			t.Errorf("not-found: want non-nil unwrapped error, got %v", err)
+		}
+	})
+	t.Run("client/wrong-owner", func(t *testing.T) {
+		c := newTestCtrlWithLoRA(t)
+		c.loraManager.InjectTestAdapter("ft-owned", &lora.AdapterInfo{
+			TaskID: "task", UserAddress: "0xOwnerA", AdapterName: "ft-owned", State: model.AdapterStateActive,
+		})
+		err := c.CheckLoRAOwnership("ft-owned", "0xNotOwner")
+		if err == nil || errors.Is(err, ErrLoRAUnavailable) {
+			t.Errorf("wrong-owner: want non-nil unwrapped error, got %v", err)
+		}
+	})
+	t.Run("client/ready-not-deployed", func(t *testing.T) {
+		c := newTestCtrlWithLoRA(t)
+		c.loraManager.InjectTestAdapter("ft-ready", &lora.AdapterInfo{
+			TaskID: "task", UserAddress: "0xOwnerA", AdapterName: "ft-ready", State: model.AdapterStateReady,
+		})
+		err := c.CheckLoRAOwnership("ft-ready", "0xOwnerA")
+		if err == nil || errors.Is(err, ErrLoRAUnavailable) {
+			t.Errorf("ready: want non-nil unwrapped error, got %v", err)
+		}
+	})
 }
 
 func TestRewriteResponseModel_LoRA(t *testing.T) {
