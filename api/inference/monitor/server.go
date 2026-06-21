@@ -128,9 +128,11 @@ const (
 // upstream sets is overwritten on a >=400 response and removed on a <400 one,
 // so it cannot be forged end-to-end. HTTP header names are case-insensitive.
 //
-// The name and value set are a cross-service contract with the router; see
-// docs/design/failure-attribution-contract.md before changing them.
-const FailureSourceHeader = "X-ZG-Failure-Source"
+// The name follows the existing ZG-* convention (cf. ZG-Res-Key); no X- prefix
+// (RFC 6648 deprecates it). The name and value set are a cross-service contract
+// with the router; see docs/design/failure-attribution-contract.md before
+// changing them.
+const FailureSourceHeader = "ZG-Failure-Source"
 
 // CtxKeyFailureSource lets a handler override the failure source TrackMetrics
 // attributes to a >=400 response. When unset, resolveFailureSource derives it:
@@ -587,7 +589,7 @@ func TrackMetrics() gin.HandlerFunc {
 		startTime := time.Now()
 		c.Set(RequestStartTimeKey, startTime)
 
-		// Wrap the writer so every >=400 response carries the X-ZG-Failure-Source
+		// Wrap the writer so every >=400 response carries the ZG-Failure-Source
 		// header. It must be set before the handler flushes its headers, which the
 		// post-c.Next() code below is too late to do; the wrapper stamps it at the
 		// first write instead.

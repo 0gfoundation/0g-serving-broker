@@ -817,7 +817,7 @@ func TestTrackMetricsFailureSource(t *testing.T) {
 	}
 }
 
-// TestFailureSourceHeader verifies the X-ZG-Failure-Source response header: it
+// TestFailureSourceHeader verifies the ZG-Failure-Source response header: it
 // carries the same attribution as the metric on every >=400 response, and is
 // absent on a 2xx (including when a proxied upstream tried to forge it).
 func TestFailureSourceHeader(t *testing.T) {
