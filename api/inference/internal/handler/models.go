@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -38,7 +39,17 @@ type ModelObject struct {
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
 	ProviderType        string                    `json:"provider_type,omitempty"`
 	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
-	RateLimits          *ModelRateLimits          `json:"rate_limits,omitempty"`
+	// ServingDomain is the upstream hostname (FQDN, e.g. "api.openai.com") that
+	// the broker actually connects to for a centralized provider. It is the host
+	// component of service.targetUrl — scheme, port, and path stripped — so it
+	// matches the TLS SNI / certificate SAN seen on the upstream connection.
+	//
+	// This is a discovery/display hint surfaced from unsigned broker config; it is
+	// NOT a verifiable claim on its own. Verification of where a request was routed
+	// relies on the TEE-signed routing proof, not this field. Empty for
+	// decentralized providers. Consumers prepend "https://" if they need a URL.
+	ServingDomain string           `json:"serving_domain,omitempty"`
+	RateLimits    *ModelRateLimits `json:"rate_limits,omitempty"`
 }
 
 // ModelRateLimits exposes per-user rate limit configuration so clients/SDKs
@@ -128,6 +139,12 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	if cfg.HasMultiModelPricing() {
 		models := make([]ModelObject, 0, len(cfg.ModelPricing))
 		teeVerifier := parseTeeVerifier(svc.AdditionalInfo)
+		// Serving domain is provider-level (one targetUrl for all models); compute
+		// once. Only meaningful for centralized providers.
+		var servingDomain string
+		if cfg.IsCentralized() {
+			servingDomain = parseServingDomain(cfg.TargetURL)
+		}
 		var created int64
 		if svc.CreatedAt != nil {
 			created = svc.CreatedAt.Unix()
@@ -204,6 +221,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
 				ProviderType:     cfg.ProviderType,
 				ProviderIdentity: cfg.ProviderIdentity,
+				ServingDomain:    servingDomain,
 				RateLimits:       sharedLimits,
 			}
 
@@ -411,6 +429,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	if cfg.IsCentralized() {
 		obj.ProviderType = cfg.ProviderType
 		obj.ProviderIdentity = cfg.ProviderIdentity
+		obj.ServingDomain = parseServingDomain(cfg.TargetURL)
 	}
 
 	// USD-denominated providers: surface per-token USD pricing (derived from
@@ -452,6 +471,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		Data:      []ModelObject{obj},
 		PriceFeed: priceFeedOut,
 	})
+}
+
+// parseServingDomain extracts the bare hostname (FQDN) from a target URL,
+// stripping scheme, port, and path. Returns "" if the URL is empty or cannot be
+// parsed into a host. The result is meant to match the TLS SNI / certificate SAN
+// of the upstream the broker connects to (e.g. "api.openai.com").
+func parseServingDomain(targetURL string) string {
+	if targetURL == "" {
+		return ""
+	}
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // parseTeeVerifier extracts the TEEVerifier field from the additionalInfo JSON string.

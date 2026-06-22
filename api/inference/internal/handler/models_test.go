@@ -413,6 +413,7 @@ func TestGetModels_CentralizedProviderInfo(t *testing.T) {
 			OwnedBy:          "0G Foundation",
 			ProviderType:     "centralized",
 			ProviderIdentity: "openai",
+			TargetURL:        "https://api.openai.com/v1",
 		},
 	}
 
@@ -435,6 +436,10 @@ func TestGetModels_CentralizedProviderInfo(t *testing.T) {
 	if m.ProviderIdentity != "openai" {
 		t.Errorf("expected provider_identity=openai, got %q", m.ProviderIdentity)
 	}
+	// serving_domain is the bare FQDN from targetUrl — scheme, port, and path stripped.
+	if m.ServingDomain != "api.openai.com" {
+		t.Errorf("expected serving_domain=api.openai.com, got %q", m.ServingDomain)
+	}
 }
 
 func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
@@ -447,6 +452,8 @@ func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
 		},
 		serviceConfig: config.Service{
 			ProviderType: "decentralized",
+			// A decentralized targetUrl is internal and must NOT leak as serving_domain.
+			TargetURL: "https://backend:8000",
 		},
 	}
 
@@ -469,6 +476,9 @@ func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
 	if m.ProviderIdentity != "" {
 		t.Errorf("expected empty provider_identity for decentralized, got %q", m.ProviderIdentity)
 	}
+	if m.ServingDomain != "" {
+		t.Errorf("expected empty serving_domain for decentralized, got %q", m.ServingDomain)
+	}
 
 	// Also verify the fields are omitted from JSON output
 	raw := w.Body.Bytes()
@@ -484,6 +494,9 @@ func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
 	if _, exists := modelMap["provider_identity"]; exists {
 		t.Error("provider_identity should be omitted from JSON for decentralized providers")
 	}
+	if _, exists := modelMap["serving_domain"]; exists {
+		t.Error("serving_domain should be omitted from JSON for decentralized providers")
+	}
 }
 
 func TestGetModels_USDPricingAndFeedState(t *testing.T) {
@@ -494,14 +507,14 @@ func TestGetModels_USDPricingAndFeedState(t *testing.T) {
 	updatedAt := time.Now().Add(-5 * time.Second)
 	mock := &mockModelsCtrl{
 		service: model.Service{
-			ModelType:      "test-model",
-			Type:           "chatbot",
-			InputPrice:     "166660000000000",
-			OutputPrice:    "500000000000000",
+			ModelType:                      "test-model",
+			Type:                           "chatbot",
+			InputPrice:                     "166660000000000",
+			OutputPrice:                    "500000000000000",
 			InputPriceUSDPerMillionTokens:  "0.50",
 			OutputPriceUSDPerMillionTokens: "1.50",
 		},
-		serviceConfig: config.Service{},
+		serviceConfig:  config.Service{},
 		priceFeedIsUSD: true,
 		priceFeedSnapshot: pricefeed.Snapshot{
 			InputPriceWei:  big.NewInt(166660000000000),
@@ -606,14 +619,14 @@ func TestGetModels_USDModeCachePopulatedButStale(t *testing.T) {
 	rate, _ := new(big.Rat).SetString("0.003")
 	mock := &mockModelsCtrl{
 		service: model.Service{
-			ModelType:      "test-model",
-			Type:           "chatbot",
-			InputPrice:     "1",
-			OutputPrice:    "1",
+			ModelType:                      "test-model",
+			Type:                           "chatbot",
+			InputPrice:                     "1",
+			OutputPrice:                    "1",
 			InputPriceUSDPerMillionTokens:  "0.50",
 			OutputPriceUSDPerMillionTokens: "1.50",
 		},
-		serviceConfig: config.Service{},
+		serviceConfig:  config.Service{},
 		priceFeedIsUSD: true,
 		priceFeedSnapshot: pricefeed.Snapshot{
 			InputPriceWei:  big.NewInt(1),
@@ -645,10 +658,10 @@ func TestGetModels_USDModeUnpopulatedCacheOmitsPriceFeed(t *testing.T) {
 	// omitted since there's no meaningful rate to report.
 	mock := &mockModelsCtrl{
 		service: model.Service{
-			ModelType:      "test-model",
-			Type:           "chatbot",
-			InputPrice:     "1",
-			OutputPrice:    "1",
+			ModelType:                      "test-model",
+			Type:                           "chatbot",
+			InputPrice:                     "1",
+			OutputPrice:                    "1",
 			InputPriceUSDPerMillionTokens:  "0.50",
 			OutputPriceUSDPerMillionTokens: "1.50",
 		},
@@ -682,6 +695,7 @@ func TestGetModels_MultiModel_PerModelInfoAndFallback(t *testing.T) {
 	svcCfg := config.Service{
 		ProviderType:     "centralized",
 		ProviderIdentity: "openai",
+		TargetURL:        "https://api.openai.com/v1",
 		ModelType:        "gpt-4o",
 		Type:             "chatbot",
 		OwnedBy:          "0G Foundation",
@@ -764,6 +778,14 @@ func TestGetModels_MultiModel_PerModelInfoAndFallback(t *testing.T) {
 	if mini.Architecture == nil || mini.Architecture.Modality != "text->text" {
 		t.Errorf("gpt-4o-mini architecture = %+v, want service-level text->text", mini.Architecture)
 	}
+
+	// serving_domain is provider-level: every model carries the same FQDN.
+	if full.ServingDomain != "api.openai.com" {
+		t.Errorf("gpt-4o serving_domain = %q, want api.openai.com", full.ServingDomain)
+	}
+	if mini.ServingDomain != "api.openai.com" {
+		t.Errorf("gpt-4o-mini serving_domain = %q, want api.openai.com", mini.ServingDomain)
+	}
 }
 
 func TestParseTeeVerifier(t *testing.T) {
@@ -785,6 +807,31 @@ func TestParseTeeVerifier(t *testing.T) {
 			got := parseTeeVerifier(tt.additionalInfo)
 			if got != tt.want {
 				t.Errorf("parseTeeVerifier(%q) = %q, want %q", tt.additionalInfo, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseServingDomain(t *testing.T) {
+	tests := []struct {
+		name      string
+		targetURL string
+		want      string
+	}{
+		{"https with path", "https://api.openai.com/v1", "api.openai.com"},
+		{"https bare host", "https://api.openai.com", "api.openai.com"},
+		{"strips port", "https://api.openai.com:443/v1", "api.openai.com"},
+		{"gateway host preserved", "https://openrouter.ai/api/v1", "openrouter.ai"},
+		{"subdomain preserved", "https://gateway.example.com/v1", "gateway.example.com"},
+		{"empty", "", ""},
+		{"not a url", "://nonsense", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseServingDomain(tt.targetURL)
+			if got != tt.want {
+				t.Errorf("parseServingDomain(%q) = %q, want %q", tt.targetURL, got, tt.want)
 			}
 		})
 	}
