@@ -52,6 +52,11 @@ type Ctrl struct {
 	priceFeed         config.PriceFeedConfig
 	concurrencyLimit  config.ConcurrencyLimitConfig
 
+	// assayVerdictFilter, when true, records the Assay verifier's ZG-Verdict
+	// per request and excludes REJECT'd requests from settlement. Set from
+	// cfg.Assay.Enabled; off by default so the path is fully inert until opted in.
+	assayVerdictFilter bool
+
 	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
 	// because the requests.input_count column conflates seconds (whisper)
 	// and tokens (gpt-4o-transcribe) until issue #530 lands. See
@@ -211,6 +216,7 @@ func New(
 		tieredPricing:        cfg.TieredPricing,
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
+		assayVerdictFilter:   cfg.Assay.Enabled,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,

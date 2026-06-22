@@ -24,9 +24,28 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
+
+// recordAssayVerdict persists the Assay/LDD audit verdict from the verifier's
+// ZG-Verdict response header onto the request row, so settlement can exclude
+// REJECT'd requests from the TEE-signed batch. No-op when the integration is
+// disabled, for whitelisted (unbilled) traffic, or when the upstream set no
+// verdict header (fail-open).
+func (c *Ctrl) recordAssayVerdict(resp *http.Response, reqModel model.Request) {
+	if !c.assayVerdictFilter || reqModel.IsWhitelisted {
+		return
+	}
+	verdict := resp.Header.Get(constant.HeaderZGVerdict)
+	if verdict == "" {
+		return
+	}
+	if err := c.db.UpdateRequestVerdict(reqModel.RequestHash, verdict); err != nil {
+		c.logger.Warnf("Assay: failed to record verdict %q for request %s: %v", verdict, reqModel.RequestHash, err)
+	}
+}
 
 // ChatSignature, SigningAlgo, ChatPrefix, and the chat-signing helpers
 // (signChatWithKey, signImageResponse, signCentralizedRoutingProof, chatCacheKey)
@@ -151,6 +170,8 @@ func (c *Ctrl) handleChatbotResponse(ctx *gin.Context, resp *http.Response, acco
 func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	c.recordAssayVerdict(resp, reqModel)
+
 	chatKey := uuid.NewString()
 
 	// Set ZG-Res-Key for broker-signed responses:
@@ -224,6 +245,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	if isCompressedEncoding(resp.Header.Get("Content-Encoding")) {
 		c.logger.Warnf("streaming response has Content-Encoding %q despite identity request; SSE leak sanitization may be skipped", resp.Header.Get("Content-Encoding"))
 	}
+
+	c.recordAssayVerdict(resp, reqModel)
 
 	chatKey := uuid.NewString()
 

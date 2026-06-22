@@ -27,6 +27,11 @@ type Request struct {
 	// For multi-model centralized providers, this is the user's requested model.
 	// For single-model providers, this is the configured ModelType.
 	ModelName string `gorm:"type:varchar(255);not null;default:''" json:"modelName"`
+	// Verdict is the Assay/LDD audit result reported by the verifier via the
+	// ZG-Verdict response header (PASS / REJECT / UNVERIFIED). Empty when the
+	// Assay integration is disabled or the upstream set no header. Settlement
+	// excludes REJECT'd requests from the TEE-signed batch (filterRejectedRequests).
+	Verdict string `gorm:"type:varchar(16);not null;default:''" json:"verdict"`
 	// IsWhitelisted indicates if this request is from a whitelisted user.
 	// Whitelisted users receive full response processing (stream handling, TEE signing)
 	// but bypass billing/settlement operations.
