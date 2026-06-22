@@ -122,8 +122,14 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 		// even if settlement straddles UTC midnight. Reading it from the DB
 		// (rather than the app clock) keeps it consistent with the existing
 		// UTC_DATE() semantics and avoids app/DB clock skew.
+		//
+		// DATE_FORMAT (not bare UTC_DATE()) is deliberate: with the driver's
+		// parseTime=True a DATE-typed result is decoded to time.Time and, when
+		// scanned into a string, re-serialized as RFC3339 ("...T00:00:00Z"),
+		// which MySQL rejects as a DATE literal in strict mode. Formatting to a
+		// plain string server-side returns "YYYY-MM-DD" verbatim.
 		var date string
-		if err := tx.Raw("SELECT UTC_DATE()").Scan(&date).Error; err != nil {
+		if err := tx.Raw("SELECT DATE_FORMAT(UTC_DATE(), '%Y-%m-%d')").Scan(&date).Error; err != nil {
 			return fmt.Errorf("failed to resolve settlement date: %w", err)
 		}
 
