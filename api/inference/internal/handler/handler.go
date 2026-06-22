@@ -109,6 +109,13 @@ func (h *Handler) Register(r *gin.Engine) {
 	group.GET("/logs", corsMiddleware(), h.ListLogs)                        // List all log files
 	group.GET("/logs/:component/:filename", corsMiddleware(), h.GetLogFile) // Download specific log file
 
+	// Per-wallet daily usage for the Router to pull direct (non-whitelisted)
+	// consumption. Only registered when the feature is enabled, so it returns
+	// 404 by default. Whitelist-gated inside the handler.
+	if h.ctrl.UserUsageStatsEnabled() {
+		group.GET("/admin/usage/daily", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetUserDailyUsage)
+	}
+
 	// Async job endpoints (OpenAI-style paths)
 	asyncGroup := group.Group("/async")
 	asyncGroup.Use(corsMiddleware())

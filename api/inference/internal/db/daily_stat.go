@@ -2,25 +2,61 @@ package db
 
 import (
 	"fmt"
+	"strings"
 
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"gorm.io/gorm"
 )
 
+// unknownModelLabel labels a per-wallet usage row whose request carried no
+// model id and for which no fallback was configured, so the model primary-key
+// component is never blank.
+const unknownModelLabel = "unknown"
+
+// AccumulateOptions configures the optional per-wallet recording in
+// AccumulateAndDeleteRequests. Using a struct with named fields (rather than
+// positional string/bool/string parameters) makes the two string fields
+// impossible to transpose silently — a transposition of ServiceType and
+// FallbackModel would otherwise flip the STT token-skip and corrupt analytics
+// with no compile error.
+type AccumulateOptions struct {
+	// ServiceType is the broker's configured service type ("chatbot",
+	// "speech-to-text", etc.). For "speech-to-text", input_count/output_count
+	// carry seconds (whisper) rather than tokens, so the token-named columns
+	// are skipped to stay unit-coherent.
+	ServiceType string
+	// RecordPerWallet enables the per-wallet, per-model upsert into
+	// user_daily_stat (in the same transaction, before request deletion).
+	RecordPerWallet bool
+	// FallbackModel labels per-wallet rows whose request ModelName is empty
+	// (rows predating the model_name column). When it is itself empty, such
+	// rows fall back to the unknownModelLabel sentinel.
+	FallbackModel string
+}
+
 // AccumulateAndDeleteRequests atomically accumulates request stats into daily_stat
 // and deletes the requests in a single transaction. This prevents double-counting
 // that would occur if accumulation succeeds but deletion fails.
 //
-// serviceType is the broker's configured service type ("chatbot",
-// "speech-to-text", etc.). For "speech-to-text", input_count/output_count
-// carry seconds (whisper) rather than tokens, so we skip the token-named
-// columns in daily_stat to keep AllTimeInputTokens / AllTimeOutputTokens
-// unit-coherent. total_requests is still bumped because the requests really
-// did happen. The whisper traffic loses long-term per-second analytics
-// history until issue #530 lands a per-unit column on daily_stat — that's
-// the accepted trade-off for the deployment window.
-func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, serviceType string) error {
+// For opts.ServiceType == "speech-to-text", input_count/output_count carry
+// seconds (whisper) rather than tokens, so we skip the token-named columns in
+// daily_stat to keep AllTimeInputTokens / AllTimeOutputTokens unit-coherent.
+// total_requests is still bumped because the requests really did happen. The
+// whisper traffic loses long-term per-second analytics history until issue
+// #530 lands a per-unit column on daily_stat — that's the accepted trade-off
+// for the deployment window.
+//
+// When opts.RecordPerWallet is true, the per-wallet, per-model breakdown is
+// also upserted into user_daily_stat in the SAME transaction, before the
+// request rows are deleted — otherwise the breakdown would be lost at
+// settlement (the request rows are the only per-wallet source; see
+// docs/wallet-direct-usage-design.md §4.1 in the router repo). The STT token
+// skip applies identically here. To bound how long the settlement transaction
+// is held open (and how many statements could fail and roll back an
+// already-on-chain settlement), all per-wallet rows go in a single multi-row
+// upsert rather than one statement per (user, model) pair.
+func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts AccumulateOptions) error {
 	if len(requests) == 0 {
 		return nil
 	}
@@ -32,7 +68,23 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, serviceType 
 	// speech-to-text writes seconds into input_count for whisper rows. Token
 	// accumulation would silently corrupt daily_stat.input_tokens, so skip
 	// it until #530 lands a dedicated audio_seconds column.
-	skipTokenAccumulation := serviceType == constant.ServiceTypeSpeechToText
+	skipTokenAccumulation := opts.ServiceType == constant.ServiceTypeSpeechToText
+
+	// Per-wallet aggregation grouped by (user_address, model). Keyed off the
+	// same request batch so it shares the STT skip and never double-counts.
+	type userModelKey struct {
+		user  string
+		model string
+	}
+	type userModelAgg struct {
+		requestCount int64
+		inputTokens  int64
+		outputTokens int64
+	}
+	var perWallet map[userModelKey]*userModelAgg
+	if opts.RecordPerWallet {
+		perWallet = make(map[userModelKey]*userModelAgg)
+	}
 
 	for _, req := range requests {
 		totalRequests++
@@ -41,19 +93,73 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, serviceType 
 			outputTokens += req.OutputCount
 		}
 		hashes = append(hashes, req.RequestHash)
+
+		if opts.RecordPerWallet {
+			modelName := req.ModelName
+			if modelName == "" {
+				modelName = opts.FallbackModel
+			}
+			if modelName == "" {
+				modelName = unknownModelLabel
+			}
+			key := userModelKey{user: req.UserAddress, model: modelName}
+			agg := perWallet[key]
+			if agg == nil {
+				agg = &userModelAgg{}
+				perWallet[key] = agg
+			}
+			agg.requestCount++
+			if !skipTokenAccumulation {
+				agg.inputTokens += req.InputCount
+				agg.outputTokens += req.OutputCount
+			}
+		}
 	}
 
 	return d.db.Transaction(func(tx *gorm.DB) error {
+		// Resolve the UTC calendar day once for the whole transaction so the
+		// daily_stat row and every user_daily_stat row land on the same date
+		// even if settlement straddles UTC midnight. Reading it from the DB
+		// (rather than the app clock) keeps it consistent with the existing
+		// UTC_DATE() semantics and avoids app/DB clock skew.
+		var date string
+		if err := tx.Raw("SELECT UTC_DATE()").Scan(&date).Error; err != nil {
+			return fmt.Errorf("failed to resolve settlement date: %w", err)
+		}
+
 		if err := tx.Exec(
 			`INSERT INTO daily_stat (date, total_requests, input_tokens, output_tokens)
-			 VALUES (UTC_DATE(), ?, ?, ?) AS new_vals
+			 VALUES (?, ?, ?, ?) AS new_vals
 			 ON DUPLICATE KEY UPDATE
 			   total_requests = daily_stat.total_requests + new_vals.total_requests,
 			   input_tokens = daily_stat.input_tokens + new_vals.input_tokens,
 			   output_tokens = daily_stat.output_tokens + new_vals.output_tokens`,
-			totalRequests, inputTokens, outputTokens,
+			date, totalRequests, inputTokens, outputTokens,
 		).Error; err != nil {
 			return fmt.Errorf("failed to accumulate daily stats: %w", err)
+		}
+
+		if len(perWallet) > 0 {
+			var b strings.Builder
+			b.WriteString("INSERT INTO user_daily_stat (date, user_address, model, request_count, input_tokens, output_tokens) VALUES ")
+			args := make([]any, 0, len(perWallet)*6)
+			i := 0
+			for key, agg := range perWallet {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.WriteString("(?, ?, ?, ?, ?, ?)")
+				args = append(args, date, key.user, key.model, agg.requestCount, agg.inputTokens, agg.outputTokens)
+				i++
+			}
+			b.WriteString(` AS new_vals
+			 ON DUPLICATE KEY UPDATE
+			   request_count = user_daily_stat.request_count + new_vals.request_count,
+			   input_tokens  = user_daily_stat.input_tokens  + new_vals.input_tokens,
+			   output_tokens = user_daily_stat.output_tokens + new_vals.output_tokens`)
+			if err := tx.Exec(b.String(), args...).Error; err != nil {
+				return fmt.Errorf("failed to accumulate user daily stats: %w", err)
+			}
 		}
 
 		if err := tx.Where("request_hash IN ?", hashes).Delete(&model.Request{}).Error; err != nil {
@@ -62,6 +168,48 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, serviceType 
 
 		return nil
 	})
+}
+
+// ListUserDailyStat returns the per-wallet usage rows for a single UTC date,
+// ordered by (user_address, model) — the stable order the date-leading primary
+// key serves without a filesort. It also returns the total row count for that
+// date so the caller can paginate. limit/offset bound the returned slice;
+// callers should pass a sane limit (the handler caps it).
+func (d *DB) ListUserDailyStat(date string, limit, offset int) ([]model.UserDailyStat, int64, error) {
+	var total int64
+	if err := d.db.Model(&model.UserDailyStat{}).Where("date = ?", date).Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count user daily stats: %w", err)
+	}
+
+	var rows []model.UserDailyStat
+	if err := d.db.Where("date = ?", date).
+		Order("user_address, model").
+		Limit(limit).
+		Offset(offset).
+		Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to list user daily stats: %w", err)
+	}
+	return rows, total, nil
+}
+
+// PruneUserDailyStat deletes user_daily_stat rows older than the given number
+// of retention days (relative to the current UTC date). It returns the number
+// of rows removed. A non-positive retentionDays is a no-op — callers gate on
+// the configured retention before invoking. This bounds the otherwise
+// unbounded growth of the per-wallet table (the Router keeps its own permanent
+// copy). See config.UserUsageStatsConfig.
+func (d *DB) PruneUserDailyStat(retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	res := d.db.Exec(
+		"DELETE FROM user_daily_stat WHERE date < DATE_SUB(UTC_DATE(), INTERVAL ? DAY)",
+		retentionDays,
+	)
+	if res.Error != nil {
+		return 0, fmt.Errorf("failed to prune user daily stats: %w", res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 // TotalStats holds the all-time cumulative statistics.

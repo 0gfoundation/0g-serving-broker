@@ -250,6 +250,54 @@ func Main() {
 		logger.Info("LoRA serving enabled: manager and event watcher started")
 	}
 
+	// The /v1/admin/usage/daily read endpoint is authorized via the billing
+	// whitelist (IsWhitelistedUser). With the whitelist disabled that gate
+	// rejects everyone, so an operator who enables the feature without a
+	// whitelist gets a route that 403s every caller — including the Router it
+	// was turned on for. Warn loudly rather than fail silently.
+	if config.UserUsageStats.Enabled && !config.Whitelist.Enabled {
+		logger.Warn("userUsageStats is enabled but whitelist is disabled: GET /v1/admin/usage/daily will reject all callers (it is whitelist-gated). Configure whitelist.userAddresses with the Router's address.")
+	}
+
+	// Per-wallet usage retention pruner. user_daily_stat is never deleted at
+	// settlement (unlike request) and grows as wallets × models × days, so
+	// trim rows older than the configured retention. The Router keeps its own
+	// permanent copy, so the broker only needs the pull window. Pure DB
+	// deletes on its own cancellable context, cancelled in the shutdown block
+	// below (mirroring the price-processor / LoRA workers — the root ctx is
+	// never cancelled).
+	var pruneCancel context.CancelFunc
+	if config.UserUsageStats.Enabled && config.UserUsageStats.RetentionDays > 0 {
+		retentionDays := config.UserUsageStats.RetentionDays
+		interval := config.UserUsageStats.PruneInterval
+		var pruneCtx context.Context
+		pruneCtx, pruneCancel = context.WithCancel(ctx)
+		go func() {
+			prune := func() {
+				removed, err := db.PruneUserDailyStat(retentionDays)
+				if err != nil {
+					logger.Errorf("user_daily_stat prune failed: %v", err)
+					return
+				}
+				if removed > 0 {
+					logger.Infof("user_daily_stat prune: removed %d rows older than %d days", removed, retentionDays)
+				}
+			}
+			prune() // run once at startup
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pruneCtx.Done():
+					return
+				case <-ticker.C:
+					prune()
+				}
+			}
+		}()
+		logger.Infof("user_daily_stat retention pruner started: %d-day retention, every %s", retentionDays, interval)
+	}
+
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)
@@ -306,6 +354,11 @@ func Main() {
 
 	// Shutdown monitor background goroutines
 	monitorCancel()
+
+	// Stop the per-wallet usage retention pruner
+	if pruneCancel != nil {
+		pruneCancel()
+	}
 
 	// Shutdown LoRA event watcher and manager
 	if loraCancel != nil {
