@@ -1019,6 +1019,131 @@ service:
 	}
 }
 
+func TestLoadConfig_USDImagePerImage(t *testing.T) {
+	// USD image service: operator gives outputPriceUSDPerImage; loadConfig
+	// normalizes it into the per-1M-unit USD representation (×1e6) with the input
+	// side fixed at 0, so the shared USD pipeline prices it unchanged.
+	for _, svcType := range []string{"text-to-image", "image-editing"} {
+		t.Run(svcType, func(t *testing.T) {
+			configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "`+svcType+`"
+  model: "stable-diffusion-xl"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  outputPriceUSDPerImage: "0.04"
+priceFeed:
+  sources: ["coingecko"]
+`)
+			t.Setenv("CONFIG_FILE", configPath)
+
+			cfg := &Config{}
+			if err := loadConfig(cfg); err != nil {
+				t.Fatalf("loadConfig failed: %v", err)
+			}
+			if cfg.Service.OutputPriceUSDPerImage != "0.04" {
+				t.Errorf("raw per-image preserved: got %q want 0.04", cfg.Service.OutputPriceUSDPerImage)
+			}
+			if cfg.Service.OutputPriceUSDPerMillionTokens != "40000" {
+				t.Errorf("normalized output: got %q want 40000", cfg.Service.OutputPriceUSDPerMillionTokens)
+			}
+			if cfg.Service.InputPriceUSDPerMillionTokens != "0" {
+				t.Errorf("input side: got %q want 0", cfg.Service.InputPriceUSDPerMillionTokens)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_USDImageRequiresPerImage(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "text-to-image"
+  model: "stable-diffusion-xl"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "outputPriceUSDPerImage is required") {
+		t.Errorf("expected error about required outputPriceUSDPerImage, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDImageRejectsPerMillion(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "text-to-image"
+  model: "stable-diffusion-xl"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  outputPriceUSDPerImage: "0.04"
+  outputPriceUSDPerMillionTokens: "40000"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "use service.outputPriceUSDPerImage") {
+		t.Errorf("expected error rejecting per-1M-token fields for image service, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDPerImageRejectedForNonImage(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
+  outputPriceUSDPerImage: "0.04"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "only valid for image service types") {
+		t.Errorf("expected error rejecting outputPriceUSDPerImage for chatbot, got %v", err)
+	}
+}
+
+func TestLoadConfig_NativeRejectsPerImage(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "text-to-image"
+  model: "stable-diffusion-xl"
+  verifiability: "TeeML"
+  outputPrice: "5000000000000"
+  outputPriceUSDPerImage: "0.04"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "outputPriceUSDPerImage is only valid when priceDenomination is") {
+		t.Errorf("expected error rejecting outputPriceUSDPerImage under NATIVE, got %v", err)
+	}
+}
+
 func TestService_IsCentralized(t *testing.T) {
 	tests := []struct {
 		name         string

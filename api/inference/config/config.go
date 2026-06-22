@@ -226,6 +226,18 @@ type Service struct {
 	// tokens, decimal string.  Required iff PriceDenomination == "USD".
 	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
 
+	// OutputPriceUSDPerImage is the USD price per generated image for a
+	// USD-denominated image-generation / image-editing service (decimal string,
+	// e.g. "0.04" = $0.04 per image). It is REQUIRED — and the per-1M-token USD
+	// fields are forbidden — for those service types under USD denomination,
+	// because an image bills per image, not per token. At config load it is
+	// normalized into OutputPriceUSDPerMillionTokens (×1e6, with the input side
+	// fixed at "0") so the existing token-shaped USD machinery (price feed,
+	// on-chain ceiling, wei conversion, /v1/models display) prices and advertises
+	// it unchanged — the pipeline's ÷1e6 quantum cancels the ×1e6 normalization to
+	// yield wei-per-image. Mirrors OutputPriceUSDPerSecond for video. See validate.
+	OutputPriceUSDPerImage string `yaml:"outputPriceUSDPerImage"`
+
 	// ModelPricing defines per-model pricing for centralized providers that serve multiple models.
 	// When configured, the broker validates requested models against this allowlist
 	// and bills at model-specific rates instead of the single on-chain price.
@@ -924,31 +936,65 @@ func loadConfig(cfg *Config) error {
 		cfg.Service.PriceDenomination = constant.PriceDenominationNative
 	}
 	cfg.Service.PriceDenomination = strings.ToUpper(cfg.Service.PriceDenomination)
+	// Image generation / editing bill per image, so under USD denomination they
+	// use service.outputPriceUSDPerImage instead of the per-1M-token fields.
+	isImageType := cfg.Service.Type == constant.ServiceTypeTextToImage ||
+		cfg.Service.Type == constant.ServiceTypeImageEditing
 	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
 		if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
 			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty when priceDenomination is '%s'", constant.PriceDenominationNative)
 		}
+		if cfg.Service.OutputPriceUSDPerImage != "" {
+			return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid when priceDenomination is '%s'", constant.PriceDenominationUSD)
+		}
 	case constant.PriceDenominationUSD:
-		// With multi-model pricing the per-model entries carry the USD prices and
-		// the service-level USD fields are derived (max-over-models) later in this
-		// function, so they may legitimately be empty here.
-		multiModelUSD := len(cfg.Service.ModelPricing) > 0
-		if !multiModelUSD && (cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "") {
-			return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
-		}
-		if cfg.Service.InputPriceUSDPerMillionTokens != "" {
-			if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
-				return err
-			}
-		}
-		if cfg.Service.OutputPriceUSDPerMillionTokens != "" {
-			if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
-				return err
-			}
-		}
 		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
+		}
+		if isImageType {
+			// USD image service: outputPriceUSDPerImage is mandatory; the per-1M-token
+			// fields are forbidden (image bills per image, not per token).
+			if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
+				return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty for service type '%s' under USD denomination (use service.outputPriceUSDPerImage)", cfg.Service.Type)
+			}
+			if cfg.Service.OutputPriceUSDPerImage == "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is required for service type '%s' when priceDenomination is '%s'", cfg.Service.Type, constant.PriceDenominationUSD)
+			}
+			if err := validateUSDPriceString("service.outputPriceUSDPerImage", cfg.Service.OutputPriceUSDPerImage); err != nil {
+				return err
+			}
+			// Normalize per-image USD into the per-1M-unit representation the shared USD
+			// pipeline consumes: the "unit" is one image, the input side is 0. Parse the
+			// trimmed value (validateUSDPriceString trims before validating) so a padded
+			// string that passed validation can't slip a nil into the multiply.
+			perImage, ok := new(big.Rat).SetString(strings.TrimSpace(cfg.Service.OutputPriceUSDPerImage))
+			if !ok {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage %q is not a valid decimal", cfg.Service.OutputPriceUSDPerImage)
+			}
+			cfg.Service.OutputPriceUSDPerMillionTokens = ratToDecimalString(new(big.Rat).Mul(perImage, big.NewRat(1_000_000, 1)))
+			cfg.Service.InputPriceUSDPerMillionTokens = "0"
+		} else {
+			if cfg.Service.OutputPriceUSDPerImage != "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)
+			}
+			// With multi-model pricing the per-model entries carry the USD prices and
+			// the service-level USD fields are derived (max-over-models) later in this
+			// function, so they may legitimately be empty here.
+			multiModelUSD := len(cfg.Service.ModelPricing) > 0
+			if !multiModelUSD && (cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "") {
+				return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
+			}
+			if cfg.Service.InputPriceUSDPerMillionTokens != "" {
+				if err := validateUSDPriceString("service.inputPriceUSDPerMillionTokens", cfg.Service.InputPriceUSDPerMillionTokens); err != nil {
+					return err
+				}
+			}
+			if cfg.Service.OutputPriceUSDPerMillionTokens != "" {
+				if err := validateUSDPriceString("service.outputPriceUSDPerMillionTokens", cfg.Service.OutputPriceUSDPerMillionTokens); err != nil {
+					return err
+				}
+			}
 		}
 		if err := validatePriceFeedConfig(&cfg.PriceFeed); err != nil {
 			return err

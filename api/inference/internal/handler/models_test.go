@@ -388,6 +388,70 @@ func TestGetModels_ImagePricingForImageTypes(t *testing.T) {
 	}
 }
 
+// TestGetModels_ImagePricingUSD pins the USD-denominated image-service shape:
+// the per-image price surfaces under pricing.image (wei) and pricing_usd.image
+// (USD), while the per-token prompt/completion fields report 0 (an image model
+// bills per image, not per token, so a per-token rate would mislead
+// OpenAI-compatible clients).
+func TestGetModels_ImagePricingUSD(t *testing.T) {
+	types := []string{"text-to-image", "image-editing"}
+	for _, svcType := range types {
+		t.Run(svcType, func(t *testing.T) {
+			mock := &mockModelsCtrl{
+				service: model.Service{
+					ModelType:   "stable-diffusion-xl",
+					Type:        svcType,
+					InputPrice:  "0",
+					OutputPrice: "126963160000000000",
+					// USD per 1M images: 0.04 × 1e6 → per-image USD is 0.04.
+					InputPriceUSDPerMillionTokens:  "0",
+					OutputPriceUSDPerMillionTokens: "40000",
+				},
+				serviceConfig:  config.Service{},
+				priceFeedIsUSD: true,
+			}
+
+			h := newModelsTestHandler(mock)
+			w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", w.Code)
+			}
+
+			var resp ModelListResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+			m := resp.Data[0]
+
+			// Native pricing: per-image price under image; per-token fields are 0.
+			if m.Pricing.Image != "126963160000000000" {
+				t.Errorf("pricing.image = %q, want 126963160000000000", m.Pricing.Image)
+			}
+			if m.Pricing.Prompt != "0" {
+				t.Errorf("pricing.prompt = %q, want 0 for image service", m.Pricing.Prompt)
+			}
+			if m.Pricing.Completion != "0" {
+				t.Errorf("pricing.completion = %q, want 0 for image service", m.Pricing.Completion)
+			}
+
+			// USD pricing: per-image USD under image; per-token fields are 0.
+			if m.PricingUSD == nil {
+				t.Fatal("expected pricing_usd to be present for USD image service")
+			}
+			if m.PricingUSD.Image != "0.04" {
+				t.Errorf("pricing_usd.image = %q, want 0.04", m.PricingUSD.Image)
+			}
+			if m.PricingUSD.Prompt != "0" {
+				t.Errorf("pricing_usd.prompt = %q, want 0 for image service", m.PricingUSD.Prompt)
+			}
+			if m.PricingUSD.Completion != "0" {
+				t.Errorf("pricing_usd.completion = %q, want 0 for image service", m.PricingUSD.Completion)
+			}
+		})
+	}
+}
+
 func TestGetModels_ServiceError(t *testing.T) {
 	mock := &mockModelsCtrl{
 		serviceErr: errors.New("contract unreachable"),

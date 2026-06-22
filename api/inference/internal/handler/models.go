@@ -89,6 +89,12 @@ type ModelPricing struct {
 type ModelPricingUSD struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
+	// Image is the USD price per generated image for a USD-denominated
+	// image-generation / image-editing model (decimal string). Mutually
+	// exclusive with the per-token prompt/completion fields above; derived from
+	// OutputPriceUSDPerMillionTokens with the same ÷1e6 the wei conversion uses,
+	// so it stays consistent with the native pricing.image value.
+	Image string `json:"image,omitempty"`
 	// Video is the USD price per effective output second for a USD-denominated
 	// video-generation model (decimal string). Mutually exclusive with the
 	// per-token prompt/completion fields above.
@@ -342,10 +348,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		Type:          svc.Type,
 		Verifiability: svc.Verifiability,
 		TeeAttested:   svc.TeeSignerAcknowledged,
-		Pricing: &ModelPricing{
-			Prompt:     svc.InputPrice,
-			Completion: svc.OutputPrice,
-		},
+		Pricing:       &ModelPricing{},
 	}
 
 	if svc.CreatedAt != nil {
@@ -366,14 +369,27 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ExpirationDate = cfg.ModelInfo.ExpirationDate
 	}
 
-	// Set image pricing from output price for image service types
-	if svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing {
+	// Native per-unit pricing keyed by modality. Image generation / editing bill
+	// per generated image (OutputPrice is the per-image price), surfaced under
+	// `image`; the per-token prompt/completion fields don't apply, so they report
+	// 0 rather than a misleading per-token rate. Video keeps its existing shape
+	// (prompt/completion plus the per-second `video`). Token modalities use
+	// prompt/completion.
+	switch svc.Type {
+	case constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing:
+		// Image bills per generated image (under `image`); there is no per-token
+		// charge — the input fee is fixed at 0 in the request path — so report both
+		// prompt and completion as 0 rather than a misleading per-token rate.
+		obj.Pricing.Prompt = "0"
+		obj.Pricing.Completion = "0"
 		obj.Pricing.Image = svc.OutputPrice
-	}
-
-	// Set video pricing from output price for video service type
-	if svc.Type == constant.ServiceTypeVideoGeneration {
+	case constant.ServiceTypeVideoGeneration:
+		obj.Pricing.Prompt = svc.InputPrice
+		obj.Pricing.Completion = svc.OutputPrice
 		obj.Pricing.Video = svc.OutputPrice
+	default:
+		obj.Pricing.Prompt = svc.InputPrice
+		obj.Pricing.Completion = svc.OutputPrice
 	}
 
 	// Populate tiered pricing from config
@@ -443,7 +459,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// list — but the log signal prevents "PricingUSD silently missing"
 	// from going undiagnosed.
 	var priceFeedOut *PriceFeedState
-	if svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "" {
+	isImageType := svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing
+	switch {
+	case isImageType && svc.OutputPriceUSDPerMillionTokens != "":
+		// Image bills per generated image, not per token: surface the per-image
+		// USD under `image` (mirrors the native pricing.image) and report the
+		// per-token prompt/completion as 0. Deriving with the same ÷1e6 used by
+		// the wei conversion keeps pricing_usd.image consistent with pricing.image.
+		image, imageErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
+		if imageErr != nil {
+			h.logger.Warnf("GetModels: derive per-image USD price from %q failed (omitting PricingUSD block): %v",
+				svc.OutputPriceUSDPerMillionTokens, imageErr)
+		} else {
+			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Image: image}
+		}
+	case svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "":
 		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)
 		completion, completionErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
 		switch {
