@@ -15,6 +15,7 @@ import (
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
+	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -789,7 +790,11 @@ func (c *Ctrl) deleteRequests(requests []*model.Request) error {
 	// at settlement time therefore shares c.Service.Type, so a function-wide
 	// skip is safe. If we ever multiplex services in one broker, this needs
 	// to partition `requests` by per-row service type instead — track in #530.
-	if err := c.db.AccumulateAndDeleteRequests(requests, c.Service.Type); err != nil {
+	if err := c.db.AccumulateAndDeleteRequests(requests, db.AccumulateOptions{
+		ServiceType:     c.Service.Type,
+		RecordPerWallet: c.userUsageStats.Enabled,
+		FallbackModel:   c.Service.ModelType,
+	}); err != nil {
 		c.logger.Errorf("CRITICAL: failed to accumulate stats and delete settled requests: %v", err)
 		return err
 	}

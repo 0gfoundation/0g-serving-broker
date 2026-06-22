@@ -105,6 +105,10 @@ type Ctrl struct {
 	// Whitelist for users that bypass billing
 	whitelistUsers map[string]struct{}
 
+	// userUsageStats gates the per-wallet daily usage feature (settlement-time
+	// upsert into user_daily_stat + the /v1/admin/usage/daily read endpoint).
+	userUsageStats config.UserUsageStatsConfig
+
 	// Async processing
 	asyncMu         sync.RWMutex // protects asyncEnabled + asyncJobQueue against send-on-closed-channel during shutdown
 	asyncJobQueue   chan asyncJobParams
@@ -211,6 +215,7 @@ func New(
 		tieredPricing:        cfg.TieredPricing,
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
+		userUsageStats:       cfg.UserUsageStats,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,

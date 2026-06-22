@@ -390,6 +390,26 @@ type WhitelistConfig struct {
 	UserAddresses []string `yaml:"userAddresses"` // List of whitelisted user addresses (case-insensitive)
 }
 
+// UserUsageStatsConfig gates the per-wallet daily usage feature: the
+// user_daily_stat table written inside settlement and the read-only
+// GET /v1/admin/usage/daily endpoint the Router pulls from. Defaults to
+// disabled so the settlement hot-path is unchanged and the route is not
+// registered (404) until an operator opts in. See
+// docs/wallet-direct-usage-design.md (router repo) for the full contract.
+type UserUsageStatsConfig struct {
+	// Enabled turns on both the settlement-time per-wallet upsert and the
+	// read endpoint. When false the broker behaves exactly as before.
+	Enabled bool `yaml:"enabled"`
+	// RetentionDays bounds the unbounded-growth of user_daily_stat: rows with
+	// date older than now-RetentionDays are pruned by a background worker.
+	// The Router keeps its own permanent copy, so the broker only needs to
+	// retain enough history to cover the Router's pull window. 0 disables
+	// pruning (keep forever). Defaults to 90 when Enabled and left unset.
+	RetentionDays int `yaml:"retentionDays"`
+	// PruneInterval is how often the pruner runs. Defaults to 24h.
+	PruneInterval time.Duration `yaml:"pruneInterval"`
+}
+
 // LoRAConfig configures LoRA adapter serving for fine-tuned models.
 // When enabled, the inference broker can serve fine-tuned LoRA adapters
 // via ServerlessLLM, with per-user access control and automatic adapter
@@ -499,6 +519,7 @@ type Config struct {
 	Async               AsyncConfig             `yaml:"async"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
+	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
 	// AllowTokenBilledSpeechToText opens the billing path for token-billed
 	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
 	// Defaults to false.
@@ -1046,6 +1067,17 @@ func loadConfig(cfg *Config) error {
 	// ceiling — see model_pricing.go.
 	if err := validateModelPricing(cfg); err != nil {
 		return err
+	}
+
+	// Per-wallet usage stats defaults. Only meaningful when the feature is
+	// enabled; leaving them unset gives a 90-day retention pruned daily.
+	if cfg.UserUsageStats.Enabled {
+		if cfg.UserUsageStats.RetentionDays == 0 {
+			cfg.UserUsageStats.RetentionDays = 90
+		}
+		if cfg.UserUsageStats.PruneInterval == 0 {
+			cfg.UserUsageStats.PruneInterval = 24 * time.Hour
+		}
 	}
 
 	return nil

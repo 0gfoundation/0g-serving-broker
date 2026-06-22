@@ -272,6 +272,24 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "create-user-daily-stat",
+			Migrate: func(tx *gorm.DB) error {
+				// Per-wallet daily usage for direct consumers. PK column order
+				// (date, user_address, model) matches the only read pattern
+				// (WHERE date=? ORDER BY user_address, model). See
+				// model.UserDailyStat.
+				type UserDailyStat struct {
+					Date         string `gorm:"type:date;primaryKey"`
+					UserAddress  string `gorm:"type:varchar(255);primaryKey"`
+					Model        string `gorm:"type:varchar(255);primaryKey"`
+					RequestCount int64  `gorm:"type:bigint;not null;default:0"`
+					InputTokens  int64  `gorm:"type:bigint;not null;default:0"`
+					OutputTokens int64  `gorm:"type:bigint;not null;default:0"`
+				}
+				return tx.AutoMigrate(&UserDailyStat{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
