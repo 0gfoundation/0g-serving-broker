@@ -39,6 +39,14 @@ type ModelObject struct {
 	ExpirationDate      string                    `json:"expiration_date,omitempty"`
 	ProviderType        string                    `json:"provider_type,omitempty"`
 	ProviderIdentity    string                    `json:"provider_identity,omitempty"`
+	// ProviderName is an optional human-readable display name (e.g. "OpenAI",
+	// "Aliyun (CN)"). Freeform presentation companion to ProviderIdentity (the
+	// lowercase machine key); use this for UI labels, not for lookups.
+	ProviderName string `json:"provider_name,omitempty"`
+	// ProviderCountry is the provider's ISO 3166-1 alpha-2 jurisdiction code
+	// (e.g. "US", "CN"). Display/discovery hint only — self-asserted by the broker
+	// and not verifiable.
+	ProviderCountry string `json:"provider_country,omitempty"`
 	// ServingDomain is the upstream hostname (FQDN, e.g. "api.openai.com") that
 	// the broker actually connects to for a centralized provider. It is the host
 	// component of service.targetUrl — scheme, port, and path stripped — so it
@@ -227,6 +235,8 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
 				ProviderType:     cfg.ProviderType,
 				ProviderIdentity: cfg.ProviderIdentity,
+				ProviderName:     cfg.ProviderName,
+				ProviderCountry:  cfg.ProviderCountry,
 				ServingDomain:    servingDomain,
 				RateLimits:       sharedLimits,
 			}
@@ -447,6 +457,10 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ProviderIdentity = cfg.ProviderIdentity
 		obj.ServingDomain = parseServingDomain(cfg.TargetURL)
 	}
+
+	// Provider display metadata is provider-type-agnostic; surface whenever set.
+	obj.ProviderName = cfg.ProviderName
+	obj.ProviderCountry = cfg.ProviderCountry
 
 	// USD-denominated providers: surface per-token USD pricing (derived from
 	// the configured per-1M-tokens value) plus the live rate-feed state.

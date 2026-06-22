@@ -18,6 +18,11 @@ import (
 // This prevents issues with the colon-delimited routing proof text format.
 var validProviderIdentity = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// validProviderCountry matches a two-letter ISO 3166-1 alpha-2 country code.
+// Format-only check (not validated against the full code list) — the value is a
+// display hint, so enforcing two ASCII letters is enough to keep it well-formed.
+var validProviderCountry = regexp.MustCompile(`^[A-Z]{2}$`)
+
 // validCanonicalID matches a bare lowercase canonical model identifier
 // (e.g. "glm-5.1", "deepseek-v3", "whisper-large-v3"). Disallows slashes
 // so namespaced names like "zai-org/GLM-5-FP8" cannot be set as canonical
@@ -211,6 +216,16 @@ type Service struct {
 	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
 	// Only used when ProviderType is "centralized".
 	ProviderIdentity string `yaml:"providerIdentity"`
+	// ProviderName is an optional human-readable display name for the provider
+	// (e.g., "OpenAI", "Aliyun (CN)"). Surfaced as provider_name in /v1/models for
+	// presentation only. Unlike ProviderIdentity (a lowercase machine key), this is
+	// freeform and may carry brand casing. Applies to any provider type.
+	ProviderName string `yaml:"providerName"`
+	// ProviderCountry is an optional ISO 3166-1 alpha-2 country code (e.g., "US",
+	// "CN") identifying the provider's jurisdiction, surfaced as provider_country
+	// in /v1/models. Normalized to uppercase. Display/discovery hint only — it is
+	// self-asserted by the broker and not verifiable. Applies to any provider type.
+	ProviderCountry string `yaml:"providerCountry"`
 
 	// PriceDenomination selects how input/output prices are expressed:
 	//   "NATIVE" (default): InputPrice/OutputPrice are wei amounts, written to chain as-is.
@@ -928,6 +943,15 @@ func loadConfig(cfg *Config) error {
 		// resp.TLS which is only populated for HTTPS connections.
 		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
+		}
+	}
+
+	// Provider display metadata (applies to any provider type). Both are optional.
+	cfg.Service.ProviderName = strings.TrimSpace(cfg.Service.ProviderName)
+	if cfg.Service.ProviderCountry != "" {
+		cfg.Service.ProviderCountry = strings.ToUpper(strings.TrimSpace(cfg.Service.ProviderCountry))
+		if !validProviderCountry.MatchString(cfg.Service.ProviderCountry) {
+			return fmt.Errorf("invalid config: service.providerCountry must be a two-letter ISO 3166-1 alpha-2 code (e.g., 'US', 'CN'), got '%s'", cfg.Service.ProviderCountry)
 		}
 	}
 

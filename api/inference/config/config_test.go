@@ -711,6 +711,70 @@ service:
 	}
 }
 
+func TestLoadConfig_ProviderNameAndCountry(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://api.openai.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  providerName: "Aliyun (CN)"
+  providerCountry: "cn"
+  additionalSecret:
+    Authorization: "Bearer sk-test"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+
+	// providerName is freeform and preserved as-is (brand casing kept).
+	if cfg.Service.ProviderName != "Aliyun (CN)" {
+		t.Errorf("expected providerName 'Aliyun (CN)', got %q", cfg.Service.ProviderName)
+	}
+	// providerCountry is normalized to uppercase.
+	if cfg.Service.ProviderCountry != "CN" {
+		t.Errorf("expected providerCountry 'CN' (uppercased), got %q", cfg.Service.ProviderCountry)
+	}
+	// providerIdentity stays lowercase regardless of the display name.
+	if cfg.Service.ProviderIdentity != "alibaba" {
+		t.Errorf("expected providerIdentity 'alibaba', got %q", cfg.Service.ProviderIdentity)
+	}
+}
+
+func TestLoadConfig_InvalidProviderCountry(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://api.openai.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  providerCountry: "USA"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid providerCountry")
+	}
+	if !strings.Contains(err.Error(), "providerCountry must be a two-letter") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
 func TestLoadConfig_CentralizedMissingIdentity(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
