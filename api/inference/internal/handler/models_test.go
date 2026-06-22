@@ -477,6 +477,8 @@ func TestGetModels_CentralizedProviderInfo(t *testing.T) {
 			OwnedBy:          "0G Foundation",
 			ProviderType:     "centralized",
 			ProviderIdentity: "openai",
+			ProviderName:     "OpenAI",
+			ProviderCountry:  "US",
 			TargetURL:        "https://api.openai.com/v1",
 		},
 	}
@@ -500,9 +502,59 @@ func TestGetModels_CentralizedProviderInfo(t *testing.T) {
 	if m.ProviderIdentity != "openai" {
 		t.Errorf("expected provider_identity=openai, got %q", m.ProviderIdentity)
 	}
+	if m.ProviderName != "OpenAI" {
+		t.Errorf("expected provider_name=OpenAI, got %q", m.ProviderName)
+	}
+	if m.ProviderCountry != "US" {
+		t.Errorf("expected provider_country=US, got %q", m.ProviderCountry)
+	}
 	// serving_domain is the bare FQDN from targetUrl — scheme, port, and path stripped.
 	if m.ServingDomain != "api.openai.com" {
 		t.Errorf("expected serving_domain=api.openai.com, got %q", m.ServingDomain)
+	}
+}
+
+// TestGetModels_ProviderNameCountryDecentralized pins that provider_name and
+// provider_country are provider-type-agnostic display metadata: they surface for
+// a decentralized provider too (unlike serving_domain / provider_identity, which
+// are centralized-only).
+func TestGetModels_ProviderNameCountryDecentralized(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "llama-3.1-8b",
+			Type:        "chatbot",
+			InputPrice:  "100",
+			OutputPrice: "200",
+		},
+		serviceConfig: config.Service{
+			ProviderType:    "decentralized",
+			ProviderName:    "Community GPU",
+			ProviderCountry: "SG",
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	m := resp.Data[0]
+	if m.ProviderName != "Community GPU" {
+		t.Errorf("expected provider_name=Community GPU for decentralized, got %q", m.ProviderName)
+	}
+	if m.ProviderCountry != "SG" {
+		t.Errorf("expected provider_country=SG for decentralized, got %q", m.ProviderCountry)
+	}
+	// Centralized-only fields stay empty.
+	if m.ProviderIdentity != "" {
+		t.Errorf("expected empty provider_identity for decentralized, got %q", m.ProviderIdentity)
 	}
 }
 
@@ -560,6 +612,13 @@ func TestGetModels_DecentralizedOmitsProviderFields(t *testing.T) {
 	}
 	if _, exists := modelMap["serving_domain"]; exists {
 		t.Error("serving_domain should be omitted from JSON for decentralized providers")
+	}
+	// provider_name / provider_country were not configured here, so they must be omitted too.
+	if _, exists := modelMap["provider_name"]; exists {
+		t.Error("provider_name should be omitted from JSON when unset")
+	}
+	if _, exists := modelMap["provider_country"]; exists {
+		t.Error("provider_country should be omitted from JSON when unset")
 	}
 }
 
