@@ -147,7 +147,7 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 			monitor.RecordTokens("chatbot", metricModel, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64((*usage).CompletionTokens))
-			c.consumeGlobalChatTokens(ctx, *usage)
+			c.consumeGlobalChatTokens(ctx, *usage, *output)
 			return nil
 		}
 
@@ -158,8 +158,10 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 		return c.updateAccountWithUsage(ctx, *usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling)
 	}
 
-	// Skip billing for whitelisted users
+	// Skip billing for whitelisted users (no usage reported → word-count estimate
+	// still counts against the global TPM quota).
 	if isWhitelisted {
+		c.consumeGlobalChatTokens(ctx, nil, *output)
 		return nil
 	}
 

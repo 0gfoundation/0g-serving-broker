@@ -449,8 +449,8 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 			monitor.RecordTokens("chatbot", metricModel, int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(chunk.Usage.CompletionTokens))
-			c.consumeGlobalChatTokens(ctx, chunk.Usage)
 		}
+		c.consumeGlobalChatTokens(ctx, chunk.Usage, *output)
 		return nil
 	}
 
@@ -694,13 +694,20 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 // whitelisted traffic skips per-user billing but still consumes real upstream
 // tokens, so it must count against the global quota. Always pair a token-billed
 // chatbot response with one of these calls — see CtxKeyGlobalTPMLimiter.
-func (c *Ctrl) consumeGlobalChatTokens(ctx context.Context, usage *Usage) {
-	if usage == nil {
+//
+// When usage is nil (provider omitted it), it falls back to a word-count
+// estimate of the output, mirroring updateAccountWithOutput, so the global quota
+// still accounts for whitelisted traffic from providers that don't report usage.
+func (c *Ctrl) consumeGlobalChatTokens(ctx context.Context, usage *Usage, output string) {
+	ginCtx, ok := ctx.(*gin.Context)
+	if !ok {
 		return
 	}
-	if ginCtx, ok := ctx.(*gin.Context); ok {
+	if usage != nil {
 		middleware.ConsumeGlobalTokens(ginCtx, usage.PromptTokens+usage.CompletionTokens)
+		return
 	}
+	middleware.ConsumeGlobalTokens(ginCtx, len(strings.Fields(output)))
 }
 
 func isStreamDone(line []byte) bool {
@@ -822,8 +829,8 @@ func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usa
 			monitor.RecordTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(usage.CompletionTokens))
-			c.consumeGlobalChatTokens(ctx, usage)
 		}
+		c.consumeGlobalChatTokens(ctx, usage, output)
 		return nil
 	}
 	if usage != nil {
