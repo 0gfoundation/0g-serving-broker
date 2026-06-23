@@ -630,6 +630,9 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 				limiter.ConsumeTokens(userStr, totalTokens)
 			}
 		}
+		// Deduct the same tokens from the broker-wide TPM bucket (applies to all
+		// users, including whitelisted ones, so it mirrors the upstream quota).
+		middleware.ConsumeGlobalTokens(ginCtx, totalTokens)
 	}
 
 	return nil
@@ -671,12 +674,14 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		userAddr, _ := ginCtx.Get("userAddress")
 		userStr, userOk := userAddr.(string)
+		estimatedTotal := int(outputCount + request.InputCount)
 		if tpmLimiter, exists := ginCtx.Get("tpmLimiter"); exists && userOk {
 			if limiter, ok := tpmLimiter.(*middleware.PerUserTPMLimiter); ok {
-				estimatedTotal := int(outputCount + request.InputCount)
 				limiter.ConsumeTokens(userStr, estimatedTotal)
 			}
 		}
+		// Mirror the deduction into the broker-wide TPM bucket (fallback path).
+		middleware.ConsumeGlobalTokens(ginCtx, estimatedTotal)
 	}
 
 	return nil

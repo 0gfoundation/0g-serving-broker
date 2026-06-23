@@ -675,6 +675,12 @@ func (c *Ctrl) consumeSpeechToTextLimiter(ctx context.Context, units int) {
 		c.logger.Debugf("consumeSpeechToTextLimiter: ctx is not *gin.Context (units=%d), limiter skipped", units)
 		return
 	}
+	// Deduct from the broker-wide TPM bucket first, before the per-user early
+	// returns below: the global limiter is wired for all users (including
+	// whitelisted ones) and is independent of the per-user "tpmLimiter"/
+	// userAddress keys. No-op when global TPM is disabled.
+	middleware.ConsumeGlobalTokens(ginCtx, units)
+
 	userAddr, _ := ginCtx.Get("userAddress")
 	userStr, userOk := userAddr.(string)
 	if !userOk {

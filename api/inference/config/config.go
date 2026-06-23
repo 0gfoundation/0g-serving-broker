@@ -549,6 +549,10 @@ type Config struct {
 // Per-user limit prevents a single user from monopolizing all slots.
 type ConcurrencyLimitConfig struct {
 	MaxGlobalConcurrent  int `yaml:"maxGlobalConcurrent"`  // Max total concurrent requests to backend (default: 20)
+	MaxGlobalRPM         int `yaml:"maxGlobalRPM"`         // Broker-wide requests/min cap mirroring the upstream account quota (default: 0 = disabled, applies to ALL users incl. whitelisted)
+	MaxGlobalRPMBurst    int `yaml:"maxGlobalRPMBurst"`    // Burst for global RPM (default: 0 → MaxGlobalRPM/6)
+	MaxGlobalTPM         int `yaml:"maxGlobalTPM"`         // Broker-wide tokens/min cap mirroring the upstream account quota (default: 0 = disabled, chatbot/speech-to-text)
+	MaxGlobalTPMBurst    int `yaml:"maxGlobalTPMBurst"`    // Burst for global TPM (default: 0 → MaxGlobalTPM/6, floored to context_length)
 	MaxPerUserConcurrent int `yaml:"maxPerUserConcurrent"` // Max concurrent requests per user (default: 5, whitelisted users are exempt)
 	PerUserRPM           int `yaml:"perUserRPM"`           // Max requests per minute per user (default: 30, 0 = disabled)
 	PerUserBurst         int `yaml:"perUserBurst"`         // Max burst size for per-user rate limit (default: 5)
@@ -1201,6 +1205,10 @@ func GetConfig() *Config {
 			},
 			ConcurrencyLimit: ConcurrencyLimitConfig{
 				MaxGlobalConcurrent:  20,
+				MaxGlobalRPM:         0, // disabled by default
+				MaxGlobalRPMBurst:    0,
+				MaxGlobalTPM:         0, // disabled by default
+				MaxGlobalTPMBurst:    0,
 				MaxPerUserConcurrent: 5,
 				PerUserRPM:           30,
 				PerUserBurst:         5,

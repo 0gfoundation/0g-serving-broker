@@ -146,7 +146,8 @@ const CtxKeyFailureSource = "failureSource"
 
 // Rejection reason label values for RequestRejectedTotal. These are the only
 // strings ever passed to RecordRejection, keeping the metric's cardinality
-// bounded. Group: admission gates (rate/tpm/ipm/concurrency/model_mismatch),
+// bounded. Group: admission gates (rate/tpm/ipm/concurrency/global_rpm/
+// global_tpm/model_mismatch),
 // billing gates (insufficient_balance/not_acknowledged/account_not_exist), and
 // the upstream_error catch-all for validation failures whose specific cause
 // isn't classified. Every constant here has a live emit site — a reason is not
@@ -157,6 +158,8 @@ const (
 	RejectionTPMLimit        = "tpm_limit"
 	RejectionIPMLimit        = "ipm_limit"
 	RejectionConcurrency     = "concurrency"
+	RejectionGlobalRPM       = "global_rpm"
+	RejectionGlobalTPM       = "global_tpm"
 	RejectionModelMismatch   = "model_mismatch"
 	RejectionInsufficientBal = "insufficient_balance"
 	RejectionNotAcknowledged = "not_acknowledged"

@@ -38,6 +38,7 @@ type Proxy struct {
 	serviceGroup              *gin.RouterGroup
 	rateLimiter               *middleware.RateLimiter
 	concurrencyLimiter        *middleware.ConcurrencyLimiter
+	globalLimiter             *middleware.GlobalRateLimiter
 	perUserConcurrencyLimiter *middleware.PerUserConcurrencyLimiter
 	perUserRateLimiter        *middleware.PerUserRateLimiter
 	perUserTPMLimiter         *middleware.PerUserTPMLimiter
@@ -90,6 +91,38 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 		// Configure concurrency limiter to match backend GPU capacity
 		concurrencyLimiter:        middleware.NewConcurrencyLimiter(concurrencyConfig.MaxGlobalConcurrent),
 		perUserConcurrencyLimiter: middleware.NewPerUserConcurrencyLimiter(concurrencyConfig.MaxPerUserConcurrent, concOverrides),
+	}
+
+	// Initialize the broker-wide RPM/TPM limiter if configured. This mirrors a
+	// hard quota the broker's own upstream account is subject to (e.g. a
+	// third-party API key reached over TEE-TLS), so it applies to ALL users
+	// including whitelisted ones. Self-hosted GPU providers leave it off (0) and
+	// rely on the concurrency limiter instead.
+	if concurrencyConfig.MaxGlobalRPM > 0 || concurrencyConfig.MaxGlobalTPM > 0 {
+		rpmBurst := concurrencyConfig.MaxGlobalRPMBurst
+		if rpmBurst <= 0 && concurrencyConfig.MaxGlobalRPM > 0 {
+			rpmBurst = concurrencyConfig.MaxGlobalRPM / 6 // ~10 seconds worth of requests
+			if rpmBurst <= 0 {
+				rpmBurst = 1
+			}
+		}
+		tpmBurst := concurrencyConfig.MaxGlobalTPMBurst
+		if tpmBurst <= 0 && concurrencyConfig.MaxGlobalTPM > 0 {
+			tpmBurst = concurrencyConfig.MaxGlobalTPM / 6 // ~10 seconds worth of tokens
+			if tpmBurst <= 0 {
+				tpmBurst = 1
+			}
+		}
+		// Floor the global TPM burst to context_length so a single max-context
+		// request can't drive the shared bucket deeply negative and lock out
+		// every user, mirroring the per-user TPM burst rule above.
+		if concurrencyConfig.MaxGlobalTPM > 0 && contextLength > tpmBurst {
+			tpmBurst = contextLength
+		}
+		p.globalLimiter = middleware.NewGlobalRateLimiter(
+			concurrencyConfig.MaxGlobalRPM, rpmBurst, concurrencyConfig.MaxGlobalTPM, tpmBurst)
+		logger.Infof("Global rate limit: RPM=%d (burst=%d), TPM=%d (burst=%d)",
+			concurrencyConfig.MaxGlobalRPM, rpmBurst, concurrencyConfig.MaxGlobalTPM, tpmBurst)
 	}
 
 	// Initialize per-user rate limiter if configured
@@ -524,6 +557,29 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	// Check if user is whitelisted (checked early to skip per-user concurrency limit)
 	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
+
+	// Global RPM/TPM caps apply to ALL users — including whitelisted internal
+	// services and the router — because they mirror a hard quota the broker's own
+	// upstream account is subject to: every request counts against it regardless
+	// of who sent it. Checked before the per-user limits since it guards the
+	// shared upstream quota. Exhaustion returns 503 (a capacity signal) so the
+	// router fails over to another provider, consistent with the global
+	// concurrency limiter.
+	if p.globalLimiter.Enabled() {
+		if !middleware.CheckGlobalRPM(p.globalLimiter, ctx) {
+			p.rejections.record(ctx, monitor.RejectionGlobalRPM, userAddress)
+			return
+		}
+		if !middleware.CheckGlobalTPM(p.globalLimiter, ctx, svcType) {
+			p.rejections.record(ctx, monitor.RejectionGlobalTPM, userAddress)
+			return
+		}
+		// Stash for post-response token consumption (token-based services only),
+		// regardless of whitelist status so global TPM accounts for all traffic.
+		if svcType == "chatbot" || svcType == "speech-to-text" {
+			ctx.Set(middleware.CtxKeyGlobalTPMLimiter, p.globalLimiter)
+		}
+	}
 
 	// Apply per-user rate limit and concurrency limit for non-whitelisted users.
 	// Whitelisted users (internal services, monitoring) are exempt to avoid

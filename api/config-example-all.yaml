@@ -40,3 +40,55 @@ zkProver:
   # requestLength defines the number of requests prover broker packs into one
   # chunk as the minimum unit for settlement.
   requestLength: 40
+
+# Concurrency and rate limiting for backend protection. All values shown are the
+# built-in defaults — the whole block is optional; omit it to keep the defaults.
+concurrencyLimit:
+  # ---- Global caps (apply to ALL users, including whitelisted ones) ----
+
+  # Max total in-flight requests to the backend. Size this to your GPU/serving
+  # capacity. Exhaustion returns HTTP 503 (the router treats it as a capacity
+  # signal and fails over to another provider).
+  maxGlobalConcurrent: 20
+
+  # Broker-wide requests-per-minute / tokens-per-minute caps. 0 disables them.
+  # Leave OFF for self-hosted GPU providers (concurrency is the right axis there).
+  # Turn ON when this broker fronts a rate-limited third-party upstream API
+  # (e.g. an Alibaba account reached over TEE-TLS): set these to mirror the
+  # RPM/TPM quota the upstream grants your account so the broker self-throttles
+  # (returns 503 -> router fails over) instead of overrunning the upstream and
+  # getting throttled/banned. TPM applies to chatbot/speech-to-text only.
+  # Bursts default to limit/6 (~10s) when 0; global TPM burst is floored to the
+  # model's context_length.
+  maxGlobalRPM: 0
+  maxGlobalRPMBurst: 0
+  maxGlobalTPM: 0
+  maxGlobalTPMBurst: 0
+
+  # ---- Per-user caps (keyed by wallet address; whitelisted users are exempt) ----
+
+  # Max concurrent requests per user. Exhaustion returns HTTP 429.
+  maxPerUserConcurrent: 5
+
+  # Per-user requests/tokens/images per minute. 0 disables a dimension.
+  # RPM applies to all services; TPM to chatbot/speech-to-text; IPM to
+  # text-to-image/image-editing. Exhaustion returns HTTP 429.
+  perUserRPM: 30
+  perUserBurst: 5
+  perUserTPM: 0
+  perUserTPMBurst: 0
+  perUserIPM: 0
+  perUserIPMBurst: 0
+
+  # Optional per-address overrides for heavy partners. A zero field inherits the
+  # corresponding default above; an override only takes effect for a dimension
+  # that is globally enabled. Overrides never raise maxGlobalConcurrent.
+  # perUserOverrides:
+  #   - userAddress: "0xabc...123"
+  #     maxConcurrent: 10
+  #     rpm: 120
+  #     burst: 20
+  #     tpm: 0
+  #     tpmBurst: 0
+  #     ipm: 0
+  #     ipmBurst: 0
