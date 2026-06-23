@@ -336,6 +336,7 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(transcriptionResp.Usage, c.metricModel(ctx))
+		c.consumeGlobalSpeechToTextUnits(ctx, transcriptionResp.Usage)
 		return nil
 	}
 
@@ -463,6 +464,7 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 	// Skip billing for whitelisted users, but record whitelist traffic metrics
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(usage, c.metricModel(ctx))
+		c.consumeGlobalSpeechToTextUnits(ctx, usage)
 		return nil
 	}
 
@@ -698,6 +700,22 @@ func (c *Ctrl) consumeSpeechToTextLimiter(ctx context.Context, units int) {
 		return
 	}
 	limiter.ConsumeTokens(userStr, units)
+}
+
+// consumeGlobalSpeechToTextUnits debits the broker-wide TPM bucket for a
+// speech-to-text response on the whitelisted path (which skips per-user billing
+// and so never reaches consumeSpeechToTextLimiter, where the non-whitelisted
+// global deduction lives). Units mirror the per-user limiter: audio seconds in
+// duration mode, otherwise input+output tokens.
+func (c *Ctrl) consumeGlobalSpeechToTextUnits(ctx context.Context, u *SpeechToTextUsage) {
+	seconds, in, out := classifyUsageForMetrics(u)
+	units := int(in + out)
+	if seconds > 0 {
+		units = int(seconds)
+	}
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		middleware.ConsumeGlobalTokens(ginCtx, units)
+	}
 }
 
 // classifyUsageForMetrics splits a usage object into the values destined for

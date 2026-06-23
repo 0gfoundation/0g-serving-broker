@@ -147,6 +147,7 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 			monitor.RecordTokens("chatbot", metricModel, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64((*usage).PromptTokens), int64((*usage).CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64((*usage).CompletionTokens))
+			c.consumeGlobalChatTokens(ctx, *usage)
 			return nil
 		}
 

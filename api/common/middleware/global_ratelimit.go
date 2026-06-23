@@ -35,6 +35,11 @@ const CtxKeyGlobalTPMLimiter = "globalTPMLimiter"
 // read-only Tokens()>0 check and the actual token count is deducted after the
 // response via ConsumeTokens. Either dimension is optional; a nil sub-limiter
 // means that dimension is disabled and always admits.
+//
+// A nil *GlobalRateLimiter is a valid "fully disabled" value: every method is
+// nil-receiver-safe by design (the proxy holds a nil field when neither
+// dimension is configured), so the g == nil guards are load-bearing — do not
+// strip them as redundant.
 type GlobalRateLimiter struct {
 	rpm      *rate.Limiter // nil when global RPM disabled
 	tpm      *rate.Limiter // nil when global TPM disabled
@@ -135,8 +140,8 @@ func (g *GlobalRateLimiter) tpmResetSeconds() float64 {
 }
 
 // CheckGlobalRPM enforces the broker-wide RPM cap for every request. On
-// rejection it writes a 503 (see writeGlobalCapacity503) and returns false;
-// returns true when admitted or when global RPM is disabled.
+// rejection it writes a 503 and aborts the context (response already written)
+// and returns false; returns true when admitted or when global RPM is disabled.
 func CheckGlobalRPM(g *GlobalRateLimiter, c *gin.Context) bool {
 	if g == nil || g.rpm == nil {
 		return true
@@ -150,12 +155,22 @@ func CheckGlobalRPM(g *GlobalRateLimiter, c *gin.Context) bool {
 	return true
 }
 
+// IsTokenService reports whether a service type is billed in tokens and is thus
+// subject to the TPM caps (per-user and global). Centralizing the set keeps the
+// admission gate (CheckGlobalTPM / CheckPerUserTPMLimit) and the proxy's
+// post-consume wiring from silently diverging — a divergence would admit a
+// request against the TPM cap without ever stashing the limiter to debit it.
+func IsTokenService(serviceType string) bool {
+	return serviceType == "chatbot" || serviceType == "speech-to-text"
+}
+
 // CheckGlobalTPM enforces the broker-wide TPM cap for token-based services
-// (chatbot, speech-to-text), mirroring the per-user TPM scope. On rejection it
-// writes a 503 and returns false; returns true when admitted, when global TPM is
-// disabled, or for non-token services.
+// (see IsTokenService), mirroring the per-user TPM scope. On rejection it writes
+// a 503 and aborts the context (response already written) and returns false;
+// returns true when admitted, when global TPM is disabled, or for non-token
+// services.
 func CheckGlobalTPM(g *GlobalRateLimiter, c *gin.Context, serviceType string) bool {
-	if g == nil || g.tpm == nil || (serviceType != "chatbot" && serviceType != "speech-to-text") {
+	if g == nil || g.tpm == nil || !IsTokenService(serviceType) {
 		return true
 	}
 	if !g.AllowTokens() {
@@ -170,6 +185,13 @@ func CheckGlobalTPM(g *GlobalRateLimiter, c *gin.Context, serviceType string) bo
 // ConsumeGlobalTokens deducts tokens from the global TPM bucket stashed in ctx,
 // if present. Safe no-op when the limiter is absent (global TPM disabled or a
 // non-token service). Mirrors the per-user post-consume call sites.
+//
+// CONTRACT: every token-billed response — for BOTH whitelisted and
+// non-whitelisted callers — must balance its admission with exactly one
+// ConsumeGlobalTokens call, or the global TPM cap silently stops depleting and
+// the broker overruns the upstream quota it exists to protect. When adding a
+// new token-billed service or response path, debit here right where you call
+// monitor.RecordTokens.
 func ConsumeGlobalTokens(ctx *gin.Context, tokens int) {
 	if tokens <= 0 {
 		return

@@ -183,7 +183,7 @@ func (rl *PerUserTPMLimiter) EffectiveTPM(userID string) int {
 // Returns true if allowed, false if rate limited (response already written).
 // Non-token-based services always return true (TPM doesn't apply).
 func CheckPerUserTPMLimit(limiter *PerUserTPMLimiter, c *gin.Context, userAddress string, serviceType string) bool {
-	if limiter == nil || (serviceType != "chatbot" && serviceType != "speech-to-text") {
+	if limiter == nil || !IsTokenService(serviceType) {
 		return true
 	}
 

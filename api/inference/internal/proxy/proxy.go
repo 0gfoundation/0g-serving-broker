@@ -576,7 +576,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		}
 		// Stash for post-response token consumption (token-based services only),
 		// regardless of whitelist status so global TPM accounts for all traffic.
-		if svcType == "chatbot" || svcType == "speech-to-text" {
+		// Uses the same IsTokenService predicate as CheckGlobalTPM so the
+		// admission gate and the post-consume wiring can never diverge.
+		if middleware.IsTokenService(svcType) {
 			ctx.Set(middleware.CtxKeyGlobalTPMLimiter, p.globalLimiter)
 		}
 	}

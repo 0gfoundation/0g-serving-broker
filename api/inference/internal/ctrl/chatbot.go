@@ -449,6 +449,7 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 			monitor.RecordTokens("chatbot", metricModel, int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(chunk.Usage.PromptTokens), int64(chunk.Usage.CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(chunk.Usage.CompletionTokens))
+			c.consumeGlobalChatTokens(ctx, chunk.Usage)
 		}
 		return nil
 	}
@@ -687,6 +688,21 @@ func (c *Ctrl) updateAccountWithOutput(ctx context.Context, output string, outpu
 	return nil
 }
 
+// consumeGlobalChatTokens debits the broker-wide TPM bucket for a chatbot
+// response. It is the whitelisted-path counterpart to the inline
+// ConsumeGlobalTokens calls in updateAccountWithUsage/updateAccountWithOutput:
+// whitelisted traffic skips per-user billing but still consumes real upstream
+// tokens, so it must count against the global quota. Always pair a token-billed
+// chatbot response with one of these calls — see CtxKeyGlobalTPMLimiter.
+func (c *Ctrl) consumeGlobalChatTokens(ctx context.Context, usage *Usage) {
+	if usage == nil {
+		return
+	}
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		middleware.ConsumeGlobalTokens(ginCtx, usage.PromptTokens+usage.CompletionTokens)
+	}
+}
+
 func isStreamDone(line []byte) bool {
 	return bytes.Equal(line, []byte("data: [DONE]"))
 }
@@ -806,6 +822,7 @@ func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usa
 			monitor.RecordTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(usage.CompletionTokens))
+			c.consumeGlobalChatTokens(ctx, usage)
 		}
 		return nil
 	}
