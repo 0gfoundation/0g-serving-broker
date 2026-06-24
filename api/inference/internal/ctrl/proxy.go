@@ -77,6 +77,18 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			// Set resolvedModel for unified billing
 			ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 		}
+
+		// Reasoning translation: re-express the client's portable reasoning_effort
+		// as the upstream-native thinking control the target model advertises (e.g.
+		// chat_template_kwargs.enable_thinking). No-op unless the model advertises a
+		// native reasoning param. Runs after model handling so the multi-model body
+		// still carries the user's requested model for supportedParameters lookup.
+		// See docs/design/reasoning-translation.md.
+		modifiedBody, err = c.TranslateReasoning(reqBody)
+		if err != nil {
+			return nil, errors.Wrap(err, "translate reasoning")
+		}
+		reqBody = modifiedBody
 	}
 
 	// Multi-model speech-to-text / video-generation: resolve the requested model

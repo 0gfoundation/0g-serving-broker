@@ -1,149 +1,119 @@
 # Reasoning Parameter Translation Design
 
-This document describes how the broker translates a client's **reasoning intent**
-(the OpenAI-portable `reasoning_effort`) into whatever native thinking control the
-upstream model actually understands (`enable_thinking`, Anthropic `thinking`,
-OpenRouter `reasoning`, …), and why that translation is driven by an explicit
-per-model table rather than inferred from the advertised `supported_parameters`
-list.
+This document describes how the broker translates a client's **portable reasoning
+intent** — the OpenAI `reasoning_effort` field — into whatever native "thinking"
+control the target model's upstream actually understands (e.g. Qwen3/vLLM's
+`enable_thinking`). The translation is driven by the model's advertised
+`supportedParameters` plus a small in-code `switch`, not by a per-model
+translation table.
 
 ## The problem it solves
 
-Clients want one portable knob. Upstreams expose mutually incompatible ones:
+Clients want one portable knob. Different upstreams expose different ones for the
+same on/off concept:
 
-| Upstream / ecosystem | Native control | Value space | Wire placement |
-|----------------------|----------------|-------------|----------------|
-| OpenAI               | `reasoning_effort` | enum: `minimal`/`low`/`medium`/`high` | top-level |
-| Qwen3 on vLLM/SGLang | `enable_thinking`  | bool | **`chat_template_kwargs.enable_thinking`** |
-| Anthropic            | `thinking`         | object `{type, budget_tokens}` | top-level |
-| OpenRouter           | `reasoning`        | object `{effort \| max_tokens}` | top-level |
+| Upstream / ecosystem | Native control     | Wire placement                  |
+|----------------------|--------------------|---------------------------------|
+| OpenAI               | `reasoning_effort` | top-level (no translation needed)|
+| Qwen3 on vLLM/SGLang | `enable_thinking`  | `chat_template_kwargs.enable_thinking` (bool) |
 
-A request arriving at the broker carries the portable form; the upstream behind a
-given model may need any of the others. The broker is the only place that knows
-which upstream a model maps to, so the translation belongs here.
+A request reaching the broker carries the portable `reasoning_effort`. The broker
+is the only component that knows which upstream a given model maps to, so the
+translation belongs here.
 
-## Normalized intent
+## How it works
 
-The broker reduces every inbound reasoning signal to a single normalized intent
-before translation:
+The mechanism is two pieces — a startup-known set of native parameter names, and a
+request-time `switch` — exactly mirroring how the rest of the request pipeline
+rewrites bodies (`EnsureStreamOptions`, `EnforceConfiguredModel` in
+`internal/ctrl/proxy.go`).
 
-```
-intent ∈ { On, Off, Unset }
-```
+### 1. Which native parameter (driven by `supportedParameters`)
 
-`reasoning_effort` maps to intent with **threshold semantics**:
-
-```
-none, minimal   → Off      (explicitly disable thinking)
-low, medium, high (any other non-empty effort) → On
-absent / ""     → Unset    (do not emit any native control; upstream default stands)
-```
-
-The decision is deliberately coarse — **any effort level except `none`/`minimal`
-turns thinking on**. We do not attempt a faithful effort→budget gradient by default
-(see [Effort gradient](#effort-gradient-optional) for the optional extension). The
-common case is a binary "think or don't," and a bool is the lowest common
-denominator that every listed upstream can satisfy.
-
-`Unset` is distinct from `Off`: when the client says nothing, the broker emits
-**nothing**, leaving the model's own default in force. Only an explicit
-`none`/`minimal` forces an active disable.
-
-## Why not drive off `supported_parameters`
-
-`supported_parameters` (`config.go` `ModelInfo.SupportedParameters`,
-`api/inference/config/config.go:97`) is **static advertisement**, hand-authored by
-the operator and surfaced only on `/v1/models` (`models.go:258`, `models.go:375`).
-Nothing on the request path reads it. It must NOT become the translation driver,
-for three reasons:
-
-1. **A name is not a rule.** The entry is the string `"enable_thinking"` — it does
-   not encode the wire placement (top-level vs `chat_template_kwargs`), the value
-   type (bool vs enum vs int), or the upstream **default state**. The default state
-   is decisive: if a model defaults thinking *on*, honoring an `Off` intent requires
-   actively sending `enable_thinking: false`. Presence of the name alone cannot tell
-   you whether the disable path must act.
-
-2. **Different ecosystems.** `supported_parameters` is OpenRouter's vocabulary (it
-   lists `reasoning`, `include_reasoning`); `enable_thinking` is a Qwen3/vLLM chat
-   template kwarg. The backends that actually consume `enable_thinking` typically do
-   not publish a `supported_parameters` list at all. Advertising it there is the
-   operator hand-bridging two worlds — i.e. config-driven mapping, not detection.
-
-3. **Redundant once the rule exists.** A complete per-parameter rule (placement +
-   type + value + default) already answers "send what, where, when." A
-   list-membership check on top of it is dead weight.
-
-The advertised list and the translation rule therefore stay **separate concerns**:
-the list says what a client *may send*; the table says how the broker *rewrites it*.
-
-## Translation table (per model)
-
-Each model carries an optional reasoning translation rule. Conceptually:
+`ModelInfo.SupportedParameters` (`config/config.go`) is parsed once at startup. A
+model that needs translation advertises **both** the portable `reasoning_effort`
+and its native control, e.g.:
 
 ```yaml
-reasoningTranslation:
-  param: enable_thinking          # native parameter name
-  placement: chat_template_kwargs # top_level | chat_template_kwargs | nested
-  type: bool                      # bool | enum | int
-  defaultOn: false                # upstream default; drives whether Off must emit
+supportedParameters: [temperature, top_p, reasoning_effort, enable_thinking]
 ```
 
-Resolution per request:
+At request time the broker scans the resolved model's `supportedParameters` for a
+name it recognizes as a native thinking control (`enable_thinking`, …) and picks
+that as the translation **target**. `reasoning_effort` is never a target — it is
+the translation *input*. A model that advertises no native control (a genuine
+OpenAI-surface upstream) gets no translation: `reasoning_effort` passes through
+untouched.
+
+### 2. The `switch` (input → output)
+
+The client's `reasoning_effort` is first normalized to a binary intent:
 
 ```
-intent = normalize(inbound reasoning signals)
-
-switch intent:
-  Unset → emit nothing
-  On    → emit (param := truthy value)   unless defaultOn already true → emit nothing
-  Off   → emit (param := falsy value)    only if defaultOn true; else emit nothing
+none, minimal   → Off
+low, medium, high (any other non-empty value) → On
+absent / ""     → Unset  → emit nothing, upstream default stands
 ```
 
-The `defaultOn` short-circuits keep the outgoing body minimal: we never send a
-parameter whose value already matches the upstream default.
+Then a `switch` on the native parameter name writes the value in the wire location
+that dialect expects:
 
-Models without a `reasoningTranslation` block do not translate — an inbound
-`reasoning_effort` is passed through unchanged (relevant for genuine OpenAI-surface
-upstreams) or dropped per the existing parameter-forwarding policy.
+```go
+switch nativeParam {
+case "enable_thinking":
+    // Qwen3/vLLM: bool nested under chat_template_kwargs
+    bodyMap["chat_template_kwargs"]["enable_thinking"] = on
+// add a case per ecosystem as upstreams are onboarded
+}
+```
+
+The shape of each native control (bool here) lives inline in its `switch` arm — so
+there is no separate `type` / on-value / off-value data to store. A future
+object-shaped control (e.g. an Anthropic-style `{type: "enabled"}`) is simply
+another `case` that builds its own shape; the registry of names to recognize in
+step 1 stays in sync with the `switch` cases by construction (same vocabulary).
+
+### Why not a per-model translation table
+
+An earlier draft proposed a per-model `{param, placement, type, on, off}` config
+block. That is redundant with the `switch`: placement/type/values are properties of
+the *named* parameter, not of the model, so they belong in one shared `switch`,
+not duplicated into every model's config. The model only needs to declare *which*
+native name its upstream speaks — which it already does via `supportedParameters`.
+
+## Precedence: explicit native parameter wins
+
+Because `supportedParameters` advertises both names, a client may send
+`reasoning_effort` **and** the native parameter in one request. Rule:
+
+> If the client already set the native parameter (in its wire location), it is
+> left untouched and `reasoning_effort` is not translated. The broker only derives
+> the native value from `reasoning_effort` when the native parameter is absent.
+
+This keeps the explicit/advanced path authoritative and prevents the broker from
+writing two conflicting controls into one upstream body.
+
+When translation does occur, the broker removes `reasoning_effort` from the
+outgoing body: it has been consumed and re-expressed natively, and a Qwen/vLLM
+upstream that needs `enable_thinking` may reject the unknown OpenAI field.
 
 ## `/v1/models` advertisement
 
-`supported_parameters` advertises **both** the portable `reasoning_effort` and the
-native `enable_thinking` for models that support thinking. Clients may send either.
-This is intentional: the portable knob is the recommended path, while exposing the
-native name lets advanced clients address the upstream directly.
+`supportedParameters` advertises **both** `reasoning_effort` (the recommended
+portable knob) and the native name (e.g. `enable_thinking`) for models that
+support thinking. Clients may send either; the precedence rule above resolves the
+both-sent case.
 
-## Precedence when both are sent
+## No per-model default tracking
 
-Because both names are advertised, a client may send `reasoning_effort` AND the
-native parameter (e.g. `enable_thinking`) in one request. Rule:
-
-> **An explicitly supplied native parameter wins.** The broker computes the
-> normalized intent from `reasoning_effort` only when the native parameter is
-> absent. If the native parameter is present, it is passed through untouched and
-> the effort value is not translated (to avoid emitting a conflicting duplicate).
-
-This keeps the advanced/explicit path authoritative and prevents the broker from
-writing two contradictory controls into one upstream body.
-
-## Effort gradient (optional)
-
-For upstreams whose native control is numeric (`thinking.budget_tokens`,
-`reasoning.max_tokens`), a future extension may map effort levels to budgets:
-
-```
-low → small budget, medium → mid, high → large
-```
-
-This is out of scope for the initial bool-only translation and is noted here so the
-table schema (`type: int`, plus a `budgets` map) can accommodate it without a
-redesign.
+The broker does not record whether a model defaults thinking on or off. When the
+client expresses no intent (`Unset`) the broker emits nothing and the upstream's
+own default stands; only an explicit intent causes the broker to write an explicit
+value. This is why no `defaultOn` flag is needed.
 
 ## Open questions
 
-- Whether `none` vs `minimal` should ever differ (today both → `Off`). Some
-  upstreams distinguish "no reasoning" from "minimal reasoning"; the bool model
-  collapses them.
+- Whether `none` vs `minimal` should ever differ (today both → `Off`).
 - Whether to validate an inbound native parameter against the model's declared
-  `supported_parameters` and reject mismatches, or forward leniently.
+  `supportedParameters` and reject mismatches, or forward leniently (today:
+  lenient — an explicit native parameter is forwarded untouched).
