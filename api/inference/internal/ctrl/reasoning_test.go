@@ -52,7 +52,7 @@ func TestNativeReasoningParam(t *testing.T) {
 		params []string
 		want   string
 	}{
-		{"detects enable_thinking", []string{"temperature", "reasoning_effort", "enable_thinking"}, "enable_thinking"},
+		{"detects chat_template_kwargs", []string{"temperature", "reasoning_effort", "chat_template_kwargs"}, "chat_template_kwargs"},
 		{"reasoning_effort is not a target", []string{"temperature", "reasoning_effort"}, ""},
 		{"no reasoning params", []string{"temperature", "top_p"}, ""},
 	}
@@ -87,7 +87,7 @@ func decodeEnableThinking(t *testing.T, body []byte) (bool, bool) {
 }
 
 func TestTranslateReasoning_EffortOn(t *testing.T) {
-	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"high","messages":[]}`)
 
 	got, err := c.TranslateReasoning(body)
@@ -107,7 +107,7 @@ func TestTranslateReasoning_EffortOn(t *testing.T) {
 }
 
 func TestTranslateReasoning_EffortOff(t *testing.T) {
-	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"none","messages":[]}`)
 
 	got, err := c.TranslateReasoning(body)
@@ -121,7 +121,7 @@ func TestTranslateReasoning_EffortOff(t *testing.T) {
 }
 
 func TestTranslateReasoning_Unset(t *testing.T) {
-	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","messages":[]}`)
 
 	got, err := c.TranslateReasoning(body)
@@ -134,7 +134,7 @@ func TestTranslateReasoning_Unset(t *testing.T) {
 }
 
 func TestTranslateReasoning_ExplicitNativeWins(t *testing.T) {
-	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	// Client sets enable_thinking=false directly AND a high effort; the explicit
 	// native value must survive and reasoning_effort must not override it.
 	body := []byte(`{"model":"qwen3","reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":false},"messages":[]}`)
@@ -176,7 +176,7 @@ func TestTranslateReasoning_NoNativeParamPassthrough(t *testing.T) {
 }
 
 func TestTranslateReasoning_PreservesExistingChatTemplateKwargs(t *testing.T) {
-	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"low","chat_template_kwargs":{"foo":"bar"},"messages":[]}`)
 
 	got, err := c.TranslateReasoning(body)
@@ -197,7 +197,7 @@ func TestTranslateReasoning_PreservesExistingChatTemplateKwargs(t *testing.T) {
 }
 
 func TestTranslateReasoning_NonJSONUnchanged(t *testing.T) {
-	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`not json`)
 	got, err := c.TranslateReasoning(body)
 	if err != nil {

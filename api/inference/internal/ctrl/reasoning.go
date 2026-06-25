@@ -23,14 +23,26 @@ const reasoningEffortKey = "reasoning_effort"
 // upstream-native thinking control the broker can translate to. This set is the
 // counterpart of the switch in applyNativeReasoning: every name here must have a
 // case there, and vice versa.
+//
+// Note the advertised name is the wire parameter the model accepts, which is not
+// always the toggle key itself: a Qwen3/GLM model advertises the container
+// "chat_template_kwargs" and the thinking toggle lives in its nested
+// "enable_thinking" key (see applyNativeReasoning).
 func isNativeReasoningParam(name string) bool {
 	switch name {
-	case "enable_thinking":
+	case nativeParamChatTemplateKwargs:
 		return true
 	default:
 		return false
 	}
 }
+
+// nativeParamChatTemplateKwargs is the container parameter Qwen3/GLM models on
+// vLLM/SGLang advertise; the thinking toggle is its nested enable_thinking bool.
+const (
+	nativeParamChatTemplateKwargs = "chat_template_kwargs"
+	enableThinkingKey             = "enable_thinking"
+)
 
 // reasoningIntent is the binary thinking on/off decision derived from the
 // client's reasoning_effort. Unset means the client expressed no preference, so
@@ -91,12 +103,12 @@ func (c *Ctrl) nativeReasoningParam(model string) string {
 // (explicit native parameter wins over a derived reasoning_effort).
 func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string) bool {
 	switch nativeParam {
-	case "enable_thinking":
-		kw, ok := bodyMap["chat_template_kwargs"].(map[string]interface{})
+	case nativeParamChatTemplateKwargs:
+		kw, ok := bodyMap[nativeParamChatTemplateKwargs].(map[string]interface{})
 		if !ok {
 			return false
 		}
-		_, present := kw["enable_thinking"]
+		_, present := kw[enableThinkingKey]
 		return present
 	default:
 		_, present := bodyMap[nativeParam]
@@ -105,20 +117,25 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 }
 
 // applyNativeReasoning writes the native thinking control for `on` into bodyMap,
-// in the wire location the upstream dialect expects. Each case owns its own value
-// shape (bool here) — there is no shared value/type data. A name handled here
-// must also be recognized by isNativeReasoningParam.
-func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool) {
+// in the wire location the upstream dialect expects, and reports whether it wrote
+// anything. Each case owns its own value shape (bool here) — there is no shared
+// value/type data. A name handled here must also be recognized by
+// isNativeReasoningParam; the bool return guards TranslateReasoning against
+// dropping reasoning_effort when a recognized-but-unhandled name writes nothing.
+func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool) bool {
 	switch nativeParam {
-	case "enable_thinking":
-		// Qwen3 on vLLM/SGLang: bool nested under chat_template_kwargs.
-		kw, ok := bodyMap["chat_template_kwargs"].(map[string]interface{})
+	case nativeParamChatTemplateKwargs:
+		// Qwen3/GLM on vLLM/SGLang: bool nested under chat_template_kwargs.
+		// Preserve any other kwargs the client already set.
+		kw, ok := bodyMap[nativeParamChatTemplateKwargs].(map[string]interface{})
 		if !ok {
 			kw = map[string]interface{}{}
-			bodyMap["chat_template_kwargs"] = kw
+			bodyMap[nativeParamChatTemplateKwargs] = kw
 		}
-		kw["enable_thinking"] = on
+		kw[enableThinkingKey] = on
+		return true
 	}
+	return false
 }
 
 // TranslateReasoning rewrites a chatbot request body so the client's portable
@@ -164,7 +181,12 @@ func (c *Ctrl) TranslateReasoning(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	applyNativeReasoning(bodyMap, nativeParam, intent == reasoningOn)
+	if !applyNativeReasoning(bodyMap, nativeParam, intent == reasoningOn) {
+		// Recognized but unhandled (should not happen while detection and the
+		// apply switch stay in sync): write nothing and leave the body untouched
+		// rather than stripping reasoning_effort without a replacement.
+		return body, nil
+	}
 	// reasoning_effort has been re-expressed natively; drop it so a vLLM-style
 	// upstream that only understands the native control doesn't reject it.
 	delete(bodyMap, reasoningEffortKey)
