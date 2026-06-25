@@ -196,6 +196,67 @@ func TestTranslateReasoning_PreservesExistingChatTemplateKwargs(t *testing.T) {
 	}
 }
 
+func TestNativeReasoningParam_PreserveThinkingNotAToggle(t *testing.T) {
+	// preserve_thinking is a multi-turn context flag, not an on/off toggle, so it
+	// must not be picked as a translation target.
+	c := newTestCtrlForReasoning(t, "temperature", "preserve_thinking")
+	if got := c.nativeReasoningParam("qwen3"); got != "" {
+		t.Errorf("nativeReasoningParam() = %q, want \"\" (preserve_thinking is not a toggle)", got)
+	}
+}
+
+func TestTranslateReasoning_TopLevelEnableThinking(t *testing.T) {
+	// DashScope dialect: top-level enable_thinking bool (not nested).
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
+	body := []byte(`{"model":"qwen3","reasoning_effort":"high","messages":[]}`)
+
+	got, err := c.TranslateReasoning(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if out["enable_thinking"] != true {
+		t.Errorf("top-level enable_thinking = %v, want true", out["enable_thinking"])
+	}
+	if _, ok := out["chat_template_kwargs"]; ok {
+		t.Errorf("top-level dialect must not create chat_template_kwargs")
+	}
+}
+
+func TestTranslateReasoning_MiniMaxThinkingObject(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "thinking", "reasoning_split")
+	tests := []struct {
+		effort   string
+		wantType string
+	}{
+		{"high", "enabled"},
+		{"none", "disabled"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.effort, func(t *testing.T) {
+			body := []byte(`{"model":"MiniMax-M3","reasoning_effort":"` + tt.effort + `","messages":[]}`)
+			got, err := c.TranslateReasoning(body)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			th, ok := out["thinking"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("thinking = %v, want object", out["thinking"])
+			}
+			if th["type"] != tt.wantType {
+				t.Errorf("thinking.type = %v, want %q", th["type"], tt.wantType)
+			}
+		})
+	}
+}
+
 func TestTranslateReasoning_NonJSONUnchanged(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`not json`)

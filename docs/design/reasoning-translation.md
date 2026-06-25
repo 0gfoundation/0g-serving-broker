@@ -10,12 +10,26 @@ translation table.
 ## The problem it solves
 
 Clients want one portable knob. Different upstreams expose different ones for the
-same on/off concept:
+same on/off concept. The dialects actually seen in the model catalog:
 
-| Upstream / ecosystem | Native control     | Wire placement                  |
-|----------------------|--------------------|---------------------------------|
-| OpenAI               | `reasoning_effort` | top-level (no translation needed)|
-| Qwen3 on vLLM/SGLang | `enable_thinking`  | `chat_template_kwargs.enable_thinking` (bool) |
+| Upstream / ecosystem   | Advertised param       | Wire form the broker writes                       |
+|------------------------|------------------------|---------------------------------------------------|
+| OpenAI                 | `reasoning_effort`     | top-level (no translation needed)                 |
+| Qwen3 / GLM on vLLM    | `chat_template_kwargs` | `chat_template_kwargs.enable_thinking` = `bool`   |
+| DeepSeek / Qwen on DashScope | `enable_thinking`| top-level `enable_thinking` = `bool`              |
+| MiniMax                | `thinking`             | `thinking` = `{"type": "enabled"｜"disabled"}`    |
+
+Note the **advertised name is not always the toggle key**: a vLLM model advertises
+the container `chat_template_kwargs` and the toggle lives in its nested
+`enable_thinking`. DashScope uses a *top-level* `enable_thinking` (an `extra_body`
+key) — a different wire location from vLLM's nested one.
+
+**`preserve_thinking` is intentionally NOT a translation target.** DeepSeek/Qwen on
+DashScope advertise it, but it is a *multi-turn* flag that keeps prior turns'
+reasoning in context — not an on/off switch. The DashScope on/off toggle is the
+top-level `enable_thinking` above. Likewise MiniMax's `reasoning_split` only
+controls how reasoning is returned (separate field vs inline `<think>` tags), so
+it is not a target either.
 
 A request reaching the broker carries the portable `reasoning_effort`. The broker
 is the only component that knows which upstream a given model maps to, so the
@@ -60,18 +74,22 @@ that dialect expects:
 
 ```go
 switch nativeParam {
-case "enable_thinking":
-    // Qwen3/vLLM: bool nested under chat_template_kwargs
+case "chat_template_kwargs": // Qwen3/GLM on vLLM: nested bool
     bodyMap["chat_template_kwargs"]["enable_thinking"] = on
-// add a case per ecosystem as upstreams are onboarded
+case "enable_thinking":      // DashScope: top-level bool
+    bodyMap["enable_thinking"] = on
+case "thinking":             // MiniMax: object
+    bodyMap["thinking"] = map[string]any{"type": onOff(on)} // "enabled"｜"disabled"
 }
 ```
 
-The shape of each native control (bool here) lives inline in its `switch` arm — so
-there is no separate `type` / on-value / off-value data to store. A future
-object-shaped control (e.g. an Anthropic-style `{type: "enabled"}`) is simply
-another `case` that builds its own shape; the registry of names to recognize in
-step 1 stays in sync with the `switch` cases by construction (same vocabulary).
+The shape of each native control (bool, or MiniMax's object) lives inline in its
+`switch` arm — so there is no separate `type` / on-value / off-value data to store.
+A new object-shaped control is simply another `case` that builds its own shape; the
+set of names recognized in step 1 stays in sync with the `switch` cases by
+construction (same vocabulary). The apply step returns whether it wrote anything,
+so a recognized-but-unhandled name never causes `reasoning_effort` to be stripped
+without a replacement.
 
 ### Why not a per-model translation table
 

@@ -25,23 +25,37 @@ const reasoningEffortKey = "reasoning_effort"
 // case there, and vice versa.
 //
 // Note the advertised name is the wire parameter the model accepts, which is not
-// always the toggle key itself: a Qwen3/GLM model advertises the container
-// "chat_template_kwargs" and the thinking toggle lives in its nested
+// always the toggle key itself: a Qwen3/GLM model on vLLM advertises the
+// container "chat_template_kwargs" and the thinking toggle lives in its nested
 // "enable_thinking" key (see applyNativeReasoning).
+//
+// "preserve_thinking" (advertised by DeepSeek/Qwen on DashScope) is deliberately
+// NOT recognized: it is not an on/off toggle but a multi-turn flag that keeps
+// prior turns' reasoning in context. The DashScope thinking toggle is a top-level
+// "enable_thinking" instead.
 func isNativeReasoningParam(name string) bool {
 	switch name {
-	case nativeParamChatTemplateKwargs:
+	case nativeParamChatTemplateKwargs, nativeParamEnableThinking, nativeParamThinking:
 		return true
 	default:
 		return false
 	}
 }
 
-// nativeParamChatTemplateKwargs is the container parameter Qwen3/GLM models on
-// vLLM/SGLang advertise; the thinking toggle is its nested enable_thinking bool.
+// Native thinking-control parameter names the broker can translate reasoning_effort into.
 const (
+	// nativeParamChatTemplateKwargs is the container Qwen3/GLM models on
+	// vLLM/SGLang advertise; the thinking toggle is its nested enable_thinking bool.
 	nativeParamChatTemplateKwargs = "chat_template_kwargs"
-	enableThinkingKey             = "enable_thinking"
+	// nativeParamEnableThinking is the top-level bool DashScope (Aliyun) accepts
+	// as an extra_body key — distinct from the vLLM nested form above.
+	nativeParamEnableThinking = "enable_thinking"
+	// nativeParamThinking is MiniMax's object control: {"type": "enabled"|"disabled"}.
+	nativeParamThinking = "thinking"
+
+	// enableThinkingKey is the toggle key (nested under chat_template_kwargs, or
+	// used top-level for DashScope).
+	enableThinkingKey = "enable_thinking"
 )
 
 // reasoningIntent is the binary thinking on/off decision derived from the
@@ -111,6 +125,7 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 		_, present := kw[enableThinkingKey]
 		return present
 	default:
+		// Top-level params (enable_thinking, thinking): present iff the key exists.
 		_, present := bodyMap[nativeParam]
 		return present
 	}
@@ -118,8 +133,8 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 
 // applyNativeReasoning writes the native thinking control for `on` into bodyMap,
 // in the wire location the upstream dialect expects, and reports whether it wrote
-// anything. Each case owns its own value shape (bool here) — there is no shared
-// value/type data. A name handled here must also be recognized by
+// anything. Each case owns its own value shape (bool, or MiniMax's object) — there
+// is no shared value/type data. A name handled here must also be recognized by
 // isNativeReasoningParam; the bool return guards TranslateReasoning against
 // dropping reasoning_effort when a recognized-but-unhandled name writes nothing.
 func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on bool) bool {
@@ -133,6 +148,18 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 			bodyMap[nativeParamChatTemplateKwargs] = kw
 		}
 		kw[enableThinkingKey] = on
+		return true
+	case nativeParamEnableThinking:
+		// DashScope (Aliyun): top-level bool.
+		bodyMap[nativeParamEnableThinking] = on
+		return true
+	case nativeParamThinking:
+		// MiniMax: object {"type": "enabled"|"disabled"}.
+		thinkingType := "disabled"
+		if on {
+			thinkingType = "enabled"
+		}
+		bodyMap[nativeParamThinking] = map[string]interface{}{"type": thinkingType}
 		return true
 	}
 	return false
