@@ -160,12 +160,16 @@ func (m *ModelInfo) Validate(serviceType string) error {
 func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
-		mp := s.GetModelPricing(model)
-		if mp == nil {
+		// Resolve through the same path as the request allowlist (exact id, then
+		// alias, then wildcard) so a request using a legacy alias is subject to the
+		// SAME expiration gate as the canonical id — GetModelPricing alone would
+		// miss aliases and let an alias bypass a model's 410-expiry.
+		entry, _, ok := s.ResolveRequestedModel(model)
+		if !ok || entry == nil {
 			return time.Time{}, false
 		}
-		if mp.ModelInfo != nil {
-			mi = mp.ModelInfo
+		if entry.ModelInfo != nil {
+			mi = entry.ModelInfo
 		}
 	}
 	if mi != nil && !mi.expiresAt.IsZero() {
@@ -262,6 +266,10 @@ type Service struct {
 
 	// modelPricingMap is a derived lookup map built during config validation.
 	modelPricingMap map[string]*ModelPricingEntry `yaml:"-"`
+	// modelAliasMap is a derived lookup from per-entry ModelAliases to the owning
+	// entry, built alongside modelPricingMap. Lets the multi-model request path
+	// accept a legacy model id and resolve it to its canonical pricing entry.
+	modelAliasMap map[string]*ModelPricingEntry `yaml:"-"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.

@@ -58,6 +58,27 @@ type ModelPricingEntry struct {
 	// validation as TieredPricingConfig.Tiers.
 	Tiers []PricingTier `yaml:"tiers"`
 
+	// UpstreamModel, when set, is the model id sent to the upstream targetUrl for
+	// this entry; Model stays the id advertised on-chain and accepted on incoming
+	// requests. It is the per-model counterpart of service.UpstreamModel (which is
+	// rejected alongside modelPricing): a multi-model centralized provider can
+	// expose a stable public id (e.g. "zai-org/GLM-5-FP8") while forwarding to an
+	// upstream that uses a different id (e.g. OpenRouter's "z-ai/glm-5"). Empty
+	// means "forward Model as-is". Only supported for chatbot services (the JSON
+	// request path is the only one that rewrites the body before forwarding).
+	UpstreamModel string `yaml:"upstreamModel"`
+
+	// ModelAliases are additional legacy model ids accepted on incoming requests
+	// and resolved to this entry (billed at this entry's price, forwarded as
+	// UpstreamModel/Model). The per-model counterpart of service.ModelAliases: it
+	// lets an operator rename the advertised Model without breaking clients still
+	// sending the old id. Aliases must be globally unique across all entries' Model
+	// ids and aliases, and must not be the "*" wildcard. Only supported for chatbot
+	// services. NOTE: aliases are accepted but NOT advertised in GET /v1/models
+	// (only Model/CanonicalID are) — they exist for backward-compatible renames,
+	// not as separately discoverable model names.
+	ModelAliases []string `yaml:"modelAliases"`
+
 	// CanonicalID is the bare-lowercase canonical model id this model maps to in
 	// the router catalog (same contract as Service.CanonicalID, but per-model so
 	// a multi-model provider can map each served model to its own canonical).
@@ -355,8 +376,71 @@ func (s *Service) BuildModelPricingMap() error {
 		}
 		m[entry.Model] = entry
 	}
+	// Build the alias index after every model id is known, so an alias can be
+	// checked against the full model-id set. An alias colliding with a model id
+	// or another alias is rejected: resolution would otherwise depend on lookup
+	// order and could bill/forward the wrong model.
+	aliases := make(map[string]*ModelPricingEntry)
+	for i := range s.ModelPricing {
+		entry := &s.ModelPricing[i]
+		for _, alias := range entry.ModelAliases {
+			if alias == ModelWildcard {
+				return fmt.Errorf("modelPricing alias %q is the reserved wildcard sentinel", alias)
+			}
+			if _, ok := m[alias]; ok {
+				return fmt.Errorf("modelPricing alias %q collides with a model id", alias)
+			}
+			if _, ok := aliases[alias]; ok {
+				return fmt.Errorf("duplicate modelPricing alias %q", alias)
+			}
+			aliases[alias] = entry
+		}
+	}
 	s.modelPricingMap = m
+	s.modelAliasMap = aliases
 	return nil
+}
+
+// ResolveRequestedModel maps a client-supplied model id to its pricing entry.
+// Resolution order: exact Model id, then a configured alias, then the wildcard
+// ("*") catch-all. It returns the matched entry, the canonical model id to
+// record for billing and metrics (entry.Model for an exact/alias match; the
+// requested id for a wildcard match so wildcard attribution is preserved), and
+// whether the model is allowed.
+//
+// When multi-model pricing is not configured the service serves a single model;
+// the request id is allowed as-is and returned unchanged (entry nil).
+func (s *Service) ResolveRequestedModel(requested string) (entry *ModelPricingEntry, resolved string, ok bool) {
+	if !s.HasMultiModelPricing() {
+		return nil, requested, true
+	}
+	// "*" is a pricing sentinel, never a selectable model — a literal request for
+	// it would hit the wildcard entry and be forwarded verbatim upstream.
+	if requested == ModelWildcard {
+		return nil, requested, false
+	}
+	if e, hit := s.modelPricingMap[requested]; hit {
+		return e, e.Model, true
+	}
+	if e, hit := s.modelAliasMap[requested]; hit {
+		return e, e.Model, true
+	}
+	if e, hit := s.modelPricingMap[ModelWildcard]; hit {
+		return e, requested, true
+	}
+	return nil, requested, false
+}
+
+// UpstreamModelFor returns the model id to forward upstream for an already
+// resolved entry: the entry's UpstreamModel when set, otherwise its Model. The
+// wildcard catch-all has no concrete id, so callers must forward the requested
+// id verbatim for it (entry.Model == "*"); this returns "*" for that case and
+// the caller is expected to skip the rewrite.
+func (e *ModelPricingEntry) UpstreamModelFor() string {
+	if e.UpstreamModel != "" {
+		return e.UpstreamModel
+	}
+	return e.Model
 }
 
 // HasWildcardModel reports whether a catch-all ("*") pricing entry is configured.
@@ -567,14 +651,15 @@ func validateModelPricing(cfg *Config) error {
 	if svc.ModelType == "" {
 		return fmt.Errorf("invalid config: service.model is required when service.modelPricing is configured")
 	}
-	// The multi-model request path forwards the requested model verbatim and never
-	// consults the single-model rewrite knobs, so a config that sets either
-	// alongside modelPricing would have it silently ignored — reject at load time.
+	// The multi-model request path resolves and rewrites per ENTRY, never via the
+	// single-model service-level knobs, so a config that sets either alongside
+	// modelPricing would have it silently ignored — reject at load time and point
+	// the operator at the per-entry fields instead.
 	if len(svc.ModelAliases) > 0 {
-		return fmt.Errorf("invalid config: service.modelAliases is not supported with service.modelPricing (the multi-model path forwards the requested model verbatim; per-model aliasing is the router's canonical-mapping job)")
+		return fmt.Errorf("invalid config: service.modelAliases is not supported with service.modelPricing (set modelAliases on the individual service.modelPricing entry instead)")
 	}
 	if svc.UpstreamModel != "" {
-		return fmt.Errorf("invalid config: service.upstreamModel is not supported with service.modelPricing (the multi-model path forwards the requested model verbatim; per-model upstream rewrite is not implemented)")
+		return fmt.Errorf("invalid config: service.upstreamModel is not supported with service.modelPricing (set upstreamModel on the individual service.modelPricing entry instead)")
 	}
 
 	isUSD := svc.IsUSDDenominated()
@@ -603,6 +688,32 @@ func validateModelPricing(cfg *Config) error {
 	// MaxModelPrices* helpers rely on.
 	if err := svc.BuildModelPricingMap(); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
+	}
+	// A per-entry upstreamModel must not be ambiguous with the public allowlist.
+	// If it equals ANOTHER entry's public Model id (or a configured alias), a
+	// request for that entry would be forwarded under a different entry's public
+	// name — confusing mis-routing the operator never intended. (Equaling its OWN
+	// Model id is a harmless no-op.) Two entries deliberately sharing one
+	// upstreamModel is allowed but warned: it collapses two priced public ids onto
+	// a single upstream model, so the client picks the price purely by public id.
+	upstreamOwners := make(map[string]string, len(svc.ModelPricing))
+	for i := range svc.ModelPricing {
+		entry := &svc.ModelPricing[i]
+		up := entry.UpstreamModel
+		if up == "" {
+			continue
+		}
+		if other, ok := svc.modelPricingMap[up]; ok && other != entry {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel %q collides with the public model id of another entry; a request would be forwarded under the wrong public id", i, up)
+		}
+		if _, ok := svc.modelAliasMap[up]; ok {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel %q collides with a configured model alias", i, up)
+		}
+		if prev, dup := upstreamOwners[up]; dup {
+			log.Printf("[CONFIG] service.modelPricing entries %q and %q share upstreamModel %q: two priced public ids map to one upstream model — ensure this is intentional (clients select the price by public id).", prev, entry.Model, up)
+		} else {
+			upstreamOwners[up] = entry.Model
+		}
 	}
 	// service.model is forwarded upstream verbatim for model-less requests, so it
 	// must be a concrete id — never the "*" pricing sentinel.
@@ -650,6 +761,46 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 		}
 	}
 
+	// Per-entry upstream rewrite / aliasing is wired only on the chatbot JSON
+	// request path (ValidateModelAllowlist rewrites the body before forwarding).
+	// On other modalities the body is not rewritten, so an upstreamModel/alias
+	// would silently forward the wrong id — reject at load rather than mis-route.
+	if serviceType != constant.ServiceTypeChatbot {
+		if entry.UpstreamModel != "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel is only supported for service type '%s' (the body rewrite runs only on the JSON chatbot path), got '%s' for model '%s'", i, constant.ServiceTypeChatbot, serviceType, entry.Model)
+		}
+		if len(entry.ModelAliases) > 0 {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].modelAliases is only supported for service type '%s', got '%s' for model '%s'", i, constant.ServiceTypeChatbot, serviceType, entry.Model)
+		}
+	}
+	// The wildcard catch-all has no concrete id to rewrite to — ValidateModelAllowlist
+	// forwards a wildcard-served model verbatim — so an upstreamModel on the "*"
+	// entry would be silently dropped at runtime. Reject it rather than mislead.
+	if entry.Model == ModelWildcard && entry.UpstreamModel != "" {
+		return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel is not supported on the wildcard ('%s') entry (the catch-all forwards the requested id verbatim)", i, ModelWildcard)
+	}
+	if entry.UpstreamModel != "" {
+		// The forwarded id must be a concrete, unpadded model id: "*" would forward
+		// the literal sentinel upstream, and surrounding whitespace would forward an
+		// id no upstream recognizes.
+		if entry.UpstreamModel == ModelWildcard {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel must be a concrete model id, not the '%s' wildcard sentinel (model '%s')", i, ModelWildcard, entry.Model)
+		}
+		if strings.TrimSpace(entry.UpstreamModel) != entry.UpstreamModel {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].upstreamModel %q must not have leading/trailing whitespace (model '%s')", i, entry.UpstreamModel, entry.Model)
+		}
+	}
+	for _, alias := range entry.ModelAliases {
+		if strings.TrimSpace(alias) == "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].modelAliases must not contain an empty id (model '%s')", i, entry.Model)
+		}
+		// Aliases are indexed and matched verbatim, so a padded alias (" glm-5 ")
+		// would pass this check yet never match a client's "glm-5" — reject the
+		// silent-no-match trap at load.
+		if strings.TrimSpace(alias) != alias {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].modelAliases entry %q must not have leading/trailing whitespace (model '%s')", i, alias, entry.Model)
+		}
+	}
 	if entry.CanonicalID != "" && !validCanonicalID.MatchString(entry.CanonicalID) {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].canonicalId %q must be bare lowercase (letters, digits, '-', '.') for model '%s'", i, entry.CanonicalID, entry.Model)
 	}
