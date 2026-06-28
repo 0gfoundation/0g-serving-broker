@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
@@ -270,6 +271,35 @@ type Service struct {
 	// entry, built alongside modelPricingMap. Lets the multi-model request path
 	// accept a legacy model id and resolve it to its canonical pricing entry.
 	modelAliasMap map[string]*ModelPricingEntry `yaml:"-"`
+
+	// InjectBodyFields, when set, are top-level key/value pairs merged into the
+	// JSON request body forwarded to a chatbot targetUrl. It lets an operator set
+	// upstream defaults/overrides per provider without code changes. The canonical
+	// use is OpenRouter provider routing — pin a backend while allowing fallbacks
+	// on failure — but it is generic: e.g. force reasoning off on a route, or set
+	// any other upstream-understood field:
+	//
+	//   injectBodyFields:
+	//     provider:                  # OpenRouter provider-routing object
+	//       order: ["DeepInfra"]
+	//       allow_fallbacks: true
+	//       require_parameters: true
+	//     reasoning:
+	//       enabled: false           # e.g. disable thinking on this route
+	//
+	// Server-config-wins: each injected key overwrites any client-supplied value
+	// of the same name, so users cannot steer it. Key names are NOT validated
+	// against an allowlist (the upstream is the authority on accepted keys), but:
+	//   - a denylist of broker-critical fields (model, messages, stream,
+	//     stream_options, lora_adapter_name) is REJECTED at load — overriding them
+	//     would break model enforcement / usage-based billing / LoRA rewriting
+	//     (see protectedInjectBodyFields);
+	//   - at config load the map is normalized and checked JSON-serializable so a
+	//     nested-object value (e.g. provider.max_price) cannot pass load yet fail
+	//     every request at marshal time — see normalizeInjectBodyFields.
+	// Empty or unset means the body is forwarded unchanged (backward compatible).
+	// Only applied for the chatbot service type; rejected for others at load.
+	InjectBodyFields map[string]interface{} `yaml:"injectBodyFields"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -724,6 +754,86 @@ func validatePricingTiers(prefix string, tiers []PricingTier) error {
 	return nil
 }
 
+// protectedInjectBodyFields are top-level request-body keys the broker sets or
+// depends on for correctness and must never be overridden by injectBodyFields:
+//   - model: enforced per service for billing integrity (users pay for the
+//     advertised model; see EnforceConfiguredModel/ValidateModelAllowlist).
+//   - messages: the actual request content.
+//   - stream / stream_options: the broker forces stream_options.include_usage so
+//     streaming responses report usage for billing (see EnsureStreamOptions).
+//   - lora_adapter_name: the broker derives this from an ft-* model during LoRA
+//     request rewriting (see RewriteLoRARequest); injecting it would clobber the
+//     resolved adapter.
+// Injecting any of these is rejected at config load (fail loud, not silent).
+var protectedInjectBodyFields = map[string]struct{}{
+	"model":             {},
+	"messages":          {},
+	"stream":            {},
+	"stream_options":    {},
+	"lora_adapter_name": {},
+}
+
+// normalizeInjectBodyFields rejects broker-critical keys, then makes the map safe
+// to json.Marshal into the forwarded request body at runtime and verifies
+// serializability so a broken value shape fails loud at load instead of on every
+// request.
+//
+// yaml.v2 decodes nested mappings as map[interface{}]interface{}, which
+// json.Marshal rejects. So a nested-object value — e.g. OpenRouter's documented
+// provider.max_price: {prompt, completion} — would otherwise pass config load
+// (the field is map[string]interface{} at the top level) yet fail EVERY chatbot
+// request at runtime inside ctrl.InjectBodyFields. We recursively convert nested
+// maps to map[string]interface{} and re-check json.Marshal.
+//
+// This intentionally does NOT validate key names against an allowlist (beyond the
+// protected denylist): upstream-accepted keys are the gateway's vocabulary, not
+// ours, and a closed allowlist both rejects legitimate keys the moment the
+// upstream adds one and gives false confidence. We only guarantee the value is
+// forwardable and does not clobber a field the broker relies on.
+func normalizeInjectBodyFields(fields map[string]interface{}) (map[string]interface{}, error) {
+	normalized := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		if _, protected := protectedInjectBodyFields[k]; protected {
+			return nil, fmt.Errorf("invalid config: service.injectBodyFields must not override broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", k)
+		}
+		normalized[k] = normalizeYAMLValue(v)
+	}
+	if _, err := json.Marshal(normalized); err != nil {
+		return nil, fmt.Errorf("invalid config: service.injectBodyFields is not JSON-serializable (check the value shapes): %w", err)
+	}
+	return normalized, nil
+}
+
+// normalizeYAMLValue recursively rewrites yaml.v2's map[interface{}]interface{}
+// nodes into map[string]interface{} (walking slices too) so the value can be
+// json.Marshal-ed. Map keys are stringified; OpenRouter routing keys are always
+// strings, so a non-string key indicates malformed config and simply becomes its
+// string form (harmless — the upstream ignores unknown keys).
+func normalizeYAMLValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[interface{}]interface{}:
+		m := make(map[string]interface{}, len(val))
+		for k, vv := range val {
+			m[fmt.Sprintf("%v", k)] = normalizeYAMLValue(vv)
+		}
+		return m
+	case map[string]interface{}:
+		m := make(map[string]interface{}, len(val))
+		for k, vv := range val {
+			m[k] = normalizeYAMLValue(vv)
+		}
+		return m
+	case []interface{}:
+		s := make([]interface{}, len(val))
+		for i, vv := range val {
+			s[i] = normalizeYAMLValue(vv)
+		}
+		return s
+	default:
+		return val
+	}
+}
+
 // validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
 // configuration. Only invoked when service.priceDenomination == "USD".
 func validatePriceFeedConfig(pf *PriceFeedConfig) error {
@@ -973,6 +1083,21 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
 		}
+	}
+
+	// Body-field injection is only applied for the chatbot service type (see
+	// ctrl.InjectBodyFields). Reject it elsewhere, reject broker-critical keys,
+	// and normalize, so any misconfiguration surfaces at load instead of silently
+	// doing nothing (or failing every request).
+	if len(cfg.Service.InjectBodyFields) > 0 {
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.injectBodyFields is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		normalized, err := normalizeInjectBodyFields(cfg.Service.InjectBodyFields)
+		if err != nil {
+			return err
+		}
+		cfg.Service.InjectBodyFields = normalized
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.

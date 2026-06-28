@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -288,6 +289,108 @@ service:
 	t.Setenv("CONFIG_FILE", configPath)
 	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "service type") {
 		t.Fatalf("expected unwired-modality rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_InjectBodyFields_RejectsNonChatbot(t *testing.T) {
+	// injectBodyFields is only applied on the chatbot forward path, so a
+	// non-chatbot service type must be rejected at load instead of silently
+	// no-op'ing.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  injectBodyFields:
+    provider:
+      order: ["z-ai"]
+      allow_fallbacks: true
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "injectBodyFields is only supported") {
+		t.Fatalf("expected non-chatbot rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_InjectBodyFields_RejectsProtectedKey(t *testing.T) {
+	// Overriding a broker-critical field (here, model) would break model
+	// enforcement / billing, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  injectBodyFields:
+    model: "some-cheaper-model"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_InjectBodyFields_NormalizesNestedObject(t *testing.T) {
+	// A nested-object value (OpenRouter's provider.max_price) decodes under
+	// yaml.v2 as map[interface{}]interface{}, which json.Marshal rejects.
+	// loadConfig must normalize it to map[string]interface{} so it loads clean
+	// AND the stored map is JSON-serializable — otherwise it would fail every
+	// chatbot request at marshal time.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  injectBodyFields:
+    provider:
+      order: ["z-ai"]
+      allow_fallbacks: true
+      max_price:
+        prompt: "0.6"
+        completion: "1.92"
+    reasoning:
+      enabled: false
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("nested-object injection should load after normalization, got: %v", err)
+	}
+	// The whole map must be JSON-serializable (the runtime injection path marshals it).
+	if _, err := json.Marshal(cfg.Service.InjectBodyFields); err != nil {
+		t.Fatalf("normalized inject map is not JSON-serializable: %v", err)
+	}
+	prov, ok := cfg.Service.InjectBodyFields["provider"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("provider not normalized to map[string]interface{}, got %T", cfg.Service.InjectBodyFields["provider"])
+	}
+	mp, ok := prov["max_price"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("max_price not normalized to map[string]interface{}, got %T", prov["max_price"])
+	}
+	if mp["prompt"] != "0.6" || mp["completion"] != "1.92" {
+		t.Errorf("max_price values not preserved: %#v", mp)
+	}
+	reasoning, ok := cfg.Service.InjectBodyFields["reasoning"].(map[string]interface{})
+	if !ok || reasoning["enabled"] != false {
+		t.Errorf("reasoning not preserved: %#v", cfg.Service.InjectBodyFields["reasoning"])
 	}
 }
 

@@ -168,6 +168,184 @@ func TestEnforceConfiguredModel_InjectsUpstreamWhenMissing(t *testing.T) {
 	}
 }
 
+// newTestCtrlForInjectBodyFields builds a chatbot Ctrl with the given
+// injectBodyFields map.
+func newTestCtrlForInjectBodyFields(t *testing.T, fields map[string]interface{}) *Ctrl {
+	t.Helper()
+	return &Ctrl{
+		Service: config.Service{
+			Type:             "chatbot",
+			ModelType:        "zai-org/GLM-5-FP8",
+			InjectBodyFields: fields,
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
+// When configured, each field is merged into the top-level body object — e.g. a
+// "provider" routing object AND a "reasoning" toggle in one injection.
+func TestInjectBodyFields_InjectsWhenConfigured(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":           []interface{}{"DeepInfra"},
+			"allow_fallbacks": true,
+		},
+		"reasoning": map[string]interface{}{"enabled": false},
+	})
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[{"role":"user","content":"hi"}]}`)
+
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov, ok := out["provider"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("provider field missing or wrong type: %#v", out["provider"])
+	}
+	if prov["allow_fallbacks"] != true {
+		t.Errorf("allow_fallbacks = %v, want true", prov["allow_fallbacks"])
+	}
+	order, ok := prov["order"].([]interface{})
+	if !ok || len(order) != 1 || order[0] != "DeepInfra" {
+		t.Errorf("order = %#v, want [DeepInfra]", prov["order"])
+	}
+	reasoning, ok := out["reasoning"].(map[string]interface{})
+	if !ok || reasoning["enabled"] != false {
+		t.Errorf("reasoning = %#v, want {enabled:false}", out["reasoning"])
+	}
+	// The original model field must be preserved.
+	if out["model"] != "zai-org/GLM-5-FP8" {
+		t.Errorf("model = %q, want it preserved", out["model"])
+	}
+}
+
+// Server-config-wins: a client-supplied value of an injected key is overwritten.
+func TestInjectBodyFields_OverwritesClientValue(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":           []interface{}{"DeepInfra"},
+			"allow_fallbacks": true,
+		},
+	})
+	body := []byte(`{"messages":[],"provider":{"order":["SomeCheapProvider"],"allow_fallbacks":false}}`)
+
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov := out["provider"].(map[string]interface{})
+	if prov["allow_fallbacks"] != true {
+		t.Errorf("client value not overwritten: allow_fallbacks = %v, want true", prov["allow_fallbacks"])
+	}
+	order := prov["order"].([]interface{})
+	if order[0] != "DeepInfra" {
+		t.Errorf("client value not overwritten: order = %#v", prov["order"])
+	}
+}
+
+// Nothing configured → body forwarded byte-for-byte unchanged (backward compat).
+func TestInjectBodyFields_NoopWhenUnset(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, nil)
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[]}`)
+
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mutated when injection unset: got %s", got)
+	}
+}
+
+// Empty body (e.g. GET) is returned unchanged even when injection is configured.
+func TestInjectBodyFields_NoopOnEmptyBody(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"DeepInfra"}}})
+	got, err := c.InjectBodyFields(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty body, got %s", got)
+	}
+}
+
+// Large integer fields in the body survive the decode/re-marshal round-trip
+// (UseNumber), rather than being mangled into float64 scientific notation.
+func TestInjectBodyFields_PreservesLargeInteger(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"z-ai"}}})
+	// 2^53+1 cannot be represented exactly as a float64.
+	body := []byte(`{"model":"glm-5","seed":9007199254740993,"messages":[]}`)
+
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`9007199254740993`)) {
+		t.Errorf("large integer seed not preserved verbatim: got %s", got)
+	}
+}
+
+// A nested-object injected value (e.g. provider.max_price) injects correctly.
+func TestInjectBodyFields_NestedObjectValue(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":     []interface{}{"z-ai"},
+			"max_price": map[string]interface{}{"prompt": "0.6", "completion": "1.92"},
+		},
+	})
+	body := []byte(`{"model":"glm-5","messages":[]}`)
+
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov := out["provider"].(map[string]interface{})
+	mp, ok := prov["max_price"].(map[string]interface{})
+	if !ok || mp["prompt"] != "0.6" || mp["completion"] != "1.92" {
+		t.Errorf("nested max_price not injected: %#v", prov["max_price"])
+	}
+}
+
+// A literal JSON `null` body decodes to a nil map without error; it must NOT
+// panic on the map assignment — forward unchanged instead.
+func TestInjectBodyFields_NoopOnNullBody(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"z-ai"}}})
+	body := []byte(`null`)
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("null body mutated: got %s", got)
+	}
+}
+
+// A non-JSON-object body is forwarded unchanged rather than erroring.
+func TestInjectBodyFields_NoopOnNonJSON(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"DeepInfra"}}})
+	body := []byte(`not json`)
+	got, err := c.InjectBodyFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("non-JSON body mutated: got %s", got)
+	}
+}
+
 func TestDecodeErrorBody(t *testing.T) {
 	const payload = `{"error":{"message":"upstream boom"}}`
 
