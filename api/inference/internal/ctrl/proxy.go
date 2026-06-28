@@ -77,6 +77,22 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			// Set resolvedModel for unified billing
 			ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 		}
+
+		// Merge operator-configured upstream body fields (e.g. OpenRouter's
+		// "provider" routing object, or a reasoning toggle). No-op unless
+		// service.injectBodyFields is configured. Runs after model rewrite so the
+		// body is the final JSON that gets forwarded.
+		modifiedBody, err = c.InjectBodyFields(reqBody)
+		if err != nil {
+			// A marshal failure here is a broker-side fault (the injected fields
+			// are server config, already verified JSON-serializable at load, and
+			// the body was valid JSON). Leave it UNFLAGGED — unlike the
+			// client-caused model-validation branches above — so the unified
+			// failure metric attributes it to source=broker and the broker alert
+			// fires (same convention as the RPC-fault path in request.go).
+			return nil, errors.Wrap(err, "inject body fields")
+		}
+		reqBody = modifiedBody
 	}
 
 	// Multi-model speech-to-text / video-generation: resolve the requested model
@@ -634,6 +650,60 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 	modifiedBody, err := json.Marshal(bodyMap)
 	if err != nil {
 		return body, errors.Wrap(err, "failed to marshal modified JSON body")
+	}
+
+	return modifiedBody, nil
+}
+
+// InjectBodyFields merges c.Service.InjectBodyFields into the request body's
+// top-level object when configured, so the operator can set upstream
+// defaults/overrides per provider (e.g. OpenRouter's "provider" routing object
+// to pin a backend with fallbacks, or a reasoning toggle). It is
+// server-config-wins: each injected key replaces any client-supplied value of
+// the same name, so users cannot steer it. Broker-critical keys (model,
+// messages, stream, stream_options) are rejected at config load, so they can
+// never be injected here.
+//
+// No-op (body returned unchanged) when the fields map is empty/unset or the body
+// is empty. A body that does not parse as a JSON object is forwarded unchanged
+// rather than erroring — chatbot bodies are expected to be JSON objects, and
+// failing closed here would break the request for purely additive fields. That
+// fall-through is logged so a silently-unapplied injection is greppable.
+//
+// The configured fields map is normalized and verified JSON-serializable at
+// config load (see config.normalizeInjectBodyFields), so the marshal here cannot
+// fail in practice; the error branch is defensive.
+//
+// Decoding uses json.Number (UseNumber) so large integer fields (e.g. a seed of
+// 2^53+1, or big integers inside tool-call arguments) survive the round-trip
+// without being mangled into float64 — matching forceB64ResponseFormat.
+func (c *Ctrl) InjectBodyFields(body []byte) ([]byte, error) {
+	if len(c.Service.InjectBodyFields) == 0 || len(body) == 0 {
+		return body, nil
+	}
+
+	var bodyMap map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	// A literal JSON `null` decodes into a nil map WITHOUT error; assigning to it
+	// below would panic ("assignment to entry in nil map"). Treat err and nil map
+	// the same as the non-object fall-through.
+	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
+		// Non-JSON-object body (or null): forward unchanged (cannot inject
+		// fields). The configured injection silently does not apply to this
+		// request, so log it — otherwise "most requests injected but some aren't"
+		// is undebuggable.
+		c.logger.Warnf("injectBodyFields configured but request body is not a JSON object; forwarding without injection: %v", err)
+		return body, nil
+	}
+
+	for k, v := range c.Service.InjectBodyFields {
+		bodyMap[k] = v
+	}
+
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to marshal body with injected fields")
 	}
 
 	return modifiedBody, nil
