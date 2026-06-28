@@ -790,18 +790,75 @@ var protectedInjectBodyFields = map[string]struct{}{
 // ours, and a closed allowlist both rejects legitimate keys the moment the
 // upstream adds one and gives false confidence. We only guarantee the value is
 // forwardable and does not clobber a field the broker relies on.
-func normalizeInjectBodyFields(fields map[string]interface{}) (map[string]interface{}, error) {
+// fieldPath names the config location for error messages (e.g.
+// "service.injectBodyFields" or "service.modelPricing[0].injectBodyFields") so a
+// rejection points the operator at the exact block.
+func normalizeInjectBodyFields(fieldPath string, fields map[string]interface{}) (map[string]interface{}, error) {
 	normalized := make(map[string]interface{}, len(fields))
 	for k, v := range fields {
 		if _, protected := protectedInjectBodyFields[k]; protected {
-			return nil, fmt.Errorf("invalid config: service.injectBodyFields must not override broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", k)
+			return nil, fmt.Errorf("invalid config: %s must not override broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", fieldPath, k)
 		}
 		normalized[k] = normalizeYAMLValue(v)
 	}
 	if _, err := json.Marshal(normalized); err != nil {
-		return nil, fmt.Errorf("invalid config: service.injectBodyFields is not JSON-serializable (check the value shapes): %w", err)
+		return nil, fmt.Errorf("invalid config: %s is not JSON-serializable (check the value shapes): %w", fieldPath, err)
 	}
 	return normalized, nil
+}
+
+// EffectiveInjectBodyFields returns the body fields to inject for a request
+// resolved to the given model: the service-level injectBodyFields with the
+// resolved model's per-entry injectBodyFields deep-merged ON TOP (the entry wins
+// on leaf conflicts). This lets a multi-model service share routing at the
+// service level (e.g. provider.sort) while each model adds its own override
+// (e.g. provider.max_price). Returns nil when neither level is configured.
+//
+// The returned map is freshly allocated at every merged level and never shares a
+// mutable node with the stored config, so callers (and json.Marshal) cannot
+// corrupt the config maps that are reused across concurrent requests. When only
+// one level is set, its (read-only) map is returned directly.
+func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{} {
+	svc := s.InjectBodyFields
+	var entry map[string]interface{}
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil {
+			entry = e.InjectBodyFields
+		}
+	}
+	switch {
+	case len(entry) == 0:
+		return svc
+	case len(svc) == 0:
+		return entry
+	default:
+		return deepMergeInjectFields(svc, entry)
+	}
+}
+
+// deepMergeInjectFields returns a new map equal to base with override applied on
+// top: nested map[string]interface{} values are merged recursively (override's
+// leaf wins), every other value type (scalars, slices) is replaced wholesale by
+// override's. Neither input is mutated. Both inputs are already normalized to
+// string-keyed maps by normalizeInjectBodyFields, so only map[string]interface{}
+// nesting needs handling.
+func deepMergeInjectFields(base, override map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(base)+len(override))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, ov := range override {
+		if bv, ok := out[k]; ok {
+			if bm, isBaseMap := bv.(map[string]interface{}); isBaseMap {
+				if om, isOverrideMap := ov.(map[string]interface{}); isOverrideMap {
+					out[k] = deepMergeInjectFields(bm, om)
+					continue
+				}
+			}
+		}
+		out[k] = ov
+	}
+	return out
 }
 
 // normalizeYAMLValue recursively rewrites yaml.v2's map[interface{}]interface{}
@@ -1093,7 +1150,7 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.Type != constant.ServiceTypeChatbot {
 			return fmt.Errorf("invalid config: service.injectBodyFields is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
 		}
-		normalized, err := normalizeInjectBodyFields(cfg.Service.InjectBodyFields)
+		normalized, err := normalizeInjectBodyFields("service.injectBodyFields", cfg.Service.InjectBodyFields)
 		if err != nil {
 			return err
 		}

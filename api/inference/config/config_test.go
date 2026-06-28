@@ -2214,6 +2214,99 @@ service:
 	}
 }
 
+func TestLoadConfig_ModelPricing_PerEntryInjectBodyFields(t *testing.T) {
+	// Service-level provider routing shared by all models, plus a per-model
+	// provider.max_price cap on each entry (the two-floor scenario where one
+	// shared cap can't serve both). EffectiveInjectBodyFields must deep-merge
+	// the shared routing with each model's own cap.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  injectBodyFields:
+    provider:
+      sort: "price"
+      allow_fallbacks: true
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      injectBodyFields:
+        provider:
+          max_price:
+            prompt: "0.60"
+            completion: "1.92"
+    - model: "deepseek-v4-flash"
+      inputPrice: "10"
+      outputPrice: "30"
+      injectBodyFields:
+        provider:
+          max_price:
+            prompt: "0.138"
+            completion: "0.275"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	svc := &cfg.Service
+
+	glm := svc.EffectiveInjectBodyFields("zai-org/GLM-5-FP8")
+	prov, ok := glm["provider"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("GLM provider missing: %#v", glm)
+	}
+	if prov["sort"] != "price" || prov["allow_fallbacks"] != true {
+		t.Errorf("GLM lost service-level routing: %#v", prov)
+	}
+	if mp, _ := prov["max_price"].(map[string]interface{}); mp == nil || mp["prompt"] != "0.60" || mp["completion"] != "1.92" {
+		t.Errorf("GLM max_price wrong: %#v", prov["max_price"])
+	}
+
+	ds := svc.EffectiveInjectBodyFields("deepseek-v4-flash")
+	dsProv := ds["provider"].(map[string]interface{})
+	if mp, _ := dsProv["max_price"].(map[string]interface{}); mp == nil || mp["prompt"] != "0.138" || mp["completion"] != "0.275" {
+		t.Errorf("deepseek max_price wrong: %#v", dsProv["max_price"])
+	}
+
+	// The service-level map must not be mutated by the merge.
+	svcProv := svc.InjectBodyFields["provider"].(map[string]interface{})
+	if svcProv["max_price"] != nil {
+		t.Errorf("service-level provider mutated by merge: %#v", svcProv)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryInjectBodyFields_RejectsProtectedKey(t *testing.T) {
+	// A per-entry injectBodyFields overriding a broker-critical key (model) must
+	// be rejected at load, same as the service-level field.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      injectBodyFields:
+        model: "some-cheaper-model"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected per-entry protected-key rejection, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ModelPricing_AliasCollidesWithModelID(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

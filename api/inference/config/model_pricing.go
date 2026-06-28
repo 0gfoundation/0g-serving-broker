@@ -119,6 +119,20 @@ type ModelPricingEntry struct {
 	// GET /v1/models. Same validation as the service-level block: divisor >= 1
 	// when enabled.
 	CacheTokenBilling *CacheTokenBillingConfig `yaml:"cacheTokenBilling"`
+
+	// InjectBodyFields is the per-model counterpart of service.injectBodyFields:
+	// top-level key/value pairs merged into the forwarded chat body for requests
+	// resolved to THIS model. It is deep-merged ON TOP of the service-level map
+	// (this entry wins on leaf conflicts; see Service.EffectiveInjectBodyFields),
+	// so a multi-model service can share routing (e.g. provider.sort) at the
+	// service level while each model adds its own override — the canonical use is
+	// a per-model OpenRouter provider.max_price cap, which a single service-level
+	// map cannot express when models have different price floors. Same load-time
+	// rules as the service-level field: broker-critical keys are rejected, the map
+	// is normalized and verified JSON-serializable, and it is only supported for
+	// the chatbot service type. Empty/unset means the service-level map applies
+	// unchanged.
+	InjectBodyFields map[string]interface{} `yaml:"injectBodyFields"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
@@ -772,6 +786,21 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 		if len(entry.ModelAliases) > 0 {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].modelAliases is only supported for service type '%s', got '%s' for model '%s'", i, constant.ServiceTypeChatbot, serviceType, entry.Model)
 		}
+	}
+	// Per-entry injectBodyFields is applied only on the chatbot forward path
+	// (same as the service-level field), so reject it on other modalities, reject
+	// broker-critical keys, and normalize it (yaml.v2 nested maps → string-keyed,
+	// verified JSON-serializable) so a bad shape fails loud at load instead of on
+	// every request.
+	if len(entry.InjectBodyFields) > 0 {
+		if serviceType != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].injectBodyFields is only supported for service type '%s', got '%s' for model '%s'", i, constant.ServiceTypeChatbot, serviceType, entry.Model)
+		}
+		normalized, err := normalizeInjectBodyFields(fmt.Sprintf("service.modelPricing[%d].injectBodyFields", i), entry.InjectBodyFields)
+		if err != nil {
+			return err
+		}
+		entry.InjectBodyFields = normalized
 	}
 	// The wildcard catch-all has no concrete id to rewrite to — ValidateModelAllowlist
 	// forwards a wildcard-served model verbatim — so an upstreamModel on the "*"
