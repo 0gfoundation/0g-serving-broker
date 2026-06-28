@@ -79,10 +79,13 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 
 		// Merge operator-configured upstream body fields (e.g. OpenRouter's
-		// "provider" routing object, or a reasoning toggle). No-op unless
-		// service.injectBodyFields is configured. Runs after model rewrite so the
-		// body is the final JSON that gets forwarded.
-		modifiedBody, err = c.InjectBodyFields(reqBody)
+		// "provider" routing object, or a per-model max_price cap). No-op unless
+		// service- or per-model injectBodyFields is configured. Runs after model
+		// rewrite so the body is final JSON and CtxKeyResolvedModel is set (for
+		// multi-model providers; empty otherwise → service-level fields only).
+		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
+		resolvedModelStr, _ := resolvedModelVal.(string)
+		modifiedBody, err = c.InjectBodyFields(reqBody, resolvedModelStr)
 		if err != nil {
 			// A marshal failure here is a broker-side fault (the injected fields
 			// are server config, already verified JSON-serializable at load, and
@@ -655,16 +658,19 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 	return modifiedBody, nil
 }
 
-// InjectBodyFields merges c.Service.InjectBodyFields into the request body's
-// top-level object when configured, so the operator can set upstream
-// defaults/overrides per provider (e.g. OpenRouter's "provider" routing object
-// to pin a backend with fallbacks, or a reasoning toggle). It is
+// InjectBodyFields merges the effective injectBodyFields for resolvedModel into
+// the request body's top-level object when configured, so the operator can set
+// upstream defaults/overrides per provider (e.g. OpenRouter's "provider" routing
+// object to pin a backend with fallbacks, or a per-model max_price cap). The
+// effective set is the service-level injectBodyFields with the resolved model's
+// per-entry override deep-merged on top (see Service.EffectiveInjectBodyFields);
+// resolvedModel is the value stamped under CtxKeyResolvedModel. It is
 // server-config-wins: each injected key replaces any client-supplied value of
 // the same name, so users cannot steer it. Broker-critical keys (model,
-// messages, stream, stream_options) are rejected at config load, so they can
-// never be injected here.
+// messages, stream, stream_options, lora_adapter_name) are rejected at config
+// load, so they can never be injected here.
 //
-// No-op (body returned unchanged) when the fields map is empty/unset or the body
+// No-op (body returned unchanged) when the effective set is empty or the body
 // is empty. A body that does not parse as a JSON object is forwarded unchanged
 // rather than erroring — chatbot bodies are expected to be JSON objects, and
 // failing closed here would break the request for purely additive fields. That
@@ -677,8 +683,9 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 // Decoding uses json.Number (UseNumber) so large integer fields (e.g. a seed of
 // 2^53+1, or big integers inside tool-call arguments) survive the round-trip
 // without being mangled into float64 — matching forceB64ResponseFormat.
-func (c *Ctrl) InjectBodyFields(body []byte) ([]byte, error) {
-	if len(c.Service.InjectBodyFields) == 0 || len(body) == 0 {
+func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, error) {
+	fields := c.Service.EffectiveInjectBodyFields(resolvedModel)
+	if len(fields) == 0 || len(body) == 0 {
 		return body, nil
 	}
 
@@ -697,7 +704,7 @@ func (c *Ctrl) InjectBodyFields(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	for k, v := range c.Service.InjectBodyFields {
+	for k, v := range fields {
 		bodyMap[k] = v
 	}
 

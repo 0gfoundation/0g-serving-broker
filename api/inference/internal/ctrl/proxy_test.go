@@ -195,7 +195,7 @@ func TestInjectBodyFields_InjectsWhenConfigured(t *testing.T) {
 	})
 	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[{"role":"user","content":"hi"}]}`)
 
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestInjectBodyFields_OverwritesClientValue(t *testing.T) {
 	})
 	body := []byte(`{"messages":[],"provider":{"order":["SomeCheapProvider"],"allow_fallbacks":false}}`)
 
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestInjectBodyFields_NoopWhenUnset(t *testing.T) {
 	c := newTestCtrlForInjectBodyFields(t, nil)
 	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[]}`)
 
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestInjectBodyFields_NoopWhenUnset(t *testing.T) {
 // Empty body (e.g. GET) is returned unchanged even when injection is configured.
 func TestInjectBodyFields_NoopOnEmptyBody(t *testing.T) {
 	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"DeepInfra"}}})
-	got, err := c.InjectBodyFields(nil)
+	got, err := c.InjectBodyFields(nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestInjectBodyFields_PreservesLargeInteger(t *testing.T) {
 	// 2^53+1 cannot be represented exactly as a float64.
 	body := []byte(`{"model":"glm-5","seed":9007199254740993,"messages":[]}`)
 
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestInjectBodyFields_NestedObjectValue(t *testing.T) {
 	})
 	body := []byte(`{"model":"glm-5","messages":[]}`)
 
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestInjectBodyFields_NestedObjectValue(t *testing.T) {
 func TestInjectBodyFields_NoopOnNullBody(t *testing.T) {
 	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"z-ai"}}})
 	body := []byte(`null`)
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -337,12 +337,121 @@ func TestInjectBodyFields_NoopOnNullBody(t *testing.T) {
 func TestInjectBodyFields_NoopOnNonJSON(t *testing.T) {
 	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"DeepInfra"}}})
 	body := []byte(`not json`)
-	got, err := c.InjectBodyFields(body)
+	got, err := c.InjectBodyFields(body, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !bytes.Equal(got, body) {
 		t.Errorf("non-JSON body mutated: got %s", got)
+	}
+}
+
+// newMultiModelCtrlForInject builds a multi-model chatbot Ctrl with a
+// service-level injectBodyFields and per-entry overrides, with the pricing
+// lookup map built so EffectiveInjectBodyFields can resolve per model.
+func newMultiModelCtrlForInject(t *testing.T, serviceFields map[string]interface{}, entries []config.ModelPricingEntry) *Ctrl {
+	t.Helper()
+	svc := config.Service{
+		Type:             "chatbot",
+		ProviderType:     "centralized",
+		ModelType:        "zai-org/GLM-5-FP8",
+		InjectBodyFields: serviceFields,
+		ModelPricing:     entries,
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	return &Ctrl{
+		Service:        svc,
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
+// The real two-model scenario: a shared service-level provider routing object
+// (sort/allow_fallbacks/require_parameters) deep-merged with each model's own
+// provider.max_price cap. Each model must get the shared routing PLUS its own cap.
+func TestInjectBodyFields_PerModelMaxPriceMergesWithServiceRouting(t *testing.T) {
+	serviceFields := map[string]interface{}{
+		"provider": map[string]interface{}{
+			"sort":               "price",
+			"allow_fallbacks":    true,
+			"require_parameters": true,
+		},
+	}
+	entries := []config.ModelPricingEntry{
+		{Model: "zai-org/GLM-5-FP8", InjectBodyFields: map[string]interface{}{
+			"provider": map[string]interface{}{"max_price": map[string]interface{}{"prompt": "0.60", "completion": "1.92"}},
+		}},
+		{Model: "deepseek-v4-flash", InjectBodyFields: map[string]interface{}{
+			"provider": map[string]interface{}{"max_price": map[string]interface{}{"prompt": "0.138", "completion": "0.275"}},
+		}},
+	}
+	c := newMultiModelCtrlForInject(t, serviceFields, entries)
+
+	cases := []struct {
+		model              string
+		wantPrompt, wantCo string
+	}{
+		{"zai-org/GLM-5-FP8", "0.60", "1.92"},
+		{"deepseek-v4-flash", "0.138", "0.275"},
+	}
+	for _, tc := range cases {
+		body := []byte(`{"model":"` + tc.model + `","messages":[]}`)
+		got, err := c.InjectBodyFields(body, tc.model)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.model, err)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("%s: invalid json: %v", tc.model, err)
+		}
+		prov, ok := out["provider"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: provider missing: %#v", tc.model, out["provider"])
+		}
+		// Shared service-level routing must survive the merge.
+		if prov["sort"] != "price" || prov["allow_fallbacks"] != true || prov["require_parameters"] != true {
+			t.Errorf("%s: service-level routing lost: %#v", tc.model, prov)
+		}
+		// Per-model cap must be present and model-specific.
+		mp, ok := prov["max_price"].(map[string]interface{})
+		if !ok || mp["prompt"] != tc.wantPrompt || mp["completion"] != tc.wantCo {
+			t.Errorf("%s: max_price = %#v, want prompt=%s completion=%s", tc.model, prov["max_price"], tc.wantPrompt, tc.wantCo)
+		}
+	}
+
+	// The service-level config map must NOT have been mutated by the merge — a
+	// subsequent request that resolves to no per-model entry sees only the shared
+	// routing, with no leaked max_price.
+	if sp := serviceFields["provider"].(map[string]interface{}); sp["max_price"] != nil {
+		t.Errorf("service-level provider was mutated by merge: %#v", sp)
+	}
+}
+
+// A request that resolves to a model without a per-entry override gets only the
+// service-level fields.
+func TestInjectBodyFields_PerModelFallsBackToServiceLevel(t *testing.T) {
+	serviceFields := map[string]interface{}{
+		"provider": map[string]interface{}{"sort": "price"},
+	}
+	entries := []config.ModelPricingEntry{
+		{Model: "zai-org/GLM-5-FP8"}, // no per-entry injectBodyFields
+	}
+	c := newMultiModelCtrlForInject(t, serviceFields, entries)
+
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[]}`)
+	got, err := c.InjectBodyFields(body, "zai-org/GLM-5-FP8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov := out["provider"].(map[string]interface{})
+	if prov["sort"] != "price" || len(prov) != 1 {
+		t.Errorf("expected only service-level {sort:price}, got %#v", prov)
 	}
 }
 
