@@ -478,8 +478,9 @@ service:
 }
 
 func TestLoadConfig_ModelPricing_RejectsModelAliases(t *testing.T) {
-	// modelAliases is a single-model rewrite knob the multi-model path never
-	// consults (it forwards the requested model verbatim). Configuring both must
+	// SERVICE-LEVEL modelAliases is never consulted by the multi-model path
+	// (which resolves per entry); per-model aliases go on the modelPricing entry
+	// instead. Configuring it at the service level alongside modelPricing must
 	// fail at load time rather than silently ignore the aliases.
 	configPath := writeTestConfig(t, `
 service:
@@ -503,9 +504,10 @@ service:
 }
 
 func TestLoadConfig_ModelPricing_RejectsUpstreamModel(t *testing.T) {
-	// upstreamModel rewrites incoming→upstream, which the multi-model path does
-	// not implement (no per-entry upstream rewrite). Configuring both must fail
-	// at load time rather than silently ignore the rewrite.
+	// SERVICE-LEVEL upstreamModel rewrites incoming→upstream for the single-model
+	// path only; the multi-model path rewrites per entry, so per-model upstream
+	// goes on the modelPricing entry instead. Configuring it at the service level
+	// alongside modelPricing must fail at load time rather than be silently ignored.
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -2000,6 +2002,28 @@ func TestService_ModelExpiration(t *testing.T) {
 		}
 	})
 
+	t.Run("multi-model alias is subject to its entry's expiration", func(t *testing.T) {
+		entryMI := validModelInfo()
+		entryMI.ExpirationDate = exp
+		if err := entryMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{
+			ModelPricing: []ModelPricingEntry{
+				{Model: "expired", ModelInfo: entryMI, ModelAliases: []string{"expired-legacy"}},
+			},
+		}
+		if err := s.BuildModelPricingMap(); err != nil {
+			t.Fatal(err)
+		}
+		// A request using the alias must hit the same expiration as the canonical id,
+		// not silently bypass the 410 gate.
+		got, ok := s.ModelExpiration("expired-legacy")
+		if !ok || !got.Equal(wantTime) {
+			t.Errorf("ModelExpiration(alias) = %v, ok=%v; want %v, true", got, ok, wantTime)
+		}
+	})
+
 	t.Run("multi-model wildcard expiration applies to any served model", func(t *testing.T) {
 		wildMI := validModelInfo()
 		wildMI.ExpirationDate = exp
@@ -2017,4 +2041,320 @@ func TestService_ModelExpiration(t *testing.T) {
 			t.Errorf("ModelExpiration(any-model-name) = %v, ok=%v; want %v, true", got, ok, wantTime)
 		}
 	})
+}
+
+// TestLoadConfig_ModelPricing_PerEntryUpstreamModel exercises the issue-558
+// scenario: one centralized provider serving two models, each advertising a
+// stable public id on-chain while forwarding to a different upstream id, plus a
+// legacy alias accepted on incoming requests.
+func TestLoadConfig_ModelPricing_PerEntryUpstreamModel(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      upstreamModel: "z-ai/glm-5"
+      modelAliases: ["glm-5-legacy"]
+    - model: "deepseek-ai/DeepSeek-V4-Flash"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "deepseek/deepseek-v4-flash"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	svc := &cfg.Service
+
+	if got := svc.GetModelPricing("zai-org/GLM-5-FP8"); got == nil || got.UpstreamModel != "z-ai/glm-5" {
+		t.Errorf("expected GLM entry with upstream z-ai/glm-5, got %+v", got)
+	}
+
+	// Exact id, alias, and the unknown id all resolve as expected.
+	cases := []struct {
+		requested    string
+		wantResolved string
+		wantUpstream string
+		wantOK       bool
+	}{
+		{"zai-org/GLM-5-FP8", "zai-org/GLM-5-FP8", "z-ai/glm-5", true},
+		{"glm-5-legacy", "zai-org/GLM-5-FP8", "z-ai/glm-5", true}, // alias → canonical entry
+		{"deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Flash", "deepseek/deepseek-v4-flash", true},
+		{"unknown-model", "unknown-model", "", false},
+		{ModelWildcard, ModelWildcard, "", false},
+	}
+	for _, tc := range cases {
+		entry, resolved, ok := svc.ResolveRequestedModel(tc.requested)
+		if ok != tc.wantOK {
+			t.Errorf("ResolveRequestedModel(%q) ok=%v, want %v", tc.requested, ok, tc.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if resolved != tc.wantResolved {
+			t.Errorf("ResolveRequestedModel(%q) resolved=%q, want %q", tc.requested, resolved, tc.wantResolved)
+		}
+		if entry == nil || entry.UpstreamModelFor() != tc.wantUpstream {
+			t.Errorf("ResolveRequestedModel(%q) upstream=%v, want %q", tc.requested, entry, tc.wantUpstream)
+		}
+	}
+}
+
+func TestLoadConfig_ModelPricing_AliasCollidesWithModelID(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "model-b"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["model-a"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "collides with a model id") {
+		t.Fatalf("expected alias/model-id collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_DuplicateAliasAcrossEntries(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["legacy"]
+    - model: "model-b"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["legacy"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "duplicate modelPricing alias") {
+		t.Fatalf("expected duplicate-alias error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_WildcardAliasRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["*"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "wildcard") {
+		t.Fatalf("expected wildcard-alias error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamCollidesWithModelID(t *testing.T) {
+	// upstreamModel pointing at another entry's PUBLIC id would forward a request
+	// for model-b under model-a's public name — reject the ambiguity at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "model-b"
+      inputPrice: "500"
+      outputPrice: "1500"
+      upstreamModel: "model-a"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "wrong public id") {
+		t.Fatalf("expected upstreamModel/public-id collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamCollidesWithAlias(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["legacy-a"]
+    - model: "model-b"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "legacy-a"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "collides with a configured model alias") {
+		t.Fatalf("expected upstreamModel/alias collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamWildcardValueRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "*"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "wildcard sentinel") {
+		t.Fatalf("expected upstreamModel='*' rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamOnWildcardEntryRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "*"
+      inputPrice: "20"
+      outputPrice: "60"
+      upstreamModel: "vendor/catchall"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "not supported on the wildcard") {
+		t.Fatalf("expected upstreamModel-on-wildcard rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_AliasWhitespaceRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: [" legacy-a "]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "leading/trailing whitespace") {
+		t.Fatalf("expected alias-whitespace rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_SharedUpstreamAllowed(t *testing.T) {
+	// Two public ids deliberately mapping to one upstream model is allowed (warned,
+	// not rejected) — e.g. a price-tier rename during a cutover.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "public-new"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "public-new"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "vendor/x"
+    - model: "public-old"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "vendor/x"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err != nil {
+		t.Fatalf("shared upstreamModel should be allowed, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryUpstreamRejectedForSpeechToText(t *testing.T) {
+	// The per-entry upstream rewrite runs only on the chatbot JSON path; allowing
+	// it on speech-to-text (multipart, no body rewrite) would silently forward the
+	// wrong id, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "speech-to-text"
+  model: "whisper-1"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "whisper-1"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "openai/whisper-1"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "upstreamModel is only supported") {
+		t.Fatalf("expected per-entry upstreamModel rejection for speech-to-text, got: %v", err)
+	}
 }

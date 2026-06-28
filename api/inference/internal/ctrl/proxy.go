@@ -949,9 +949,29 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 
 	requestModel, _ := bodyMap["model"].(string)
 	if requestModel == "" {
-		// No model specified — use the configured ModelType as default
+		// No model specified — bill and forward the configured default model.
 		requestModel = c.Service.ModelType
-		bodyMap["model"] = requestModel
+	}
+
+	entry, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
+	if !ok {
+		c.recordModelMismatch(userAddr, requestModel)
+		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
+	}
+
+	// Forward the entry's upstream id (UpstreamModel when set, else its Model) so
+	// the request reaches the upstream under the id it expects, while billing and
+	// metrics stay keyed on the resolved public id. The wildcard catch-all has no
+	// concrete id, so a wildcard-served model is forwarded verbatim.
+	forwardModel := requestModel
+	if entry != nil && entry.Model != config.ModelWildcard {
+		forwardModel = entry.UpstreamModelFor()
+	} else if entry != nil {
+		c.logger.Debugf("Model served via wildcard catch-all pricing: requested=%s", requestModel)
+	}
+
+	if cur, _ := bodyMap["model"].(string); cur != forwardModel {
+		bodyMap["model"] = forwardModel
 		modifiedBody, err := json.Marshal(bodyMap)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to marshal modified JSON body")
@@ -959,12 +979,8 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		body = modifiedBody
 	}
 
-	if err := c.checkModelAllowed(ctx, requestModel, userAddr); err != nil {
-		return nil, err
-	}
-
-	ctx.Set(CtxKeyResolvedModel, requestModel)
-	c.logger.Debugf("Model allowlist passed: requested=%s", requestModel)
+	ctx.Set(CtxKeyResolvedModel, resolved)
+	c.logger.Debugf("Model allowlist passed: requested=%s resolved=%s forwarded=%s", requestModel, resolved, forwardModel)
 	return body, nil
 }
 
@@ -979,34 +995,21 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	if requestModel == "" {
 		requestModel = c.Service.ModelType
 	}
-	if err := c.checkModelAllowed(ctx, requestModel, userAddr); err != nil {
-		return err
+	_, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
+	if !ok {
+		c.recordModelMismatch(userAddr, requestModel)
+		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
-	ctx.Set(CtxKeyResolvedModel, requestModel)
-	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s", requestModel)
+	ctx.Set(CtxKeyResolvedModel, resolved)
+	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s resolved=%s", requestModel, resolved)
 	return nil
 }
 
-// checkModelAllowed enforces the multi-model allowlist for a resolved model id.
-// On rejection it records a model-mismatch against the user's rate limiter (to
-// throttle clients that spam invalid model names) and returns an error. A
-// wildcard ("*") entry makes every model allowed.
-func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string) error {
-	// The wildcard "*" is a config sentinel for catch-all pricing, never a
-	// selectable model. A request literally asking for "*" would otherwise be an
-	// exact map hit (IsModelAllowed true) and get forwarded verbatim upstream;
-	// reject it like any other unsupported model.
-	if requestModel != config.ModelWildcard && c.Service.IsModelAllowed(requestModel) {
-		// Audit trail: when a request is served via the catch-all wildcard rather
-		// than an explicit allowlist entry, surface the actual model so operators
-		// can see what the wildcard price is being applied to. At Debug to avoid
-		// per-request log volume on a serve-all provider (the client controls the
-		// model string); the always-on load-time warning is the operator alert.
-		if c.Service.ServedViaWildcard(requestModel) {
-			c.logger.Debugf("Model served via wildcard catch-all pricing: requested=%s (no explicit modelPricing entry)", requestModel)
-		}
-		return nil
-	}
+// recordModelMismatch records a rejected model request against the user's rate
+// limiter (to throttle clients that spam invalid model names) and logs it. Used
+// by both multi-model resolution paths (chatbot JSON and STT/video billing-only)
+// when ResolveRequestedModel reports the requested model is not allowed.
+func (c *Ctrl) recordModelMismatch(userAddr, requestModel string) {
 	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
 	if userAddr != "" {
 		rateLimiter := GetRateLimiter()
@@ -1016,5 +1019,4 @@ func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string
 				userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
 		}
 	}
-	return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 }
