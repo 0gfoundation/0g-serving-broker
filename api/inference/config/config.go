@@ -321,6 +321,18 @@ type Service struct {
 	// names, so the worst case is a missed param that keeps 404-ing (loud,
 	// discoverable) rather than a legitimate request silently mangled.
 	//
+	// The "worst case is a loud 404" guarantee holds only for params the upstream
+	// REQUIRES/rejects. Stripping a param the upstream merely accepts changes
+	// request behavior silently with no error — in particular do NOT strip
+	// cost-affecting keys (max_tokens / max_completion_tokens, etc.): removing an
+	// output cap can uncap generation and inflate the output-token bill the user
+	// pays. List only params that actually cause upstream rejection.
+	//
+	// Matching is case-sensitive and exact: an entry must equal the JSON key the
+	// client sends byte-for-byte ("logprobs", not "Logprobs"). A typo loads fine
+	// but silently never matches; confirm via the per-request "stripped … field(s)"
+	// log that the denylist is firing.
+	//
 	// Broker-critical fields (model, messages, stream, stream_options,
 	// lora_adapter_name) are REJECTED at load — stripping them would break model
 	// enforcement / usage-based billing / LoRA rewriting (same protected denylist

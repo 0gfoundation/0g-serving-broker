@@ -588,14 +588,23 @@ func TestStripBodyFields_PerModelUnionsWithServiceLevel(t *testing.T) {
 	}
 	c := &Ctrl{Service: svc, logger: testLogger(), whitelistUsers: make(map[string]struct{})}
 
-	// Model with a per-entry strip: BOTH logprobs (service) and top_logprobs (model) gone.
+	// Model with a per-entry strip: BOTH logprobs (service) and top_logprobs (model)
+	// gone. Check keys precisely — "top_logprobs" contains the substring "logprobs",
+	// so a bytes.Contains check would conflate the two.
 	body := []byte(`{"model":"zai-org/GLM-5-FP8","logprobs":true,"top_logprobs":5,"messages":[]}`)
 	got, err := c.StripBodyFields(body, "zai-org/GLM-5-FP8")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if bytes.Contains(got, []byte(`logprobs`)) {
-		t.Errorf("union strip incomplete, logprobs/top_logprobs remain: got %s", got)
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out["logprobs"]; present {
+		t.Errorf("service-level logprobs not stripped: %#v", out)
+	}
+	if _, present := out["top_logprobs"]; present {
+		t.Errorf("per-model top_logprobs not stripped: %#v", out)
 	}
 
 	// Model without a per-entry strip: only the service-level logprobs is removed,

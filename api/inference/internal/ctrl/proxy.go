@@ -744,12 +744,13 @@ func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, erro
 // missing entry merely keeps 404-ing (loud) rather than silently dropping a
 // legitimate param.
 //
-// Every field actually removed is logged (with the resolved model and key) so a
-// strip — invisible to the client, which sees a plain success — is greppable on
-// our side. No-op (body returned unchanged) when the effective set is empty or
-// the body is empty; a body that is not a JSON object is forwarded unchanged and
-// logged, matching InjectBodyFields. Decoding uses json.Number so large integer
-// fields survive the round-trip unmangled.
+// The keys actually removed are logged once per request (their names only, never
+// values) so a strip — invisible to the client, which sees a plain success — is
+// greppable on our side without emitting a line per field on the steady-state
+// workload that strips every request. No-op (body returned unchanged) when the
+// effective set is empty or the body is empty; a body that is not a JSON object
+// is forwarded unchanged and logged, matching InjectBodyFields. Decoding uses
+// json.Number so large integer fields survive the round-trip unmangled.
 func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error) {
 	fields := c.Service.EffectiveStripBodyFields(resolvedModel)
 	if len(fields) == 0 || len(body) == 0 {
@@ -760,23 +761,34 @@ func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
-		c.logger.Warnf("stripBodyFields configured but request body is not a JSON object; forwarding without stripping: %v", err)
+		// A literal JSON `null` decodes to a nil map with err == nil; the generic
+		// "%v" would then print "<nil>" and read like a parse failure. Distinguish
+		// the two and carry the resolved model so the line is correlatable.
+		if err != nil {
+			c.logger.Warnf("stripBodyFields configured but request body for model %q did not parse as JSON; forwarding without stripping: %v", resolvedModel, err)
+		} else {
+			c.logger.Warnf("stripBodyFields configured but request body for model %q is JSON null, not an object; forwarding without stripping", resolvedModel)
+		}
 		return body, nil
 	}
 
-	stripped := false
+	// Collect the keys actually removed and log them ONCE per request rather than a
+	// line per field: the motivating workload strips on every request, so per-field
+	// INFO would be steady-state spam. Only the key NAMES are logged (never values),
+	// so no client content leaks; the single line stays greppable per guardrail.
+	var strippedKeys []string
 	for _, k := range fields {
 		if _, present := bodyMap[k]; present {
 			delete(bodyMap, k)
-			stripped = true
-			c.logger.Infof("stripped unsupported request body field %q for model %q before forwarding upstream", k, resolvedModel)
+			strippedKeys = append(strippedKeys, k)
 		}
 	}
-	if !stripped {
+	if len(strippedKeys) == 0 {
 		// Nothing matched — avoid a needless re-marshal (which would also reorder
 		// keys); forward the original bytes unchanged.
 		return body, nil
 	}
+	c.logger.Infof("stripped unsupported request body field(s) %v for model %q before forwarding upstream", strippedKeys, resolvedModel)
 
 	modifiedBody, err := json.Marshal(bodyMap)
 	if err != nil {
