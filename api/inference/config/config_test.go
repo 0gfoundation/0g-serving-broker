@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -468,6 +470,43 @@ service:
 	t.Setenv("CONFIG_FILE", configPath)
 	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
 		t.Fatalf("expected protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_WarnsOnCostAffectingKey(t *testing.T) {
+	// A cost-affecting output-cap key (max_tokens) is NOT broker-critical, so it
+	// must LOAD (not be rejected) — an upstream might genuinely reject it — but it
+	// must emit a loud [CONFIG] warning, since stripping it silently inflates the
+	// user's bill rather than producing a visible 404.
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOut)
+
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - max_tokens
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("cost-affecting key must load (not be rejected), got: %v", err)
+	}
+	if got := cfg.Service.StripBodyFields; len(got) != 1 || got[0] != "max_tokens" {
+		t.Errorf("stripBodyFields = %#v, want [max_tokens] retained", got)
+	}
+	if logged := logBuf.String(); !strings.Contains(logged, "[CONFIG]") || !strings.Contains(logged, "max_tokens") || !strings.Contains(logged, "cost-affecting") {
+		t.Errorf("expected a [CONFIG] cost-affecting warning for max_tokens, got log: %q", logged)
 	}
 }
 

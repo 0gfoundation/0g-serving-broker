@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
 	"regexp"
@@ -326,7 +327,15 @@ type Service struct {
 	// request behavior silently with no error — in particular do NOT strip
 	// cost-affecting keys (max_tokens / max_completion_tokens, etc.): removing an
 	// output cap can uncap generation and inflate the output-token bill the user
-	// pays. List only params that actually cause upstream rejection.
+	// pays. Listing one of those keys loads (an upstream might genuinely reject it)
+	// but emits a loud [CONFIG] warning at startup; list only params that actually
+	// cause upstream rejection.
+	//
+	// Service-level and per-model (modelPricing[].stripBodyFields) lists are UNIONed,
+	// NOT overridden like injectBodyFields' deep-merge: a key removed at either level
+	// is removed, and there is no per-model way to un-strip a service-level key (see
+	// EffectiveStripBodyFields). Scope a key to one model by listing it only on that
+	// model's entry, not at the service level.
 	//
 	// Matching is case-sensitive and exact: an entry must equal the JSON key the
 	// client sends byte-for-byte ("logprobs", not "Logprobs"). A typo loads fine
@@ -816,6 +825,20 @@ var protectedInjectBodyFields = map[string]struct{}{
 	"lora_adapter_name": {},
 }
 
+// costAffectingStripKeys are output-cap keys that the upstream merely ACCEPTS
+// (rather than rejects), so stripping one does not produce the loud 404 the
+// denylist's worst-case rests on — it silently uncaps generation and inflates
+// the user's output-token bill. They are NOT in the protected denylist: an
+// upstream might genuinely reject one, so hard-rejecting it would wrongly block a
+// legitimate strip. Instead, listing one only emits a loud [CONFIG] warning at
+// load (see normalizeStripBodyFields) so the silent billing change becomes a
+// visible startup signal rather than a comment-only caveat.
+var costAffectingStripKeys = map[string]struct{}{
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
+}
+
 // normalizeInjectBodyFields rejects broker-critical keys, then makes the map safe
 // to json.Marshal into the forwarded request body at runtime and verifies
 // serializability so a broken value shape fails loud at load instead of on every
@@ -855,8 +878,10 @@ func normalizeInjectBodyFields(fieldPath string, fields map[string]interface{}) 
 // injectBodyFields — stripping model/messages/stream/stream_options/
 // lora_adapter_name would break model enforcement, usage-based billing, or LoRA
 // rewriting, so it fails loud at load instead of silently mangling every request.
-// Blank entries are dropped. fieldPath names the config location for error
-// messages (e.g. "service.stripBodyFields" or
+// Blank entries are dropped. Listing a cost-affecting output-cap key (max_tokens
+// etc.) is allowed but emits a loud [CONFIG] warning, since stripping it silently
+// inflates the user's bill rather than producing a visible 404. fieldPath names
+// the config location for error messages (e.g. "service.stripBodyFields" or
 // "service.modelPricing[0].stripBodyFields").
 func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(fields))
@@ -871,6 +896,9 @@ func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, erro
 		}
 		if _, dup := seen[k]; dup {
 			continue
+		}
+		if _, costly := costAffectingStripKeys[k]; costly {
+			log.Printf("[CONFIG] %s strips cost-affecting key %q: removing an output cap can uncap generation and inflate the user's output-token bill. Strip it only if the upstream actually rejects it.", fieldPath, k)
 		}
 		seen[k] = struct{}{}
 		normalized = append(normalized, k)

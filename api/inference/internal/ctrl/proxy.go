@@ -765,7 +765,7 @@ func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error
 		// "%v" would then print "<nil>" and read like a parse failure. Distinguish
 		// the two and carry the resolved model so the line is correlatable.
 		if err != nil {
-			c.logger.Warnf("stripBodyFields configured but request body for model %q did not parse as JSON; forwarding without stripping: %v", resolvedModel, err)
+			c.logger.Warnf("stripBodyFields configured but request body for model %q did not decode as a JSON object (malformed JSON, or a non-object like an array); forwarding without stripping: %v", resolvedModel, err)
 		} else {
 			c.logger.Warnf("stripBodyFields configured but request body for model %q is JSON null, not an object; forwarding without stripping", resolvedModel)
 		}
