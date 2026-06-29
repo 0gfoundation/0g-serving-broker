@@ -85,6 +85,18 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		// multi-model providers; empty otherwise → service-level fields only).
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
 		resolvedModelStr, _ := resolvedModelVal.(string)
+
+		// Strip operator-denylisted client params (e.g. logprobs/top_logprobs the
+		// routed upstream rejects) BEFORE injecting server fields, so a stripped
+		// key can be re-set by injection. No-op unless service- or per-model
+		// stripBodyFields is configured. A marshal failure here is a broker-side
+		// fault (same reasoning as InjectBodyFields below) — leave it unflagged.
+		modifiedBody, err = c.StripBodyFields(reqBody, resolvedModelStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "strip body fields")
+		}
+		reqBody = modifiedBody
+
 		modifiedBody, err = c.InjectBodyFields(reqBody, resolvedModelStr)
 		if err != nil {
 			// A marshal failure here is a broker-side fault (the injected fields
@@ -711,6 +723,76 @@ func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, erro
 	modifiedBody, err := json.Marshal(bodyMap)
 	if err != nil {
 		return body, errors.Wrap(err, "failed to marshal body with injected fields")
+	}
+
+	return modifiedBody, nil
+}
+
+// StripBodyFields removes the effective stripBodyFields for resolvedModel from the
+// request body's top-level object when configured, so the operator can drop
+// client-supplied params the upstream rejects (the motivating case: OpenRouter
+// 404s a request carrying logprobs/top_logprobs that the routed backend lacks).
+// The effective set is the union of the service-level and the resolved model's
+// per-entry stripBodyFields (see Service.EffectiveStripBodyFields); resolvedModel
+// is the value stamped under CtxKeyResolvedModel. Broker-critical keys (model,
+// messages, stream, stream_options, lora_adapter_name) are rejected at config
+// load, so they can never be stripped here.
+//
+// This runs BEFORE InjectBodyFields, so an operator may strip a client's value of
+// a key and then inject the server's own. It is a denylist, not an allowlist
+// derived from supportedParameters: a denylist can only remove named keys, so a
+// missing entry merely keeps 404-ing (loud) rather than silently dropping a
+// legitimate param.
+//
+// The keys actually removed are logged once per request (their names only, never
+// values) so a strip — invisible to the client, which sees a plain success — is
+// greppable on our side without emitting a line per field on the steady-state
+// workload that strips every request. No-op (body returned unchanged) when the
+// effective set is empty or the body is empty; a body that is not a JSON object
+// is forwarded unchanged and logged, matching InjectBodyFields. Decoding uses
+// json.Number so large integer fields survive the round-trip unmangled.
+func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error) {
+	fields := c.Service.EffectiveStripBodyFields(resolvedModel)
+	if len(fields) == 0 || len(body) == 0 {
+		return body, nil
+	}
+
+	var bodyMap map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
+		// A literal JSON `null` decodes to a nil map with err == nil; the generic
+		// "%v" would then print "<nil>" and read like a parse failure. Distinguish
+		// the two and carry the resolved model so the line is correlatable.
+		if err != nil {
+			c.logger.Warnf("stripBodyFields configured but request body for model %q did not parse as JSON; forwarding without stripping: %v", resolvedModel, err)
+		} else {
+			c.logger.Warnf("stripBodyFields configured but request body for model %q is JSON null, not an object; forwarding without stripping", resolvedModel)
+		}
+		return body, nil
+	}
+
+	// Collect the keys actually removed and log them ONCE per request rather than a
+	// line per field: the motivating workload strips on every request, so per-field
+	// INFO would be steady-state spam. Only the key NAMES are logged (never values),
+	// so no client content leaks; the single line stays greppable per guardrail.
+	var strippedKeys []string
+	for _, k := range fields {
+		if _, present := bodyMap[k]; present {
+			delete(bodyMap, k)
+			strippedKeys = append(strippedKeys, k)
+		}
+	}
+	if len(strippedKeys) == 0 {
+		// Nothing matched — avoid a needless re-marshal (which would also reorder
+		// keys); forward the original bytes unchanged.
+		return body, nil
+	}
+	c.logger.Infof("stripped unsupported request body field(s) %v for model %q before forwarding upstream", strippedKeys, resolvedModel)
+
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to marshal body with stripped fields")
 	}
 
 	return modifiedBody, nil

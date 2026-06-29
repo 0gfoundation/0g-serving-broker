@@ -455,6 +455,177 @@ func TestInjectBodyFields_PerModelFallsBackToServiceLevel(t *testing.T) {
 	}
 }
 
+// newTestCtrlForStripBodyFields builds a chatbot Ctrl with the given
+// service-level stripBodyFields list.
+func newTestCtrlForStripBodyFields(t *testing.T, fields []string) *Ctrl {
+	t.Helper()
+	return &Ctrl{
+		Service: config.Service{
+			Type:            "chatbot",
+			ModelType:       "zai-org/GLM-5-FP8",
+			StripBodyFields: fields,
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
+// A configured field present in the body is removed before forwarding; other
+// fields (including the model) are preserved untouched.
+func TestStripBodyFields_RemovesConfiguredField(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs", "top_logprobs"})
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[{"role":"user","content":"hi"}],"logprobs":true,"top_logprobs":5,"temperature":0.7}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out["logprobs"]; present {
+		t.Errorf("logprobs not stripped: %#v", out)
+	}
+	if _, present := out["top_logprobs"]; present {
+		t.Errorf("top_logprobs not stripped: %#v", out)
+	}
+	if out["model"] != "zai-org/GLM-5-FP8" {
+		t.Errorf("model = %q, want it preserved", out["model"])
+	}
+	if out["temperature"] == nil {
+		t.Errorf("unrelated field temperature dropped: %#v", out)
+	}
+}
+
+// Nothing configured → body forwarded byte-for-byte unchanged.
+func TestStripBodyFields_NoopWhenUnset(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, nil)
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","logprobs":true,"messages":[]}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mutated when strip unset: got %s", got)
+	}
+}
+
+// Configured field absent from the body → body forwarded byte-for-byte unchanged
+// (no needless re-marshal/key-reorder).
+func TestStripBodyFields_NoopWhenFieldAbsent(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","temperature":0.7,"messages":[]}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mutated when no configured field present: got %s", got)
+	}
+}
+
+// Empty body is returned unchanged even when stripping is configured.
+func TestStripBodyFields_NoopOnEmptyBody(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	got, err := c.StripBodyFields(nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty body, got %s", got)
+	}
+}
+
+// A non-JSON-object body is forwarded unchanged rather than erroring.
+func TestStripBodyFields_NoopOnNonJSON(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	body := []byte(`not json`)
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("non-JSON body mutated: got %s", got)
+	}
+}
+
+// Large integer fields elsewhere in the body survive the decode/re-marshal
+// round-trip (UseNumber) when a strip does occur.
+func TestStripBodyFields_PreservesLargeInteger(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	body := []byte(`{"model":"glm-5","seed":9007199254740993,"logprobs":true,"messages":[]}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`9007199254740993`)) {
+		t.Errorf("large integer seed not preserved verbatim: got %s", got)
+	}
+	if bytes.Contains(got, []byte(`logprobs`)) {
+		t.Errorf("logprobs not stripped: got %s", got)
+	}
+}
+
+// The effective strip set is the UNION of service-level and per-model lists: a
+// request resolved to a model gets both stripped.
+func TestStripBodyFields_PerModelUnionsWithServiceLevel(t *testing.T) {
+	svc := config.Service{
+		Type:            "chatbot",
+		ProviderType:    "centralized",
+		ModelType:       "zai-org/GLM-5-FP8",
+		StripBodyFields: []string{"logprobs"},
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "zai-org/GLM-5-FP8", StripBodyFields: []string{"top_logprobs"}},
+			{Model: "deepseek-v4-flash"}, // no per-entry strip → service-level only
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	c := &Ctrl{Service: svc, logger: testLogger(), whitelistUsers: make(map[string]struct{})}
+
+	// Model with a per-entry strip: BOTH logprobs (service) and top_logprobs (model)
+	// gone. Check keys precisely — "top_logprobs" contains the substring "logprobs",
+	// so a bytes.Contains check would conflate the two.
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","logprobs":true,"top_logprobs":5,"messages":[]}`)
+	got, err := c.StripBodyFields(body, "zai-org/GLM-5-FP8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out["logprobs"]; present {
+		t.Errorf("service-level logprobs not stripped: %#v", out)
+	}
+	if _, present := out["top_logprobs"]; present {
+		t.Errorf("per-model top_logprobs not stripped: %#v", out)
+	}
+
+	// Model without a per-entry strip: only the service-level logprobs is removed,
+	// top_logprobs is left intact.
+	body2 := []byte(`{"model":"deepseek-v4-flash","logprobs":true,"top_logprobs":5,"messages":[]}`)
+	got2, err := c.StripBodyFields(body2, "deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out2 map[string]interface{}
+	if err := json.Unmarshal(got2, &out2); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out2["logprobs"]; present {
+		t.Errorf("service-level logprobs not stripped: %#v", out2)
+	}
+	if _, present := out2["top_logprobs"]; !present {
+		t.Errorf("top_logprobs wrongly stripped for model without per-entry strip: %#v", out2)
+	}
+}
+
 func TestDecodeErrorBody(t *testing.T) {
 	const payload = `{"error":{"message":"upstream boom"}}`
 

@@ -394,6 +394,83 @@ service:
 	}
 }
 
+func TestLoadConfig_StripBodyFields_LoadsAndNormalizes(t *testing.T) {
+	// A valid stripBodyFields list (with a blank entry and a duplicate) loads and
+	// is normalized to a trimmed, de-duplicated list.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - logprobs
+    - top_logprobs
+    - logprobs
+    - "  "
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("valid stripBodyFields should load, got: %v", err)
+	}
+	want := []string{"logprobs", "top_logprobs"}
+	if got := cfg.Service.StripBodyFields; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("stripBodyFields = %#v, want %#v (trimmed + de-duplicated)", got, want)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_RejectsNonChatbot(t *testing.T) {
+	// stripBodyFields is only applied on the chatbot forward path, so a non-chatbot
+	// service type must be rejected at load instead of silently no-op'ing.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - logprobs
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "stripBodyFields is only supported") {
+		t.Fatalf("expected non-chatbot rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_RejectsProtectedKey(t *testing.T) {
+	// Stripping a broker-critical field (here, messages) would break the request /
+	// billing, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - messages
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected protected-key rejection, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ModelPricing_USD(t *testing.T) {
 	// USD-denominated multi-model pricing: each entry carries USD-per-1M prices,
 	// and the service-level USD price is set to the max over models so the price
@@ -2304,6 +2381,69 @@ service:
 	t.Setenv("CONFIG_FILE", configPath)
 	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
 		t.Fatalf("expected per-entry protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryStripBodyFields_RejectsProtectedKey(t *testing.T) {
+	// A per-entry stripBodyFields naming a broker-critical key (messages) must be
+	// rejected at load, same as the service-level field.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      stripBodyFields:
+        - messages
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected per-entry protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryStripBodyFields_Loads(t *testing.T) {
+	// A valid per-entry stripBodyFields loads and is normalized (trim/dedup).
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  stripBodyFields:
+    - logprobs
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      stripBodyFields:
+        - top_logprobs
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("valid per-entry stripBodyFields should load, got: %v", err)
+	}
+	// The effective set for the model is the union of service + per-entry lists.
+	got := cfg.Service.EffectiveStripBodyFields("zai-org/GLM-5-FP8")
+	want := map[string]bool{"logprobs": true, "top_logprobs": true}
+	if len(got) != len(want) {
+		t.Fatalf("EffectiveStripBodyFields = %#v, want union %v", got, want)
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Errorf("unexpected key %q in effective strip set %#v", k, got)
+		}
 	}
 }
 

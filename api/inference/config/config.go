@@ -300,6 +300,49 @@ type Service struct {
 	// Empty or unset means the body is forwarded unchanged (backward compatible).
 	// Only applied for the chatbot service type; rejected for others at load.
 	InjectBodyFields map[string]interface{} `yaml:"injectBodyFields"`
+
+	// StripBodyFields, when set, are top-level keys REMOVED from the JSON request
+	// body before it is forwarded to a chatbot targetUrl. It is the surgical
+	// counterpart of injectBodyFields: a denylist of client-supplied params the
+	// upstream does not accept. The motivating case is OpenRouter returning 404 for
+	// a request carrying a param the picked backend lacks (e.g. logprobs /
+	// top_logprobs) — the broker strips it rather than letting the upstream reject
+	// the whole request:
+	//
+	//   stripBodyFields:
+	//     - logprobs
+	//     - top_logprobs
+	//
+	// It is deliberately a denylist, NOT an allowlist derived from
+	// modelInfo.supportedParameters: that field advertises sampling capabilities
+	// for /v1/models and is not an exhaustive set of legal body keys, so using it
+	// to strip would silently drop legitimate params (max_completion_tokens, n,
+	// tools, response_format, …). A denylist can only remove keys the operator
+	// names, so the worst case is a missed param that keeps 404-ing (loud,
+	// discoverable) rather than a legitimate request silently mangled.
+	//
+	// The "worst case is a loud 404" guarantee holds only for params the upstream
+	// REQUIRES/rejects. Stripping a param the upstream merely accepts changes
+	// request behavior silently with no error — in particular do NOT strip
+	// cost-affecting keys (max_tokens / max_completion_tokens, etc.): removing an
+	// output cap can uncap generation and inflate the output-token bill the user
+	// pays. List only params that actually cause upstream rejection.
+	//
+	// Matching is case-sensitive and exact: an entry must equal the JSON key the
+	// client sends byte-for-byte ("logprobs", not "Logprobs"). A typo loads fine
+	// but silently never matches; confirm via the per-request "stripped … field(s)"
+	// log that the denylist is firing.
+	//
+	// Broker-critical fields (model, messages, stream, stream_options,
+	// lora_adapter_name) are REJECTED at load — stripping them would break model
+	// enforcement / usage-based billing / LoRA rewriting (same protected denylist
+	// as injectBodyFields; see protectedInjectBodyFields). Names are otherwise NOT
+	// validated against an allowlist (the upstream is the authority on accepted
+	// keys). Applied BEFORE injectBodyFields, so an operator may strip a client's
+	// value and then inject the server's own. Empty or unset means the body is
+	// forwarded unchanged. Only applied for the chatbot service type; rejected for
+	// others at load.
+	StripBodyFields []string `yaml:"stripBodyFields"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
@@ -807,6 +850,68 @@ func normalizeInjectBodyFields(fieldPath string, fields map[string]interface{}) 
 	return normalized, nil
 }
 
+// normalizeStripBodyFields trims and de-duplicates a stripBodyFields list and
+// rejects broker-critical keys, reusing the same protected denylist as
+// injectBodyFields — stripping model/messages/stream/stream_options/
+// lora_adapter_name would break model enforcement, usage-based billing, or LoRA
+// rewriting, so it fails loud at load instead of silently mangling every request.
+// Blank entries are dropped. fieldPath names the config location for error
+// messages (e.g. "service.stripBodyFields" or
+// "service.modelPricing[0].stripBodyFields").
+func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(fields))
+	normalized := make([]string, 0, len(fields))
+	for _, k := range fields {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if _, protected := protectedInjectBodyFields[k]; protected {
+			return nil, fmt.Errorf("invalid config: %s must not strip broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", fieldPath, k)
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		normalized = append(normalized, k)
+	}
+	return normalized, nil
+}
+
+// EffectiveStripBodyFields returns the top-level body keys to strip for a request
+// resolved to the given model: the UNION of the service-level stripBodyFields and
+// the resolved model's per-entry stripBodyFields. Unlike injectBodyFields (which
+// deep-merges so a per-model leaf overrides the service value), stripping is
+// additive — a key removed at either level should be removed — so the two lists
+// are combined rather than overridden. Returns nil when neither level is
+// configured. The result is order-stable (service entries first, then any
+// model-only entries) and de-duplicated.
+func (s *Service) EffectiveStripBodyFields(model string) []string {
+	svc := s.StripBodyFields
+	var entry []string
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil {
+			entry = e.StripBodyFields
+		}
+	}
+	if len(entry) == 0 {
+		return svc
+	}
+	if len(svc) == 0 {
+		return entry
+	}
+	seen := make(map[string]struct{}, len(svc)+len(entry))
+	out := make([]string, 0, len(svc)+len(entry))
+	for _, k := range append(append([]string{}, svc...), entry...) {
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
+}
+
 // EffectiveInjectBodyFields returns the body fields to inject for a request
 // resolved to the given model: the service-level injectBodyFields with the
 // resolved model's per-entry injectBodyFields deep-merged ON TOP (the entry wins
@@ -1155,6 +1260,20 @@ func loadConfig(cfg *Config) error {
 			return err
 		}
 		cfg.Service.InjectBodyFields = normalized
+	}
+
+	// Body-field stripping mirrors injection: only meaningful on the chatbot
+	// forward path, rejects broker-critical keys, and is normalized (trim/dedup) at
+	// load so a misconfiguration surfaces here rather than silently doing nothing.
+	if len(cfg.Service.StripBodyFields) > 0 {
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.stripBodyFields is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		normalized, err := normalizeStripBodyFields("service.stripBodyFields", cfg.Service.StripBodyFields)
+		if err != nil {
+			return err
+		}
+		cfg.Service.StripBodyFields = normalized
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.
