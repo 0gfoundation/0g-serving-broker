@@ -394,6 +394,83 @@ service:
 	}
 }
 
+func TestLoadConfig_StripBodyFields_LoadsAndNormalizes(t *testing.T) {
+	// A valid stripBodyFields list (with a blank entry and a duplicate) loads and
+	// is normalized to a trimmed, de-duplicated list.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - logprobs
+    - top_logprobs
+    - logprobs
+    - "  "
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("valid stripBodyFields should load, got: %v", err)
+	}
+	want := []string{"logprobs", "top_logprobs"}
+	if got := cfg.Service.StripBodyFields; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("stripBodyFields = %#v, want %#v (trimmed + de-duplicated)", got, want)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_RejectsNonChatbot(t *testing.T) {
+	// stripBodyFields is only applied on the chatbot forward path, so a non-chatbot
+	// service type must be rejected at load instead of silently no-op'ing.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - logprobs
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "stripBodyFields is only supported") {
+		t.Fatalf("expected non-chatbot rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_RejectsProtectedKey(t *testing.T) {
+	// Stripping a broker-critical field (here, messages) would break the request /
+	// billing, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - messages
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected protected-key rejection, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ModelPricing_USD(t *testing.T) {
 	// USD-denominated multi-model pricing: each entry carries USD-per-1M prices,
 	// and the service-level USD price is set to the max over models so the price

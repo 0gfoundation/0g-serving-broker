@@ -133,6 +133,17 @@ type ModelPricingEntry struct {
 	// the chatbot service type. Empty/unset means the service-level map applies
 	// unchanged.
 	InjectBodyFields map[string]interface{} `yaml:"injectBodyFields"`
+
+	// StripBodyFields is the per-model counterpart of service.stripBodyFields:
+	// top-level keys removed from the forwarded chat body for requests resolved to
+	// THIS model. It is UNIONed with the service-level list (not deep-merged): the
+	// effective strip set is every key named at either level (see
+	// Service.EffectiveStripBodyFields), so a multi-model service can strip a param
+	// globally while one model strips an extra param its backend rejects. Same
+	// load-time rules as the service-level field: broker-critical keys are rejected
+	// and it is only supported for the chatbot service type. Empty/unset means the
+	// service-level list applies unchanged.
+	StripBodyFields []string `yaml:"stripBodyFields"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
@@ -801,6 +812,19 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 			return err
 		}
 		entry.InjectBodyFields = normalized
+	}
+	// Per-entry stripBodyFields, like injectBodyFields, only applies on the chatbot
+	// forward path; reject it elsewhere, reject broker-critical keys, and normalize
+	// (trim/dedup) so a bad list fails loud at load.
+	if len(entry.StripBodyFields) > 0 {
+		if serviceType != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].stripBodyFields is only supported for service type '%s', got '%s' for model '%s'", i, constant.ServiceTypeChatbot, serviceType, entry.Model)
+		}
+		normalized, err := normalizeStripBodyFields(fmt.Sprintf("service.modelPricing[%d].stripBodyFields", i), entry.StripBodyFields)
+		if err != nil {
+			return err
+		}
+		entry.StripBodyFields = normalized
 	}
 	// The wildcard catch-all has no concrete id to rewrite to — ValidateModelAllowlist
 	// forwards a wildcard-served model verbatim — so an upstreamModel on the "*"
