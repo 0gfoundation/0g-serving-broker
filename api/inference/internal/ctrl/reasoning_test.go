@@ -24,6 +24,40 @@ func newTestCtrlForReasoning(t *testing.T, supportedParams ...string) *Ctrl {
 	}
 }
 
+// newTestCtrlForReasoningMultiModel builds a multi-model chatbot Ctrl. serviceParams
+// (when non-nil) become the service-level ModelInfo.supportedParameters used as the
+// fallback; entries maps a model id to its per-model supportedParameters — a nil
+// slice means that entry has NO own ModelInfo, so resolution falls back to the
+// service-level ModelInfo. Use "*" as a model id to exercise the wildcard entry.
+func newTestCtrlForReasoningMultiModel(t *testing.T, serviceParams []string, entries map[string][]string) *Ctrl {
+	t.Helper()
+	svc := config.Service{
+		Type:      "chatbot",
+		ModelType: "default-model",
+	}
+	if serviceParams != nil {
+		svc.ModelInfo = &config.ModelInfo{SupportedParameters: serviceParams}
+	}
+	for model, params := range entries {
+		entry := config.ModelPricingEntry{Model: model}
+		if params != nil {
+			entry.ModelInfo = &config.ModelInfo{SupportedParameters: params}
+		}
+		svc.ModelPricing = append(svc.ModelPricing, entry)
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	if !svc.HasMultiModelPricing() {
+		t.Fatalf("expected multi-model service, got single-model")
+	}
+	return &Ctrl{
+		Service:        svc,
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
 func TestNormalizeReasoningEffort(t *testing.T) {
 	tests := []struct {
 		effort string
@@ -254,6 +288,99 @@ func TestTranslateReasoning_MiniMaxThinkingObject(t *testing.T) {
 				t.Errorf("thinking.type = %v, want %q", th["type"], tt.wantType)
 			}
 		})
+	}
+}
+
+// TestTranslateReasoning_MultiModel_PerModelNativeParam verifies that in a
+// multi-model service each model's own supportedParameters drives translation, so
+// the SAME effort is re-expressed in different dialects depending on the requested
+// model. This is the behavior that depends on the body still carrying the user's
+// requested model (ValidateModelAllowlist preserves it) when TranslateReasoning runs.
+func TestTranslateReasoning_MultiModel_PerModelNativeParam(t *testing.T) {
+	c := newTestCtrlForReasoningMultiModel(t,
+		[]string{"temperature"}, // service-level fallback advertises no native param
+		map[string][]string{
+			"qwen-a":    {"reasoning_effort", "enable_thinking"}, // DashScope top-level bool
+			"minimax-b": {"reasoning_effort", "thinking"},        // MiniMax object
+		},
+	)
+
+	// qwen-a → top-level enable_thinking, no thinking object.
+	gotA, err := c.TranslateReasoning([]byte(`{"model":"qwen-a","reasoning_effort":"high","messages":[]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var outA map[string]interface{}
+	if err := json.Unmarshal(gotA, &outA); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if outA["enable_thinking"] != true {
+		t.Errorf("qwen-a: enable_thinking = %v, want true", outA["enable_thinking"])
+	}
+	if _, ok := outA["thinking"]; ok {
+		t.Errorf("qwen-a: must not emit MiniMax thinking object")
+	}
+
+	// minimax-b → thinking object, no top-level enable_thinking.
+	gotB, err := c.TranslateReasoning([]byte(`{"model":"minimax-b","reasoning_effort":"high","messages":[]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var outB map[string]interface{}
+	if err := json.Unmarshal(gotB, &outB); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	th, ok := outB["thinking"].(map[string]interface{})
+	if !ok || th["type"] != "enabled" {
+		t.Errorf("minimax-b: thinking = %v, want {type:enabled}", outB["thinking"])
+	}
+	if _, ok := outB["enable_thinking"]; ok {
+		t.Errorf("minimax-b: must not emit top-level enable_thinking")
+	}
+}
+
+// TestTranslateReasoning_MultiModel_FallbackToServiceModelInfo verifies that a
+// per-model entry without its own ModelInfo falls back to the service-level
+// ModelInfo for the native-param lookup.
+func TestTranslateReasoning_MultiModel_FallbackToServiceModelInfo(t *testing.T) {
+	c := newTestCtrlForReasoningMultiModel(t,
+		[]string{"reasoning_effort", "chat_template_kwargs"}, // service-level fallback
+		map[string][]string{
+			"qwen-a": nil, // no per-model ModelInfo → fall back to service-level
+		},
+	)
+
+	got, err := c.TranslateReasoning([]byte(`{"model":"qwen-a","reasoning_effort":"high","messages":[]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	on, present := decodeEnableThinking(t, got)
+	if !present || !on {
+		t.Errorf("fallback: chat_template_kwargs.enable_thinking = (%v,%v), want (true,true)", on, present)
+	}
+}
+
+// TestTranslateReasoning_MultiModel_WildcardEntry verifies that a request for a
+// model not enumerated in modelPricing resolves through the wildcard ("*") entry,
+// whose ModelInfo drives the translation.
+func TestTranslateReasoning_MultiModel_WildcardEntry(t *testing.T) {
+	c := newTestCtrlForReasoningMultiModel(t,
+		[]string{"temperature"}, // service-level fallback advertises no native param
+		map[string][]string{
+			"*": {"reasoning_effort", "enable_thinking"},
+		},
+	)
+
+	got, err := c.TranslateReasoning([]byte(`{"model":"some-unlisted-model","reasoning_effort":"high","messages":[]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if out["enable_thinking"] != true {
+		t.Errorf("wildcard: enable_thinking = %v, want true", out["enable_thinking"])
 	}
 }
 
