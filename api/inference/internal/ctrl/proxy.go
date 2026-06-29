@@ -78,13 +78,28 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 		}
 
-		// Merge operator-configured upstream body fields (e.g. OpenRouter's
-		// "provider" routing object, or a per-model max_price cap). No-op unless
-		// service- or per-model injectBodyFields is configured. Runs after model
-		// rewrite so the body is final JSON and CtxKeyResolvedModel is set (for
-		// multi-model providers; empty otherwise → service-level fields only).
+		// resolvedModel is the public/canonical id stamped by the model-handling
+		// branches above (ValidateModelAllowlist for multi-model, the single-model
+		// rewrite path otherwise). It keys per-model config lookups. Read it here so
+		// it is available to TranslateMaxTokens as well as Strip/InjectBodyFields —
+		// the body's "model" field may have been rewritten to the UPSTREAM id by
+		// ValidateModelAllowlist, so per-model lookups must use this, not the body.
+		// Empty for a single-model provider with no rewrite trigger (resolved to the
+		// default later); Effective* lookups treat "" as the service-level config.
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
 		resolvedModelStr, _ := resolvedModelVal.(string)
+
+		// Translate the output-token cap to the field name the target model accepts
+		// (max_tokens vs max_completion_tokens), detected from its advertised
+		// supportedParameters — the DeepSeek-on-vLLM case rejects the newer
+		// max_completion_tokens an OpenAI-compatible client sends. No-op unless the
+		// model advertises exactly one of the two and the client sent the other. The
+		// two fields are semantically identical, so billing is unaffected.
+		modifiedBody, err = c.TranslateMaxTokens(reqBody, resolvedModelStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "translate max tokens")
+		}
+		reqBody = modifiedBody
 
 		// Strip operator-denylisted client params (e.g. logprobs/top_logprobs the
 		// routed upstream rejects) BEFORE injecting server fields, so a stripped
