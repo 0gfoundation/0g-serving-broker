@@ -179,6 +179,28 @@ func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// EffectiveModelInfo resolves the ModelInfo that applies to a request for the
+// given model, or nil when none is configured. Resolution mirrors ModelExpiration
+// and the /v1/models metadata: in multi-model mode a per-model pricing entry's own
+// ModelInfo wins wholesale (resolved alias-aware via ResolveRequestedModel, so a
+// legacy alias is subject to the same metadata as its canonical id), otherwise the
+// service-level ModelInfo applies; an unknown multi-model id with no wildcard entry
+// resolves to nil — it is not a model this service serves. In single-model mode the
+// service-level ModelInfo is returned regardless of the requested name.
+func (s *Service) EffectiveModelInfo(model string) *ModelInfo {
+	mi := s.ModelInfo
+	if s.HasMultiModelPricing() {
+		entry, _, ok := s.ResolveRequestedModel(model)
+		if !ok || entry == nil {
+			return nil
+		}
+		if entry.ModelInfo != nil {
+			mi = entry.ModelInfo
+		}
+	}
+	return mi
+}
+
 type Service struct {
 	ServingURL  string `yaml:"servingUrl"`
 	TargetURL   string `yaml:"targetUrl"`
