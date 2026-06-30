@@ -623,6 +623,7 @@ type Config struct {
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
+	CreditBilling       CreditBillingConfig     `yaml:"creditBilling"`
 	// AllowTokenBilledSpeechToText opens the billing path for token-billed
 	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
 	// Defaults to false.
@@ -728,6 +729,27 @@ type ProviderHttpConfig struct {
 type LogPathsConfig struct {
 	BrokerLogDir string `yaml:"brokerLogDir"`
 	EventLogDir  string `yaml:"eventLogDir"`
+}
+
+// CreditBillingConfig configures off-chain USD credit billing via the
+// centralized credit service. When Enable is false (default), the broker bills
+// purely on-chain and this config is ignored — on-chain users are unaffected.
+//
+// When enabled, admission checks balance from Endpoint instead of on-chain lock
+// balance, and per-request fees are settled by submitting a TEE-signed receipt
+// to the credit service (see internal/creditbilling). Prices come from the
+// service's USD pricing config; PriceDenomination must be "USD".
+type CreditBillingConfig struct {
+	// Enable turns on off-chain credit billing for this provider.
+	Enable bool `yaml:"enable"`
+	// Endpoint is the credit service base URL (the authenticated central domain).
+	Endpoint string `yaml:"endpoint"`
+	// Timeout bounds each call to the credit service. Defaults to 5s.
+	Timeout time.Duration `yaml:"timeout"`
+	// MinBalanceMicroUsd is the admission threshold in micro-USD (1 USD = 1e6).
+	// Requests are rejected (fail-closed) below this, or if the service is
+	// unreachable.
+	MinBalanceMicroUsd int64 `yaml:"minBalanceMicroUsd"`
 }
 
 // ControllerConfig Controller service configuration
