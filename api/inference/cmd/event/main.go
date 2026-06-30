@@ -91,18 +91,25 @@ func Main() {
 	// the cache and the PriceUpdateProcessor.
 	ctrl := ctrl.New(db, contract, conf, nil, teeService, nil, logger)
 
-	settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)
-	if err := mgr.Add(settlementProcessor); err != nil {
-		panic(err)
-	}
-
-	// Add reconciliation processor for event-based settlement verification
-	if conf.Interval.ReconciliationProcessor > 0 {
-		reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, logger)
-		if err := mgr.Add(reconciliationProcessor); err != nil {
+	// Credit providers bill off-chain via the credit service and never settle
+	// on-chain, so the on-chain settlement and reconciliation processors are
+	// disabled entirely.
+	if conf.Service.CreditBilling.Enable {
+		logger.Info("credit billing enabled: on-chain settlement and reconciliation processors disabled")
+	} else {
+		settlementProcessor := event.NewSettlementProcessor(ctrl, conf.Interval.SettlementProcessor, conf.Interval.ForceSettlementProcessor, conf.Monitor.Enable, logger)
+		if err := mgr.Add(settlementProcessor); err != nil {
 			panic(err)
 		}
-		logger.Infof("Starting reconciliation processor: interval=%s", conf.Interval.ReconciliationProcessor)
+
+		// Add reconciliation processor for event-based settlement verification
+		if conf.Interval.ReconciliationProcessor > 0 {
+			reconciliationProcessor := event.NewReconciliationProcessor(db, contract, conf.Interval.ReconciliationProcessor, logger)
+			if err := mgr.Add(reconciliationProcessor); err != nil {
+				panic(err)
+			}
+			logger.Infof("Starting reconciliation processor: interval=%s", conf.Interval.ReconciliationProcessor)
+		}
 	}
 
 	// Add revenue transfer processor if configured

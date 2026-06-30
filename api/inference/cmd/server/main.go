@@ -156,9 +156,13 @@ func Main() {
 	if err := ctrl.SyncUserAccounts(ctx); err != nil {
 		panic(err)
 	}
-	settleFeesErr := ctrl.SettleFeesWithTEE(ctx)
-	if settleFeesErr != nil {
-		logger.Errorf("error settling fees: %v", settleFeesErr)
+	// Credit providers bill off-chain via the credit service and never settle
+	// on-chain, so skip the boot-time settlement sweep entirely.
+	if !config.Service.CreditBilling.Enable {
+		settleFeesErr := ctrl.SettleFeesWithTEE(ctx)
+		if settleFeesErr != nil {
+			logger.Errorf("error settling fees: %v", settleFeesErr)
+		}
 	}
 	// At startup, USD providers use SyncServiceWithPrices — the same full
 	// identicalService comparison as NATIVE's SyncService, but with the

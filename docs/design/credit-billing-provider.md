@@ -12,10 +12,13 @@
 > | **Broker 配置** `CreditBillingConfig` | broker `api/inference/config/config.go` | ✅ 编译通过,默认 `enable=false`(链上用户零影响) |
 > | **SDK credit 模式开关** `setCreditMode({skipAutoFunding, skipAcknowledgement})` | user-broker `src.ts/sdk/inference/broker/`(分支 `raven/credit-billing`) | ✅ tsc 通过 |
 > | **跨 repo 互操作锁定** | 两侧共享 canonical 文本测试向量 + 签名/验签往返测试 | ✅ 两侧测试通过,格式漂移会被测试捕获 |
-> | **Broker 活路径接线**(admission 查余额 / 响应后签回执+扣费) | broker 各服务 handler(chatbot/stt/image/video)+ settlement | ⏳ **唯一剩余步骤**,见 §10、§11 |
+> | **Broker 活路径接线**(admission 查余额 / 响应后签回执+扣费) | broker chatbot 路径 + 两个 settlement 入口 + config 校验 | ✅ **已接线(chatbot)**,见 §10、§11 |
 >
-> 接线之所以单列:它要逐个改 broker 既有的多服务计费活路径(含流式),应当 config-gated + 配合团队 review,
-> 不宜盲改以免影响链上用户。组件已就绪,接线即"在两处调用已实现的 `creditbilling` API"。
+> 接线已完成并 config-gated(`CreditBilling.Enable`,默认关,链上用户零影响):
+> admission 在 `ValidateRequestWithEstimatedFee` 早分支查 credit 余额(fail-closed);chatbot 响应后在
+> `decodeAndProcess` 用真实 usage 签回执并调 credit 服务扣费(流式/非流式同路);`cmd/server` 启动结算与
+> `cmd/event` 的 SettlementProcessor/Reconciliation 在 credit 模式下整体禁用。**其它服务类型(image/stt/video)
+> 的 credit 计费暂未接线**——其 USD 计价单位不同,启动时 fail-stop 而非静默不计费(见 §10 config 校验)。
 
 ## 1. 目标与范围
 

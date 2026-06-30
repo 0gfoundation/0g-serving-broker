@@ -266,6 +266,14 @@ func (c *Ctrl) ValidateProviderAuth(ctx *gin.Context) error {
 // ValidateRequestWithEstimatedFee validates the request using an estimated fee
 // This is used before the actual token count is known from the LLM
 func (c *Ctrl) ValidateRequestWithEstimatedFee(ctx *gin.Context, req model.Request, estimatedFee string) error {
+	// Off-chain credit providers bill via the credit service, not on-chain.
+	// Their users may have no on-chain account, and the service is intentionally
+	// not TeeSigner-acknowledged — so bypass the on-chain account/ack/balance
+	// checks entirely and gate on the credit balance (fail-closed) instead.
+	if c.creditEnabled() {
+		return c.checkCreditBalance(ctx, req.UserAddress)
+	}
+
 	// Try to get contract account from cache first
 	userAddress := common.HexToAddress(req.UserAddress)
 	accountCacheKey := userAddress.Hex()

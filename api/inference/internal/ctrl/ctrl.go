@@ -16,6 +16,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
+	"github.com/0glabs/0g-serving-broker/inference/internal/creditbilling"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/internal/lora"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
@@ -44,7 +45,7 @@ type Ctrl struct {
 	logger   log.Logger
 
 	autoSettleBufferTime time.Duration
-	minSettlementFee    *big.Int
+	minSettlementFee     *big.Int
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
@@ -79,6 +80,13 @@ type Ctrl struct {
 
 	teeService          *tee.TeeService
 	chatCacheExpiration time.Duration
+
+	// Off-chain credit billing. creditClient is non-nil only when
+	// config.Service.CreditBilling.Enable; creditInMicro/creditOutMicro are the
+	// per-million-token prices in integer micro-USD (USD denomination required).
+	creditClient   *creditbilling.Client
+	creditInMicro  int64
+	creditOutMicro int64
 
 	// Session validation cache
 	sessionCache *cache.Cache
@@ -237,16 +245,16 @@ func New(
 			Timeout: cfg.ProviderHttp.TotalTimeout, // Overall request timeout
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
-				MaxIdleConns:          200,                                                                        // Increased total idle connections to handle more concurrent users
-				MaxIdleConnsPerHost:   200,                                                                        // Idle connections per host (critical for single backend)
-				MaxConnsPerHost:       500,                                                                        // Limit max active connections to prevent resource exhaustion
-				IdleConnTimeout:       90 * time.Second,                                                           // How long idle connections stay open
-				TLSHandshakeTimeout:   10 * time.Second,                                                           // TLS handshake timeout
+				MaxIdleConns:          200,                                    // Increased total idle connections to handle more concurrent users
+				MaxIdleConnsPerHost:   200,                                    // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       500,                                    // Limit max active connections to prevent resource exhaustion
+				IdleConnTimeout:       90 * time.Second,                       // How long idle connections stay open
+				TLSHandshakeTimeout:   10 * time.Second,                       // TLS handshake timeout
 				ResponseHeaderTimeout: cfg.ProviderHttp.ResponseHeaderTimeout, // Time to wait for response headers
-				ExpectContinueTimeout: 1 * time.Second,                                                            // Time to wait for 100-continue response
-				DisableKeepAlives:     false,                                                                      // Enable connection reuse (critical)
-				DisableCompression:    false,                                                                      // Allow gzip compression
-				ForceAttemptHTTP2:     false,                                                                      // Use HTTP/1.1 for stability
+				ExpectContinueTimeout: 1 * time.Second,                        // Time to wait for 100-continue response
+				DisableKeepAlives:     false,                                  // Enable connection reuse (critical)
+				DisableCompression:    false,                                  // Allow gzip compression
+				ForceAttemptHTTP2:     false,                                  // Use HTTP/1.1 for stability
 			},
 		},
 		// Initialize whitelist users map
@@ -276,6 +284,25 @@ func New(
 		}
 	} else {
 		logger.Info("Whitelist: disabled")
+	}
+
+	// Off-chain credit billing setup. Config validation guarantees, when
+	// enabled, that the endpoint is set, the service type is chatbot, and prices
+	// are USD-denominated — so the conversions below cannot fail in practice.
+	if cfg.Service.CreditBilling.Enable {
+		p.creditClient = creditbilling.NewClient(cfg.Service.CreditBilling.Endpoint, cfg.Service.CreditBilling.Timeout)
+		inMicro, err := creditbilling.UsdDecimalToMicro(cfg.Service.InputPriceUSDPerMillionTokens)
+		if err != nil {
+			logger.Errorf("credit billing: invalid inputPriceUSDPerMillionTokens %q: %v", cfg.Service.InputPriceUSDPerMillionTokens, err)
+		}
+		outMicro, err := creditbilling.UsdDecimalToMicro(cfg.Service.OutputPriceUSDPerMillionTokens)
+		if err != nil {
+			logger.Errorf("credit billing: invalid outputPriceUSDPerMillionTokens %q: %v", cfg.Service.OutputPriceUSDPerMillionTokens, err)
+		}
+		p.creditInMicro = inMicro
+		p.creditOutMicro = outMicro
+		logger.Infof("credit billing enabled: endpoint=%s, inputMicroUSD/M=%d, outputMicroUSD/M=%d",
+			cfg.Service.CreditBilling.Endpoint, inMicro, outMicro)
 	}
 
 	return p

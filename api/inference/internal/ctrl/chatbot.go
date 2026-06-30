@@ -427,6 +427,21 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	}
 
+	// Off-chain credit billing: charge the credit service from the actual usage.
+	// Runs after the response is delivered; a failure is logged (see
+	// billCreditChat), never surfaced to the client.
+	if c.creditEnabled() {
+		if usage != nil {
+			c.billCreditChat(reqBody, signData, int64(usage.PromptTokens), int64(usage.CompletionTokens), reqModel)
+		} else {
+			// No usage in the response: the request was served but cannot be
+			// billed (fail-open). The broker injects stream_options.include_usage,
+			// so this only happens with a non-compliant upstream — log loudly so
+			// the unbilled traffic is observable rather than silent revenue loss.
+			c.logger.Warnf("credit billing: response for %s carried no usage; request served UNBILLED", reqModel.RequestHash)
+		}
+	}
+
 	return nil
 }
 

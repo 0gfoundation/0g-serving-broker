@@ -280,6 +280,12 @@ type Service struct {
 	// yield wei-per-image. Mirrors OutputPriceUSDPerSecond for video. See validate.
 	OutputPriceUSDPerImage string `yaml:"outputPriceUSDPerImage"`
 
+	// CreditBilling configures off-chain USD credit billing for this service.
+	// When enabled the broker bills via the credit service (TEE-signed micro-USD
+	// receipts) instead of on-chain settlement. Requires USD denomination and
+	// (currently) the chatbot service type. See validate and CreditBillingConfig.
+	CreditBilling CreditBillingConfig `yaml:"creditBilling"`
+
 	// ModelPricing defines per-model pricing for centralized providers that serve multiple models.
 	// When configured, the broker validates requested models against this allowlist
 	// and bills at model-specific rates instead of the single on-chain price.
@@ -623,7 +629,6 @@ type Config struct {
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
-	CreditBilling       CreditBillingConfig     `yaml:"creditBilling"`
 	// AllowTokenBilledSpeechToText opens the billing path for token-billed
 	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
 	// Defaults to false.
@@ -851,6 +856,7 @@ func validatePricingTiers(prefix string, tiers []PricingTier) error {
 //   - lora_adapter_name: the broker derives this from an ft-* model during LoRA
 //     request rewriting (see RewriteLoRARequest); injecting it would clobber the
 //     resolved adapter.
+//
 // Injecting any of these is rejected at config load (fail loud, not silent).
 var protectedInjectBodyFields = map[string]struct{}{
 	"model":             {},
@@ -1318,6 +1324,28 @@ func loadConfig(cfg *Config) error {
 			return err
 		}
 		cfg.Service.StripBodyFields = normalized
+	}
+
+	// Off-chain credit billing. When enabled the broker bills via the credit
+	// service (TEE-signed micro-USD receipts) instead of on-chain settlement, so
+	// it requires: an endpoint, USD price denomination (the receipt fee is
+	// micro-USD derived from the USD-per-million prices), a non-negative balance
+	// threshold, and — for now — the chatbot service type. Other service types'
+	// USD-unit billing is not yet wired into the credit path; fail-stop rather
+	// than serve them unbilled.
+	if cfg.Service.CreditBilling.Enable {
+		if cfg.Service.CreditBilling.Endpoint == "" {
+			return fmt.Errorf("invalid config: service.creditBilling.endpoint is required when creditBilling.enable is true")
+		}
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.creditBilling is currently only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		if cfg.Service.PriceDenomination != constant.PriceDenominationUSD {
+			return fmt.Errorf("invalid config: service.creditBilling requires service.priceDenomination '%s', got '%s'", constant.PriceDenominationUSD, cfg.Service.PriceDenomination)
+		}
+		if cfg.Service.CreditBilling.MinBalanceMicroUsd < 0 {
+			return fmt.Errorf("invalid config: service.creditBilling.minBalanceMicroUsd must be >= 0, got %d", cfg.Service.CreditBilling.MinBalanceMicroUsd)
+		}
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.
