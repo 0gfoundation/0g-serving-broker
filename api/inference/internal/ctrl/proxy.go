@@ -352,10 +352,16 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 		return c.handleResponse(ctx, resp)
 	}
 
-	_, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress)
-	if err != nil {
-		c.handleBrokerError(ctx, err, "")
-		return err
+	// Credit providers bill off-chain; their users may have no on-chain account,
+	// so skip the on-chain GetOrCreateAccount (it hard-requires one and would
+	// otherwise discard an already-served response unbilled). Admission already
+	// gated on credit balance, and the downstream handlers only use the minimal
+	// account below (independent of the contract fetch).
+	if !c.creditEnabled() {
+		if _, err = c.GetOrCreateAccount(ctx, reqModel.UserAddress); err != nil {
+			c.handleBrokerError(ctx, err, "")
+			return err
+		}
 	}
 
 	account := model.User{

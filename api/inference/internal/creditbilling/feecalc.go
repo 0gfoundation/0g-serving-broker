@@ -2,7 +2,6 @@ package creditbilling
 
 import (
 	"math/big"
-	"strconv"
 
 	"github.com/pkg/errors"
 )
@@ -34,15 +33,6 @@ func FeeMicroUsd(inputCount, outputCount, inPriceMicroPerMillion, outPriceMicroP
 		return 0, errors.Errorf("computed fee overflows int64: %s micro-USD", sum.String())
 	}
 	return sum.Int64(), nil
-}
-
-// FeeMicroUsdString is FeeMicroUsd formatted as a decimal string for the receipt.
-func FeeMicroUsdString(inputCount, outputCount, inPriceMicroPerMillion, outPriceMicroPerMillion int64) (string, error) {
-	fee, err := FeeMicroUsd(inputCount, outputCount, inPriceMicroPerMillion, outPriceMicroPerMillion)
-	if err != nil {
-		return "", err
-	}
-	return strconv.FormatInt(fee, 10), nil
 }
 
 // UsdDecimalToMicro converts a decimal USD string (e.g. "2", "0.04", "1.5") to an
