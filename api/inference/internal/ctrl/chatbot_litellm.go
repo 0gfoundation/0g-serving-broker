@@ -150,6 +150,12 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 			return nil
 		}
 
+		// Credit providers bill from usage (captured above) via the credit
+		// service; skip the on-chain wei-price path (see processSingleResponse).
+		if c.creditEnabled() {
+			return nil
+		}
+
 		prices, err := c.GetBillingPrices(ctx)
 		if err != nil {
 			return errors.Wrap(err, "get billing prices for LiteLLM single response billing")
@@ -159,6 +165,12 @@ func (c *Ctrl) processLiteLLMSingleResponse(ctx context.Context, decodedBody []b
 
 	// Skip billing for whitelisted users
 	if isWhitelisted {
+		return nil
+	}
+
+	// Credit providers never touch the on-chain wei path; with no usage the
+	// request is logged served-unbilled in decodeAndProcess (no phantom wei row).
+	if c.creditEnabled() {
 		return nil
 	}
 

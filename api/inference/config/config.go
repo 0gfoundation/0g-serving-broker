@@ -1346,6 +1346,14 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.CreditBilling.MinBalanceMicroUsd < 0 {
 			return fmt.Errorf("invalid config: service.creditBilling.minBalanceMicroUsd must be >= 0, got %d", cfg.Service.CreditBilling.MinBalanceMicroUsd)
 		}
+		// Credit billing uses a single service-level price (creditInMicro/Out).
+		// modelPricing would make the service-level USD fields the max-over-models
+		// ceiling, so the credit path would bill every model at the most expensive
+		// model's price. Reject the combination until per-model credit pricing is
+		// implemented, rather than silently overcharge.
+		if len(cfg.Service.ModelPricing) > 0 {
+			return fmt.Errorf("invalid config: service.creditBilling is not yet supported together with service.modelPricing (would bill every model at the max-over-models price)")
+		}
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.

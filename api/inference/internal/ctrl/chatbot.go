@@ -430,7 +430,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	// Off-chain credit billing: charge the credit service from the actual usage.
 	// Runs after the response is delivered; a failure is logged (see
 	// billCreditChat), never surfaced to the client.
-	if c.creditEnabled() {
+	if c.creditEnabled() && !reqModel.IsWhitelisted {
 		if usage != nil {
 			c.billCreditChat(reqBody, signData, int64(usage.PromptTokens), int64(usage.CompletionTokens), reqModel)
 		} else {
@@ -471,6 +471,13 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 	// For non-stream responses, usage info is in the same response
 	if chunk.Usage != nil {
 		*usage = chunk.Usage
+		// Credit providers bill from usage (captured above) via the credit
+		// service in decodeAndProcess; skip the on-chain wei-price path — it
+		// needs the price feed credit doesn't use, and its stale-feed failure
+		// would otherwise return before the credit charge runs (served-unbilled).
+		if c.creditEnabled() {
+			return nil
+		}
 		// Get billing prices (model-specific for multi-model, on-chain for single-model)
 		prices, err := c.GetBillingPrices(ctx)
 		if err != nil {
@@ -479,6 +486,11 @@ func (c *Ctrl) processSingleResponse(ctx context.Context, decodedBody []byte, ou
 		return c.updateAccountWithUsage(ctx, chunk.Usage, prices.OutputPrice, requestHash, prices.InputPrice, prices.Tiers, prices.CacheTokenBilling)
 	}
 
+	// Credit providers never touch the on-chain wei path; with no usage the
+	// request is logged served-unbilled in decodeAndProcess (no phantom wei row).
+	if c.creditEnabled() {
+		return nil
+	}
 	return c.updateAccountWithOutput(ctx, *output, outputPrice, requestHash)
 }
 
@@ -817,6 +829,11 @@ func (c *Ctrl) finalizeChatStream(ctx context.Context, output string, usage *Usa
 			monitor.RecordWhitelistTokens("chatbot", metricModel, int64(usage.PromptTokens), int64(usage.CompletionTokens))
 			monitor.RecordTPSFromContext(ctx, "chatbot", metricModel, int64(usage.CompletionTokens))
 		}
+		return nil
+	}
+	// Credit providers bill from usage (captured by the caller) via the credit
+	// service; skip the on-chain wei-price path (see processSingleResponse).
+	if c.creditEnabled() {
 		return nil
 	}
 	if usage != nil {
