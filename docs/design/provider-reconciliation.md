@@ -132,31 +132,50 @@ multi-upstream routing lands. **No schema or query change is needed when that ha
 
 The retained aggregate that reconciliation reads. It mirrors `daily_stat`'s role (a
 non-user-scoped rollup written inside the settlement transaction) but at hourly resolution
-and with the `upstream` and `model` dimensions added:
+and with the `upstream`, `model`, and `service_type` dimensions added:
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `hour` | DATETIME (UTC, truncated to the hour) | Part of primary key |
+| `hour` | DATETIME (UTC, truncated to the hour) | Part of primary key; bucketed by the request's `created_at`, **not** settlement time (see below) |
 | `upstream` | VARCHAR | Part of primary key; vendor label from `Request.Upstream` |
 | `model` | VARCHAR | Part of primary key; the served model |
+| `service_type` | VARCHAR | Part of primary key; the unit discriminator for the count columns |
 | `request_count` | BIGINT | Always recorded (unit-agnostic) |
-| `input_tokens` | BIGINT | Token-billed services; `0` for speech-to-text (see below) |
-| `output_tokens` | BIGINT | Token-billed services; `0` for speech-to-text |
+| `input_count` | BIGINT | Raw, same semantics as `Request.InputCount` for the row's `service_type` |
+| `output_count` | BIGINT | Raw, same semantics as `Request.OutputCount` for the row's `service_type` |
 
-Primary key: `(hour, upstream, model)`. Row cardinality is `hours × upstreams × models`,
-which is tiny (a day is ≤ `24 × vendors × models` rows), so a retention pruner analogous to
-`user_daily_stat`'s trims old rows.
+Primary key: `(hour, upstream, model, service_type)`. Row cardinality is
+`hours × upstreams × models × service_types`, which is tiny (a day is ≤ a few dozen rows per
+model), so a retention pruner analogous to `user_daily_stat`'s trims old rows.
 
 It is written in the same atomic path that already accumulates `daily_stat` /
 `user_daily_stat` and deletes settled requests
 (`db.AccumulateAndDeleteRequests`), so the hourly rollup survives request deletion and never
 double-counts.
 
-**Speech-to-text unit caveat.** As with `daily_stat`, STT stores *seconds* in
-`input_count`, not tokens, so its token columns are left `0` (consistent with the #530
-gating). STT reconciliation is therefore by `request_count` (and, when a seconds dimension
-is added, by duration) — never by the token columns. For token-billed chatbot traffic
-(the MiniMax case) the token columns are the primary reconciliation dimension.
+**Bucket by `created_at`, not settlement time.** `daily_stat` attributes usage to the
+*settlement* day (`UTC_DATE()` at the moment of settlement). Reconciliation must instead
+attribute usage to when the request actually happened, because that is how a provider
+statement buckets it. So the hourly rollup groups each request by `req.CreatedAt.UTC()`
+truncated to the hour — computed per request in Go during the accumulation loop — rather than
+by the single settlement date the sibling `daily_stat` upsert uses.
+
+**Units are per `service_type`, so counts are stored raw, not as "tokens".** The
+`input_count`/`output_count` columns carry whatever unit the service type bills in, and that
+differs by type. Storing them raw (with `service_type` as the discriminator) keeps the rollup
+faithful and avoids the lossy token-column skip `daily_stat` makes for STT (#530):
+
+| `service_type` | `input_count` | `output_count` |
+|----------------|---------------|----------------|
+| chatbot | input tokens | output tokens |
+| speech-to-text (whisper) | seconds | 0 |
+| text-to-image / image-editing | 0 | image count |
+
+Reconciliation interprets the unit from `service_type`: a chatbot (MiniMax) statement is
+compared token-for-token, an image vendor's statement against `output_count` (images), an STT
+vendor's statement against `input_count` (seconds, converted to the vendor's unit). The
+"compare only the fields present" logic is unchanged; only the unit interpretation is keyed
+off `service_type`.
 
 ## Timezones and boundary handling
 
