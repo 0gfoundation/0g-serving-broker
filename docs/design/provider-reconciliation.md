@@ -153,14 +153,17 @@ and with the `upstream`, `model`, and `unit` dimensions added:
 | `upstream` | VARCHAR | Part of primary key; vendor label from `Request.Upstream` |
 | `model` | VARCHAR | Part of primary key; the served model |
 | `unit` | VARCHAR | Part of primary key; the authoritative billing unit for the count columns (`tokens` / `seconds` / `images`) |
+| `is_whitelisted` | BOOL | Part of primary key; whitelisted traffic is counted here (it hits the upstream) but tagged so settlement-side views still exclude it — see [Definitional alignment](#whitelisted-traffic-must-be-counted-even-though-it-is-not-billed) |
 | `service_type` | VARCHAR | Informational context (`chatbot` / `speech-to-text` / `text-to-image` / …) |
 | `request_count` | BIGINT | Always recorded (unit-agnostic) |
 | `input_count` | BIGINT | Raw, same semantics as `Request.InputCount` for the row's `unit` |
 | `output_count` | BIGINT | Raw, same semantics as `Request.OutputCount` for the row's `unit` |
+| `cached_input_tokens` | BIGINT | Optional sub-category; cache-hit input tokens (`0` when not reported / not applicable) |
 
-Primary key: `(hour, upstream, model, unit)`. Row cardinality is
-`hours × upstreams × models × units`, which is tiny (a day is ≤ a few dozen rows per model),
-so a retention pruner analogous to `user_daily_stat`'s trims old rows.
+Primary key: `(hour, upstream, model, unit, is_whitelisted)`. Row cardinality stays tiny (a
+day is ≤ a few dozen rows per model), so a retention pruner analogous to `user_daily_stat`'s
+trims old rows. Further sub-category columns (e.g. `reasoning_output_tokens`) are added when
+the corresponding usage detail is parsed.
 
 It is written in the same atomic path that already accumulates `daily_stat` /
 `user_daily_stat` and deletes settled requests
@@ -248,6 +251,57 @@ the broker's `fee` is in 0G (A0GI wei) charged to users at the on-chain price. T
 directly equal. When `cost` is supplied, reconciliation converts via the existing
 `pricefeed` and reports it as a **margin check** under a wider tolerance — never as a hard
 balance. Token / request dimensions are the high-confidence checks.
+
+## Definitional alignment: what counts as a token / a request
+
+Most reconciliation gaps are not lost data — they are the two sides *counting different
+things*. These definitional mismatches are systematic (they recur every period) and must be
+handled explicitly, not absorbed as noise.
+
+### Whitelisted traffic must be counted, even though it is not billed
+
+Whitelisted users (internal services, monitoring) bypass billing and **never create a
+`request` row** (`proxy.go`; see `user_daily_stat.go`). But that traffic still hits the
+upstream and still appears on the upstream's statement. If the rollup only sees billable
+requests, every reconciliation shows a **persistent, unexplained shortfall equal to the
+whitelisted volume** — and the vendor cannot subtract it for us (it cannot tell which of our
+calls were whitelisted).
+
+Therefore the hourly rollup **must count whitelisted traffic too**, tagged with an
+`is_whitelisted` flag so reconciliation can include it against the vendor total while
+everything else (settlement, `daily_stat`) continues to exclude it. Consequence: the hourly
+counter cannot be written *only* inside `AccumulateAndDeleteRequests` (which runs for
+billable, settled requests). Whitelisted requests need a separate increment into
+`hourly_usage_stat` at response completion, since they are deleted from no table because they
+were never inserted into one.
+
+### Token sub-categories: cache, reasoning, audio
+
+`prompt_tokens` (what the broker stores as `InputCount`) is the **total** input **including
+cached tokens**. `PromptTokensDetails.CachedTokens` is already parsed from the upstream
+response but currently discarded. When a vendor statement reports input split into fresh vs
+cache-hit tokens (billed at different rates), or reports "billable input = total − cached",
+comparing the broker's total against the vendor's fresh-only number leaves a gap of exactly
+`cached_tokens` — a definitional mismatch, not a bug. So the rollup carries optional
+sub-category columns (`cached_input_tokens`, and `reasoning_output_tokens` once thinking
+models are served and `completion_tokens_details` is parsed) so reconciliation can align to
+whichever definition the vendor bills on, and so the cost/margin dimension can account for
+the cache discount.
+
+> Note (policy, not a reconciliation bug): the broker currently bills users
+> `prompt_tokens × input_price`, i.e. **cached tokens at full price**. Passing a cache
+> discount through to users would require `cached_tokens` in the fee calculation — recording
+> it here is a prerequisite if that policy is ever adopted.
+
+### What counts as a "request"
+
+Errored / zero-output requests (the broker prunes zero-output rows after an hour), upstream
+retries (the broker may count one where the vendor counts the retried attempts), and
+client-disconnect (the broker bills the completed response) are all points where "one
+request" can mean different things on the two sides. For each, either align the definition
+with the vendor or let the tolerance band absorb it — but decide deliberately rather than
+discovering the gap during a reconciliation. STT second-rounding (`billableSeconds`) and
+broker-vs-vendor timestamp skew are small enough to leave to the tolerance band.
 
 ## Output
 
