@@ -111,6 +111,10 @@ dynamic routing (the intended target ≠ the served target).
 
 ## Data model
 
+Two new server-set columns on `model.Request` (`Upstream` and `Unit`). Both are stamped by
+the broker, never client-supplied, so — like the existing `ModelName` — they do not appear
+in the generated `Bind()` and require no `model/gen` regeneration.
+
 ### `Request.Upstream` (new field)
 
 A new column on `model.Request`, populated in the proxy/dispatch path with the vendor label
@@ -128,25 +132,35 @@ ones, so it is **not** used as the reconciliation key directly — it merely *se
 identical across all three scenarios; only the field's population source changes when
 multi-upstream routing lands. **No schema or query change is needed when that happens.**
 
+### `Request.Unit` (new field)
+
+A new column on `model.Request` recording the authoritative billing unit (`tokens` /
+`seconds` / `images`) for that request's `InputCount`/`OutputCount`. Stamped at the point the
+response processor decides the unit and sets the counts — in particular the `isDurationBilled`
+branch in `ctrl/speech_to_text.go`, since STT splits between seconds (whisper) and tokens
+(gpt-4o-transcribe) by response shape, so the unit cannot be inferred from `service_type`
+alone. Carried into the `hourly_usage_stat` key at settlement.
+
 ### `hourly_usage_stat` (new table)
 
 The retained aggregate that reconciliation reads. It mirrors `daily_stat`'s role (a
 non-user-scoped rollup written inside the settlement transaction) but at hourly resolution
-and with the `upstream`, `model`, and `service_type` dimensions added:
+and with the `upstream`, `model`, and `unit` dimensions added:
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `hour` | DATETIME (UTC, truncated to the hour) | Part of primary key; bucketed by the request's `created_at`, **not** settlement time (see below) |
 | `upstream` | VARCHAR | Part of primary key; vendor label from `Request.Upstream` |
 | `model` | VARCHAR | Part of primary key; the served model |
-| `service_type` | VARCHAR | Part of primary key; the unit discriminator for the count columns |
+| `unit` | VARCHAR | Part of primary key; the authoritative billing unit for the count columns (`tokens` / `seconds` / `images`) |
+| `service_type` | VARCHAR | Informational context (`chatbot` / `speech-to-text` / `text-to-image` / …) |
 | `request_count` | BIGINT | Always recorded (unit-agnostic) |
-| `input_count` | BIGINT | Raw, same semantics as `Request.InputCount` for the row's `service_type` |
-| `output_count` | BIGINT | Raw, same semantics as `Request.OutputCount` for the row's `service_type` |
+| `input_count` | BIGINT | Raw, same semantics as `Request.InputCount` for the row's `unit` |
+| `output_count` | BIGINT | Raw, same semantics as `Request.OutputCount` for the row's `unit` |
 
-Primary key: `(hour, upstream, model, service_type)`. Row cardinality is
-`hours × upstreams × models × service_types`, which is tiny (a day is ≤ a few dozen rows per
-model), so a retention pruner analogous to `user_daily_stat`'s trims old rows.
+Primary key: `(hour, upstream, model, unit)`. Row cardinality is
+`hours × upstreams × models × units`, which is tiny (a day is ≤ a few dozen rows per model),
+so a retention pruner analogous to `user_daily_stat`'s trims old rows.
 
 It is written in the same atomic path that already accumulates `daily_stat` /
 `user_daily_stat` and deletes settled requests
@@ -160,22 +174,27 @@ statement buckets it. So the hourly rollup groups each request by `req.CreatedAt
 truncated to the hour — computed per request in Go during the accumulation loop — rather than
 by the single settlement date the sibling `daily_stat` upsert uses.
 
-**Units are per `service_type`, so counts are stored raw, not as "tokens".** The
-`input_count`/`output_count` columns carry whatever unit the service type bills in, and that
-differs by type. Storing them raw (with `service_type` as the discriminator) keeps the rollup
-faithful and avoids the lossy token-column skip `daily_stat` makes for STT (#530):
+**`unit` is authoritative and per-request, not inferred from `service_type`.** The
+`input_count`/`output_count` columns carry whatever unit the request was billed in, and that
+unit is **not** a function of `service_type`: within `speech-to-text`, whisper responses
+(`{"type":"duration","seconds":N}`) are billed by **seconds** while gpt-4o-transcribe
+responses (`{"type":"tokens","input_tokens":N,…}`) are billed by **tokens** — the
+`isDurationBilled` branch in `ctrl/speech_to_text.go` decides per response. So the unit is
+stamped on the `Request` at the exact point that branch runs and `InputCount`/`OutputCount`
+are set, then carried into the rollup key. This keeps the aggregate faithful and avoids the
+lossy token-column skip `daily_stat` makes for STT (#530):
 
-| `service_type` | `input_count` | `output_count` |
-|----------------|---------------|----------------|
-| chatbot | input tokens | output tokens |
-| speech-to-text (whisper) | seconds | 0 |
-| text-to-image / image-editing | 0 | image count |
+| `service_type` | `unit` | `input_count` | `output_count` |
+|----------------|--------|---------------|----------------|
+| chatbot | `tokens` | input tokens | output tokens |
+| speech-to-text (whisper) | `seconds` | seconds | 0 |
+| speech-to-text (gpt-4o-transcribe) | `tokens` | input tokens | output tokens |
+| text-to-image / image-editing | `images` | 0 | image count |
 
-Reconciliation interprets the unit from `service_type`: a chatbot (MiniMax) statement is
-compared token-for-token, an image vendor's statement against `output_count` (images), an STT
-vendor's statement against `input_count` (seconds, converted to the vendor's unit). The
-"compare only the fields present" logic is unchanged; only the unit interpretation is keyed
-off `service_type`.
+Reconciliation interprets the counts from `unit`: a `tokens` statement (MiniMax) is compared
+token-for-token, an `images` statement against `output_count`, a `seconds` statement against
+`input_count` (converted to the vendor's unit, e.g. minutes). The "compare only the fields
+present" logic is unchanged; only the unit interpretation is keyed off `unit`.
 
 ## Timezones and boundary handling
 
