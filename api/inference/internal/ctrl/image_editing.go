@@ -141,13 +141,29 @@ func findSubstring(s, substr string) int {
 func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	// chatKey always backs the image store / broker-served URLs; ZG-Res-Key (the
+	// signature-lookup handle) is only advertised when the response is signed. A
+	// standard/TargetSeparated provider produces no signature, so advertising it
+	// would point clients at a signature endpoint that only 404s.
 	chatKey := uuid.NewString()
-	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read image editing response body")
 		return err
+	}
+
+	// For forwarder providers, strip #184 upstream identity/cost leak fields before
+	// the envelope is used for extraction, URL rewrite, signing, or forwarding
+	// (sanitize-before-sign keeps the signature bound to what the client receives).
+	// sanitizeResponseBody preserves data[] (image payloads).
+	if c.Service.IsForwarder() {
+		if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
+			body = sanitized
+		}
 	}
 
 	responseSizeMB := float64(len(body)) / (1024 * 1024)

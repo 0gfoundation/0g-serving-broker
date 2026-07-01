@@ -159,6 +159,18 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		if cfg.IsCentralized() {
 			servingDomain = parseServingDomain(cfg.TargetURL)
 		}
+		// Provider class/identity are surfaced only for centralized providers (same
+		// gate as the single-model path). A standard provider hides its upstream, so
+		// it must not publish providerType/providerIdentity here either.
+		var providerType, providerIdentity string
+		if cfg.IsCentralized() {
+			providerType = cfg.ProviderType
+			providerIdentity = cfg.ProviderIdentity
+		}
+		// A standard provider performs no response attestation; its settlement TEE
+		// signer being acknowledged must not surface as tee_attested (that marker
+		// reflects response verifiability, which standard deliberately omits).
+		teeAttested := svc.TeeSignerAcknowledged && !cfg.IsStandard()
 		var created int64
 		if svc.CreatedAt != nil {
 			created = svc.CreatedAt.Unix()
@@ -230,11 +242,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				OwnedBy:          cfg.OwnedBy,
 				Type:             svc.Type,
 				Verifiability:    svc.Verifiability,
-				TeeAttested:      svc.TeeSignerAcknowledged,
+				TeeAttested:      teeAttested,
 				TeeVerifier:      teeVerifier,
 				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
-				ProviderType:     cfg.ProviderType,
-				ProviderIdentity: cfg.ProviderIdentity,
+				ProviderType:     providerType,
+				ProviderIdentity: providerIdentity,
 				ProviderName:     cfg.ProviderName,
 				ProviderCountry:  cfg.ProviderCountry,
 				ServingDomain:    servingDomain,
@@ -357,8 +369,10 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		OwnedBy:       cfg.OwnedBy,
 		Type:          svc.Type,
 		Verifiability: svc.Verifiability,
-		TeeAttested:   svc.TeeSignerAcknowledged,
-		Pricing:       &ModelPricing{},
+		// A standard provider does no response attestation; don't surface its
+		// settlement-signer acknowledgement as tee_attested (mirrors multi-model).
+		TeeAttested: svc.TeeSignerAcknowledged && !cfg.IsStandard(),
+		Pricing:     &ModelPricing{},
 	}
 
 	if svc.CreatedAt != nil {

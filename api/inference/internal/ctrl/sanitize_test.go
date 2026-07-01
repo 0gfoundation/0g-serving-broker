@@ -315,6 +315,15 @@ func TestIsUpstreamLeakHeader(t *testing.T) {
 		{"X-Powered-By", true},
 		{"X-Ratelimit-Remaining", true},
 		{"X-Clerk-Auth", true},
+		// Upstream-vendor identity headers (OpenAI / Anthropic / Cloudflare front).
+		{"Openai-Organization", true},
+		{"Openai-Version", true},
+		{"Openai-Processing-Ms", true},
+		{"Anthropic-Ratelimit-Requests-Remaining", true},
+		{"Anthropic-Organization-Id", true},
+		{"Cf-Ray", true},
+		{"Cf-Cache-Status", true},
+		{"Location", true},
 		{"Content-Type", false},
 		{"Content-Encoding", false},
 		{"ZG-Res-Key", false},
@@ -329,6 +338,47 @@ func TestIsUpstreamLeakHeader(t *testing.T) {
 
 // router #373: the synthesized openrouter.reasoning redacted_thinking block must
 // not reach the client on the Anthropic surface.
+// TestSanitizeResponseBody_ImageEnvelopePreservesData pins the property the
+// forwarder image/video/async paths rely on: leak keys (provider/cost) are
+// stripped from an image envelope while the data[] payload (b64/url images) is
+// left intact, so sanitizing before extraction/URL-rewrite/signing is safe.
+func TestSanitizeResponseBody_ImageEnvelopePreservesData(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+
+	in := []byte(`{"created":1700000000,"provider":"openai","cost":0.04,` +
+		`"data":[{"b64_json":"aGVsbG8="},{"b64_json":"d29ybGQ="}]}`)
+	out, changed := c.sanitizeResponseBody(in, "")
+	if !changed {
+		t.Fatal("expected changed=true (provider/cost present)")
+	}
+	obj := decode(t, out)
+	if _, ok := obj["provider"]; ok {
+		t.Error("provider leak key not stripped from image envelope")
+	}
+	if _, ok := obj["cost"]; ok {
+		t.Error("cost leak key not stripped from image envelope")
+	}
+	data, ok := obj["data"].([]interface{})
+	if !ok || len(data) != 2 {
+		t.Fatalf("data[] must be preserved intact, got %v", obj["data"])
+	}
+	if d0 := data[0].(map[string]interface{}); d0["b64_json"] != "aGVsbG8=" {
+		t.Errorf("image payload corrupted, got %v", d0["b64_json"])
+	}
+}
+
+// TestSanitizeResponseBody_CleanImageEnvelopeUnchanged verifies a clean upstream
+// image envelope (no leak keys) is a no-op, so forwarder sanitization never
+// rewrites or corrupts a well-behaved response.
+func TestSanitizeResponseBody_CleanImageEnvelopeUnchanged(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	in := []byte(`{"created":1700000000,"data":[{"b64_json":"aGVsbG8="}]}`)
+	out, changed := c.sanitizeResponseBody(in, "")
+	if changed {
+		t.Errorf("clean envelope should be unchanged, got %s", out)
+	}
+}
+
 func TestSanitizeResponseBody_StripsUpstreamReasoningLeak(t *testing.T) {
 	c := &Ctrl{logger: testLogger()}
 

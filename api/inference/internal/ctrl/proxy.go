@@ -408,12 +408,25 @@ func isUpstreamLeakHeader(key string) bool {
 	switch k {
 	case "provider", "server", "via", "x-powered-by":
 		return true
+	case "location":
+		// An upstream redirect Location would name the upstream host. Go's http
+		// client auto-follows redirects so this rarely reaches the response today,
+		// but strip it defensively so a future CheckRedirect change can't leak it.
+		return true
 	}
 	return strings.HasPrefix(k, "x-openrouter") ||
 		strings.HasPrefix(k, "openrouter") ||
 		strings.HasPrefix(k, "x-or-") ||
 		strings.HasPrefix(k, "x-ratelimit") ||
-		strings.HasPrefix(k, "x-clerk")
+		strings.HasPrefix(k, "x-clerk") ||
+		// Upstream-vendor identity headers real providers emit and name themselves
+		// with: OpenAI (openai-organization/openai-version/openai-processing-ms),
+		// Anthropic (anthropic-ratelimit-*/anthropic-organization-id), and the
+		// Cloudflare front all three sit behind (cf-ray/cf-cache-status). Forwarding
+		// any of these would reveal the upstream a "standard" provider must hide.
+		strings.HasPrefix(k, "openai-") ||
+		strings.HasPrefix(k, "anthropic-") ||
+		strings.HasPrefix(k, "cf-")
 }
 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
@@ -562,16 +575,32 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", decodedBody, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
+	// Forwarder providers (centralized/standard) hide their upstream, but an
+	// upstream ERROR body can still name it (e.g. {"error":{...,"provider":"openai"}}
+	// or an upstream model id). The success path sanitizes (#184, see handleResponse);
+	// the error path did not. Strip leak fields from the decoded error body before
+	// re-emitting for forwarders. Emit the decoded body (dropping the now-stale
+	// Content-Encoding) when sanitization changed it; otherwise forward the original
+	// bytes unchanged (leak headers are already stripped upstream in ProcessHTTPRequest).
+	outBody := respBody
+	if c.Service.IsForwarder() {
+		if sanitized, changed := c.sanitizeResponseBody([]byte(decodedBody), ""); changed {
+			outBody = sanitized
+			ctx.Writer.Header().Del("Content-Encoding")
+		}
+	}
+
 	ctx.Writer.WriteHeader(statusCode)
 
-	if _, err := ctx.Writer.Write(respBody); err != nil {
+	if _, err := ctx.Writer.Write(outBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
 	}
 }
 
 // decodeErrorBody returns a human-readable form of an upstream error body, decompressing
-// it according to the upstream Content-Encoding. On any failure, it returns the raw string —
-// callers use this only for logging and substring matching, never for re-emission.
+// it according to the upstream Content-Encoding. On any failure, it returns the raw string.
+// Used for logging and substring matching, and — for forwarder providers — as the input to
+// leak-field sanitization whose decoded output is then re-emitted (Content-Encoding dropped).
 func decodeErrorBody(body []byte, contentEncoding string) string {
 	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
 	case "", "identity":

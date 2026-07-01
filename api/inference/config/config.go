@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
 	"regexp"
@@ -1296,6 +1297,11 @@ func loadConfig(cfg *Config) error {
 		// A standard provider forwards to an external upstream and never signs, so it
 		// always behaves as TargetSeparated (no broker signature, no ZG-Res-Key).
 		cfg.Service.TargetSeparated = true
+		// TargetSeparated is forced on, which would otherwise publish a
+		// TargetTeeAddress on-chain (see buildAdditionalInfo). A standard provider has
+		// no upstream TEE, so force it empty rather than leak a stale/misleading TEE
+		// address for a non-verifiable service.
+		cfg.Service.TargetTeeAddress = ""
 		// The upstream must be configured explicitly — a standard provider has no
 		// co-located model and no known default base URL.
 		if cfg.Service.TargetURL == "" {
@@ -1310,6 +1316,19 @@ func loadConfig(cfg *Config) error {
 			return fmt.Errorf("invalid config: service.verifiability must be empty or '%s' when providerType is 'standard', got '%s'", constant.VerifiabilityStandard, cfg.Service.Verifiability)
 		}
 		cfg.Service.Verifiability = constant.VerifiabilityStandard
+
+		// Upstream-hiding is complete for chatbot / speech-to-text / image responses
+		// (leak headers + leak-key body fields are stripped, and image assets are
+		// broker-served). Video is the exception: the broker does not proxy video
+		// bytes, so if the upstream returns the finished asset as a DIRECT URL in the
+		// response body (e.g. {"output":{"video_url":"https://<upstream-host>/..."}}),
+		// that host reaches the client — leak-key stripping does not rewrite URL
+		// values. Upstreams that expose the asset via the OpenAI GET /videos/{id}/content
+		// pattern (which the broker proxies) do not leak. Warn so the operator makes a
+		// conscious choice. (stdlib log: the structured logger isn't up at config load.)
+		if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
+			log.Printf("[CONFIG] providerType 'standard' with type 'video-generation': the upstream is fully hidden only when it returns the asset via GET /videos/{id}/content (broker-proxied). An upstream that returns a direct asset URL in the response body will expose that URL's host to clients — the broker does not proxy video bytes or rewrite URL values.")
+		}
 	}
 
 	// Body-field injection is only applied for the chatbot service type (see

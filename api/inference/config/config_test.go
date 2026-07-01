@@ -182,6 +182,31 @@ service:
 	}
 }
 
+func TestLoadConfig_ProviderTypeStandard_ForcesEmptyTargetTeeAddress(t *testing.T) {
+	// standard forces TargetSeparated=true, which would otherwise publish a
+	// TargetTeeAddress on-chain. A stale/copied targetTeeAddress must be zeroed so a
+	// non-verifiable, upstream-hidden service never advertises a TEE address.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  targetTeeAddress: "0x1234567890123456789012345678901234567890"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.Service.TargetTeeAddress != "" {
+		t.Errorf("expected TargetTeeAddress forced empty for standard, got %q", cfg.Service.TargetTeeAddress)
+	}
+}
+
 func TestLoadConfig_ProviderTypeStandard_RejectsProviderIdentity(t *testing.T) {
 	// A standard provider hides its upstream, so a providerIdentity is rejected
 	// rather than silently ignored.
