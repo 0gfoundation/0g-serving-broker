@@ -148,6 +148,120 @@ service:
 	}
 }
 
+func TestLoadConfig_ProviderTypeStandard(t *testing.T) {
+	// A standard provider is a pure forwarder: it must load without a
+	// providerIdentity, force TargetSeparated, and force the "standard"
+	// verifiability marker so it can never claim a TEE mode.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if !cfg.Service.IsStandard() || !cfg.Service.IsForwarder() {
+		t.Errorf("expected IsStandard && IsForwarder, got providerType %q", cfg.Service.ProviderType)
+	}
+	if cfg.Service.IsCentralized() {
+		t.Error("standard provider must not report IsCentralized")
+	}
+	if !cfg.Service.TargetSeparated {
+		t.Error("standard provider must force TargetSeparated")
+	}
+	if cfg.Service.Verifiability != "standard" {
+		t.Errorf("expected verifiability 'standard', got %q", cfg.Service.Verifiability)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsProviderIdentity(t *testing.T) {
+	// A standard provider hides its upstream, so a providerIdentity is rejected
+	// rather than silently ignored.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  providerIdentity: "openai"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "providerIdentity must not be set") {
+		t.Fatalf("expected providerIdentity rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsTeeMLVerifiability(t *testing.T) {
+	// A standard provider is non-verifiable; it must not advertise a TEE mode that
+	// would make clients attempt a verification the broker never backs.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "verifiability must be empty or 'standard'") {
+		t.Fatalf("expected verifiability rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RequiresTargetURL(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "targetUrl is required") {
+		t.Fatalf("expected targetUrl-required rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_AllowsModelPricing(t *testing.T) {
+	// Multi-model pricing is supported for standard forwarders, same as centralized.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "standard"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("standard multi-model should be allowed, got: %v", err)
+	}
+	if !cfg.Service.HasMultiModelPricing() {
+		t.Fatal("expected multi-model pricing to be configured")
+	}
+}
+
 func TestLoadConfig_CanonicalID_Valid(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
@@ -1025,7 +1139,7 @@ service:
 	if err == nil {
 		t.Fatal("expected error for invalid providerType")
 	}
-	if !strings.Contains(err.Error(), "must be 'decentralized' or 'centralized'") {
+	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', or 'standard'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

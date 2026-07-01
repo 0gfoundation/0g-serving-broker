@@ -42,18 +42,29 @@ var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(bi
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
 func buildAdditionalInfo(service config.Service, imageName, imageDigest string, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (string, error) {
-	// Determine TEE verifier based on NETWORK environment variable
+	// Determine TEE verifier based on NETWORK environment variable. A standard
+	// provider performs no TEE verification, so it publishes no verifier: leaving
+	// TEEVerifier/VerifierURL empty means a client has nothing to call even if it
+	// somehow reached the verification path (it does not — verifiability "standard"
+	// is already skipped client-side).
 	var teeVerifier string
-	switch os.Getenv("NETWORK") {
-	case "phala":
-		teeVerifier = tee.VerifierDStack
-	default:
-		teeVerifier = tee.VerifierCryptoPilot
+	if !service.IsStandard() {
+		switch os.Getenv("NETWORK") {
+		case "phala":
+			teeVerifier = tee.VerifierDStack
+		default:
+			teeVerifier = tee.VerifierCryptoPilot
+		}
+	}
+
+	verifierURL := service.VerifierURL
+	if service.IsStandard() {
+		verifierURL = ""
 	}
 
 	// Create AdditionalInfo JSON string
 	additionalInfo := map[string]interface{}{
-		"VerifierURL":      service.VerifierURL,
+		"VerifierURL":      verifierURL,
 		"TEEVerifier":      teeVerifier,
 		"TargetSeparated":  service.TargetSeparated,
 		"TargetTeeAddress": "",

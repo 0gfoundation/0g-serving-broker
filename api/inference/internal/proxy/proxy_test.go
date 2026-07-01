@@ -209,15 +209,48 @@ func TestProxyHTTPRequest_CentralizedBlocksAttestation(t *testing.T) {
 				t.Fatalf("failed to parse response body: %v", err)
 			}
 			errMsg, _ := body["error"].(string)
-			if !strings.Contains(errMsg, "centralized") {
-				t.Errorf("expected error mentioning 'centralized', got: %s", errMsg)
+			if !strings.Contains(errMsg, "attestation report is not available") {
+				t.Errorf("expected error mentioning attestation unavailability, got: %s", errMsg)
 			}
 		})
 	}
 }
 
+func TestProxyHTTPRequest_StandardBlocksAttestation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// A standard forwarder hides its upstream and hosts no local TEE, so an
+	// attestation request must be blocked at the broker (501) rather than proxied
+	// to — and thereby revealing — the upstream.
+	c := &ctrl.Ctrl{
+		Service: config.Service{
+			ProviderType: "standard",
+		},
+	}
+	p := &Proxy{
+		ctrl:          c,
+		logger:        noopLogger{},
+		serviceTarget: "https://backend:8000",
+		serviceType:   "chatbot",
+	}
+
+	w := httptest.NewRecorder()
+	ctx, engine := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", constant.ServicePrefix+"/attestation/report", nil)
+	engine.GET(constant.ServicePrefix+"/*any", func(c *gin.Context) {
+		p.proxyHTTPRequest(c)
+	})
+	engine.ServeHTTP(w, ctx.Request)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("expected status %d, got %d; body: %s", http.StatusNotImplemented, w.Code, w.Body.String())
+	}
+}
+
 func TestCentralizedAttestationGuard_Logic(t *testing.T) {
-	// Verify the guard condition: only centralized + attestation path triggers blocking.
+	// Verify the guard condition: any forwarder (centralized/standard) +
+	// attestation path triggers blocking; decentralized and non-attestation paths
+	// do not.
 	tests := []struct {
 		name         string
 		providerType string
@@ -226,8 +259,11 @@ func TestCentralizedAttestationGuard_Logic(t *testing.T) {
 	}{
 		{"centralized + attestation", "centralized", "/attestation/report", true},
 		{"centralized + attestation with query", "centralized", "/attestation/report?model=gpt-4o", true},
+		{"standard + attestation", "standard", "/attestation/report", true},
+		{"standard + attestation with query", "standard", "/attestation/report?model=gpt-4o", true},
 		{"decentralized + attestation", "decentralized", "/attestation/report", false},
 		{"centralized + signature", "centralized", "/signature/abc123", false},
+		{"standard + signature", "standard", "/signature/abc123", false},
 		{"decentralized + signature", "decentralized", "/signature/abc123", false},
 	}
 
@@ -241,7 +277,7 @@ func TestCentralizedAttestationGuard_Logic(t *testing.T) {
 				targetPath = targetPath[:idx]
 			}
 
-			blocked := svc.IsCentralized() && strings.HasPrefix(strings.ToLower(targetPath), "/attestation")
+			blocked := svc.IsForwarder() && strings.HasPrefix(strings.ToLower(targetPath), "/attestation")
 			if blocked != tt.shouldBlock {
 				t.Errorf("expected shouldBlock=%v, got %v", tt.shouldBlock, blocked)
 			}

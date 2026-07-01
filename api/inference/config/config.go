@@ -372,6 +372,21 @@ func (s *Service) IsCentralized() bool {
 	return s.ProviderType == constant.ProviderTypeCentralized
 }
 
+// IsStandard returns true if this service is a "standard" pure forwarder: no TEE
+// verification, no response signing, and a hidden upstream (no provider identity
+// or upstream domain published). See constant.ProviderTypeStandard.
+func (s *Service) IsStandard() bool {
+	return s.ProviderType == constant.ProviderTypeStandard
+}
+
+// IsForwarder returns true for provider types that proxy to an external upstream
+// rather than co-locating the model with the broker (centralized and standard).
+// These share forwarding behavior: TargetSeparated is forced, per-model pricing is
+// allowed, and no LLM attestation is hosted locally.
+func (s *Service) IsForwarder() bool {
+	return s.IsCentralized() || s.IsStandard()
+}
+
 // IsUSDDenominated returns true if this service's prices are configured in USD
 // and must be converted to wei by the price-feed subsystem.
 func (s *Service) IsUSDDenominated() bool {
@@ -829,6 +844,7 @@ func validatePricingTiers(prefix string, tiers []PricingTier) error {
 //   - lora_adapter_name: the broker derives this from an ft-* model during LoRA
 //     request rewriting (see RewriteLoRARequest); injecting it would clobber the
 //     resolved adapter.
+//
 // Injecting any of these is rejected at config load (fail loud, not silent).
 var protectedInjectBodyFields = map[string]struct{}{
 	"model":             {},
@@ -1249,8 +1265,10 @@ func loadConfig(cfg *Config) error {
 	if cfg.Service.ProviderType == "" {
 		cfg.Service.ProviderType = constant.ProviderTypeDecentralized
 	}
-	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
-		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, cfg.Service.ProviderType)
+	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized &&
+		cfg.Service.ProviderType != constant.ProviderTypeCentralized &&
+		cfg.Service.ProviderType != constant.ProviderTypeStandard {
+		return fmt.Errorf("invalid config: service.providerType must be '%s', '%s', or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, constant.ProviderTypeStandard, cfg.Service.ProviderType)
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeCentralized {
 		if cfg.Service.ProviderIdentity == "" {
@@ -1267,6 +1285,31 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
 		}
+	}
+	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
+		// A standard provider deliberately hides its upstream: it never publishes a
+		// provider identity, so reject one rather than silently ignoring it (which
+		// would mislead an operator into thinking it is advertised).
+		if cfg.Service.ProviderIdentity != "" {
+			return fmt.Errorf("invalid config: service.providerIdentity must not be set when providerType is 'standard' (a standard provider hides its upstream identity)")
+		}
+		// A standard provider forwards to an external upstream and never signs, so it
+		// always behaves as TargetSeparated (no broker signature, no ZG-Res-Key).
+		cfg.Service.TargetSeparated = true
+		// The upstream must be configured explicitly — a standard provider has no
+		// co-located model and no known default base URL.
+		if cfg.Service.TargetURL == "" {
+			return fmt.Errorf("invalid config: service.targetUrl is required when providerType is 'standard'")
+		}
+		// Standard is non-verifiable by construction. Force the "standard" marker so
+		// the on-chain verifiability can never claim a TEE mode (which would make
+		// clients attempt a verification the broker never backs). Reject any
+		// operator-supplied value other than the standard marker rather than
+		// silently overwriting it.
+		if cfg.Service.Verifiability != "" && cfg.Service.Verifiability != constant.VerifiabilityStandard {
+			return fmt.Errorf("invalid config: service.verifiability must be empty or '%s' when providerType is 'standard', got '%s'", constant.VerifiabilityStandard, cfg.Service.Verifiability)
+		}
+		cfg.Service.Verifiability = constant.VerifiabilityStandard
 	}
 
 	// Body-field injection is only applied for the chatbot service type (see
