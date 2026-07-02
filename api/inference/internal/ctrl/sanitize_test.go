@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -376,6 +377,53 @@ func TestSanitizeResponseBody_CleanImageEnvelopeUnchanged(t *testing.T) {
 	out, changed := c.sanitizeResponseBody(in, "")
 	if changed {
 		t.Errorf("clean envelope should be unchanged, got %s", out)
+	}
+}
+
+// TestSanitizeForwarderResponseBody_GzipStripsLeak pins the fix for the gap where
+// the sync forwarder paths (image/video) forced Accept-Encoding: identity but did
+// not decode a body an upstream compressed anyway — sanitizeResponseBody then
+// failed to parse it and forwarded the upstream identity unsanitized. The helper
+// must decode the gzip body, strip the leak key, and drop the stale
+// Content-Encoding header so the broker serves inspectable identity bytes.
+func TestSanitizeForwarderResponseBody_GzipStripsLeak(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Writer.Header().Set("Content-Encoding", "gzip")
+
+	plain := []byte(`{"created":1700000000,"provider":"openai","data":[{"b64_json":"aGk="}]}`)
+	out := c.sanitizeForwarderResponseBody(ctx, gzipBytes(t, plain), "gzip")
+
+	if bytes.Contains(out, []byte("openai")) || bytes.Contains(out, []byte("\"provider\"")) {
+		t.Errorf("upstream identity leaked from compressed forwarder body: %s", out)
+	}
+	obj := decode(t, out)
+	if _, ok := obj["provider"]; ok {
+		t.Error("provider leak key not stripped from decoded body")
+	}
+	if data, ok := obj["data"].([]interface{}); !ok || len(data) != 1 {
+		t.Fatalf("data[] must survive decode+sanitize, got %v", obj["data"])
+	}
+	if ce := ctx.Writer.Header().Get("Content-Encoding"); ce != "" {
+		t.Errorf("stale Content-Encoding must be dropped after decode, got %q", ce)
+	}
+}
+
+// TestSanitizeForwarderResponseBody_UndecodableGzipFailsOpen verifies that a body
+// labelled gzip but not actually decodable is forwarded unchanged (fail-open) with
+// its Content-Encoding preserved, rather than corrupting the response.
+func TestSanitizeForwarderResponseBody_UndecodableGzipFailsOpen(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Writer.Header().Set("Content-Encoding", "gzip")
+
+	raw := []byte("not actually gzip")
+	out := c.sanitizeForwarderResponseBody(ctx, raw, "gzip")
+	if !bytes.Equal(out, raw) {
+		t.Errorf("undecodable body must be returned unchanged, got %s", out)
+	}
+	if ce := ctx.Writer.Header().Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding must be preserved on decode failure, got %q", ce)
 	}
 }
 
