@@ -89,6 +89,16 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
 		resolvedModelStr, _ := resolvedModelVal.(string)
 
+		// Reject a request that arrived on an API surface the resolved model does
+		// not declare in supportedFormats (e.g. a client hitting /chat/completions
+		// on a model exposed only via /v1/messages). This is a client error, not a
+		// broker fault, so flag it like the allowlist rejection above so it does not
+		// trip broker health alerts. No-op unless supportedFormats is configured.
+		if err := c.enforceRequestFormat(ctx, resolvedModelStr); err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, err
+		}
+
 		// Translate the output-token cap to the field name the target model accepts
 		// (max_tokens vs max_completion_tokens), detected from its advertised
 		// supportedParameters — the DeepSeek-on-vLLM case rejects the newer
@@ -1185,6 +1195,59 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 	ctx.Set(CtxKeyResolvedModel, resolved)
 	c.logger.Debugf("Model allowlist passed: requested=%s resolved=%s forwarded=%s", requestModel, resolved, forwardModel)
 	return body, nil
+}
+
+// apiFormatForPath maps an incoming request path to the API surface it targets:
+// config.APIFormatAnthropic for the Anthropic /v1/messages shape (bare /messages
+// too), config.APIFormatOpenAI for OpenAI /chat/completions. Returns "" for any
+// other path, which callers treat as "not a chat surface — do not gate". The
+// path is gin's URL.Path (query already excluded); a trailing slash is tolerated.
+func apiFormatForPath(path string) string {
+	p := strings.TrimRight(path, "/")
+	switch {
+	case strings.HasSuffix(p, "/messages"):
+		return config.APIFormatAnthropic
+	case strings.HasSuffix(p, "/chat/completions"):
+		return config.APIFormatOpenAI
+	}
+	return ""
+}
+
+// formatAllowed reports whether surface (the API format a request arrived on) is
+// permitted by supportedFormats. An empty supportedFormats means "unconstrained"
+// (backward compatible with configs predating format enforcement), and an empty
+// surface (a path apiFormatForPath doesn't recognize) is never gated. Matching is
+// case-insensitive to tolerate config casing.
+func formatAllowed(supportedFormats []string, surface string) bool {
+	if len(supportedFormats) == 0 || surface == "" {
+		return true
+	}
+	for _, f := range supportedFormats {
+		if strings.EqualFold(strings.TrimSpace(f), surface) {
+			return true
+		}
+	}
+	return false
+}
+
+// enforceRequestFormat rejects a chat request whose API surface is not declared
+// in the resolved model's supportedFormats. It is a no-op when the model declares
+// no formats (unconstrained) or the path is not a recognized chat surface. Only
+// called on the chatbot path, after the model has been resolved onto the context.
+func (c *Ctrl) enforceRequestFormat(ctx *gin.Context, resolvedModel string) error {
+	surface := apiFormatForPath(ctx.Request.URL.Path)
+	if surface == "" {
+		return nil
+	}
+	model := resolvedModel
+	if model == "" {
+		model = c.Service.ModelType
+	}
+	formats := c.Service.SupportedFormatsFor(model)
+	if formatAllowed(formats, surface) {
+		return nil
+	}
+	return fmt.Errorf("model '%s' is not available on the %s API format (supported: %v); use the matching endpoint", model, surface, formats)
 }
 
 // ResolveModelForBilling resolves the requested model for per-model billing

@@ -87,6 +87,17 @@ func (a *ModelArchitecture) Validate() error {
 	return nil
 }
 
+// API surface format identifiers used in ModelInfo.SupportedFormats. They name
+// the request surface a chat model accepts: APIFormatOpenAI is the OpenAI
+// /chat/completions shape, APIFormatAnthropic is the Anthropic /v1/messages
+// shape. The request path enforces these against the resolved model (see
+// ctrl.enforceRequestFormat) so a client can't hit a surface whose usage the
+// upstream doesn't report (which would silently misbill).
+const (
+	APIFormatOpenAI    = "openai"
+	APIFormatAnthropic = "anthropic"
+)
+
 // ModelInfo holds optional metadata for the /v1/models endpoint.
 // These fields enrich the on-chain service data with static model details.
 // When provided, name, description, contextLength, architecture, and supportedParameters are required.
@@ -97,7 +108,7 @@ type ModelInfo struct {
 	MaxCompletionTokens int                    `yaml:"maxCompletionTokens"` // Optional. Max output tokens
 	Architecture        *ModelArchitecture     `yaml:"architecture"`        // Required. Model architecture details
 	SupportedParameters []string               `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
-	SupportedFormats    []string               `yaml:"supportedFormats"`    // Optional. API formats this model supports, e.g., ["openai", "anthropic"]. Defaults to ["openai"] if omitted.
+	SupportedFormats    []string               `yaml:"supportedFormats"`    // Optional. API surfaces this model accepts: "openai" (/chat/completions) and/or "anthropic" (/v1/messages). When omitted the model is unconstrained and accepts every surface (backward compatible); when set, requests on an undeclared surface are rejected (see ctrl.enforceRequestFormat).
 	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
 	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
 	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z". After this instant the broker rejects requests for the model with HTTP 410.
@@ -135,6 +146,16 @@ func (m *ModelInfo) Validate(serviceType string) error {
 	}
 	if len(m.SupportedParameters) == 0 {
 		return fmt.Errorf("service.modelInfo.supportedParameters is required")
+	}
+	// supportedFormats is optional, but when set every entry must name a surface
+	// the request path knows how to enforce — a typo (e.g. "anthropc") would
+	// otherwise silently block ALL traffic on that surface at request time.
+	for _, f := range m.SupportedFormats {
+		switch strings.ToLower(strings.TrimSpace(f)) {
+		case APIFormatOpenAI, APIFormatAnthropic:
+		default:
+			return fmt.Errorf("service.modelInfo.supportedFormats contains unknown format %q (allowed: %q, %q)", f, APIFormatOpenAI, APIFormatAnthropic)
+		}
 	}
 	// Parse the optional expiration once at load time so the request path never
 	// re-parses it. An unparseable value is a config error (fail fast) rather
@@ -200,6 +221,19 @@ func (s *Service) EffectiveModelInfo(model string) *ModelInfo {
 		}
 	}
 	return mi
+}
+
+// SupportedFormatsFor returns the explicitly-configured API surface formats
+// (APIFormatOpenAI / APIFormatAnthropic) for the resolved model, resolving the
+// per-model ModelInfo the same way EffectiveModelInfo does. It returns nil when
+// none is configured — callers treat nil as "unconstrained" so services written
+// before format enforcement keep accepting every surface (backward compatible).
+func (s *Service) SupportedFormatsFor(model string) []string {
+	mi := s.EffectiveModelInfo(model)
+	if mi == nil {
+		return nil
+	}
+	return mi.SupportedFormats
 }
 
 type Service struct {
