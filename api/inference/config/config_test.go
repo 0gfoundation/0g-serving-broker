@@ -1876,6 +1876,15 @@ func TestValidateCacheTokenBilling(t *testing.T) {
 		{"enabled divisor 0 rejected (would divide-by-zero)", CacheTokenBillingConfig{Enabled: true, Divisor: 0}, true},
 		{"enabled negative divisor rejected", CacheTokenBillingConfig{Enabled: true, Divisor: -2}, true},
 		{"disabled divisor 0 ignored", CacheTokenBillingConfig{Enabled: false, Divisor: 0}, false},
+		{"write multiplier 5/4 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4}, false},
+		{"write multiplier 2/1 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 2, WriteMultiplierDenominator: 1}, false},
+		{"write multiplier 1/1 (exactly 1x) ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 1}, false},
+		{"write multiplier unset ignored", CacheTokenBillingConfig{Enabled: true, Divisor: 10}, false},
+		{"write multiplier zero denominator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 0}, true},
+		{"write multiplier zero numerator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 0, WriteMultiplierDenominator: 4}, true},
+		{"write multiplier negative rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: -5, WriteMultiplierDenominator: 4}, true},
+		{"write multiplier below 1x rejected (transposed 1/2)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 2}, true},
+		{"write multiplier below 1x rejected (4/5)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 4, WriteMultiplierDenominator: 5}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

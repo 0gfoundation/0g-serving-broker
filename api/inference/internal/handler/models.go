@@ -76,8 +76,28 @@ type ModelPricingTier struct {
 }
 
 // ModelCacheTokenBilling holds cache token billing info for display.
+// WriteMultiplierNumerator/Denominator are omitted when no cache-write premium is
+// configured (cache-write tokens then bill at full input price).
 type ModelCacheTokenBilling struct {
-	Divisor int64 `json:"divisor"`
+	Divisor                    int64 `json:"divisor"`
+	WriteMultiplierNumerator   int64 `json:"write_multiplier_numerator,omitempty"`
+	WriteMultiplierDenominator int64 `json:"write_multiplier_denominator,omitempty"`
+}
+
+// newModelCacheTokenBilling builds the display struct from resolved cache-billing
+// config, returning nil when caching is disabled or unset (so the field is omitted
+// from GET /v1/models). The write-multiplier fraction is surfaced only when
+// configured — matching what billing applies and what buildAdditionalInfo publishes.
+func newModelCacheTokenBilling(cfg config.CacheTokenBillingConfig) *ModelCacheTokenBilling {
+	if !cfg.Enabled || cfg.Divisor <= 0 {
+		return nil
+	}
+	out := &ModelCacheTokenBilling{Divisor: cfg.Divisor}
+	if cfg.WriteMultiplierEnabled() {
+		out.WriteMultiplierNumerator = cfg.WriteMultiplierNumerator
+		out.WriteMultiplierDenominator = cfg.WriteMultiplierDenominator
+	}
+	return out
 }
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
@@ -233,10 +253,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			if mp.CacheTokenBilling != nil {
 				effCache = *mp.CacheTokenBilling
 			}
-			var modelCacheBilling *ModelCacheTokenBilling
-			if effCache.Enabled && effCache.Divisor > 0 {
-				modelCacheBilling = &ModelCacheTokenBilling{Divisor: effCache.Divisor}
-			}
+			modelCacheBilling := newModelCacheTokenBilling(effCache)
 			obj := ModelObject{
 				ID:               mp.Model,
 				CanonicalID:      canonicalID,
@@ -434,12 +451,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	}
 
 	// Populate cache token billing from config
-	cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
-	if cacheCfg.Enabled && cacheCfg.Divisor > 0 {
-		obj.Pricing.CacheTokenBilling = &ModelCacheTokenBilling{
-			Divisor: cacheCfg.Divisor,
-		}
-	}
+	obj.Pricing.CacheTokenBilling = newModelCacheTokenBilling(h.modelsCtrl.GetCacheTokenBillingConfig())
 
 	// Extract TEE verifier from on-chain additionalInfo JSON
 	obj.TeeVerifier = parseTeeVerifier(svc.AdditionalInfo)

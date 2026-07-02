@@ -118,6 +118,13 @@ type Usage struct {
 	CompletionTokens    int                  `json:"completion_tokens"`
 	TotalTokens         int                  `json:"total_tokens"`
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	// CacheWriteTokens is the number of cache-creation ("cache write") input
+	// tokens: a subset of PromptTokens that the upstream charged a write premium
+	// for. On the OpenAI path OpenRouter reports it as usage.cache_write_tokens;
+	// on the Anthropic path toUsage populates it from cache_creation_input_tokens.
+	// Billed at a premium when cacheTokenBilling.WriteMultiplier* is configured
+	// (see updateAccountWithUsage); otherwise it bills at full input price.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type Choice struct {
@@ -524,6 +531,93 @@ func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, in
 	return last.InputMultiplier, last.OutputMultiplier
 }
 
+// inputFeeBreakdown is the result of splitting a request's prompt tokens into
+// billing buckets. Total is the summed input fee (in the on-chain unit); the
+// token counts are for logging/metrics.
+type inputFeeBreakdown struct {
+	Total        *big.Int
+	CachedTokens int // cache-read tokens billed at the discount
+	WriteTokens  int // cache-write tokens billed at the premium
+	FullTokens   int // remaining tokens billed at full input price
+}
+
+// computeInputFee calculates the total input-token fee, splitting PromptTokens
+// into three disjoint buckets when cacheTokenBilling is enabled:
+//
+//   - cache-read tokens  → inputPrice / Divisor                     (discount)
+//   - cache-write tokens → inputPrice * WriteNumerator / WriteDenominator (premium)
+//   - everything else    → inputPrice                               (full price)
+//
+// Read and write counts are treated as subsets of PromptTokens and clamped so the
+// full-price remainder is never negative (read is clamped first, then write to
+// what's left). The write bucket is only carved out when a write multiplier is
+// configured; otherwise cache-write tokens bill at full price, preserving the
+// prior behavior. When caching is disabled or no cache tokens are reported, every
+// prompt token bills at full price. All arithmetic is integer big.Int (fractions
+// are applied as multiply-then-divide to avoid precision loss).
+func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheTokenBillingConfig) (inputFeeBreakdown, error) {
+	cachedTokens := 0
+	writeTokens := 0
+	if cacheBilling.Enabled {
+		if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+			cachedTokens = usage.PromptTokensDetails.CachedTokens
+			if cachedTokens > usage.PromptTokens {
+				cachedTokens = usage.PromptTokens
+			}
+		}
+		if cacheBilling.WriteMultiplierEnabled() && usage.CacheWriteTokens > 0 {
+			writeTokens = usage.CacheWriteTokens
+			if writeTokens > usage.PromptTokens-cachedTokens {
+				writeTokens = usage.PromptTokens - cachedTokens
+			}
+		}
+	}
+
+	// Fast path: nothing to discount or surcharge — bill every token at full price.
+	if cachedTokens == 0 && writeTokens == 0 {
+		fee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
+		if err != nil {
+			return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating input fee from actual tokens")
+		}
+		return inputFeeBreakdown{Total: fee, FullTokens: usage.PromptTokens}, nil
+	}
+
+	fullTokens := usage.PromptTokens - cachedTokens - writeTokens
+	inputFee, err := util.Multiply(inputPrice, int64(fullTokens))
+	if err != nil {
+		return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating full-price input fee")
+	}
+
+	if cachedTokens > 0 {
+		// cachedFee = inputPrice * cachedTokens / Divisor
+		cachedFullFee, err := util.Multiply(inputPrice, int64(cachedTokens))
+		if err != nil {
+			return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating cached input fee")
+		}
+		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(cacheBilling.Divisor))
+		inputFee, err = util.Add(inputFee, cachedFee)
+		if err != nil {
+			return inputFeeBreakdown{}, errors.Wrap(err, "Error adding cached input fee")
+		}
+	}
+
+	if writeTokens > 0 {
+		// writeFee = inputPrice * writeTokens * WriteNumerator / WriteDenominator
+		writeFullFee, err := util.Multiply(inputPrice, int64(writeTokens))
+		if err != nil {
+			return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating cache-write input fee")
+		}
+		writeFee := new(big.Int).Mul(writeFullFee, big.NewInt(cacheBilling.WriteMultiplierNumerator))
+		writeFee.Div(writeFee, big.NewInt(cacheBilling.WriteMultiplierDenominator))
+		inputFee, err = util.Add(inputFee, writeFee)
+		if err != nil {
+			return inputFeeBreakdown{}, errors.Wrap(err, "Error adding cache-write input fee")
+		}
+	}
+
+	return inputFeeBreakdown{Total: inputFee, CachedTokens: cachedTokens, WriteTokens: writeTokens, FullTokens: fullTokens}, nil
+}
+
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response.
 // tiers is the model-specific tier table (from per-model pricing); when empty the
 // service-level tieredPricing applies if enabled.
@@ -557,45 +651,18 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		}
 	}
 
-	// Calculate actual fees based on LLM-provided token counts.
-	// When cacheTokenBilling is enabled and cached tokens are reported,
-	// apply discounted pricing for cached input tokens.
-	var inputFee *big.Int
-	cachedTokens := 0
-	if cacheBilling.Enabled && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
-		cachedTokens = usage.PromptTokensDetails.CachedTokens
-		if cachedTokens > usage.PromptTokens {
-			cachedTokens = usage.PromptTokens
-		}
-		nonCachedTokens := usage.PromptTokens - cachedTokens
-
-		// Fee for non-cached tokens at full price
-		nonCachedFee, err := util.Multiply(inputPrice, int64(nonCachedTokens))
-		if err != nil {
-			return errors.Wrap(err, "Error calculating non-cached input fee")
-		}
-
-		// Fee for cached tokens at discounted price
-		// cachedFee = inputPrice * cachedTokens / Divisor
-		cachedFullFee, err := util.Multiply(inputPrice, int64(cachedTokens))
-		if err != nil {
-			return errors.Wrap(err, "Error calculating cached input fee")
-		}
-		cachedFee := new(big.Int).Div(cachedFullFee, big.NewInt(cacheBilling.Divisor))
-
-		inputFee, err = util.Add(nonCachedFee, cachedFee)
-		if err != nil {
-			return errors.Wrap(err, "Error adding cached and non-cached input fees")
-		}
-
-		c.logger.Infof("Cache token billing: prompt_tokens=%d, cached_tokens=%d, non_cached=%d, divisor=%d, inputFee=%s",
-			usage.PromptTokens, cachedTokens, nonCachedTokens, cacheBilling.Divisor, inputFee.String())
-	} else {
-		var err error
-		inputFee, err = util.Multiply(inputPrice, int64(usage.PromptTokens))
-		if err != nil {
-			return errors.Wrap(err, "Error calculating input fee from actual tokens")
-		}
+	// Calculate actual fees based on LLM-provided token counts. When
+	// cacheTokenBilling is enabled, cache-read tokens are discounted and
+	// cache-write tokens may carry a premium; everything else bills at full price.
+	fee, err := computeInputFee(inputPrice, usage, cacheBilling)
+	if err != nil {
+		return err
+	}
+	inputFee := fee.Total
+	if fee.CachedTokens > 0 || fee.WriteTokens > 0 {
+		c.logger.Infof("Cache token billing: prompt_tokens=%d, cache_read=%d, cache_write=%d, full=%d, divisor=%d, writeMultiplier=%d/%d, inputFee=%s",
+			usage.PromptTokens, fee.CachedTokens, fee.WriteTokens, fee.FullTokens,
+			cacheBilling.Divisor, cacheBilling.WriteMultiplierNumerator, cacheBilling.WriteMultiplierDenominator, inputFee.String())
 	}
 
 	outputFee, err := util.Multiply(outputPrice, int64(usage.CompletionTokens))
