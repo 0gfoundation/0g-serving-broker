@@ -159,12 +159,15 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		if cfg.IsCentralized() {
 			servingDomain = parseServingDomain(cfg.TargetURL)
 		}
-		// Provider class/identity are surfaced only for centralized providers (same
-		// gate as the single-model path). A standard provider hides its upstream, so
-		// it must not publish providerType/providerIdentity here either.
+		// Provider class is surfaced for every forwarder (centralized and standard),
+		// same gate as the single-model path. A standard provider still hides its
+		// upstream, so providerIdentity stays centralized-only (and servingDomain
+		// above is already IsCentralized()-gated).
 		var providerType, providerIdentity string
-		if cfg.IsCentralized() {
+		if cfg.IsForwarder() {
 			providerType = cfg.ProviderType
+		}
+		if cfg.IsCentralized() {
 			providerIdentity = cfg.ProviderIdentity
 		}
 		// A standard provider performs no response attestation; its settlement TEE
@@ -465,9 +468,13 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.RateLimits = rl
 	}
 
-	// Expose centralized proxy info so SDK can choose the correct verification path
-	if cfg.IsCentralized() {
+	// Surface the provider class for every forwarder (centralized and standard) so
+	// clients can identify the provider type. A standard provider still hides its
+	// upstream: provider_identity and serving_domain remain centralized-only.
+	if cfg.IsForwarder() {
 		obj.ProviderType = cfg.ProviderType
+	}
+	if cfg.IsCentralized() {
 		obj.ProviderIdentity = cfg.ProviderIdentity
 		obj.ServingDomain = parseServingDomain(cfg.TargetURL)
 	}
