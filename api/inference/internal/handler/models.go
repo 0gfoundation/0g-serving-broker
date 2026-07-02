@@ -159,6 +159,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		if cfg.IsCentralized() {
 			servingDomain = parseServingDomain(cfg.TargetURL)
 		}
+		// Provider class is surfaced for every forwarder (centralized and standard),
+		// same gate as the single-model path. A standard provider still hides its
+		// upstream, so providerIdentity stays centralized-only (and servingDomain
+		// above is already IsCentralized()-gated).
+		var providerType, providerIdentity string
+		if cfg.IsForwarder() {
+			providerType = cfg.ProviderType
+		}
+		if cfg.IsCentralized() {
+			providerIdentity = cfg.ProviderIdentity
+		}
+		// A standard provider performs no response attestation; its settlement TEE
+		// signer being acknowledged must not surface as tee_attested (that marker
+		// reflects response verifiability, which standard deliberately omits).
+		teeAttested := svc.TeeSignerAcknowledged && !cfg.IsStandard()
 		var created int64
 		if svc.CreatedAt != nil {
 			created = svc.CreatedAt.Unix()
@@ -230,11 +245,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				OwnedBy:          cfg.OwnedBy,
 				Type:             svc.Type,
 				Verifiability:    svc.Verifiability,
-				TeeAttested:      svc.TeeSignerAcknowledged,
+				TeeAttested:      teeAttested,
 				TeeVerifier:      teeVerifier,
 				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
-				ProviderType:     cfg.ProviderType,
-				ProviderIdentity: cfg.ProviderIdentity,
+				ProviderType:     providerType,
+				ProviderIdentity: providerIdentity,
 				ProviderName:     cfg.ProviderName,
 				ProviderCountry:  cfg.ProviderCountry,
 				ServingDomain:    servingDomain,
@@ -357,8 +372,10 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		OwnedBy:       cfg.OwnedBy,
 		Type:          svc.Type,
 		Verifiability: svc.Verifiability,
-		TeeAttested:   svc.TeeSignerAcknowledged,
-		Pricing:       &ModelPricing{},
+		// A standard provider does no response attestation; don't surface its
+		// settlement-signer acknowledgement as tee_attested (mirrors multi-model).
+		TeeAttested: svc.TeeSignerAcknowledged && !cfg.IsStandard(),
+		Pricing:     &ModelPricing{},
 	}
 
 	if svc.CreatedAt != nil {
@@ -451,9 +468,13 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.RateLimits = rl
 	}
 
-	// Expose centralized proxy info so SDK can choose the correct verification path
-	if cfg.IsCentralized() {
+	// Surface the provider class for every forwarder (centralized and standard) so
+	// clients can identify the provider type. A standard provider still hides its
+	// upstream: provider_identity and serving_domain remain centralized-only.
+	if cfg.IsForwarder() {
 		obj.ProviderType = cfg.ProviderType
+	}
+	if cfg.IsCentralized() {
 		obj.ProviderIdentity = cfg.ProviderIdentity
 		obj.ServingDomain = parseServingDomain(cfg.TargetURL)
 	}

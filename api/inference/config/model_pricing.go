@@ -658,8 +658,8 @@ func validateModelPricing(cfg *Config) error {
 		return nil
 	}
 	svc := &cfg.Service
-	if svc.ProviderType != constant.ProviderTypeCentralized {
-		return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized'")
+	if !svc.IsForwarder() {
+		return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized' or 'standard'")
 	}
 	// Per-model billing is wired only for the modalities whose request path
 	// resolves the request model before billing: chatbot + speech-to-text (token

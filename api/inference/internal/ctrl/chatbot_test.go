@@ -367,6 +367,15 @@ func TestZGResKeyCondition(t *testing.T) {
 			targetSeparated: true,
 			wantResKey:      true,
 		},
+		{
+			// A standard provider never signs, so it must never advertise ZG-Res-Key
+			// (it is TargetSeparated + !centralized). This is the gate used by the
+			// chatbot, speech-to-text, text-to-image, image-editing, and video paths.
+			name:            "standard never sets key",
+			providerType:    "standard",
+			targetSeparated: true,
+			wantResKey:      false,
+		},
 	}
 
 	for _, tt := range tests {
