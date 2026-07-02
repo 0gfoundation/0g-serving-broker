@@ -559,9 +559,10 @@ func TestGetModels_ProviderNameCountryDecentralized(t *testing.T) {
 }
 
 func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
-	// A standard provider hides its upstream and is non-verifiable: even with an
+	// A standard provider surfaces its provider_type (so clients can identify the
+	// provider class) but hides its upstream and is non-verifiable: even with an
 	// acknowledged settlement TEE signer it must report tee_attested=false and
-	// expose no provider_type / provider_identity / serving_domain.
+	// expose no provider_identity / serving_domain.
 	mock := &mockModelsCtrl{
 		service: model.Service{
 			ModelType:             "gpt-4o",
@@ -596,8 +597,8 @@ func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
 	if m.TeeAttested {
 		t.Error("expected tee_attested=false for standard even with acknowledged signer")
 	}
-	if m.ProviderType != "" {
-		t.Errorf("expected empty provider_type for standard, got %q", m.ProviderType)
+	if m.ProviderType != "standard" {
+		t.Errorf("expected provider_type=standard, got %q", m.ProviderType)
 	}
 	if m.ProviderIdentity != "" {
 		t.Errorf("expected empty provider_identity for standard, got %q", m.ProviderIdentity)
@@ -608,9 +609,9 @@ func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
 }
 
 func TestGetModels_MultiModelStandardHidesProviderFields(t *testing.T) {
-	// The multi-model path builds ModelObject inline; verify standard hides
-	// provider_type/identity/serving_domain and reports tee_attested=false there
-	// too (parity with the single-model path).
+	// The multi-model path builds ModelObject inline; verify standard surfaces
+	// provider_type, hides identity/serving_domain, and reports tee_attested=false
+	// there too (parity with the single-model path).
 	svcCfg := config.Service{
 		ProviderType: "standard",
 		TargetURL:    "https://secret-upstream:8000",
@@ -646,8 +647,8 @@ func TestGetModels_MultiModelStandardHidesProviderFields(t *testing.T) {
 		t.Fatalf("expected 2 models, got %d", len(resp.Data))
 	}
 	for _, m := range resp.Data {
-		if m.ProviderType != "" {
-			t.Errorf("model %s: expected empty provider_type, got %q", m.ID, m.ProviderType)
+		if m.ProviderType != "standard" {
+			t.Errorf("model %s: expected provider_type=standard, got %q", m.ID, m.ProviderType)
 		}
 		if m.ProviderIdentity != "" {
 			t.Errorf("model %s: expected empty provider_identity, got %q", m.ID, m.ProviderIdentity)
