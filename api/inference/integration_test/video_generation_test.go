@@ -115,9 +115,11 @@ func TestVideoGenerationFlow(t *testing.T) {
 			t.Errorf("expected status=queued, got %v", resp["status"])
 		}
 
-		// Verify billing headers
-		if w.Header().Get("ZG-Res-Key") == "" {
-			t.Error("expected ZG-Res-Key header to be set")
+		// Verify billing headers. A decentralized + TargetSeparated provider (the
+		// default test setup) produces no signature, so it must NOT advertise
+		// ZG-Res-Key — the signature-lookup handle would only point at a 404.
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("expected no ZG-Res-Key header for unsigned provider, got %q", got)
 		}
 		if w.Header().Get("Provider") == "" {
 			t.Error("expected Provider header to be set")
