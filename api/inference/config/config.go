@@ -456,21 +456,63 @@ type PriceFeedConfig struct {
 	HTTPTimeout time.Duration `yaml:"httpTimeout"`
 }
 
-// CacheTokenBillingConfig defines configuration for cached token discount billing.
-// When enabled, cached input tokens (reported by the LLM via prompt_tokens_details.cached_tokens)
+// CacheTokenBillingConfig defines configuration for cache-aware token billing.
+// When enabled, cache-READ input tokens (reported by the LLM via
+// prompt_tokens_details.cached_tokens, or Anthropic's cache_read_input_tokens)
 // are billed at a discounted rate: inputPrice / Divisor.
+//
+// Optionally, cache-WRITE tokens (cache creation, reported as
+// usage.cache_write_tokens on the OpenAI path or cache_creation_input_tokens on
+// the Anthropic path) are billed at a premium: inputPrice * WriteMultiplierNumerator
+// / WriteMultiplierDenominator. This mirrors Anthropic's pricing, where writing to
+// the cache costs 1.25x the input price for a 5-minute TTL (num=5, den=4) and 2x
+// for a 1-hour TTL (num=2, den=1). When the write multiplier is unset (either
+// field 0), cache-write tokens fall back to full input price (1x) — the prior
+// behavior.
 type CacheTokenBillingConfig struct {
-	Enabled bool  `yaml:"enabled"` // Enable cached token discount billing (default: false)
-	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
+	Enabled bool  `yaml:"enabled"` // Enable cache-aware billing (default: false)
+	Divisor int64 `yaml:"divisor"` // Discount divisor for cache-read tokens (e.g., 4 means 25% of full price)
+	// WriteMultiplierNumerator / WriteMultiplierDenominator express the cache-write
+	// premium as a fraction of the input price (fee = inputPrice * num / den).
+	// When set, the fraction must be >= 1x (num >= den >= 1) since a cache write is
+	// a premium, never a discount; leaving either at 0 disables the premium and
+	// bills cache-write tokens at full input price.
+	WriteMultiplierNumerator   int64 `yaml:"writeMultiplierNumerator"`
+	WriteMultiplierDenominator int64 `yaml:"writeMultiplierDenominator"`
+}
+
+// WriteMultiplierEnabled reports whether a cache-write premium is configured
+// (both fraction fields set to a usable value). Billing consults this before
+// splitting out cache-write tokens; otherwise they bill at full input price.
+func (c *CacheTokenBillingConfig) WriteMultiplierEnabled() bool {
+	return c.Enabled && c.WriteMultiplierNumerator > 0 && c.WriteMultiplierDenominator > 0
 }
 
 // validateCacheTokenBilling rejects a divisor < 1 when caching is enabled: a 0
 // divisor would divide-by-zero panic at billing time (fee = price*tokens/divisor)
-// and a negative one would produce a garbage/negative discount. prefix labels the
-// source (service-level "cacheTokenBilling" or a per-model entry).
+// and a negative one would produce a garbage/negative discount. The write
+// multiplier fraction is validated the same way: if either field is set both must
+// be >= 1 (a 0 denominator would divide-by-zero, a partial fraction is a config
+// typo). prefix labels the source (service-level "cacheTokenBilling" or a
+// per-model entry).
 func validateCacheTokenBilling(prefix string, c *CacheTokenBillingConfig) error {
 	if c.Enabled && c.Divisor < 1 {
 		return fmt.Errorf("invalid config: %s.divisor must be >= 1 when enabled, got %d", prefix, c.Divisor)
+	}
+	if c.WriteMultiplierNumerator != 0 || c.WriteMultiplierDenominator != 0 {
+		if c.WriteMultiplierNumerator < 1 || c.WriteMultiplierDenominator < 1 {
+			return fmt.Errorf("invalid config: %s.writeMultiplierNumerator/writeMultiplierDenominator must both be >= 1 when set, got %d/%d",
+				prefix, c.WriteMultiplierNumerator, c.WriteMultiplierDenominator)
+		}
+		// The write multiplier is a PREMIUM (cache-write costs at least full input
+		// price), so the fraction must be >= 1x. Rejecting numerator < denominator
+		// catches the likely operator error of transposing the fields (e.g. writing
+		// 1/2 when 2/1 was intended), which would silently DISCOUNT cache-write
+		// tokens instead of surcharging them.
+		if c.WriteMultiplierNumerator < c.WriteMultiplierDenominator {
+			return fmt.Errorf("invalid config: %s.writeMultiplierNumerator/writeMultiplierDenominator is a premium and must be >= 1x (numerator >= denominator), got %d/%d",
+				prefix, c.WriteMultiplierNumerator, c.WriteMultiplierDenominator)
+		}
 	}
 	return nil
 }

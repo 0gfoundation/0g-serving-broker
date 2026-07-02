@@ -49,20 +49,21 @@ type LiteLLMUsage struct {
 // Anthropic reports input_tokens, cache_creation_input_tokens and
 // cache_read_input_tokens as three disjoint buckets: input_tokens EXCLUDES
 // cached tokens (unlike OpenAI's prompt_tokens, which is the total with cached
-// as a subset). The canonical prompt_tokens is therefore their sum. Only
-// cache_read tokens are eligible for the cached-token discount; freshly written
-// cache_creation tokens are billed at full input price (the broker's billing
-// model has no separate cache-write premium).
+// as a subset). The canonical prompt_tokens is therefore their sum. cache_read
+// tokens are eligible for the cached-token discount; cache_creation (write)
+// tokens are surfaced as CacheWriteTokens so cacheTokenBilling can apply a write
+// premium (falling back to full input price when no premium is configured).
 //
-// Populating PromptTokensDetails is what lets cacheTokenBilling engage on the
-// Anthropic /v1/messages path (see updateAccountWithUsage / finalizeResponseWithUsage,
-// which gate the discount on usage.PromptTokensDetails != nil).
+// Populating PromptTokensDetails / CacheWriteTokens is what lets cacheTokenBilling
+// engage on the Anthropic /v1/messages path (see computeInputFee, which gates the
+// discount on usage.PromptTokensDetails and the premium on usage.CacheWriteTokens).
 func (u *LiteLLMUsage) toUsage() *Usage {
 	promptTokens := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 	usage := &Usage{
 		PromptTokens:     promptTokens,
 		CompletionTokens: u.OutputTokens,
 		TotalTokens:      promptTokens + u.OutputTokens,
+		CacheWriteTokens: u.CacheCreationInputTokens,
 	}
 	if u.CacheReadInputTokens > 0 {
 		usage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}

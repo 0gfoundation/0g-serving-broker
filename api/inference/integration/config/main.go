@@ -199,7 +199,7 @@ func (d *durationYAML) UnmarshalYAML(node *yaml.Node) error {
 type Config struct {
 	AllowOrigins    []string `yaml:"allowOrigins,omitempty"`
 	ContractAddress string   `yaml:"contractAddress,omitempty"`
-	Database struct {
+	Database        struct {
 		DSN string `yaml:"dsn,omitempty"`
 		// Deprecated: use DSN.
 		Provider string `yaml:"provider,omitempty"`
@@ -226,8 +226,8 @@ type Config struct {
 		ReserveAmount string       `yaml:"reserveAmount,omitempty"`
 		Interval      durationYAML `yaml:"interval,omitempty"`
 	} `yaml:"revenueTransfer,omitempty"`
-	Service  Service  `yaml:"service,omitempty"`
-	Network  *NetworkConfig `yaml:"network,omitempty"`
+	Service Service        `yaml:"service,omitempty"`
+	Network *NetworkConfig `yaml:"network,omitempty"`
 	// Networks is kept so legacy config files still parse during the #507
 	// deprecation window. Deprecated: use Network.
 	Networks Networks `yaml:"networks,omitempty"`
@@ -249,8 +249,10 @@ type Config struct {
 	} `yaml:"logPaths,omitempty"`
 	Controller        ControllerConfig `yaml:"controller,omitempty"`
 	CacheTokenBilling struct {
-		Enabled bool  `yaml:"enabled,omitempty"`
-		Divisor int64 `yaml:"divisor,omitempty"`
+		Enabled                    bool  `yaml:"enabled,omitempty"`
+		Divisor                    int64 `yaml:"divisor,omitempty"`
+		WriteMultiplierNumerator   int64 `yaml:"writeMultiplierNumerator,omitempty"`
+		WriteMultiplierDenominator int64 `yaml:"writeMultiplierDenominator,omitempty"`
 	} `yaml:"cacheTokenBilling,omitempty"`
 	Whitelist struct {
 		Enabled       bool     `yaml:"enabled,omitempty"`

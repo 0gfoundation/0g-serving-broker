@@ -104,9 +104,16 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 
 	// Include cache token billing info so user-broker can display cache hit prices
 	if cacheTokenBilling.Enabled && cacheTokenBilling.Divisor > 0 {
-		additionalInfo["cacheTokenBilling"] = map[string]interface{}{
+		cacheInfo := map[string]interface{}{
 			"divisor": cacheTokenBilling.Divisor,
 		}
+		// Publish the cache-write premium fraction only when configured, so
+		// user-broker can display cache-write prices (inputPrice * num / den).
+		if cacheTokenBilling.WriteMultiplierEnabled() {
+			cacheInfo["writeMultiplierNumerator"] = cacheTokenBilling.WriteMultiplierNumerator
+			cacheInfo["writeMultiplierDenominator"] = cacheTokenBilling.WriteMultiplierDenominator
+		}
+		additionalInfo["cacheTokenBilling"] = cacheInfo
 	}
 
 	// Multi-model: publish only a compact summary on-chain — the MultiModel flag and

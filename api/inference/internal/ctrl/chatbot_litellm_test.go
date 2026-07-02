@@ -10,6 +10,7 @@ func TestLiteLLMUsageToUsage(t *testing.T) {
 		wantCompletion   int
 		wantTotal        int
 		wantCachedTokens int
+		wantWriteTokens  int
 		wantNilDetails   bool
 	}{
 		{
@@ -29,12 +30,13 @@ func TestLiteLLMUsageToUsage(t *testing.T) {
 			wantCachedTokens: 980,
 		},
 		{
-			name:             "cache creation billed as full-price input (not cached)",
+			name:             "cache creation surfaced as write tokens; only read is discountable",
 			in:               LiteLLMUsage{InputTokens: 20, OutputTokens: 10, CacheCreationInputTokens: 500, CacheReadInputTokens: 480},
 			wantPrompt:       1000, // 20 + 500 + 480
 			wantCompletion:   10,
 			wantTotal:        1010,
 			wantCachedTokens: 480, // only cache_read is discountable
+			wantWriteTokens:  500, // cache_creation surfaced for the write premium
 		},
 	}
 	for _, c := range cases {
@@ -42,6 +44,9 @@ func TestLiteLLMUsageToUsage(t *testing.T) {
 			got := c.in.toUsage()
 			if got.PromptTokens != c.wantPrompt {
 				t.Errorf("PromptTokens = %d, want %d", got.PromptTokens, c.wantPrompt)
+			}
+			if got.CacheWriteTokens != c.wantWriteTokens {
+				t.Errorf("CacheWriteTokens = %d, want %d", got.CacheWriteTokens, c.wantWriteTokens)
 			}
 			if got.CompletionTokens != c.wantCompletion {
 				t.Errorf("CompletionTokens = %d, want %d", got.CompletionTokens, c.wantCompletion)
