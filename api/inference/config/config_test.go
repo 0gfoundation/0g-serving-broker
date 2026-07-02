@@ -38,6 +38,60 @@ func TestModelInfo_Validate_OptionalFields(t *testing.T) {
 	}
 }
 
+func TestModelInfo_Validate_SupportedFormats(t *testing.T) {
+	cases := []struct {
+		name    string
+		formats []string
+		wantErr bool
+	}{
+		{"unset ok", nil, false},
+		{"openai ok", []string{"openai"}, false},
+		{"anthropic ok", []string{"anthropic"}, false},
+		{"both ok", []string{"openai", "anthropic"}, false},
+		{"case-insensitive ok", []string{"OpenAI", "Anthropic"}, false},
+		{"whitespace tolerated", []string{" anthropic "}, false},
+		{"unknown rejected", []string{"anthropc"}, true}, // typo must fail fast
+		{"one bad among good rejected", []string{"openai", "grpc"}, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.SupportedFormats = tt.formats
+			err := m.Validate("chatbot")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate supportedFormats=%v: err=%v, wantErr=%v", tt.formats, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSupportedFormatsFor(t *testing.T) {
+	// Multi-model: per-model ModelInfo wins; a model without one falls back to the
+	// service-level ModelInfo; an unknown id (no wildcard) resolves to nil.
+	svc := Service{
+		ProviderType: "centralized",
+		ModelType:    "base",
+		ModelInfo:    &ModelInfo{SupportedFormats: []string{"openai"}}, // service default
+		ModelPricing: []ModelPricingEntry{
+			{Model: "base", InputPrice: "1", OutputPrice: "2"},
+			{Model: "claude", InputPrice: "1", OutputPrice: "2", ModelInfo: &ModelInfo{SupportedFormats: []string{"anthropic"}}},
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	if got := svc.SupportedFormatsFor("claude"); len(got) != 1 || got[0] != "anthropic" {
+		t.Errorf("per-model override: got %v, want [anthropic]", got)
+	}
+	if got := svc.SupportedFormatsFor("base"); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("service-level fallback: got %v, want [openai]", got)
+	}
+	if got := svc.SupportedFormatsFor("unknown-no-wildcard"); got != nil {
+		t.Errorf("unknown model: got %v, want nil", got)
+	}
+}
+
 func TestModelInfo_Validate_VideoGeneration_NullContextLength(t *testing.T) {
 	m := validModelInfo()
 	m.ContextLength = 0

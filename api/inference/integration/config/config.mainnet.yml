@@ -89,6 +89,8 @@ service:
   #     instructType: "chatml"
   #     tokenizer: "llama3"
   #   supportedParameters: ["temperature", "top_p", "top_k", "max_tokens"]
+  #   # ENFORCED when set: requests on an undeclared surface get HTTP 400. Add
+  #   # "anthropic" if the upstream serves /v1/messages; omit to accept every surface.
   #   supportedFormats: ["openai"]
   #   defaultParameters:
   #     temperature: 0.7
