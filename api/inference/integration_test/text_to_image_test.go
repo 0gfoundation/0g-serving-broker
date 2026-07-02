@@ -88,9 +88,11 @@ func TestTextToImageFlow(t *testing.T) {
 		t.Errorf("expected 2 images in response, got %v", resp["data"])
 	}
 
-	// Verify billing headers
-	if w.Header().Get("ZG-Res-Key") == "" {
-		t.Error("expected ZG-Res-Key header to be set")
+	// Verify billing headers. A decentralized + TargetSeparated provider (the
+	// default test setup) produces no signature, so it must NOT advertise
+	// ZG-Res-Key — the signature-lookup handle would only point at a 404.
+	if got := w.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("expected no ZG-Res-Key header for unsigned provider, got %q", got)
 	}
 	if w.Header().Get("Provider") == "" {
 		t.Error("expected Provider header to be set")
@@ -319,9 +321,11 @@ func TestTextToImageFlow_ResponseFormatURL(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	chatKey := w.Header().Get("ZG-Res-Key")
-	if chatKey == "" {
-		t.Fatal("expected ZG-Res-Key header")
+	// Unsigned provider: no ZG-Res-Key header. The broker-served URLs still embed
+	// the internal chatKey, so derive it from the first returned URL (path shape
+	// /v1/proxy/images/{chatKey}/{i}) and verify the rest share it.
+	if got := w.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("expected no ZG-Res-Key header for unsigned provider, got %q", got)
 	}
 
 	var resp map[string]interface{}
@@ -332,6 +336,17 @@ func TestTextToImageFlow_ResponseFormatURL(t *testing.T) {
 	if !ok || len(data) != 2 {
 		t.Fatalf("expected 2 images, got %v", resp["data"])
 	}
+	first, _ := data[0].(map[string]interface{})
+	firstURL, _ := first["url"].(string)
+	fu, err := url.Parse(firstURL)
+	if err != nil {
+		t.Fatalf("parse first image url %q: %v", firstURL, err)
+	}
+	seg := strings.Split(strings.Trim(fu.Path, "/"), "/")
+	if len(seg) != 5 || seg[0] != "v1" || seg[1] != "proxy" || seg[2] != "images" || seg[3] == "" {
+		t.Fatalf("unexpected image url path %q, want /v1/proxy/images/{chatKey}/0", fu.Path)
+	}
+	chatKey := seg[3]
 	for i, raw := range data {
 		item := raw.(map[string]interface{})
 		if v, has := item["b64_json"]; has {
