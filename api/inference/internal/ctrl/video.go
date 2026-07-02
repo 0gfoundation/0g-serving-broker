@@ -256,11 +256,11 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	// For forwarder providers, strip #184 upstream identity/cost leak fields before
 	// the body is forwarded, signed, or billed (sanitize-before-sign keeps any
-	// signature bound to what the client receives). Non-JSON bodies fail open.
+	// signature bound to what the client receives). Decode a compressed body first
+	// (the sync path forces identity upstream; an upstream that ignores it would
+	// otherwise slip the leak past the JSON parse). Non-JSON bodies fail open.
 	if c.Service.IsForwarder() {
-		if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
-			body = sanitized
-		}
+		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
 	if _, err := ctx.Writer.Write(body); err != nil {

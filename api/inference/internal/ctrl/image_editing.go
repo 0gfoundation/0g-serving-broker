@@ -159,11 +159,11 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	// For forwarder providers, strip #184 upstream identity/cost leak fields before
 	// the envelope is used for extraction, URL rewrite, signing, or forwarding
 	// (sanitize-before-sign keeps the signature bound to what the client receives).
+	// Decode a compressed body first (the sync path forces identity upstream; an
+	// upstream that ignores it would otherwise slip the leak past the JSON parse).
 	// sanitizeResponseBody preserves data[] (image payloads).
 	if c.Service.IsForwarder() {
-		if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
-			body = sanitized
-		}
+		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
 	responseSizeMB := float64(len(body)) / (1024 * 1024)

@@ -269,13 +269,25 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	// For forwarder providers, strip #184 upstream identity/cost leak fields from a
 	// JSON transcription body before forwarding (and, for in-network signing,
 	// before signing — sanitize-before-sign keeps the signature bound to what the
-	// client receives). STT also returns non-JSON formats (text/srt/vtt) that carry
-	// no such fields; skip them (and sanitizeResponseBody's fail-open warning) by
-	// only sanitizing a JSON object body. Usage fields are not leak keys, so
-	// downstream billing extraction is unaffected.
-	if c.Service.IsForwarder() && bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
-		if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
-			body = sanitized
+	// client receives). Decode a compressed body first: the sync path forces
+	// identity upstream, so an upstream that ignores it delivers compressed bytes
+	// that would otherwise never match the JSON-object check below. STT also returns
+	// non-JSON formats (text/srt/vtt) that carry no such fields; skip them (and
+	// sanitizeResponseBody's fail-open warning) by only sanitizing a JSON object
+	// body. Usage fields are not leak keys, so downstream billing is unaffected.
+	if c.Service.IsForwarder() {
+		if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+			if decoded, derr := decodeBody(body, enc); derr == nil {
+				body = decoded
+				ctx.Writer.Header().Del("Content-Encoding")
+			} else {
+				c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s transcription; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
+			}
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+			if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
+				body = sanitized
+			}
 		}
 	}
 
