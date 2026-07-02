@@ -1,6 +1,78 @@
 package providercontract
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/0glabs/0g-serving-broker/inference/config"
+)
+
+// TestBuildAdditionalInfo_ProviderTypeGating verifies the on-chain additionalInfo
+// provider-class gating: ProviderType is published for every forwarder
+// (centralized and standard) so on-chain discovery / SDK can identify the class,
+// while ProviderIdentity (which reveals the upstream) stays centralized-only and a
+// standard provider therefore never leaks it. Decentralized publishes neither.
+func TestBuildAdditionalInfo_ProviderTypeGating(t *testing.T) {
+	cases := []struct {
+		name            string
+		service         config.Service
+		wantType        string // "" means the key must be absent
+		wantIdentity    string // "" means the key must be absent
+		wantIdentityKey bool   // whether ProviderIdentity key should be present
+	}{
+		{
+			name:            "centralized publishes type and identity",
+			service:         config.Service{ProviderType: "centralized", ProviderIdentity: "openai"},
+			wantType:        "centralized",
+			wantIdentity:    "openai",
+			wantIdentityKey: true,
+		},
+		{
+			name:            "standard publishes type but hides identity",
+			service:         config.Service{ProviderType: "standard", ProviderIdentity: "openai"},
+			wantType:        "standard",
+			wantIdentityKey: false,
+		},
+		{
+			name:            "decentralized publishes neither",
+			service:         config.Service{ProviderType: "decentralized"},
+			wantType:        "",
+			wantIdentityKey: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := buildAdditionalInfo(tc.service, "", "", config.TieredPricingConfig{}, config.CacheTokenBillingConfig{})
+			if err != nil {
+				t.Fatalf("buildAdditionalInfo: %v", err)
+			}
+			var info map[string]interface{}
+			if err := json.Unmarshal([]byte(raw), &info); err != nil {
+				t.Fatalf("unmarshal additionalInfo: %v", err)
+			}
+
+			gotType, typeExists := info["ProviderType"]
+			if tc.wantType == "" {
+				if typeExists {
+					t.Errorf("ProviderType should be absent, got %v", gotType)
+				}
+			} else {
+				if gotType != tc.wantType {
+					t.Errorf("ProviderType = %v, want %q", gotType, tc.wantType)
+				}
+			}
+
+			gotIdentity, identityExists := info["ProviderIdentity"]
+			if !tc.wantIdentityKey {
+				if identityExists {
+					t.Errorf("ProviderIdentity should be absent (upstream hidden), got %v", gotIdentity)
+				}
+			} else if gotIdentity != tc.wantIdentity {
+				t.Errorf("ProviderIdentity = %v, want %q", gotIdentity, tc.wantIdentity)
+			}
+		})
+	}
+}
 
 // TestIsServiceNotFoundMessage verifies that the anchored match correctly
 // classifies the RPC "service not found" sentinel and rejects sibling

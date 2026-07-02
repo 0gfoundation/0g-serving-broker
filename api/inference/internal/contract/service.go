@@ -77,9 +77,13 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		additionalInfo["TargetTeeAddress"] = service.TargetTeeAddress
 	}
 
-	// Include provider type info for centralized providers
-	if service.IsCentralized() {
+	// Publish the provider class for every forwarder (centralized and standard) so
+	// on-chain discovery / SDK can identify the provider type. A standard provider
+	// still hides its upstream: ProviderIdentity stays centralized-only.
+	if service.IsForwarder() {
 		additionalInfo["ProviderType"] = service.ProviderType
+	}
+	if service.IsCentralized() {
 		additionalInfo["ProviderIdentity"] = service.ProviderIdentity
 	}
 
