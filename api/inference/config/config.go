@@ -495,58 +495,120 @@ type PriceFeedConfig struct {
 // prompt_tokens_details.cached_tokens, or Anthropic's cache_read_input_tokens)
 // are billed at a discounted rate: inputPrice / Divisor.
 //
-// Optionally, cache-WRITE tokens (cache creation, reported as
-// usage.cache_write_tokens on the OpenAI path or cache_creation_input_tokens on
-// the Anthropic path) are billed at a premium: inputPrice * WriteMultiplierNumerator
-// / WriteMultiplierDenominator. This mirrors Anthropic's pricing, where writing to
-// the cache costs 1.25x the input price for a 5-minute TTL (num=5, den=4) and 2x
-// for a 1-hour TTL (num=2, den=1). When the write multiplier is unset (either
-// field 0), cache-write tokens fall back to full input price (1x) — the prior
-// behavior.
+// Optionally, cache-WRITE tokens (cache creation) are billed at a premium in up
+// to two tiers, mirroring how upstreams (Anthropic/Bedrock) price cache writes by
+// TTL:
+//
+//   - The DEFAULT / 5-minute tier: inputPrice * WriteMultiplierNumerator /
+//     WriteMultiplierDenominator. Applies to the OpenAI-path usage.cache_write_tokens,
+//     to Anthropic's cache_creation.ephemeral_5m_input_tokens, and to any
+//     cache-creation tokens with no TTL breakdown. Anthropic's 5-minute rate is
+//     1.25x (num=5, den=4).
+//   - The 1-hour tier: inputPrice * Write1hMultiplierNumerator /
+//     Write1hMultiplierDenominator. Applies to Anthropic's
+//     cache_creation.ephemeral_1h_input_tokens. Anthropic's 1-hour rate is 2x
+//     (num=2, den=1). When left unset, 1-hour cache-write tokens fall back to the
+//     default tier's multiplier (and, if that is also unset, to full input price).
+//
+// When the default write multiplier is unset (either field 0), cache-write tokens
+// fall back to full input price (1x) — the prior behavior.
 type CacheTokenBillingConfig struct {
 	Enabled bool  `yaml:"enabled"` // Enable cache-aware billing (default: false)
 	Divisor int64 `yaml:"divisor"` // Discount divisor for cache-read tokens (e.g., 4 means 25% of full price)
-	// WriteMultiplierNumerator / WriteMultiplierDenominator express the cache-write
-	// premium as a fraction of the input price (fee = inputPrice * num / den).
-	// When set, the fraction must be >= 1x (num >= den >= 1) since a cache write is
-	// a premium, never a discount; leaving either at 0 disables the premium and
-	// bills cache-write tokens at full input price.
+	// WriteMultiplierNumerator / WriteMultiplierDenominator express the DEFAULT
+	// (5-minute) cache-write premium as a fraction of the input price
+	// (fee = inputPrice * num / den). When set, the fraction must be >= 1x
+	// (num >= den >= 1) since a cache write is a premium, never a discount; leaving
+	// either at 0 disables the premium and bills cache-write tokens at full input
+	// price.
 	WriteMultiplierNumerator   int64 `yaml:"writeMultiplierNumerator"`
 	WriteMultiplierDenominator int64 `yaml:"writeMultiplierDenominator"`
+	// Write1hMultiplierNumerator / Write1hMultiplierDenominator express the 1-hour
+	// cache-write premium the same way. Same >= 1x rule. When unset, 1-hour
+	// cache-write tokens fall back to the default write multiplier above.
+	Write1hMultiplierNumerator   int64 `yaml:"write1hMultiplierNumerator"`
+	Write1hMultiplierDenominator int64 `yaml:"write1hMultiplierDenominator"`
 }
 
-// WriteMultiplierEnabled reports whether a cache-write premium is configured
-// (both fraction fields set to a usable value). Billing consults this before
-// splitting out cache-write tokens; otherwise they bill at full input price.
+// WriteMultiplierEnabled reports whether the default (5-minute) cache-write
+// premium is configured (both fraction fields set to a usable value). Billing
+// consults this before splitting out cache-write tokens; otherwise they bill at
+// full input price.
 func (c *CacheTokenBillingConfig) WriteMultiplierEnabled() bool {
 	return c.Enabled && c.WriteMultiplierNumerator > 0 && c.WriteMultiplierDenominator > 0
 }
 
+// Write1hMultiplierEnabled reports whether a distinct 1-hour cache-write premium
+// is configured. When false, 1-hour cache-write tokens fall back to the default
+// write multiplier (see WriteMultiplierEnabled).
+func (c *CacheTokenBillingConfig) Write1hMultiplierEnabled() bool {
+	return c.Enabled && c.Write1hMultiplierNumerator > 0 && c.Write1hMultiplierDenominator > 0
+}
+
 // validateCacheTokenBilling rejects a divisor < 1 when caching is enabled: a 0
 // divisor would divide-by-zero panic at billing time (fee = price*tokens/divisor)
-// and a negative one would produce a garbage/negative discount. The write
-// multiplier fraction is validated the same way: if either field is set both must
-// be >= 1 (a 0 denominator would divide-by-zero, a partial fraction is a config
-// typo). prefix labels the source (service-level "cacheTokenBilling" or a
+// and a negative one would produce a garbage/negative discount. Each write
+// multiplier fraction (default and 1-hour) is validated the same way: if either
+// field of a fraction is set both must be >= 1 (a 0 denominator would
+// divide-by-zero, a partial fraction is a config typo) and the fraction must be
+// >= 1x. prefix labels the source (service-level "cacheTokenBilling" or a
 // per-model entry).
 func validateCacheTokenBilling(prefix string, c *CacheTokenBillingConfig) error {
 	if c.Enabled && c.Divisor < 1 {
 		return fmt.Errorf("invalid config: %s.divisor must be >= 1 when enabled, got %d", prefix, c.Divisor)
 	}
-	if c.WriteMultiplierNumerator != 0 || c.WriteMultiplierDenominator != 0 {
-		if c.WriteMultiplierNumerator < 1 || c.WriteMultiplierDenominator < 1 {
-			return fmt.Errorf("invalid config: %s.writeMultiplierNumerator/writeMultiplierDenominator must both be >= 1 when set, got %d/%d",
-				prefix, c.WriteMultiplierNumerator, c.WriteMultiplierDenominator)
-		}
-		// The write multiplier is a PREMIUM (cache-write costs at least full input
-		// price), so the fraction must be >= 1x. Rejecting numerator < denominator
-		// catches the likely operator error of transposing the fields (e.g. writing
-		// 1/2 when 2/1 was intended), which would silently DISCOUNT cache-write
-		// tokens instead of surcharging them.
-		if c.WriteMultiplierNumerator < c.WriteMultiplierDenominator {
-			return fmt.Errorf("invalid config: %s.writeMultiplierNumerator/writeMultiplierDenominator is a premium and must be >= 1x (numerator >= denominator), got %d/%d",
-				prefix, c.WriteMultiplierNumerator, c.WriteMultiplierDenominator)
-		}
+	if err := validateWriteMultiplier(prefix, "writeMultiplier", c.WriteMultiplierNumerator, c.WriteMultiplierDenominator); err != nil {
+		return err
+	}
+	if err := validateWriteMultiplier(prefix, "write1hMultiplier", c.Write1hMultiplierNumerator, c.Write1hMultiplierDenominator); err != nil {
+		return err
+	}
+
+	defaultSet := c.WriteMultiplierNumerator != 0 || c.WriteMultiplierDenominator != 0
+	write1hSet := c.Write1hMultiplierNumerator != 0 || c.Write1hMultiplierDenominator != 0
+
+	// The 1-hour tier layers on top of the default (5-minute) tier. Configuring it
+	// alone would silently bill the far more common 5-minute cache writes at full
+	// input price (1x) while the upstream still charges a 5-minute premium — a
+	// silent under-charge and almost never what the operator intended. Require the
+	// default tier to be set explicitly (set it to 1/1 to deliberately bill
+	// 5-minute cache writes at cost).
+	if write1hSet && !defaultSet {
+		return fmt.Errorf("invalid config: %s.write1hMultiplier is set but %s.writeMultiplier (the default/5-minute tier) is not; configure the default tier too (use 1/1 to bill 5-minute cache writes at full input price)", prefix, prefix)
+	}
+	// A 1-hour cache write is never cheaper than a 5-minute one upstream, so a
+	// 1-hour premium below the default premium is almost certainly a transposed
+	// config that would silently under-charge the 1-hour tier — the same class of
+	// error the per-fraction num<den check guards against, at the cross-tier level.
+	// Compare by cross-multiplication (both denominators are >= 1 once set).
+	if defaultSet && write1hSet &&
+		c.Write1hMultiplierNumerator*c.WriteMultiplierDenominator < c.WriteMultiplierNumerator*c.Write1hMultiplierDenominator {
+		return fmt.Errorf("invalid config: %s.write1hMultiplier (%d/%d) must be >= writeMultiplier (%d/%d); a 1-hour cache write is never cheaper than a 5-minute one",
+			prefix, c.Write1hMultiplierNumerator, c.Write1hMultiplierDenominator, c.WriteMultiplierNumerator, c.WriteMultiplierDenominator)
+	}
+	return nil
+}
+
+// validateWriteMultiplier enforces the >= 1x premium rule shared by both
+// cache-write tiers. field is the yaml key stem ("writeMultiplier" or
+// "write1hMultiplier") used in error messages. A fully-zero fraction is "unset"
+// and passes; a partially-set or below-1x fraction is rejected.
+func validateWriteMultiplier(prefix, field string, num, den int64) error {
+	if num == 0 && den == 0 {
+		return nil
+	}
+	if num < 1 || den < 1 {
+		return fmt.Errorf("invalid config: %s.%sNumerator/%sDenominator must both be >= 1 when set, got %d/%d",
+			prefix, field, field, num, den)
+	}
+	// The write multiplier is a PREMIUM (cache-write costs at least full input
+	// price), so the fraction must be >= 1x. Rejecting numerator < denominator
+	// catches the likely operator error of transposing the fields (e.g. writing
+	// 1/2 when 2/1 was intended), which would silently DISCOUNT cache-write
+	// tokens instead of surcharging them.
+	if num < den {
+		return fmt.Errorf("invalid config: %s.%sNumerator/%sDenominator is a premium and must be >= 1x (numerator >= denominator), got %d/%d",
+			prefix, field, field, num, den)
 	}
 	return nil
 }

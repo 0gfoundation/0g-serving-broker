@@ -50,15 +50,25 @@ func TestComputeInputFee(t *testing.T) {
 
 	discount := config.CacheTokenBillingConfig{Enabled: true, Divisor: 10}
 	premium := config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4}
+	// twoTier surcharges 5-minute writes at 5/4 (1.25x) and 1-hour writes at 2/1
+	// (2x), matching Anthropic/Bedrock cache-write pricing.
+	twoTier := config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}
+	// only1h has the 1-hour tier but no default tier. validateCacheTokenBilling
+	// rejects this combination at load, so it cannot occur in production; it is used
+	// here only to exercise computeInputFee's defensive handling of a default tier
+	// with a zero denominator (5-minute writes fall through to full price, 1-hour
+	// writes still bill at 2x).
+	only1h := config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}
 
 	cases := []struct {
-		name       string
-		usage      *Usage
-		cfg        config.CacheTokenBillingConfig
-		wantTotal  string
-		wantCached int
-		wantWrite  int
-		wantFull   int
+		name        string
+		usage       *Usage
+		cfg         config.CacheTokenBillingConfig
+		wantTotal   string
+		wantCached  int
+		wantWrite   int
+		wantWrite1h int
+		wantFull    int
 	}{
 		{
 			name:      "caching disabled: all full price",
@@ -123,6 +133,42 @@ func TestComputeInputFee(t *testing.T) {
 			wantCached: 1000,
 			wantFull:   0,
 		},
+		{
+			name:        "two tiers: 5m at 1.25x, 1h at 2x",
+			usage:       &Usage{PromptTokens: 1000, CacheWriteTokens: 200, CacheWrite1hTokens: 300},
+			cfg:         twoTier,
+			wantTotal:   "135000", // 500*100 + (200*100)*5/4 + (300*100)*2/1 = 50000+25000+60000
+			wantWrite:   200,
+			wantWrite1h: 300,
+			wantFull:    500,
+		},
+		{
+			name:        "1h tier falls back to default write multiplier when unset",
+			usage:       &Usage{PromptTokens: 1000, CacheWriteTokens: 200, CacheWrite1hTokens: 300},
+			cfg:         premium,  // only default 5/4 configured
+			wantTotal:   "112500", // 500*100 + (200*100)*5/4 + (300*100)*5/4 = 50000+25000+37500
+			wantWrite:   200,
+			wantWrite1h: 300, // billed via the default multiplier fallback
+			wantFull:    500,
+		},
+		{
+			name:        "only 1h tier configured: 5m writes bill full price",
+			usage:       &Usage{PromptTokens: 1000, CacheWriteTokens: 200, CacheWrite1hTokens: 300},
+			cfg:         only1h,
+			wantTotal:   "130000", // (200 5m + 500)*100 full=70000 + (300*100)*2/1=60000
+			wantWrite1h: 300,
+			wantFull:    700, // 500 non-cache + 200 5m writes (no default premium)
+		},
+		{
+			name:        "1h clamped after read and 5m writes (full never negative)",
+			usage:       &Usage{PromptTokens: 1000, PromptTokensDetails: &PromptTokensDetails{CachedTokens: 400}, CacheWriteTokens: 400, CacheWrite1hTokens: 500},
+			cfg:         twoTier,
+			wantTotal:   "94000", // full=0; read 400*100/10=4000; 5m (400*100)*5/4=50000; 1h (200*100)*2/1=40000
+			wantCached:  400,
+			wantWrite:   400,
+			wantWrite1h: 200, // clamped from 500 to 1000-400-400
+			wantFull:    0,
+		},
 	}
 
 	for _, tt := range cases {
@@ -139,6 +185,9 @@ func TestComputeInputFee(t *testing.T) {
 			}
 			if got.WriteTokens != tt.wantWrite {
 				t.Errorf("WriteTokens = %d, want %d", got.WriteTokens, tt.wantWrite)
+			}
+			if got.Write1hTokens != tt.wantWrite1h {
+				t.Errorf("Write1hTokens = %d, want %d", got.Write1hTokens, tt.wantWrite1h)
 			}
 			if got.FullTokens != tt.wantFull {
 				t.Errorf("FullTokens = %d, want %d", got.FullTokens, tt.wantFull)

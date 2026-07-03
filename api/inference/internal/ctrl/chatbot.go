@@ -118,13 +118,21 @@ type Usage struct {
 	CompletionTokens    int                  `json:"completion_tokens"`
 	TotalTokens         int                  `json:"total_tokens"`
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
-	// CacheWriteTokens is the number of cache-creation ("cache write") input
-	// tokens: a subset of PromptTokens that the upstream charged a write premium
-	// for. On the OpenAI path OpenRouter reports it as usage.cache_write_tokens;
-	// on the Anthropic path toUsage populates it from cache_creation_input_tokens.
-	// Billed at a premium when cacheTokenBilling.WriteMultiplier* is configured
-	// (see updateAccountWithUsage); otherwise it bills at full input price.
+	// CacheWriteTokens is the number of DEFAULT-tier (5-minute) cache-creation
+	// ("cache write") input tokens: a subset of PromptTokens that the upstream
+	// charged a write premium for. On the OpenAI path OpenRouter reports it as
+	// usage.cache_write_tokens; on the Anthropic path toUsage populates it from
+	// cache_creation.ephemeral_5m_input_tokens (or the whole
+	// cache_creation_input_tokens when no TTL breakdown is present). Billed at a
+	// premium when cacheTokenBilling.WriteMultiplier* is configured (see
+	// computeInputFee); otherwise it bills at full input price.
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// CacheWrite1hTokens is the number of 1-hour-TTL cache-creation input tokens,
+	// a subset of PromptTokens disjoint from CacheWriteTokens. On the Anthropic
+	// path toUsage populates it from cache_creation.ephemeral_1h_input_tokens.
+	// Billed at cacheTokenBilling.Write1hMultiplier* when configured, otherwise at
+	// the default write multiplier, otherwise at full input price.
+	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty"`
 }
 
 type Choice struct {
@@ -535,29 +543,68 @@ func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, in
 // billing buckets. Total is the summed input fee (in the on-chain unit); the
 // token counts are for logging/metrics.
 type inputFeeBreakdown struct {
-	Total        *big.Int
-	CachedTokens int // cache-read tokens billed at the discount
-	WriteTokens  int // cache-write tokens billed at the premium
-	FullTokens   int // remaining tokens billed at full input price
+	Total         *big.Int
+	CachedTokens  int // cache-read tokens billed at the discount
+	WriteTokens   int // default-tier (5-minute) cache-write tokens billed at the premium
+	Write1hTokens int // 1-hour-tier cache-write tokens billed at the 1-hour premium
+	FullTokens    int // remaining tokens billed at full input price
+}
+
+// addTierFee returns base + inputPrice*tokens*num/den. It is the shared per-tier
+// multiply-then-divide used for both the default and 1-hour cache-write premiums,
+// keeping all fraction arithmetic in integer big.Int to avoid precision loss.
+//
+// Callers must only invoke it with den > 0 (guaranteed by the writeDen/write1hDen
+// carve-out gates in computeInputFee). The explicit guard keeps a future caller
+// that forgets that precondition from hitting a big.Int divide-by-zero panic on
+// the settlement path — it returns an error instead.
+func addTierFee(base *big.Int, inputPrice string, tokens int, num, den int64) (*big.Int, error) {
+	if den <= 0 {
+		return nil, fmt.Errorf("addTierFee: non-positive denominator %d (write-multiplier gate bypassed)", den)
+	}
+	full, err := util.Multiply(inputPrice, int64(tokens))
+	if err != nil {
+		return nil, err
+	}
+	fee := new(big.Int).Mul(full, big.NewInt(num))
+	fee.Div(fee, big.NewInt(den))
+	return util.Add(base, fee)
 }
 
 // computeInputFee calculates the total input-token fee, splitting PromptTokens
-// into three disjoint buckets when cacheTokenBilling is enabled:
+// into disjoint buckets when cacheTokenBilling is enabled:
 //
-//   - cache-read tokens  → inputPrice / Divisor                     (discount)
-//   - cache-write tokens → inputPrice * WriteNumerator / WriteDenominator (premium)
-//   - everything else    → inputPrice                               (full price)
+//   - cache-read tokens      → inputPrice / Divisor                       (discount)
+//   - default cache-write    → inputPrice * WriteNum / WriteDen           (premium)
+//   - 1-hour cache-write     → inputPrice * Write1hNum / Write1hDen       (premium)
+//   - everything else        → inputPrice                                 (full price)
 //
-// Read and write counts are treated as subsets of PromptTokens and clamped so the
-// full-price remainder is never negative (read is clamped first, then write to
-// what's left). The write bucket is only carved out when a write multiplier is
-// configured; otherwise cache-write tokens bill at full price, preserving the
-// prior behavior. When caching is disabled or no cache tokens are reported, every
-// prompt token bills at full price. All arithmetic is integer big.Int (fractions
-// are applied as multiply-then-divide to avoid precision loss).
+// The 1-hour tier falls back to the default write multiplier when it is not
+// separately configured. Read and write counts are treated as subsets of
+// PromptTokens and clamped so the full-price remainder is never negative (read is
+// clamped first, then the two write tiers to what's left). A write bucket is only
+// carved out when an effective multiplier applies to it; otherwise those tokens
+// bill at full price, preserving the prior behavior. When caching is disabled or
+// no cache tokens are reported, every prompt token bills at full price. All
+// arithmetic is integer big.Int (fractions are applied as multiply-then-divide to
+// avoid precision loss).
 func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheTokenBillingConfig) (inputFeeBreakdown, error) {
+	// Resolve the effective write multiplier for each tier. The 1-hour tier falls
+	// back to the default tier's fraction (and, if that too is unset, to 1x / full
+	// price by leaving the denominator 0). A 0 denominator means "no premium — do
+	// not carve these tokens out of the full-price bucket".
+	writeNum, writeDen := int64(0), int64(0)
+	if cacheBilling.WriteMultiplierEnabled() {
+		writeNum, writeDen = cacheBilling.WriteMultiplierNumerator, cacheBilling.WriteMultiplierDenominator
+	}
+	write1hNum, write1hDen := writeNum, writeDen
+	if cacheBilling.Write1hMultiplierEnabled() {
+		write1hNum, write1hDen = cacheBilling.Write1hMultiplierNumerator, cacheBilling.Write1hMultiplierDenominator
+	}
+
 	cachedTokens := 0
 	writeTokens := 0
+	write1hTokens := 0
 	if cacheBilling.Enabled {
 		if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
 			cachedTokens = usage.PromptTokensDetails.CachedTokens
@@ -565,16 +612,24 @@ func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheT
 				cachedTokens = usage.PromptTokens
 			}
 		}
-		if cacheBilling.WriteMultiplierEnabled() && usage.CacheWriteTokens > 0 {
+		remaining := usage.PromptTokens - cachedTokens
+		if writeDen > 0 && usage.CacheWriteTokens > 0 {
 			writeTokens = usage.CacheWriteTokens
-			if writeTokens > usage.PromptTokens-cachedTokens {
-				writeTokens = usage.PromptTokens - cachedTokens
+			if writeTokens > remaining {
+				writeTokens = remaining
+			}
+			remaining -= writeTokens
+		}
+		if write1hDen > 0 && usage.CacheWrite1hTokens > 0 {
+			write1hTokens = usage.CacheWrite1hTokens
+			if write1hTokens > remaining {
+				write1hTokens = remaining
 			}
 		}
 	}
 
 	// Fast path: nothing to discount or surcharge — bill every token at full price.
-	if cachedTokens == 0 && writeTokens == 0 {
+	if cachedTokens == 0 && writeTokens == 0 && write1hTokens == 0 {
 		fee, err := util.Multiply(inputPrice, int64(usage.PromptTokens))
 		if err != nil {
 			return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating input fee from actual tokens")
@@ -582,7 +637,7 @@ func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheT
 		return inputFeeBreakdown{Total: fee, FullTokens: usage.PromptTokens}, nil
 	}
 
-	fullTokens := usage.PromptTokens - cachedTokens - writeTokens
+	fullTokens := usage.PromptTokens - cachedTokens - writeTokens - write1hTokens
 	inputFee, err := util.Multiply(inputPrice, int64(fullTokens))
 	if err != nil {
 		return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating full-price input fee")
@@ -602,20 +657,20 @@ func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheT
 	}
 
 	if writeTokens > 0 {
-		// writeFee = inputPrice * writeTokens * WriteNumerator / WriteDenominator
-		writeFullFee, err := util.Multiply(inputPrice, int64(writeTokens))
-		if err != nil {
-			return inputFeeBreakdown{}, errors.Wrap(err, "Error calculating cache-write input fee")
-		}
-		writeFee := new(big.Int).Mul(writeFullFee, big.NewInt(cacheBilling.WriteMultiplierNumerator))
-		writeFee.Div(writeFee, big.NewInt(cacheBilling.WriteMultiplierDenominator))
-		inputFee, err = util.Add(inputFee, writeFee)
+		inputFee, err = addTierFee(inputFee, inputPrice, writeTokens, writeNum, writeDen)
 		if err != nil {
 			return inputFeeBreakdown{}, errors.Wrap(err, "Error adding cache-write input fee")
 		}
 	}
 
-	return inputFeeBreakdown{Total: inputFee, CachedTokens: cachedTokens, WriteTokens: writeTokens, FullTokens: fullTokens}, nil
+	if write1hTokens > 0 {
+		inputFee, err = addTierFee(inputFee, inputPrice, write1hTokens, write1hNum, write1hDen)
+		if err != nil {
+			return inputFeeBreakdown{}, errors.Wrap(err, "Error adding 1-hour cache-write input fee")
+		}
+	}
+
+	return inputFeeBreakdown{Total: inputFee, CachedTokens: cachedTokens, WriteTokens: writeTokens, Write1hTokens: write1hTokens, FullTokens: fullTokens}, nil
 }
 
 // updateAccountWithUsage updates the request with accurate token counts from the LLM response.
@@ -659,10 +714,11 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		return err
 	}
 	inputFee := fee.Total
-	if fee.CachedTokens > 0 || fee.WriteTokens > 0 {
-		c.logger.Infof("Cache token billing: prompt_tokens=%d, cache_read=%d, cache_write=%d, full=%d, divisor=%d, writeMultiplier=%d/%d, inputFee=%s",
-			usage.PromptTokens, fee.CachedTokens, fee.WriteTokens, fee.FullTokens,
-			cacheBilling.Divisor, cacheBilling.WriteMultiplierNumerator, cacheBilling.WriteMultiplierDenominator, inputFee.String())
+	if fee.CachedTokens > 0 || fee.WriteTokens > 0 || fee.Write1hTokens > 0 {
+		c.logger.Infof("Cache token billing: prompt_tokens=%d, cache_read=%d, cache_write=%d, cache_write_1h=%d, full=%d, divisor=%d, writeMultiplier=%d/%d, write1hMultiplier=%d/%d, inputFee=%s",
+			usage.PromptTokens, fee.CachedTokens, fee.WriteTokens, fee.Write1hTokens, fee.FullTokens,
+			cacheBilling.Divisor, cacheBilling.WriteMultiplierNumerator, cacheBilling.WriteMultiplierDenominator,
+			cacheBilling.Write1hMultiplierNumerator, cacheBilling.Write1hMultiplierDenominator, inputFee.String())
 	}
 
 	outputFee, err := util.Multiply(outputPrice, int64(usage.CompletionTokens))

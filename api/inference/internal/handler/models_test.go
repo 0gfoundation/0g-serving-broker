@@ -1063,3 +1063,66 @@ func TestParseServingDomain(t *testing.T) {
 		})
 	}
 }
+
+// TestNewModelCacheTokenBilling asserts the display struct surfaces the EFFECTIVE
+// cache-write fractions billing applies — in particular that an unset 1-hour tier
+// is advertised at the default multiplier it falls back to (computeInputFee), so
+// the advertised price never understates what is charged.
+func TestNewModelCacheTokenBilling(t *testing.T) {
+	cases := []struct {
+		name                           string
+		cfg                            config.CacheTokenBillingConfig
+		wantNil                        bool
+		wantDivisor                    int64
+		wantWriteNum, wantWriteDen     int64
+		wantWrite1hNum, wantWrite1hDen int64
+	}{
+		{
+			name:    "disabled -> nil",
+			cfg:     config.CacheTokenBillingConfig{Enabled: false, Divisor: 10},
+			wantNil: true,
+		},
+		{
+			name:        "divisor only, no write premium -> both write tiers omitted",
+			cfg:         config.CacheTokenBillingConfig{Enabled: true, Divisor: 10},
+			wantDivisor: 10,
+		},
+		{
+			name:         "default tier only -> 1h advertised at the default it falls back to",
+			cfg:          config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4},
+			wantDivisor:  10,
+			wantWriteNum: 5, wantWriteDen: 4,
+			wantWrite1hNum: 5, wantWrite1hDen: 4,
+		},
+		{
+			name:         "both tiers -> each advertised as configured",
+			cfg:          config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1},
+			wantDivisor:  10,
+			wantWriteNum: 5, wantWriteDen: 4,
+			wantWrite1hNum: 2, wantWrite1hDen: 1,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := newModelCacheTokenBilling(tt.cfg)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("got %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("got nil, want non-nil")
+			}
+			if got.Divisor != tt.wantDivisor {
+				t.Errorf("Divisor = %d, want %d", got.Divisor, tt.wantDivisor)
+			}
+			if got.WriteMultiplierNumerator != tt.wantWriteNum || got.WriteMultiplierDenominator != tt.wantWriteDen {
+				t.Errorf("write = %d/%d, want %d/%d", got.WriteMultiplierNumerator, got.WriteMultiplierDenominator, tt.wantWriteNum, tt.wantWriteDen)
+			}
+			if got.Write1hMultiplierNumerator != tt.wantWrite1hNum || got.Write1hMultiplierDenominator != tt.wantWrite1hDen {
+				t.Errorf("write1h = %d/%d, want %d/%d", got.Write1hMultiplierNumerator, got.Write1hMultiplierDenominator, tt.wantWrite1hNum, tt.wantWrite1hDen)
+			}
+		})
+	}
+}

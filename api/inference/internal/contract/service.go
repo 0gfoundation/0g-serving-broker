@@ -107,11 +107,22 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		cacheInfo := map[string]interface{}{
 			"divisor": cacheTokenBilling.Divisor,
 		}
-		// Publish the cache-write premium fraction only when configured, so
-		// user-broker can display cache-write prices (inputPrice * num / den).
+		// Publish the EFFECTIVE cache-write premium fractions billing applies, so
+		// user-broker can display cache-write prices (inputPrice * num / den). An
+		// unset 1-hour tier falls back to the default multiplier at billing time
+		// (see computeInputFee), so publish that fallback value rather than omitting
+		// it — otherwise the advertised 1-hour price would understate what is charged.
 		if cacheTokenBilling.WriteMultiplierEnabled() {
 			cacheInfo["writeMultiplierNumerator"] = cacheTokenBilling.WriteMultiplierNumerator
 			cacheInfo["writeMultiplierDenominator"] = cacheTokenBilling.WriteMultiplierDenominator
+		}
+		switch {
+		case cacheTokenBilling.Write1hMultiplierEnabled():
+			cacheInfo["write1hMultiplierNumerator"] = cacheTokenBilling.Write1hMultiplierNumerator
+			cacheInfo["write1hMultiplierDenominator"] = cacheTokenBilling.Write1hMultiplierDenominator
+		case cacheTokenBilling.WriteMultiplierEnabled():
+			cacheInfo["write1hMultiplierNumerator"] = cacheTokenBilling.WriteMultiplierNumerator
+			cacheInfo["write1hMultiplierDenominator"] = cacheTokenBilling.WriteMultiplierDenominator
 		}
 		additionalInfo["cacheTokenBilling"] = cacheInfo
 	}
