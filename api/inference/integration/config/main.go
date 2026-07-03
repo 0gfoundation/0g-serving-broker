@@ -249,10 +249,12 @@ type Config struct {
 	} `yaml:"logPaths,omitempty"`
 	Controller        ControllerConfig `yaml:"controller,omitempty"`
 	CacheTokenBilling struct {
-		Enabled                    bool  `yaml:"enabled,omitempty"`
-		Divisor                    int64 `yaml:"divisor,omitempty"`
-		WriteMultiplierNumerator   int64 `yaml:"writeMultiplierNumerator,omitempty"`
-		WriteMultiplierDenominator int64 `yaml:"writeMultiplierDenominator,omitempty"`
+		Enabled                      bool  `yaml:"enabled,omitempty"`
+		Divisor                      int64 `yaml:"divisor,omitempty"`
+		WriteMultiplierNumerator     int64 `yaml:"writeMultiplierNumerator,omitempty"`
+		WriteMultiplierDenominator   int64 `yaml:"writeMultiplierDenominator,omitempty"`
+		Write1hMultiplierNumerator   int64 `yaml:"write1hMultiplierNumerator,omitempty"`
+		Write1hMultiplierDenominator int64 `yaml:"write1hMultiplierDenominator,omitempty"`
 	} `yaml:"cacheTokenBilling,omitempty"`
 	Whitelist struct {
 		Enabled       bool     `yaml:"enabled,omitempty"`

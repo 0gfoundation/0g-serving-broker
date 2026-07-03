@@ -76,18 +76,27 @@ type ModelPricingTier struct {
 }
 
 // ModelCacheTokenBilling holds cache token billing info for display.
-// WriteMultiplierNumerator/Denominator are omitted when no cache-write premium is
-// configured (cache-write tokens then bill at full input price).
+// The default (5-minute) and 1-hour write-multiplier fractions are each omitted
+// when not configured (those cache-write tokens then bill at the default tier, or
+// at full input price when no premium applies).
 type ModelCacheTokenBilling struct {
-	Divisor                    int64 `json:"divisor"`
-	WriteMultiplierNumerator   int64 `json:"write_multiplier_numerator,omitempty"`
-	WriteMultiplierDenominator int64 `json:"write_multiplier_denominator,omitempty"`
+	Divisor                      int64 `json:"divisor"`
+	WriteMultiplierNumerator     int64 `json:"write_multiplier_numerator,omitempty"`
+	WriteMultiplierDenominator   int64 `json:"write_multiplier_denominator,omitempty"`
+	Write1hMultiplierNumerator   int64 `json:"write_1h_multiplier_numerator,omitempty"`
+	Write1hMultiplierDenominator int64 `json:"write_1h_multiplier_denominator,omitempty"`
 }
 
 // newModelCacheTokenBilling builds the display struct from resolved cache-billing
 // config, returning nil when caching is disabled or unset (so the field is omitted
-// from GET /v1/models). The write-multiplier fraction is surfaced only when
-// configured — matching what billing applies and what buildAdditionalInfo publishes.
+// from GET /v1/models). It surfaces the EFFECTIVE fractions billing actually
+// applies: the default (5-minute) fraction when configured, and — because an unset
+// 1-hour tier falls back to the default multiplier at billing time (see
+// computeInputFee) — the 1-hour fraction resolves to the explicit 1-hour value if
+// set, else the default. Both 1-hour fields are omitted only when no default tier
+// is set either (then 1-hour writes bill at full input price). This keeps the
+// advertised cache-write prices equal to what is charged, so consumers never have
+// to re-derive the fallback rule.
 func newModelCacheTokenBilling(cfg config.CacheTokenBillingConfig) *ModelCacheTokenBilling {
 	if !cfg.Enabled || cfg.Divisor <= 0 {
 		return nil
@@ -96,6 +105,15 @@ func newModelCacheTokenBilling(cfg config.CacheTokenBillingConfig) *ModelCacheTo
 	if cfg.WriteMultiplierEnabled() {
 		out.WriteMultiplierNumerator = cfg.WriteMultiplierNumerator
 		out.WriteMultiplierDenominator = cfg.WriteMultiplierDenominator
+	}
+	switch {
+	case cfg.Write1hMultiplierEnabled():
+		out.Write1hMultiplierNumerator = cfg.Write1hMultiplierNumerator
+		out.Write1hMultiplierDenominator = cfg.Write1hMultiplierDenominator
+	case cfg.WriteMultiplierEnabled():
+		// 1-hour falls back to the default multiplier.
+		out.Write1hMultiplierNumerator = cfg.WriteMultiplierNumerator
+		out.Write1hMultiplierDenominator = cfg.WriteMultiplierDenominator
 	}
 	return out
 }

@@ -4,14 +4,15 @@ import "testing"
 
 func TestLiteLLMUsageToUsage(t *testing.T) {
 	cases := []struct {
-		name             string
-		in               LiteLLMUsage
-		wantPrompt       int
-		wantCompletion   int
-		wantTotal        int
-		wantCachedTokens int
-		wantWriteTokens  int
-		wantNilDetails   bool
+		name              string
+		in                LiteLLMUsage
+		wantPrompt        int
+		wantCompletion    int
+		wantTotal         int
+		wantCachedTokens  int
+		wantWriteTokens   int
+		wantWrite1hTokens int
+		wantNilDetails    bool
 	}{
 		{
 			name:           "no cache",
@@ -38,6 +39,34 @@ func TestLiteLLMUsageToUsage(t *testing.T) {
 			wantCachedTokens: 480, // only cache_read is discountable
 			wantWriteTokens:  500, // cache_creation surfaced for the write premium
 		},
+		{
+			name: "cache_creation TTL breakdown splits into 5m and 1h write buckets",
+			in: LiteLLMUsage{
+				InputTokens: 20, OutputTokens: 10, CacheReadInputTokens: 480,
+				CacheCreationInputTokens: 500,
+				CacheCreation:            &LiteLLMCacheCreation{Ephemeral5mInputTokens: 200, Ephemeral1hInputTokens: 300},
+			},
+			wantPrompt:        1000, // 20 + 500 + 480
+			wantCompletion:    10,
+			wantTotal:         1010,
+			wantCachedTokens:  480,
+			wantWriteTokens:   200, // ephemeral_5m
+			wantWrite1hTokens: 300, // ephemeral_1h
+		},
+		{
+			name: "1h-only breakdown: 5m bucket zero, aggregate not double-counted",
+			in: LiteLLMUsage{
+				InputTokens: 20, OutputTokens: 10,
+				CacheCreationInputTokens: 300,
+				CacheCreation:            &LiteLLMCacheCreation{Ephemeral1hInputTokens: 300},
+			},
+			wantPrompt:        320, // 20 + 300
+			wantCompletion:    10,
+			wantTotal:         330,
+			wantWriteTokens:   0,
+			wantWrite1hTokens: 300,
+			wantNilDetails:    true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -47,6 +76,9 @@ func TestLiteLLMUsageToUsage(t *testing.T) {
 			}
 			if got.CacheWriteTokens != c.wantWriteTokens {
 				t.Errorf("CacheWriteTokens = %d, want %d", got.CacheWriteTokens, c.wantWriteTokens)
+			}
+			if got.CacheWrite1hTokens != c.wantWrite1hTokens {
+				t.Errorf("CacheWrite1hTokens = %d, want %d", got.CacheWrite1hTokens, c.wantWrite1hTokens)
 			}
 			if got.CompletionTokens != c.wantCompletion {
 				t.Errorf("CompletionTokens = %d, want %d", got.CompletionTokens, c.wantCompletion)
@@ -90,5 +122,26 @@ func TestMergeLiteLLMUsage(t *testing.T) {
 	}
 	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.CachedTokens != 200 {
 		t.Errorf("CachedTokens = %+v, want 200", usage.PromptTokensDetails)
+	}
+}
+
+func TestMergeLiteLLMUsage_CacheCreationBreakdown(t *testing.T) {
+	// The per-TTL cache_creation breakdown arrives in message_start; a later
+	// message_delta carrying only output must not clear it, so the 5m/1h split
+	// survives to billing.
+	var acc LiteLLMUsage
+	mergeLiteLLMUsage(&acc, &LiteLLMUsage{
+		InputTokens:              20,
+		CacheCreationInputTokens: 500,
+		CacheCreation:            &LiteLLMCacheCreation{Ephemeral5mInputTokens: 200, Ephemeral1hInputTokens: 300},
+	})
+	mergeLiteLLMUsage(&acc, &LiteLLMUsage{OutputTokens: 17}) // message_delta: only output
+
+	if acc.CacheCreation == nil {
+		t.Fatal("CacheCreation cleared by later delta")
+	}
+	usage := acc.toUsage()
+	if usage.CacheWriteTokens != 200 || usage.CacheWrite1hTokens != 300 {
+		t.Errorf("write split = %d/%d, want 200/300", usage.CacheWriteTokens, usage.CacheWrite1hTokens)
 	}
 }
