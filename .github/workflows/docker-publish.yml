@@ -22,6 +22,18 @@ jobs:
       id-token: write
 
     steps:
+    - name: Validate image tag
+      run: |
+        TAG="${{ inputs.image_tag }}"
+        if [[ "$TAG" =~ ^[vV][0-9] ]]; then
+          echo "::error::image_tag '$TAG' looks like a release version (v*), which is reserved for the tagged-release workflow (build.yml). Choose a different tag."
+          exit 1
+        fi
+        if [[ "$TAG" == "latest" ]]; then
+          echo "::error::image_tag 'latest' is reserved and must not be overwritten by a manual branch build."
+          exit 1
+        fi
+
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       with:
