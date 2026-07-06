@@ -105,13 +105,15 @@ selection intelligence moves to a **control-plane** call over metadata only; the
 sequenceDiagram
     autonumber
     participant App as User app + OpenAI SDK
-    participant SC as Local sidecar
+    participant SC as Client core
     participant R as Router - L7, metadata only
     participant B1 as Broker enclave 1
     participant B2 as Broker enclave 2
     participant M as Upstream model
 
-    App->>SC: OpenAI request (localhost)
+    Note over SC: Client core = one implementation, deployed as:<br/>local sidecar (own machine) · in-process SDK (in the app) · 0G cloud-TEE gateway (attested).<br/>See Deployment modes & packaging.
+
+    App->>SC: OpenAI request (localhost, or direct call if in-process)
 
     rect rgb(238, 246, 255)
     Note over SC,R: Phase 1 - Control plane (metadata only)
