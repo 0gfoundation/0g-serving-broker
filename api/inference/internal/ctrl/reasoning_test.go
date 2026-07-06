@@ -384,6 +384,30 @@ func TestTranslateReasoning_MultiModel_WildcardEntry(t *testing.T) {
 	}
 }
 
+func TestTranslateReasoning_EmptyBody(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
+	got, err := c.TranslateReasoning(nil, "qwen3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("empty body should be returned unchanged, got %q", got)
+	}
+}
+
+func TestNativeReasoningParam_NilModelInfo(t *testing.T) {
+	// A single-model service with no ModelInfo advertises nothing, so no native
+	// reasoning param can be resolved.
+	c := &Ctrl{
+		Service:        config.Service{Type: "chatbot", ModelType: "qwen3"},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	if got := c.nativeReasoningParam("qwen3"); got != "" {
+		t.Errorf("nativeReasoningParam() = %q, want \"\" when ModelInfo is nil", got)
+	}
+}
+
 func TestTranslateReasoning_NonJSONUnchanged(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`not json`)
