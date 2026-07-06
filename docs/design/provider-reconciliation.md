@@ -158,7 +158,8 @@ and with the `upstream`, `model`, and `unit` dimensions added:
 | `request_count` | BIGINT | Always recorded (unit-agnostic) |
 | `input_count` | BIGINT | Raw, same semantics as `Request.InputCount` for the row's `unit` |
 | `output_count` | BIGINT | Raw, same semantics as `Request.OutputCount` for the row's `unit` |
-| `cached_input_tokens` | BIGINT | Optional sub-category; cache-hit input tokens (`0` when not reported / not applicable) |
+| `cached_input_tokens` | BIGINT | Optional sub-category; cache-**read** input tokens (`0` when not reported / not applicable) |
+| `cache_write_input_tokens` | BIGINT | Optional sub-category; cache-**write** / cache-creation input tokens (`0` when not applicable) |
 
 Primary key: `(hour, upstream, model, unit, is_whitelisted)`. Row cardinality stays tiny (a
 day is ≤ a few dozen rows per model), so a retention pruner analogous to `user_daily_stat`'s
@@ -277,21 +278,33 @@ were never inserted into one.
 
 ### Token sub-categories: cache, reasoning, audio
 
-`prompt_tokens` (what the broker stores as `InputCount`) is the **total** input **including
-cached tokens**. `PromptTokensDetails.CachedTokens` is already parsed from the upstream
-response but currently discarded. When a vendor statement reports input split into fresh vs
-cache-hit tokens (billed at different rates), or reports "billable input = total − cached",
-comparing the broker's total against the vendor's fresh-only number leaves a gap of exactly
-`cached_tokens` — a definitional mismatch, not a bug. So the rollup carries optional
-sub-category columns (`cached_input_tokens`, and `reasoning_output_tokens` once thinking
-models are served and `completion_tokens_details` is parsed) so reconciliation can align to
-whichever definition the vendor bills on, and so the cost/margin dimension can account for
-the cache discount.
+`InputCount` collapses what vendors report — and price — as **three disjoint input buckets**.
+Anthropic (via the LiteLLM path, `chatbot_litellm.go`) reports `input_tokens` (fresh, excludes
+cache), `cache_creation_input_tokens` (cache **write**), and `cache_read_input_tokens` (cache
+**read**); the broker sums all three into `PromptTokens`/`InputCount` and preserves only the
+read bucket (`PromptTokensDetails.CachedTokens`, which earns the cache discount from #522). The
+**write** bucket is folded in and lost, and billed to users at full input price — while the
+vendor charges cache **writes at a premium** (Anthropic 1.25×–2×). So both cache buckets are
+reconciliation-relevant, for two reasons:
 
-> Note (policy, not a reconciliation bug): the broker currently bills users
-> `prompt_tokens × input_price`, i.e. **cached tokens at full price**. Passing a cache
-> discount through to users would require `cached_tokens` in the fee calculation — recording
-> it here is a prerequisite if that policy is ever adopted.
+- **Token-definition alignment.** A vendor statement itemizes fresh / cache-read / cache-write
+  separately. Comparing the broker's collapsed `InputCount` against any single itemized bucket
+  leaves a definitional gap — not a bug.
+- **Cost / margin.** The three buckets carry three different vendor rates (fresh 1×, read a
+  discount, write a premium), so the cost dimension cannot be reconstructed from a single
+  input number.
+
+The rollup therefore records both `cached_input_tokens` (read) and `cache_write_input_tokens`
+(write); the fresh bucket is derivable as `input_count − read − write`.
+`reasoning_output_tokens` is added likewise once thinking models are served and
+`completion_tokens_details` is parsed (see #529). Capturing the write bucket requires carrying
+`cache_creation_input_tokens` through `toUsage()` instead of discarding it, then stamping it on
+the `Request`.
+
+> Note (policy, not a reconciliation bug): the broker bills cache **read** at a discount (#522)
+> but cache **write** and fresh input both at full 1× input price, whereas the vendor prices
+> write at a premium. Recording the write bucket is the prerequisite for ever surfacing that
+> margin or repricing it.
 
 ### What counts as a "request"
 
