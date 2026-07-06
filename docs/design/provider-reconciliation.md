@@ -284,8 +284,9 @@ cache), `cache_creation_input_tokens` (cache **write**), and `cache_read_input_t
 **read**); the broker sums all three into `PromptTokens`/`InputCount` and preserves only the
 read bucket (`PromptTokensDetails.CachedTokens`, which earns the cache discount from #522). The
 **write** bucket is folded in and lost, and billed to users at full input price — while the
-vendor charges cache **writes at a premium** (Anthropic 1.25×–2×). So both cache buckets are
-reconciliation-relevant, for two reasons:
+vendor charges cache **writes at a premium**, itself split by TTL (production `/v1/models`
+advertises both `cache_write` (5-minute, ≈1.25×) and `cache_write_1h` (1-hour, ≈2×) for
+claude-fable-5). So both cache buckets are reconciliation-relevant, for two reasons:
 
 - **Token-definition alignment.** A vendor statement itemizes fresh / cache-read / cache-write
   separately. Comparing the broker's collapsed `InputCount` against any single itemized bucket
@@ -344,10 +345,35 @@ never mutates billing state.
 
 ## Assumptions and limitations
 
-- **Upstream ↔ traffic attribution.** Each vendor statement must correspond exactly to the
-  traffic tagged with that `upstream` label. If a vendor's API key is also consumed outside
-  this broker, that external usage appears as an irreducible broker-side shortfall — verify
-  the 1:1 relationship before trusting a mismatch.
+- **A vendor statement can span many broker instances (fleet-level reconciliation).** The
+  same vendor is fronted by *multiple* on-chain provider addresses — in production `/v1/models`,
+  `provider_name: "Aliyun"` appears under seven distinct addresses, each a separate broker
+  deployment with its own database. If the vendor bills per **account**, its single statement
+  covers all of them, so reconciliation must **aggregate `hourly_usage_stat` across every
+  broker that routes to that vendor** — no single broker's DB holds the whole picture. This
+  decides *where* reconciliation runs: a central layer (e.g. the router) that pulls each
+  broker's hourly rollup, not a single broker's endpoint. The determining question is the
+  vendor's billing granularity:
+  - **Per-API-key** (each broker uses its own upstream key and the vendor reports usage per
+    key) → reconciliation can stay per-broker, one statement slice per key.
+  - **Per-account** (shared credentials) → reconciliation must sum the fleet.
+  Confirm this per vendor before trusting any mismatch — it also subsumes the older 1:1
+  "upstream ↔ traffic" attribution assumption (external consumption of the same key still
+  shows as an irreducible shortfall).
+- **Reconcile on the upstream model id, not `canonical_id` or the user-requested model.** A
+  vendor statement itemizes by *its own* model name (OpenRouter bills `zai-org/GLM-5-FP8`,
+  Aliyun bills `glm-5`), whereas `canonical_id` collapses distinct upstream models into one
+  (`glm-5`) and `Request.ModelName` holds the client-requested id (possibly an alias, and
+  rewritten by `UpstreamModel` before dispatch). The rollup's `model` dimension must therefore
+  be the identifier actually sent upstream, or per-model lineup against the statement fails and
+  same-canonical/different-upstream models collide.
+- **Tiered and cache pricing make cost non-linear in tokens.** Many models price by
+  input-length tier (`TieredPricingConfig`: the base price is multiplied by the tier whose
+  `maxInputTokens ≥ prompt_tokens`, *before* cache billing), and cache read/write carry their
+  own rates (including Anthropic's 5-minute vs 1-hour cache-write premiums, `cache_write` /
+  `cache_write_1h`). So neither the internal fee self-check nor the cost dimension can multiply
+  aggregate tokens by a single price — the effective rate is per-request. Either stamp the
+  applied effective price/tier on each `Request`, or bucket tokens by tier in the rollup.
 - **Currency mismatch on cost.** As above, `cost` is a margin check, not a hard balance.
 - **Coarse granularity.** With daily vendor statements, reconciliation resolves to the
   period, not the individual request. If per-request drill-down is ever required, a retained
@@ -360,11 +386,15 @@ never mutates billing state.
 - **Phase 1 — broker-internal self-check + hourly store.** Add the `hourly_usage_stat`
   table and `Request.Upstream`, populate `upstream` from `providerIdentity` (single-upstream
   today), and ship the `/v1/admin/reconciliation` endpoint. Independently, add a pure
-  broker-internal audit that needs no vendor statement: verify `fee == input_count ×
-  input_price + output_count × output_price` (catches price-cache drift between `pricefeed`
-  and the on-chain price), and that period revenue accrued in `daily_stat` matches the sum
-  of `confirmed` `pending_settlement` totals (catches unsettled revenue leak on the ② ↔ ③
-  edge). This delivers value with zero dependency on any provider integration.
+  broker-internal audit that needs no vendor statement: verify each request's `fee` against
+  its **tier- and cache-adjusted** expected price (`input × input_price × tierMultiplier`
+  ∓ cache read/write adjustments + `output × output_price`; catches price-cache drift between
+  `pricefeed` and the on-chain price, and tier/cache mis-application), and that period revenue
+  accrued in `daily_stat` matches the sum of `confirmed` `pending_settlement` totals (catches
+  unsettled revenue leak on the ② ↔ ③ edge). This delivers value with zero dependency on any
+  provider integration. Because the effective rate is per-request, this audit is done against
+  the stored per-request `fee` before settlement deletes the row — not by multiplying an
+  aggregate.
 - **Phase 2 — cross-provider reconciliation at scale.** Persist each run into a
   `reconciliation_report` table for trend analysis, wire the Prometheus metrics and bounded
   summary log, and — when multi-upstream routing lands — stamp `Request.Upstream` from the
@@ -373,6 +403,16 @@ never mutates billing state.
 
 ## Open questions / future work
 
+- **Per vendor: is billing per-API-key or per-account?** This decides whether reconciliation
+  stays per-broker or must aggregate the fleet (see Assumptions). Answer it per vendor before
+  building the aggregation layer.
+- Where the fleet aggregation runs when a vendor bills per-account — a central puller of each
+  broker's `hourly_usage_stat`, versus each broker exporting its rollup for offline summation.
+- Whether to stamp an explicit per-request effective price/tier column, versus bucketing the
+  rollup by tier, to make the cost dimension tier-aware without re-deriving tiers at
+  reconciliation time.
+- Whether to split the cache-write sub-category by TTL (`cache_write` vs `cache_write_1h`)
+  once the broker bills cache-write separately at all.
 - Whether to add a 30-minute bucket resolution if a UTC+5:30/+5:45 vendor is onboarded.
 - Whether to add a retained per-request billing log for `request_hash`-level drill-down.
 - Whether to auto-ingest common vendor statement formats (CSV) via a generic
