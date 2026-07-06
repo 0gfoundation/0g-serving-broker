@@ -408,6 +408,11 @@ never mutates billing state.
 - Whether to split the cache-write sub-category by TTL (`cache_write` vs `cache_write_1h`)
   once the broker bills cache-write separately at all.
 - Whether to add a 30-minute bucket resolution if a UTC+5:30/+5:45 vendor is onboarded.
-- Whether to add a retained per-request billing log for `request_hash`-level drill-down.
+- A retained per-request billing log (keeping request-level detail instead of deleting at
+  settlement) was considered as an alternative source of truth — it would also give
+  arbitrary-range/timezone queries and `request_hash` drill-down. **Deferred**: at ~100k
+  requests/day and growing, even a bounded/partitioned raw table is far heavier than the
+  hourly rollup, and the raw-detail/drill-down need is currently weak. The hourly aggregate is
+  the chosen primary; revisit only if request-level drill-down becomes a real requirement.
 - Whether to auto-ingest common vendor statement formats (CSV) via a generic
   column-mapping config — still no per-vendor code, only per-vendor data mapping.
