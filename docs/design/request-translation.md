@@ -1,82 +1,82 @@
-# Request Body Translation & Rewrite Pipeline
+# Request Body Translation
 
-This document is the map of what the broker does to a chatbot request body between
-receiving it from the client and forwarding it upstream. It ties together the
-individual rewrite/translation steps, fixes their **order**, and explains how the
-pipeline interacts with TEE signing. For the deep design of a specific step, follow
-the links in each section.
+The broker accepts a **portable OpenAI-schema** chatbot request and, before
+forwarding it upstream, rewrites certain fields into the **third-party schema** the
+target model actually understands. This lets a client speak plain OpenAI while the
+broker adapts to whatever the routed upstream (vLLM, DashScope, MiniMax, …) expects.
 
-## The pipeline
+This document lists **what is translated today**. Each translation is driven by the
+model's advertised `supportedParameters`, not a per-model table: the broker only
+translates a field when the resolved model advertises the corresponding upstream
+parameter. If it advertises nothing translatable, the body passes through untouched.
 
-All steps below run inside `PrepareHTTPRequest` (`inference/internal/ctrl/proxy.go`),
-gated on `svcType == "chatbot" && len(reqBody) > 0`. Order matters — later steps
-depend on earlier ones (notably the resolved model id).
+## Supported translations
 
-| # | Step | Kind | What it does |
-|---|------|------|--------------|
-| 1 | `EnsureStreamOptions` | rewrite | Adds `stream_options.include_usage` for streaming requests so usage is billable. |
-| 2 | `RewriteLoRARequest` | rewrite | Rewrites a `ft-*` fine-tuned model id to its base model + `lora_adapter_name`. |
-| 3 | `ValidateModelAllowlist` (multi-model) / `EnforceConfiguredModel` (single-model) | rewrite | Validates the requested model and rewrites the body's `model` to the **upstream** id. Stamps the **canonical** id into `CtxKeyResolvedModel`. |
-| 4 | `enforceRequestFormat` | reject | Rejects a request on an API surface the resolved model doesn't declare in `supportedFormats`. Does not modify the body. |
-| 5 | `TranslateMaxTokens` | **translate** | Renames `max_tokens` ⇄ `max_completion_tokens` to whichever the model accepts. See `max_tokens.go`. |
-| 6 | `TranslateReasoning` | **translate** | Re-expresses `reasoning_effort` as the model's native thinking control. See [reasoning-translation.md](reasoning-translation.md). |
-| 7 | `StripBodyFields` | rewrite | Removes operator-denylisted client params (e.g. `logprobs`) the upstream rejects. |
-| 8 | `InjectBodyFields` | rewrite | Injects operator server-side fields. Runs after strip so an injected key can replace a stripped one. |
+### 1. Output token cap — `TranslateMaxTokens`
 
-After step 8 the body is forwarded to the upstream. When the response returns it is
-sanitized and — for decentralized in-network and centralized providers — TEE-signed
-(see [TEE signing](#interaction-with-tee-signing) below).
+Same value, different field name. `max_tokens` (original) and `max_completion_tokens`
+(its replacement) mean the same thing, but some upstreams accept only one.
 
-## Two kinds of step: translate vs rewrite
+| OpenAI schema (client sends) | Third-party schema (broker writes) | Applies when the model advertises |
+|------------------------------|-------------------------------------|-----------------------------------|
+| `"max_completion_tokens": 256` | `"max_tokens": 256` | `max_tokens` only (e.g. DeepSeek-on-vLLM) |
+| `"max_tokens": 256` | `"max_completion_tokens": 256` | `max_completion_tokens` only |
 
-**Translations (steps 5–6)** re-express a *portable* OpenAI field as the
-*upstream-native* field the target model actually accepts. They share one mechanism:
+Details: `inference/internal/ctrl/max_tokens.go`.
 
-- **Keyed on `resolvedModelStr`** (the canonical id from `CtxKeyResolvedModel`), **not**
-  the body's `model` field — step 3 may already have rewritten that to the upstream id,
+### 2. Reasoning / thinking control — `TranslateReasoning`
+
+The OpenAI input is `reasoning_effort`. It is normalized to a binary on/off intent:
+`none` / `minimal` → **off**; any other non-empty value (`low` / `medium` / `high`)
+→ **on**. That intent is then written in the upstream's dialect:
+
+| OpenAI schema (client sends) | Third-party schema (broker writes) | Upstream dialect (advertised param) |
+|------------------------------|-------------------------------------|-------------------------------------|
+| `"reasoning_effort": "high"` | `"chat_template_kwargs": {"enable_thinking": true}` | Qwen3 / GLM on vLLM (`chat_template_kwargs`) |
+| `"reasoning_effort": "none"` | `"chat_template_kwargs": {"enable_thinking": false}` | Qwen3 / GLM on vLLM (`chat_template_kwargs`) |
+| `"reasoning_effort": "high"` | `"enable_thinking": true` | DashScope / Aliyun (top-level `enable_thinking`) |
+| `"reasoning_effort": "high"` | `"thinking": {"type": "enabled"}` | MiniMax (`thinking`) |
+| `"reasoning_effort": "none"` | `"thinking": {"type": "disabled"}` | MiniMax (`thinking`) |
+
+**Not translated:** `preserve_thinking` (a DashScope *multi-turn* context flag, not an
+on/off toggle) and MiniMax's `reasoning_split` (output-format control). Advertising
+either does not trigger reasoning translation.
+
+Full design: [reasoning-translation.md](reasoning-translation.md).
+
+## Shared rules
+
+All translations above follow the same contract:
+
+- **Keyed on the resolved canonical model id** (`CtxKeyResolvedModel`), not the body's
+  `model` field — model validation may already have rewritten that to the upstream id,
   while per-model config is keyed by the canonical id. An empty resolved model selects
-  the service-level `ModelInfo` (single-model providers with no rewrite trigger).
-- **Driven by `supportedParameters`**, not a per-model table. The broker reads what the
-  model advertises and picks the target field/dialect from a small in-code `switch`.
-  A model advertising nothing translatable → no-op passthrough.
-- **Explicit client value wins.** If the client already set the native field, the
-  translation leaves it untouched rather than overriding it from the portable field.
-- **Consume-and-replace.** Once translated, the portable field is removed from the
-  outgoing body so a strict upstream (e.g. vLLM) doesn't reject an unknown field.
+  the service-level `ModelInfo`.
+- **Driven by `supportedParameters`** — the broker picks the target field/dialect from
+  what the model advertises, via a small in-code `switch`, not a per-model table.
+- **Explicit client value wins** — if the client already set the third-party field, the
+  broker leaves it untouched instead of overriding it from the portable field.
+- **Consume-and-replace** — once translated, the portable OpenAI field is removed from
+  the outgoing body so a strict upstream (e.g. vLLM) doesn't reject an unknown field.
 
-**Rewrites (steps 1–3, 7–8)** are not portable-parameter translations — they adjust
-the model id, adapter, streaming options, or apply operator config. They do not follow
-the `supportedParameters`/`resolvedModel` translation contract above (though 7–8 are
-also keyed on `resolvedModelStr` for per-model operator config).
+## Where it runs
 
-## Interaction with TEE signing
+Both translations run inside `PrepareHTTPRequest`
+(`inference/internal/ctrl/proxy.go`), after model validation has stamped the resolved
+model id, and before the operator strip/inject steps. Full chatbot rewrite order:
 
-**Body rewriting does not break signature verification.** Two independent signatures
-exist and neither is invalidated by the pipeline:
-
-1. **Inbound request auth** (client → broker, `request.go`) signs the **session token**,
-   not the request body. Body rewriting is irrelevant to it.
-2. **Outbound TEE proof** (broker → client, `signing.go`) signs
-   `sha256(reqBody):sha256(respData)`. The `reqBody` hashed here is the body **read back
-   from the forwarded request** (`ProcessHTTPRequest` reads `req.Body`, which
-   `PrepareHTTPRequest` populated with the fully-rewritten body). The signature is
-   produced at the **end** of the pipeline, so it attests exactly the bytes the broker
-   forwarded and the response it got back — it is internally consistent by construction.
-
-Consequence: the TEE proof attests **what the broker processed**, not the client's raw
-pre-translation body. A verifier that re-hashed the original client body would not match
-the proof's request hash — but this has always been true for every rewrite step, so the
-verification model does not rely on it. Adding a new translation step is safe as long as
-it stays **before** signing (i.e. inside `PrepareHTTPRequest`), which all steps are.
+```
+EnsureStreamOptions → RewriteLoRARequest → ValidateModelAllowlist / EnforceConfiguredModel
+  → enforceRequestFormat → TranslateMaxTokens → TranslateReasoning
+  → StripBodyFields → InjectBodyFields → forward upstream
+```
 
 ## Adding a new translation
 
-1. Implement it as a `func (c *Ctrl) TranslateX(body []byte, resolvedModel string) ([]byte, error)`
-   following the four shared properties above.
-2. Detect the target from `supportedParameters` (via `resolveModelInfo` /
-   `nativeReasoningParam`-style lookup), not a per-model table.
-3. Wire it into `PrepareHTTPRequest` in the resolved-model block (after step 3), and
-   place it relative to strip/inject deliberately — translations generally run before
+1. Implement `func (c *Ctrl) TranslateX(body []byte, resolvedModel string) ([]byte, error)`
+   following the four shared rules above.
+2. Detect the target from `supportedParameters`, not a per-model table.
+3. Wire it into `PrepareHTTPRequest` in the resolved-model block; place it before
    `StripBodyFields` so operator denylists can still act on the translated result.
-4. Cover it with unit tests including the multi-model (`GetModelPricing`) and
-   service-level `ModelInfo` fallback paths.
+4. Add a row to the relevant table above, and cover it with unit tests including the
+   multi-model (`GetModelPricing`) and service-level `ModelInfo` fallback paths.

@@ -7,9 +7,8 @@ control the target model's upstream actually understands (e.g. Qwen3/vLLM's
 `supportedParameters` plus a small in-code `switch`, not by a per-model
 translation table.
 
-> For where this step sits in the full request-body pipeline (and how it relates to
-> `max_tokens` translation and TEE signing), see
-> [request-translation.md](request-translation.md).
+> For the full list of supported translations (this plus `max_tokens`) and where they
+> sit in the request-body pipeline, see [request-translation.md](request-translation.md).
 
 ## The problem it solves
 
