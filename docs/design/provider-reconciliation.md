@@ -345,21 +345,20 @@ never mutates billing state.
 
 ## Assumptions and limitations
 
-- **A vendor statement can span many broker instances (fleet-level reconciliation).** The
-  same vendor is fronted by *multiple* on-chain provider addresses — in production `/v1/models`,
-  `provider_name: "Aliyun"` appears under seven distinct addresses, each a separate broker
-  deployment with its own database. If the vendor bills per **account**, its single statement
-  covers all of them, so reconciliation must **aggregate `hourly_usage_stat` across every
-  broker that routes to that vendor** — no single broker's DB holds the whole picture. This
-  decides *where* reconciliation runs: a central layer (e.g. the router) that pulls each
-  broker's hourly rollup, not a single broker's endpoint. The determining question is the
-  vendor's billing granularity:
-  - **Per-API-key** (each broker uses its own upstream key and the vendor reports usage per
-    key) → reconciliation can stay per-broker, one statement slice per key.
-  - **Per-account** (shared credentials) → reconciliation must sum the fleet.
-  Confirm this per vendor before trusting any mismatch — it also subsumes the older 1:1
-  "upstream ↔ traffic" attribution assumption (external consumption of the same key still
-  shows as an irreducible shortfall).
+- **Reconciliation is per-broker, not fleet-level.** Vendor billing is **per API key, and
+  each broker instance uses its own account/key**. So although one vendor is fronted by
+  multiple on-chain provider addresses (production `/v1/models` shows `provider_name: "Aliyun"`
+  under seven distinct addresses), each of those brokers has its own Aliyun sub-account and its
+  own statement — there is no shared account to aggregate. Reconciliation therefore stays on
+  each broker: the per-broker `/v1/admin/reconciliation` endpoint reconciles that broker's
+  `hourly_usage_stat` against the statement for **its** key. No central aggregation layer is
+  needed. Two operational consequences: (1) the Admin must feed each broker the statement for
+  *its own* key — pasting another broker's statement will look wildly off; and (2) the
+  `upstream` label (e.g. `aliyun`) is not globally unique to a key — it is the broker instance
+  that pins the key, so any cross-broker report rollup must distinguish by provider address,
+  not by `upstream` name alone. The clean 1:1 (key ↔ broker ↔ statement) holds only while that
+  key is not also consumed elsewhere; external use of the same key still shows as an
+  irreducible broker-side shortfall.
 - **Reconcile on the upstream model id, not `canonical_id` or the user-requested model.** A
   vendor statement itemizes by *its own* model name (OpenRouter bills `zai-org/GLM-5-FP8`,
   Aliyun bills `glm-5`), whereas `canonical_id` collapses distinct upstream models into one
@@ -403,11 +402,6 @@ never mutates billing state.
 
 ## Open questions / future work
 
-- **Per vendor: is billing per-API-key or per-account?** This decides whether reconciliation
-  stays per-broker or must aggregate the fleet (see Assumptions). Answer it per vendor before
-  building the aggregation layer.
-- Where the fleet aggregation runs when a vendor bills per-account — a central puller of each
-  broker's `hourly_usage_stat`, versus each broker exporting its rollup for offline summation.
 - Whether to stamp an explicit per-request effective price/tier column, versus bucketing the
   rollup by tier, to make the cost dimension tier-aware without re-deriving tiers at
   reconciliation time.
