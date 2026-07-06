@@ -12,6 +12,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   BUILDPACK_IMAGE: ghcr.io/0gfoundation/compute-network-buildpack:20250619
+  IMAGE_TAG: ${{ inputs.image_tag }}
 
 jobs:
   build:
@@ -24,12 +25,11 @@ jobs:
     steps:
     - name: Validate image tag
       run: |
-        TAG="${{ inputs.image_tag }}"
-        if [[ "$TAG" =~ ^[vV][0-9] ]]; then
-          echo "::error::image_tag '$TAG' looks like a release version (v*), which is reserved for the tagged-release workflow (build.yml). Choose a different tag."
+        if [[ "$IMAGE_TAG" =~ ^[vV][0-9] ]]; then
+          echo "::error::image_tag '$IMAGE_TAG' looks like a release version (v*), which is reserved for the tagged-release workflow (build.yml). Choose a different tag."
           exit 1
         fi
-        if [[ "$TAG" == "latest" ]]; then
+        if [[ "$IMAGE_TAG" == "latest" ]]; then
           echo "::error::image_tag 'latest' is reserved and must not be overwritten by a manual branch build."
           exit 1
         fi
@@ -59,24 +59,25 @@ jobs:
       run: |
         # Use the same build process as local development / tagged releases
         docker run --rm \
+          -e IMAGE_TAG="$IMAGE_TAG" \
           -v "${{ github.workspace }}:/workspace" \
           -v /var/run/docker.sock:/var/run/docker.sock \
           -w /workspace/api \
           ${{ env.BUILDPACK_IMAGE }} \
-          bash -c "
+          bash -c '
             git config --global --add safe.directory /workspace && \
             git config --global --add safe.directory /workspace/api/token-counter && \
             git config --global --add safe.directory /workspace/api/libs/0g-serving-contract && \
-            make release VERSION='${{ inputs.image_tag }}'
-          "
+            make release VERSION="$IMAGE_TAG"
+          '
 
     - name: Push built image to registry
       id: push
       run: |
         # The buildpack created the image in local Docker daemon
         # Makefile creates image with -amd64 suffix
-        LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${{ inputs.image_tag }}-amd64"
-        REGISTRY_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}"
+        LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${IMAGE_TAG}-amd64"
+        REGISTRY_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
         if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
           echo "Found local image: $LOCAL_IMAGE"
