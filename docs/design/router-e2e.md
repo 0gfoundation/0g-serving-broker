@@ -241,7 +241,77 @@ loop, response-signature verification, and key cache.
 This also resolves the browser limitation: a pure browser cannot verify RA-TLS
 or do these steps against the raw TLS layer; a local sidecar (or native client)
 can. Browser-only clients would instead use the app-layer sealed channel (a
-JS/WASM SDK) — out of scope here.
+JS/WASM SDK) — see [Deployment modes & packaging](#deployment-modes--packaging).
+
+---
+
+## Deployment modes & packaging
+
+There is one **client core** — verify quote → HPKE-seal → pin → fallback →
+verify response signature → key cache. *Packaging* (how it is consumed) is
+independent from *trust* (who runs it, and whether it must be attested).
+
+### Trust boundary by location
+
+The core touches plaintext (it holds the request before sealing), so **where it
+runs determines the trust boundary — not just the deployment target.**
+
+| | Local sidecar | Cloud-TEE gateway |
+|---|---|---|
+| New trust party | none | one (must be attested) |
+| Plaintext lands on | the user's own machine | 0G's TEE (in-enclave) |
+| Attestation of the client component | not needed (user owns it) | required (else it degrades to today's plaintext L7 router) |
+| Routing / fallback | driven locally | centralized in the gateway (decrypt + re-seal) — this is Approach B |
+| Best for | clients that can run software; max privacy | clients that cannot (browser / thin / no-install) |
+
+**A cloud gateway does not remove client-side crypto.** The user→gateway hop
+still needs securing (RA-TLS or app-layer seal to the gateway), so the client
+must still verify the gateway's quote and seal to it. If the client can do that,
+it could seal to the broker directly — so the gateway's only added value is
+centralizing routing + fallback, or serving clients that cannot run a sidecar.
+Trusting the gateway *without* attestation reduces it to today's plaintext L7
+router (no privacy). There is no free lunch: cloud privacy requires attesting the
+cloud component.
+
+### Packaging forms (one core, several shells)
+
+- **In-process SDK (library):** imported into the app; `create()` verifies +
+  seals inline. Lowest latency, no extra process. Cost: per-language
+  maintenance; pulls crypto deps (HPKE, quote verification, ethers) into the
+  app; browser needs a dedicated JS/WASM build.
+- **Local sidecar (process):** the core wrapped as a localhost OpenAI-API
+  proxy; user changes only `base_url`. Written once, serves any user language;
+  keeps crypto out of the app. Cost: a running process + one localhost hop.
+- **Cloud-TEE gateway (server in a CVM):** the same core wrapped as a server,
+  run in an attested enclave (Approach B). Serves no-install / browser clients;
+  adds one attested trust party.
+
+The sidecar and the gateway are the *same core wrapped as a server*; the
+in-process SDK is that core *without* the server shell.
+
+### Language plan: Go first
+
+1. **Reuse the broker's Go code.** The core shares logic with the broker:
+   ECDSA sign/recover (`go-ethereum/crypto`, already used in `signing.go`), TDX
+   quote handling (`go-tdx-guest`, dstack client), and shared types
+   (`ChatSignature`). One language, byte-for-byte consistency with the broker.
+2. **The sidecar binary and the cloud gateway are both server-side Go
+   processes** — single static binary, containerized, runs in the same
+   Phala/dstack CVM the broker targets.
+3. **Shipping the sidecar form covers every non-browser language on day one**
+   via `base_url` (Python/TS/… keep their OpenAI SDK). No per-language
+   libraries required initially.
+
+**Known gap — the browser needs TS/WASM, and Go does not cover it well.** The
+app-layer sealed channel for pure browsers needs in-browser quote verification +
+HPKE. Go→WASM for a browser crypto/network library is awkward (bundle size,
+WebCrypto/fetch interop), so plan a **focused TS build of just verify + seal**
+for the browser segment — kept in lockstep with a written wire spec (envelope +
+proof format) so it matches the Go core byte-for-byte.
+
+**Recommended sequencing:** Go core → (1) sidecar binary (covers all
+non-browser) + (2) same core reused as the cloud-TEE gateway → later, a TS/WASM
+build for the browser segment.
 
 ---
 
