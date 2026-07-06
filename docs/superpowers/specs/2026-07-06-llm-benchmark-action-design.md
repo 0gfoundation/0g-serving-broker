@@ -159,7 +159,7 @@ Single job on `ubuntu-latest`:
      ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
      --concurrency "$CONCURRENCY" \
      --request-count "$REQUEST_COUNT" \
-     --output-directory ./aiperf-out
+     --output-artifact-dir ./aiperf-out
    ```
    The `Authorization` header is only added when the api key is non-empty.
    `continue-on-error` ensures the report step always runs.
