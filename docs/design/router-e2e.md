@@ -124,7 +124,7 @@ sequenceDiagram
     rect rgb(235, 250, 240)
     Note over SC,M: Phase 3 - Data plane (sealed)
     SC->>R: manifest pin + allow_fallbacks=false, plus sealed body
-    R->>B1: forward to pinned broker (SNI pin + L4, or header pin + L7; body opaque)
+    R->>B1: L7: re-auth as router, bill router account, forward (body sealed/opaque)
     B1->>M: unseal in-enclave, call model
     M-->>B1: completion
     B1-->>SC: signed response
@@ -182,30 +182,39 @@ Notes:
 "Pin" = the destination is fully determined by the sidecar, so the router's
 dynamic routing/fallback is disabled for this request.
 
-**Where the pin lives depends on the router's layer — and this is a real
-constraint, not a free choice.** An **L4** forwarder only sees TCP/IP metadata
-and the TLS **SNI**; HTTP headers are inside the encrypted stream, so an L4
-router **cannot read a `pin` header**. Reading a header requires an **L7** router
-that terminates TLS. So "L4 + pin-in-header" is contradictory — pick one:
+**The billing/identity model constrains this more than crypto does.** The router
+is a **reseller**: it terminates the user's request, re-authenticates to the
+broker **as itself**, and the broker settles fees against the **router's**
+on-chain account (`settleFeesWithTEE`). That only works if the router
+**terminates TLS (L7)** to substitute its own auth and bill its own account. A
+pure L4/SNI passthrough leaves the TLS session end-to-end user↔broker, so the
+router never terminates, cannot inject its credentials, and the broker would see
+the *user*, not the router — breaking the reseller accounting.
 
-- **(i-a) L7, TLS-terminating, body sealed:** the router terminates TLS, reads
-  the HTTP headers / route manifest (carrying `pin=provider_X,
-  allow_fallbacks=false`), forwards to X, and does **not** re-route. It sees
-  headers + metadata but the body is opaque ciphertext. This is where a
-  **pin HTTP header works** (matches the current implementation) — but call it
-  what it is: **L7 body-blind, not L4.** Reuses the existing ingress and the
-  `pin` / `allow_fallbacks` concept.
-- **(i-b) L4 SNI passthrough (most private):** the router does **not** terminate
-  TLS; it forwards TCP by **SNI**. It cannot read any HTTP header, so the **pin
-  moves to the SNI/hostname** — each broker gets a routable hostname and the
-  sidecar sets the target SNI. The router sees only SNI + traffic shape.
-- **(ii) Direct to broker:** the sidecar connects straight to the chosen
-  broker's endpoint; the router is out of the data path entirely.
+So the viable data-plane options are:
 
-**Recommendation:** for the sealed path prefer **i-b (SNI pin + L4)** — strictly
-more private (the router never parses HTTP). Keep header-based pin (i-a) only if
-the router must stay L7 for other reasons; if so, do not describe that hop as
-"L4".
+- **(i-a) L7, TLS-terminating, body sealed — the default.** The router terminates
+  TLS, reads/replaces auth headers and the route manifest (carrying
+  `pin=provider_X, allow_fallbacks=false`), bills its account, and forwards. It
+  sees headers + metadata but the **body is opaque ciphertext**. Confidentiality
+  comes **entirely from sealing the body, not from L4.** Matches the current
+  ingress + `pin`/`allow_fallbacks` concept; the only change is that the body is
+  sealed. (Note: an L4 forwarder cannot read a `pin` *header* at all — HTTP is
+  inside the TLS stream — so header-based pin *requires* L7 anyway.)
+- **(i-b) L4 SNI passthrough / (ii) direct — only viable with delegated billing.**
+  These bypass the router's TLS termination (more private: the router sees only
+  SNI + traffic shape, or nothing), but they **break reseller billing** unless a
+  **voucher / delegated-authorization** scheme is added: the control-plane call
+  also returns a router-signed voucher ("router X authorizes up to N tokens on
+  its account for broker Y, nonce, expiry"); the sidecar presents it directly to
+  the broker; the broker's settlement layer verifies the voucher and charges the
+  router. This requires **broker settlement changes** + a voucher format — a
+  larger lift, deferred.
+
+**Recommendation:** default to **i-a** — it preserves the router's
+authentication and billing unchanged, and confidentiality is provided by sealing
+the body. Pursue i-b/ii (with vouchers) only if bypassing the router on the data
+plane becomes a hard requirement.
 
 **Fallback loop lives in the sidecar.** On failure/busy/timeout for candidate
 #1, the sidecar seals to #2's key and retries. This is why sealing forces the
@@ -256,11 +265,11 @@ Unchanged in principle:
 - The broker signs the response (`signChatWithKey` /
   `signCentralizedRoutingProof`); the sidecar verifies the signature against the
   on-chain `teeSignerAddress` (the per-response verification flow).
-- Sealing in this design is **request-direction**. The response already travels
-  over TLS; with SNI-pinned L4 passthrough (i-b) or direct connect (ii) no
-  plaintext-L7 hop reads it. Under header-pinned L7 (i-a) the router does
-  terminate TLS on the return path — response confidentiality from the router
-  then relies on response-direction sealing (below), not just transport TLS.
+- Sealing in this design is **request-direction**. Under the default L7 model
+  (i-a) the router terminates TLS on the return path too, so response
+  confidentiality *from the router* requires response-direction sealing (below),
+  not just transport TLS. Only the voucher-based i-b/ii bypass keeps a
+  plaintext-L7 hop off the response path.
 - If response-direction confidentiality from the transport is also required, the
   broker can seal the response to a client-supplied ephemeral key. Deferred —
   the signature already gives integrity + origin.
@@ -395,9 +404,10 @@ Backward compatible; sealed mode is opt-in ("privacy mode").
 1. **Groundwork:** broker publishes an encryption pubkey in the quote; add the
    control-plane candidate endpoint on the router (metadata in → ranked list +
    quotes out). No client change yet.
-2. **Sidecar seal + pin:** sidecar seals the body, sends with
-   `pin, allow_fallbacks=false` (variant i); router honors the pin and forwards
-   without re-routing. Fallback loop in the sidecar.
+2. **Sidecar seal + pin (i-a):** sidecar seals the body, sends with
+   `pin, allow_fallbacks=false`; the L7 router re-auths as itself, bills its
+   account, honors the pin, and forwards without re-routing. Fallback loop in the
+   sidecar. (Data-plane bypass — i-b/ii — is a later, voucher-gated step.)
 3. **Harden:** measurement-tied key rotation + TTL cache; manifest↔body
    consistency check in the enclave; optional direct-to-broker (variant ii).
 4. **Legacy path stays** for users who do not opt into privacy mode (router keeps
