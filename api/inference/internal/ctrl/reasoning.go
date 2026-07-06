@@ -53,8 +53,11 @@ const (
 	// nativeParamThinking is MiniMax's object control: {"type": "enabled"|"disabled"}.
 	nativeParamThinking = "thinking"
 
-	// enableThinkingKey is the toggle key (nested under chat_template_kwargs, or
-	// used top-level for DashScope).
+	// enableThinkingKey is the toggle key NESTED under chat_template_kwargs (the
+	// vLLM/SGLang dialect). It coincidentally shares the literal "enable_thinking"
+	// with nativeParamEnableThinking above, but the two play different roles — this
+	// is a key inside a container, that is a top-level advertised param / wire key —
+	// so they are deliberately kept as separate constants.
 	enableThinkingKey = "enable_thinking"
 )
 
