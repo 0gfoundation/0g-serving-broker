@@ -7,6 +7,10 @@ control the target model's upstream actually understands (e.g. Qwen3/vLLM's
 `supportedParameters` plus a small in-code `switch`, not by a per-model
 translation table.
 
+> For where this step sits in the full request-body pipeline (and how it relates to
+> `max_tokens` translation and TEE signing), see
+> [request-translation.md](request-translation.md).
+
 ## The problem it solves
 
 Clients want one portable knob. Different upstreams expose different ones for the
