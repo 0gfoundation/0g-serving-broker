@@ -168,7 +168,10 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 // TranslateReasoning rewrites a chatbot request body so the client's portable
 // reasoning_effort is expressed as the upstream-native thinking control the
 // target model advertises (e.g. chat_template_kwargs.enable_thinking). The model
-// is read from the body itself, so the call needs no extra plumbing.
+// is passed in as the resolved canonical id (from CtxKeyResolvedModel), NOT read
+// from the body: ValidateModelAllowlist may have already rewritten the body's
+// "model" to the upstream id, while per-model supportedParameters are keyed by
+// canonical id. An empty model resolves to the service-level ModelInfo.
 //
 // It returns the body unchanged when:
 //   - the body is empty or not a JSON object (mirrors EnsureStreamOptions);
@@ -179,7 +182,7 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 // When translation occurs, reasoning_effort is removed from the outgoing body:
 // it has been consumed and re-expressed natively, and a Qwen/vLLM upstream that
 // needs enable_thinking may reject the unknown OpenAI field.
-func (c *Ctrl) TranslateReasoning(body []byte) ([]byte, error) {
+func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
 	}
@@ -190,7 +193,6 @@ func (c *Ctrl) TranslateReasoning(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	model, _ := bodyMap["model"].(string)
 	nativeParam := c.nativeReasoningParam(model)
 	if nativeParam == "" {
 		return body, nil

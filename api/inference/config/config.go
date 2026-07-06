@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
 	"regexp"
@@ -85,6 +87,17 @@ func (a *ModelArchitecture) Validate() error {
 	return nil
 }
 
+// API surface format identifiers used in ModelInfo.SupportedFormats. They name
+// the request surface a chat model accepts: APIFormatOpenAI is the OpenAI
+// /chat/completions shape, APIFormatAnthropic is the Anthropic /v1/messages
+// shape. The request path enforces these against the resolved model (see
+// ctrl.enforceRequestFormat) so a client can't hit a surface whose usage the
+// upstream doesn't report (which would silently misbill).
+const (
+	APIFormatOpenAI    = "openai"
+	APIFormatAnthropic = "anthropic"
+)
+
 // ModelInfo holds optional metadata for the /v1/models endpoint.
 // These fields enrich the on-chain service data with static model details.
 // When provided, name, description, contextLength, architecture, and supportedParameters are required.
@@ -95,7 +108,7 @@ type ModelInfo struct {
 	MaxCompletionTokens int                    `yaml:"maxCompletionTokens"` // Optional. Max output tokens
 	Architecture        *ModelArchitecture     `yaml:"architecture"`        // Required. Model architecture details
 	SupportedParameters []string               `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
-	SupportedFormats    []string               `yaml:"supportedFormats"`    // Optional. API formats this model supports, e.g., ["openai", "anthropic"]. Defaults to ["openai"] if omitted.
+	SupportedFormats    []string               `yaml:"supportedFormats"`    // Optional. API surfaces this model accepts: "openai" (/chat/completions) and/or "anthropic" (/v1/messages). When omitted the model is unconstrained and accepts every surface (backward compatible); when set, requests on an undeclared surface are rejected (see ctrl.enforceRequestFormat).
 	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
 	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
 	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z". After this instant the broker rejects requests for the model with HTTP 410.
@@ -134,6 +147,16 @@ func (m *ModelInfo) Validate(serviceType string) error {
 	if len(m.SupportedParameters) == 0 {
 		return fmt.Errorf("service.modelInfo.supportedParameters is required")
 	}
+	// supportedFormats is optional, but when set every entry must name a surface
+	// the request path knows how to enforce — a typo (e.g. "anthropc") would
+	// otherwise silently block ALL traffic on that surface at request time.
+	for _, f := range m.SupportedFormats {
+		switch strings.ToLower(strings.TrimSpace(f)) {
+		case APIFormatOpenAI, APIFormatAnthropic:
+		default:
+			return fmt.Errorf("service.modelInfo.supportedFormats contains unknown format %q (allowed: %q, %q)", f, APIFormatOpenAI, APIFormatAnthropic)
+		}
+	}
 	// Parse the optional expiration once at load time so the request path never
 	// re-parses it. An unparseable value is a config error (fail fast) rather
 	// than a silently ignored string.
@@ -160,18 +183,57 @@ func (m *ModelInfo) Validate(serviceType string) error {
 func (s *Service) ModelExpiration(model string) (time.Time, bool) {
 	mi := s.ModelInfo
 	if s.HasMultiModelPricing() {
-		mp := s.GetModelPricing(model)
-		if mp == nil {
+		// Resolve through the same path as the request allowlist (exact id, then
+		// alias, then wildcard) so a request using a legacy alias is subject to the
+		// SAME expiration gate as the canonical id — GetModelPricing alone would
+		// miss aliases and let an alias bypass a model's 410-expiry.
+		entry, _, ok := s.ResolveRequestedModel(model)
+		if !ok || entry == nil {
 			return time.Time{}, false
 		}
-		if mp.ModelInfo != nil {
-			mi = mp.ModelInfo
+		if entry.ModelInfo != nil {
+			mi = entry.ModelInfo
 		}
 	}
 	if mi != nil && !mi.expiresAt.IsZero() {
 		return mi.expiresAt, true
 	}
 	return time.Time{}, false
+}
+
+// EffectiveModelInfo resolves the ModelInfo that applies to a request for the
+// given model, or nil when none is configured. Resolution mirrors ModelExpiration
+// and the /v1/models metadata: in multi-model mode a per-model pricing entry's own
+// ModelInfo wins wholesale (resolved alias-aware via ResolveRequestedModel, so a
+// legacy alias is subject to the same metadata as its canonical id), otherwise the
+// service-level ModelInfo applies; an unknown multi-model id with no wildcard entry
+// resolves to nil — it is not a model this service serves. In single-model mode the
+// service-level ModelInfo is returned regardless of the requested name.
+func (s *Service) EffectiveModelInfo(model string) *ModelInfo {
+	mi := s.ModelInfo
+	if s.HasMultiModelPricing() {
+		entry, _, ok := s.ResolveRequestedModel(model)
+		if !ok || entry == nil {
+			return nil
+		}
+		if entry.ModelInfo != nil {
+			mi = entry.ModelInfo
+		}
+	}
+	return mi
+}
+
+// SupportedFormatsFor returns the explicitly-configured API surface formats
+// (APIFormatOpenAI / APIFormatAnthropic) for the resolved model, resolving the
+// per-model ModelInfo the same way EffectiveModelInfo does. It returns nil when
+// none is configured — callers treat nil as "unconstrained" so services written
+// before format enforcement keep accepting every surface (backward compatible).
+func (s *Service) SupportedFormatsFor(model string) []string {
+	mi := s.EffectiveModelInfo(model)
+	if mi == nil {
+		return nil
+	}
+	return mi.SupportedFormats
 }
 
 type Service struct {
@@ -262,11 +324,102 @@ type Service struct {
 
 	// modelPricingMap is a derived lookup map built during config validation.
 	modelPricingMap map[string]*ModelPricingEntry `yaml:"-"`
+	// modelAliasMap is a derived lookup from per-entry ModelAliases to the owning
+	// entry, built alongside modelPricingMap. Lets the multi-model request path
+	// accept a legacy model id and resolve it to its canonical pricing entry.
+	modelAliasMap map[string]*ModelPricingEntry `yaml:"-"`
+
+	// InjectBodyFields, when set, are top-level key/value pairs merged into the
+	// JSON request body forwarded to a chatbot targetUrl. It lets an operator set
+	// upstream defaults/overrides per provider without code changes. The canonical
+	// use is OpenRouter provider routing — pin a backend while allowing fallbacks
+	// on failure — but it is generic: e.g. force reasoning off on a route, or set
+	// any other upstream-understood field:
+	//
+	//   injectBodyFields:
+	//     provider:                  # OpenRouter provider-routing object
+	//       order: ["DeepInfra"]
+	//       allow_fallbacks: true
+	//       require_parameters: true
+	//     reasoning:
+	//       enabled: false           # e.g. disable thinking on this route
+	//
+	// Server-config-wins: each injected key overwrites any client-supplied value
+	// of the same name, so users cannot steer it. Key names are NOT validated
+	// against an allowlist (the upstream is the authority on accepted keys), but:
+	//   - a denylist of broker-critical fields (model, messages, stream,
+	//     stream_options, lora_adapter_name) is REJECTED at load — overriding them
+	//     would break model enforcement / usage-based billing / LoRA rewriting
+	//     (see protectedInjectBodyFields);
+	//   - at config load the map is normalized and checked JSON-serializable so a
+	//     nested-object value (e.g. provider.max_price) cannot pass load yet fail
+	//     every request at marshal time — see normalizeInjectBodyFields.
+	// Empty or unset means the body is forwarded unchanged (backward compatible).
+	// Only applied for the chatbot service type; rejected for others at load.
+	InjectBodyFields map[string]interface{} `yaml:"injectBodyFields"`
+
+	// StripBodyFields, when set, are top-level keys REMOVED from the JSON request
+	// body before it is forwarded to a chatbot targetUrl. It is the surgical
+	// counterpart of injectBodyFields: a denylist of client-supplied params the
+	// upstream does not accept. The motivating case is OpenRouter returning 404 for
+	// a request carrying a param the picked backend lacks (e.g. logprobs /
+	// top_logprobs) — the broker strips it rather than letting the upstream reject
+	// the whole request:
+	//
+	//   stripBodyFields:
+	//     - logprobs
+	//     - top_logprobs
+	//
+	// It is deliberately a denylist, NOT an allowlist derived from
+	// modelInfo.supportedParameters: that field advertises sampling capabilities
+	// for /v1/models and is not an exhaustive set of legal body keys, so using it
+	// to strip would silently drop legitimate params (max_completion_tokens, n,
+	// tools, response_format, …). A denylist can only remove keys the operator
+	// names, so the worst case is a missed param that keeps 404-ing (loud,
+	// discoverable) rather than a legitimate request silently mangled.
+	//
+	// The "worst case is a loud 404" guarantee holds only for params the upstream
+	// REQUIRES/rejects. Stripping a param the upstream merely accepts changes
+	// request behavior silently with no error — in particular do NOT strip
+	// cost-affecting keys (max_tokens / max_completion_tokens, etc.): removing an
+	// output cap can uncap generation and inflate the output-token bill the user
+	// pays. List only params that actually cause upstream rejection.
+	//
+	// Matching is case-sensitive and exact: an entry must equal the JSON key the
+	// client sends byte-for-byte ("logprobs", not "Logprobs"). A typo loads fine
+	// but silently never matches; confirm via the per-request "stripped … field(s)"
+	// log that the denylist is firing.
+	//
+	// Broker-critical fields (model, messages, stream, stream_options,
+	// lora_adapter_name) are REJECTED at load — stripping them would break model
+	// enforcement / usage-based billing / LoRA rewriting (same protected denylist
+	// as injectBodyFields; see protectedInjectBodyFields). Names are otherwise NOT
+	// validated against an allowlist (the upstream is the authority on accepted
+	// keys). Applied BEFORE injectBodyFields, so an operator may strip a client's
+	// value and then inject the server's own. Empty or unset means the body is
+	// forwarded unchanged. Only applied for the chatbot service type; rejected for
+	// others at load.
+	StripBodyFields []string `yaml:"stripBodyFields"`
 }
 
 // IsCentralized returns true if this service routes to a centralized API provider.
 func (s *Service) IsCentralized() bool {
 	return s.ProviderType == constant.ProviderTypeCentralized
+}
+
+// IsStandard returns true if this service is a "standard" pure forwarder: no TEE
+// verification, no response signing, and a hidden upstream (no provider identity
+// or upstream domain published). See constant.ProviderTypeStandard.
+func (s *Service) IsStandard() bool {
+	return s.ProviderType == constant.ProviderTypeStandard
+}
+
+// IsForwarder returns true for provider types that proxy to an external upstream
+// rather than co-locating the model with the broker (centralized and standard).
+// These share forwarding behavior: TargetSeparated is forced, per-model pricing is
+// allowed, and no LLM attestation is hosted locally.
+func (s *Service) IsForwarder() bool {
+	return s.IsCentralized() || s.IsStandard()
 }
 
 // IsUSDDenominated returns true if this service's prices are configured in USD
@@ -337,21 +490,125 @@ type PriceFeedConfig struct {
 	HTTPTimeout time.Duration `yaml:"httpTimeout"`
 }
 
-// CacheTokenBillingConfig defines configuration for cached token discount billing.
-// When enabled, cached input tokens (reported by the LLM via prompt_tokens_details.cached_tokens)
+// CacheTokenBillingConfig defines configuration for cache-aware token billing.
+// When enabled, cache-READ input tokens (reported by the LLM via
+// prompt_tokens_details.cached_tokens, or Anthropic's cache_read_input_tokens)
 // are billed at a discounted rate: inputPrice / Divisor.
+//
+// Optionally, cache-WRITE tokens (cache creation) are billed at a premium in up
+// to two tiers, mirroring how upstreams (Anthropic/Bedrock) price cache writes by
+// TTL:
+//
+//   - The DEFAULT / 5-minute tier: inputPrice * WriteMultiplierNumerator /
+//     WriteMultiplierDenominator. Applies to the OpenAI-path usage.cache_write_tokens,
+//     to Anthropic's cache_creation.ephemeral_5m_input_tokens, and to any
+//     cache-creation tokens with no TTL breakdown. Anthropic's 5-minute rate is
+//     1.25x (num=5, den=4).
+//   - The 1-hour tier: inputPrice * Write1hMultiplierNumerator /
+//     Write1hMultiplierDenominator. Applies to Anthropic's
+//     cache_creation.ephemeral_1h_input_tokens. Anthropic's 1-hour rate is 2x
+//     (num=2, den=1). When left unset, 1-hour cache-write tokens fall back to the
+//     default tier's multiplier (and, if that is also unset, to full input price).
+//
+// When the default write multiplier is unset (either field 0), cache-write tokens
+// fall back to full input price (1x) — the prior behavior.
 type CacheTokenBillingConfig struct {
-	Enabled bool  `yaml:"enabled"` // Enable cached token discount billing (default: false)
-	Divisor int64 `yaml:"divisor"` // Discount divisor for cached tokens (e.g., 4 means 25% of full price)
+	Enabled bool  `yaml:"enabled"` // Enable cache-aware billing (default: false)
+	Divisor int64 `yaml:"divisor"` // Discount divisor for cache-read tokens (e.g., 4 means 25% of full price)
+	// WriteMultiplierNumerator / WriteMultiplierDenominator express the DEFAULT
+	// (5-minute) cache-write premium as a fraction of the input price
+	// (fee = inputPrice * num / den). When set, the fraction must be >= 1x
+	// (num >= den >= 1) since a cache write is a premium, never a discount; leaving
+	// either at 0 disables the premium and bills cache-write tokens at full input
+	// price.
+	WriteMultiplierNumerator   int64 `yaml:"writeMultiplierNumerator"`
+	WriteMultiplierDenominator int64 `yaml:"writeMultiplierDenominator"`
+	// Write1hMultiplierNumerator / Write1hMultiplierDenominator express the 1-hour
+	// cache-write premium the same way. Same >= 1x rule. When unset, 1-hour
+	// cache-write tokens fall back to the default write multiplier above.
+	Write1hMultiplierNumerator   int64 `yaml:"write1hMultiplierNumerator"`
+	Write1hMultiplierDenominator int64 `yaml:"write1hMultiplierDenominator"`
+}
+
+// WriteMultiplierEnabled reports whether the default (5-minute) cache-write
+// premium is configured (both fraction fields set to a usable value). Billing
+// consults this before splitting out cache-write tokens; otherwise they bill at
+// full input price.
+func (c *CacheTokenBillingConfig) WriteMultiplierEnabled() bool {
+	return c.Enabled && c.WriteMultiplierNumerator > 0 && c.WriteMultiplierDenominator > 0
+}
+
+// Write1hMultiplierEnabled reports whether a distinct 1-hour cache-write premium
+// is configured. When false, 1-hour cache-write tokens fall back to the default
+// write multiplier (see WriteMultiplierEnabled).
+func (c *CacheTokenBillingConfig) Write1hMultiplierEnabled() bool {
+	return c.Enabled && c.Write1hMultiplierNumerator > 0 && c.Write1hMultiplierDenominator > 0
 }
 
 // validateCacheTokenBilling rejects a divisor < 1 when caching is enabled: a 0
 // divisor would divide-by-zero panic at billing time (fee = price*tokens/divisor)
-// and a negative one would produce a garbage/negative discount. prefix labels the
-// source (service-level "cacheTokenBilling" or a per-model entry).
+// and a negative one would produce a garbage/negative discount. Each write
+// multiplier fraction (default and 1-hour) is validated the same way: if either
+// field of a fraction is set both must be >= 1 (a 0 denominator would
+// divide-by-zero, a partial fraction is a config typo) and the fraction must be
+// >= 1x. prefix labels the source (service-level "cacheTokenBilling" or a
+// per-model entry).
 func validateCacheTokenBilling(prefix string, c *CacheTokenBillingConfig) error {
 	if c.Enabled && c.Divisor < 1 {
 		return fmt.Errorf("invalid config: %s.divisor must be >= 1 when enabled, got %d", prefix, c.Divisor)
+	}
+	if err := validateWriteMultiplier(prefix, "writeMultiplier", c.WriteMultiplierNumerator, c.WriteMultiplierDenominator); err != nil {
+		return err
+	}
+	if err := validateWriteMultiplier(prefix, "write1hMultiplier", c.Write1hMultiplierNumerator, c.Write1hMultiplierDenominator); err != nil {
+		return err
+	}
+
+	defaultSet := c.WriteMultiplierNumerator != 0 || c.WriteMultiplierDenominator != 0
+	write1hSet := c.Write1hMultiplierNumerator != 0 || c.Write1hMultiplierDenominator != 0
+
+	// The 1-hour tier layers on top of the default (5-minute) tier. Configuring it
+	// alone would silently bill the far more common 5-minute cache writes at full
+	// input price (1x) while the upstream still charges a 5-minute premium — a
+	// silent under-charge and almost never what the operator intended. Require the
+	// default tier to be set explicitly (set it to 1/1 to deliberately bill
+	// 5-minute cache writes at cost).
+	if write1hSet && !defaultSet {
+		return fmt.Errorf("invalid config: %s.write1hMultiplier is set but %s.writeMultiplier (the default/5-minute tier) is not; configure the default tier too (use 1/1 to bill 5-minute cache writes at full input price)", prefix, prefix)
+	}
+	// A 1-hour cache write is never cheaper than a 5-minute one upstream, so a
+	// 1-hour premium below the default premium is almost certainly a transposed
+	// config that would silently under-charge the 1-hour tier — the same class of
+	// error the per-fraction num<den check guards against, at the cross-tier level.
+	// Compare by cross-multiplication (both denominators are >= 1 once set).
+	if defaultSet && write1hSet &&
+		c.Write1hMultiplierNumerator*c.WriteMultiplierDenominator < c.WriteMultiplierNumerator*c.Write1hMultiplierDenominator {
+		return fmt.Errorf("invalid config: %s.write1hMultiplier (%d/%d) must be >= writeMultiplier (%d/%d); a 1-hour cache write is never cheaper than a 5-minute one",
+			prefix, c.Write1hMultiplierNumerator, c.Write1hMultiplierDenominator, c.WriteMultiplierNumerator, c.WriteMultiplierDenominator)
+	}
+	return nil
+}
+
+// validateWriteMultiplier enforces the >= 1x premium rule shared by both
+// cache-write tiers. field is the yaml key stem ("writeMultiplier" or
+// "write1hMultiplier") used in error messages. A fully-zero fraction is "unset"
+// and passes; a partially-set or below-1x fraction is rejected.
+func validateWriteMultiplier(prefix, field string, num, den int64) error {
+	if num == 0 && den == 0 {
+		return nil
+	}
+	if num < 1 || den < 1 {
+		return fmt.Errorf("invalid config: %s.%sNumerator/%sDenominator must both be >= 1 when set, got %d/%d",
+			prefix, field, field, num, den)
+	}
+	// The write multiplier is a PREMIUM (cache-write costs at least full input
+	// price), so the fraction must be >= 1x. Rejecting numerator < denominator
+	// catches the likely operator error of transposing the fields (e.g. writing
+	// 1/2 when 2/1 was intended), which would silently DISCOUNT cache-write
+	// tokens instead of surcharging them.
+	if num < den {
+		return fmt.Errorf("invalid config: %s.%sNumerator/%sDenominator is a premium and must be >= 1x (numerator >= denominator), got %d/%d",
+			prefix, field, field, num, den)
 	}
 	return nil
 }
@@ -716,6 +973,206 @@ func validatePricingTiers(prefix string, tiers []PricingTier) error {
 	return nil
 }
 
+// protectedInjectBodyFields are top-level request-body keys the broker sets or
+// depends on for correctness and must never be overridden by injectBodyFields:
+//   - model: enforced per service for billing integrity (users pay for the
+//     advertised model; see EnforceConfiguredModel/ValidateModelAllowlist).
+//   - messages: the actual request content.
+//   - stream / stream_options: the broker forces stream_options.include_usage so
+//     streaming responses report usage for billing (see EnsureStreamOptions).
+//   - lora_adapter_name: the broker derives this from an ft-* model during LoRA
+//     request rewriting (see RewriteLoRARequest); injecting it would clobber the
+//     resolved adapter.
+//
+// Injecting any of these is rejected at config load (fail loud, not silent).
+var protectedInjectBodyFields = map[string]struct{}{
+	"model":             {},
+	"messages":          {},
+	"stream":            {},
+	"stream_options":    {},
+	"lora_adapter_name": {},
+}
+
+// normalizeInjectBodyFields rejects broker-critical keys, then makes the map safe
+// to json.Marshal into the forwarded request body at runtime and verifies
+// serializability so a broken value shape fails loud at load instead of on every
+// request.
+//
+// yaml.v2 decodes nested mappings as map[interface{}]interface{}, which
+// json.Marshal rejects. So a nested-object value — e.g. OpenRouter's documented
+// provider.max_price: {prompt, completion} — would otherwise pass config load
+// (the field is map[string]interface{} at the top level) yet fail EVERY chatbot
+// request at runtime inside ctrl.InjectBodyFields. We recursively convert nested
+// maps to map[string]interface{} and re-check json.Marshal.
+//
+// This intentionally does NOT validate key names against an allowlist (beyond the
+// protected denylist): upstream-accepted keys are the gateway's vocabulary, not
+// ours, and a closed allowlist both rejects legitimate keys the moment the
+// upstream adds one and gives false confidence. We only guarantee the value is
+// forwardable and does not clobber a field the broker relies on.
+// fieldPath names the config location for error messages (e.g.
+// "service.injectBodyFields" or "service.modelPricing[0].injectBodyFields") so a
+// rejection points the operator at the exact block.
+func normalizeInjectBodyFields(fieldPath string, fields map[string]interface{}) (map[string]interface{}, error) {
+	normalized := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		if _, protected := protectedInjectBodyFields[k]; protected {
+			return nil, fmt.Errorf("invalid config: %s must not override broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", fieldPath, k)
+		}
+		normalized[k] = normalizeYAMLValue(v)
+	}
+	if _, err := json.Marshal(normalized); err != nil {
+		return nil, fmt.Errorf("invalid config: %s is not JSON-serializable (check the value shapes): %w", fieldPath, err)
+	}
+	return normalized, nil
+}
+
+// normalizeStripBodyFields trims and de-duplicates a stripBodyFields list and
+// rejects broker-critical keys, reusing the same protected denylist as
+// injectBodyFields — stripping model/messages/stream/stream_options/
+// lora_adapter_name would break model enforcement, usage-based billing, or LoRA
+// rewriting, so it fails loud at load instead of silently mangling every request.
+// Blank entries are dropped. fieldPath names the config location for error
+// messages (e.g. "service.stripBodyFields" or
+// "service.modelPricing[0].stripBodyFields").
+func normalizeStripBodyFields(fieldPath string, fields []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(fields))
+	normalized := make([]string, 0, len(fields))
+	for _, k := range fields {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if _, protected := protectedInjectBodyFields[k]; protected {
+			return nil, fmt.Errorf("invalid config: %s must not strip broker-critical field %q (protected: model, messages, stream, stream_options, lora_adapter_name)", fieldPath, k)
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		normalized = append(normalized, k)
+	}
+	return normalized, nil
+}
+
+// EffectiveStripBodyFields returns the top-level body keys to strip for a request
+// resolved to the given model: the UNION of the service-level stripBodyFields and
+// the resolved model's per-entry stripBodyFields. Unlike injectBodyFields (which
+// deep-merges so a per-model leaf overrides the service value), stripping is
+// additive — a key removed at either level should be removed — so the two lists
+// are combined rather than overridden. Returns nil when neither level is
+// configured. The result is order-stable (service entries first, then any
+// model-only entries) and de-duplicated.
+func (s *Service) EffectiveStripBodyFields(model string) []string {
+	svc := s.StripBodyFields
+	var entry []string
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil {
+			entry = e.StripBodyFields
+		}
+	}
+	if len(entry) == 0 {
+		return svc
+	}
+	if len(svc) == 0 {
+		return entry
+	}
+	seen := make(map[string]struct{}, len(svc)+len(entry))
+	out := make([]string, 0, len(svc)+len(entry))
+	for _, k := range append(append([]string{}, svc...), entry...) {
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
+}
+
+// EffectiveInjectBodyFields returns the body fields to inject for a request
+// resolved to the given model: the service-level injectBodyFields with the
+// resolved model's per-entry injectBodyFields deep-merged ON TOP (the entry wins
+// on leaf conflicts). This lets a multi-model service share routing at the
+// service level (e.g. provider.sort) while each model adds its own override
+// (e.g. provider.max_price). Returns nil when neither level is configured.
+//
+// The returned map is freshly allocated at every merged level and never shares a
+// mutable node with the stored config, so callers (and json.Marshal) cannot
+// corrupt the config maps that are reused across concurrent requests. When only
+// one level is set, its (read-only) map is returned directly.
+func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{} {
+	svc := s.InjectBodyFields
+	var entry map[string]interface{}
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil {
+			entry = e.InjectBodyFields
+		}
+	}
+	switch {
+	case len(entry) == 0:
+		return svc
+	case len(svc) == 0:
+		return entry
+	default:
+		return deepMergeInjectFields(svc, entry)
+	}
+}
+
+// deepMergeInjectFields returns a new map equal to base with override applied on
+// top: nested map[string]interface{} values are merged recursively (override's
+// leaf wins), every other value type (scalars, slices) is replaced wholesale by
+// override's. Neither input is mutated. Both inputs are already normalized to
+// string-keyed maps by normalizeInjectBodyFields, so only map[string]interface{}
+// nesting needs handling.
+func deepMergeInjectFields(base, override map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(base)+len(override))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, ov := range override {
+		if bv, ok := out[k]; ok {
+			if bm, isBaseMap := bv.(map[string]interface{}); isBaseMap {
+				if om, isOverrideMap := ov.(map[string]interface{}); isOverrideMap {
+					out[k] = deepMergeInjectFields(bm, om)
+					continue
+				}
+			}
+		}
+		out[k] = ov
+	}
+	return out
+}
+
+// normalizeYAMLValue recursively rewrites yaml.v2's map[interface{}]interface{}
+// nodes into map[string]interface{} (walking slices too) so the value can be
+// json.Marshal-ed. Map keys are stringified; OpenRouter routing keys are always
+// strings, so a non-string key indicates malformed config and simply becomes its
+// string form (harmless — the upstream ignores unknown keys).
+func normalizeYAMLValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[interface{}]interface{}:
+		m := make(map[string]interface{}, len(val))
+		for k, vv := range val {
+			m[fmt.Sprintf("%v", k)] = normalizeYAMLValue(vv)
+		}
+		return m
+	case map[string]interface{}:
+		m := make(map[string]interface{}, len(val))
+		for k, vv := range val {
+			m[k] = normalizeYAMLValue(vv)
+		}
+		return m
+	case []interface{}:
+		s := make([]interface{}, len(val))
+		for i, vv := range val {
+			s[i] = normalizeYAMLValue(vv)
+		}
+		return s
+	default:
+		return val
+	}
+}
+
 // validatePriceFeedConfig validates (and normalizes with defaults) the price-feed
 // configuration. Only invoked when service.priceDenomination == "USD".
 func validatePriceFeedConfig(pf *PriceFeedConfig) error {
@@ -947,8 +1404,10 @@ func loadConfig(cfg *Config) error {
 	if cfg.Service.ProviderType == "" {
 		cfg.Service.ProviderType = constant.ProviderTypeDecentralized
 	}
-	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
-		return fmt.Errorf("invalid config: service.providerType must be '%s' or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, cfg.Service.ProviderType)
+	if cfg.Service.ProviderType != constant.ProviderTypeDecentralized &&
+		cfg.Service.ProviderType != constant.ProviderTypeCentralized &&
+		cfg.Service.ProviderType != constant.ProviderTypeStandard {
+		return fmt.Errorf("invalid config: service.providerType must be '%s', '%s', or '%s', got '%s'", constant.ProviderTypeDecentralized, constant.ProviderTypeCentralized, constant.ProviderTypeStandard, cfg.Service.ProviderType)
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeCentralized {
 		if cfg.Service.ProviderIdentity == "" {
@@ -965,6 +1424,78 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
 		}
+	}
+	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
+		// A standard provider deliberately hides its upstream: it never publishes a
+		// provider identity, so reject one rather than silently ignoring it (which
+		// would mislead an operator into thinking it is advertised).
+		if cfg.Service.ProviderIdentity != "" {
+			return fmt.Errorf("invalid config: service.providerIdentity must not be set when providerType is 'standard' (a standard provider hides its upstream identity)")
+		}
+		// A standard provider forwards to an external upstream and never signs, so it
+		// always behaves as TargetSeparated (no broker signature, no ZG-Res-Key).
+		cfg.Service.TargetSeparated = true
+		// TargetSeparated is forced on, which would otherwise publish a
+		// TargetTeeAddress on-chain (see buildAdditionalInfo). A standard provider has
+		// no upstream TEE, so force it empty rather than leak a stale/misleading TEE
+		// address for a non-verifiable service.
+		cfg.Service.TargetTeeAddress = ""
+		// The upstream must be configured explicitly — a standard provider has no
+		// co-located model and no known default base URL.
+		if cfg.Service.TargetURL == "" {
+			return fmt.Errorf("invalid config: service.targetUrl is required when providerType is 'standard'")
+		}
+		// Standard is non-verifiable by construction. Force the "standard" marker so
+		// the on-chain verifiability can never claim a TEE mode (which would make
+		// clients attempt a verification the broker never backs). Reject any
+		// operator-supplied value other than the standard marker rather than
+		// silently overwriting it.
+		if cfg.Service.Verifiability != "" && cfg.Service.Verifiability != constant.VerifiabilityStandard {
+			return fmt.Errorf("invalid config: service.verifiability must be empty or '%s' when providerType is 'standard', got '%s'", constant.VerifiabilityStandard, cfg.Service.Verifiability)
+		}
+		cfg.Service.Verifiability = constant.VerifiabilityStandard
+
+		// Upstream-hiding is complete for chatbot / speech-to-text / image responses
+		// (leak headers + leak-key body fields are stripped, and image assets are
+		// broker-served). Video is the exception: the broker does not proxy video
+		// bytes, so if the upstream returns the finished asset as a DIRECT URL in the
+		// response body (e.g. {"output":{"video_url":"https://<upstream-host>/..."}}),
+		// that host reaches the client — leak-key stripping does not rewrite URL
+		// values. Upstreams that expose the asset via the OpenAI GET /videos/{id}/content
+		// pattern (which the broker proxies) do not leak. Warn so the operator makes a
+		// conscious choice. (stdlib log: the structured logger isn't up at config load.)
+		if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
+			log.Printf("[CONFIG] providerType 'standard' with type 'video-generation': the upstream is fully hidden only when it returns the asset via GET /videos/{id}/content (broker-proxied). An upstream that returns a direct asset URL in the response body will expose that URL's host to clients — the broker does not proxy video bytes or rewrite URL values.")
+		}
+	}
+
+	// Body-field injection is only applied for the chatbot service type (see
+	// ctrl.InjectBodyFields). Reject it elsewhere, reject broker-critical keys,
+	// and normalize, so any misconfiguration surfaces at load instead of silently
+	// doing nothing (or failing every request).
+	if len(cfg.Service.InjectBodyFields) > 0 {
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.injectBodyFields is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		normalized, err := normalizeInjectBodyFields("service.injectBodyFields", cfg.Service.InjectBodyFields)
+		if err != nil {
+			return err
+		}
+		cfg.Service.InjectBodyFields = normalized
+	}
+
+	// Body-field stripping mirrors injection: only meaningful on the chatbot
+	// forward path, rejects broker-critical keys, and is normalized (trim/dedup) at
+	// load so a misconfiguration surfaces here rather than silently doing nothing.
+	if len(cfg.Service.StripBodyFields) > 0 {
+		if cfg.Service.Type != constant.ServiceTypeChatbot {
+			return fmt.Errorf("invalid config: service.stripBodyFields is only supported for service type '%s', got '%s'", constant.ServiceTypeChatbot, cfg.Service.Type)
+		}
+		normalized, err := normalizeStripBodyFields("service.stripBodyFields", cfg.Service.StripBodyFields)
+		if err != nil {
+			return err
+		}
+		cfg.Service.StripBodyFields = normalized
 	}
 
 	// Provider display metadata (applies to any provider type). Both are optional.

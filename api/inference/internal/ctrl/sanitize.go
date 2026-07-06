@@ -335,6 +335,36 @@ func (c *Ctrl) sanitizeResponseBody(body []byte, newID string) ([]byte, bool) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), true
 }
 
+// sanitizeForwarderResponseBody strips #184 upstream identity/cost leak fields
+// from a forwarder response body, decoding a compressed body first so the leak
+// control can never silently no-op on bytes it cannot parse as JSON.
+//
+// The sync proxy path forces Accept-Encoding: identity upstream (see
+// prepareRequest), which suppresses Go's transparent gzip decompression, so an
+// upstream that ignores that request delivers a still-compressed body straight
+// through. handleChargingResponse / handleResponse decode-before-sanitize for
+// exactly this reason; this is the shared form for the image / video forwarder
+// handlers. On a successful decode it drops the now-stale Content-Encoding header
+// from the client response (the broker serves identity); on decode failure it
+// warns and forwards the original bytes untouched (fail-open, but surfaced).
+// Returns the bytes the caller should forward/sign.
+func (c *Ctrl) sanitizeForwarderResponseBody(ctx *gin.Context, body []byte, contentEncoding string) []byte {
+	out := body
+	if isCompressedEncoding(contentEncoding) {
+		decoded, err := decodeBody(body, contentEncoding)
+		if err != nil {
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s response; forwarding upstream body unsanitized (potential identity/cost leak): %v", contentEncoding, err)
+			return body
+		}
+		out = decoded
+		ctx.Writer.Header().Del("Content-Encoding")
+	}
+	if sanitized, changed := c.sanitizeResponseBody(out, ""); changed {
+		return sanitized
+	}
+	return out
+}
+
 // isCompressedEncoding reports whether a Content-Encoding value denotes a
 // compressed body that must be decoded before JSON sanitization.
 func isCompressedEncoding(enc string) bool {

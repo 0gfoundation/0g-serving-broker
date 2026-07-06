@@ -42,18 +42,29 @@ var DefaultProviderStake = new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(bi
 
 // buildAdditionalInfo creates the additionalInfo JSON string for a service
 func buildAdditionalInfo(service config.Service, imageName, imageDigest string, tieredPricing config.TieredPricingConfig, cacheTokenBilling config.CacheTokenBillingConfig) (string, error) {
-	// Determine TEE verifier based on NETWORK environment variable
+	// Determine TEE verifier based on NETWORK environment variable. A standard
+	// provider performs no TEE verification, so it publishes no verifier: leaving
+	// TEEVerifier/VerifierURL empty means a client has nothing to call even if it
+	// somehow reached the verification path (it does not — verifiability "standard"
+	// is already skipped client-side).
 	var teeVerifier string
-	switch os.Getenv("NETWORK") {
-	case "phala":
-		teeVerifier = tee.VerifierDStack
-	default:
-		teeVerifier = tee.VerifierCryptoPilot
+	if !service.IsStandard() {
+		switch os.Getenv("NETWORK") {
+		case "phala":
+			teeVerifier = tee.VerifierDStack
+		default:
+			teeVerifier = tee.VerifierCryptoPilot
+		}
+	}
+
+	verifierURL := service.VerifierURL
+	if service.IsStandard() {
+		verifierURL = ""
 	}
 
 	// Create AdditionalInfo JSON string
 	additionalInfo := map[string]interface{}{
-		"VerifierURL":      service.VerifierURL,
+		"VerifierURL":      verifierURL,
 		"TEEVerifier":      teeVerifier,
 		"TargetSeparated":  service.TargetSeparated,
 		"TargetTeeAddress": "",
@@ -66,9 +77,13 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 		additionalInfo["TargetTeeAddress"] = service.TargetTeeAddress
 	}
 
-	// Include provider type info for centralized providers
-	if service.IsCentralized() {
+	// Publish the provider class for every forwarder (centralized and standard) so
+	// on-chain discovery / SDK can identify the provider type. A standard provider
+	// still hides its upstream: ProviderIdentity stays centralized-only.
+	if service.IsForwarder() {
 		additionalInfo["ProviderType"] = service.ProviderType
+	}
+	if service.IsCentralized() {
 		additionalInfo["ProviderIdentity"] = service.ProviderIdentity
 	}
 
@@ -89,9 +104,27 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 
 	// Include cache token billing info so user-broker can display cache hit prices
 	if cacheTokenBilling.Enabled && cacheTokenBilling.Divisor > 0 {
-		additionalInfo["cacheTokenBilling"] = map[string]interface{}{
+		cacheInfo := map[string]interface{}{
 			"divisor": cacheTokenBilling.Divisor,
 		}
+		// Publish the EFFECTIVE cache-write premium fractions billing applies, so
+		// user-broker can display cache-write prices (inputPrice * num / den). An
+		// unset 1-hour tier falls back to the default multiplier at billing time
+		// (see computeInputFee), so publish that fallback value rather than omitting
+		// it — otherwise the advertised 1-hour price would understate what is charged.
+		if cacheTokenBilling.WriteMultiplierEnabled() {
+			cacheInfo["writeMultiplierNumerator"] = cacheTokenBilling.WriteMultiplierNumerator
+			cacheInfo["writeMultiplierDenominator"] = cacheTokenBilling.WriteMultiplierDenominator
+		}
+		switch {
+		case cacheTokenBilling.Write1hMultiplierEnabled():
+			cacheInfo["write1hMultiplierNumerator"] = cacheTokenBilling.Write1hMultiplierNumerator
+			cacheInfo["write1hMultiplierDenominator"] = cacheTokenBilling.Write1hMultiplierDenominator
+		case cacheTokenBilling.WriteMultiplierEnabled():
+			cacheInfo["write1hMultiplierNumerator"] = cacheTokenBilling.WriteMultiplierNumerator
+			cacheInfo["write1hMultiplierDenominator"] = cacheTokenBilling.WriteMultiplierDenominator
+		}
+		additionalInfo["cacheTokenBilling"] = cacheInfo
 	}
 
 	// Multi-model: publish only a compact summary on-chain — the MultiModel flag and

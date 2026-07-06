@@ -101,13 +101,31 @@ func (c *Ctrl) GetTextToImageInputFeeAndImageNum(reqBody []byte) (string, int64,
 func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	// chatKey is always generated: it keys the image store and the broker-served
+	// image URLs (buildURLResponse) regardless of signing. But ZG-Res-Key — the
+	// signature-lookup handle — is only advertised when the response is actually
+	// signed (broker-in-network or centralized routing proof). A standard/
+	// TargetSeparated provider produces no signature, so emitting ZG-Res-Key would
+	// point clients at a signature endpoint that only 404s.
 	chatKey := uuid.NewString()
-	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read image response body")
 		return err
+	}
+
+	// For forwarder providers, strip #184 upstream identity/cost leak fields before
+	// the envelope is used for extraction, URL rewrite, signing, or forwarding —
+	// sanitizing first keeps the (later) signature bound to the bytes the client
+	// receives. Decode a compressed body first (the sync path forces identity
+	// upstream; an upstream that ignores it would otherwise slip the leak past the
+	// JSON parse). sanitizeResponseBody preserves data[] (image payloads).
+	if c.Service.IsForwarder() {
+		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
 	// Resolve the original client request body (pre-b64 rewrite) for signing.

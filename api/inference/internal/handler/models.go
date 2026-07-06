@@ -76,8 +76,46 @@ type ModelPricingTier struct {
 }
 
 // ModelCacheTokenBilling holds cache token billing info for display.
+// The default (5-minute) and 1-hour write-multiplier fractions are each omitted
+// when not configured (those cache-write tokens then bill at the default tier, or
+// at full input price when no premium applies).
 type ModelCacheTokenBilling struct {
-	Divisor int64 `json:"divisor"`
+	Divisor                      int64 `json:"divisor"`
+	WriteMultiplierNumerator     int64 `json:"write_multiplier_numerator,omitempty"`
+	WriteMultiplierDenominator   int64 `json:"write_multiplier_denominator,omitempty"`
+	Write1hMultiplierNumerator   int64 `json:"write_1h_multiplier_numerator,omitempty"`
+	Write1hMultiplierDenominator int64 `json:"write_1h_multiplier_denominator,omitempty"`
+}
+
+// newModelCacheTokenBilling builds the display struct from resolved cache-billing
+// config, returning nil when caching is disabled or unset (so the field is omitted
+// from GET /v1/models). It surfaces the EFFECTIVE fractions billing actually
+// applies: the default (5-minute) fraction when configured, and — because an unset
+// 1-hour tier falls back to the default multiplier at billing time (see
+// computeInputFee) — the 1-hour fraction resolves to the explicit 1-hour value if
+// set, else the default. Both 1-hour fields are omitted only when no default tier
+// is set either (then 1-hour writes bill at full input price). This keeps the
+// advertised cache-write prices equal to what is charged, so consumers never have
+// to re-derive the fallback rule.
+func newModelCacheTokenBilling(cfg config.CacheTokenBillingConfig) *ModelCacheTokenBilling {
+	if !cfg.Enabled || cfg.Divisor <= 0 {
+		return nil
+	}
+	out := &ModelCacheTokenBilling{Divisor: cfg.Divisor}
+	if cfg.WriteMultiplierEnabled() {
+		out.WriteMultiplierNumerator = cfg.WriteMultiplierNumerator
+		out.WriteMultiplierDenominator = cfg.WriteMultiplierDenominator
+	}
+	switch {
+	case cfg.Write1hMultiplierEnabled():
+		out.Write1hMultiplierNumerator = cfg.Write1hMultiplierNumerator
+		out.Write1hMultiplierDenominator = cfg.Write1hMultiplierDenominator
+	case cfg.WriteMultiplierEnabled():
+		// 1-hour falls back to the default multiplier.
+		out.Write1hMultiplierNumerator = cfg.WriteMultiplierNumerator
+		out.Write1hMultiplierDenominator = cfg.WriteMultiplierDenominator
+	}
+	return out
 }
 
 // ModelPricing holds per-token pricing in the smallest unit (wei).
@@ -159,6 +197,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		if cfg.IsCentralized() {
 			servingDomain = parseServingDomain(cfg.TargetURL)
 		}
+		// Provider class is surfaced for every forwarder (centralized and standard),
+		// same gate as the single-model path. A standard provider still hides its
+		// upstream, so providerIdentity stays centralized-only (and servingDomain
+		// above is already IsCentralized()-gated).
+		var providerType, providerIdentity string
+		if cfg.IsForwarder() {
+			providerType = cfg.ProviderType
+		}
+		if cfg.IsCentralized() {
+			providerIdentity = cfg.ProviderIdentity
+		}
+		// A standard provider performs no response attestation; its settlement TEE
+		// signer being acknowledged must not surface as tee_attested (that marker
+		// reflects response verifiability, which standard deliberately omits).
+		teeAttested := svc.TeeSignerAcknowledged && !cfg.IsStandard()
 		var created int64
 		if svc.CreatedAt != nil {
 			created = svc.CreatedAt.Unix()
@@ -218,10 +271,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			if mp.CacheTokenBilling != nil {
 				effCache = *mp.CacheTokenBilling
 			}
-			var modelCacheBilling *ModelCacheTokenBilling
-			if effCache.Enabled && effCache.Divisor > 0 {
-				modelCacheBilling = &ModelCacheTokenBilling{Divisor: effCache.Divisor}
-			}
+			modelCacheBilling := newModelCacheTokenBilling(effCache)
 			obj := ModelObject{
 				ID:               mp.Model,
 				CanonicalID:      canonicalID,
@@ -230,11 +280,11 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				OwnedBy:          cfg.OwnedBy,
 				Type:             svc.Type,
 				Verifiability:    svc.Verifiability,
-				TeeAttested:      svc.TeeSignerAcknowledged,
+				TeeAttested:      teeAttested,
 				TeeVerifier:      teeVerifier,
 				Pricing:          &ModelPricing{CacheTokenBilling: modelCacheBilling},
-				ProviderType:     cfg.ProviderType,
-				ProviderIdentity: cfg.ProviderIdentity,
+				ProviderType:     providerType,
+				ProviderIdentity: providerIdentity,
 				ProviderName:     cfg.ProviderName,
 				ProviderCountry:  cfg.ProviderCountry,
 				ServingDomain:    servingDomain,
@@ -357,8 +407,10 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		OwnedBy:       cfg.OwnedBy,
 		Type:          svc.Type,
 		Verifiability: svc.Verifiability,
-		TeeAttested:   svc.TeeSignerAcknowledged,
-		Pricing:       &ModelPricing{},
+		// A standard provider does no response attestation; don't surface its
+		// settlement-signer acknowledgement as tee_attested (mirrors multi-model).
+		TeeAttested: svc.TeeSignerAcknowledged && !cfg.IsStandard(),
+		Pricing:     &ModelPricing{},
 	}
 
 	if svc.CreatedAt != nil {
@@ -417,12 +469,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	}
 
 	// Populate cache token billing from config
-	cacheCfg := h.modelsCtrl.GetCacheTokenBillingConfig()
-	if cacheCfg.Enabled && cacheCfg.Divisor > 0 {
-		obj.Pricing.CacheTokenBilling = &ModelCacheTokenBilling{
-			Divisor: cacheCfg.Divisor,
-		}
-	}
+	obj.Pricing.CacheTokenBilling = newModelCacheTokenBilling(h.modelsCtrl.GetCacheTokenBillingConfig())
 
 	// Extract TEE verifier from on-chain additionalInfo JSON
 	obj.TeeVerifier = parseTeeVerifier(svc.AdditionalInfo)
@@ -451,9 +498,13 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.RateLimits = rl
 	}
 
-	// Expose centralized proxy info so SDK can choose the correct verification path
-	if cfg.IsCentralized() {
+	// Surface the provider class for every forwarder (centralized and standard) so
+	// clients can identify the provider type. A standard provider still hides its
+	// upstream: provider_identity and serving_domain remain centralized-only.
+	if cfg.IsForwarder() {
 		obj.ProviderType = cfg.ProviderType
+	}
+	if cfg.IsCentralized() {
 		obj.ProviderIdentity = cfg.ProviderIdentity
 		obj.ServingDomain = parseServingDomain(cfg.TargetURL)
 	}

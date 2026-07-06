@@ -124,7 +124,7 @@ func TestTranslateReasoning_EffortOn(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"high","messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestTranslateReasoning_EffortOff(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"none","messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestTranslateReasoning_Unset(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestTranslateReasoning_ExplicitNativeWins(t *testing.T) {
 	// native value must survive and reasoning_effort must not override it.
 	body := []byte(`{"model":"qwen3","reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":false},"messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestTranslateReasoning_NoNativeParamPassthrough(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"high","messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestTranslateReasoning_PreservesExistingChatTemplateKwargs(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"low","chat_template_kwargs":{"foo":"bar"},"messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestTranslateReasoning_TopLevelEnableThinking(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
 	body := []byte(`{"model":"qwen3","reasoning_effort":"high","messages":[]}`)
 
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestTranslateReasoning_MiniMaxThinkingObject(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.effort, func(t *testing.T) {
 			body := []byte(`{"model":"MiniMax-M3","reasoning_effort":"` + tt.effort + `","messages":[]}`)
-			got, err := c.TranslateReasoning(body)
+			got, err := c.TranslateReasoning(body, "MiniMax-M3")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -306,7 +306,7 @@ func TestTranslateReasoning_MultiModel_PerModelNativeParam(t *testing.T) {
 	)
 
 	// qwen-a → top-level enable_thinking, no thinking object.
-	gotA, err := c.TranslateReasoning([]byte(`{"model":"qwen-a","reasoning_effort":"high","messages":[]}`))
+	gotA, err := c.TranslateReasoning([]byte(`{"model":"qwen-a","reasoning_effort":"high","messages":[]}`), "qwen-a")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestTranslateReasoning_MultiModel_PerModelNativeParam(t *testing.T) {
 	}
 
 	// minimax-b → thinking object, no top-level enable_thinking.
-	gotB, err := c.TranslateReasoning([]byte(`{"model":"minimax-b","reasoning_effort":"high","messages":[]}`))
+	gotB, err := c.TranslateReasoning([]byte(`{"model":"minimax-b","reasoning_effort":"high","messages":[]}`), "minimax-b")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestTranslateReasoning_MultiModel_FallbackToServiceModelInfo(t *testing.T) 
 		},
 	)
 
-	got, err := c.TranslateReasoning([]byte(`{"model":"qwen-a","reasoning_effort":"high","messages":[]}`))
+	got, err := c.TranslateReasoning([]byte(`{"model":"qwen-a","reasoning_effort":"high","messages":[]}`), "qwen-a")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestTranslateReasoning_MultiModel_WildcardEntry(t *testing.T) {
 		},
 	)
 
-	got, err := c.TranslateReasoning([]byte(`{"model":"some-unlisted-model","reasoning_effort":"high","messages":[]}`))
+	got, err := c.TranslateReasoning([]byte(`{"model":"some-unlisted-model","reasoning_effort":"high","messages":[]}`), "some-unlisted-model")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestTranslateReasoning_MultiModel_WildcardEntry(t *testing.T) {
 func TestTranslateReasoning_NonJSONUnchanged(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	body := []byte(`not json`)
-	got, err := c.TranslateReasoning(body)
+	got, err := c.TranslateReasoning(body, "qwen3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

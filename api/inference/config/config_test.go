@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,60 @@ func TestModelInfo_Validate_OptionalFields(t *testing.T) {
 	m.MaxCompletionTokens = 0 // optional
 	if err := m.Validate("chatbot"); err != nil {
 		t.Errorf("expected no error for optional fields, got %v", err)
+	}
+}
+
+func TestModelInfo_Validate_SupportedFormats(t *testing.T) {
+	cases := []struct {
+		name    string
+		formats []string
+		wantErr bool
+	}{
+		{"unset ok", nil, false},
+		{"openai ok", []string{"openai"}, false},
+		{"anthropic ok", []string{"anthropic"}, false},
+		{"both ok", []string{"openai", "anthropic"}, false},
+		{"case-insensitive ok", []string{"OpenAI", "Anthropic"}, false},
+		{"whitespace tolerated", []string{" anthropic "}, false},
+		{"unknown rejected", []string{"anthropc"}, true}, // typo must fail fast
+		{"one bad among good rejected", []string{"openai", "grpc"}, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.SupportedFormats = tt.formats
+			err := m.Validate("chatbot")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate supportedFormats=%v: err=%v, wantErr=%v", tt.formats, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSupportedFormatsFor(t *testing.T) {
+	// Multi-model: per-model ModelInfo wins; a model without one falls back to the
+	// service-level ModelInfo; an unknown id (no wildcard) resolves to nil.
+	svc := Service{
+		ProviderType: "centralized",
+		ModelType:    "base",
+		ModelInfo:    &ModelInfo{SupportedFormats: []string{"openai"}}, // service default
+		ModelPricing: []ModelPricingEntry{
+			{Model: "base", InputPrice: "1", OutputPrice: "2"},
+			{Model: "claude", InputPrice: "1", OutputPrice: "2", ModelInfo: &ModelInfo{SupportedFormats: []string{"anthropic"}}},
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	if got := svc.SupportedFormatsFor("claude"); len(got) != 1 || got[0] != "anthropic" {
+		t.Errorf("per-model override: got %v, want [anthropic]", got)
+	}
+	if got := svc.SupportedFormatsFor("base"); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("service-level fallback: got %v, want [openai]", got)
+	}
+	if got := svc.SupportedFormatsFor("unknown-no-wildcard"); got != nil {
+		t.Errorf("unknown model: got %v, want nil", got)
 	}
 }
 
@@ -144,6 +199,145 @@ service:
 
 	if cfg.Service.ProviderType != "decentralized" {
 		t.Errorf("expected providerType 'decentralized', got %q", cfg.Service.ProviderType)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard(t *testing.T) {
+	// A standard provider is a pure forwarder: it must load without a
+	// providerIdentity, force TargetSeparated, and force the "standard"
+	// verifiability marker so it can never claim a TEE mode.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if !cfg.Service.IsStandard() || !cfg.Service.IsForwarder() {
+		t.Errorf("expected IsStandard && IsForwarder, got providerType %q", cfg.Service.ProviderType)
+	}
+	if cfg.Service.IsCentralized() {
+		t.Error("standard provider must not report IsCentralized")
+	}
+	if !cfg.Service.TargetSeparated {
+		t.Error("standard provider must force TargetSeparated")
+	}
+	if cfg.Service.Verifiability != "standard" {
+		t.Errorf("expected verifiability 'standard', got %q", cfg.Service.Verifiability)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_ForcesEmptyTargetTeeAddress(t *testing.T) {
+	// standard forces TargetSeparated=true, which would otherwise publish a
+	// TargetTeeAddress on-chain. A stale/copied targetTeeAddress must be zeroed so a
+	// non-verifiable, upstream-hidden service never advertises a TEE address.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  targetTeeAddress: "0x1234567890123456789012345678901234567890"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.Service.TargetTeeAddress != "" {
+		t.Errorf("expected TargetTeeAddress forced empty for standard, got %q", cfg.Service.TargetTeeAddress)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsProviderIdentity(t *testing.T) {
+	// A standard provider hides its upstream, so a providerIdentity is rejected
+	// rather than silently ignored.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  providerIdentity: "openai"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "providerIdentity must not be set") {
+		t.Fatalf("expected providerIdentity rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsTeeMLVerifiability(t *testing.T) {
+	// A standard provider is non-verifiable; it must not advertise a TEE mode that
+	// would make clients attempt a verification the broker never backs.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "verifiability must be empty or 'standard'") {
+		t.Fatalf("expected verifiability rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RequiresTargetURL(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "targetUrl is required") {
+		t.Fatalf("expected targetUrl-required rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_AllowsModelPricing(t *testing.T) {
+	// Multi-model pricing is supported for standard forwarders, same as centralized.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "standard"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("standard multi-model should be allowed, got: %v", err)
+	}
+	if !cfg.Service.HasMultiModelPricing() {
+		t.Fatal("expected multi-model pricing to be configured")
 	}
 }
 
@@ -288,6 +482,185 @@ service:
 	t.Setenv("CONFIG_FILE", configPath)
 	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "service type") {
 		t.Fatalf("expected unwired-modality rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_InjectBodyFields_RejectsNonChatbot(t *testing.T) {
+	// injectBodyFields is only applied on the chatbot forward path, so a
+	// non-chatbot service type must be rejected at load instead of silently
+	// no-op'ing.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  injectBodyFields:
+    provider:
+      order: ["z-ai"]
+      allow_fallbacks: true
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "injectBodyFields is only supported") {
+		t.Fatalf("expected non-chatbot rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_InjectBodyFields_RejectsProtectedKey(t *testing.T) {
+	// Overriding a broker-critical field (here, model) would break model
+	// enforcement / billing, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  injectBodyFields:
+    model: "some-cheaper-model"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_InjectBodyFields_NormalizesNestedObject(t *testing.T) {
+	// A nested-object value (OpenRouter's provider.max_price) decodes under
+	// yaml.v2 as map[interface{}]interface{}, which json.Marshal rejects.
+	// loadConfig must normalize it to map[string]interface{} so it loads clean
+	// AND the stored map is JSON-serializable — otherwise it would fail every
+	// chatbot request at marshal time.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  injectBodyFields:
+    provider:
+      order: ["z-ai"]
+      allow_fallbacks: true
+      max_price:
+        prompt: "0.6"
+        completion: "1.92"
+    reasoning:
+      enabled: false
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("nested-object injection should load after normalization, got: %v", err)
+	}
+	// The whole map must be JSON-serializable (the runtime injection path marshals it).
+	if _, err := json.Marshal(cfg.Service.InjectBodyFields); err != nil {
+		t.Fatalf("normalized inject map is not JSON-serializable: %v", err)
+	}
+	prov, ok := cfg.Service.InjectBodyFields["provider"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("provider not normalized to map[string]interface{}, got %T", cfg.Service.InjectBodyFields["provider"])
+	}
+	mp, ok := prov["max_price"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("max_price not normalized to map[string]interface{}, got %T", prov["max_price"])
+	}
+	if mp["prompt"] != "0.6" || mp["completion"] != "1.92" {
+		t.Errorf("max_price values not preserved: %#v", mp)
+	}
+	reasoning, ok := cfg.Service.InjectBodyFields["reasoning"].(map[string]interface{})
+	if !ok || reasoning["enabled"] != false {
+		t.Errorf("reasoning not preserved: %#v", cfg.Service.InjectBodyFields["reasoning"])
+	}
+}
+
+func TestLoadConfig_StripBodyFields_LoadsAndNormalizes(t *testing.T) {
+	// A valid stripBodyFields list (with a blank entry and a duplicate) loads and
+	// is normalized to a trimmed, de-duplicated list.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - logprobs
+    - top_logprobs
+    - logprobs
+    - "  "
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("valid stripBodyFields should load, got: %v", err)
+	}
+	want := []string{"logprobs", "top_logprobs"}
+	if got := cfg.Service.StripBodyFields; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("stripBodyFields = %#v, want %#v (trimmed + de-duplicated)", got, want)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_RejectsNonChatbot(t *testing.T) {
+	// stripBodyFields is only applied on the chatbot forward path, so a non-chatbot
+	// service type must be rejected at load instead of silently no-op'ing.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "text-to-image"
+  model: "dall-e-3"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - logprobs
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "stripBodyFields is only supported") {
+		t.Fatalf("expected non-chatbot rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_StripBodyFields_RejectsProtectedKey(t *testing.T) {
+	// Stripping a broker-critical field (here, messages) would break the request /
+	// billing, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "glm-5"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  inputPrice: "10"
+  outputPrice: "30"
+  stripBodyFields:
+    - messages
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected protected-key rejection, got: %v", err)
 	}
 }
 
@@ -478,8 +851,9 @@ service:
 }
 
 func TestLoadConfig_ModelPricing_RejectsModelAliases(t *testing.T) {
-	// modelAliases is a single-model rewrite knob the multi-model path never
-	// consults (it forwards the requested model verbatim). Configuring both must
+	// SERVICE-LEVEL modelAliases is never consulted by the multi-model path
+	// (which resolves per entry); per-model aliases go on the modelPricing entry
+	// instead. Configuring it at the service level alongside modelPricing must
 	// fail at load time rather than silently ignore the aliases.
 	configPath := writeTestConfig(t, `
 service:
@@ -503,9 +877,10 @@ service:
 }
 
 func TestLoadConfig_ModelPricing_RejectsUpstreamModel(t *testing.T) {
-	// upstreamModel rewrites incoming→upstream, which the multi-model path does
-	// not implement (no per-entry upstream rewrite). Configuring both must fail
-	// at load time rather than silently ignore the rewrite.
+	// SERVICE-LEVEL upstreamModel rewrites incoming→upstream for the single-model
+	// path only; the multi-model path rewrites per entry, so per-model upstream
+	// goes on the modelPricing entry instead. Configuring it at the service level
+	// alongside modelPricing must fail at load time rather than be silently ignored.
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -843,7 +1218,7 @@ service:
 	if err == nil {
 		t.Fatal("expected error for invalid providerType")
 	}
-	if !strings.Contains(err.Error(), "must be 'decentralized' or 'centralized'") {
+	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', or 'standard'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1555,6 +1930,24 @@ func TestValidateCacheTokenBilling(t *testing.T) {
 		{"enabled divisor 0 rejected (would divide-by-zero)", CacheTokenBillingConfig{Enabled: true, Divisor: 0}, true},
 		{"enabled negative divisor rejected", CacheTokenBillingConfig{Enabled: true, Divisor: -2}, true},
 		{"disabled divisor 0 ignored", CacheTokenBillingConfig{Enabled: false, Divisor: 0}, false},
+		{"write multiplier 5/4 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4}, false},
+		{"write multiplier 2/1 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 2, WriteMultiplierDenominator: 1}, false},
+		{"write multiplier 1/1 (exactly 1x) ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 1}, false},
+		{"write multiplier unset ignored", CacheTokenBillingConfig{Enabled: true, Divisor: 10}, false},
+		{"write multiplier zero denominator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 0}, true},
+		{"write multiplier zero numerator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 0, WriteMultiplierDenominator: 4}, true},
+		{"write multiplier negative rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: -5, WriteMultiplierDenominator: 4}, true},
+		{"write multiplier below 1x rejected (transposed 1/2)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 2}, true},
+		{"write multiplier below 1x rejected (4/5)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 4, WriteMultiplierDenominator: 5}, true},
+		{"1h multiplier set alone rejected (default tier missing)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}, true},
+		{"1h with explicit 1x default ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 1, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}, false},
+		{"both write tiers set ok (5/4 and 2/1)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}, false},
+		{"both write tiers equal ok (5/4 and 5/4)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 5, Write1hMultiplierDenominator: 4}, false},
+		{"1h multiplier unset ignored", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4}, false},
+		{"1h multiplier zero denominator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 0}, true},
+		{"1h multiplier zero numerator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 0, Write1hMultiplierDenominator: 1}, true},
+		{"1h multiplier below 1x rejected (transposed 1/2)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 1, Write1hMultiplierDenominator: 2}, true},
+		{"1h cheaper than default rejected (2/1 default, 5/4 1h)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 2, WriteMultiplierDenominator: 1, Write1hMultiplierNumerator: 5, Write1hMultiplierDenominator: 4}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2000,6 +2393,28 @@ func TestService_ModelExpiration(t *testing.T) {
 		}
 	})
 
+	t.Run("multi-model alias is subject to its entry's expiration", func(t *testing.T) {
+		entryMI := validModelInfo()
+		entryMI.ExpirationDate = exp
+		if err := entryMI.Validate("chatbot"); err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{
+			ModelPricing: []ModelPricingEntry{
+				{Model: "expired", ModelInfo: entryMI, ModelAliases: []string{"expired-legacy"}},
+			},
+		}
+		if err := s.BuildModelPricingMap(); err != nil {
+			t.Fatal(err)
+		}
+		// A request using the alias must hit the same expiration as the canonical id,
+		// not silently bypass the 410 gate.
+		got, ok := s.ModelExpiration("expired-legacy")
+		if !ok || !got.Equal(wantTime) {
+			t.Errorf("ModelExpiration(alias) = %v, ok=%v; want %v, true", got, ok, wantTime)
+		}
+	})
+
 	t.Run("multi-model wildcard expiration applies to any served model", func(t *testing.T) {
 		wildMI := validModelInfo()
 		wildMI.ExpirationDate = exp
@@ -2017,4 +2432,476 @@ func TestService_ModelExpiration(t *testing.T) {
 			t.Errorf("ModelExpiration(any-model-name) = %v, ok=%v; want %v, true", got, ok, wantTime)
 		}
 	})
+}
+
+// TestLoadConfig_ModelPricing_PerEntryUpstreamModel exercises the issue-558
+// scenario: one centralized provider serving two models, each advertising a
+// stable public id on-chain while forwarding to a different upstream id, plus a
+// legacy alias accepted on incoming requests.
+func TestLoadConfig_ModelPricing_PerEntryUpstreamModel(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      upstreamModel: "z-ai/glm-5"
+      modelAliases: ["glm-5-legacy"]
+    - model: "deepseek-ai/DeepSeek-V4-Flash"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "deepseek/deepseek-v4-flash"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	svc := &cfg.Service
+
+	if got := svc.GetModelPricing("zai-org/GLM-5-FP8"); got == nil || got.UpstreamModel != "z-ai/glm-5" {
+		t.Errorf("expected GLM entry with upstream z-ai/glm-5, got %+v", got)
+	}
+
+	// Exact id, alias, and the unknown id all resolve as expected.
+	cases := []struct {
+		requested    string
+		wantResolved string
+		wantUpstream string
+		wantOK       bool
+	}{
+		{"zai-org/GLM-5-FP8", "zai-org/GLM-5-FP8", "z-ai/glm-5", true},
+		{"glm-5-legacy", "zai-org/GLM-5-FP8", "z-ai/glm-5", true}, // alias → canonical entry
+		{"deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Flash", "deepseek/deepseek-v4-flash", true},
+		{"unknown-model", "unknown-model", "", false},
+		{ModelWildcard, ModelWildcard, "", false},
+	}
+	for _, tc := range cases {
+		entry, resolved, ok := svc.ResolveRequestedModel(tc.requested)
+		if ok != tc.wantOK {
+			t.Errorf("ResolveRequestedModel(%q) ok=%v, want %v", tc.requested, ok, tc.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if resolved != tc.wantResolved {
+			t.Errorf("ResolveRequestedModel(%q) resolved=%q, want %q", tc.requested, resolved, tc.wantResolved)
+		}
+		if entry == nil || entry.UpstreamModelFor() != tc.wantUpstream {
+			t.Errorf("ResolveRequestedModel(%q) upstream=%v, want %q", tc.requested, entry, tc.wantUpstream)
+		}
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryInjectBodyFields(t *testing.T) {
+	// Service-level provider routing shared by all models, plus a per-model
+	// provider.max_price cap on each entry (the two-floor scenario where one
+	// shared cap can't serve both). EffectiveInjectBodyFields must deep-merge
+	// the shared routing with each model's own cap.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  injectBodyFields:
+    provider:
+      sort: "price"
+      allow_fallbacks: true
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      injectBodyFields:
+        provider:
+          max_price:
+            prompt: "0.60"
+            completion: "1.92"
+    - model: "deepseek-v4-flash"
+      inputPrice: "10"
+      outputPrice: "30"
+      injectBodyFields:
+        provider:
+          max_price:
+            prompt: "0.138"
+            completion: "0.275"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	svc := &cfg.Service
+
+	glm := svc.EffectiveInjectBodyFields("zai-org/GLM-5-FP8")
+	prov, ok := glm["provider"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("GLM provider missing: %#v", glm)
+	}
+	if prov["sort"] != "price" || prov["allow_fallbacks"] != true {
+		t.Errorf("GLM lost service-level routing: %#v", prov)
+	}
+	if mp, _ := prov["max_price"].(map[string]interface{}); mp == nil || mp["prompt"] != "0.60" || mp["completion"] != "1.92" {
+		t.Errorf("GLM max_price wrong: %#v", prov["max_price"])
+	}
+
+	ds := svc.EffectiveInjectBodyFields("deepseek-v4-flash")
+	dsProv := ds["provider"].(map[string]interface{})
+	if mp, _ := dsProv["max_price"].(map[string]interface{}); mp == nil || mp["prompt"] != "0.138" || mp["completion"] != "0.275" {
+		t.Errorf("deepseek max_price wrong: %#v", dsProv["max_price"])
+	}
+
+	// The service-level map must not be mutated by the merge.
+	svcProv := svc.InjectBodyFields["provider"].(map[string]interface{})
+	if svcProv["max_price"] != nil {
+		t.Errorf("service-level provider mutated by merge: %#v", svcProv)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryInjectBodyFields_RejectsProtectedKey(t *testing.T) {
+	// A per-entry injectBodyFields overriding a broker-critical key (model) must
+	// be rejected at load, same as the service-level field.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      injectBodyFields:
+        model: "some-cheaper-model"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected per-entry protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryStripBodyFields_RejectsProtectedKey(t *testing.T) {
+	// A per-entry stripBodyFields naming a broker-critical key (messages) must be
+	// rejected at load, same as the service-level field.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      stripBodyFields:
+        - messages
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "broker-critical field") {
+		t.Fatalf("expected per-entry protected-key rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryStripBodyFields_Loads(t *testing.T) {
+	// A valid per-entry stripBodyFields loads and is normalized (trim/dedup).
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://openrouter.ai/api/v1"
+  type: "chatbot"
+  model: "zai-org/GLM-5-FP8"
+  providerType: "centralized"
+  providerIdentity: "openrouter"
+  verifiability: "TeeML"
+  stripBodyFields:
+    - logprobs
+  modelPricing:
+    - model: "zai-org/GLM-5-FP8"
+      inputPrice: "100"
+      outputPrice: "300"
+      stripBodyFields:
+        - top_logprobs
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("valid per-entry stripBodyFields should load, got: %v", err)
+	}
+	// The effective set for the model is the union of service + per-entry lists.
+	got := cfg.Service.EffectiveStripBodyFields("zai-org/GLM-5-FP8")
+	want := map[string]bool{"logprobs": true, "top_logprobs": true}
+	if len(got) != len(want) {
+		t.Fatalf("EffectiveStripBodyFields = %#v, want union %v", got, want)
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Errorf("unexpected key %q in effective strip set %#v", k, got)
+		}
+	}
+}
+
+func TestLoadConfig_ModelPricing_AliasCollidesWithModelID(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "model-b"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["model-a"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "collides with a model id") {
+		t.Fatalf("expected alias/model-id collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_DuplicateAliasAcrossEntries(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["legacy"]
+    - model: "model-b"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["legacy"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "duplicate modelPricing alias") {
+		t.Fatalf("expected duplicate-alias error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_WildcardAliasRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["*"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "wildcard") {
+		t.Fatalf("expected wildcard-alias error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamCollidesWithModelID(t *testing.T) {
+	// upstreamModel pointing at another entry's PUBLIC id would forward a request
+	// for model-b under model-a's public name — reject the ambiguity at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "model-b"
+      inputPrice: "500"
+      outputPrice: "1500"
+      upstreamModel: "model-a"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "wrong public id") {
+		t.Fatalf("expected upstreamModel/public-id collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamCollidesWithAlias(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: ["legacy-a"]
+    - model: "model-b"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "legacy-a"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "collides with a configured model alias") {
+		t.Fatalf("expected upstreamModel/alias collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamWildcardValueRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "*"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "wildcard sentinel") {
+		t.Fatalf("expected upstreamModel='*' rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_UpstreamOnWildcardEntryRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+    - model: "*"
+      inputPrice: "20"
+      outputPrice: "60"
+      upstreamModel: "vendor/catchall"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "not supported on the wildcard") {
+		t.Fatalf("expected upstreamModel-on-wildcard rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_AliasWhitespaceRejected(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "model-a"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "model-a"
+      inputPrice: "10"
+      outputPrice: "30"
+      modelAliases: [" legacy-a "]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "leading/trailing whitespace") {
+		t.Fatalf("expected alias-whitespace rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_SharedUpstreamAllowed(t *testing.T) {
+	// Two public ids deliberately mapping to one upstream model is allowed (warned,
+	// not rejected) — e.g. a price-tier rename during a cutover.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "public-new"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "public-new"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "vendor/x"
+    - model: "public-old"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "vendor/x"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err != nil {
+		t.Fatalf("shared upstreamModel should be allowed, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ModelPricing_PerEntryUpstreamRejectedForSpeechToText(t *testing.T) {
+	// The per-entry upstream rewrite runs only on the chatbot JSON path; allowing
+	// it on speech-to-text (multipart, no body rewrite) would silently forward the
+	// wrong id, so it must be rejected at load.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "speech-to-text"
+  model: "whisper-1"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  modelPricing:
+    - model: "whisper-1"
+      inputPrice: "10"
+      outputPrice: "30"
+      upstreamModel: "openai/whisper-1"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "upstreamModel is only supported") {
+		t.Fatalf("expected per-entry upstreamModel rejection for speech-to-text, got: %v", err)
+	}
 }

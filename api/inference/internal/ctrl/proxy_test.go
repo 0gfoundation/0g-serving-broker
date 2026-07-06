@@ -168,6 +168,464 @@ func TestEnforceConfiguredModel_InjectsUpstreamWhenMissing(t *testing.T) {
 	}
 }
 
+// newTestCtrlForInjectBodyFields builds a chatbot Ctrl with the given
+// injectBodyFields map.
+func newTestCtrlForInjectBodyFields(t *testing.T, fields map[string]interface{}) *Ctrl {
+	t.Helper()
+	return &Ctrl{
+		Service: config.Service{
+			Type:             "chatbot",
+			ModelType:        "zai-org/GLM-5-FP8",
+			InjectBodyFields: fields,
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
+// When configured, each field is merged into the top-level body object — e.g. a
+// "provider" routing object AND a "reasoning" toggle in one injection.
+func TestInjectBodyFields_InjectsWhenConfigured(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":           []interface{}{"DeepInfra"},
+			"allow_fallbacks": true,
+		},
+		"reasoning": map[string]interface{}{"enabled": false},
+	})
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[{"role":"user","content":"hi"}]}`)
+
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov, ok := out["provider"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("provider field missing or wrong type: %#v", out["provider"])
+	}
+	if prov["allow_fallbacks"] != true {
+		t.Errorf("allow_fallbacks = %v, want true", prov["allow_fallbacks"])
+	}
+	order, ok := prov["order"].([]interface{})
+	if !ok || len(order) != 1 || order[0] != "DeepInfra" {
+		t.Errorf("order = %#v, want [DeepInfra]", prov["order"])
+	}
+	reasoning, ok := out["reasoning"].(map[string]interface{})
+	if !ok || reasoning["enabled"] != false {
+		t.Errorf("reasoning = %#v, want {enabled:false}", out["reasoning"])
+	}
+	// The original model field must be preserved.
+	if out["model"] != "zai-org/GLM-5-FP8" {
+		t.Errorf("model = %q, want it preserved", out["model"])
+	}
+}
+
+// Server-config-wins: a client-supplied value of an injected key is overwritten.
+func TestInjectBodyFields_OverwritesClientValue(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":           []interface{}{"DeepInfra"},
+			"allow_fallbacks": true,
+		},
+	})
+	body := []byte(`{"messages":[],"provider":{"order":["SomeCheapProvider"],"allow_fallbacks":false}}`)
+
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov := out["provider"].(map[string]interface{})
+	if prov["allow_fallbacks"] != true {
+		t.Errorf("client value not overwritten: allow_fallbacks = %v, want true", prov["allow_fallbacks"])
+	}
+	order := prov["order"].([]interface{})
+	if order[0] != "DeepInfra" {
+		t.Errorf("client value not overwritten: order = %#v", prov["order"])
+	}
+}
+
+// Nothing configured → body forwarded byte-for-byte unchanged (backward compat).
+func TestInjectBodyFields_NoopWhenUnset(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, nil)
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[]}`)
+
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mutated when injection unset: got %s", got)
+	}
+}
+
+// Empty body (e.g. GET) is returned unchanged even when injection is configured.
+func TestInjectBodyFields_NoopOnEmptyBody(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"DeepInfra"}}})
+	got, err := c.InjectBodyFields(nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty body, got %s", got)
+	}
+}
+
+// Large integer fields in the body survive the decode/re-marshal round-trip
+// (UseNumber), rather than being mangled into float64 scientific notation.
+func TestInjectBodyFields_PreservesLargeInteger(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"z-ai"}}})
+	// 2^53+1 cannot be represented exactly as a float64.
+	body := []byte(`{"model":"glm-5","seed":9007199254740993,"messages":[]}`)
+
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`9007199254740993`)) {
+		t.Errorf("large integer seed not preserved verbatim: got %s", got)
+	}
+}
+
+// A nested-object injected value (e.g. provider.max_price) injects correctly.
+func TestInjectBodyFields_NestedObjectValue(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":     []interface{}{"z-ai"},
+			"max_price": map[string]interface{}{"prompt": "0.6", "completion": "1.92"},
+		},
+	})
+	body := []byte(`{"model":"glm-5","messages":[]}`)
+
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov := out["provider"].(map[string]interface{})
+	mp, ok := prov["max_price"].(map[string]interface{})
+	if !ok || mp["prompt"] != "0.6" || mp["completion"] != "1.92" {
+		t.Errorf("nested max_price not injected: %#v", prov["max_price"])
+	}
+}
+
+// A literal JSON `null` body decodes to a nil map without error; it must NOT
+// panic on the map assignment — forward unchanged instead.
+func TestInjectBodyFields_NoopOnNullBody(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"z-ai"}}})
+	body := []byte(`null`)
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("null body mutated: got %s", got)
+	}
+}
+
+// A non-JSON-object body is forwarded unchanged rather than erroring.
+func TestInjectBodyFields_NoopOnNonJSON(t *testing.T) {
+	c := newTestCtrlForInjectBodyFields(t, map[string]interface{}{"provider": map[string]interface{}{"order": []interface{}{"DeepInfra"}}})
+	body := []byte(`not json`)
+	got, err := c.InjectBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("non-JSON body mutated: got %s", got)
+	}
+}
+
+// newMultiModelCtrlForInject builds a multi-model chatbot Ctrl with a
+// service-level injectBodyFields and per-entry overrides, with the pricing
+// lookup map built so EffectiveInjectBodyFields can resolve per model.
+func newMultiModelCtrlForInject(t *testing.T, serviceFields map[string]interface{}, entries []config.ModelPricingEntry) *Ctrl {
+	t.Helper()
+	svc := config.Service{
+		Type:             "chatbot",
+		ProviderType:     "centralized",
+		ModelType:        "zai-org/GLM-5-FP8",
+		InjectBodyFields: serviceFields,
+		ModelPricing:     entries,
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	return &Ctrl{
+		Service:        svc,
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
+// The real two-model scenario: a shared service-level provider routing object
+// (sort/allow_fallbacks/require_parameters) deep-merged with each model's own
+// provider.max_price cap. Each model must get the shared routing PLUS its own cap.
+func TestInjectBodyFields_PerModelMaxPriceMergesWithServiceRouting(t *testing.T) {
+	serviceFields := map[string]interface{}{
+		"provider": map[string]interface{}{
+			"sort":               "price",
+			"allow_fallbacks":    true,
+			"require_parameters": true,
+		},
+	}
+	entries := []config.ModelPricingEntry{
+		{Model: "zai-org/GLM-5-FP8", InjectBodyFields: map[string]interface{}{
+			"provider": map[string]interface{}{"max_price": map[string]interface{}{"prompt": "0.60", "completion": "1.92"}},
+		}},
+		{Model: "deepseek-v4-flash", InjectBodyFields: map[string]interface{}{
+			"provider": map[string]interface{}{"max_price": map[string]interface{}{"prompt": "0.138", "completion": "0.275"}},
+		}},
+	}
+	c := newMultiModelCtrlForInject(t, serviceFields, entries)
+
+	cases := []struct {
+		model              string
+		wantPrompt, wantCo string
+	}{
+		{"zai-org/GLM-5-FP8", "0.60", "1.92"},
+		{"deepseek-v4-flash", "0.138", "0.275"},
+	}
+	for _, tc := range cases {
+		body := []byte(`{"model":"` + tc.model + `","messages":[]}`)
+		got, err := c.InjectBodyFields(body, tc.model)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.model, err)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("%s: invalid json: %v", tc.model, err)
+		}
+		prov, ok := out["provider"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: provider missing: %#v", tc.model, out["provider"])
+		}
+		// Shared service-level routing must survive the merge.
+		if prov["sort"] != "price" || prov["allow_fallbacks"] != true || prov["require_parameters"] != true {
+			t.Errorf("%s: service-level routing lost: %#v", tc.model, prov)
+		}
+		// Per-model cap must be present and model-specific.
+		mp, ok := prov["max_price"].(map[string]interface{})
+		if !ok || mp["prompt"] != tc.wantPrompt || mp["completion"] != tc.wantCo {
+			t.Errorf("%s: max_price = %#v, want prompt=%s completion=%s", tc.model, prov["max_price"], tc.wantPrompt, tc.wantCo)
+		}
+	}
+
+	// The service-level config map must NOT have been mutated by the merge — a
+	// subsequent request that resolves to no per-model entry sees only the shared
+	// routing, with no leaked max_price.
+	if sp := serviceFields["provider"].(map[string]interface{}); sp["max_price"] != nil {
+		t.Errorf("service-level provider was mutated by merge: %#v", sp)
+	}
+}
+
+// A request that resolves to a model without a per-entry override gets only the
+// service-level fields.
+func TestInjectBodyFields_PerModelFallsBackToServiceLevel(t *testing.T) {
+	serviceFields := map[string]interface{}{
+		"provider": map[string]interface{}{"sort": "price"},
+	}
+	entries := []config.ModelPricingEntry{
+		{Model: "zai-org/GLM-5-FP8"}, // no per-entry injectBodyFields
+	}
+	c := newMultiModelCtrlForInject(t, serviceFields, entries)
+
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[]}`)
+	got, err := c.InjectBodyFields(body, "zai-org/GLM-5-FP8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	prov := out["provider"].(map[string]interface{})
+	if prov["sort"] != "price" || len(prov) != 1 {
+		t.Errorf("expected only service-level {sort:price}, got %#v", prov)
+	}
+}
+
+// newTestCtrlForStripBodyFields builds a chatbot Ctrl with the given
+// service-level stripBodyFields list.
+func newTestCtrlForStripBodyFields(t *testing.T, fields []string) *Ctrl {
+	t.Helper()
+	return &Ctrl{
+		Service: config.Service{
+			Type:            "chatbot",
+			ModelType:       "zai-org/GLM-5-FP8",
+			StripBodyFields: fields,
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+}
+
+// A configured field present in the body is removed before forwarding; other
+// fields (including the model) are preserved untouched.
+func TestStripBodyFields_RemovesConfiguredField(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs", "top_logprobs"})
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","messages":[{"role":"user","content":"hi"}],"logprobs":true,"top_logprobs":5,"temperature":0.7}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out["logprobs"]; present {
+		t.Errorf("logprobs not stripped: %#v", out)
+	}
+	if _, present := out["top_logprobs"]; present {
+		t.Errorf("top_logprobs not stripped: %#v", out)
+	}
+	if out["model"] != "zai-org/GLM-5-FP8" {
+		t.Errorf("model = %q, want it preserved", out["model"])
+	}
+	if out["temperature"] == nil {
+		t.Errorf("unrelated field temperature dropped: %#v", out)
+	}
+}
+
+// Nothing configured → body forwarded byte-for-byte unchanged.
+func TestStripBodyFields_NoopWhenUnset(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, nil)
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","logprobs":true,"messages":[]}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mutated when strip unset: got %s", got)
+	}
+}
+
+// Configured field absent from the body → body forwarded byte-for-byte unchanged
+// (no needless re-marshal/key-reorder).
+func TestStripBodyFields_NoopWhenFieldAbsent(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","temperature":0.7,"messages":[]}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mutated when no configured field present: got %s", got)
+	}
+}
+
+// Empty body is returned unchanged even when stripping is configured.
+func TestStripBodyFields_NoopOnEmptyBody(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	got, err := c.StripBodyFields(nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty body, got %s", got)
+	}
+}
+
+// A non-JSON-object body is forwarded unchanged rather than erroring.
+func TestStripBodyFields_NoopOnNonJSON(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	body := []byte(`not json`)
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("non-JSON body mutated: got %s", got)
+	}
+}
+
+// Large integer fields elsewhere in the body survive the decode/re-marshal
+// round-trip (UseNumber) when a strip does occur.
+func TestStripBodyFields_PreservesLargeInteger(t *testing.T) {
+	c := newTestCtrlForStripBodyFields(t, []string{"logprobs"})
+	body := []byte(`{"model":"glm-5","seed":9007199254740993,"logprobs":true,"messages":[]}`)
+
+	got, err := c.StripBodyFields(body, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`9007199254740993`)) {
+		t.Errorf("large integer seed not preserved verbatim: got %s", got)
+	}
+	if bytes.Contains(got, []byte(`logprobs`)) {
+		t.Errorf("logprobs not stripped: got %s", got)
+	}
+}
+
+// The effective strip set is the UNION of service-level and per-model lists: a
+// request resolved to a model gets both stripped.
+func TestStripBodyFields_PerModelUnionsWithServiceLevel(t *testing.T) {
+	svc := config.Service{
+		Type:            "chatbot",
+		ProviderType:    "centralized",
+		ModelType:       "zai-org/GLM-5-FP8",
+		StripBodyFields: []string{"logprobs"},
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "zai-org/GLM-5-FP8", StripBodyFields: []string{"top_logprobs"}},
+			{Model: "deepseek-v4-flash"}, // no per-entry strip → service-level only
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	c := &Ctrl{Service: svc, logger: testLogger(), whitelistUsers: make(map[string]struct{})}
+
+	// Model with a per-entry strip: BOTH logprobs (service) and top_logprobs (model)
+	// gone. Check keys precisely — "top_logprobs" contains the substring "logprobs",
+	// so a bytes.Contains check would conflate the two.
+	body := []byte(`{"model":"zai-org/GLM-5-FP8","logprobs":true,"top_logprobs":5,"messages":[]}`)
+	got, err := c.StripBodyFields(body, "zai-org/GLM-5-FP8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out["logprobs"]; present {
+		t.Errorf("service-level logprobs not stripped: %#v", out)
+	}
+	if _, present := out["top_logprobs"]; present {
+		t.Errorf("per-model top_logprobs not stripped: %#v", out)
+	}
+
+	// Model without a per-entry strip: only the service-level logprobs is removed,
+	// top_logprobs is left intact.
+	body2 := []byte(`{"model":"deepseek-v4-flash","logprobs":true,"top_logprobs":5,"messages":[]}`)
+	got2, err := c.StripBodyFields(body2, "deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out2 map[string]interface{}
+	if err := json.Unmarshal(got2, &out2); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, present := out2["logprobs"]; present {
+		t.Errorf("service-level logprobs not stripped: %#v", out2)
+	}
+	if _, present := out2["top_logprobs"]; !present {
+		t.Errorf("top_logprobs wrongly stripped for model without per-entry strip: %#v", out2)
+	}
+}
+
 func TestDecodeErrorBody(t *testing.T) {
 	const payload = `{"error":{"message":"upstream boom"}}`
 

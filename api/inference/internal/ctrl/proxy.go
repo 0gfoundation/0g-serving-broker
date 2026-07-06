@@ -78,15 +78,72 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 		}
 
+		// resolvedModel is the public/canonical id stamped by the model-handling
+		// branches above (ValidateModelAllowlist for multi-model, the single-model
+		// rewrite path otherwise). It keys per-model config lookups. Read it here so
+		// it is available to TranslateMaxTokens as well as Strip/InjectBodyFields —
+		// the body's "model" field may have been rewritten to the UPSTREAM id by
+		// ValidateModelAllowlist, so per-model lookups must use this, not the body.
+		// Empty for a single-model provider with no rewrite trigger (resolved to the
+		// default later); Effective* lookups treat "" as the service-level config.
+		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
+		resolvedModelStr, _ := resolvedModelVal.(string)
+
+		// Reject a request that arrived on an API surface the resolved model does
+		// not declare in supportedFormats (e.g. a client hitting /chat/completions
+		// on a model exposed only via /v1/messages). This is a client error, not a
+		// broker fault, so flag it like the allowlist rejection above so it does not
+		// trip broker health alerts. No-op unless supportedFormats is configured.
+		if err := c.enforceRequestFormat(ctx, resolvedModelStr); err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, err
+		}
+
+		// Translate the output-token cap to the field name the target model accepts
+		// (max_tokens vs max_completion_tokens), detected from its advertised
+		// supportedParameters — the DeepSeek-on-vLLM case rejects the newer
+		// max_completion_tokens an OpenAI-compatible client sends. No-op unless the
+		// model advertises exactly one of the two and the client sent the other. The
+		// two fields are semantically identical, so billing is unaffected.
+		modifiedBody, err = c.TranslateMaxTokens(reqBody, resolvedModelStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "translate max tokens")
+		}
+		reqBody = modifiedBody
+
 		// Reasoning translation: re-express the client's portable reasoning_effort
 		// as the upstream-native thinking control the target model advertises (e.g.
 		// chat_template_kwargs.enable_thinking). No-op unless the model advertises a
-		// native reasoning param. Runs after model handling so the multi-model body
-		// still carries the user's requested model for supportedParameters lookup.
-		// See docs/design/reasoning-translation.md.
-		modifiedBody, err = c.TranslateReasoning(reqBody)
+		// native reasoning param. Keyed on resolvedModelStr (the canonical id), NOT
+		// the body's "model" — ValidateModelAllowlist may have rewritten the body to
+		// the upstream id, but per-model supportedParameters are keyed by canonical
+		// id. See docs/design/reasoning-translation.md.
+		modifiedBody, err = c.TranslateReasoning(reqBody, resolvedModelStr)
 		if err != nil {
 			return nil, errors.Wrap(err, "translate reasoning")
+		}
+		reqBody = modifiedBody
+
+		// Strip operator-denylisted client params (e.g. logprobs/top_logprobs the
+		// routed upstream rejects) BEFORE injecting server fields, so a stripped
+		// key can be re-set by injection. No-op unless service- or per-model
+		// stripBodyFields is configured. A marshal failure here is a broker-side
+		// fault (same reasoning as InjectBodyFields below) — leave it unflagged.
+		modifiedBody, err = c.StripBodyFields(reqBody, resolvedModelStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "strip body fields")
+		}
+		reqBody = modifiedBody
+
+		modifiedBody, err = c.InjectBodyFields(reqBody, resolvedModelStr)
+		if err != nil {
+			// A marshal failure here is a broker-side fault (the injected fields
+			// are server config, already verified JSON-serializable at load, and
+			// the body was valid JSON). Leave it UNFLAGGED — unlike the
+			// client-caused model-validation branches above — so the unified
+			// failure metric attributes it to source=broker and the broker alert
+			// fires (same convention as the RPC-fault path in request.go).
+			return nil, errors.Wrap(err, "inject body fields")
 		}
 		reqBody = modifiedBody
 	}
@@ -374,12 +431,25 @@ func isUpstreamLeakHeader(key string) bool {
 	switch k {
 	case "provider", "server", "via", "x-powered-by":
 		return true
+	case "location":
+		// An upstream redirect Location would name the upstream host. Go's http
+		// client auto-follows redirects so this rarely reaches the response today,
+		// but strip it defensively so a future CheckRedirect change can't leak it.
+		return true
 	}
 	return strings.HasPrefix(k, "x-openrouter") ||
 		strings.HasPrefix(k, "openrouter") ||
 		strings.HasPrefix(k, "x-or-") ||
 		strings.HasPrefix(k, "x-ratelimit") ||
-		strings.HasPrefix(k, "x-clerk")
+		strings.HasPrefix(k, "x-clerk") ||
+		// Upstream-vendor identity headers real providers emit and name themselves
+		// with: OpenAI (openai-organization/openai-version/openai-processing-ms),
+		// Anthropic (anthropic-ratelimit-*/anthropic-organization-id), and the
+		// Cloudflare front all three sit behind (cf-ray/cf-cache-status). Forwarding
+		// any of these would reveal the upstream a "standard" provider must hide.
+		strings.HasPrefix(k, "openai-") ||
+		strings.HasPrefix(k, "anthropic-") ||
+		strings.HasPrefix(k, "cf-")
 }
 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
@@ -528,16 +598,32 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", decodedBody, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
+	// Forwarder providers (centralized/standard) hide their upstream, but an
+	// upstream ERROR body can still name it (e.g. {"error":{...,"provider":"openai"}}
+	// or an upstream model id). The success path sanitizes (#184, see handleResponse);
+	// the error path did not. Strip leak fields from the decoded error body before
+	// re-emitting for forwarders. Emit the decoded body (dropping the now-stale
+	// Content-Encoding) when sanitization changed it; otherwise forward the original
+	// bytes unchanged (leak headers are already stripped upstream in ProcessHTTPRequest).
+	outBody := respBody
+	if c.Service.IsForwarder() {
+		if sanitized, changed := c.sanitizeResponseBody([]byte(decodedBody), ""); changed {
+			outBody = sanitized
+			ctx.Writer.Header().Del("Content-Encoding")
+		}
+	}
+
 	ctx.Writer.WriteHeader(statusCode)
 
-	if _, err := ctx.Writer.Write(respBody); err != nil {
+	if _, err := ctx.Writer.Write(outBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
 	}
 }
 
 // decodeErrorBody returns a human-readable form of an upstream error body, decompressing
-// it according to the upstream Content-Encoding. On any failure, it returns the raw string —
-// callers use this only for logging and substring matching, never for re-emission.
+// it according to the upstream Content-Encoding. On any failure, it returns the raw string.
+// Used for logging and substring matching, and — for forwarder providers — as the input to
+// leak-field sanitization whose decoded output is then re-emitted (Content-Encoding dropped).
 func decodeErrorBody(body []byte, contentEncoding string) string {
 	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
 	case "", "identity":
@@ -646,6 +732,134 @@ func (c *Ctrl) EnsureStreamOptions(body []byte) ([]byte, error) {
 	modifiedBody, err := json.Marshal(bodyMap)
 	if err != nil {
 		return body, errors.Wrap(err, "failed to marshal modified JSON body")
+	}
+
+	return modifiedBody, nil
+}
+
+// InjectBodyFields merges the effective injectBodyFields for resolvedModel into
+// the request body's top-level object when configured, so the operator can set
+// upstream defaults/overrides per provider (e.g. OpenRouter's "provider" routing
+// object to pin a backend with fallbacks, or a per-model max_price cap). The
+// effective set is the service-level injectBodyFields with the resolved model's
+// per-entry override deep-merged on top (see Service.EffectiveInjectBodyFields);
+// resolvedModel is the value stamped under CtxKeyResolvedModel. It is
+// server-config-wins: each injected key replaces any client-supplied value of
+// the same name, so users cannot steer it. Broker-critical keys (model,
+// messages, stream, stream_options, lora_adapter_name) are rejected at config
+// load, so they can never be injected here.
+//
+// No-op (body returned unchanged) when the effective set is empty or the body
+// is empty. A body that does not parse as a JSON object is forwarded unchanged
+// rather than erroring — chatbot bodies are expected to be JSON objects, and
+// failing closed here would break the request for purely additive fields. That
+// fall-through is logged so a silently-unapplied injection is greppable.
+//
+// The configured fields map is normalized and verified JSON-serializable at
+// config load (see config.normalizeInjectBodyFields), so the marshal here cannot
+// fail in practice; the error branch is defensive.
+//
+// Decoding uses json.Number (UseNumber) so large integer fields (e.g. a seed of
+// 2^53+1, or big integers inside tool-call arguments) survive the round-trip
+// without being mangled into float64 — matching forceB64ResponseFormat.
+func (c *Ctrl) InjectBodyFields(body []byte, resolvedModel string) ([]byte, error) {
+	fields := c.Service.EffectiveInjectBodyFields(resolvedModel)
+	if len(fields) == 0 || len(body) == 0 {
+		return body, nil
+	}
+
+	var bodyMap map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	// A literal JSON `null` decodes into a nil map WITHOUT error; assigning to it
+	// below would panic ("assignment to entry in nil map"). Treat err and nil map
+	// the same as the non-object fall-through.
+	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
+		// Non-JSON-object body (or null): forward unchanged (cannot inject
+		// fields). The configured injection silently does not apply to this
+		// request, so log it — otherwise "most requests injected but some aren't"
+		// is undebuggable.
+		c.logger.Warnf("injectBodyFields configured but request body is not a JSON object; forwarding without injection: %v", err)
+		return body, nil
+	}
+
+	for k, v := range fields {
+		bodyMap[k] = v
+	}
+
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to marshal body with injected fields")
+	}
+
+	return modifiedBody, nil
+}
+
+// StripBodyFields removes the effective stripBodyFields for resolvedModel from the
+// request body's top-level object when configured, so the operator can drop
+// client-supplied params the upstream rejects (the motivating case: OpenRouter
+// 404s a request carrying logprobs/top_logprobs that the routed backend lacks).
+// The effective set is the union of the service-level and the resolved model's
+// per-entry stripBodyFields (see Service.EffectiveStripBodyFields); resolvedModel
+// is the value stamped under CtxKeyResolvedModel. Broker-critical keys (model,
+// messages, stream, stream_options, lora_adapter_name) are rejected at config
+// load, so they can never be stripped here.
+//
+// This runs BEFORE InjectBodyFields, so an operator may strip a client's value of
+// a key and then inject the server's own. It is a denylist, not an allowlist
+// derived from supportedParameters: a denylist can only remove named keys, so a
+// missing entry merely keeps 404-ing (loud) rather than silently dropping a
+// legitimate param.
+//
+// The keys actually removed are logged once per request (their names only, never
+// values) so a strip — invisible to the client, which sees a plain success — is
+// greppable on our side without emitting a line per field on the steady-state
+// workload that strips every request. No-op (body returned unchanged) when the
+// effective set is empty or the body is empty; a body that is not a JSON object
+// is forwarded unchanged and logged, matching InjectBodyFields. Decoding uses
+// json.Number so large integer fields survive the round-trip unmangled.
+func (c *Ctrl) StripBodyFields(body []byte, resolvedModel string) ([]byte, error) {
+	fields := c.Service.EffectiveStripBodyFields(resolvedModel)
+	if len(fields) == 0 || len(body) == 0 {
+		return body, nil
+	}
+
+	var bodyMap map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
+		// A literal JSON `null` decodes to a nil map with err == nil; the generic
+		// "%v" would then print "<nil>" and read like a parse failure. Distinguish
+		// the two and carry the resolved model so the line is correlatable.
+		if err != nil {
+			c.logger.Warnf("stripBodyFields configured but request body for model %q did not parse as JSON; forwarding without stripping: %v", resolvedModel, err)
+		} else {
+			c.logger.Warnf("stripBodyFields configured but request body for model %q is JSON null, not an object; forwarding without stripping", resolvedModel)
+		}
+		return body, nil
+	}
+
+	// Collect the keys actually removed and log them ONCE per request rather than a
+	// line per field: the motivating workload strips on every request, so per-field
+	// INFO would be steady-state spam. Only the key NAMES are logged (never values),
+	// so no client content leaks; the single line stays greppable per guardrail.
+	var strippedKeys []string
+	for _, k := range fields {
+		if _, present := bodyMap[k]; present {
+			delete(bodyMap, k)
+			strippedKeys = append(strippedKeys, k)
+		}
+	}
+	if len(strippedKeys) == 0 {
+		// Nothing matched — avoid a needless re-marshal (which would also reorder
+		// keys); forward the original bytes unchanged.
+		return body, nil
+	}
+	c.logger.Infof("stripped unsupported request body field(s) %v for model %q before forwarding upstream", strippedKeys, resolvedModel)
+
+	modifiedBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body, errors.Wrap(err, "failed to marshal body with stripped fields")
 	}
 
 	return modifiedBody, nil
@@ -961,9 +1175,29 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 
 	requestModel, _ := bodyMap["model"].(string)
 	if requestModel == "" {
-		// No model specified — use the configured ModelType as default
+		// No model specified — bill and forward the configured default model.
 		requestModel = c.Service.ModelType
-		bodyMap["model"] = requestModel
+	}
+
+	entry, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
+	if !ok {
+		c.recordModelMismatch(userAddr, requestModel)
+		return nil, fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
+	}
+
+	// Forward the entry's upstream id (UpstreamModel when set, else its Model) so
+	// the request reaches the upstream under the id it expects, while billing and
+	// metrics stay keyed on the resolved public id. The wildcard catch-all has no
+	// concrete id, so a wildcard-served model is forwarded verbatim.
+	forwardModel := requestModel
+	if entry != nil && entry.Model != config.ModelWildcard {
+		forwardModel = entry.UpstreamModelFor()
+	} else if entry != nil {
+		c.logger.Debugf("Model served via wildcard catch-all pricing: requested=%s", requestModel)
+	}
+
+	if cur, _ := bodyMap["model"].(string); cur != forwardModel {
+		bodyMap["model"] = forwardModel
 		modifiedBody, err := json.Marshal(bodyMap)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to marshal modified JSON body")
@@ -971,13 +1205,62 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		body = modifiedBody
 	}
 
-	if err := c.checkModelAllowed(ctx, requestModel, userAddr); err != nil {
-		return nil, err
-	}
-
-	ctx.Set(CtxKeyResolvedModel, requestModel)
-	c.logger.Debugf("Model allowlist passed: requested=%s", requestModel)
+	ctx.Set(CtxKeyResolvedModel, resolved)
+	c.logger.Debugf("Model allowlist passed: requested=%s resolved=%s forwarded=%s", requestModel, resolved, forwardModel)
 	return body, nil
+}
+
+// apiFormatForPath maps an incoming request path to the API surface it targets:
+// config.APIFormatAnthropic for the Anthropic /v1/messages shape (bare /messages
+// too), config.APIFormatOpenAI for OpenAI /chat/completions. Returns "" for any
+// other path, which callers treat as "not a chat surface — do not gate". The
+// path is gin's URL.Path (query already excluded); a trailing slash is tolerated.
+func apiFormatForPath(path string) string {
+	p := strings.TrimRight(path, "/")
+	switch {
+	case strings.HasSuffix(p, "/messages"):
+		return config.APIFormatAnthropic
+	case strings.HasSuffix(p, "/chat/completions"):
+		return config.APIFormatOpenAI
+	}
+	return ""
+}
+
+// formatAllowed reports whether surface (the API format a request arrived on) is
+// permitted by supportedFormats. An empty supportedFormats means "unconstrained"
+// (backward compatible with configs predating format enforcement), and an empty
+// surface (a path apiFormatForPath doesn't recognize) is never gated. Matching is
+// case-insensitive to tolerate config casing.
+func formatAllowed(supportedFormats []string, surface string) bool {
+	if len(supportedFormats) == 0 || surface == "" {
+		return true
+	}
+	for _, f := range supportedFormats {
+		if strings.EqualFold(strings.TrimSpace(f), surface) {
+			return true
+		}
+	}
+	return false
+}
+
+// enforceRequestFormat rejects a chat request whose API surface is not declared
+// in the resolved model's supportedFormats. It is a no-op when the model declares
+// no formats (unconstrained) or the path is not a recognized chat surface. Only
+// called on the chatbot path, after the model has been resolved onto the context.
+func (c *Ctrl) enforceRequestFormat(ctx *gin.Context, resolvedModel string) error {
+	surface := apiFormatForPath(ctx.Request.URL.Path)
+	if surface == "" {
+		return nil
+	}
+	model := resolvedModel
+	if model == "" {
+		model = c.Service.ModelType
+	}
+	formats := c.Service.SupportedFormatsFor(model)
+	if formatAllowed(formats, surface) {
+		return nil
+	}
+	return fmt.Errorf("model '%s' is not available on the %s API format (supported: %v); use the matching endpoint", model, surface, formats)
 }
 
 // ResolveModelForBilling resolves the requested model for per-model billing
@@ -991,34 +1274,21 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	if requestModel == "" {
 		requestModel = c.Service.ModelType
 	}
-	if err := c.checkModelAllowed(ctx, requestModel, userAddr); err != nil {
-		return err
+	_, resolved, ok := c.Service.ResolveRequestedModel(requestModel)
+	if !ok {
+		c.recordModelMismatch(userAddr, requestModel)
+		return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 	}
-	ctx.Set(CtxKeyResolvedModel, requestModel)
-	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s", requestModel)
+	ctx.Set(CtxKeyResolvedModel, resolved)
+	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s resolved=%s", requestModel, resolved)
 	return nil
 }
 
-// checkModelAllowed enforces the multi-model allowlist for a resolved model id.
-// On rejection it records a model-mismatch against the user's rate limiter (to
-// throttle clients that spam invalid model names) and returns an error. A
-// wildcard ("*") entry makes every model allowed.
-func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string) error {
-	// The wildcard "*" is a config sentinel for catch-all pricing, never a
-	// selectable model. A request literally asking for "*" would otherwise be an
-	// exact map hit (IsModelAllowed true) and get forwarded verbatim upstream;
-	// reject it like any other unsupported model.
-	if requestModel != config.ModelWildcard && c.Service.IsModelAllowed(requestModel) {
-		// Audit trail: when a request is served via the catch-all wildcard rather
-		// than an explicit allowlist entry, surface the actual model so operators
-		// can see what the wildcard price is being applied to. At Debug to avoid
-		// per-request log volume on a serve-all provider (the client controls the
-		// model string); the always-on load-time warning is the operator alert.
-		if c.Service.ServedViaWildcard(requestModel) {
-			c.logger.Debugf("Model served via wildcard catch-all pricing: requested=%s (no explicit modelPricing entry)", requestModel)
-		}
-		return nil
-	}
+// recordModelMismatch records a rejected model request against the user's rate
+// limiter (to throttle clients that spam invalid model names) and logs it. Used
+// by both multi-model resolution paths (chatbot JSON and STT/video billing-only)
+// when ResolveRequestedModel reports the requested model is not allowed.
+func (c *Ctrl) recordModelMismatch(userAddr, requestModel string) {
 	c.logger.Warnf("Model allowlist rejected: user=%s, requested=%s", userAddr, requestModel)
 	if userAddr != "" {
 		rateLimiter := GetRateLimiter()
@@ -1028,5 +1298,4 @@ func (c *Ctrl) checkModelAllowed(ctx *gin.Context, requestModel, userAddr string
 				userAddr, blockedUntil.Format("2006-01-02 15:04:05"))
 		}
 	}
-	return fmt.Errorf("model not supported: '%s' is not available for this service", requestModel)
 }
