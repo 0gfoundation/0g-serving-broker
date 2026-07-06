@@ -1,0 +1,120 @@
+name: Publish Docker Image (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag to publish the image as (e.g. dev, my-feature-test)'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BUILDPACK_IMAGE: ghcr.io/0gfoundation/compute-network-buildpack:20250619
+  IMAGE_TAG: ${{ inputs.image_tag }}
+  REF_NAME: ${{ github.ref_name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+    - name: Validate image tag
+      run: |
+        if [[ "$IMAGE_TAG" =~ ^[vV][0-9] ]]; then
+          echo "::error::image_tag '$IMAGE_TAG' looks like a release version (v*), which is reserved for the tagged-release workflow (build.yml). Choose a different tag."
+          exit 1
+        fi
+        if [[ "$IMAGE_TAG" == "latest" ]]; then
+          echo "::error::image_tag 'latest' is reserved and must not be overwritten by a manual branch build."
+          exit 1
+        fi
+
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        submodules: recursive
+
+    - name: Set up Git configuration
+      run: |
+        git config --global --add safe.directory ${{ github.workspace }}
+        git config --global --add safe.directory ${{ github.workspace }}/api/token-counter
+        git config --global --add safe.directory ${{ github.workspace }}/api/libs/0g-serving-contract
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+    - name: Build with buildpack container
+      run: |
+        # Use the same build process as local development / tagged releases
+        docker run --rm \
+          -e IMAGE_TAG="$IMAGE_TAG" \
+          -v "${{ github.workspace }}:/workspace" \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -w /workspace/api \
+          ${{ env.BUILDPACK_IMAGE }} \
+          bash -c '
+            git config --global --add safe.directory /workspace && \
+            git config --global --add safe.directory /workspace/api/token-counter && \
+            git config --global --add safe.directory /workspace/api/libs/0g-serving-contract && \
+            make release VERSION="$IMAGE_TAG"
+          '
+
+    - name: Push built image to registry
+      id: push
+      run: |
+        # The buildpack created the image in local Docker daemon
+        # Makefile creates image with -amd64 suffix
+        LOCAL_IMAGE="ghcr.io/0gfoundation/0g-serving-broker:${IMAGE_TAG}-amd64"
+        REGISTRY_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+        if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
+          echo "Found local image: $LOCAL_IMAGE"
+
+          docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE"
+          docker push "$REGISTRY_IMAGE"
+
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REGISTRY_IMAGE" | cut -d'@' -f2)
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "image_url=${REGISTRY_IMAGE}" >> $GITHUB_OUTPUT
+
+          echo "Successfully pushed: $REGISTRY_IMAGE"
+          echo "Image digest: $DIGEST"
+        else
+          echo "Local image not found: $LOCAL_IMAGE"
+          echo "Available images:"
+          docker images | grep -E "(0g-serving-broker|ghcr.io)" || echo "No matching images found"
+          exit 1
+        fi
+
+    - name: Sign container image with cosign
+      run: |
+        cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+    - name: Verify signature
+      run: |
+        cosign verify \
+          --certificate-identity-regexp="https://github.com/${{ github.repository }}/.*" \
+          --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+    - name: Output build summary
+      run: |
+        echo "## Published Image" >> $GITHUB_STEP_SUMMARY
+        echo "**Branch/ref:** \`${REF_NAME}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Image:** \`${{ steps.push.outputs.image_url }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Signed with Sigstore cosign**" >> $GITHUB_STEP_SUMMARY
