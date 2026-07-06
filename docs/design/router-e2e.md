@@ -101,23 +101,44 @@ The router does not stop being smart — it stops being a *plaintext decider*. I
 selection intelligence moves to a **control-plane** call over metadata only; the
 **data plane** (sealed payload) is driven by the local sidecar.
 
-```
-         ┌───────────────────────── local sidecar (Option A) ─────────────────────────┐
-         │  speaks the OpenAI API on localhost; hides everything below                 │
-user app │                                                                             │
-  (OpenAI │  ① CONTROL PLANE (metadata only)                                            │
-   SDK) ──┼─▶ route manifest ─────────────▶ router ──▶ ranked candidates:              │
-         │      {model, features, ~tokens}          [{provider, endpoint,              │
-         │                                             enclave_pubkey, quote}, …]       │
-         │                                                                             │
-         │  ② verify candidate #1 quote  →  seal payload to its enclave_pubkey          │
-         │                                                                             │
-         │  ③ DATA PLANE (sealed)                                                       │
-         │     { manifest:{pin=#1, allow_fallbacks=false}, body:<sealed> }             │
-         │        └── via router (L4 / manifest-only) ──▶ broker#1 enclave ──▶ model    │
-         │                                                                             │
-         │  ④ on failure/busy/timeout → seal to #2 → retry   (fallback loop here)       │
-         └─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as User app + OpenAI SDK
+    participant SC as Local sidecar
+    participant R as Router - L7, metadata only
+    participant B1 as Broker enclave 1
+    participant B2 as Broker enclave 2
+    participant M as Upstream model
+
+    App->>SC: OpenAI request (localhost)
+
+    rect rgb(238, 246, 255)
+    Note over SC,R: Phase 1 - Control plane (metadata only)
+    SC->>R: route manifest: model, features, approx_tokens
+    R-->>SC: ranked candidates: endpoint, enclave_pubkey, quote
+    end
+
+    Note over SC: Phase 2 - verify candidate quote, HPKE-seal body to its pubkey
+
+    rect rgb(235, 250, 240)
+    Note over SC,M: Phase 3 - Data plane (sealed)
+    SC->>R: manifest pin + allow_fallbacks=false, plus sealed body
+    R->>B1: forward by pin (L4, body opaque)
+    B1->>M: unseal in-enclave, call model
+    M-->>B1: completion
+    B1-->>SC: signed response
+    end
+
+    Note over SC: verify response signature vs on-chain teeSignerAddress
+
+    alt candidate 1 fails / busy / timeout (pre-first-token only)
+        Note over SC: Phase 4 - re-seal to candidate 2 and retry
+        SC->>B2: via router, pinned + sealed body
+        B2-->>SC: signed response
+    end
+
+    SC-->>App: response
 ```
 
 - **Control plane (router, metadata-visible):** input is the route manifest;
