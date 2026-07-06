@@ -270,9 +270,13 @@ Unchanged in principle:
   confidentiality *from the router* requires response-direction sealing (below),
   not just transport TLS. Only the voucher-based i-b/ii bypass keeps a
   plaintext-L7 hop off the response path.
-- If response-direction confidentiality from the transport is also required, the
-  broker can seal the response to a client-supplied ephemeral key. Deferred —
-  the signature already gives integrity + origin.
+- **Response-direction sealing is a tracked follow-up (Migration step 3), not
+  just "deferred".** Under i-a the request is sealed but the response is
+  plaintext to the L7 router — an asymmetry that must be closed for full
+  confidentiality: seal the response to a client-supplied ephemeral key inside
+  the enclave (per-chunk for streaming). The per-response signature already
+  gives integrity + origin regardless; this adds *confidentiality* of the
+  completion from the router.
 
 Note the sanitize interaction (#522): signing attests the **sanitized
 client-facing** bytes; the sidecar must verify against exactly the bytes it
@@ -408,9 +412,16 @@ Backward compatible; sealed mode is opt-in ("privacy mode").
    `pin, allow_fallbacks=false`; the L7 router re-auths as itself, bills its
    account, honors the pin, and forwards without re-routing. Fallback loop in the
    sidecar. (Data-plane bypass — i-b/ii — is a later, voucher-gated step.)
-3. **Harden:** measurement-tied key rotation + TTL cache; manifest↔body
+3. **Response-direction sealing.** Under i-a the router terminates TLS on the
+   return path too, so a sealed *request* with a plaintext *response* is
+   asymmetric — the router still reads the completion. Seal the response to a
+   client-supplied ephemeral key (client sends its ephemeral public key in the
+   route manifest / request; broker encrypts the response to it inside the
+   enclave; sidecar decrypts). Closes the return-path leak without giving up L7
+   billing. Streaming: seal per-chunk (or per-SSE-frame) so tokens can stream.
+4. **Harden:** measurement-tied key rotation + TTL cache; manifest↔body
    consistency check in the enclave; optional direct-to-broker (variant ii).
-4. **Legacy path stays** for users who do not opt into privacy mode (router keeps
+5. **Legacy path stays** for users who do not opt into privacy mode (router keeps
    doing plaintext L7 routing + fallback for them).
 
 ---
