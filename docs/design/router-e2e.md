@@ -124,7 +124,7 @@ sequenceDiagram
     rect rgb(235, 250, 240)
     Note over SC,M: Phase 3 - Data plane (sealed)
     SC->>R: manifest pin + allow_fallbacks=false, plus sealed body
-    R->>B1: forward by pin (L4, body opaque)
+    R->>B1: forward to pinned broker (SNI pin + L4, or header pin + L7; body opaque)
     B1->>M: unseal in-enclave, call model
     M-->>B1: completion
     B1-->>SC: signed response
@@ -180,15 +180,32 @@ Notes:
 ## Pin & fallback
 
 "Pin" = the destination is fully determined by the sidecar, so the router's
-dynamic routing/fallback is disabled for this request. Two variants:
+dynamic routing/fallback is disabled for this request.
 
-- **(i) Via router, manifest-pinned (smallest change, recommended first):** the
-  cleartext manifest carries `pin=provider_X, allow_fallbacks=false`. The router
-  reads the manifest, forwards to X, and does **not** re-route. The body is
-  opaque ciphertext it cannot read. Reuses the existing ingress and the existing
-  pin / `allow_fallbacks` concept.
+**Where the pin lives depends on the router's layer — and this is a real
+constraint, not a free choice.** An **L4** forwarder only sees TCP/IP metadata
+and the TLS **SNI**; HTTP headers are inside the encrypted stream, so an L4
+router **cannot read a `pin` header**. Reading a header requires an **L7** router
+that terminates TLS. So "L4 + pin-in-header" is contradictory — pick one:
+
+- **(i-a) L7, TLS-terminating, body sealed:** the router terminates TLS, reads
+  the HTTP headers / route manifest (carrying `pin=provider_X,
+  allow_fallbacks=false`), forwards to X, and does **not** re-route. It sees
+  headers + metadata but the body is opaque ciphertext. This is where a
+  **pin HTTP header works** (matches the current implementation) — but call it
+  what it is: **L7 body-blind, not L4.** Reuses the existing ingress and the
+  `pin` / `allow_fallbacks` concept.
+- **(i-b) L4 SNI passthrough (most private):** the router does **not** terminate
+  TLS; it forwards TCP by **SNI**. It cannot read any HTTP header, so the **pin
+  moves to the SNI/hostname** — each broker gets a routable hostname and the
+  sidecar sets the target SNI. The router sees only SNI + traffic shape.
 - **(ii) Direct to broker:** the sidecar connects straight to the chosen
   broker's endpoint; the router is out of the data path entirely.
+
+**Recommendation:** for the sealed path prefer **i-b (SNI pin + L4)** — strictly
+more private (the router never parses HTTP). Keep header-based pin (i-a) only if
+the router must stay L7 for other reasons; if so, do not describe that hop as
+"L4".
 
 **Fallback loop lives in the sidecar.** On failure/busy/timeout for candidate
 #1, the sidecar seals to #2's key and retries. This is why sealing forces the
@@ -240,8 +257,10 @@ Unchanged in principle:
   `signCentralizedRoutingProof`); the sidecar verifies the signature against the
   on-chain `teeSignerAddress` (the per-response verification flow).
 - Sealing in this design is **request-direction**. The response already travels
-  over TLS; once the L7 router is bypassed (variant ii) or reduced to L4/manifest
-  forwarding (variant i), no plaintext-L7 hop reads it.
+  over TLS; with SNI-pinned L4 passthrough (i-b) or direct connect (ii) no
+  plaintext-L7 hop reads it. Under header-pinned L7 (i-a) the router does
+  terminate TLS on the return path — response confidentiality from the router
+  then relies on response-direction sealing (below), not just transport TLS.
 - If response-direction confidentiality from the transport is also required, the
   broker can seal the response to a client-supplied ephemeral key. Deferred —
   the signature already gives integrity + origin.
@@ -333,6 +352,39 @@ proof format) so it matches the Go core byte-for-byte.
 **Recommended sequencing:** Go core → (1) sidecar binary (covers all
 non-browser) + (2) same core reused as the cloud-TEE gateway → later, a TS/WASM
 build for the browser segment.
+
+### Shared core vs native per language (and where Go vs Rust fit)
+
+"Go first" above is about the **server-side forms** (sidecar + gateway), which are
+standalone Go processes needing no bindings. The separate question — *if we ship
+in-process libraries in many languages* — is **shared core + bindings**, not
+native reimplementation per language.
+
+- **Do not re-implement the crypto natively N times.** Seal / attestation /
+  fallback is security-critical; every reimplementation multiplies the audit
+  surface and risks subtle divergence (EIP-191 prefix, HPKE params, quote
+  parsing). Minimize implementations.
+- **A shared embeddable core points to Rust, not Go.** Go makes a poor FFI/WASM
+  core (cgo drags the runtime/GC, heavy shared libs, and Go→WASM is awkward for a
+  browser crypto lib). Rust gives a clean small C ABI plus first-class binding
+  generators — `napi-rs` (Node/TS), `PyO3` (Python), `wasm-bindgen` (browser) —
+  and covers the browser gap Go cannot.
+- **These do not conflict.** Server forms stay **Go** (reuse broker code, no
+  FFI). A multi-language *embeddable* core, if/when needed, is a **Rust core +
+  thin bindings + WASM**. Doing the Go sidecar first lets you defer — and maybe
+  avoid — the Rust core entirely.
+- **Split by risk.** Heavy/dangerous logic → shared core. A trivial *verify-only*
+  helper (ecrecover + two SHA-256s, ~10 lines) is fine to write natively per
+  language — low risk, no FFI/distribution burden.
+- **Non-negotiable prerequisite:** a frozen **wire spec** (envelope + proof /
+  signature format) as the single source of truth, so any implementation (Go
+  core, Rust core, native verify helper) matches byte-for-byte.
+
+| Concern | Language / form |
+|---------|-----------------|
+| Sidecar + cloud gateway (server) | Go native (reuse broker; no bindings) |
+| Multi-language in-process SDK + browser | Rust core + `napi-rs`/`PyO3`/`wasm-bindgen` |
+| Verify-only helper | native per language (trivial, low risk) |
 
 ---
 
