@@ -765,6 +765,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 	req.ServiceName = svcType
+	// Reconciliation dimensions (see docs/design/provider-reconciliation.md).
+	// Upstream is the billing counterparty that served this request; for a single
+	// centralized upstream it is providerIdentity, and "self" for decentralized.
+	// Unit is the default billing unit for the service type; the STT token-billed
+	// path corrects it to tokens where counts are finalized.
+	req.Upstream = p.ctrl.Service.ProviderIdentity
+	if req.Upstream == "" {
+		req.Upstream = constant.UpstreamSelf
+	}
+	req.Unit = constant.DefaultBillingUnitForService(svcType)
 	req.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if req.ModelName == "" {
 		req.ModelName = p.ctrl.Service.ModelType

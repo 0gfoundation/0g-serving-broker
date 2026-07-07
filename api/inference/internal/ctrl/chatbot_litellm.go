@@ -64,8 +64,16 @@ func (u *LiteLLMUsage) toUsage() *Usage {
 		CompletionTokens: u.OutputTokens,
 		TotalTokens:      promptTokens + u.OutputTokens,
 	}
-	if u.CacheReadInputTokens > 0 {
-		usage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
+	// Preserve both cache buckets: cache_read earns the discount (CachedTokens), while
+	// cache_creation (write) is folded into PromptTokens for billing but recorded
+	// separately for reconciliation. PromptTokensDetails still gates the cache discount
+	// on CachedTokens > 0 (see updateAccountWithUsage), so surfacing a write-only report
+	// here does not change billing.
+	if u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 {
+		usage.PromptTokensDetails = &PromptTokensDetails{
+			CachedTokens:     u.CacheReadInputTokens,
+			CacheWriteTokens: u.CacheCreationInputTokens,
+		}
 	}
 	return usage
 }

@@ -18,6 +18,22 @@ type Request struct {
 	// Optimized count fields for efficient aggregation
 	InputCount   int64      `gorm:"type:bigint;not null;default:0" json:"inputCount"`
 	OutputCount  int64      `gorm:"type:bigint;not null;default:0" json:"outputCount"`
+	// Reconciliation dimensions (server-set, see docs/design/provider-reconciliation.md).
+	// Upstream is the billing counterparty that actually served the request (the vendor
+	// label, e.g. "minimax"; "self" for decentralized providers with no external vendor).
+	Upstream string `gorm:"type:varchar(64);not null;default:''" json:"upstream"`
+	// Unit is the authoritative billing unit for InputCount/OutputCount: "tokens",
+	// "seconds" (whisper STT), or "images" (text-to-image). service_type alone is
+	// insufficient because STT splits between seconds (whisper) and tokens
+	// (gpt-4o-transcribe).
+	Unit string `gorm:"type:varchar(16);not null;default:''" json:"unit"`
+	// CachedInputTokens is the cache-read subset of InputCount (prompt_tokens_details
+	// .cached_tokens). CacheWriteInputTokens is the cache-creation (write) subset. Both
+	// are 0 when not reported/applicable. Recorded so reconciliation can align token
+	// definitions and the cost/margin dimension against vendor statements that price
+	// cache buckets separately.
+	CachedInputTokens     int64 `gorm:"type:bigint;not null;default:0" json:"cachedInputTokens"`
+	CacheWriteInputTokens int64 `gorm:"type:bigint;not null;default:0" json:"cacheWriteInputTokens"`
 	// Skip this request in settlement until this time
 	SkipUntil    *time.Time `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
 	// Settling indicates the request is currently being settled on-chain

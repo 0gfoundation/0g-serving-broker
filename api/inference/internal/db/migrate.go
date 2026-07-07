@@ -290,6 +290,41 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&UserDailyStat{})
 			},
 		},
+		{
+			ID: "add-reconciliation-fields-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				type Request struct {
+					Upstream              string `gorm:"type:varchar(64);not null;default:''"`
+					Unit                  string `gorm:"type:varchar(16);not null;default:''"`
+					CachedInputTokens     int64  `gorm:"type:bigint;not null;default:0"`
+					CacheWriteInputTokens int64  `gorm:"type:bigint;not null;default:0"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
+			ID: "create-hourly-usage-stat",
+			Migrate: func(tx *gorm.DB) error {
+				// Retained hourly rollup for broker↔provider reconciliation. Bucketed
+				// by request created_at (not settlement time) so a vendor statement's
+				// day boundary (in its own timezone) can be reconstructed exactly. See
+				// model.HourlyUsageStat and docs/design/provider-reconciliation.md.
+				type HourlyUsageStat struct {
+					Hour                  time.Time `gorm:"type:datetime;primaryKey"`
+					Upstream              string    `gorm:"type:varchar(64);primaryKey"`
+					Model                 string    `gorm:"type:varchar(255);primaryKey"`
+					Unit                  string    `gorm:"type:varchar(16);primaryKey"`
+					IsWhitelisted         bool      `gorm:"type:tinyint(1);primaryKey;default:0"`
+					ServiceType           string    `gorm:"type:varchar(32);not null;default:''"`
+					RequestCount          int64     `gorm:"type:bigint;not null;default:0"`
+					InputCount            int64     `gorm:"type:bigint;not null;default:0"`
+					OutputCount           int64     `gorm:"type:bigint;not null;default:0"`
+					CachedInputTokens     int64     `gorm:"type:bigint;not null;default:0"`
+					CacheWriteInputTokens int64     `gorm:"type:bigint;not null;default:0"`
+				}
+				return tx.AutoMigrate(&HourlyUsageStat{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

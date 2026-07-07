@@ -24,6 +24,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -111,6 +112,10 @@ type CompletionChunk struct {
 
 type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	// CacheWriteTokens is the cache-creation (write) count. OpenAI does not report it
+	// (stays 0); the Anthropic/LiteLLM path populates it from cache_creation_input_tokens
+	// so it can be persisted for reconciliation. Billing does not discount it.
+	CacheWriteTokens int `json:"-"`
 }
 
 type Usage struct {
@@ -608,9 +613,22 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		return errors.Wrap(err, "Error calculating total fee")
 	}
 
+	// Reconciliation sub-categories: record the reported cache read/write token counts
+	// regardless of whether cache billing discounts them, so reconciliation can align
+	// token definitions and the cost dimension against vendor statements.
+	reportedCached, reportedCacheWrite := 0, 0
+	if usage.PromptTokensDetails != nil {
+		reportedCached = usage.PromptTokensDetails.CachedTokens
+		if reportedCached > usage.PromptTokens {
+			reportedCached = usage.PromptTokens
+		}
+		reportedCacheWrite = usage.PromptTokensDetails.CacheWriteTokens
+	}
+
 	// Update the request with accurate token counts and fees
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(),
-		int64(usage.PromptTokens), int64(usage.CompletionTokens)); err != nil {
+		int64(usage.PromptTokens), int64(usage.CompletionTokens),
+		constant.BillingUnitTokens, int64(reportedCached), int64(reportedCacheWrite)); err != nil {
 		return errors.Wrap(err, "Error updating request with accurate tokens")
 	}
 

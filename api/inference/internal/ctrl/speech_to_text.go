@@ -22,6 +22,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -529,11 +530,10 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 		return errors.Wrap(err, "calculate duration fee")
 	}
 
-	// Persist seconds in input_count and 0 in output_count. There is no
-	// per-row unit discriminator; operators identify duration-billed rows
-	// by the service the row belongs to (whisper services bill seconds).
+	// Persist seconds in input_count and 0 in output_count, tagged with the seconds
+	// unit so reconciliation interprets the count correctly (whisper bills by seconds).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
-		int64(seconds), 0); err != nil {
+		int64(seconds), 0, constant.BillingUnitSeconds, 0, 0); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
@@ -611,8 +611,10 @@ func (c *Ctrl) billSpeechToTextByTokensCore(ctx context.Context, usage *SpeechTo
 		return err
 	}
 
+	// gpt-4o-transcribe bills by tokens, so tag this row's unit as tokens (overriding
+	// the seconds default stamped at request creation for the STT service type).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFeeStr, outputFeeStr, totalFeeStr,
-		int64(usage.InputTokens), int64(usage.OutputTokens)); err != nil {
+		int64(usage.InputTokens), int64(usage.OutputTokens), constant.BillingUnitTokens, 0, 0); err != nil {
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 

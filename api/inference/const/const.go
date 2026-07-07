@@ -22,6 +22,35 @@ const (
 	ProviderTypeCentralized   = "centralized"
 )
 
+// Billing unit constants for the reconciliation rollup (Request.Unit /
+// HourlyUsageStat.Unit). They label what InputCount/OutputCount are measured in, which
+// varies by service type — and, for speech-to-text, by the response shape (whisper bills
+// by seconds, gpt-4o-transcribe by tokens). See docs/design/provider-reconciliation.md.
+const (
+	BillingUnitTokens  = "tokens"
+	BillingUnitSeconds = "seconds"
+	BillingUnitImages  = "images"
+)
+
+// UpstreamSelf labels a request served by the provider's own engine (decentralized /
+// TeeML), i.e. no external vendor to reconcile against.
+const UpstreamSelf = "self"
+
+// DefaultBillingUnitForService returns the billing unit a service type bills in by
+// default. Speech-to-text defaults to seconds (whisper); the token-billed
+// gpt-4o-transcribe path overrides it to tokens where the counts are finalized.
+func DefaultBillingUnitForService(serviceType string) string {
+	switch serviceType {
+	case ServiceTypeTextToImage, ServiceTypeImageEditing:
+		return BillingUnitImages
+	case ServiceTypeSpeechToText:
+		return BillingUnitSeconds
+	default:
+		// chatbot and video-generation bill in tokens.
+		return BillingUnitTokens
+	}
+}
+
 // Known centralized provider identities.
 const (
 	CentralizedProviderOpenAI    = "openai"
