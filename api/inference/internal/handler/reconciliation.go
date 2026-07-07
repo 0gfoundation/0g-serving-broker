@@ -18,7 +18,7 @@ import (
 //	@ID           reconcile
 //	@Tags         admin
 //	@Produce      json
-//	@Param        upstream  query  string  true   "Upstream vendor label (e.g. minimax)"
+//	@Param        upstream  query  string  false  "Upstream vendor label (e.g. minimax); omit for all upstreams"
 //	@Param        start     query  string  true   "Period start date (YYYY-MM-DD, in timezone)"
 //	@Param        end       query  string  true   "Period end date, inclusive (YYYY-MM-DD, in timezone)"
 //	@Param        timezone  query  string  false  "Fixed UTC offset of the period (+08:00, -05:00, Z); defaults to UTC"
@@ -41,17 +41,17 @@ func (h *Handler) Reconcile(ctx *gin.Context) {
 		return
 	}
 
-	upstream := ctx.Query("upstream")
 	start := ctx.Query("start")
 	end := ctx.Query("end")
-	if upstream == "" || start == "" || end == "" {
+	if start == "" || end == "" {
 		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error": "upstream, start, and end are required",
+			"error": "start and end are required",
 		})
 		return
 	}
 
-	report, err := h.ctrl.Reconcile(upstream, start, end, ctx.Query("timezone"))
+	// upstream is optional: empty means "all upstreams" (grouped in the report).
+	report, err := h.ctrl.Reconcile(ctx.Query("upstream"), start, end, ctx.Query("timezone"))
 	if err != nil {
 		// Errors are dominated by bad input (dates/timezone/period); echo with a 400.
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

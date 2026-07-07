@@ -226,16 +226,19 @@ clean case the hourly-UTC store is designed to exploit.
 
 ## Report construction
 
-Given `upstream`, `periodStart`, `periodEnd`, and `timezone`:
+Given an optional `upstream`, plus `periodStart`, `periodEnd`, and `timezone`:
 
 1. Convert `[periodStart, periodEnd]` in `timezone` to a UTC hour range (`reconciliationWindowUTC`).
-2. Query `hourly_usage_stat` for rows where `hour` is in that range **and** `upstream`
-   matches; this returns per-`(model, unit, service_type)` sums.
-3. Aggregate into `totalsByUnit` (counts summed across models, keyed by billing unit) plus a
+2. Query `hourly_usage_stat` for rows where `hour` is in that range, filtered to `upstream`
+   **when one was requested** (omitted → all upstreams); returns per-`(upstream, model, unit,
+   service_type)` sums.
+3. Group by upstream (sorted by name for a deterministic response). Within each upstream,
+   aggregate into `totalsByUnit` (counts summed across models, keyed by billing unit) plus a
    `totalRequests`, and pass the per-model rows through as `perModel` for drill-down.
 
-The response is the broker's own numbers only; the operator compares each unit's totals
-against the corresponding line of the vendor statement (a token statement against
+The response is the broker's own numbers only, grouped under `upstreams` (one entry when a
+specific upstream was requested, one per upstream otherwise). The operator compares each
+upstream's per-unit totals against that vendor's statement (a token statement against
 `totalsByUnit["tokens"]`, an image statement against `["images"]`, etc.).
 
 **Cost / money is out of scope for the report.** The rollup stores usage counts, not fees,
@@ -302,11 +305,11 @@ broker-vs-vendor timestamp skew are small enough to ignore.
 ## Output
 
 The endpoint returns a single JSON **usage report** (`ctrl.ReconciliationReport`): the
-window it resolved (`windowStartUtc`/`windowEndUtc`), `totalRequests`, `totalsByUnit`
-(counts summed across models, keyed by billing unit — `requestCount`, `inputCount`,
-`outputCount`, `cachedInputTokens`, `cacheWriteInputTokens`), and `perModel` (the
-per-`(model, unit, service_type)` breakdown). No verdict, no vendor numbers — the operator
-compares it against the statement.
+window it resolved (`windowStartUtc`/`windowEndUtc`) and an `upstreams` array (sorted by
+name). Each entry has `totalRequests`, `totalsByUnit` (counts summed across models, keyed by
+billing unit — `requestCount`, `inputCount`, `outputCount`, `cachedInputTokens`,
+`cacheWriteInputTokens`), and `perModel` (the per-`(model, unit, service_type)` breakdown).
+No verdict, no vendor numbers — the operator compares each upstream against its statement.
 
 Prometheus metrics / a bounded summary log for automated drift alerting are **Phase 2** —
 they only make sense once the broker itself compares, which the report-only design
@@ -319,8 +322,9 @@ GET /v1/admin/reconciliation?upstream=minimax&start=2026-06-29&end=2026-06-29&ti
 Authorization: Bearer app-sk-<token>
 ```
 
-Query params: `upstream` (required), `start` / `end` (required, `YYYY-MM-DD` inclusive, in
-`timezone`), `timezone` (optional fixed offset like `+08:00`; defaults to UTC). Reuses the
+Query params: `upstream` (optional — omit for all upstreams), `start` / `end` (required,
+`YYYY-MM-DD` inclusive, in `timezone`), `timezone` (optional fixed offset like `+08:00`;
+defaults to UTC). Reuses the
 same admin authentication and whitelist gate as `/v1/admin/usage/daily`
 (`internal/handler/usage_stats.go`). Read-only against `hourly_usage_stat` — it never
 mutates billing state.

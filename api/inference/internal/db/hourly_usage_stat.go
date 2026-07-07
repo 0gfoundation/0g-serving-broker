@@ -73,6 +73,7 @@ func (d *DB) PruneHourlyUsageStat(retentionDays int) (int64, error) {
 // (model, unit, service_type) over the requested UTC window and upstream, summed across
 // hours and whitelisted/non-whitelisted rows.
 type HourlyUsageSum struct {
+	Upstream              string `json:"upstream"`
 	Model                 string `json:"model"`
 	Unit                  string `json:"unit"`
 	ServiceType           string `json:"serviceType"`
@@ -83,22 +84,27 @@ type HourlyUsageSum struct {
 	CacheWriteInputTokens int64  `json:"cacheWriteInputTokens"`
 }
 
-// SumHourlyUsageByModel returns the per-(model, unit, service_type) usage totals for an
-// upstream over the half-open UTC window [startUTC, endUTC). The caller supplies exact
-// UTC hour boundaries derived from the vendor statement's own timezone and period, so a
-// whole-hour-offset timezone's day is reconstructed exactly from the hourly buckets.
-// Whitelisted traffic is included (it is on the vendor statement).
+// SumHourlyUsageByModel returns the per-(upstream, model, unit, service_type) usage totals
+// over the half-open UTC window [startUTC, endUTC). When upstream is non-empty, results are
+// filtered to that vendor; when empty, all upstreams are returned (the caller groups by
+// upstream). The caller supplies exact UTC hour boundaries derived from the statement's own
+// timezone and period, so a whole-hour-offset timezone's day is reconstructed exactly from
+// the hourly buckets. Whitelisted traffic is included (it is on the vendor statement).
 func (d *DB) SumHourlyUsageByModel(upstream string, startUTC, endUTC time.Time) ([]HourlyUsageSum, error) {
-	var rows []HourlyUsageSum
-	err := d.db.Model(&model.HourlyUsageStat{}).
-		Select("model, unit, service_type, "+
+	q := d.db.Model(&model.HourlyUsageStat{}).
+		Select("upstream, model, unit, service_type, "+
 			"COALESCE(SUM(request_count),0) as request_count, "+
 			"COALESCE(SUM(input_count),0) as input_count, "+
 			"COALESCE(SUM(output_count),0) as output_count, "+
 			"COALESCE(SUM(cached_input_tokens),0) as cached_input_tokens, "+
 			"COALESCE(SUM(cache_write_input_tokens),0) as cache_write_input_tokens").
-		Where("upstream = ? AND hour >= ? AND hour < ?", upstream, startUTC, endUTC).
-		Group("model, unit, service_type").
+		Where("hour >= ? AND hour < ?", startUTC, endUTC)
+	if upstream != "" {
+		q = q.Where("upstream = ?", upstream)
+	}
+	var rows []HourlyUsageSum
+	err := q.Group("upstream, model, unit, service_type").
+		Order("upstream, model, unit").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to sum hourly usage: %w", err)

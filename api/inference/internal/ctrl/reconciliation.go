@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -66,19 +67,10 @@ type UnitTotals struct {
 	CacheWriteInputTokens int64 `json:"cacheWriteInputTokens"`
 }
 
-// ReconciliationReport is the broker's own usage for an upstream over a period, produced
-// so an operator can compare it against the upstream provider's statement themselves. It
-// is report-only: the broker does not take the vendor's numbers as input and does not
-// judge a tolerance — it just reports what it recorded. See
-// docs/design/provider-reconciliation.md.
-type ReconciliationReport struct {
-	Upstream       string `json:"upstream"`
-	PeriodStart    string `json:"periodStart"`
-	PeriodEnd      string `json:"periodEnd"`
-	Timezone       string `json:"timezone"`
-	WindowStartUTC string `json:"windowStartUtc"`
-	WindowEndUTC   string `json:"windowEndUtc"`
-	// TotalRequests is the request count across all units and models.
+// UpstreamReport is the broker's usage for a single upstream over the report window.
+type UpstreamReport struct {
+	Upstream string `json:"upstream"`
+	// TotalRequests is the request count across all units and models for this upstream.
 	TotalRequests int64 `json:"totalRequests"`
 	// TotalsByUnit holds the counts summed across models, keyed by billing unit, so a
 	// token statement is read from TotalsByUnit["tokens"], an image statement from
@@ -88,10 +80,26 @@ type ReconciliationReport struct {
 	PerModel []db.HourlyUsageSum `json:"perModel"`
 }
 
-// Reconcile produces the broker's usage report for an upstream over [periodStart,
-// periodEnd] interpreted in timezone. It re-buckets the hourly UTC rollup into that
-// window (exact for whole-hour offsets, e.g. MiniMax UTC+8) and returns the totals plus a
-// per-model breakdown. The caller compares this against the upstream's own statement.
+// ReconciliationReport is the broker's own usage over a period, grouped by upstream, so an
+// operator can compare each upstream against its provider's statement themselves. It is
+// report-only: the broker does not take the vendor's numbers as input and does not judge a
+// tolerance. When a specific upstream was requested, Upstreams has one entry; when none was
+// requested, it has one entry per upstream seen in the window. See
+// docs/design/provider-reconciliation.md.
+type ReconciliationReport struct {
+	PeriodStart    string           `json:"periodStart"`
+	PeriodEnd      string           `json:"periodEnd"`
+	Timezone       string           `json:"timezone"`
+	WindowStartUTC string           `json:"windowStartUtc"`
+	WindowEndUTC   string           `json:"windowEndUtc"`
+	Upstreams      []UpstreamReport `json:"upstreams"`
+}
+
+// Reconcile produces the broker's usage report over [periodStart, periodEnd] interpreted
+// in timezone, grouped by upstream. When upstream is non-empty the report is scoped to
+// that vendor; when empty it covers every upstream in the window. It re-buckets the hourly
+// UTC rollup into that window (exact for whole-hour offsets, e.g. MiniMax UTC+8). The
+// caller compares each upstream against its own statement.
 func (c *Ctrl) Reconcile(upstream, periodStart, periodEnd, timezone string) (*ReconciliationReport, error) {
 	loc, tzLabel, err := parseFixedZone(timezone)
 	if err != nil {
@@ -108,41 +116,52 @@ func (c *Ctrl) Reconcile(upstream, periodStart, periodEnd, timezone string) (*Re
 		return nil, errors.Wrap(err, "sum hourly usage for reconciliation")
 	}
 
-	return buildReconciliationReport(upstream, periodStart, periodEnd, tzLabel, startUTC, endUTC, rows), nil
+	return buildReconciliationReport(periodStart, periodEnd, tzLabel, startUTC, endUTC, rows), nil
 }
 
-// buildReconciliationReport aggregates the broker's hourly rows into per-unit totals and a
-// per-model breakdown. Pure (no DB) so it is unit-testable in isolation.
-func buildReconciliationReport(upstream, periodStart, periodEnd, tzLabel string, startUTC, endUTC time.Time, rows []db.HourlyUsageSum) *ReconciliationReport {
-	if rows == nil {
-		rows = []db.HourlyUsageSum{}
-	}
-	totalsByUnit := make(map[string]*UnitTotals)
-	var totalRequests int64
+// buildReconciliationReport groups the broker's hourly rows by upstream, each into per-unit
+// totals and a per-model breakdown. Pure (no DB) so it is unit-testable in isolation.
+// Upstreams are sorted by name for a deterministic response regardless of row order.
+func buildReconciliationReport(periodStart, periodEnd, tzLabel string, startUTC, endUTC time.Time, rows []db.HourlyUsageSum) *ReconciliationReport {
+	byUpstream := make(map[string]*UpstreamReport)
 	for _, r := range rows {
-		totalRequests += r.RequestCount
-		ut := totalsByUnit[r.Unit]
+		up := byUpstream[r.Upstream]
+		if up == nil {
+			up = &UpstreamReport{Upstream: r.Upstream, TotalsByUnit: make(map[string]*UnitTotals)}
+			byUpstream[r.Upstream] = up
+		}
+		up.TotalRequests += r.RequestCount
+		ut := up.TotalsByUnit[r.Unit]
 		if ut == nil {
 			ut = &UnitTotals{}
-			totalsByUnit[r.Unit] = ut
+			up.TotalsByUnit[r.Unit] = ut
 		}
 		ut.RequestCount += r.RequestCount
 		ut.InputCount += r.InputCount
 		ut.OutputCount += r.OutputCount
 		ut.CachedInputTokens += r.CachedInputTokens
 		ut.CacheWriteInputTokens += r.CacheWriteInputTokens
+		up.PerModel = append(up.PerModel, r)
+	}
+
+	names := make([]string, 0, len(byUpstream))
+	for name := range byUpstream {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	upstreams := make([]UpstreamReport, 0, len(names))
+	for _, name := range names {
+		upstreams = append(upstreams, *byUpstream[name])
 	}
 
 	return &ReconciliationReport{
-		Upstream:       upstream,
 		PeriodStart:    periodStart,
 		PeriodEnd:      periodEnd,
 		Timezone:       tzLabel,
 		WindowStartUTC: startUTC.Format(time.RFC3339),
 		WindowEndUTC:   endUTC.Format(time.RFC3339),
-		TotalRequests:  totalRequests,
-		TotalsByUnit:   totalsByUnit,
-		PerModel:       rows,
+		Upstreams:      upstreams,
 	}
 }
 
