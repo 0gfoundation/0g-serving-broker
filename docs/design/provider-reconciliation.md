@@ -1,10 +1,11 @@
 # Broker ↔ Provider Reconciliation Design
 
-This document describes how the broker reconciles its own billing ledger against the
-**upstream provider's** billing statement — the missing edge in the system's accounting
-triangle. It exists so that a divergence between "what the broker billed users for" and
-"what the upstream actually served / charged us for" becomes a measurable number instead
-of an invisible leak.
+This document describes how the broker exposes its own billing ledger — as a usage report
+per upstream, period, and timezone — so an operator can reconcile it against the **upstream
+provider's** billing statement, the missing edge in the system's accounting triangle. It
+exists so that a divergence between "what the broker billed users for" and "what the
+upstream actually served / charged us for" becomes a measurable number instead of an
+invisible leak. The broker produces the numbers; the operator does the comparison.
 
 ## The problem it solves
 
@@ -68,30 +69,20 @@ These are hard constraints from how provider statements actually arrive, not ass
 
 ## Design principles
 
-### 1. Heterogeneity lives in the input data, not in code
+### 1. Report-only: the broker emits its numbers, the operator compares
 
-The broker never parses a vendor-specific statement format. Instead, when the Admin
-obtains a statement, they transcribe it into one **canonical, sparse input record** with
-every field optional; fields the vendor did not provide are left null:
+The broker does **not** take the vendor's statement as input, does **not** parse any
+vendor-specific format, and does **not** judge a pass/fail tolerance. It answers one
+question — *"for upstream X, over period [start, end] in timezone Z, what usage did the
+broker record?"* — and returns its own totals plus a per-model breakdown. The operator
+compares that against the vendor's statement themselves.
 
-```json
-{
-  "upstream": "minimax",
-  "periodStart": "2026-06-29",
-  "periodEnd": "2026-06-29",
-  "timezone": "+08:00",
-  "inputTokens": 12345678,
-  "outputTokens": 2345678,
-  "totalTokens": 14691356,
-  "requests": null,
-  "cost": null
-}
-```
-
-There is exactly **one** reconciliation code path. It compares **only the fields the input
-supplies** (a loop over a fixed dimension set, skipping nulls). Adding a new vendor is a
-new row of Admin-entered data, never a code change. The only per-vendor facts that ever
-exist are *parameters* — the timezone, and which `upstream` label the statement covers.
+This keeps the broker side free of any per-vendor knowledge: the only per-vendor facts are
+*request parameters* — the `upstream` label, the period, and the timezone. Adding a new
+vendor is a new query, never a code change. (An earlier design had the broker ingest the
+statement and compute a per-dimension diff with a tolerance band; that was dropped —
+operators only wanted the report, and a broker-side tolerance verdict is redundant when a
+human does the comparison.)
 
 ### 2. The broker must retain finer granularity than the reconciliation granularity
 
@@ -212,11 +203,10 @@ declares.** Three mechanisms compose:
 2. **Re-bucket, don't pre-commit.** Because the broker keeps hourly UTC buckets, it sums the
    exact set of hours that fall inside the vendor's day. A whole-hour-offset timezone maps
    to a whole number of hour buckets, so the reconstruction is **exact**.
-3. **Reconcile over the whole statement period with a tolerance band.** Comparing an entire
-   billing period (a week, a month) rather than isolated single days confines boundary
-   ambiguity to the two edge hours; over a long period their weight is negligible. A
-   tolerance band (e.g. variance `< 0.5%` counts as balanced) absorbs residual clock skew
-   and sub-hour zones.
+3. **Report over the whole statement period.** Requesting an entire billing period (a week,
+   a month) rather than isolated single days confines boundary ambiguity to the two edge
+   hours; over a long period their weight is negligible, so the residual clock-skew / sub-hour
+   noise the operator sees when comparing is tiny.
 
 ### Worked example: MiniMax (UTC+8, daily)
 
@@ -230,29 +220,27 @@ clean case the hourly-UTC store is designed to exploit.
 - **DST-observing vendor timezones.** A local "day" is 23 or 25 hours twice a year; summing
   the correct set of hour buckets still reconstructs it exactly.
 - **Half-hour / 45-minute zones** (UTC+5:30, UTC+5:45). Hour buckets cannot split a partial
-  hour, leaving **≤ 1 hour** of boundary slippage per period edge. Documented; absorbed by
-  the tolerance band. If a vendor bills in such a zone and tighter precision is needed,
-  30-minute buckets can be adopted without changing the reconciliation logic.
+  hour, leaving **≤ 1 hour** of boundary slippage per period edge — a small edge in the
+  reported numbers the operator accounts for. If a vendor bills in such a zone and tighter
+  precision is needed, 30-minute buckets can be adopted without changing the report logic.
 
-## Reconciliation algorithm
+## Report construction
 
-Given a canonical input record:
+Given `upstream`, `periodStart`, `periodEnd`, and `timezone`:
 
-1. Convert `[periodStart, periodEnd]` in the input's `timezone` to a UTC hour range.
+1. Convert `[periodStart, periodEnd]` in `timezone` to a UTC hour range (`reconciliationWindowUTC`).
 2. Query `hourly_usage_stat` for rows where `hour` is in that range **and** `upstream`
-   matches the input's `upstream`; sum over `model` (keep the per-model breakdown for
-   drill-down).
-3. For each dimension the input supplies (non-null), compute `brokerValue`,
-   `providerValue`, `delta`, and `percentVariance`. Skip null dimensions.
-4. When both `inputTokens`/`outputTokens` and `totalTokens` are present, additionally
-   cross-check `input + output == total` on both sides.
-5. Flag any dimension whose `percentVariance` exceeds the tolerance band.
+   matches; this returns per-`(model, unit, service_type)` sums.
+3. Aggregate into `totalsByUnit` (counts summed across models, keyed by billing unit) plus a
+   `totalRequests`, and pass the per-model rows through as `perModel` for drill-down.
 
-**Cost / 0G is a soft dimension.** A vendor's `cost` is in the vendor's currency (e.g. USD);
-the broker's `fee` is in 0G (A0GI wei) charged to users at the on-chain price. They are not
-directly equal. When `cost` is supplied, reconciliation converts via the existing
-`pricefeed` and reports it as a **margin check** under a wider tolerance — never as a hard
-balance. Token / request dimensions are the high-confidence checks.
+The response is the broker's own numbers only; the operator compares each unit's totals
+against the corresponding line of the vendor statement (a token statement against
+`totalsByUnit["tokens"]`, an image statement against `["images"]`, etc.).
+
+**Cost / money is out of scope for the report.** The rollup stores usage counts, not fees,
+so a currency comparison (vendor cost in USD vs broker fee in 0G) is not produced here; see
+the cost-dimension open question for the deferred `rate_class` approach.
 
 ## Definitional alignment: what counts as a token / a request
 
@@ -307,35 +295,35 @@ Errored / zero-output requests (the broker prunes zero-output rows after an hour
 retries (the broker may count one where the vendor counts the retried attempts), and
 client-disconnect (the broker bills the completed response) are all points where "one
 request" can mean different things on the two sides. For each, either align the definition
-with the vendor or let the tolerance band absorb it — but decide deliberately rather than
-discovering the gap during a reconciliation. STT second-rounding (`billableSeconds`) and
-broker-vs-vendor timestamp skew are small enough to leave to the tolerance band.
+with the vendor or note it as expected edge noise — but decide deliberately rather than
+discovering the gap during a comparison. STT second-rounding (`billableSeconds`) and
+broker-vs-vendor timestamp skew are small enough to ignore.
 
 ## Output
 
-Three artifacts, consistent with the broker's existing observability
-(`docs/design/rejection-observability.md`):
+The endpoint returns a single JSON **usage report** (`ctrl.ReconciliationReport`): the
+window it resolved (`windowStartUtc`/`windowEndUtc`), `totalRequests`, `totalsByUnit`
+(counts summed across models, keyed by billing unit — `requestCount`, `inputCount`,
+`outputCount`, `cachedInputTokens`, `cacheWriteInputTokens`), and `perModel` (the
+per-`(model, unit, service_type)` breakdown). No verdict, no vendor numbers — the operator
+compares it against the statement.
 
-- **Diff report** returned by the Admin endpoint: per-dimension `brokerValue`,
-  `providerValue`, `delta`, `percentVariance`, `withinTolerance`, plus the per-model
-  breakdown for any dimension that is out of tolerance.
-- **Prometheus metrics** in the `broker_*` family, labeled by a bounded
-  `upstream` and `dimension` (never by user address), e.g.
-  `broker_reconciliation_variance_ratio{upstream="minimax",dimension="input_tokens"}`.
-- **Bounded summary log**: one line per reconciliation run per upstream, following the
-  bounded-log discipline already established for rejections.
+Prometheus metrics / a bounded summary log for automated drift alerting are **Phase 2** —
+they only make sense once the broker itself compares, which the report-only design
+deliberately does not do.
 
 ## Admin endpoint
 
 ```
-POST /v1/admin/reconciliation
+GET /v1/admin/reconciliation?upstream=minimax&start=2026-06-29&end=2026-06-29&timezone=%2B08:00
 Authorization: Bearer app-sk-<token>
 ```
 
-Reuses the same admin authentication and whitelist gate as `/v1/admin/usage/daily`
-(`internal/handler/usage_stats.go`). The body is the canonical sparse input record; the
-response is the diff report. The endpoint is read-only against `hourly_usage_stat` — it
-never mutates billing state.
+Query params: `upstream` (required), `start` / `end` (required, `YYYY-MM-DD` inclusive, in
+`timezone`), `timezone` (optional fixed offset like `+08:00`; defaults to UTC). Reuses the
+same admin authentication and whitelist gate as `/v1/admin/usage/daily`
+(`internal/handler/usage_stats.go`). Read-only against `hourly_usage_stat` — it never
+mutates billing state.
 
 ## Assumptions and limitations
 
@@ -376,11 +364,12 @@ never mutates billing state.
 
 ## Phased rollout
 
-- **Phase 1 — hourly store + Admin reconciliation endpoint.** Add `Request.Upstream` /
+- **Phase 1 — hourly store + Admin usage-report endpoint.** Add `Request.Upstream` /
   `Request.Unit` / cache sub-category fields, the `hourly_usage_stat` table (written in the
   settlement accumulation path, plus the whitelisted-traffic increment), and the
-  `/v1/admin/reconciliation` endpoint that reconciles a vendor statement against the rollup.
-  This is the whole value: the Admin-driven ① ↔ ② check.
+  `GET /v1/admin/reconciliation` endpoint that returns the broker's usage for an upstream
+  over a period/timezone. This is the whole value: the operator compares that report against
+  the upstream statement (the ① ↔ ② check).
 
   > A broker-internal self-check (recompute each request's `fee` from its counts × price;
   > compare accrued revenue to `confirmed` `pending_settlement` totals) was considered as a

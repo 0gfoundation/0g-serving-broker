@@ -7,114 +7,6 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 )
 
-func ptrI64(v int64) *int64 { return &v }
-
-func dimByName(dims []ReconDimension, name string) (ReconDimension, bool) {
-	for _, d := range dims {
-		if d.Dimension == name {
-			return d, true
-		}
-	}
-	return ReconDimension{}, false
-}
-
-// TestBuildReconciliationReport_OnlyPresentFields verifies only the statement-supplied
-// dimensions are compared (nil fields are skipped).
-func TestBuildReconciliationReport_OnlyPresentFields(t *testing.T) {
-	rows := []db.HourlyUsageSum{
-		{Model: "MiniMax-M3", Unit: "tokens", ServiceType: "chatbot", RequestCount: 10, InputCount: 1000, OutputCount: 500, CachedInputTokens: 100, CacheWriteInputTokens: 20},
-	}
-	in := ReconciliationInput{
-		Upstream:    "minimax",
-		InputTokens: ptrI64(1000), // only these two supplied
-		Requests:    ptrI64(10),
-	}
-	rep := buildReconciliationReport(in, "+08:00", time.Now().UTC(), time.Now().UTC(), rows)
-	if len(rep.Dimensions) != 2 {
-		t.Fatalf("dimensions = %d, want 2 (only supplied fields)", len(rep.Dimensions))
-	}
-	if d, ok := dimByName(rep.Dimensions, "input_tokens"); !ok || d.BrokerValue != 1000 || !d.WithinTolerance {
-		t.Errorf("input_tokens dim = %+v (ok=%v), want broker=1000 within", d, ok)
-	}
-	if _, ok := dimByName(rep.Dimensions, "output_tokens"); ok {
-		t.Error("output_tokens should be absent (not supplied)")
-	}
-	if !rep.AllWithinTolerance {
-		t.Error("AllWithinTolerance = false, want true")
-	}
-}
-
-// TestBuildReconciliationReport_TokenUnitFiltering verifies token dimensions sum ONLY
-// unit=="tokens" rows, while requests are summed across all units — so a mixed
-// chatbot+STT rollup does not fold seconds into the token comparison.
-func TestBuildReconciliationReport_TokenUnitFiltering(t *testing.T) {
-	rows := []db.HourlyUsageSum{
-		{Model: "MiniMax-M3", Unit: "tokens", ServiceType: "chatbot", RequestCount: 3, InputCount: 300, OutputCount: 90},
-		{Model: "whisper", Unit: "seconds", ServiceType: "speech-to-text", RequestCount: 2, InputCount: 999, OutputCount: 0},
-	}
-	in := ReconciliationInput{
-		Upstream:     "mixed",
-		InputTokens:  ptrI64(300), // must match tokens rows only, not + 999 seconds
-		OutputTokens: ptrI64(90),
-		Requests:     ptrI64(5), // 3 + 2 across all units
-	}
-	rep := buildReconciliationReport(in, "+00:00", time.Now().UTC(), time.Now().UTC(), rows)
-	inTok, _ := dimByName(rep.Dimensions, "input_tokens")
-	if inTok.BrokerValue != 300 || !inTok.WithinTolerance {
-		t.Errorf("input_tokens broker = %d, want 300 (seconds excluded)", inTok.BrokerValue)
-	}
-	req, _ := dimByName(rep.Dimensions, "requests")
-	if req.BrokerValue != 5 || !req.WithinTolerance {
-		t.Errorf("requests broker = %d, want 5 (all units)", req.BrokerValue)
-	}
-}
-
-// TestBuildReconciliationReport_OutOfTolerance verifies a mismatch flips both the
-// dimension and the report-level flag.
-func TestBuildReconciliationReport_OutOfTolerance(t *testing.T) {
-	rows := []db.HourlyUsageSum{
-		{Model: "m", Unit: "tokens", RequestCount: 1, InputCount: 900},
-	}
-	in := ReconciliationInput{Upstream: "u", InputTokens: ptrI64(1000)} // 10% variance
-	rep := buildReconciliationReport(in, "+00:00", time.Now().UTC(), time.Now().UTC(), rows)
-	d, _ := dimByName(rep.Dimensions, "input_tokens")
-	if d.WithinTolerance {
-		t.Errorf("input_tokens within = true, want false (10%% > 0.5%%)")
-	}
-	if d.Delta != -100 {
-		t.Errorf("delta = %d, want -100", d.Delta)
-	}
-	if rep.AllWithinTolerance {
-		t.Error("AllWithinTolerance = true, want false")
-	}
-}
-
-// TestBuildReconciliationReport_CacheAndTotal verifies cache sub-categories and the
-// total_tokens dimension aggregate correctly, and a custom tolerance is honored.
-func TestBuildReconciliationReport_CacheAndTotal(t *testing.T) {
-	rows := []db.HourlyUsageSum{
-		{Model: "m", Unit: "tokens", RequestCount: 2, InputCount: 1000, OutputCount: 400, CachedInputTokens: 250, CacheWriteInputTokens: 60},
-	}
-	tol := 2.0
-	in := ReconciliationInput{
-		Upstream:              "u",
-		TotalTokens:           ptrI64(1400),
-		CachedInputTokens:     ptrI64(250),
-		CacheWriteInputTokens: ptrI64(61), // ~1.6% off, within 2% tolerance
-		TolerancePercent:      &tol,
-	}
-	rep := buildReconciliationReport(in, "+00:00", time.Now().UTC(), time.Now().UTC(), rows)
-	if tot, _ := dimByName(rep.Dimensions, "total_tokens"); tot.BrokerValue != 1400 || !tot.WithinTolerance {
-		t.Errorf("total_tokens = %+v, want broker=1400 within", tot)
-	}
-	if cw, _ := dimByName(rep.Dimensions, "cache_write_input_tokens"); !cw.WithinTolerance {
-		t.Errorf("cache_write within = false, want true under 2%% tolerance (pct=%v)", cw.PercentVariance)
-	}
-	if rep.TolerancePercent != 2.0 {
-		t.Errorf("tolerance = %v, want 2.0", rep.TolerancePercent)
-	}
-}
-
 func TestParseFixedZone(t *testing.T) {
 	tests := []struct {
 		in         string
@@ -197,29 +89,50 @@ func TestReconciliationWindowUTC_EndBeforeStart(t *testing.T) {
 	}
 }
 
-func TestMakeDimension(t *testing.T) {
-	tests := []struct {
-		name       string
-		broker     int64
-		provider   int64
-		tol        float64
-		wantDelta  int64
-		wantWithin bool
-	}{
-		{"exact match", 1000, 1000, 0.5, 0, true},
-		{"within tolerance", 1004, 1000, 0.5, 4, true},   // 0.4%
-		{"out of tolerance", 1010, 1000, 0.5, 10, false}, // 1.0%
-		{"both zero", 0, 0, 0.5, 0, true},
-		{"provider zero broker nonzero", 5, 0, 0.5, 5, false},
-		{"broker short", 990, 1000, 0.5, -10, false},
+// TestBuildReconciliationReport_TotalsAndPerModel verifies per-unit totals sum across
+// models and requests span all units, while each unit's counts stay separate (a mixed
+// chatbot+STT rollup must not fold seconds into the token totals).
+func TestBuildReconciliationReport_TotalsAndPerModel(t *testing.T) {
+	rows := []db.HourlyUsageSum{
+		{Model: "MiniMax-M3", Unit: "tokens", ServiceType: "chatbot", RequestCount: 3, InputCount: 300, OutputCount: 90, CachedInputTokens: 30, CacheWriteInputTokens: 6},
+		{Model: "glm-5", Unit: "tokens", ServiceType: "chatbot", RequestCount: 2, InputCount: 200, OutputCount: 40, CachedInputTokens: 10},
+		{Model: "whisper", Unit: "seconds", ServiceType: "speech-to-text", RequestCount: 5, InputCount: 999},
 	}
-	for _, tt := range tests {
-		d := makeDimension(tt.name, tt.broker, tt.provider, tt.tol)
-		if d.Delta != tt.wantDelta {
-			t.Errorf("%s: delta = %d, want %d", tt.name, d.Delta, tt.wantDelta)
-		}
-		if d.WithinTolerance != tt.wantWithin {
-			t.Errorf("%s: within = %v (pct=%v), want %v", tt.name, d.WithinTolerance, d.PercentVariance, tt.wantWithin)
-		}
+	start := time.Date(2026, 6, 28, 16, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 29, 16, 0, 0, 0, time.UTC)
+	rep := buildReconciliationReport("minimax", "2026-06-29", "2026-06-29", "+08:00", start, end, rows)
+
+	if rep.TotalRequests != 10 {
+		t.Errorf("TotalRequests = %d, want 10 (all units)", rep.TotalRequests)
+	}
+	tok := rep.TotalsByUnit["tokens"]
+	if tok == nil || tok.InputCount != 500 || tok.OutputCount != 130 || tok.RequestCount != 5 || tok.CachedInputTokens != 40 || tok.CacheWriteInputTokens != 6 {
+		t.Errorf("tokens totals = %+v, want in=500 out=130 req=5 cached=40 write=6", tok)
+	}
+	sec := rep.TotalsByUnit["seconds"]
+	if sec == nil || sec.InputCount != 999 || sec.RequestCount != 5 {
+		t.Errorf("seconds totals = %+v, want in=999 req=5 (not folded into tokens)", sec)
+	}
+	if len(rep.PerModel) != 3 {
+		t.Errorf("PerModel len = %d, want 3", len(rep.PerModel))
+	}
+	if rep.WindowStartUTC != "2026-06-28T16:00:00Z" || rep.WindowEndUTC != "2026-06-29T16:00:00Z" {
+		t.Errorf("window = [%s, %s), want the UTC+8 day", rep.WindowStartUTC, rep.WindowEndUTC)
+	}
+}
+
+// TestBuildReconciliationReport_Empty verifies an empty rollup yields zero totals and a
+// non-nil (JSON-friendly) PerModel slice.
+func TestBuildReconciliationReport_Empty(t *testing.T) {
+	rep := buildReconciliationReport("minimax", "2026-06-29", "2026-06-29", "+08:00",
+		time.Now().UTC(), time.Now().UTC(), nil)
+	if rep.TotalRequests != 0 {
+		t.Errorf("TotalRequests = %d, want 0", rep.TotalRequests)
+	}
+	if len(rep.TotalsByUnit) != 0 {
+		t.Errorf("TotalsByUnit = %v, want empty", rep.TotalsByUnit)
+	}
+	if rep.PerModel == nil {
+		t.Error("PerModel is nil, want empty non-nil slice for clean JSON")
 	}
 }

@@ -4,23 +4,25 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 )
 
-// Reconcile compares an upstream provider's billing statement against the broker's
-// hourly usage rollup for the statement's period and timezone, returning a per-dimension
-// diff. Read-only; never mutates billing state.
+// Reconcile returns the broker's own usage for an upstream over a period (in the given
+// timezone), so an operator can compare it against the upstream provider's statement
+// themselves. Report-only: it does not take the vendor's numbers and does not judge a
+// tolerance. Read-only; never mutates billing state.
 //
 // Auth reuses the admin whitelist gate (session token AND whitelisted), matching
 // /admin/usage/daily.
 //
-//	@Description  Reconcile a provider statement against broker usage (whitelist-gated)
+//	@Description  Broker usage report for an upstream over a period (whitelist-gated)
 //	@ID           reconcile
 //	@Tags         admin
-//	@Accept       json
 //	@Produce      json
-//	@Router       /admin/reconciliation [post]
+//	@Param        upstream  query  string  true   "Upstream vendor label (e.g. minimax)"
+//	@Param        start     query  string  true   "Period start date (YYYY-MM-DD, in timezone)"
+//	@Param        end       query  string  true   "Period end date, inclusive (YYYY-MM-DD, in timezone)"
+//	@Param        timezone  query  string  false  "Fixed UTC offset of the period (+08:00, -05:00, Z); defaults to UTC"
+//	@Router       /admin/reconciliation [get]
 //	@Success      200  {object}  ctrl.ReconciliationReport
 func (h *Handler) Reconcile(ctx *gin.Context) {
 	// 1. Authenticate the session (proves possession of the private key).
@@ -31,25 +33,27 @@ func (h *Handler) Reconcile(ctx *gin.Context) {
 		return
 	}
 
-	// 2. Authorize: only whitelisted addresses may run reconciliation.
+	// 2. Authorize: only whitelisted addresses may read usage reports.
 	if !h.ctrl.IsWhitelistedUser(authedUser) {
 		ctx.JSON(http.StatusForbidden, gin.H{
-			"error": "not authorized to run reconciliation",
+			"error": "not authorized to read reconciliation reports",
 		})
 		return
 	}
 
-	var in ctrl.ReconciliationInput
-	if err := ctx.ShouldBindJSON(&in); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	upstream := ctx.Query("upstream")
+	start := ctx.Query("start")
+	end := ctx.Query("end")
+	if upstream == "" || start == "" || end == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": "upstream, start, and end are required",
+		})
 		return
 	}
 
-	report, err := h.ctrl.Reconcile(in)
+	report, err := h.ctrl.Reconcile(upstream, start, end, ctx.Query("timezone"))
 	if err != nil {
-		// Reconcile's errors are dominated by bad input (dates/timezone/period). This is
-		// an Admin-facing endpoint, so echo the message with a 400 rather than
-		// distinguishing the rarer DB-fault case.
+		// Errors are dominated by bad input (dates/timezone/period); echo with a 400.
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
