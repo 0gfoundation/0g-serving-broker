@@ -8,11 +8,11 @@ package ctrl
 // applyNativeReasoning. See docs/design/reasoning-translation.md.
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
-	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
 // reasoningEffortKey is the portable OpenAI field the broker translates FROM. It
@@ -86,19 +86,6 @@ func normalizeReasoningEffort(effort string) reasoningIntent {
 	}
 }
 
-// resolveModelInfo returns the effective ModelInfo for a model: a per-model
-// pricing entry's own ModelInfo wins, otherwise the service-level ModelInfo.
-// Mirrors the resolution used by ModelExpiration and the /v1/models handler.
-func (c *Ctrl) resolveModelInfo(model string) *config.ModelInfo {
-	mi := c.Service.ModelInfo
-	if c.Service.HasMultiModelPricing() {
-		if mp := c.Service.GetModelPricing(model); mp != nil && mp.ModelInfo != nil {
-			mi = mp.ModelInfo
-		}
-	}
-	return mi
-}
-
 // AdvertisedSupportedParameters returns supportedParameters as it should appear in
 // the GET /v1/models response. When the model advertises a native thinking toggle
 // the broker can translate into (chat_template_kwargs / enable_thinking / thinking)
@@ -131,7 +118,7 @@ func AdvertisedSupportedParameters(params []string) []string {
 // model advertises in supportedParameters (e.g. "enable_thinking"), or "" if it
 // advertises none the broker can translate to.
 func (c *Ctrl) nativeReasoningParam(model string) string {
-	mi := c.resolveModelInfo(model)
+	mi := c.Service.EffectiveModelInfo(model)
 	if mi == nil {
 		return ""
 	}
@@ -218,8 +205,15 @@ func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 		return body, nil
 	}
 
+	// UseNumber so large integer fields (e.g. a client-supplied `seed` above 2^53)
+	// survive the decode→encode round-trip intact instead of being silently mangled
+	// through float64. Mirrors TranslateMaxTokens / Strip/InjectBodyFields.
 	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	// A literal JSON `null` decodes to a nil map without error; treat it like a
+	// non-object body and forward unchanged.
+	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
 		// Non-JSON request: leave as-is, consistent with the other body rewriters.
 		return body, nil
 	}

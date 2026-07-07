@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -436,6 +437,25 @@ func TestAdvertisedSupportedParameters_DoesNotMutateInput(t *testing.T) {
 	_ = AdvertisedSupportedParameters(in)
 	if len(in) != 2 {
 		t.Errorf("input slice was mutated: %v", in)
+	}
+}
+
+func TestTranslateReasoning_PreservesLargeIntegers(t *testing.T) {
+	// A seed above 2^53 must survive the decode→encode round-trip exactly; a plain
+	// json.Unmarshal into interface{} would round it through float64 and corrupt it.
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
+	body := []byte(`{"model":"qwen3","reasoning_effort":"high","seed":9007199254740993,"messages":[]}`)
+
+	got, err := c.TranslateReasoning(body, "qwen3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`9007199254740993`)) {
+		t.Errorf("seed was corrupted in translation; got %s", got)
+	}
+	// And the translation still happened.
+	if on, present := decodeEnableThinking(t, got); !present || !on {
+		t.Errorf("enable_thinking = (%v,%v), want (true,true)", on, present)
 	}
 }
 
