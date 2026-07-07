@@ -112,19 +112,19 @@ configuration has a resolution order, evaluated per-parameter in an early
 2. **Repo variable** (`vars.*`) — the normal source for label-triggered runs.
 3. **Built-in default** — fallback baked into the workflow.
 
-| Parameter | Dispatch input | Repo variable | Default |
-|---|---|---|---|
-| Endpoint URL | `endpoint_url` | `vars.LLM_BENCHMARK_ENDPOINT_URL` | *(none — required)* |
-| Model | `model` | `vars.LLM_BENCHMARK_MODEL` | *(none — required)* |
-| Tokenizer | `tokenizer` | `vars.LLM_BENCHMARK_TOKENIZER` | `""` |
-| Concurrency | `concurrency` | `vars.LLM_BENCHMARK_CONCURRENCY` | `5` |
-| Request count | `request_count` | `vars.LLM_BENCHMARK_REQUEST_COUNT` | `20` |
-| Streaming | `streaming` | `vars.LLM_BENCHMARK_STREAMING` | `true` |
-| Max TTFT p99 (ms) | `max_ttft_ms` | `vars.LLM_BENCHMARK_MAX_TTFT_MS` | `2000` |
-| Max latency p99 (ms) | `max_latency_ms` | `vars.LLM_BENCHMARK_MAX_LATENCY_MS` | `10000` |
-| Min output tok/s | `min_output_tps` | `vars.LLM_BENCHMARK_MIN_OUTPUT_TPS` | `10` |
-| Max error rate | `max_error_rate` | `vars.LLM_BENCHMARK_MAX_ERROR_RATE` | `0` |
-| Git ref | `ref` | — | PR head / `main` |
+| Parameter            | Dispatch input   | Repo variable                       | Default             |
+|----------------------|------------------|-------------------------------------|---------------------|
+| Endpoint URL         | `endpoint_url`   | `vars.LLM_BENCHMARK_ENDPOINT_URL`   | *(none — required)* |
+| Model                | `model`          | `vars.LLM_BENCHMARK_MODEL`          | *(none — required)* |
+| Tokenizer            | `tokenizer`      | `vars.LLM_BENCHMARK_TOKENIZER`      | `""`                |
+| Concurrency          | `concurrency`    | `vars.LLM_BENCHMARK_CONCURRENCY`    | `5`                 |
+| Request count        | `request_count`  | `vars.LLM_BENCHMARK_REQUEST_COUNT`  | `20`                |
+| Streaming            | `streaming`      | `vars.LLM_BENCHMARK_STREAMING`      | `true`              |
+| Max TTFT p99 (ms)    | `max_ttft_ms`    | `vars.LLM_BENCHMARK_MAX_TTFT_MS`    | `2000`              |
+| Max latency p99 (ms) | `max_latency_ms` | `vars.LLM_BENCHMARK_MAX_LATENCY_MS` | `10000`             |
+| Min output tok/s     | `min_output_tps` | `vars.LLM_BENCHMARK_MIN_OUTPUT_TPS` | `10`                |
+| Max error rate       | `max_error_rate` | `vars.LLM_BENCHMARK_MAX_ERROR_RATE` | `0`                 |
+| Git ref              | `ref`            | —                                   | PR head / `main`    |
 
 Auth: **`secrets.LLM_BENCHMARK_API_KEY`** (optional). When non-empty it is passed
 to aiperf as `-H "Authorization: Bearer …"`. Empty ⇒ unauthenticated.
