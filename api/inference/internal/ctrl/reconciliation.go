@@ -134,14 +134,21 @@ func (c *Ctrl) Reconcile(in ReconciliationInput) (*ReconciliationReport, error) 
 		return nil, errors.Wrap(err, "sum hourly usage for reconciliation")
 	}
 
-	// Aggregate broker totals. Token dimensions sum only unit=="tokens" rows so seconds
-	// or image counts are never mixed into a token comparison; requests are unit-agnostic.
+	return buildReconciliationReport(in, tzLabel, startUTC, endUTC, rows), nil
+}
+
+// buildReconciliationReport aggregates the broker's hourly rows and diffs them against the
+// vendor statement. Pure (no DB), so the aggregation and comparison rules are unit-testable
+// in isolation: token dimensions sum only unit=="tokens" rows (seconds/images are never
+// mixed into a token comparison), requests/cache are unit-agnostic, and only the fields the
+// statement supplied are compared.
+func buildReconciliationReport(in ReconciliationInput, tzLabel string, startUTC, endUTC time.Time, rows []db.HourlyUsageSum) *ReconciliationReport {
 	var tokenInput, tokenOutput, cached, cacheWrite, requests int64
 	for _, r := range rows {
 		requests += r.RequestCount
 		cached += r.CachedInputTokens
 		cacheWrite += r.CacheWriteInputTokens
-		if r.Unit == "tokens" {
+		if r.Unit == constant.BillingUnitTokens {
 			tokenInput += r.InputCount
 			tokenOutput += r.OutputCount
 		}
@@ -185,7 +192,7 @@ func (c *Ctrl) Reconcile(in ReconciliationInput) (*ReconciliationReport, error) 
 		Dimensions:         dims,
 		PerModel:           rows,
 		AllWithinTolerance: allWithin,
-	}, nil
+	}
 }
 
 // reconciliationWindowUTC converts an inclusive [periodStart, periodEnd] date range in
