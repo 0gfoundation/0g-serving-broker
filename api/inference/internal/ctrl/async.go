@@ -378,7 +378,17 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		c.markAsyncJobFailed(jobID, "provider returned status "+resp.Status+": "+string(respBody))
+		detail := string(respBody)
+		// Forwarder providers hide their upstream, but an upstream error body can
+		// name it (e.g. {"provider":"openai"}). Strip #184 leak fields before this
+		// body becomes the client-visible job ErrorMessage — mirrors the sync path's
+		// handleServiceError sanitization.
+		if c.Service.IsForwarder() {
+			if sanitized, changed := c.sanitizeResponseBody(respBody, ""); changed {
+				detail = string(sanitized)
+			}
+		}
+		c.markAsyncJobFailed(jobID, "provider returned status "+resp.Status+": "+detail)
 		return
 	}
 
@@ -387,6 +397,16 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	if err != nil {
 		c.markAsyncJobFailed(jobID, "failed to read provider response: "+err.Error())
 		return
+	}
+	// For forwarder providers, strip #184 upstream identity/cost leak fields before
+	// the body is stored/returned or signed. Done here (before b64 extraction, URL
+	// rewrite, and signing) so every downstream consumer — including the TEE
+	// signature, which must bind the bytes the client actually receives — sees the
+	// sanitized bytes. sanitizeResponseBody preserves data[] (image payloads).
+	if c.Service.IsForwarder() {
+		if sanitized, changed := c.sanitizeResponseBody(providerRespBody, ""); changed {
+			providerRespBody = sanitized
+		}
 	}
 	respBody := providerRespBody
 

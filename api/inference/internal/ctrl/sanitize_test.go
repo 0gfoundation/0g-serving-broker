@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -315,6 +316,15 @@ func TestIsUpstreamLeakHeader(t *testing.T) {
 		{"X-Powered-By", true},
 		{"X-Ratelimit-Remaining", true},
 		{"X-Clerk-Auth", true},
+		// Upstream-vendor identity headers (OpenAI / Anthropic / Cloudflare front).
+		{"Openai-Organization", true},
+		{"Openai-Version", true},
+		{"Openai-Processing-Ms", true},
+		{"Anthropic-Ratelimit-Requests-Remaining", true},
+		{"Anthropic-Organization-Id", true},
+		{"Cf-Ray", true},
+		{"Cf-Cache-Status", true},
+		{"Location", true},
 		{"Content-Type", false},
 		{"Content-Encoding", false},
 		{"ZG-Res-Key", false},
@@ -329,6 +339,94 @@ func TestIsUpstreamLeakHeader(t *testing.T) {
 
 // router #373: the synthesized openrouter.reasoning redacted_thinking block must
 // not reach the client on the Anthropic surface.
+// TestSanitizeResponseBody_ImageEnvelopePreservesData pins the property the
+// forwarder image/video/async paths rely on: leak keys (provider/cost) are
+// stripped from an image envelope while the data[] payload (b64/url images) is
+// left intact, so sanitizing before extraction/URL-rewrite/signing is safe.
+func TestSanitizeResponseBody_ImageEnvelopePreservesData(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+
+	in := []byte(`{"created":1700000000,"provider":"openai","cost":0.04,` +
+		`"data":[{"b64_json":"aGVsbG8="},{"b64_json":"d29ybGQ="}]}`)
+	out, changed := c.sanitizeResponseBody(in, "")
+	if !changed {
+		t.Fatal("expected changed=true (provider/cost present)")
+	}
+	obj := decode(t, out)
+	if _, ok := obj["provider"]; ok {
+		t.Error("provider leak key not stripped from image envelope")
+	}
+	if _, ok := obj["cost"]; ok {
+		t.Error("cost leak key not stripped from image envelope")
+	}
+	data, ok := obj["data"].([]interface{})
+	if !ok || len(data) != 2 {
+		t.Fatalf("data[] must be preserved intact, got %v", obj["data"])
+	}
+	if d0 := data[0].(map[string]interface{}); d0["b64_json"] != "aGVsbG8=" {
+		t.Errorf("image payload corrupted, got %v", d0["b64_json"])
+	}
+}
+
+// TestSanitizeResponseBody_CleanImageEnvelopeUnchanged verifies a clean upstream
+// image envelope (no leak keys) is a no-op, so forwarder sanitization never
+// rewrites or corrupts a well-behaved response.
+func TestSanitizeResponseBody_CleanImageEnvelopeUnchanged(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	in := []byte(`{"created":1700000000,"data":[{"b64_json":"aGVsbG8="}]}`)
+	out, changed := c.sanitizeResponseBody(in, "")
+	if changed {
+		t.Errorf("clean envelope should be unchanged, got %s", out)
+	}
+}
+
+// TestSanitizeForwarderResponseBody_GzipStripsLeak pins the fix for the gap where
+// the sync forwarder paths (image/video) forced Accept-Encoding: identity but did
+// not decode a body an upstream compressed anyway — sanitizeResponseBody then
+// failed to parse it and forwarded the upstream identity unsanitized. The helper
+// must decode the gzip body, strip the leak key, and drop the stale
+// Content-Encoding header so the broker serves inspectable identity bytes.
+func TestSanitizeForwarderResponseBody_GzipStripsLeak(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Writer.Header().Set("Content-Encoding", "gzip")
+
+	plain := []byte(`{"created":1700000000,"provider":"openai","data":[{"b64_json":"aGk="}]}`)
+	out := c.sanitizeForwarderResponseBody(ctx, gzipBytes(t, plain), "gzip")
+
+	if bytes.Contains(out, []byte("openai")) || bytes.Contains(out, []byte("\"provider\"")) {
+		t.Errorf("upstream identity leaked from compressed forwarder body: %s", out)
+	}
+	obj := decode(t, out)
+	if _, ok := obj["provider"]; ok {
+		t.Error("provider leak key not stripped from decoded body")
+	}
+	if data, ok := obj["data"].([]interface{}); !ok || len(data) != 1 {
+		t.Fatalf("data[] must survive decode+sanitize, got %v", obj["data"])
+	}
+	if ce := ctx.Writer.Header().Get("Content-Encoding"); ce != "" {
+		t.Errorf("stale Content-Encoding must be dropped after decode, got %q", ce)
+	}
+}
+
+// TestSanitizeForwarderResponseBody_UndecodableGzipFailsOpen verifies that a body
+// labelled gzip but not actually decodable is forwarded unchanged (fail-open) with
+// its Content-Encoding preserved, rather than corrupting the response.
+func TestSanitizeForwarderResponseBody_UndecodableGzipFailsOpen(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Writer.Header().Set("Content-Encoding", "gzip")
+
+	raw := []byte("not actually gzip")
+	out := c.sanitizeForwarderResponseBody(ctx, raw, "gzip")
+	if !bytes.Equal(out, raw) {
+		t.Errorf("undecodable body must be returned unchanged, got %s", out)
+	}
+	if ce := ctx.Writer.Header().Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding must be preserved on decode failure, got %q", ce)
+	}
+}
+
 func TestSanitizeResponseBody_StripsUpstreamReasoningLeak(t *testing.T) {
 	c := &Ctrl{logger: testLogger()}
 

@@ -89,6 +89,16 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
 		resolvedModelStr, _ := resolvedModelVal.(string)
 
+		// Reject a request that arrived on an API surface the resolved model does
+		// not declare in supportedFormats (e.g. a client hitting /chat/completions
+		// on a model exposed only via /v1/messages). This is a client error, not a
+		// broker fault, so flag it like the allowlist rejection above so it does not
+		// trip broker health alerts. No-op unless supportedFormats is configured.
+		if err := c.enforceRequestFormat(ctx, resolvedModelStr); err != nil {
+			ctx.Set("ignoreError", true)
+			return nil, err
+		}
+
 		// Translate the output-token cap to the field name the target model accepts
 		// (max_tokens vs max_completion_tokens), detected from its advertised
 		// supportedParameters — the DeepSeek-on-vLLM case rejects the newer
@@ -98,6 +108,19 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		modifiedBody, err = c.TranslateMaxTokens(reqBody, resolvedModelStr)
 		if err != nil {
 			return nil, errors.Wrap(err, "translate max tokens")
+		}
+		reqBody = modifiedBody
+
+		// Reasoning translation: re-express the client's portable reasoning_effort
+		// as the upstream-native thinking control the target model advertises (e.g.
+		// chat_template_kwargs.enable_thinking). No-op unless the model advertises a
+		// native reasoning param. Keyed on resolvedModelStr (the canonical id), NOT
+		// the body's "model" — ValidateModelAllowlist may have rewritten the body to
+		// the upstream id, but per-model supportedParameters are keyed by canonical
+		// id. See docs/design/reasoning-translation.md.
+		modifiedBody, err = c.TranslateReasoning(reqBody, resolvedModelStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "translate reasoning")
 		}
 		reqBody = modifiedBody
 
@@ -408,12 +431,25 @@ func isUpstreamLeakHeader(key string) bool {
 	switch k {
 	case "provider", "server", "via", "x-powered-by":
 		return true
+	case "location":
+		// An upstream redirect Location would name the upstream host. Go's http
+		// client auto-follows redirects so this rarely reaches the response today,
+		// but strip it defensively so a future CheckRedirect change can't leak it.
+		return true
 	}
 	return strings.HasPrefix(k, "x-openrouter") ||
 		strings.HasPrefix(k, "openrouter") ||
 		strings.HasPrefix(k, "x-or-") ||
 		strings.HasPrefix(k, "x-ratelimit") ||
-		strings.HasPrefix(k, "x-clerk")
+		strings.HasPrefix(k, "x-clerk") ||
+		// Upstream-vendor identity headers real providers emit and name themselves
+		// with: OpenAI (openai-organization/openai-version/openai-processing-ms),
+		// Anthropic (anthropic-ratelimit-*/anthropic-organization-id), and the
+		// Cloudflare front all three sit behind (cf-ray/cf-cache-status). Forwarding
+		// any of these would reveal the upstream a "standard" provider must hide.
+		strings.HasPrefix(k, "openai-") ||
+		strings.HasPrefix(k, "anthropic-") ||
+		strings.HasPrefix(k, "cf-")
 }
 
 func (c *Ctrl) handleResponse(ctx *gin.Context, resp *http.Response) error {
@@ -562,16 +598,32 @@ func (c *Ctrl) handleServiceError(ctx *gin.Context, resp *http.Response) {
 		c.logger.Errorf("Service returned error response: %s, Incoming request: method=%s, URI=%s, path=%s, RemoteAddr=%s,", decodedBody, ctx.Request.Method, ctx.Request.RequestURI, ctx.Request.URL.Path, ctx.Request.RemoteAddr)
 	}
 
+	// Forwarder providers (centralized/standard) hide their upstream, but an
+	// upstream ERROR body can still name it (e.g. {"error":{...,"provider":"openai"}}
+	// or an upstream model id). The success path sanitizes (#184, see handleResponse);
+	// the error path did not. Strip leak fields from the decoded error body before
+	// re-emitting for forwarders. Emit the decoded body (dropping the now-stale
+	// Content-Encoding) when sanitization changed it; otherwise forward the original
+	// bytes unchanged (leak headers are already stripped upstream in ProcessHTTPRequest).
+	outBody := respBody
+	if c.Service.IsForwarder() {
+		if sanitized, changed := c.sanitizeResponseBody([]byte(decodedBody), ""); changed {
+			outBody = sanitized
+			ctx.Writer.Header().Del("Content-Encoding")
+		}
+	}
+
 	ctx.Writer.WriteHeader(statusCode)
 
-	if _, err := ctx.Writer.Write(respBody); err != nil {
+	if _, err := ctx.Writer.Write(outBody); err != nil {
 		c.logger.Errorf("Failed to write service error response: %v", err)
 	}
 }
 
 // decodeErrorBody returns a human-readable form of an upstream error body, decompressing
-// it according to the upstream Content-Encoding. On any failure, it returns the raw string —
-// callers use this only for logging and substring matching, never for re-emission.
+// it according to the upstream Content-Encoding. On any failure, it returns the raw string.
+// Used for logging and substring matching, and — for forwarder providers — as the input to
+// leak-field sanitization whose decoded output is then re-emitted (Content-Encoding dropped).
 func decodeErrorBody(body []byte, contentEncoding string) string {
 	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
 	case "", "identity":
@@ -1156,6 +1208,59 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 	ctx.Set(CtxKeyResolvedModel, resolved)
 	c.logger.Debugf("Model allowlist passed: requested=%s resolved=%s forwarded=%s", requestModel, resolved, forwardModel)
 	return body, nil
+}
+
+// apiFormatForPath maps an incoming request path to the API surface it targets:
+// config.APIFormatAnthropic for the Anthropic /v1/messages shape (bare /messages
+// too), config.APIFormatOpenAI for OpenAI /chat/completions. Returns "" for any
+// other path, which callers treat as "not a chat surface — do not gate". The
+// path is gin's URL.Path (query already excluded); a trailing slash is tolerated.
+func apiFormatForPath(path string) string {
+	p := strings.TrimRight(path, "/")
+	switch {
+	case strings.HasSuffix(p, "/messages"):
+		return config.APIFormatAnthropic
+	case strings.HasSuffix(p, "/chat/completions"):
+		return config.APIFormatOpenAI
+	}
+	return ""
+}
+
+// formatAllowed reports whether surface (the API format a request arrived on) is
+// permitted by supportedFormats. An empty supportedFormats means "unconstrained"
+// (backward compatible with configs predating format enforcement), and an empty
+// surface (a path apiFormatForPath doesn't recognize) is never gated. Matching is
+// case-insensitive to tolerate config casing.
+func formatAllowed(supportedFormats []string, surface string) bool {
+	if len(supportedFormats) == 0 || surface == "" {
+		return true
+	}
+	for _, f := range supportedFormats {
+		if strings.EqualFold(strings.TrimSpace(f), surface) {
+			return true
+		}
+	}
+	return false
+}
+
+// enforceRequestFormat rejects a chat request whose API surface is not declared
+// in the resolved model's supportedFormats. It is a no-op when the model declares
+// no formats (unconstrained) or the path is not a recognized chat surface. Only
+// called on the chatbot path, after the model has been resolved onto the context.
+func (c *Ctrl) enforceRequestFormat(ctx *gin.Context, resolvedModel string) error {
+	surface := apiFormatForPath(ctx.Request.URL.Path)
+	if surface == "" {
+		return nil
+	}
+	model := resolvedModel
+	if model == "" {
+		model = c.Service.ModelType
+	}
+	formats := c.Service.SupportedFormatsFor(model)
+	if formatAllowed(formats, surface) {
+		return nil
+	}
+	return fmt.Errorf("model '%s' is not available on the %s API format (supported: %v); use the matching endpoint", model, surface, formats)
 }
 
 // ResolveModelForBilling resolves the requested model for per-model billing

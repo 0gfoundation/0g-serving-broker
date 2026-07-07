@@ -280,13 +280,13 @@ were never inserted into one.
 
 `InputCount` collapses what vendors report — and price — as **three disjoint input buckets**.
 Anthropic (via the LiteLLM path, `chatbot_litellm.go`) reports `input_tokens` (fresh, excludes
-cache), `cache_creation_input_tokens` (cache **write**), and `cache_read_input_tokens` (cache
-**read**); the broker sums all three into `PromptTokens`/`InputCount` and preserves only the
-read bucket (`PromptTokensDetails.CachedTokens`, which earns the cache discount from #522). The
-**write** bucket is folded in and lost, and billed to users at full input price — while the
-vendor charges cache **writes at a premium**, itself split by TTL (production `/v1/models`
-advertises both `cache_write` (5-minute, ≈1.25×) and `cache_write_1h` (1-hour, ≈2×) for
-claude-fable-5). So both cache buckets are reconciliation-relevant, for two reasons:
+cache), `cache_creation_input_tokens` (cache **write**, itself split by TTL into 5-minute and
+1-hour buckets), and `cache_read_input_tokens` (cache **read**). The broker sums all three into
+`PromptTokens`/`InputCount`, and surfaces the sub-categories on `Usage`: `PromptTokensDetails
+.CachedTokens` (read, earns the discount from #522) and `CacheWriteTokens` / `CacheWrite1hTokens`
+(write, billed at a per-TTL premium via #568/#573). Reconciliation records both cache
+sub-categories from these fields — but the single `InputCount` still hides them, so both remain
+reconciliation-relevant, for two reasons:
 
 - **Token-definition alignment.** A vendor statement itemizes fresh / cache-read / cache-write
   separately. Comparing the broker's collapsed `InputCount` against any single itemized bucket
@@ -295,17 +295,10 @@ claude-fable-5). So both cache buckets are reconciliation-relevant, for two reas
   discount, write a premium), so the cost dimension cannot be reconstructed from a single
   input number.
 
-The rollup therefore records both `cached_input_tokens` (read) and `cache_write_input_tokens`
-(write); the fresh bucket is derivable as `input_count − read − write`.
-`reasoning_output_tokens` is added likewise once thinking models are served and
-`completion_tokens_details` is parsed (see #529). Capturing the write bucket requires carrying
-`cache_creation_input_tokens` through `toUsage()` instead of discarding it, then stamping it on
-the `Request`.
-
-> Note (policy, not a reconciliation bug): the broker bills cache **read** at a discount (#522)
-> but cache **write** and fresh input both at full 1× input price, whereas the vendor prices
-> write at a premium. Recording the write bucket is the prerequisite for ever surfacing that
-> margin or repricing it.
+The rollup therefore records `cached_input_tokens` (read) and `cache_write_input_tokens`
+(write, the sum of the 5-minute + 1-hour TTL tiers); the fresh bucket is derivable as
+`input_count − read − write`. `reasoning_output_tokens` is added likewise once thinking models
+are served and `completion_tokens_details` is parsed (see #529).
 
 ### What counts as a "request"
 
@@ -407,8 +400,9 @@ never mutates billing state.
 - Whether to stamp an explicit per-request effective price/tier column, versus bucketing the
   rollup by tier, to make the cost dimension tier-aware without re-deriving tiers at
   reconciliation time.
-- Whether to split the cache-write sub-category by TTL (`cache_write` vs `cache_write_1h`)
-  once the broker bills cache-write separately at all.
+- Whether to store the cache-write sub-category split by TTL (`cache_write` vs
+  `cache_write_1h`) rather than summed — the broker now bills them at distinct per-TTL
+  premiums (#568/#573), so a cost-dimension reconciliation may want them separated.
 - Whether to add a 30-minute bucket resolution if a UTC+5:30/+5:45 vendor is onboarded.
 - A retained per-request billing log (keeping request-level detail instead of deleting at
   settlement) was considered as an alternative source of truth — it would also give

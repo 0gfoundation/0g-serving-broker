@@ -17,10 +17,24 @@ const (
 
 // Provider type constants for distinguishing between decentralized GPU providers
 // and centralized API providers (e.g., OpenAI, Anthropic).
+//
+// ProviderTypeStandard is a pure forwarder that performs NO TEE verification and
+// deliberately hides its upstream: it never signs responses (no routing proof, no
+// broker signature), never publishes a provider identity or upstream domain, and
+// advertises verifiability "standard" so clients skip verification instead of
+// attempting it. It is the non-verifiable sibling of the TEE ("TeeML") mode.
 const (
 	ProviderTypeDecentralized = "decentralized"
 	ProviderTypeCentralized   = "centralized"
+	ProviderTypeStandard      = "standard"
 )
+
+// VerifiabilityStandard is the verifiability marker written on-chain for a
+// standard (pure-forwarder, non-verifiable) service. It is intentionally NOT one
+// of the client-recognized verifiability values (OpML/TeeML/ZKML), so the
+// user-broker treats the service as non-verifiable and never requests a
+// signature.
+const VerifiabilityStandard = "standard"
 
 // Billing unit constants for the reconciliation rollup (Request.Unit /
 // HourlyUsageStat.Unit). They label what InputCount/OutputCount are measured in, which

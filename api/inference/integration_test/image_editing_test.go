@@ -87,9 +87,11 @@ func TestImageEditingFlow_JSON(t *testing.T) {
 		t.Errorf("expected 2 edited images, got %v", resp["data"])
 	}
 
-	// Verify billing headers
-	if w.Header().Get("ZG-Res-Key") == "" {
-		t.Error("expected ZG-Res-Key header to be set")
+	// Verify billing headers. A decentralized + TargetSeparated provider (the
+	// default test setup) produces no signature, so it must NOT advertise
+	// ZG-Res-Key — the signature-lookup handle would only point at a 404.
+	if got := w.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("expected no ZG-Res-Key header for unsigned provider, got %q", got)
 	}
 	if w.Header().Get("Provider") == "" {
 		t.Error("expected Provider header to be set")
@@ -330,9 +332,10 @@ func TestImageEditingFlow_ResponseFormatURL_Multipart(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	chatKey := w.Header().Get("ZG-Res-Key")
-	if chatKey == "" {
-		t.Fatal("expected ZG-Res-Key header")
+	// Unsigned provider: no ZG-Res-Key header. The broker-served URL still embeds
+	// the internal chatKey, so verify the path shape directly.
+	if got := w.Header().Get("ZG-Res-Key"); got != "" {
+		t.Errorf("expected no ZG-Res-Key header for unsigned provider, got %q", got)
 	}
 
 	var resp map[string]interface{}
@@ -355,9 +358,10 @@ func TestImageEditingFlow_ResponseFormatURL_Multipart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse returned URL: %v", err)
 	}
-	wantPath := "/v1/proxy/images/" + chatKey + "/0"
-	if u.Path != wantPath {
-		t.Errorf("url path = %q, want %q", u.Path, wantPath)
+	// Path shape: /v1/proxy/images/{chatKey}/0 — chatKey is a server-generated
+	// uuid we don't know here, so validate the surrounding shape.
+	if !strings.HasPrefix(u.Path, "/v1/proxy/images/") || !strings.HasSuffix(u.Path, "/0") {
+		t.Errorf("url path = %q, want /v1/proxy/images/{chatKey}/0", u.Path)
 	}
 
 	// Fetch the broker-served URL and verify bytes.

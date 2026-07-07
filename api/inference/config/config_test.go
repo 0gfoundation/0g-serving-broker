@@ -38,6 +38,60 @@ func TestModelInfo_Validate_OptionalFields(t *testing.T) {
 	}
 }
 
+func TestModelInfo_Validate_SupportedFormats(t *testing.T) {
+	cases := []struct {
+		name    string
+		formats []string
+		wantErr bool
+	}{
+		{"unset ok", nil, false},
+		{"openai ok", []string{"openai"}, false},
+		{"anthropic ok", []string{"anthropic"}, false},
+		{"both ok", []string{"openai", "anthropic"}, false},
+		{"case-insensitive ok", []string{"OpenAI", "Anthropic"}, false},
+		{"whitespace tolerated", []string{" anthropic "}, false},
+		{"unknown rejected", []string{"anthropc"}, true}, // typo must fail fast
+		{"one bad among good rejected", []string{"openai", "grpc"}, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := validModelInfo()
+			m.SupportedFormats = tt.formats
+			err := m.Validate("chatbot")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate supportedFormats=%v: err=%v, wantErr=%v", tt.formats, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSupportedFormatsFor(t *testing.T) {
+	// Multi-model: per-model ModelInfo wins; a model without one falls back to the
+	// service-level ModelInfo; an unknown id (no wildcard) resolves to nil.
+	svc := Service{
+		ProviderType: "centralized",
+		ModelType:    "base",
+		ModelInfo:    &ModelInfo{SupportedFormats: []string{"openai"}}, // service default
+		ModelPricing: []ModelPricingEntry{
+			{Model: "base", InputPrice: "1", OutputPrice: "2"},
+			{Model: "claude", InputPrice: "1", OutputPrice: "2", ModelInfo: &ModelInfo{SupportedFormats: []string{"anthropic"}}},
+		},
+	}
+	if err := svc.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	if got := svc.SupportedFormatsFor("claude"); len(got) != 1 || got[0] != "anthropic" {
+		t.Errorf("per-model override: got %v, want [anthropic]", got)
+	}
+	if got := svc.SupportedFormatsFor("base"); len(got) != 1 || got[0] != "openai" {
+		t.Errorf("service-level fallback: got %v, want [openai]", got)
+	}
+	if got := svc.SupportedFormatsFor("unknown-no-wildcard"); got != nil {
+		t.Errorf("unknown model: got %v, want nil", got)
+	}
+}
+
 func TestModelInfo_Validate_VideoGeneration_NullContextLength(t *testing.T) {
 	m := validModelInfo()
 	m.ContextLength = 0
@@ -145,6 +199,145 @@ service:
 
 	if cfg.Service.ProviderType != "decentralized" {
 		t.Errorf("expected providerType 'decentralized', got %q", cfg.Service.ProviderType)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard(t *testing.T) {
+	// A standard provider is a pure forwarder: it must load without a
+	// providerIdentity, force TargetSeparated, and force the "standard"
+	// verifiability marker so it can never claim a TEE mode.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if !cfg.Service.IsStandard() || !cfg.Service.IsForwarder() {
+		t.Errorf("expected IsStandard && IsForwarder, got providerType %q", cfg.Service.ProviderType)
+	}
+	if cfg.Service.IsCentralized() {
+		t.Error("standard provider must not report IsCentralized")
+	}
+	if !cfg.Service.TargetSeparated {
+		t.Error("standard provider must force TargetSeparated")
+	}
+	if cfg.Service.Verifiability != "standard" {
+		t.Errorf("expected verifiability 'standard', got %q", cfg.Service.Verifiability)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_ForcesEmptyTargetTeeAddress(t *testing.T) {
+	// standard forces TargetSeparated=true, which would otherwise publish a
+	// TargetTeeAddress on-chain. A stale/copied targetTeeAddress must be zeroed so a
+	// non-verifiable, upstream-hidden service never advertises a TEE address.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  targetTeeAddress: "0x1234567890123456789012345678901234567890"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.Service.TargetTeeAddress != "" {
+		t.Errorf("expected TargetTeeAddress forced empty for standard, got %q", cfg.Service.TargetTeeAddress)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsProviderIdentity(t *testing.T) {
+	// A standard provider hides its upstream, so a providerIdentity is rejected
+	// rather than silently ignored.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  providerIdentity: "openai"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "providerIdentity must not be set") {
+		t.Fatalf("expected providerIdentity rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsTeeMLVerifiability(t *testing.T) {
+	// A standard provider is non-verifiable; it must not advertise a TEE mode that
+	// would make clients attempt a verification the broker never backs.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  verifiability: "TeeML"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "verifiability must be empty or 'standard'") {
+		t.Fatalf("expected verifiability rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RequiresTargetURL(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "targetUrl is required") {
+		t.Fatalf("expected targetUrl-required rejection, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_AllowsModelPricing(t *testing.T) {
+	// Multi-model pricing is supported for standard forwarders, same as centralized.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "standard"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPrice: "10"
+      outputPrice: "30"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("standard multi-model should be allowed, got: %v", err)
+	}
+	if !cfg.Service.HasMultiModelPricing() {
+		t.Fatal("expected multi-model pricing to be configured")
 	}
 }
 
@@ -1025,7 +1218,7 @@ service:
 	if err == nil {
 		t.Fatal("expected error for invalid providerType")
 	}
-	if !strings.Contains(err.Error(), "must be 'decentralized' or 'centralized'") {
+	if !strings.Contains(err.Error(), "must be 'decentralized', 'centralized', or 'standard'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1737,6 +1930,24 @@ func TestValidateCacheTokenBilling(t *testing.T) {
 		{"enabled divisor 0 rejected (would divide-by-zero)", CacheTokenBillingConfig{Enabled: true, Divisor: 0}, true},
 		{"enabled negative divisor rejected", CacheTokenBillingConfig{Enabled: true, Divisor: -2}, true},
 		{"disabled divisor 0 ignored", CacheTokenBillingConfig{Enabled: false, Divisor: 0}, false},
+		{"write multiplier 5/4 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4}, false},
+		{"write multiplier 2/1 ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 2, WriteMultiplierDenominator: 1}, false},
+		{"write multiplier 1/1 (exactly 1x) ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 1}, false},
+		{"write multiplier unset ignored", CacheTokenBillingConfig{Enabled: true, Divisor: 10}, false},
+		{"write multiplier zero denominator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 0}, true},
+		{"write multiplier zero numerator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 0, WriteMultiplierDenominator: 4}, true},
+		{"write multiplier negative rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: -5, WriteMultiplierDenominator: 4}, true},
+		{"write multiplier below 1x rejected (transposed 1/2)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 2}, true},
+		{"write multiplier below 1x rejected (4/5)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 4, WriteMultiplierDenominator: 5}, true},
+		{"1h multiplier set alone rejected (default tier missing)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}, true},
+		{"1h with explicit 1x default ok", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 1, WriteMultiplierDenominator: 1, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}, false},
+		{"both write tiers set ok (5/4 and 2/1)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1}, false},
+		{"both write tiers equal ok (5/4 and 5/4)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 5, Write1hMultiplierDenominator: 4}, false},
+		{"1h multiplier unset ignored", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4}, false},
+		{"1h multiplier zero denominator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 0}, true},
+		{"1h multiplier zero numerator rejected", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 0, Write1hMultiplierDenominator: 1}, true},
+		{"1h multiplier below 1x rejected (transposed 1/2)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 1, Write1hMultiplierDenominator: 2}, true},
+		{"1h cheaper than default rejected (2/1 default, 5/4 1h)", CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 2, WriteMultiplierDenominator: 1, Write1hMultiplierNumerator: 5, Write1hMultiplierDenominator: 4}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

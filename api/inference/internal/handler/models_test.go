@@ -233,6 +233,64 @@ func TestGetModels_FullResponse(t *testing.T) {
 	}
 }
 
+func TestGetModels_AdvertisesReasoningEffortWhenTranslatable(t *testing.T) {
+	created := time.Unix(1700000000, 0)
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			Model:       model.Model{CreatedAt: &created},
+			ModelType:   "qwen3",
+			Type:        "chatbot",
+			InputPrice:  "100000000000",
+			OutputPrice: "200000000000",
+		},
+		serviceConfig: config.Service{
+			ModelInfo: &config.ModelInfo{
+				Name:          "Qwen3",
+				Description:   "thinking-capable model",
+				ContextLength: 32768,
+				Architecture: &config.ModelArchitecture{
+					Modality:         "text->text",
+					InputModalities:  []string{"text"},
+					OutputModalities: []string{"text"},
+				},
+				// Advertises a native thinking toggle but NOT reasoning_effort.
+				SupportedParameters: []string{"temperature", "enable_thinking"},
+			},
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(resp.Data))
+	}
+
+	params := resp.Data[0].SupportedParameters
+	var hasEffort, hasNative bool
+	for _, p := range params {
+		if p == "reasoning_effort" {
+			hasEffort = true
+		}
+		if p == "enable_thinking" {
+			hasNative = true
+		}
+	}
+	if !hasNative {
+		t.Errorf("expected native toggle enable_thinking to be preserved, got %v", params)
+	}
+	if !hasEffort {
+		t.Errorf("expected reasoning_effort to be advertised (broker translates it), got %v", params)
+	}
+}
+
 func TestGetModels_WithoutModelInfo(t *testing.T) {
 	mock := &mockModelsCtrl{
 		service: model.Service{
@@ -555,6 +613,110 @@ func TestGetModels_ProviderNameCountryDecentralized(t *testing.T) {
 	// Centralized-only fields stay empty.
 	if m.ProviderIdentity != "" {
 		t.Errorf("expected empty provider_identity for decentralized, got %q", m.ProviderIdentity)
+	}
+}
+
+func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
+	// A standard provider surfaces its provider_type (so clients can identify the
+	// provider class) but hides its upstream and is non-verifiable: even with an
+	// acknowledged settlement TEE signer it must report tee_attested=false and
+	// expose no provider_identity / serving_domain.
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:             "gpt-4o",
+			Type:                  "chatbot",
+			InputPrice:            "100",
+			OutputPrice:           "200",
+			Verifiability:         "standard",
+			TeeSignerAcknowledged: true, // acknowledged for settlement, but not response-attested
+			AdditionalInfo:        `{"TargetSeparated":true}`,
+		},
+		serviceConfig: config.Service{
+			ProviderType: "standard",
+			// Upstream URL must never leak as serving_domain.
+			TargetURL: "https://secret-upstream:8000",
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+	if m.Verifiability != "standard" {
+		t.Errorf("expected verifiability=standard, got %q", m.Verifiability)
+	}
+	if m.TeeAttested {
+		t.Error("expected tee_attested=false for standard even with acknowledged signer")
+	}
+	if m.ProviderType != "standard" {
+		t.Errorf("expected provider_type=standard, got %q", m.ProviderType)
+	}
+	if m.ProviderIdentity != "" {
+		t.Errorf("expected empty provider_identity for standard, got %q", m.ProviderIdentity)
+	}
+	if m.ServingDomain != "" {
+		t.Errorf("expected empty serving_domain for standard, got %q", m.ServingDomain)
+	}
+}
+
+func TestGetModels_MultiModelStandardHidesProviderFields(t *testing.T) {
+	// The multi-model path builds ModelObject inline; verify standard surfaces
+	// provider_type, hides identity/serving_domain, and reports tee_attested=false
+	// there too (parity with the single-model path).
+	svcCfg := config.Service{
+		ProviderType: "standard",
+		TargetURL:    "https://secret-upstream:8000",
+		ModelType:    "gpt-4o",
+		Type:         "chatbot",
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "gpt-4o", InputPrice: "10", OutputPrice: "30"},
+			{Model: "gpt-4o-mini", InputPrice: "1", OutputPrice: "3"},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:             "gpt-4o",
+			Type:                  "chatbot",
+			Verifiability:         "standard",
+			TeeSignerAcknowledged: true,
+		},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(resp.Data))
+	}
+	for _, m := range resp.Data {
+		if m.ProviderType != "standard" {
+			t.Errorf("model %s: expected provider_type=standard, got %q", m.ID, m.ProviderType)
+		}
+		if m.ProviderIdentity != "" {
+			t.Errorf("model %s: expected empty provider_identity, got %q", m.ID, m.ProviderIdentity)
+		}
+		if m.ServingDomain != "" {
+			t.Errorf("model %s: expected empty serving_domain, got %q", m.ID, m.ServingDomain)
+		}
+		if m.TeeAttested {
+			t.Errorf("model %s: expected tee_attested=false for standard", m.ID)
+		}
 	}
 }
 
@@ -955,6 +1117,69 @@ func TestParseServingDomain(t *testing.T) {
 			got := parseServingDomain(tt.targetURL)
 			if got != tt.want {
 				t.Errorf("parseServingDomain(%q) = %q, want %q", tt.targetURL, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewModelCacheTokenBilling asserts the display struct surfaces the EFFECTIVE
+// cache-write fractions billing applies — in particular that an unset 1-hour tier
+// is advertised at the default multiplier it falls back to (computeInputFee), so
+// the advertised price never understates what is charged.
+func TestNewModelCacheTokenBilling(t *testing.T) {
+	cases := []struct {
+		name                           string
+		cfg                            config.CacheTokenBillingConfig
+		wantNil                        bool
+		wantDivisor                    int64
+		wantWriteNum, wantWriteDen     int64
+		wantWrite1hNum, wantWrite1hDen int64
+	}{
+		{
+			name:    "disabled -> nil",
+			cfg:     config.CacheTokenBillingConfig{Enabled: false, Divisor: 10},
+			wantNil: true,
+		},
+		{
+			name:        "divisor only, no write premium -> both write tiers omitted",
+			cfg:         config.CacheTokenBillingConfig{Enabled: true, Divisor: 10},
+			wantDivisor: 10,
+		},
+		{
+			name:         "default tier only -> 1h advertised at the default it falls back to",
+			cfg:          config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4},
+			wantDivisor:  10,
+			wantWriteNum: 5, wantWriteDen: 4,
+			wantWrite1hNum: 5, wantWrite1hDen: 4,
+		},
+		{
+			name:         "both tiers -> each advertised as configured",
+			cfg:          config.CacheTokenBillingConfig{Enabled: true, Divisor: 10, WriteMultiplierNumerator: 5, WriteMultiplierDenominator: 4, Write1hMultiplierNumerator: 2, Write1hMultiplierDenominator: 1},
+			wantDivisor:  10,
+			wantWriteNum: 5, wantWriteDen: 4,
+			wantWrite1hNum: 2, wantWrite1hDen: 1,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := newModelCacheTokenBilling(tt.cfg)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("got %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("got nil, want non-nil")
+			}
+			if got.Divisor != tt.wantDivisor {
+				t.Errorf("Divisor = %d, want %d", got.Divisor, tt.wantDivisor)
+			}
+			if got.WriteMultiplierNumerator != tt.wantWriteNum || got.WriteMultiplierDenominator != tt.wantWriteDen {
+				t.Errorf("write = %d/%d, want %d/%d", got.WriteMultiplierNumerator, got.WriteMultiplierDenominator, tt.wantWriteNum, tt.wantWriteDen)
+			}
+			if got.Write1hMultiplierNumerator != tt.wantWrite1hNum || got.Write1hMultiplierDenominator != tt.wantWrite1hDen {
+				t.Errorf("write1h = %d/%d, want %d/%d", got.Write1hMultiplierNumerator, got.Write1hMultiplierDenominator, tt.wantWrite1hNum, tt.wantWrite1hDen)
 			}
 		})
 	}

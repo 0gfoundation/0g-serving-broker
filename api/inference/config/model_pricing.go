@@ -658,8 +658,8 @@ func validateModelPricing(cfg *Config) error {
 		return nil
 	}
 	svc := &cfg.Service
-	if svc.ProviderType != constant.ProviderTypeCentralized {
-		return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized'")
+	if !svc.IsForwarder() {
+		return fmt.Errorf("invalid config: service.modelPricing is only supported when providerType is 'centralized' or 'standard'")
 	}
 	// Per-model billing is wired only for the modalities whose request path
 	// resolves the request model before billing: chatbot + speech-to-text (token
@@ -869,8 +869,9 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 			return fmt.Errorf("invalid config: service.modelPricing[%d].modelInfo (model '%s'): %w", i, entry.Model, err)
 		}
 	}
-	// Optional per-model cache-discount override; same divisor rule as the
-	// service-level block (a 0 divisor would divide-by-zero panic at billing).
+	// Optional per-model cache-billing override; same divisor and write-multiplier
+	// rules as the service-level block (a 0 divisor/denominator would divide-by-zero
+	// panic at billing).
 	if entry.CacheTokenBilling != nil {
 		if err := validateCacheTokenBilling(fmt.Sprintf("service.modelPricing[%d].cacheTokenBilling", i), entry.CacheTokenBilling); err != nil {
 			return err

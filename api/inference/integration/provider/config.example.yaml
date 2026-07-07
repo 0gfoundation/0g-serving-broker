@@ -62,8 +62,11 @@ service:
   #     - frequency_penalty
   #     - presence_penalty
   #     - stop
-  #   # Optional: API formats supported by this model. Defaults to ["openai"] if omitted.
-  #   # Add "anthropic" if the target service supports /v1/messages (Anthropic Messages API).
+  #   # Optional: API surfaces this model accepts — "openai" (/chat/completions)
+  #   # and/or "anthropic" (/v1/messages). ENFORCED when set: a request on an
+  #   # undeclared surface is rejected with HTTP 400. Omit to leave the model
+  #   # unconstrained (accepts every surface). Only declare a surface the upstream
+  #   # reports usage on — otherwise cache/usage billing on the other surface is wrong.
   #   supportedFormats:
   #     - openai
   #     - anthropic

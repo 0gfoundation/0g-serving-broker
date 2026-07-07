@@ -41,6 +41,19 @@ type LiteLLMUsage struct {
 	TotalTokens              int `json:"total_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// CacheCreation is Anthropic's per-TTL breakdown of the cache_creation
+	// (cache-write) tokens. When present it splits CacheCreationInputTokens into a
+	// 5-minute and a 1-hour bucket so each can bill at its own write multiplier.
+	// Absent for upstreams that only report the aggregate — toUsage then treats
+	// the whole aggregate as the default (5-minute) tier.
+	CacheCreation *LiteLLMCacheCreation `json:"cache_creation,omitempty"`
+}
+
+// LiteLLMCacheCreation is Anthropic's usage.cache_creation object, breaking the
+// cache-write tokens down by TTL.
+type LiteLLMCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
 // toUsage converts an Anthropic/LiteLLM usage report into the broker's canonical
@@ -49,14 +62,21 @@ type LiteLLMUsage struct {
 // Anthropic reports input_tokens, cache_creation_input_tokens and
 // cache_read_input_tokens as three disjoint buckets: input_tokens EXCLUDES
 // cached tokens (unlike OpenAI's prompt_tokens, which is the total with cached
-// as a subset). The canonical prompt_tokens is therefore their sum. Only
-// cache_read tokens are eligible for the cached-token discount; freshly written
-// cache_creation tokens are billed at full input price (the broker's billing
-// model has no separate cache-write premium).
+// as a subset). The canonical prompt_tokens is therefore their sum. cache_read
+// tokens are eligible for the cached-token discount; cache_creation (write)
+// tokens are surfaced as CacheWriteTokens / CacheWrite1hTokens so cacheTokenBilling
+// can apply a per-TTL write premium (falling back to full input price when no
+// premium is configured).
 //
-// Populating PromptTokensDetails is what lets cacheTokenBilling engage on the
-// Anthropic /v1/messages path (see updateAccountWithUsage / finalizeResponseWithUsage,
-// which gate the discount on usage.PromptTokensDetails != nil).
+// When the usage.cache_creation TTL breakdown is present, the 5-minute and 1-hour
+// buckets map to CacheWriteTokens and CacheWrite1hTokens respectively. When it is
+// absent (upstream reports only the aggregate cache_creation_input_tokens), the
+// whole aggregate bills at the default (5-minute) tier via CacheWriteTokens.
+//
+// Populating PromptTokensDetails / CacheWriteTokens / CacheWrite1hTokens is what
+// lets cacheTokenBilling engage on the Anthropic /v1/messages path (see
+// computeInputFee, which gates the discount on usage.PromptTokensDetails and the
+// premiums on the cache-write token counts).
 func (u *LiteLLMUsage) toUsage() *Usage {
 	promptTokens := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 	usage := &Usage{
@@ -64,16 +84,16 @@ func (u *LiteLLMUsage) toUsage() *Usage {
 		CompletionTokens: u.OutputTokens,
 		TotalTokens:      promptTokens + u.OutputTokens,
 	}
-	// Preserve both cache buckets: cache_read earns the discount (CachedTokens), while
-	// cache_creation (write) is folded into PromptTokens for billing but recorded
-	// separately for reconciliation. PromptTokensDetails still gates the cache discount
-	// on CachedTokens > 0 (see updateAccountWithUsage), so surfacing a write-only report
-	// here does not change billing.
-	if u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 {
-		usage.PromptTokensDetails = &PromptTokensDetails{
-			CachedTokens:     u.CacheReadInputTokens,
-			CacheWriteTokens: u.CacheCreationInputTokens,
-		}
+	// Split cache-write tokens by TTL when the breakdown is present; otherwise the
+	// whole aggregate is billed at the default (5-minute) tier.
+	if u.CacheCreation != nil && (u.CacheCreation.Ephemeral5mInputTokens > 0 || u.CacheCreation.Ephemeral1hInputTokens > 0) {
+		usage.CacheWriteTokens = u.CacheCreation.Ephemeral5mInputTokens
+		usage.CacheWrite1hTokens = u.CacheCreation.Ephemeral1hInputTokens
+	} else {
+		usage.CacheWriteTokens = u.CacheCreationInputTokens
+	}
+	if u.CacheReadInputTokens > 0 {
+		usage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
 	}
 	return usage
 }
@@ -95,6 +115,9 @@ func mergeLiteLLMUsage(acc, in *LiteLLMUsage) {
 	}
 	if in.CacheCreationInputTokens > 0 {
 		acc.CacheCreationInputTokens = in.CacheCreationInputTokens
+	}
+	if in.CacheCreation != nil && (in.CacheCreation.Ephemeral5mInputTokens > 0 || in.CacheCreation.Ephemeral1hInputTokens > 0) {
+		acc.CacheCreation = in.CacheCreation
 	}
 }
 

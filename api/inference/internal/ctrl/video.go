@@ -239,13 +239,28 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
 
+	// ZG-Res-Key (the signature-lookup handle) is only advertised when the
+	// response is actually signed (broker-in-network). A standard/TargetSeparated
+	// provider produces no signature, so advertising it would point clients at a
+	// signature endpoint that only 404s.
 	chatKey := uuid.NewString()
-	ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.handleBrokerError(ctx, err, "read video generation response body")
 		return err
+	}
+
+	// For forwarder providers, strip #184 upstream identity/cost leak fields before
+	// the body is forwarded, signed, or billed (sanitize-before-sign keeps any
+	// signature bound to what the client receives). Decode a compressed body first
+	// (the sync path forces identity upstream; an upstream that ignores it would
+	// otherwise slip the leak past the JSON parse). Non-JSON bodies fail open.
+	if c.Service.IsForwarder() {
+		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
 	if _, err := ctx.Writer.Write(body); err != nil {

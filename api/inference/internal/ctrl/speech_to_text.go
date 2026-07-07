@@ -267,6 +267,31 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		return err
 	}
 
+	// For forwarder providers, strip #184 upstream identity/cost leak fields from a
+	// JSON transcription body before forwarding (and, for in-network signing,
+	// before signing — sanitize-before-sign keeps the signature bound to what the
+	// client receives). Decode a compressed body first: the sync path forces
+	// identity upstream, so an upstream that ignores it delivers compressed bytes
+	// that would otherwise never match the JSON-object check below. STT also returns
+	// non-JSON formats (text/srt/vtt) that carry no such fields; skip them (and
+	// sanitizeResponseBody's fail-open warning) by only sanitizing a JSON object
+	// body. Usage fields are not leak keys, so downstream billing is unaffected.
+	if c.Service.IsForwarder() {
+		if enc := resp.Header.Get("Content-Encoding"); isCompressedEncoding(enc) {
+			if decoded, derr := decodeBody(body, enc); derr == nil {
+				body = decoded
+				ctx.Writer.Header().Del("Content-Encoding")
+			} else {
+				c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s transcription; forwarding upstream body unsanitized (potential identity/cost leak): %v", enc, derr)
+			}
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+			if sanitized, changed := c.sanitizeResponseBody(body, ""); changed {
+				body = sanitized
+			}
+		}
+	}
+
 	// Attempt to write raw response to client. If client disconnected, continue to billing.
 	if _, writeErr := ctx.Writer.Write(body); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
@@ -358,6 +383,25 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 	return c.updateSpeechToTextFallback(ctx, reqModel, string(decompressedBody))
 }
 
+// sanitizeSTTStreamLine strips #184 upstream identity/cost leak fields from a
+// single speech-to-text stream line for forwarder providers. It returns the bytes
+// to forward, or nil to drop the line entirely (an upstream comment/keepalive
+// banner such as OpenRouter's ": OPENROUTER PROCESSING"). It handles both SSE
+// "data: {json}" chunks (via sanitizeStreamLine) and bare ND-JSON object lines
+// (via sanitizeResponseBody); non-JSON lines pass through unchanged.
+func (c *Ctrl) sanitizeSTTStreamLine(ctx *gin.Context, line []byte) []byte {
+	s, forward := c.sanitizeStreamLine(ctx, string(line), "")
+	if !forward {
+		return nil
+	}
+	if trimmed := bytes.TrimSpace([]byte(s)); bytes.HasPrefix(trimmed, []byte("{")) {
+		if sanitized, changed := c.sanitizeResponseBody(trimmed, ""); changed {
+			return append(sanitized, '\n')
+		}
+	}
+	return []byte(s)
+}
+
 // handleStreamingSpeechToText handles streaming speech-to-text response
 func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
@@ -402,20 +446,30 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 				}
 			}
 
-			// Only write to client if still connected
+			// Only write to client if still connected. For forwarder providers,
+			// strip #184 upstream leak fields from the client-facing bytes first
+			// (billing still uses the original `line` / captured rawBody). A nil
+			// result means the line was an upstream comment/keepalive banner and is
+			// dropped.
 			if !clientDisconnected {
-				_, streamErr = w.Write(line)
-				if streamErr != nil {
-					if c.isClientDisconnectError(streamErr) {
-						ctx.Set("ignoreError", true)
-						clientDisconnected = true
-						c.logger.Warnf("Client disconnected during speech-to-text stream, continuing to read for billing")
+				writeLine := line
+				if c.Service.IsForwarder() {
+					writeLine = c.sanitizeSTTStreamLine(ctx, line)
+				}
+				if writeLine != nil {
+					_, streamErr = w.Write(writeLine)
+					if streamErr != nil {
+						if c.isClientDisconnectError(streamErr) {
+							ctx.Set("ignoreError", true)
+							clientDisconnected = true
+							c.logger.Warnf("Client disconnected during speech-to-text stream, continuing to read for billing")
+						} else {
+							c.handleBrokerError(ctx, streamErr, "write to stream")
+							return false
+						}
 					} else {
-						c.handleBrokerError(ctx, streamErr, "write to stream")
-						return false
+						ctx.Writer.Flush()
 					}
-				} else {
-					ctx.Writer.Flush()
 				}
 			}
 

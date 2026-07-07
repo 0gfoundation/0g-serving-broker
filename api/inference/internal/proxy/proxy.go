@@ -436,20 +436,20 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		}
 
 		if isFree {
-			// Centralized providers don't host an LLM TEE, so attestation
-			// report requests would be proxied to e.g. OpenAI which has no
-			// such endpoint.  Intercept early and return a clear error.
+			// Forwarder providers (centralized/standard) don't host an LLM TEE, so
+			// attestation report requests would be proxied to e.g. OpenAI which has no
+			// such endpoint.  Intercept early and return a clear error so the request
+			// never reaches — and never reveals — the upstream.
 			// Old SDK versions set TargetSeparated=true → call
 			// /attestation/report?model=… and cannot parse the body, but
 			// the 501 status is still more informative than a 404 from OpenAI.
-			if p.ctrl.Service.IsCentralized() && strings.HasPrefix(strings.ToLower(targetPath), "/attestation") {
-				p.logger.Warnf("Blocked LLM attestation request on centralized provider: path=%s, remote=%s",
-					targetPath, ctx.Request.RemoteAddr)
+			if p.ctrl.Service.IsForwarder() && strings.HasPrefix(strings.ToLower(targetPath), "/attestation") {
+				p.logger.Warnf("Blocked LLM attestation request on forwarder provider: path=%s, providerType=%s, remote=%s",
+					targetPath, p.ctrl.Service.ProviderType, ctx.Request.RemoteAddr)
 				ctx.Set("ignoreError", true)
 				ctx.JSON(http.StatusNotImplemented, gin.H{
-					"error": "LLM attestation report is not available for centralized providers. " +
-						"This service routes to a centralized API (e.g., OpenAI). " +
-						"Please upgrade your SDK to a version that supports centralized provider verification.",
+					"error": "LLM attestation report is not available for this provider. " +
+						"This service forwards to an upstream API without local TEE attestation.",
 				})
 				return
 			}
@@ -931,7 +931,11 @@ func (p *Proxy) handleSignatureRoute(ctx *gin.Context, targetRoute string) bool 
 	relativePath := strings.ToLower(ctx.Param("any"))
 	chatID := strings.TrimPrefix(relativePath, "/signature/")
 
-	if !p.ctrl.Service.TargetSeparated || p.ctrl.Service.IsCentralized() {
+	// Standard providers never sign responses, so no signature is ever cached.
+	// Serve the lookup from the broker cache (which always misses → a 404
+	// chat_id_not_found) rather than forwarding /signature/ to the upstream, which
+	// would both leak the upstream and hit an endpoint it does not implement.
+	if !p.ctrl.Service.TargetSeparated || p.ctrl.Service.IsCentralized() || p.ctrl.Service.IsStandard() {
 		sig, err := p.ctrl.GetChatSignature(chatID)
 		if err != nil {
 			if errors.Is(err, ctrl.ErrChatIDNotFound) {
