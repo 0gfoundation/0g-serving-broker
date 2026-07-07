@@ -59,6 +59,23 @@ All translations above follow the same contract:
 - **Consume-and-replace** — once translated, the portable OpenAI field is removed from
   the outgoing body so a strict upstream (e.g. vLLM) doesn't reject an unknown field.
 
+## Advertising the portable field in `/v1/models`
+
+Because the broker *accepts* `reasoning_effort` via translation, it should also
+*advertise* it — otherwise an OpenAI-schema client can't discover the portable knob and
+is pushed toward the leaky upstream-native field. This is automatic:
+`AdvertisedSupportedParameters` (in `reasoning.go`) augments the `supported_parameters`
+served by `GET /v1/models` — when a model advertises a native thinking toggle
+(`chat_template_kwargs` / `enable_thinking` / `thinking`) but not `reasoning_effort`, the
+handler appends `reasoning_effort`.
+
+This keeps **"broker can translate `reasoning_effort`" ⇔ "`reasoning_effort` is
+advertised"** true with no per-provider config work, and it can't drift because the same
+`isNativeReasoningParam` set drives both translation and advertisement. The augmentation
+applies only to the advertised view; the config value the broker reads for *detection* is
+untouched. A model whose upstream genuinely accepts `reasoning_effort` natively simply
+lists it in config and no augmentation is needed.
+
 ## Where it runs
 
 Both translations run inside `PrepareHTTPRequest`

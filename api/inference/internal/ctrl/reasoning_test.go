@@ -384,6 +384,61 @@ func TestTranslateReasoning_MultiModel_WildcardEntry(t *testing.T) {
 	}
 }
 
+func TestAdvertisedSupportedParameters(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "native toggle present, reasoning_effort appended",
+			in:   []string{"temperature", "enable_thinking"},
+			want: []string{"temperature", "enable_thinking", "reasoning_effort"},
+		},
+		{
+			name: "nested container toggle also triggers",
+			in:   []string{"chat_template_kwargs"},
+			want: []string{"chat_template_kwargs", "reasoning_effort"},
+		},
+		{
+			name: "reasoning_effort already advertised, unchanged",
+			in:   []string{"reasoning_effort", "thinking"},
+			want: []string{"reasoning_effort", "thinking"},
+		},
+		{
+			name: "no native toggle (preserve_thinking only), unchanged",
+			in:   []string{"temperature", "preserve_thinking"},
+			want: []string{"temperature", "preserve_thinking"},
+		},
+		{
+			name: "no reasoning params, unchanged",
+			in:   []string{"temperature", "top_p"},
+			want: []string{"temperature", "top_p"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AdvertisedSupportedParameters(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("AdvertisedSupportedParameters(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("AdvertisedSupportedParameters(%v) = %v, want %v", tt.in, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestAdvertisedSupportedParameters_DoesNotMutateInput(t *testing.T) {
+	in := []string{"temperature", "enable_thinking"}
+	_ = AdvertisedSupportedParameters(in)
+	if len(in) != 2 {
+		t.Errorf("input slice was mutated: %v", in)
+	}
+}
+
 func TestTranslateReasoning_EmptyBody(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "chat_template_kwargs")
 	got, err := c.TranslateReasoning(nil, "qwen3")

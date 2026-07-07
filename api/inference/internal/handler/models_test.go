@@ -233,6 +233,64 @@ func TestGetModels_FullResponse(t *testing.T) {
 	}
 }
 
+func TestGetModels_AdvertisesReasoningEffortWhenTranslatable(t *testing.T) {
+	created := time.Unix(1700000000, 0)
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			Model:       model.Model{CreatedAt: &created},
+			ModelType:   "qwen3",
+			Type:        "chatbot",
+			InputPrice:  "100000000000",
+			OutputPrice: "200000000000",
+		},
+		serviceConfig: config.Service{
+			ModelInfo: &config.ModelInfo{
+				Name:          "Qwen3",
+				Description:   "thinking-capable model",
+				ContextLength: 32768,
+				Architecture: &config.ModelArchitecture{
+					Modality:         "text->text",
+					InputModalities:  []string{"text"},
+					OutputModalities: []string{"text"},
+				},
+				// Advertises a native thinking toggle but NOT reasoning_effort.
+				SupportedParameters: []string{"temperature", "enable_thinking"},
+			},
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(resp.Data))
+	}
+
+	params := resp.Data[0].SupportedParameters
+	var hasEffort, hasNative bool
+	for _, p := range params {
+		if p == "reasoning_effort" {
+			hasEffort = true
+		}
+		if p == "enable_thinking" {
+			hasNative = true
+		}
+	}
+	if !hasNative {
+		t.Errorf("expected native toggle enable_thinking to be preserved, got %v", params)
+	}
+	if !hasEffort {
+		t.Errorf("expected reasoning_effort to be advertised (broker translates it), got %v", params)
+	}
+}
+
 func TestGetModels_WithoutModelInfo(t *testing.T) {
 	mock := &mockModelsCtrl{
 		service: model.Service{

@@ -99,6 +99,34 @@ func (c *Ctrl) resolveModelInfo(model string) *config.ModelInfo {
 	return mi
 }
 
+// AdvertisedSupportedParameters returns supportedParameters as it should appear in
+// the GET /v1/models response. When the model advertises a native thinking toggle
+// the broker can translate into (chat_template_kwargs / enable_thinking / thinking)
+// but not the portable "reasoning_effort" itself, reasoning_effort is appended so
+// OpenAI-schema clients discover they can use it — the broker accepts it via
+// translation (see TranslateReasoning).
+//
+// The input slice is never mutated, and the config value used by nativeReasoningParam
+// for detection is unaffected: only the advertised view gains the field, keeping
+// "broker can translate reasoning_effort" ⇔ "reasoning_effort is advertised" true.
+func AdvertisedSupportedParameters(params []string) []string {
+	hasNative, hasEffort := false, false
+	for _, p := range params {
+		if isNativeReasoningParam(p) {
+			hasNative = true
+		}
+		if p == reasoningEffortKey {
+			hasEffort = true
+		}
+	}
+	if !hasNative || hasEffort {
+		return params
+	}
+	out := make([]string, len(params), len(params)+1)
+	copy(out, params)
+	return append(out, reasoningEffortKey)
+}
+
 // nativeReasoningParam returns the upstream-native thinking control the given
 // model advertises in supportedParameters (e.g. "enable_thinking"), or "" if it
 // advertises none the broker can translate to.
