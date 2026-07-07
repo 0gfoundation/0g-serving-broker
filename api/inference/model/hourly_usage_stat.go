@@ -24,14 +24,21 @@ import "time"
 // vendor statement, so excluding it would make every reconciliation short by the
 // whitelisted volume.
 //
-// The primary key (Hour, Upstream, Model, Unit, IsWhitelisted) keeps cardinality tiny
-// (a day is at most a few dozen rows per model), so a retention pruner trims old rows.
+// The primary key (Hour, Upstream, Model, Unit, RateClass, IsWhitelisted) keeps cardinality
+// tiny (a day is at most a few dozen rows per model), so a retention pruner trims old rows.
 type HourlyUsageStat struct {
-	Hour          time.Time `gorm:"type:datetime;primaryKey" json:"hour"`
-	Upstream      string    `gorm:"type:varchar(64);primaryKey" json:"upstream"`
-	Model         string    `gorm:"type:varchar(255);primaryKey" json:"model"`
-	Unit          string    `gorm:"type:varchar(16);primaryKey" json:"unit"`
-	IsWhitelisted bool      `gorm:"type:tinyint(1);primaryKey;default:0" json:"isWhitelisted"`
+	Hour     time.Time `gorm:"type:datetime;primaryKey" json:"hour"`
+	Upstream string    `gorm:"type:varchar(64);primaryKey" json:"upstream"`
+	Model    string    `gorm:"type:varchar(255);primaryKey" json:"model"`
+	Unit     string    `gorm:"type:varchar(16);primaryKey" json:"unit"`
+	// RateClass is a reserved pricing-tier dimension — the mutually-exclusive, whole-request
+	// price class within a unit (chatbot input-length tier, image/video resolution, …). It is
+	// part of the primary key so tiers never collapse at aggregation, but is left empty ("")
+	// for now: it is populated only in Phase 2, together with the cost-dimension reconciliation
+	// that consumes it. Reserving the PK column now avoids a later primary-key-altering
+	// migration (which AutoMigrate cannot do). See docs/design/provider-reconciliation.md.
+	RateClass     string `gorm:"type:varchar(64);primaryKey;default:''" json:"rateClass"`
+	IsWhitelisted bool   `gorm:"type:tinyint(1);primaryKey;default:0" json:"isWhitelisted"`
 	// ServiceType is informational context (chatbot / speech-to-text / text-to-image).
 	ServiceType string `gorm:"type:varchar(32);not null;default:''" json:"serviceType"`
 	// RequestCount is unit-agnostic and always recorded.

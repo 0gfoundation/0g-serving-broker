@@ -314,6 +314,7 @@ func (d *DB) Migrate() error {
 					Upstream              string    `gorm:"type:varchar(64);primaryKey"`
 					Model                 string    `gorm:"type:varchar(255);primaryKey"`
 					Unit                  string    `gorm:"type:varchar(16);primaryKey"`
+					RateClass             string    `gorm:"type:varchar(64);primaryKey;default:''"`
 					IsWhitelisted         bool      `gorm:"type:tinyint(1);primaryKey;default:0"`
 					ServiceType           string    `gorm:"type:varchar(32);not null;default:''"`
 					RequestCount          int64     `gorm:"type:bigint;not null;default:0"`

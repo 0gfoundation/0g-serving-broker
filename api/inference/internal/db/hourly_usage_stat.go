@@ -19,14 +19,14 @@ func upsertHourlyUsage(tx *gorm.DB, rows []model.HourlyUsageStat) error {
 	}
 
 	var b strings.Builder
-	b.WriteString("INSERT INTO hourly_usage_stat (hour, upstream, model, unit, is_whitelisted, service_type, request_count, input_count, output_count, cached_input_tokens, cache_write_input_tokens) VALUES ")
-	args := make([]any, 0, len(rows)*11)
+	b.WriteString("INSERT INTO hourly_usage_stat (hour, upstream, model, unit, rate_class, is_whitelisted, service_type, request_count, input_count, output_count, cached_input_tokens, cache_write_input_tokens) VALUES ")
+	args := make([]any, 0, len(rows)*12)
 	for i, r := range rows {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		args = append(args, r.Hour, r.Upstream, r.Model, r.Unit, r.IsWhitelisted, r.ServiceType,
+		b.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, r.Hour, r.Upstream, r.Model, r.Unit, r.RateClass, r.IsWhitelisted, r.ServiceType,
 			r.RequestCount, r.InputCount, r.OutputCount, r.CachedInputTokens, r.CacheWriteInputTokens)
 	}
 	b.WriteString(` AS new_vals

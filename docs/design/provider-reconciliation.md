@@ -144,6 +144,7 @@ and with the `upstream`, `model`, and `unit` dimensions added:
 | `upstream` | VARCHAR | Part of primary key; vendor label from `Request.Upstream` |
 | `model` | VARCHAR | Part of primary key; the served model |
 | `unit` | VARCHAR | Part of primary key; the authoritative billing unit for the count columns (`tokens` / `seconds` / `images`) |
+| `rate_class` | VARCHAR | Part of primary key; **reserved** pricing-tier dimension (input-length tier, resolution, …). Written empty (`""`) in Phase 1; populated in Phase 2 with the cost dimension that consumes it. Reserving the PK column now avoids a later primary-key-altering migration. |
 | `is_whitelisted` | BOOL | Part of primary key; whitelisted traffic is counted here (it hits the upstream) but tagged so settlement-side views still exclude it — see [Definitional alignment](#whitelisted-traffic-must-be-counted-even-though-it-is-not-billed) |
 | `service_type` | VARCHAR | Informational context (`chatbot` / `speech-to-text` / `text-to-image` / …) |
 | `request_count` | BIGINT | Always recorded (unit-agnostic) |
@@ -152,10 +153,10 @@ and with the `upstream`, `model`, and `unit` dimensions added:
 | `cached_input_tokens` | BIGINT | Optional sub-category; cache-**read** input tokens (`0` when not reported / not applicable) |
 | `cache_write_input_tokens` | BIGINT | Optional sub-category; cache-**write** / cache-creation input tokens (`0` when not applicable) |
 
-Primary key: `(hour, upstream, model, unit, is_whitelisted)`. Row cardinality stays tiny (a
-day is ≤ a few dozen rows per model), so a retention pruner analogous to `user_daily_stat`'s
-trims old rows. Further sub-category columns (e.g. `reasoning_output_tokens`) are added when
-the corresponding usage detail is parsed.
+Primary key: `(hour, upstream, model, unit, rate_class, is_whitelisted)`. Row cardinality
+stays tiny (a day is ≤ a few dozen rows per model), so a retention pruner analogous to
+`user_daily_stat`'s trims old rows. Further sub-category columns (e.g.
+`reasoning_output_tokens`) are added when the corresponding usage detail is parsed.
 
 It is written in the same atomic path that already accumulates `daily_stat` /
 `user_daily_stat` and deletes settled requests
@@ -395,33 +396,37 @@ mutates billing state.
 
 The hourly rollup records only usage counts, not fees, so it supports the **usage**
 dimensions (tokens / requests / images) but not a **cost/money** reconciliation against a
-vendor statement. Three separate pricing wrinkles all turn out to be the *same shape* —
-"the same base unit is billed at a different effective rate depending on a per-request
-attribute" — and one mechanism covers all three:
+vendor statement. Two pricing wrinkles share the *same shape* — "the same base unit is
+billed at a different effective rate depending on a mutually-exclusive, whole-request
+attribute" — and one mechanism (`rate_class`) covers both:
 
 | Case | base unit | attribute that changes the rate |
 |------|-----------|---------------------------------|
 | Chatbot tiered pricing (`TieredPricingConfig`) | token | input-length tier (0–32k / 32k+ …) |
 | Video generation | **second** | resolution (1024² / 1080p …) |
-| Anthropic cache-write | token | TTL tier (`cache_write` 5m / `cache_write_1h`) |
 
-The generic fix is: add a **`rate_class`** dimension to `hourly_usage_stat` (values like
-`tier:0-32k`, `res:1080p`, `cache_write:1h`) and **store the raw base unit**, then group by
-`rate_class` to compare against a vendor's tiered statement.
+The generic fix groups by **`rate_class`** (values like `tier:<=32000`, `res:1080p`) to
+compare against a vendor's tiered statement. `rate_class` is the mutually-exclusive,
+whole-request price class within a unit — **not** the coexisting token sub-categories (cache
+read/write live in their own columns, since one request has all of them at once; likewise a
+future realtime request's audio-vs-text tokens are columns/units, not `rate_class`).
 
-Consequences per case:
-- **Chatbot tiered**: `input_count` is already raw tokens — only the `rate_class` dimension
-  (the applied tier) is missing.
+The `rate_class` PK column is **already reserved** (written empty in Phase 1), so no
+primary-key-altering migration is needed later. Phase 2 only has to start populating it and
+build the consumer:
+- **Chatbot tiered**: `input_count` is already raw tokens — stamp the applied input-length
+  tier (from the same `getTierMultipliers` match billing uses) as `rate_class`.
 - **Video**: the rollup currently stores the resolution-**weighted** `video_units`, which has
-  already folded resolution in and lost the raw seconds. This case requires switching to
-  **raw seconds** (from `resolveVideoBilling`) with resolution as the `rate_class` — at which
-  point the awkward `video_units` unit can revert to `seconds`.
-- **Cache-write**: record the two TTL tiers separately (as `rate_class`) instead of the
-  current summed `cache_write_input_tokens`.
+  folded resolution in and lost the raw seconds. Switch to **raw seconds** (from
+  `resolveVideoBilling`) with resolution as `rate_class` — at which point the awkward
+  `video_units` unit can revert to `seconds`.
+- **Cache-write TTL** (5m vs 1h) is a coexisting sub-category, not a `rate_class`; if per-TTL
+  cost matters, split `cache_write_input_tokens` into two columns rather than using
+  `rate_class`.
 
-All three are deferred together until a **cost/money** reconciliation against a vendor
-statement is actually needed; the usage-dimension reconciliation shipped here is unaffected
-(tier/resolution/TTL change only the price, never the token/second counts).
+Deferred until a **cost/money** reconciliation against a vendor statement is actually needed;
+the usage-dimension report shipped here is unaffected (tier/resolution change only the price,
+never the token/second counts).
 
 ### Other
 
