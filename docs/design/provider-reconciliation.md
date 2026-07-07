@@ -194,6 +194,7 @@ lossy token-column skip `daily_stat` makes for STT (#530):
 | speech-to-text (whisper) | `seconds` | seconds | 0 |
 | speech-to-text (gpt-4o-transcribe) | `tokens` | input tokens | output tokens |
 | text-to-image / image-editing | `images` | 0 | image count |
+| video-generation | `video_units` | 0 | resolution-weighted units (seconds × size-ratio) |
 
 Reconciliation interprets the counts from `unit`: a `tokens` statement (MiniMax) is compared
 token-for-token, an `images` statement against `output_count`, a `seconds` statement against
@@ -403,6 +404,9 @@ never mutates billing state.
 - Whether to store the cache-write sub-category split by TTL (`cache_write` vs
   `cache_write_1h`) rather than summed — the broker now bills them at distinct per-TTL
   premiums (#568/#573), so a cost-dimension reconciliation may want them separated.
+- Recording raw video seconds (in addition to the resolution-weighted `video_units`
+  output count) so a video vendor's per-second statement can be reconciled — deferred
+  until a video upstream is onboarded.
 - Whether to add a 30-minute bucket resolution if a UTC+5:30/+5:45 vendor is onboarded.
 - A retained per-request billing log (keeping request-level detail instead of deleting at
   settlement) was considered as an alternative source of truth — it would also give
