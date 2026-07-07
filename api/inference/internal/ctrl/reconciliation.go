@@ -8,8 +8,54 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// recordWhitelistedUsage increments the hourly reconciliation rollup for a whitelisted
+// request. Whitelisted traffic bypasses billing and creates no request row, so it never
+// reaches AccumulateAndDeleteRequests — but it still hits the upstream and appears on the
+// vendor statement, so it must be counted (tagged is_whitelisted) or every reconciliation
+// is short by the whitelisted volume. Bucketed at the current UTC hour (whitelisted
+// requests carry no persisted created_at). Best-effort: a failure is logged, not
+// propagated — the client already received its response.
+func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, outputCount, cachedInputTokens, cacheWriteInputTokens int64) {
+	upstream := reqModel.Upstream
+	if upstream == "" {
+		upstream = c.Service.ProviderIdentity
+	}
+	if upstream == "" {
+		upstream = constant.UpstreamSelf
+	}
+	unit := reqModel.Unit
+	if unit == "" {
+		unit = constant.DefaultBillingUnitForService(reqModel.ServiceName)
+	}
+	modelName := reqModel.ModelName
+	if modelName == "" {
+		modelName = c.Service.ModelType
+	}
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	row := model.HourlyUsageStat{
+		Hour:                  time.Now().UTC().Truncate(time.Hour),
+		Upstream:              upstream,
+		Model:                 modelName,
+		Unit:                  unit,
+		IsWhitelisted:         true,
+		ServiceType:           reqModel.ServiceName,
+		RequestCount:          1,
+		InputCount:            inputCount,
+		OutputCount:           outputCount,
+		CachedInputTokens:     cachedInputTokens,
+		CacheWriteInputTokens: cacheWriteInputTokens,
+	}
+	if err := c.db.AccumulateHourlyUsage(row); err != nil {
+		c.logger.Warnf("failed to record whitelisted usage for reconciliation (upstream=%s model=%s): %v", upstream, modelName, err)
+	}
+}
 
 // defaultReconciliationTolerancePercent is the variance (in percent) under which a
 // dimension is considered balanced. It absorbs residual clock skew, sub-hour timezones,

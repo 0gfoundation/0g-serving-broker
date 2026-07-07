@@ -334,9 +334,11 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
-	// Skip billing for whitelisted users, but record whitelist traffic metrics
+	// Skip billing for whitelisted users, but record whitelist traffic metrics and
+	// count the usage into the reconciliation rollup (it hit the upstream).
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(transcriptionResp.Usage, c.metricModel(ctx))
+		c.recordWhitelistedSTT(reqModel, transcriptionResp.Usage)
 		return nil
 	}
 
@@ -461,9 +463,11 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 		}
 	}
 
-	// Skip billing for whitelisted users, but record whitelist traffic metrics
+	// Skip billing for whitelisted users, but record whitelist traffic metrics and
+	// count the usage into the reconciliation rollup (it hit the upstream).
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(usage, c.metricModel(ctx))
+		c.recordWhitelistedSTT(reqModel, usage)
 		return nil
 	}
 
@@ -718,6 +722,24 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 		return int64(billableSeconds(u)), 0, 0
 	}
 	return 0, int64(u.InputTokens), int64(u.OutputTokens)
+}
+
+// recordWhitelistedSTT counts a whitelisted speech-to-text request into the hourly
+// reconciliation rollup. It tags the unit explicitly (seconds for whisper, tokens for
+// gpt-4o-transcribe) because the billing path that normally corrects the unit is skipped
+// for whitelisted traffic.
+func (c *Ctrl) recordWhitelistedSTT(reqModel model.Request, usage *SpeechToTextUsage) {
+	seconds, inputTokens, outputTokens := classifyUsageForMetrics(usage)
+	if seconds == 0 && inputTokens == 0 && outputTokens == 0 {
+		return
+	}
+	if seconds > 0 {
+		reqModel.Unit = constant.BillingUnitSeconds
+		c.recordWhitelistedUsage(reqModel, seconds, 0, 0, 0)
+		return
+	}
+	reqModel.Unit = constant.BillingUnitTokens
+	c.recordWhitelistedUsage(reqModel, inputTokens, outputTokens, 0, 0)
 }
 
 // recordWhitelistUsageMetrics writes a usage object into both the general and

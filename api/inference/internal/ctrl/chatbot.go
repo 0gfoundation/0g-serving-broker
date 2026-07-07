@@ -401,6 +401,17 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	}
 
+	// Whitelisted traffic bypasses billing/settlement (so it never enters the hourly
+	// rollup via settlement) but still hits the upstream; count it for reconciliation.
+	if reqModel.IsWhitelisted && usage != nil {
+		cached, cacheWrite := int64(0), int64(0)
+		if usage.PromptTokensDetails != nil {
+			cached = int64(usage.PromptTokensDetails.CachedTokens)
+			cacheWrite = int64(usage.PromptTokensDetails.CacheWriteTokens)
+		}
+		c.recordWhitelistedUsage(reqModel, int64(usage.PromptTokens), int64(usage.CompletionTokens), cached, cacheWrite)
+	}
+
 	if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
 		var tlsState *tls.ConnectionState

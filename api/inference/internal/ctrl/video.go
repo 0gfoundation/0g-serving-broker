@@ -267,6 +267,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			metricModel := c.metricModel(ctx)
 			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
+			c.recordWhitelistedUsage(reqModel, 0, outputCount, 0, 0)
 		} else {
 			c.logger.Warnf("whitelist video: no usable seconds in response or request, skipping metrics for %s", reqModel.RequestHash)
 		}

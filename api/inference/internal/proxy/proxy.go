@@ -693,6 +693,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			IsWhitelisted: true,
 			Nonce:         uuid.New().String(),
 			ServiceName:   svcType,
+			// Stamp reconciliation dimensions so whitelisted traffic (which is never
+			// persisted or settled) can still be counted into the hourly rollup.
+			Upstream: p.ctrl.Service.ProviderIdentity,
+			Unit:     constant.DefaultBillingUnitForService(svcType),
+		}
+		if whitelistReq.Upstream == "" {
+			whitelistReq.Upstream = constant.UpstreamSelf
 		}
 		whitelistReq.RequestHash = whitelistReq.Nonce
 		whitelistReq.ModelName = modelName

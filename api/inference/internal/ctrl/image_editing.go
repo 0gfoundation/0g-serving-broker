@@ -244,11 +244,13 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		}
 	}
 
-	// Skip billing for whitelisted users, but record whitelist traffic metrics
+	// Skip billing for whitelisted users, but record whitelist traffic metrics and
+	// count the images into the reconciliation rollup (they hit the upstream).
 	if reqModel.IsWhitelisted {
 		metricModel := c.metricModel(ctx)
 		monitor.RecordTokens("image-editing", metricModel, 0, reqModel.OutputCount)
 		monitor.RecordWhitelistTokens("image-editing", metricModel, 0, reqModel.OutputCount)
+		c.recordWhitelistedUsage(reqModel, 0, reqModel.OutputCount, 0, 0)
 		return nil
 	}
 

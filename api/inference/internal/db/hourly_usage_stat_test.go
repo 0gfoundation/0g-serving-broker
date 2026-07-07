@@ -134,6 +134,60 @@ func TestSumHourlyUsageByModel_UTC8Window(t *testing.T) {
 	}
 }
 
+// TestAccumulateHourlyUsageWhitelisted verifies the whitelisted increment path: rows are
+// tagged is_whitelisted, accumulate on repeat, are stored separately from non-whitelisted
+// rows of the same (hour, upstream, model, unit), yet the reconciliation sum includes
+// both (whitelisted traffic is on the vendor statement).
+func TestAccumulateHourlyUsageWhitelisted(t *testing.T) {
+	d := setupTestDB(t)
+	migrateUsageTables(t, d)
+
+	h := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	wl := model.HourlyUsageStat{Hour: h, Upstream: "minimax", Model: "MiniMax-M3", Unit: "tokens", IsWhitelisted: true, ServiceType: "chatbot", RequestCount: 1, InputCount: 50, OutputCount: 10}
+	if err := d.AccumulateHourlyUsage(wl); err != nil {
+		t.Fatalf("accumulate whitelisted: %v", err)
+	}
+	if err := d.AccumulateHourlyUsage(wl); err != nil { // accumulates onto the same row
+		t.Fatalf("accumulate whitelisted 2: %v", err)
+	}
+	// A non-whitelisted row with the same key must be a SEPARATE row (is_whitelisted is
+	// part of the PK), e.g. from the settlement path.
+	nonWL := wl
+	nonWL.IsWhitelisted = false
+	nonWL.InputCount = 200
+	nonWL.OutputCount = 40
+	nonWL.RequestCount = 1
+	if err := d.AccumulateHourlyUsage(nonWL); err != nil {
+		t.Fatalf("accumulate non-whitelisted: %v", err)
+	}
+
+	var rows []model.HourlyUsageStat
+	if err := d.db.Find(&rows).Error; err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (whitelisted + non-whitelisted stored separately)", len(rows))
+	}
+	for _, r := range rows {
+		if r.IsWhitelisted && (r.RequestCount != 2 || r.InputCount != 100) {
+			t.Errorf("whitelisted row = %+v, want req=2 in=100", r)
+		}
+	}
+
+	// Reconciliation sum groups by (model, unit, service_type) and therefore combines
+	// whitelisted + non-whitelisted: 100+200 input, 10+40 output, 3 requests.
+	sums, err := d.SumHourlyUsageByModel("minimax", h, h.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if len(sums) != 1 {
+		t.Fatalf("groups = %d, want 1", len(sums))
+	}
+	if got := sums[0]; got.InputCount != 300 || got.OutputCount != 50 || got.RequestCount != 3 {
+		t.Errorf("sum = %+v, want in=300 out=50 req=3 (whitelisted included)", got)
+	}
+}
+
 // TestPruneHourlyUsageStat verifies retention: 0 is a no-op, and a bounded retention
 // drops ancient rows while keeping recent ones.
 func TestPruneHourlyUsageStat(t *testing.T) {
