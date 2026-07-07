@@ -370,7 +370,7 @@ never mutates billing state.
   input-length tier (`TieredPricingConfig`: the base price is multiplied by the tier whose
   `maxInputTokens ≥ prompt_tokens`, *before* cache billing), and cache read/write carry their
   own rates (including Anthropic's 5-minute vs 1-hour cache-write premiums, `cache_write` /
-  `cache_write_1h`). So neither the internal fee self-check nor the cost dimension can multiply
+  `cache_write_1h`). So the cost dimension cannot multiply
   aggregate tokens by a single price — the effective rate is per-request. Either stamp the
   applied effective price/tier on each `Request`, or bucket tokens by tier in the rollup.
 - **Currency mismatch on cost.** As above, `cost` is a margin check, not a hard balance.
@@ -382,18 +382,20 @@ never mutates billing state.
 
 ## Phased rollout
 
-- **Phase 1 — broker-internal self-check + hourly store.** Add the `hourly_usage_stat`
-  table and `Request.Upstream`, populate `upstream` from `providerIdentity` (single-upstream
-  today), and ship the `/v1/admin/reconciliation` endpoint. Independently, add a pure
-  broker-internal audit that needs no vendor statement: verify each request's `fee` against
-  its **tier- and cache-adjusted** expected price (`input × input_price × tierMultiplier`
-  ∓ cache read/write adjustments + `output × output_price`; catches price-cache drift between
-  `pricefeed` and the on-chain price, and tier/cache mis-application), and that period revenue
-  accrued in `daily_stat` matches the sum of `confirmed` `pending_settlement` totals (catches
-  unsettled revenue leak on the ② ↔ ③ edge). This delivers value with zero dependency on any
-  provider integration. Because the effective rate is per-request, this audit is done against
-  the stored per-request `fee` before settlement deletes the row — not by multiplying an
-  aggregate.
+- **Phase 1 — hourly store + Admin reconciliation endpoint.** Add `Request.Upstream` /
+  `Request.Unit` / cache sub-category fields, the `hourly_usage_stat` table (written in the
+  settlement accumulation path, plus the whitelisted-traffic increment), and the
+  `/v1/admin/reconciliation` endpoint that reconciles a vendor statement against the rollup.
+  This is the whole value: the Admin-driven ① ↔ ② check.
+
+  > A broker-internal self-check (recompute each request's `fee` from its counts × price;
+  > compare accrued revenue to `confirmed` `pending_settlement` totals) was considered as a
+  > zero-dependency add-on but **dropped**: the fee recomputation is near-circular (same code,
+  > same counts, same price → always equal, unless it re-prices against a different source),
+  > and the revenue-vs-settled check overlaps the existing `reconciliation_processor` (② ↔ ③).
+  > The only sliver of unique value — a continuous *cached-price vs on-chain-price* consistency
+  > check that does not wait for a statement — can be added later as a tiny standalone check if
+  > price-cache drift proves to be a real risk.
 - **Phase 2 — cross-provider reconciliation at scale.** Persist each run into a
   `reconciliation_report` table for trend analysis, wire the Prometheus metrics and bounded
   summary log, and — when multi-upstream routing lands — stamp `Request.Upstream` from the
