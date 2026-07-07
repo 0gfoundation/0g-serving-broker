@@ -90,10 +90,12 @@ type ReconciliationInput struct {
 
 // ReconDimension is the diff for one compared dimension.
 type ReconDimension struct {
-	Dimension       string  `json:"dimension"`
-	BrokerValue     int64   `json:"brokerValue"`
-	ProviderValue   int64   `json:"providerValue"`
-	Delta           int64   `json:"delta"` // broker - provider
+	Dimension     string `json:"dimension"`
+	BrokerValue   int64  `json:"brokerValue"`
+	ProviderValue int64  `json:"providerValue"`
+	Delta         int64  `json:"delta"` // broker - provider
+	// PercentVariance is |delta|/|provider|*100, or -1 (undefinedVariance) when the
+	// provider reported 0 but the broker recorded a non-zero value.
 	PercentVariance float64 `json:"percentVariance"`
 	WithinTolerance bool    `json:"withinTolerance"`
 }
@@ -206,21 +208,31 @@ func reconciliationWindowUTC(periodStart, periodEnd string, loc *time.Location) 
 	return startLocal.UTC(), endDate.AddDate(0, 0, 1).UTC(), nil
 }
 
+// undefinedVariance is the PercentVariance sentinel used when the provider reported 0 but
+// the broker recorded a non-zero value: the ratio is undefined (division by zero) and,
+// crucially, must not be math.Inf — encoding/json (used by ctx.JSON) fails to marshal Inf
+// or NaN, which would break the whole reconciliation response. Callers treat it as
+// out-of-tolerance; inspect Delta for the magnitude.
+const undefinedVariance = -1.0
+
 // makeDimension computes the diff for one dimension. When the provider value is 0 the
-// dimension is within tolerance only if the broker value is also 0 (variance is otherwise
-// undefined / infinite).
+// dimension is within tolerance only if the broker value is also 0; otherwise the variance
+// is undefined (see undefinedVariance) and the dimension is flagged out of tolerance.
 func makeDimension(name string, broker, provider int64, tolerancePercent float64) ReconDimension {
 	delta := broker - provider
-	var pct float64
 	if provider == 0 {
 		if broker == 0 {
-			pct = 0
-		} else {
-			pct = math.Inf(1)
+			return ReconDimension{
+				Dimension: name, BrokerValue: broker, ProviderValue: provider,
+				Delta: 0, PercentVariance: 0, WithinTolerance: true,
+			}
 		}
-	} else {
-		pct = math.Abs(float64(delta)) / math.Abs(float64(provider)) * 100
+		return ReconDimension{
+			Dimension: name, BrokerValue: broker, ProviderValue: provider,
+			Delta: delta, PercentVariance: undefinedVariance, WithinTolerance: false,
+		}
 	}
+	pct := math.Abs(float64(delta)) / math.Abs(float64(provider)) * 100
 	return ReconDimension{
 		Dimension:       name,
 		BrokerValue:     broker,
