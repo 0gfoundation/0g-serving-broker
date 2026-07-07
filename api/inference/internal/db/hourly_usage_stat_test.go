@@ -38,12 +38,14 @@ func TestHourlyBucketingByCreatedAt(t *testing.T) {
 	hLate := time.Date(2026, 6, 29, 23, 50, 0, 0, time.UTC)
 	hNext := time.Date(2026, 6, 30, 0, 10, 0, 0, time.UTC)
 
+	// user_address + nonce must be distinct per row (unique index); the hourly rollup
+	// keys off upstream/model/unit/created_at, so these values don't affect assertions.
 	batch := []*model.Request{
-		{Model: model.Model{CreatedAt: &h10}, RequestHash: "a1", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 100, OutputCount: 50, CachedInputTokens: 20, CacheWriteInputTokens: 5},
-		{Model: model.Model{CreatedAt: &h10b}, RequestHash: "a2", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 10, OutputCount: 5, CachedInputTokens: 1},
-		{Model: model.Model{CreatedAt: &h11}, RequestHash: "a3", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 7, OutputCount: 3},
-		{Model: model.Model{CreatedAt: &hLate}, RequestHash: "a4", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 1, OutputCount: 1},
-		{Model: model.Model{CreatedAt: &hNext}, RequestHash: "a5", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 2, OutputCount: 2},
+		{Model: model.Model{CreatedAt: &h10}, UserAddress: "0xUser", Nonce: "a1", RequestHash: "a1", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 100, OutputCount: 50, CachedInputTokens: 20, CacheWriteInputTokens: 5},
+		{Model: model.Model{CreatedAt: &h10b}, UserAddress: "0xUser", Nonce: "a2", RequestHash: "a2", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 10, OutputCount: 5, CachedInputTokens: 1},
+		{Model: model.Model{CreatedAt: &h11}, UserAddress: "0xUser", Nonce: "a3", RequestHash: "a3", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 7, OutputCount: 3},
+		{Model: model.Model{CreatedAt: &hLate}, UserAddress: "0xUser", Nonce: "a4", RequestHash: "a4", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 1, OutputCount: 1},
+		{Model: model.Model{CreatedAt: &hNext}, UserAddress: "0xUser", Nonce: "a5", RequestHash: "a5", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", InputCount: 2, OutputCount: 2},
 	}
 	if err := d.db.Create(&batch).Error; err != nil {
 		t.Fatalf("seed requests: %v", err)
@@ -84,7 +86,7 @@ func TestHourlySTTKeepsSeconds(t *testing.T) {
 
 	h := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
 	batch := []*model.Request{
-		{Model: model.Model{CreatedAt: &h}, RequestHash: "s1", Upstream: "self", ModelName: "whisper-large-v3", Unit: "seconds", InputCount: 120, OutputCount: 0},
+		{Model: model.Model{CreatedAt: &h}, UserAddress: "0xUser", Nonce: "s1", RequestHash: "s1", Upstream: "self", ModelName: "whisper-large-v3", Unit: "seconds", InputCount: 120, OutputCount: 0},
 	}
 	if err := d.db.Create(&batch).Error; err != nil {
 		t.Fatalf("seed: %v", err)
@@ -175,7 +177,8 @@ func TestAccumulateHourlyUsageWhitelisted(t *testing.T) {
 	}
 
 	// Reconciliation sum groups by (model, unit, service_type) and therefore combines
-	// whitelisted + non-whitelisted: 100+200 input, 10+40 output, 3 requests.
+	// whitelisted + non-whitelisted. Whitelisted was upserted twice (in 100/out 20 after
+	// accumulation), non-whitelisted is in 200/out 40: totals in=300, out=60, req=3.
 	sums, err := d.SumHourlyUsageByModel("minimax", h, h.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("sum: %v", err)
@@ -183,8 +186,8 @@ func TestAccumulateHourlyUsageWhitelisted(t *testing.T) {
 	if len(sums) != 1 {
 		t.Fatalf("groups = %d, want 1", len(sums))
 	}
-	if got := sums[0]; got.InputCount != 300 || got.OutputCount != 50 || got.RequestCount != 3 {
-		t.Errorf("sum = %+v, want in=300 out=50 req=3 (whitelisted included)", got)
+	if got := sums[0]; got.InputCount != 300 || got.OutputCount != 60 || got.RequestCount != 3 {
+		t.Errorf("sum = %+v, want in=300 out=60 req=3 (whitelisted included)", got)
 	}
 }
 
