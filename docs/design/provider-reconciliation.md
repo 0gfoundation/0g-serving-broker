@@ -269,6 +269,21 @@ billable, settled requests). Whitelisted requests need a separate increment into
 `hourly_usage_stat` at response completion, since they are deleted from no table because they
 were never inserted into one.
 
+Two consistency details on that increment:
+
+- **Bucket by receive time, not completion time.** The whitelisted request carries no
+  persisted `created_at`, so the proxy stamps a receive timestamp on it and the increment
+  buckets by that hour — matching the `created_at` bucketing of billable rows. Otherwise a
+  slow request that crosses an hour boundary would land in a different hour on the
+  whitelisted vs the billed path, making the broker's own data internally inconsistent.
+- **Count the request even without parseable usage.** If the upstream response carries no
+  usable usage (malformed / partial / a service with no billable seconds), the request is
+  still recorded with `request_count = 1` and zero counts — because whitelisted traffic has
+  no other capture, so dropping it would make it permanently invisible, which is exactly the
+  leak this is meant to catch. (This means the request-count dimension includes requests the
+  broker merely *saw*; a vendor that excludes failed requests may differ — the "what counts
+  as a request" caveat below.)
+
 ### Token sub-categories: cache, reasoning, audio
 
 `InputCount` collapses what vendors report — and price — as **three disjoint input buckets**.

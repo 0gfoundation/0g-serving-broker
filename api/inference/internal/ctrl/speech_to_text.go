@@ -784,16 +784,16 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 // for whitelisted traffic.
 func (c *Ctrl) recordWhitelistedSTT(reqModel model.Request, usage *SpeechToTextUsage) {
 	seconds, inputTokens, outputTokens := classifyUsageForMetrics(usage)
-	if seconds == 0 && inputTokens == 0 && outputTokens == 0 {
+	// Token-shaped usage → tokens unit; otherwise keep the seconds default (also used when
+	// no usage was parseable). Always record: the request hit the upstream, and dropping a
+	// zero/unparseable one would make it permanently invisible to reconciliation.
+	if inputTokens > 0 || outputTokens > 0 {
+		reqModel.Unit = constant.BillingUnitTokens
+		c.recordWhitelistedUsage(reqModel, inputTokens, outputTokens, 0, 0)
 		return
 	}
-	if seconds > 0 {
-		reqModel.Unit = constant.BillingUnitSeconds
-		c.recordWhitelistedUsage(reqModel, seconds, 0, 0, 0)
-		return
-	}
-	reqModel.Unit = constant.BillingUnitTokens
-	c.recordWhitelistedUsage(reqModel, inputTokens, outputTokens, 0, 0)
+	reqModel.Unit = constant.BillingUnitSeconds
+	c.recordWhitelistedUsage(reqModel, seconds, 0, 0, 0)
 }
 
 // recordWhitelistUsageMetrics writes a usage object into both the general and

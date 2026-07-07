@@ -276,16 +276,19 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	}
 
 	if reqModel.IsWhitelisted {
-		// Whitelist traffic is unbilled; record metrics only (same response→request fallback).
+		// Whitelist traffic is unbilled; record metrics + reconciliation count only.
+		var outputCount int64
 		if sec, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); source != "" {
-			outputCount := c.videoOutputUnits(ctx, sec, size)
+			outputCount = c.videoOutputUnits(ctx, sec, size)
 			metricModel := c.metricModel(ctx)
 			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
-			c.recordWhitelistedUsage(reqModel, 0, outputCount, 0, 0)
 		} else {
-			c.logger.Warnf("whitelist video: no usable seconds in response or request, skipping metrics for %s", reqModel.RequestHash)
+			c.logger.Warnf("whitelist video: no usable seconds in response or request for %s; recording request count only", reqModel.RequestHash)
 		}
+		// Always record the request (outputCount 0 when unresolved): it hit the upstream and
+		// has no other capture, so dropping it would make it invisible to reconciliation.
+		c.recordWhitelistedUsage(reqModel, 0, outputCount, 0, 0)
 		return nil
 	}
 

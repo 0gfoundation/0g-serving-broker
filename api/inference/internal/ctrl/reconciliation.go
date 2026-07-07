@@ -17,9 +17,11 @@ import (
 // request. Whitelisted traffic bypasses billing and creates no request row, so it never
 // reaches AccumulateAndDeleteRequests — but it still hits the upstream and appears on the
 // vendor statement, so it must be counted (tagged is_whitelisted) or every reconciliation
-// is short by the whitelisted volume. Bucketed at the current UTC hour (whitelisted
-// requests carry no persisted created_at). Best-effort: a failure is logged, not
-// propagated — the client already received its response.
+// is short by the whitelisted volume. Bucketed by the request's CreatedAt (the receive
+// time stamped in the proxy) to match the created_at bucketing of billable rows, so a slow
+// request that crosses an hour boundary lands in the same hour on both paths; falls back to
+// now only if unset. Best-effort: a failure is logged, not propagated — the client already
+// received its response.
 func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, outputCount, cachedInputTokens, cacheWriteInputTokens int64) {
 	upstream := reqModel.Upstream
 	if upstream == "" {
@@ -39,8 +41,12 @@ func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, output
 	if modelName == "" {
 		modelName = "unknown"
 	}
+	bucketHour := time.Now().UTC().Truncate(time.Hour)
+	if reqModel.CreatedAt != nil {
+		bucketHour = reqModel.CreatedAt.UTC().Truncate(time.Hour)
+	}
 	row := model.HourlyUsageStat{
-		Hour:                  time.Now().UTC().Truncate(time.Hour),
+		Hour:                  bucketHour,
 		Upstream:              upstream,
 		Model:                 modelName,
 		Unit:                  unit,

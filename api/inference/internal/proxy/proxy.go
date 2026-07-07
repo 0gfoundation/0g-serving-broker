@@ -701,6 +701,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		if whitelistReq.Upstream == "" {
 			whitelistReq.Upstream = constant.UpstreamSelf
 		}
+		// Stamp the receive time so the reconciliation rollup buckets whitelisted traffic
+		// by request-start hour (matching billable rows' created_at), not by response
+		// completion — otherwise a slow request crossing an hour boundary would land in a
+		// different hour on the whitelisted vs billed path. The row is never persisted, so
+		// this only feeds recordWhitelistedUsage's bucketing.
+		receivedAt := time.Now()
+		whitelistReq.CreatedAt = &receivedAt
 		whitelistReq.RequestHash = whitelistReq.Nonce
 		whitelistReq.ModelName = modelName
 
