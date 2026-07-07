@@ -205,6 +205,15 @@ func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 		return body, nil
 	}
 
+	// Eligibility check first — it needs only the model id, not the body. Most models
+	// in a deployment advertise no native thinking toggle, so bail out before the
+	// decode/allocate to keep this a cheap no-op on the bulk of chatbot traffic
+	// (mirrors TranslateMaxTokens's supportsMax==supportsCompletion early return).
+	nativeParam := c.nativeReasoningParam(model)
+	if nativeParam == "" {
+		return body, nil
+	}
+
 	// UseNumber so large integer fields (e.g. a client-supplied `seed` above 2^53)
 	// survive the decode→encode round-trip intact instead of being silently mangled
 	// through float64. Mirrors TranslateMaxTokens / Strip/InjectBodyFields.
@@ -215,11 +224,6 @@ func (c *Ctrl) TranslateReasoning(body []byte, model string) ([]byte, error) {
 	// non-object body and forward unchanged.
 	if err := dec.Decode(&bodyMap); err != nil || bodyMap == nil {
 		// Non-JSON request: leave as-is, consistent with the other body rewriters.
-		return body, nil
-	}
-
-	nativeParam := c.nativeReasoningParam(model)
-	if nativeParam == "" {
 		return body, nil
 	}
 
