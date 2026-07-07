@@ -111,6 +111,19 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 		reqBody = modifiedBody
 
+		// Reasoning translation: re-express the client's portable reasoning_effort
+		// as the upstream-native thinking control the target model advertises (e.g.
+		// chat_template_kwargs.enable_thinking). No-op unless the model advertises a
+		// native reasoning param. Keyed on resolvedModelStr (the canonical id), NOT
+		// the body's "model" — ValidateModelAllowlist may have rewritten the body to
+		// the upstream id, but per-model supportedParameters are keyed by canonical
+		// id. See docs/design/reasoning-translation.md.
+		modifiedBody, err = c.TranslateReasoning(reqBody, resolvedModelStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "translate reasoning")
+		}
+		reqBody = modifiedBody
+
 		// Strip operator-denylisted client params (e.g. logprobs/top_logprobs the
 		// routed upstream rejects) BEFORE injecting server fields, so a stripped
 		// key can be re-set by injection. No-op unless service- or per-model

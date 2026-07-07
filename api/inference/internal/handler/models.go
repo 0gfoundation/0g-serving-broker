@@ -11,6 +11,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/internal/pricefeed"
 )
 
@@ -305,7 +306,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				obj.ContextLength = mi.ContextLength
 				obj.MaxCompletionTokens = mi.MaxCompletionTokens
 				obj.Architecture = mi.Architecture
-				obj.SupportedParameters = mi.SupportedParameters
+				obj.SupportedParameters = ctrl.AdvertisedSupportedParameters(mi.SupportedParameters)
 				obj.SupportedFormats = mi.SupportedFormats
 				obj.DefaultParameters = mi.DefaultParameters
 				obj.ExpirationDate = mi.ExpirationDate
@@ -424,7 +425,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		obj.ContextLength = cfg.ModelInfo.ContextLength
 		obj.MaxCompletionTokens = cfg.ModelInfo.MaxCompletionTokens
 		obj.Architecture = cfg.ModelInfo.Architecture
-		obj.SupportedParameters = cfg.ModelInfo.SupportedParameters
+		obj.SupportedParameters = ctrl.AdvertisedSupportedParameters(cfg.ModelInfo.SupportedParameters)
 		obj.SupportedFormats = cfg.ModelInfo.SupportedFormats
 		obj.DefaultParameters = cfg.ModelInfo.DefaultParameters
 		obj.TeeType = cfg.ModelInfo.TeeType
