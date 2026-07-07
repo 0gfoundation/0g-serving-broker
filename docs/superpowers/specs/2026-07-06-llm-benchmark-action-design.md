@@ -244,7 +244,35 @@ produces an explicit NOT READY note rather than a silent false READY.
   `pull-requests: write`.
 - No private keys, wallets, or on-chain interaction are involved.
 
-## 9. Open questions
+## 9. Post-review amendments (2026-07-07)
+
+Adopted after an adversarial code review of the initial implementation:
+
+- **Fail-closed everywhere, crash nowhere.** Threshold env vars are parsed
+  defensively (a non-numeric repo variable yields a NOT READY verdict naming
+  the variable, not a traceback); a non-object JSON export and a corrupt
+  (unparseable) export each yield NOT READY with a note distinguishing them
+  from the missing-file case; the error-rate row renders "n/a ❌" when
+  `error_summary`/`request_count` are absent instead of a silent `0.00 ✅`.
+- **Streaming is a first-class config.** `streaming=false` no longer forces a
+  permanent NOT READY: the gate receives STREAMING and renders TTFT as
+  "n/a (non-streaming)" informational. The dispatch input is a *string*
+  (empty = repo var = default true) because a boolean input always renders
+  true/false and would shadow the repo variable; the resolve step normalizes
+  free-form spellings (True/1/yes/…) and routes unrecognized values to the
+  "not configured" verdict.
+- **aiperf is pinned** (`pip install aiperf==0.10.0`) to match the export
+  schema the gate and fixtures are written against.
+- **Fork-PR safety.** The comment upsert is wrapped in try/catch (fork PRs get
+  a read-only token); a failed upsert logs a warning, never fails the job.
+- **Concurrency group** per PR prevents duplicate sticky comments from racing
+  runs.
+- **Semantics pinned by fixture.** `request_count.avg` counts only successful
+  requests (verified against a real partially-failing run; captured as
+  `testdata/partial_failure_export.json`).
+- **Gate unit tests run in CI** (`gate-script-tests` job in ci.yml).
+
+## 10. Open questions
 
 1. **Threshold defaults** — shipped as conservative placeholders; confirm target
    numbers when real broker measurements are available.

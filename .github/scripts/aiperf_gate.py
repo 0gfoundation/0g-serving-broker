@@ -4,17 +4,19 @@
 Parses an aiperf JSON export (``profile_export_aiperf.json``), compares the
 measured metrics against configured thresholds, and renders a READY / NOT READY
 verdict as Markdown. Written for GitHub Actions: the verdict is appended to
-``$GITHUB_STEP_SUMMARY`` and written to ``$GITHUB_OUTPUT``'s companion file for
-the PR-comment step.
+``$GITHUB_STEP_SUMMARY`` and written to ``$VERDICT_FILE`` (default
+``verdict.md``) for the PR-comment step.
 
 Report-only: this script ALWAYS exits 0. Readiness is conveyed solely in the
-verdict text; a NOT READY result (including a missing/unparseable export) never
-fails the job.
+verdict text; a NOT READY result (including a missing/unparseable export or a
+misconfigured threshold) never fails the job.
 
 Configuration comes from environment variables:
   ENDPOINT_URL, MODEL, CONCURRENCY, REQUEST_COUNT   — run parameters (display)
+  STREAMING             — "true"/"false"; when false, absent TTFT is informational
   MAX_TTFT_MS, MAX_LATENCY_MS, MIN_OUTPUT_TPS, MAX_ERROR_RATE  — thresholds
   AIPERF_ARTIFACT_DIR   — directory searched for the JSON export
+  GATE_CONFIG_ERROR     — non-empty ⇒ render a "not configured" verdict and stop
   GITHUB_STEP_SUMMARY   — file the verdict table is appended to (optional)
   VERDICT_FILE          — file the comment body is written to (default verdict.md)
 """
@@ -26,6 +28,16 @@ from dataclasses import dataclass, field
 
 COMMENT_MARKER = "<!-- llm-benchmark-verdict -->"
 EXPORT_FILENAME = "profile_export_aiperf.json"
+
+# Threshold env vars with defaults. Kept in one table so parse errors can name
+# the exact variable. An empty string (GitHub sets empty, not unset, when an
+# expression is empty) falls back to the default.
+THRESHOLD_SPEC = {
+    "max_ttft_ms": ("MAX_TTFT_MS", "2000"),
+    "max_latency_ms": ("MAX_LATENCY_MS", "10000"),
+    "min_output_tps": ("MIN_OUTPUT_TPS", "10"),
+    "max_error_rate": ("MAX_ERROR_RATE", "0"),
+}
 
 
 @dataclass
@@ -44,19 +56,44 @@ class EvalResult:
 
 
 def load_export(artifact_dir):
-    """Return the parsed aiperf JSON export found under artifact_dir, or None.
+    """Locate and parse the aiperf JSON export under artifact_dir.
 
-    aiperf writes profile_export_aiperf.json directly in the artifact dir; when a
-    run fails entirely it writes no export at all, so None means "no results".
+    Returns (data, note):
+      (dict, None)  — export found and parsed
+      (None, None)  — no export file (aiperf writes none when every request fails)
+      (None, str)   — file present but unusable; note says why (never silently
+                      conflated with the missing-file case)
     """
     matches = glob.glob(os.path.join(artifact_dir, "**", EXPORT_FILENAME), recursive=True)
     if not matches:
-        return None
+        return None, None
+    path = matches[0]
     try:
-        with open(matches[0]) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, f"export file present but unparseable ({path}): {e}"
+    if not isinstance(data, dict):
+        return None, (f"export JSON has unexpected structure ({path}): "
+                      f"expected an object, got {type(data).__name__}")
+    return data, None
+
+
+def parse_thresholds(env):
+    """Parse threshold env vars → (thresholds, None) or (None, error_note).
+
+    Never raises: a non-numeric value yields an error note naming the variable
+    so main() can render a NOT READY verdict instead of crashing.
+    """
+    out = {}
+    for key, (var, default) in THRESHOLD_SPEC.items():
+        raw = (env.get(var) or "").strip() or default
+        try:
+            out[key] = float(raw)
+        except ValueError:
+            return None, (f"threshold {var} has invalid value {raw!r} — "
+                          f"expected a number.")
+    return out, None
 
 
 def _stat(data, metric, stat):
@@ -71,45 +108,42 @@ def _stat(data, metric, stat):
         return None
 
 
-def _error_rate(data):
-    """errors / (errors + successful), where errors come from error_summary counts."""
-    errors = 0
-    for entry in data.get("error_summary") or []:
-        try:
-            errors += int(entry.get("count", 0))
-        except (TypeError, ValueError, AttributeError):
-            continue
-    successful = _stat(data, "request_count", "avg") or 0.0
-    total = errors + successful
-    return (errors / total) if total > 0 else 0.0
-
-
 def config_error_result(message):
     """A NOT READY result for a misconfiguration (e.g. endpoint/model unset)."""
     return EvalResult(ready=False, rows=[], notes=[message])
 
 
-def evaluate(data, thresholds):
-    """Evaluate an aiperf export (or None) against thresholds → EvalResult."""
+def evaluate(data, thresholds, streaming=True, data_note=None):
+    """Evaluate an aiperf export (or None) against thresholds → EvalResult.
+
+    streaming=False marks an absent TTFT as informational rather than failing:
+    non-streaming endpoints are a supported configuration and must not be
+    permanently NOT READY. Every other missing metric fails closed.
+    """
     if data is None:
         return EvalResult(
             ready=False,
             rows=[],
-            notes=["No aiperf JSON export found — the benchmark produced no results "
+            notes=[data_note or
+                   "No aiperf JSON export found — the benchmark produced no results "
                    "(the endpoint may be unreachable or every request failed)."],
         )
 
     rows = []
     notes = []
 
-    # TTFT p99 — only present on streaming runs; absent ⇒ cannot confirm readiness.
+    # TTFT p99 — only present on streaming runs. If measured, always evaluate;
+    # if absent, fail closed only when streaming was requested.
     ttft = _stat(data, "time_to_first_token", "p99")
     max_ttft = thresholds["max_ttft_ms"]
-    if ttft is None:
-        rows.append(Row("TTFT p99 (ms)", "n/a", f"≤ {max_ttft:g}", False))
-        notes.append("time_to_first_token missing from export — enable --streaming to measure TTFT.")
-    else:
+    if ttft is not None:
         rows.append(Row("TTFT p99 (ms)", f"{ttft:.1f}", f"≤ {max_ttft:g}", ttft <= max_ttft))
+    elif streaming:
+        rows.append(Row("TTFT p99 (ms)", "n/a", f"≤ {max_ttft:g}", False))
+        notes.append("time_to_first_token missing from export despite streaming mode — "
+                     "the endpoint may not stream; TTFT cannot be verified.")
+    else:
+        rows.append(Row("TTFT p99 (ms)", "n/a (non-streaming)", "—", True))
 
     # Request latency p99 (lower is better).
     latency = _stat(data, "request_latency", "p99")
@@ -131,10 +165,30 @@ def evaluate(data, thresholds):
         rows.append(Row("Output token throughput (tok/s)", f"{tps:.1f}",
                         f"≥ {min_tps:g}", tps >= min_tps))
 
-    # Error rate (lower is better) — always computable.
-    rate = _error_rate(data)
+    # Error rate (lower is better). Fails CLOSED when the fields are absent —
+    # schema drift must never render a silent "0.00 ✅" (false READY).
+    # aiperf 0.10.0 semantics (pinned by testdata/partial_failure_export.json):
+    # request_count.avg counts only successful requests; errors live in
+    # error_summary as [{error_details, count}].
     max_rate = thresholds["max_error_rate"]
-    rows.append(Row("Error rate", f"{rate:.2f}", f"≤ {max_rate:g}", rate <= max_rate))
+    err_summary = data.get("error_summary")
+    successful = _stat(data, "request_count", "avg")
+    if not isinstance(err_summary, list) or successful is None:
+        rows.append(Row("Error rate", "n/a", f"≤ {max_rate:g}", False))
+        notes.append("error_summary/request_count missing from export — "
+                     "cannot compute error rate.")
+    else:
+        errors = 0
+        for entry in err_summary:
+            try:
+                errors += int(entry.get("count", 0))
+            except (TypeError, ValueError, AttributeError):
+                errors += 1  # malformed entry still counts as at least one error
+                notes.append("error_summary contains a malformed entry — "
+                             "counted as one error.")
+        total = errors + successful
+        rate = (errors / total) if total > 0 else 0.0
+        rows.append(Row("Error rate", f"{rate:.2f}", f"≤ {max_rate:g}", rate <= max_rate))
 
     ready = all(r.passed for r in rows)
     return EvalResult(ready=ready, rows=rows, notes=notes)
@@ -165,15 +219,6 @@ def render_markdown(result, params):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _thresholds_from_env():
-    return {
-        "max_ttft_ms": float(os.environ.get("MAX_TTFT_MS", "2000")),
-        "max_latency_ms": float(os.environ.get("MAX_LATENCY_MS", "10000")),
-        "min_output_tps": float(os.environ.get("MIN_OUTPUT_TPS", "10")),
-        "max_error_rate": float(os.environ.get("MAX_ERROR_RATE", "0")),
-    }
-
-
 def _params_from_env():
     return {
         "endpoint": os.environ.get("ENDPOINT_URL", ""),
@@ -185,12 +230,16 @@ def _params_from_env():
 
 def main():
     config_error = os.environ.get("GATE_CONFIG_ERROR", "").strip()
+    thresholds, threshold_error = parse_thresholds(os.environ)
     if config_error:
         result = config_error_result(config_error)
+    elif threshold_error:
+        result = config_error_result(threshold_error)
     else:
+        streaming = os.environ.get("STREAMING", "true").strip().lower() == "true"
         artifact_dir = os.environ.get("AIPERF_ARTIFACT_DIR", "./aiperf-out")
-        data = load_export(artifact_dir)
-        result = evaluate(data, _thresholds_from_env())
+        data, data_note = load_export(artifact_dir)
+        result = evaluate(data, thresholds, streaming=streaming, data_note=data_note)
     md = render_markdown(result, _params_from_env())
 
     # Console (visible in the Actions log).

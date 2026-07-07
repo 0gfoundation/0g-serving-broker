@@ -40,10 +40,9 @@ on:
         required: false
         type: string
       streaming:
-        description: "Stream responses (required to measure TTFT)"
+        description: "Stream responses: true/false; empty uses vars.LLM_BENCHMARK_STREAMING or true. (A boolean input would always render true/false and shadow the repo variable.)"
         required: false
-        type: boolean
-        default: true
+        type: string
       max_ttft_ms:
         description: "Threshold: p99 time-to-first-token in ms (default 2000)"
         required: false
@@ -69,6 +68,13 @@ on:
 permissions:
   contents: read
   pull-requests: write
+
+# One run per PR (or per dispatch) at a time: prevents two overlapping runs
+# from racing the sticky-comment upsert into duplicate comments, and a stale
+# run from overwriting a newer verdict.
+concurrency:
+  group: llm-benchmark-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   benchmark:
@@ -116,7 +122,17 @@ jobs:
           tokenizer="${IN_TOKENIZER:-${VAR_TOKENIZER:-}}"
           concurrency="${IN_CONCURRENCY:-${VAR_CONCURRENCY:-5}}"
           request_count="${IN_REQUEST_COUNT:-${VAR_REQUEST_COUNT:-20}}"
-          streaming="${IN_STREAMING:-${VAR_STREAMING:-true}}"
+          # Normalize the streaming flag: the repo variable is free-form text,
+          # so accept common truthy/falsy spellings instead of silently
+          # disabling streaming on e.g. "True" or "1".
+          streaming_error=""
+          streaming_raw="${IN_STREAMING:-${VAR_STREAMING:-true}}"
+          case "$(echo "$streaming_raw" | tr '[:upper:]' '[:lower:]')" in
+            true|1|yes|on)   streaming="true" ;;
+            false|0|no|off)  streaming="false" ;;
+            *)               streaming="true"
+                             streaming_error="streaming has unrecognized value '$streaming_raw' — expected true or false." ;;
+          esac
           max_ttft_ms="${IN_MAX_TTFT_MS:-${VAR_MAX_TTFT_MS:-2000}}"
           max_latency_ms="${IN_MAX_LATENCY_MS:-${VAR_MAX_LATENCY_MS:-10000}}"
           min_output_tps="${IN_MIN_OUTPUT_TPS:-${VAR_MIN_OUTPUT_TPS:-10}}"
@@ -125,6 +141,8 @@ jobs:
           config_error=""
           if [ -z "$endpoint_url" ] || [ -z "$model" ]; then
             config_error="Benchmark not configured: set endpoint_url and model as workflow inputs, or repo variables vars.LLM_BENCHMARK_ENDPOINT_URL / vars.LLM_BENCHMARK_MODEL."
+          elif [ -n "$streaming_error" ]; then
+            config_error="$streaming_error"
           fi
 
           {
@@ -142,13 +160,17 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
+        if: steps.cfg.outputs.config_error == ''
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
 
       - name: Install aiperf
         if: steps.cfg.outputs.config_error == ''
-        run: pip install aiperf
+        # Pinned: aiperf_gate.py and the test fixtures are written against the
+        # aiperf 0.10.0 export schema (profile_export_aiperf.json, flat metric
+        # keys). Bump this together with the gate script and fixtures.
+        run: pip install aiperf==0.10.0
 
       - name: Run aiperf
         id: bench
@@ -187,6 +209,7 @@ jobs:
           MODEL: ${{ steps.cfg.outputs.model }}
           CONCURRENCY: ${{ steps.cfg.outputs.concurrency }}
           REQUEST_COUNT: ${{ steps.cfg.outputs.request_count }}
+          STREAMING: ${{ steps.cfg.outputs.streaming }}
           MAX_TTFT_MS: ${{ steps.cfg.outputs.max_ttft_ms }}
           MAX_LATENCY_MS: ${{ steps.cfg.outputs.max_latency_ms }}
           MIN_OUTPUT_TPS: ${{ steps.cfg.outputs.min_output_tps }}
@@ -208,12 +231,19 @@ jobs:
             }
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number,
-            });
-            const existing = comments.find(c => c.body && c.body.includes(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            // Fork PRs get a read-only GITHUB_TOKEN regardless of the
+            // permissions block; the report is still in the Step Summary, so a
+            // failed upsert must not fail the (report-only) job.
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number,
+              });
+              const existing = comments.find(c => c.body && c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              }
+            } catch (e) {
+              core.warning(`Could not post PR comment (read-only token on fork PRs?): ${e.message}. The verdict is available in the Step Summary.`);
             }
