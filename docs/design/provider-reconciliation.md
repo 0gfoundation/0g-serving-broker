@@ -398,15 +398,40 @@ never mutates billing state.
 
 ## Open questions / future work
 
-- Whether to stamp an explicit per-request effective price/tier column, versus bucketing the
-  rollup by tier, to make the cost dimension tier-aware without re-deriving tiers at
-  reconciliation time.
-- Whether to store the cache-write sub-category split by TTL (`cache_write` vs
-  `cache_write_1h`) rather than summed — the broker now bills them at distinct per-TTL
-  premiums (#568/#573), so a cost-dimension reconciliation may want them separated.
-- Recording raw video seconds (in addition to the resolution-weighted `video_units`
-  output count) so a video vendor's per-second statement can be reconciled — deferred
-  until a video upstream is onboarded.
+### Cost-dimension reconciliation: a generic `rate_class` dimension + raw base unit
+
+The hourly rollup records only usage counts, not fees, so it supports the **usage**
+dimensions (tokens / requests / images) but not a **cost/money** reconciliation against a
+vendor statement. Three separate pricing wrinkles all turn out to be the *same shape* —
+"the same base unit is billed at a different effective rate depending on a per-request
+attribute" — and one mechanism covers all three:
+
+| Case | base unit | attribute that changes the rate |
+|------|-----------|---------------------------------|
+| Chatbot tiered pricing (`TieredPricingConfig`) | token | input-length tier (0–32k / 32k+ …) |
+| Video generation | **second** | resolution (1024² / 1080p …) |
+| Anthropic cache-write | token | TTL tier (`cache_write` 5m / `cache_write_1h`) |
+
+The generic fix is: add a **`rate_class`** dimension to `hourly_usage_stat` (values like
+`tier:0-32k`, `res:1080p`, `cache_write:1h`) and **store the raw base unit**, then group by
+`rate_class` to compare against a vendor's tiered statement.
+
+Consequences per case:
+- **Chatbot tiered**: `input_count` is already raw tokens — only the `rate_class` dimension
+  (the applied tier) is missing.
+- **Video**: the rollup currently stores the resolution-**weighted** `video_units`, which has
+  already folded resolution in and lost the raw seconds. This case requires switching to
+  **raw seconds** (from `resolveVideoBilling`) with resolution as the `rate_class` — at which
+  point the awkward `video_units` unit can revert to `seconds`.
+- **Cache-write**: record the two TTL tiers separately (as `rate_class`) instead of the
+  current summed `cache_write_input_tokens`.
+
+All three are deferred together until a **cost/money** reconciliation against a vendor
+statement is actually needed; the usage-dimension reconciliation shipped here is unaffected
+(tier/resolution/TTL change only the price, never the token/second counts).
+
+### Other
+
 - Whether to add a 30-minute bucket resolution if a UTC+5:30/+5:45 vendor is onboarded.
 - A retained per-request billing log (keeping request-level detail instead of deleting at
   settlement) was considered as an alternative source of truth — it would also give
