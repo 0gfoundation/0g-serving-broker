@@ -99,7 +99,7 @@ func (d *DB) Migrate() error {
 				if err := tx.AutoMigrate(&Request{}); err != nil {
 					return err
 				}
-				
+
 				// Add index for optimized queries if it doesn't exist
 				var count int64
 				tx.Raw("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'request' AND index_name = 'idx_requests_user_processed_counts'").Scan(&count)
@@ -191,8 +191,8 @@ func (d *DB) Migrate() error {
 			ID: "create-reconciliation-cursor",
 			Migrate: func(tx *gorm.DB) error {
 				type ReconciliationCursor struct {
-					ID              uint64     `gorm:"primaryKey;autoIncrement"`
-					LastBlockNumber uint64     `gorm:"type:bigint unsigned;not null;default:0"`
+					ID              uint64 `gorm:"primaryKey;autoIncrement"`
+					LastBlockNumber uint64 `gorm:"type:bigint unsigned;not null;default:0"`
 					UpdatedAt       *time.Time
 				}
 				return tx.AutoMigrate(&ReconciliationCursor{})

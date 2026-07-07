@@ -13,7 +13,7 @@ import (
 // touches onto the shared test DB.
 func migrateUsageTables(t *testing.T, d *DB) {
 	t.Helper()
-	if err := d.db.AutoMigrate(&model.Request{}, &model.UserDailyStat{}, &model.DailyStat{}); err != nil {
+	if err := d.db.AutoMigrate(&model.Request{}, &model.UserDailyStat{}, &model.DailyStat{}, &model.HourlyUsageStat{}); err != nil {
 		t.Fatalf("auto-migrate usage tables: %v", err)
 	}
 }

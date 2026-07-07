@@ -116,6 +116,11 @@ func (h *Handler) Register(r *gin.Engine) {
 		group.GET("/admin/usage/daily", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetUserDailyUsage)
 	}
 
+	// Broker↔provider billing reconciliation (whitelist-gated inside the handler).
+	// Reconciles a vendor statement against the hourly usage rollup. See
+	// docs/design/provider-reconciliation.md.
+	group.POST("/admin/reconciliation", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.Reconcile)
+
 	// Async job endpoints (OpenAI-style paths)
 	asyncGroup := group.Group("/async")
 	asyncGroup.Use(corsMiddleware())

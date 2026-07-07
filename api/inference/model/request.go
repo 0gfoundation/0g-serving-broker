@@ -16,8 +16,8 @@ type Request struct {
 	Processed    bool   `gorm:"type:tinyint(1);not null;default:0;index:processed_userAddress_nonce" json:"processed"`
 	VLLMProxy    bool   `gorm:"type:tinyint(1);not null;default:0" json:"vllmProxy"`
 	// Optimized count fields for efficient aggregation
-	InputCount   int64      `gorm:"type:bigint;not null;default:0" json:"inputCount"`
-	OutputCount  int64      `gorm:"type:bigint;not null;default:0" json:"outputCount"`
+	InputCount  int64 `gorm:"type:bigint;not null;default:0" json:"inputCount"`
+	OutputCount int64 `gorm:"type:bigint;not null;default:0" json:"outputCount"`
 	// Reconciliation dimensions (server-set, see docs/design/provider-reconciliation.md).
 	// Upstream is the billing counterparty that actually served the request (the vendor
 	// label, e.g. "minimax"; "self" for decentralized providers with no external vendor).
@@ -35,7 +35,7 @@ type Request struct {
 	CachedInputTokens     int64 `gorm:"type:bigint;not null;default:0" json:"cachedInputTokens"`
 	CacheWriteInputTokens int64 `gorm:"type:bigint;not null;default:0" json:"cacheWriteInputTokens"`
 	// Skip this request in settlement until this time
-	SkipUntil    *time.Time `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
+	SkipUntil *time.Time `gorm:"type:datetime;index" json:"skipUntil,omitempty"`
 	// Settling indicates the request is currently being settled on-chain
 	// and should not be included in another settlement batch
 	Settling bool `gorm:"type:tinyint(1);not null;default:0" json:"settling"`
@@ -57,8 +57,8 @@ type RequestList struct {
 }
 
 type RequestListOptions struct {
-	Processed             bool          `form:"processed"`
-	Sort                  *string       `form:"sort"`
-	ExcludeZeroOutput     bool          `form:"excludeZeroOutput"`
-	IncludeSkipped        bool          `form:"includeSkipped"` // Include requests that are temporarily skipped
+	Processed         bool    `form:"processed"`
+	Sort              *string `form:"sort"`
+	ExcludeZeroOutput bool    `form:"excludeZeroOutput"`
+	IncludeSkipped    bool    `form:"includeSkipped"` // Include requests that are temporarily skipped
 }

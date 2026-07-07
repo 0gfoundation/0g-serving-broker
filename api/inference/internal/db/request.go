@@ -102,7 +102,6 @@ func (d *DB) UpdateOutputFee(requestHash, userAddress, outputFee, fee, unsettled
 			return err
 		}
 
-
 		return nil
 	})
 }
@@ -195,7 +194,7 @@ func (d *DB) UpdateRequestsSkipUntil(requestHashes []string, skipUntil *time.Tim
 	if len(requestHashes) == 0 {
 		return nil
 	}
-	
+
 	return d.db.Model(&model.Request{}).
 		Where("request_hash IN ?", requestHashes).
 		Update("skip_until", skipUntil).Error
@@ -227,6 +226,6 @@ func (d *DB) DeleteRequestsByHashes(requestHashes []string) error {
 	if len(requestHashes) == 0 {
 		return nil
 	}
-	
+
 	return d.db.Where("request_hash IN ?", requestHashes).Delete(&model.Request{}).Error
 }
