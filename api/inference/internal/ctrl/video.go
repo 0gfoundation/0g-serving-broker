@@ -206,18 +206,21 @@ const maxVideoOutputUnits = 1 << 40
 // and trimmed to match how billing normalizes resolution multiplier keys, so the reconciliation
 // label lines up with the billed tier. See docs/design/provider-reconciliation.md.
 //
-// size is client-supplied (request/response body), so the label is bounded to fit the
-// varchar(64) rate_class column: an oversized value must not make the billing UPDATE error out
-// (which would serve the request free). The multiplier lookup already tolerates any string, so a
-// truncated label only loses reconciliation precision on an absurd input — never billing.
+// size is fully client/upstream-controlled free text, so the label is hardened against ever
+// making the billing UPDATE error out (which would serve the request free): ToValidUTF8 scrubs
+// invalid byte sequences (a raw or mid-codepoint-truncated multi-byte value would otherwise be
+// rejected by utf8mb4 strict mode), and the length cap is applied on rune boundaries — never a
+// byte offset — so it can't split a codepoint. varchar(64) is 64 characters, so "res:" (4) plus
+// a 60-rune resolution fits exactly. The multiplier lookup already tolerates any string, so
+// scrubbing/truncating an absurd input only loses reconciliation precision, never billing.
 func resolutionRateClass(size string) string {
-	res := strings.ToLower(strings.TrimSpace(size))
+	res := strings.ToLower(strings.ToValidUTF8(strings.TrimSpace(size), ""))
 	if res == "" {
 		return ""
 	}
-	const maxResLen = 56 // 64-column budget minus the "res:" prefix
-	if len(res) > maxResLen {
-		res = res[:maxResLen]
+	const maxResRunes = 60 // 64-character column budget minus the "res:" prefix
+	if r := []rune(res); len(r) > maxResRunes {
+		res = string(r[:maxResRunes])
 	}
 	return "res:" + res
 }

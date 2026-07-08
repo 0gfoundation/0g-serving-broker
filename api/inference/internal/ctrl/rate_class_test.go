@@ -3,6 +3,7 @@ package ctrl
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -92,10 +93,25 @@ func TestResolutionRateClass(t *testing.T) {
 		}
 	}
 
-	// An oversized client-supplied size must not produce a label wider than the varchar(64)
-	// rate_class column (else the billing UPDATE errors and the request is served free).
-	long := resolutionRateClass(strings.Repeat("x", 200))
-	if len(long) > 64 {
-		t.Errorf("oversized resolution label len = %d, want <= 64", len(long))
+	// size is fully client-controlled free text. Whatever it is, the label must always be valid
+	// UTF-8 and within the varchar(64) CHARACTER budget — otherwise the billing UPDATE errors
+	// under utf8mb4 strict mode and the request is served free. Covers: oversized ASCII, a long
+	// multi-byte string (naive byte truncation would split a codepoint → invalid UTF-8), and raw
+	// invalid UTF-8 bytes on input.
+	adversarial := []string{
+		strings.Repeat("x", 200),             // oversized ASCII
+		strings.Repeat("世", 200),             // multi-byte; byte-slicing would cut mid-rune
+		"1080p" + string([]byte{0xff, 0xfe}), // trailing invalid UTF-8 bytes
+		string([]byte{0xff, 0xfe, 0xfd}),     // entirely invalid UTF-8
+		strings.Repeat("界", 59) + "x",        // 60 runes but >64 bytes
+	}
+	for _, in := range adversarial {
+		got := resolutionRateClass(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("resolutionRateClass(%q) = %q, not valid UTF-8", in, got)
+		}
+		if utf8.RuneCountInString(got) > 64 {
+			t.Errorf("resolutionRateClass(%q) label = %d chars, want <= 64", in, utf8.RuneCountInString(got))
+		}
 	}
 }
