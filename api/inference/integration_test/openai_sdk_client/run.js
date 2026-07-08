@@ -145,13 +145,22 @@ async function main() {
     },
 
     async unauthorized() {
+      // Broker-side note: ValidateSession (ctrl/request.go) returns plain
+      // errors for every invalid-auth path, never wrapped with a 401 status,
+      // so this currently surfaces as OpenAI.BadRequestError/400, not
+      // AuthenticationError/401 the way a real OpenAI API would respond to a
+      // bad API key. This scenario reports both checks so the Go test can
+      // assert current behavior honestly instead of masking the gap.
       return expectError(
         () =>
           client.chat.completions.create(
             { model, messages: [{ role: "user", content: "Hi" }] },
             { timeout, headers: { Authorization: "Bearer app-sk-invalidtoken" } },
           ),
-        (err) => ({ isAuthError: err instanceof OpenAI.AuthenticationError }),
+        (err) => ({
+          isAuthError: err instanceof OpenAI.AuthenticationError,
+          isBadRequest: err instanceof OpenAI.BadRequestError,
+        }),
       );
     },
 
