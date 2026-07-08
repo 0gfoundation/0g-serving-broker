@@ -3,12 +3,15 @@ name: OpenAI SDK Contract Test
 # Contract test for issue #577: drives the broker with the REAL openai npm
 # SDK (over a real TCP socket) against a mocked OpenAI-shaped upstream, to
 # catch wire-level incompatibilities the Go-only integration suite cannot see
-# (SSE framing, response/error JSON shape, header casing). Deliberately kept
-# out of the default pull_request CI (see ci.yml) so it never blocks/slows a
-# PR review — but at well under a minute end to end, it's cheap enough to run
-# right after every merge to main instead of waiting for a nightly cron.
+# (SSE framing, response/error JSON shape, header casing). Runs on PRs too
+# (visible as a check) but lives in its own workflow rather than ci.yml's
+# validate/integration-test jobs, so it isn't a required check and can't
+# block a merge — at well under a minute end to end it's cheap enough to run
+# on every PR and again on every merge to main.
 on:
   workflow_dispatch: {}
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
 

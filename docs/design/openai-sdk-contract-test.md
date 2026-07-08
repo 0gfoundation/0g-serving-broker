@@ -105,8 +105,10 @@ a clear message if `openai_sdk_client/node_modules` hasn't been installed yet.
 
 ## CI
 
-`.github/workflows/openai-sdk-contract.yml` runs on every push to `main`
-(i.e. every PR merge) and via manual `workflow_dispatch`. It is deliberately
-**not** wired into `ci.yml`'s `pull_request` trigger, so it never blocks or
-slows down a PR review — but at well under a minute end to end, running it
-right after every merge is cheap enough to skip waiting for a nightly cron.
+`.github/workflows/openai-sdk-contract.yml` runs on every pull request
+targeting `main`, on every push to `main` (i.e. every PR merge), and via
+manual `workflow_dispatch`. It lives in its own workflow file rather than
+`ci.yml`'s `validate`/`integration-test` jobs, so it's visible as a check on
+PRs but isn't a required one and can't block a merge — at well under a
+minute end to end, running it on every PR and again after every merge is
+cheap enough to skip a nightly cron entirely.
