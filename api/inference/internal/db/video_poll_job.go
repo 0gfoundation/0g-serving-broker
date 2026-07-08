@@ -132,9 +132,10 @@ func (d *DB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt tim
 // Retries up to 3 times with backoff for transient DB errors, since by this point the
 // expensive provider work is already done. ErrVideoPollJobAlreadyResolved is deterministic —
 // once lost, a retry of the identical guarded UPDATE cannot win — so it is NOT retried: the
-// transaction closure returns it wrapped in errStopRetry, which withRetryUnless below detects
-// and returns immediately, saving the ~1.5s of pointless backoff+reattempts a blind 3x retry
-// would otherwise spend on an outcome that can never change.
+// transaction closure returns ErrVideoPollJobAlreadyResolved directly (unwrapped), and
+// withRetryUnless matches it via errors.Is and returns immediately, saving the ~1.5s of
+// pointless backoff+reattempts a blind 3x retry would otherwise spend on an outcome that can
+// never change.
 func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error {
 	return withRetryUnless(3, ErrVideoPollJobAlreadyResolved, func() error {
 		return d.db.Transaction(func(tx *gorm.DB) error {

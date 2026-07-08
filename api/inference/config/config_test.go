@@ -367,7 +367,7 @@ videoPoll:
 }
 
 // TestLoadConfig_VideoPoll_ValidConfigPasses is the sibling happy-path check: sane values
-// (matching config.Default()'s own VideoPollConfig) must not trip either new gate.
+// (matching config.GetConfig()'s own VideoPollConfig) must not trip either new gate.
 func TestLoadConfig_VideoPoll_ValidConfigPasses(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

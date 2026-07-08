@@ -432,7 +432,7 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		c.logger.Errorf("video generation for request %s is non-terminal but the VideoPoll scheduler is disabled (videoPoll.enabled=false); this request will never be billed until it is enabled", reqModel.RequestHash)
 	}
 	// c.videoPollCfg is always populated with real values (the operator's config, or
-	// config.Default()'s sane defaults) regardless of whether the scheduler is actually
+	// config.GetConfig()'s sane defaults) regardless of whether the scheduler is actually
 	// running — InitVideoPollScheduler is called unconditionally at startup and only gates
 	// STARTING GOROUTINES on cfg.Enabled, not on recording cfg. See its doc comment. So even
 	// in the disabled-scheduler case above, PollInterval/MaxPollDuration below are never the

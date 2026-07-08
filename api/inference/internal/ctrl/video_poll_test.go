@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -527,5 +529,68 @@ func TestPollVideoJob_MultiModelPricing(t *testing.T) {
 	}
 	if store.lastCompleteFee != "12000" {
 		t.Errorf("fee = %q, want 12000", store.lastCompleteFee)
+	}
+}
+
+// ==========================================================================
+// Forwarder sanitization on the poll path (mirrors sync path, video.go)
+// ==========================================================================
+
+// TestPollVideoJob_ForwarderGzipLeak_SanitizedBeforeParseAndSign is a regression test: a
+// forwarder provider whose completed poll response (a) ignores the identity request and
+// gzip-compresses anyway, and (b) contains a #184 upstream-identity leak field, must still be
+// correctly recognized as completed (the compressed body must be decoded before the status
+// check) AND have the leak field stripped before signing/billing — mirroring
+// handleVideoGenerationResponse's sync-path ordering (video.go) exactly.
+func TestPollVideoJob_ForwarderGzipLeak_SanitizedBeforeParseAndSign(t *testing.T) {
+	plain := []byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720","provider":"upstream-secret"}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(gzipBytes(t, plain))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	c.Service.ProviderType = constant.ProviderTypeCentralized // IsForwarder() == true
+	job := newPendingJob(1, server.URL)
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusCompleted {
+		t.Fatalf("Status = %q, want completed — a gzip-compressed body (despite Accept-Encoding: identity) must still be decoded and recognized", got.Status)
+	}
+	if store.lastCompleteOutputCount == 0 {
+		t.Errorf("outputCount = 0, want > 0 — billing must have run against the decoded body")
+	}
+}
+
+func TestSanitizeForwarderPollResponseBody_GzipStripsLeak(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	plain := []byte(`{"status":"completed","provider":"openai","seconds":5}`)
+
+	out := c.sanitizeForwarderPollResponseBody(gzipBytes(t, plain), "gzip")
+
+	if strings.Contains(string(out), "openai") || strings.Contains(string(out), "\"provider\"") {
+		t.Errorf("upstream identity leaked from compressed poll response: %s", out)
+	}
+	obj := decode(t, out)
+	if _, ok := obj["provider"]; ok {
+		t.Error("provider leak key not stripped from decoded poll response")
+	}
+	if obj["status"] != "completed" {
+		t.Errorf("status must survive decode+sanitize, got %v", obj["status"])
+	}
+}
+
+func TestSanitizeForwarderPollResponseBody_UndecodableGzipFailsOpen(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	raw := []byte("not actually gzip")
+
+	out := c.sanitizeForwarderPollResponseBody(raw, "gzip")
+	if string(out) != string(raw) {
+		t.Errorf("undecodable body must be returned unchanged, got %s", out)
 	}
 }

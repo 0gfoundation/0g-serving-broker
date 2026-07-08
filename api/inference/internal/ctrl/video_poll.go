@@ -26,7 +26,7 @@ import (
 //
 // c.videoPollCfg is set UNCONDITIONALLY, even when cfg.Enabled is false — callers should call
 // this once at startup regardless, passing whatever VideoPollConfig the operator configured
-// (config.Default() always populates it with sane values). This is deliberate: a video-gen
+// (config.GetConfig() always populates it with sane values). This is deliberate: a video-gen
 // request accepted while the scheduler is disabled still needs real PollInterval/MaxPollDuration
 // values to schedule its VideoPollJob against (see deferVideoBillingToPoll in video.go) — using
 // the OPERATOR'S configured values here, rather than a hardcoded fallback duplicating config.go's
@@ -289,7 +289,40 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool)
 		return nil, false
 	}
 
+	// For forwarder providers, strip #184 upstream identity/cost leak fields before this body
+	// is parsed for status or signed — mirrors handleVideoGenerationResponse's sync path
+	// (video.go) exactly: decode a compressed body first (an upstream that ignores our
+	// identity request would otherwise slip past the JSON status parse entirely, silently
+	// stalling this job's polling until it times out), then sanitize. Doing this here, once,
+	// means every downstream consumer in pollVideoJob (status check, resolveVideoBilling,
+	// signChatWithKey) sees the same bytes — sanitize-before-sign keeps the signature bound to
+	// what the client will actually receive when it separately fetches /videos/{id}/content.
+	if c.Service.IsForwarder() {
+		respBody = c.sanitizeForwarderPollResponseBody(respBody, resp.Header.Get("Content-Encoding"))
+	}
+
 	return respBody, true
+}
+
+// sanitizeForwarderPollResponseBody mirrors sanitizeForwarderResponseBody (sanitize.go) for the
+// background poller, which — unlike a live request handler — has no *gin.Context/ResponseWriter
+// to strip a Content-Encoding header from (the client's own separate GET /videos/{id} request
+// handles its own response headers independently via the normal proxy path). Only the body
+// needs decoding + leak-field sanitization here.
+func (c *Ctrl) sanitizeForwarderPollResponseBody(body []byte, contentEncoding string) []byte {
+	out := body
+	if isCompressedEncoding(contentEncoding) {
+		decoded, err := decodeBody(body, contentEncoding)
+		if err != nil {
+			c.logger.Warnf("#184 leak sanitization SKIPPED: could not decode %s poll response; using raw body (potential identity/cost leak): %v", contentEncoding, err)
+			return body
+		}
+		out = decoded
+	}
+	if sanitized, changed := c.sanitizeResponseBody(out, ""); changed {
+		return sanitized
+	}
+	return out
 }
 
 // truncateForLog bounds a byte slice to at most max bytes for log output, appending a marker
