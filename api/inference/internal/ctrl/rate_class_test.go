@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -89,5 +90,12 @@ func TestResolutionRateClass(t *testing.T) {
 		if got := resolutionRateClass(tt.in); got != tt.want {
 			t.Errorf("resolutionRateClass(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+
+	// An oversized client-supplied size must not produce a label wider than the varchar(64)
+	// rate_class column (else the billing UPDATE errors and the request is served free).
+	long := resolutionRateClass(strings.Repeat("x", 200))
+	if len(long) > 64 {
+		t.Errorf("oversized resolution label len = %d, want <= 64", len(long))
 	}
 }
