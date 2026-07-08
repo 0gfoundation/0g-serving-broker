@@ -62,13 +62,19 @@ Two edge cases in that check are deliberate, not oversights:
 - **The check is model-wide, not scoped to the current request's surface.** A
   model declaring *both* `openai` and `anthropic` in `supportedFormats`, with
   `thinking` meant only as the OpenAI-surface (type-only) toggle, would have
-  `thinking` excluded on both surfaces. This can't be fixed by threading the
-  request surface through, because `AdvertisedSupportedParameters` feeds one
-  static list into `GET /v1/models` regardless of surface — there is no way to
-  advertise "works via `/chat/completions` but not `/v1/messages`" — so
-  translation is kept at the same model-wide granularity as advertisement (see
-  the `/v1/models` advertisement invariant below). No shipped config combines
-  `thinking` with a dual-surface declaration today.
+  `thinking` excluded as a translation target on both surfaces. This is a real
+  gap, not one forced by the `/v1/models` advertisement limitation below:
+  `AdvertisedSupportedParameters` genuinely can't be surface-scoped (it feeds
+  one static list into `GET /v1/models` regardless of surface), but
+  *translation* runs at request time, where the actual surface is already
+  known (`apiFormatForPath` in `proxy.go`, computed one call before
+  `TranslateReasoning` runs) — a surface-aware fix is possible without touching
+  advertisement. It was deliberately not built: no shipped config combines
+  `thinking` with a dual-surface declaration today, and the fix would mean
+  threading the surface through `TranslateReasoning` → `nativeReasoningParam`
+  and updating every call site (including most of `reasoning_test.go`) to
+  guard against a case nothing currently exercises. Revisit if a real
+  dual-surface + `thinking` config is ever needed.
 
 A request reaching the broker carries the portable `reasoning_effort`. The broker
 is the only component that knows which upstream a given model maps to, so the

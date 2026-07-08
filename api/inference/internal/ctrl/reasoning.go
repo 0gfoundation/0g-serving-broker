@@ -71,44 +71,21 @@ const (
 // requiresAnthropicBudgetTokens reports whether formats declare the genuine
 // Anthropic /v1/messages surface (config.APIFormatAnthropic). On that surface
 // the native "thinking" control is Anthropic's own — {"type": "enabled",
-// "budget_tokens": N} — where budget_tokens is mandatory (min 1024, must be
-// less than the request's max_tokens) and the broker has no basis to compute
-// it. This is a different wire shape from MiniMax/Zhipu's "thinking" on the
-// OpenAI surface, a plain {"type": "enabled"|"disabled"} toggle with no such
-// requirement: same advertised name, incompatible dialects (see
-// nativeParamThinking). "thinking" is therefore excluded as a translation
-// target — and left off the advertised-parameters addition below — for any
-// model that declares the Anthropic surface.
+// "budget_tokens": N} — where budget_tokens is mandatory and the broker has no
+// basis to compute it, unlike MiniMax/Zhipu's plain {"type": "enabled"} on the
+// OpenAI surface: same advertised name ("thinking"), incompatible dialects.
+// "thinking" is therefore excluded as a translation target for any model that
+// declares the Anthropic surface, and left off the advertised-parameters
+// addition in AdvertisedSupportedParameters.
 //
-// The check is model-wide, not scoped to the surface of the current request:
-// AdvertisedSupportedParameters feeds one static supportedParameters list into
-// GET /v1/models regardless of surface, so there is no way to advertise
-// "reasoning_effort works via /chat/completions but not /v1/messages" — and
-// this function must stay in lockstep with that (see the "translate ⇔
-// advertise" invariant on AdvertisedSupportedParameters) rather than being
-// finer-grained than what can actually be advertised. A model declaring BOTH
-// "openai" and "anthropic" in supportedFormats with "thinking" meant only as
-// the OpenAI-surface toggle is not supported today; no shipped config does
-// this (glm-5.2 and the OpenRouter GLM-5 entry, the only dual-surface entries
-// with a reasoning dialect, use chat_template_kwargs / reasoning instead).
-//
-// A model that omits supportedFormats entirely is treated as NOT requiring
-// budget_tokens (this returns false), even though nil/empty is documented
-// elsewhere (ModelInfo.SupportedFormats, proxy.go's formatAllowed) as
-// "unconstrained — accepts every surface." That default favors the common
-// case: most configured models with a "thinking" toggle today are MiniMax/
-// Zhipu-style (OpenAI surface) and legitimately omit supportedFormats: flipping
-// this default would silently stop translating reasoning_effort for all of
-// them. A genuinely Anthropic-native model (e.g. claude-opus-4-8) MUST set
-// supportedFormats: ["anthropic"] explicitly for this exclusion to apply —
-// which matches how such a model is deployed in practice anyway, since
-// enforceRequestFormat needs the same declaration to reject stray
-// /chat/completions requests against it.
-//
-// Matching is case-insensitive and whitespace-trimmed, mirroring
-// proxy.go's formatAllowed, since ModelInfo.Validate accepts (and does not
-// normalize) a raw config value like " Anthropic" as long as it trims/folds to
-// a known format.
+// This check is model-wide (keyed on config, not the current request's
+// surface) and an omitted supportedFormats is treated as NOT requiring
+// budget_tokens — two deliberate scope decisions with edge cases; see
+// docs/design/reasoning-translation.md for the full rationale and what's
+// intentionally left unhandled. Matching is case-insensitive and
+// whitespace-trimmed, mirroring proxy.go's formatAllowed, since
+// ModelInfo.Validate accepts (and does not normalize) a raw config value like
+// " Anthropic" as long as it trims/folds to a known format.
 func requiresAnthropicBudgetTokens(formats []string) bool {
 	for _, f := range formats {
 		if strings.EqualFold(strings.TrimSpace(f), config.APIFormatAnthropic) {
