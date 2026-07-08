@@ -317,6 +317,78 @@ service:
 	}
 }
 
+// TestLoadConfig_VideoPoll_RejectsMaxPollDurationNearPruneThreshold guards
+// docs/design/video-generation-async-billing.md's core invariant: a still-polling job's
+// placeholder Request row must never be old enough for the zero-output prune sweep
+// (ZeroOutputRequestPruneThreshold) to delete it out from under CompleteVideoPollJobWithBilling.
+func TestLoadConfig_VideoPoll_RejectsMaxPollDurationNearPruneThreshold(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+videoPoll:
+  enabled: true
+  maxPollDuration: "50m"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "maxPollDuration") {
+		t.Fatalf("expected videoPoll.maxPollDuration rejection, got: %v", err)
+	}
+}
+
+// TestLoadConfig_VideoPoll_RejectsLeaseWindowNotExceedingPollTimeout guards against the
+// stale-lease-reclaim race a LeaseWindow <= PollRequestTimeout reopens (see
+// VideoPollConfig.LeaseWindow's doc comment).
+func TestLoadConfig_VideoPoll_RejectsLeaseWindowNotExceedingPollTimeout(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+videoPoll:
+  enabled: true
+  maxPollDuration: "20m"
+  leaseWindow: "30s"
+  pollRequestTimeout: "30s"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "leaseWindow") {
+		t.Fatalf("expected videoPoll.leaseWindow rejection, got: %v", err)
+	}
+}
+
+// TestLoadConfig_VideoPoll_ValidConfigPasses is the sibling happy-path check: sane values
+// (matching config.Default()'s own VideoPollConfig) must not trip either new gate.
+func TestLoadConfig_VideoPoll_ValidConfigPasses(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+videoPoll:
+  enabled: true
+  maxPollDuration: "20m"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err != nil {
+		t.Fatalf("expected valid videoPoll config to load cleanly, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ProviderTypeStandard_AllowsModelPricing(t *testing.T) {
 	// Multi-model pricing is supported for standard forwarders, same as centralized.
 	configPath := writeTestConfig(t, `

@@ -12,6 +12,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -164,9 +165,9 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		c.logger.Warnf("Failed to clear expired skipUntil for users: %v", err)
 	}
 
-	// Prune old requests with zero output
-	pruneThreshold := 1 * time.Hour // Prune requests older than 1 hours with zero output
-	if err := c.db.PruneRequest(pruneThreshold); err != nil {
+	// Prune old requests with zero output. Shared with config.VideoPollConfig.MaxPollDuration's
+	// boot-time validation (config.ZeroOutputRequestPruneThreshold) so the two can't drift.
+	if err := c.db.PruneRequest(config.ZeroOutputRequestPruneThreshold); err != nil {
 		c.logger.Warnf("Failed to prune old zero-output requests: %v", err)
 	}
 

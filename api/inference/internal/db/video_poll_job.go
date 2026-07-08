@@ -21,6 +21,27 @@ func (d *DB) CreateVideoPollJob(job model.VideoPollJob) error {
 	return d.db.Create(&job).Error
 }
 
+// withRetryUnless behaves like withRetry (same attempt count and backoff), except it returns
+// immediately, without sleeping or reattempting, the moment fn returns an error matching
+// noRetryOn via errors.Is. Use this instead of the shared withRetry when a specific outcome is
+// known to be deterministic — retrying it cannot change the result, so blindly reattempting
+// only adds latency (backoff sleeps + repeated transaction round trips) for no benefit.
+func withRetryUnless(maxAttempts int, noRetryOn error, fn func() error) error {
+	var err error
+	for i := 0; i < maxAttempts; i++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if errors.Is(err, noRetryOn) {
+			return err
+		}
+		if i < maxAttempts-1 {
+			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+		}
+	}
+	return err
+}
+
 // ClaimDueVideoPollJobs finds up to limit rows due for a poll attempt and atomically claims
 // each one individually, returning only the rows this call actually won.
 //
@@ -79,13 +100,16 @@ func (d *DB) ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]mode
 // RescheduleVideoPollJob returns a claimed job to pending with a fresh NextPollAt, after a
 // poll round-trip observed a non-terminal state.
 //
-// Guarded on status='polling': if a stale-lease reclaim (see ClaimDueVideoPollJobs) already let
-// another worker resolve this job (completed/failed/timed_out) before this call runs, that
-// worker's terminal write must not be clobbered back to pending. A 0-rows-affected outcome here
-// is exactly that — a lost race, not an error — so it is not treated as one.
-func (d *DB) RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error {
+// Guarded on status='polling' AND attempts=claimAttempts — see the package doc comment above
+// ClaimDueVideoPollJobs' Attempts field for why status alone is not enough: a status-only guard
+// cannot tell "I still hold the current claim" from "someone reclaimed this after my lease
+// expired, and it happens to read 'polling' again". attempts is bumped on every claim
+// (including a stale-lease reclaim), so it doubles as a fencing token for free — no extra
+// column needed. claimAttempts must be the Attempts value observed on the job THIS caller
+// claimed (i.e. the value ClaimDueVideoPollJobs returned), not a value read fresh from the row.
+func (d *DB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt time.Time) error {
 	return d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status = ?", id, model.VideoPollStatusPolling).
+		Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
 		Updates(map[string]interface{}{
 			"status":       model.VideoPollStatusPending,
 			"next_poll_at": nextPollAt,
@@ -97,21 +121,25 @@ func (d *DB) RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error {
 // either write fails, both roll back, so a result is never marked resolved without the fee
 // that goes with it landing too.
 //
-// The VideoPollJob update is guarded on status='polling' and its RowsAffected checked BEFORE
-// touching the Request row: if a stale-lease reclaim let another worker already resolve this
-// job, RowsAffected is 0 and the transaction returns ErrVideoPollJobAlreadyResolved WITHOUT
-// ever running the Request fee update — otherwise two workers racing on the same reclaimed job
-// could each write a (possibly different) fee to the same Request row.
+// The VideoPollJob update is guarded on status='polling' AND attempts=claimAttempts (see
+// RescheduleVideoPollJob's doc comment on why attempts, not just status, fences a stale
+// writer) and its RowsAffected checked BEFORE touching the Request row: if this caller no
+// longer holds the current claim, RowsAffected is 0 and the transaction returns
+// ErrVideoPollJobAlreadyResolved WITHOUT ever running the Request fee update — otherwise two
+// workers racing on the same reclaimed job could each write a (possibly different) fee to the
+// same Request row.
 //
 // Retries up to 3 times with backoff for transient DB errors, since by this point the
-// expensive provider work is already done. A lost race also gets retried up to 3 times (each
-// attempt cheaply re-observes RowsAffected==0), which is harmless — no mutation occurs — just
-// slightly wasteful; not worth special-casing out of the shared retry helper.
-func (d *DB) CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, fee string, outputCount int64) error {
-	return withRetry(3, func() error {
+// expensive provider work is already done. ErrVideoPollJobAlreadyResolved is deterministic —
+// once lost, a retry of the identical guarded UPDATE cannot win — so it is NOT retried: the
+// transaction closure returns it wrapped in errStopRetry, which withRetryUnless below detects
+// and returns immediately, saving the ~1.5s of pointless backoff+reattempts a blind 3x retry
+// would otherwise spend on an outcome that can never change.
+func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error {
+	return withRetryUnless(3, ErrVideoPollJobAlreadyResolved, func() error {
 		return d.db.Transaction(func(tx *gorm.DB) error {
 			res := tx.Model(&model.VideoPollJob{}).
-				Where("id = ? AND status = ?", id, model.VideoPollStatusPolling).
+				Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
 				Updates(map[string]interface{}{
 					"status": model.VideoPollStatusCompleted,
 				})
@@ -137,11 +165,12 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, 
 // zero-output default and is excluded from settlement (ListRequest's ExcludeZeroOutput) until
 // pruned.
 //
-// Guarded on status='polling' for the same reason as RescheduleVideoPollJob: a stale-lease
-// reclaim must not let a late write flip an already-resolved job back to failed.
-func (d *DB) FailVideoPollJob(id uint64, errMsg string) error {
+// Guarded on status='polling' AND attempts=claimAttempts for the same reason as
+// RescheduleVideoPollJob: a stale-lease reclaim must not let a late write from a superseded
+// claim flip an already-resolved (or actively-being-worked-by-someone-else) job to failed.
+func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
 	return d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status = ?", id, model.VideoPollStatusPolling).
+		Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
 		Updates(map[string]interface{}{
 			"status":        model.VideoPollStatusFailed,
 			"error_message": errMsg,
@@ -153,14 +182,15 @@ func (d *DB) FailVideoPollJob(id uint64, errMsg string) error {
 // provider may have delivered a video the broker never billed for — and callers should log it
 // loudly rather than treat it as routine.
 //
-// Guarded on status IN (pending, polling): a job already resolved (completed/failed) by a
-// concurrent poll must not be overwritten with a spurious timeout.
-func (d *DB) TimeOutVideoPollJob(id uint64, errMsg string) error {
+// Guarded on status IN (pending, polling) AND attempts=claimAttempts: a job already resolved,
+// OR reclaimed by a newer worker, by a concurrent poll must not be overwritten with a spurious
+// timeout from a superseded claim.
+func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
 	return d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status IN ?", id, []model.VideoPollStatus{
+		Where("id = ? AND status IN ? AND attempts = ?", id, []model.VideoPollStatus{
 			model.VideoPollStatusPending,
 			model.VideoPollStatusPolling,
-		}).
+		}, claimAttempts).
 		Updates(map[string]interface{}{
 			"status":        model.VideoPollStatusTimedOut,
 			"error_message": errMsg,

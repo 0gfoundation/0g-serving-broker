@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -67,7 +68,10 @@ func (m *mockVideoPollDB) ClaimDueVideoPollJobs(limit int, leaseWindow time.Dura
 	return claimed, nil
 }
 
-func (m *mockVideoPollDB) RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error {
+// RescheduleVideoPollJob replicates the real db.DB's status='polling' AND attempts=claimAttempts
+// guard (see db/video_poll_job.go), NOT just an unconditional write — otherwise ctrl-layer tests
+// would pass even if that guard were reverted, giving false confidence in the race fix.
+func (m *mockVideoPollDB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rescheduleCalled++
@@ -78,12 +82,17 @@ func (m *mockVideoPollDB) RescheduleVideoPollJob(id uint64, nextPollAt time.Time
 	if !ok {
 		return fmt.Errorf("job not found: %d", id)
 	}
+	if j.Status != model.VideoPollStatusPolling || j.Attempts != claimAttempts {
+		return nil // lost race — same "benign no-op" semantics as the real guarded UPDATE
+	}
 	j.Status = model.VideoPollStatusPending
 	j.NextPollAt = nextPollAt
 	return nil
 }
 
-func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, fee string, outputCount int64) error {
+// CompleteVideoPollJobWithBilling replicates the real db.DB's guard + ErrVideoPollJobAlreadyResolved
+// sentinel on a lost race — see RescheduleVideoPollJob's comment above.
+func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error {
 	if m.errOnComplete != nil {
 		return m.errOnComplete
 	}
@@ -93,13 +102,17 @@ func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, requestHash
 	if !ok {
 		return fmt.Errorf("job not found: %d", id)
 	}
+	if j.Status != model.VideoPollStatusPolling || j.Attempts != claimAttempts {
+		return db.ErrVideoPollJobAlreadyResolved
+	}
 	j.Status = model.VideoPollStatusCompleted
 	m.lastCompleteOutputCount = outputCount
 	m.lastCompleteFee = fee
 	return nil
 }
 
-func (m *mockVideoPollDB) FailVideoPollJob(id uint64, errMsg string) error {
+// FailVideoPollJob replicates the real db.DB's guard — see RescheduleVideoPollJob's comment above.
+func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
 	if m.errOnFail != nil {
 		return m.errOnFail
 	}
@@ -109,12 +122,16 @@ func (m *mockVideoPollDB) FailVideoPollJob(id uint64, errMsg string) error {
 	if !ok {
 		return fmt.Errorf("job not found: %d", id)
 	}
+	if j.Status != model.VideoPollStatusPolling || j.Attempts != claimAttempts {
+		return nil // lost race — benign no-op
+	}
 	j.Status = model.VideoPollStatusFailed
 	j.ErrorMessage = errMsg
 	return nil
 }
 
-func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, errMsg string) error {
+// TimeOutVideoPollJob replicates the real db.DB's guard — see RescheduleVideoPollJob's comment above.
+func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
 	if m.errOnTimeout != nil {
 		return m.errOnTimeout
 	}
@@ -123,6 +140,9 @@ func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, errMsg string) error {
 	j, ok := m.jobs[id]
 	if !ok {
 		return fmt.Errorf("job not found: %d", id)
+	}
+	if (j.Status != model.VideoPollStatusPending && j.Status != model.VideoPollStatusPolling) || j.Attempts != claimAttempts {
+		return nil // lost race — benign no-op
 	}
 	j.Status = model.VideoPollStatusTimedOut
 	j.ErrorMessage = errMsg
@@ -148,6 +168,7 @@ func newTestVideoPollCtrl(store *mockVideoPollDB, providerURL string) *Ctrl {
 			PollInterval:       10 * time.Second,
 			MaxPollDuration:    20 * time.Minute,
 			MaxConcurrentPolls: 10,
+			PollRequestTimeout: 5 * time.Second,
 		},
 	}
 	c.Service.TargetSeparated = true // skip TEE signing paths in tests
@@ -280,6 +301,35 @@ func newPendingJob(id uint64, pollURL string) model.VideoPollJob {
 		Status:             model.VideoPollStatusPolling,
 		NextPollAt:         now,
 		ExpiresAt:          now.Add(20 * time.Minute),
+	}
+}
+
+// TestPollVideoJob_LostRaceOnComplete_IsBenignNotError is a regression test for the
+// fencing-token fix: a worker whose lease already expired and was reclaimed by someone else
+// (simulated here by the stored job's Attempts having advanced past the value this call still
+// carries) must not treat CompleteVideoPollJobWithBilling's resulting ErrVideoPollJobAlreadyResolved
+// as a hard failure, and must not have double-billed anything.
+func TestPollVideoJob_LostRaceOnComplete_IsBenignNotError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	job := newPendingJob(1, server.URL) // job.Attempts == 0: this call's stale claim
+	stored := job
+	stored.Attempts = 1 // the row has since been reclaimed by another worker
+	store.jobs[1] = &stored
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusPolling {
+		t.Fatalf("Status = %q, want unchanged polling (the stale completion must not have been able to write anything)", got.Status)
+	}
+	if store.lastCompleteOutputCount != 0 || store.lastCompleteFee != "" {
+		t.Errorf("billing was written despite the lost race: outputCount=%d fee=%q", store.lastCompleteOutputCount, store.lastCompleteFee)
 	}
 }
 

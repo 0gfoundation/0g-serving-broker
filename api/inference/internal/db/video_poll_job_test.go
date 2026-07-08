@@ -173,7 +173,7 @@ func TestRescheduleVideoPollJob(t *testing.T) {
 	}
 
 	next := now.Add(10 * time.Second)
-	if err := d.RescheduleVideoPollJob(created.ID, next); err != nil {
+	if err := d.RescheduleVideoPollJob(created.ID, 0, next); err != nil {
 		t.Fatalf("RescheduleVideoPollJob: %v", err)
 	}
 
@@ -205,12 +205,12 @@ func TestRescheduleVideoPollJob_DoesNotClobberAlreadyResolvedJob(t *testing.T) {
 	d.db.Where("request_hash = ?", "race-1").First(&created)
 
 	// Worker A completes the job first.
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, "race-1", "5000", "5000", 5); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-1", "5000", "5000", 5); err != nil {
 		t.Fatalf("CompleteVideoPollJobWithBilling: %v", err)
 	}
 
 	// Worker B's stale, late-arriving non-terminal response tries to reschedule the same job.
-	if err := d.RescheduleVideoPollJob(created.ID, now.Add(10*time.Second)); err != nil {
+	if err := d.RescheduleVideoPollJob(created.ID, 0, now.Add(10*time.Second)); err != nil {
 		t.Fatalf("RescheduleVideoPollJob (stale worker): %v", err)
 	}
 
@@ -239,12 +239,12 @@ func TestCompleteVideoPollJobWithBilling_SecondCallIsRejected(t *testing.T) {
 	var created model.VideoPollJob
 	d.db.Where("request_hash = ?", "race-2").First(&created)
 
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, "race-2", "5000", "5000", 5); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-2", "5000", "5000", 5); err != nil {
 		t.Fatalf("first CompleteVideoPollJobWithBilling: %v", err)
 	}
 
 	// Second worker's duplicate completion, with a DIFFERENT (wrong) fee — must be rejected.
-	err := d.CompleteVideoPollJobWithBilling(created.ID, "race-2", "9999", "9999", 99)
+	err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-2", "9999", "9999", 99)
 	if !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
 		t.Fatalf("second CompleteVideoPollJobWithBilling error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
@@ -255,6 +255,70 @@ func TestCompleteVideoPollJobWithBilling_SecondCallIsRejected(t *testing.T) {
 	}
 	if gotReq.Fee != "5000" || gotReq.OutputCount != 5 {
 		t.Errorf("request fee/count = (%s, %d), want (5000, 5) — the second call's wrong values must not have overwritten the first", gotReq.Fee, gotReq.OutputCount)
+	}
+}
+
+// TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling is a regression test for
+// the gap a status-only guard cannot close: a stale worker's write can land while the row's
+// status STILL reads 'polling' (because a later worker has since reclaimed it — reclaiming
+// does not change status, only bumps Attempts and pushes NextPollAt out — see
+// ClaimDueVideoPollJobs). Only fencing on the Attempts value observed at claim time (not
+// status alone) can tell "my claim" from "a newer claim that happens to read the same status".
+func TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "fence-1")
+
+	now := time.Now()
+	// Worker A claims this job (simulated directly: status=polling, attempts=1, as if
+	// ClaimDueVideoPollJobs had already run once).
+	job := newVideoPollJob("fence-1", model.VideoPollStatusPolling, now.Add(-time.Minute), now.Add(20*time.Minute))
+	job.Attempts = 1
+	if err := d.CreateVideoPollJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	d.db.Where("request_hash = ?", "fence-1").First(&created)
+	staleAttempts := created.Attempts // what worker A believes it holds: 1
+
+	// Worker A's lease expires; ClaimDueVideoPollJobs reclaims the row for worker B. Status
+	// stays 'polling' (unchanged by a reclaim), but Attempts advances to 2 and NextPollAt is
+	// pushed out — this is the exact state a status-only guard cannot distinguish from "still
+	// worker A's own claim".
+	claimed, err := d.ClaimDueVideoPollJobs(10, 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimDueVideoPollJobs (worker B reclaim): %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].Attempts != 2 {
+		t.Fatalf("expected the reclaim to bump attempts to 2, got claimed=%+v", claimed)
+	}
+
+	// Worker A's stale, late-arriving response now tries to fail the job using the Attempts
+	// value it originally observed (1) — must be rejected even though status still says
+	// 'polling' at this exact moment (worker B hasn't written yet).
+	if err := d.FailVideoPollJob(created.ID, staleAttempts, "worker A: provider reported status=failed"); err != nil {
+		t.Fatalf("FailVideoPollJob (stale worker A): %v", err)
+	}
+
+	got, err := d.GetVideoPollJob(created.ID)
+	if err != nil {
+		t.Fatalf("GetVideoPollJob: %v", err)
+	}
+	if got.Status != model.VideoPollStatusPolling {
+		t.Errorf("Status = %q, want unchanged polling — worker A's stale Fail (attempts=%d) must not win against the current claim (attempts=%d)",
+			got.Status, staleAttempts, got.Attempts)
+	}
+	if got.ErrorMessage != "" {
+		t.Errorf("ErrorMessage = %q, want empty — worker A's stale write must not have landed at all", got.ErrorMessage)
+	}
+
+	// Worker B, using the CURRENT Attempts value, now legitimately completes the job.
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 2, "fence-1", "5000", "5000", 5); err != nil {
+		t.Fatalf("CompleteVideoPollJobWithBilling (worker B, correct attempts): %v", err)
+	}
+	gotFinal, _ := d.GetVideoPollJob(created.ID)
+	if gotFinal.Status != model.VideoPollStatusCompleted {
+		t.Errorf("Status = %q, want completed (worker B's write, with the correct current attempts, must succeed)", gotFinal.Status)
 	}
 }
 
@@ -273,7 +337,7 @@ func TestCompleteVideoPollJobWithBilling_UpdatesJobAndRequest(t *testing.T) {
 		t.Fatalf("fetch created job: %v", err)
 	}
 
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, "complete-1", "8000", "8000", 8); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "complete-1", "8000", "8000", 8); err != nil {
 		t.Fatalf("CompleteVideoPollJobWithBilling: %v", err)
 	}
 
@@ -314,10 +378,10 @@ func TestFailAndTimeOutVideoPollJob(t *testing.T) {
 	d.db.Where("request_hash = ?", "fail-1").First(&f)
 	d.db.Where("request_hash = ?", "timeout-1").First(&to)
 
-	if err := d.FailVideoPollJob(f.ID, "provider reported status=failed"); err != nil {
+	if err := d.FailVideoPollJob(f.ID, 0, "provider reported status=failed"); err != nil {
 		t.Fatalf("FailVideoPollJob: %v", err)
 	}
-	if err := d.TimeOutVideoPollJob(to.ID, "exceeded MaxPollDuration"); err != nil {
+	if err := d.TimeOutVideoPollJob(to.ID, 0, "exceeded MaxPollDuration"); err != nil {
 		t.Fatalf("TimeOutVideoPollJob: %v", err)
 	}
 

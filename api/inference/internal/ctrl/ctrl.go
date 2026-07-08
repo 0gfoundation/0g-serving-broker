@@ -41,10 +41,14 @@ type asyncDB interface {
 type videoPollDB interface {
 	CreateVideoPollJob(job model.VideoPollJob) error
 	ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]model.VideoPollJob, error)
-	RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error
-	CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, fee string, outputCount int64) error
-	FailVideoPollJob(id uint64, errMsg string) error
-	TimeOutVideoPollJob(id uint64, errMsg string) error
+	// claimAttempts fences every write below against a stale worker whose lease already
+	// expired and was reclaimed by someone else: it must be the Attempts value observed on
+	// the specific claim this caller is acting on (i.e. what ClaimDueVideoPollJobs returned),
+	// not a value re-read from the row. See db.RescheduleVideoPollJob's doc comment.
+	RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt time.Time) error
+	CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error
+	FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
+	TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 	DeleteExpiredVideoPollJobs(retention time.Duration) error
 }
 

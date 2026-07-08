@@ -426,25 +426,20 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		monitor.RecordVideoBillingSkipped()
 		return nil
 	}
-	// pollInterval/maxPollDuration fall back to these constants (matching the config
-	// package's own documented defaults) when the scheduler was never initialized —
-	// c.videoPollCfg is then still its Go zero value, and using it directly for
-	// NextPollAt/ExpiresAt would set both to `now`, marking the job pre-expired the instant
-	// an operator enables the scheduler later and defeating the "best-effort registration"
-	// this branch claims to provide.
-	pollInterval := c.videoPollCfg.PollInterval
-	maxPollDuration := c.videoPollCfg.MaxPollDuration
 	if !c.videoPollEnabled.Load() {
 		// Still register the job (best-effort, in case the scheduler is enabled later) but
 		// make the operator misconfiguration loud rather than silently never billing.
 		c.logger.Errorf("video generation for request %s is non-terminal but the VideoPoll scheduler is disabled (videoPoll.enabled=false); this request will never be billed until it is enabled", reqModel.RequestHash)
-		if pollInterval <= 0 {
-			pollInterval = defaultVideoPollInterval
-		}
-		if maxPollDuration <= 0 {
-			maxPollDuration = defaultVideoPollMaxDuration
-		}
 	}
+	// c.videoPollCfg is always populated with real values (the operator's config, or
+	// config.Default()'s sane defaults) regardless of whether the scheduler is actually
+	// running — InitVideoPollScheduler is called unconditionally at startup and only gates
+	// STARTING GOROUTINES on cfg.Enabled, not on recording cfg. See its doc comment. So even
+	// in the disabled-scheduler case above, PollInterval/MaxPollDuration below are never the
+	// Go zero value and this job gets a sane NextPollAt/ExpiresAt window if an operator
+	// enables the scheduler later — no separate fallback constants needed.
+	pollInterval := c.videoPollCfg.PollInterval
+	maxPollDuration := c.videoPollCfg.MaxPollDuration
 
 	var resolvedModel string
 	if v, exists := ctx.Get(CtxKeyResolvedModel); exists {
@@ -476,15 +471,6 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 	}
 	return nil
 }
-
-// Fallback scheduling constants for deferVideoBillingToPoll when the poll scheduler was never
-// initialized (c.videoPollCfg is still its zero value). Mirror config.go's documented
-// VideoPollConfig defaults so a job registered while disabled gets a sane window if an
-// operator enables the scheduler afterward, instead of NextPollAt==ExpiresAt==now.
-const (
-	defaultVideoPollInterval    = 10 * time.Second
-	defaultVideoPollMaxDuration = 20 * time.Minute
-)
 
 // ensureMultipartWaitField ensures the "wait" field is present in a multipart/form-data body.
 // If missing, appends wait=false before the closing boundary.

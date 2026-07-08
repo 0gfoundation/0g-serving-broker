@@ -18,12 +18,26 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
-// InitVideoPollScheduler starts the background poll-to-completion scheduler for
-// video-generation jobs whose create response was non-terminal (queued/in_progress). It bills
-// the actual delivered duration once a terminal state is observed, instead of guessing from
-// the requested duration. See docs/design/video-generation-async-billing.md.
+// InitVideoPollScheduler records cfg and, if cfg.Enabled, starts the background
+// poll-to-completion scheduler for video-generation jobs whose create response was
+// non-terminal (queued/in_progress). It bills the actual delivered duration once a terminal
+// state is observed, instead of guessing from the requested duration. See
+// docs/design/video-generation-async-billing.md.
+//
+// c.videoPollCfg is set UNCONDITIONALLY, even when cfg.Enabled is false — callers should call
+// this once at startup regardless, passing whatever VideoPollConfig the operator configured
+// (config.Default() always populates it with sane values). This is deliberate: a video-gen
+// request accepted while the scheduler is disabled still needs real PollInterval/MaxPollDuration
+// values to schedule its VideoPollJob against (see deferVideoBillingToPoll in video.go) — using
+// the OPERATOR'S configured values here, rather than a hardcoded fallback duplicating config.go's
+// defaults, is both simpler and more correct (an operator who explicitly tuned these values while
+// temporarily disabling the scheduler gets their own values honored, not silently ignored).
 func (c *Ctrl) InitVideoPollScheduler(cfg config.VideoPollConfig) error {
 	c.videoPollCfg = cfg
+	if !cfg.Enabled {
+		return nil
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	c.videoPollCancel = cancel
 
@@ -126,7 +140,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			"the provider may have delivered a video the broker never billed for — this is a reconciliation gap, not routine",
 			job.ID, job.RequestHash, job.Attempts)
 		monitor.RecordVideoPollTimedOut()
-		if err := c.videoPollDB.TimeOutVideoPollJob(job.ID, "exceeded MaxPollDuration without reaching a terminal state"); err != nil {
+		if err := c.videoPollDB.TimeOutVideoPollJob(job.ID, job.Attempts, "exceeded MaxPollDuration without reaching a terminal state"); err != nil {
 			c.logger.Errorf("video poll job %d: mark timed_out: %v", job.ID, err)
 		}
 		return
@@ -144,7 +158,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	if fields.Status == videoStatusFailed {
 		c.logger.Infof("video poll job %d (request %s): provider reported failed", job.ID, job.RequestHash)
 		monitor.RecordVideoGenerationFailed()
-		if err := c.videoPollDB.FailVideoPollJob(job.ID, "provider reported status=failed"); err != nil {
+		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "provider reported status=failed"); err != nil {
 			c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
 		}
 		return
@@ -179,7 +193,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		c.logger.Errorf("video poll job %d (request %s): provider reported completed but no usable seconds in response or original request; NOT billing (free output)",
 			job.ID, job.RequestHash)
 		monitor.RecordVideoBillingSkipped()
-		if err := c.videoPollDB.FailVideoPollJob(job.ID, "completed with no resolvable duration"); err != nil {
+		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "completed with no resolvable duration"); err != nil {
 			c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
 		}
 		return
@@ -217,7 +231,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		}
 	}
 
-	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.RequestHash, outputFee.String(), outputFee.String(), outputCount); err != nil {
+	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.Attempts, job.RequestHash, outputFee.String(), outputFee.String(), outputCount); err != nil {
 		if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
 			// Benign: a stale-lease reclaim let another worker resolve this job first (see
 			// ClaimDueVideoPollJobs' crash-recovery semantics). The Request row was
@@ -241,7 +255,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 // interval" (bounded by ExpiresAt), not an immediate failure — a single blip should not lose a
 // job that would otherwise have billed correctly on the next attempt.
 func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool) {
-	pollCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	pollCtx, cancel := context.WithTimeout(context.Background(), c.videoPollCfg.PollRequestTimeout)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(pollCtx, http.MethodGet, job.PollURL, nil)
@@ -291,7 +305,7 @@ func truncateForLog(b []byte, max int) string {
 // PollInterval.
 func (c *Ctrl) rescheduleVideoPollJob(job model.VideoPollJob) {
 	next := time.Now().Add(c.videoPollCfg.PollInterval)
-	if err := c.videoPollDB.RescheduleVideoPollJob(job.ID, next); err != nil {
+	if err := c.videoPollDB.RescheduleVideoPollJob(job.ID, job.Attempts, next); err != nil {
 		c.logger.Errorf("video poll job %d: reschedule: %v", job.ID, err)
 	}
 }
