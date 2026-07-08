@@ -164,6 +164,40 @@ func TestBuildReconciliationReport_MultiUpstream(t *testing.T) {
 	}
 }
 
+// TestBuildReconciliationReport_RateClass verifies the cost dimension: two rows for the same
+// (model, unit) but different rate_class stay as separate per-model rows (so each tier can be
+// compared against a vendor's tiered statement line), while the unit total still sums across
+// tiers.
+func TestBuildReconciliationReport_RateClass(t *testing.T) {
+	rows := []db.HourlyUsageSum{
+		{Upstream: "minimax", Model: "MiniMax-M3", Unit: "tokens", RateClass: "tier:<=32000", ServiceType: "chatbot", RequestCount: 4, InputCount: 400, OutputCount: 80},
+		{Upstream: "minimax", Model: "MiniMax-M3", Unit: "tokens", RateClass: "tier:unbounded", ServiceType: "chatbot", RequestCount: 1, InputCount: 90000, OutputCount: 200},
+	}
+	rep := buildReconciliationReport("2026-06-29", "2026-06-29", "+08:00",
+		time.Now().UTC(), time.Now().UTC(), rows)
+
+	mm, ok := upstreamByName(rep, "minimax")
+	if !ok {
+		t.Fatal("missing minimax upstream")
+	}
+	// Unit total sums across both tiers.
+	tok := mm.TotalsByUnit["tokens"]
+	if tok == nil || tok.RequestCount != 5 || tok.InputCount != 90400 || tok.OutputCount != 280 {
+		t.Errorf("tokens totals = %+v, want req=5 in=90400 out=280 (summed across tiers)", tok)
+	}
+	// But the tiers remain separately visible for per-tier comparison.
+	if len(mm.PerModel) != 2 {
+		t.Fatalf("PerModel len = %d, want 2 (one row per rate_class)", len(mm.PerModel))
+	}
+	seen := map[string]int64{}
+	for _, m := range mm.PerModel {
+		seen[m.RateClass] = m.InputCount
+	}
+	if seen["tier:<=32000"] != 400 || seen["tier:unbounded"] != 90000 {
+		t.Errorf("per-tier input counts = %v, want tier:<=32000=400 tier:unbounded=90000", seen)
+	}
+}
+
 // TestBuildReconciliationReport_Empty verifies an empty rollup yields an empty (non-nil)
 // upstreams slice.
 func TestBuildReconciliationReport_Empty(t *testing.T) {

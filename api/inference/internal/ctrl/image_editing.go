@@ -266,7 +266,7 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 		metricModel := c.metricModel(ctx)
 		monitor.RecordTokens("image-editing", metricModel, 0, reqModel.OutputCount)
 		monitor.RecordWhitelistTokens("image-editing", metricModel, 0, reqModel.OutputCount)
-		c.recordWhitelistedUsage(reqModel, 0, reqModel.OutputCount, 0, 0)
+		c.recordWhitelistedUsage(reqModel, 0, reqModel.OutputCount, 0, 0, "")
 		return nil
 	}
 

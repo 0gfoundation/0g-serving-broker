@@ -93,10 +93,11 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 	// are preserved (no token-skip). All rows here are non-whitelisted; whitelisted
 	// traffic has no request row and is counted via DB.AccumulateHourlyUsage instead.
 	type hourlyKey struct {
-		hour     time.Time
-		upstream string
-		model    string
-		unit     string
+		hour      time.Time
+		upstream  string
+		model     string
+		unit      string
+		rateClass string
 	}
 	hourly := make(map[hourlyKey]*model.HourlyUsageStat)
 
@@ -117,10 +118,11 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 				hourlyModel = unknownModelLabel
 			}
 			hk := hourlyKey{
-				hour:     req.CreatedAt.UTC().Truncate(time.Hour),
-				upstream: req.Upstream,
-				model:    hourlyModel,
-				unit:     req.Unit,
+				hour:      req.CreatedAt.UTC().Truncate(time.Hour),
+				upstream:  req.Upstream,
+				model:     hourlyModel,
+				unit:      req.Unit,
+				rateClass: req.RateClass,
 			}
 			agg := hourly[hk]
 			if agg == nil {
@@ -129,6 +131,7 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 					Upstream:    hk.upstream,
 					Model:       hk.model,
 					Unit:        hk.unit,
+					RateClass:   hk.rateClass,
 					ServiceType: opts.ServiceType,
 				}
 				hourly[hk] = agg

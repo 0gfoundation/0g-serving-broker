@@ -70,12 +70,15 @@ func (d *DB) PruneHourlyUsageStat(retentionDays int) (int64, error) {
 }
 
 // HourlyUsageSum is one grouped row of the reconciliation query: usage for a single
-// (model, unit, service_type) over the requested UTC window and upstream, summed across
-// hours and whitelisted/non-whitelisted rows.
+// (model, unit, rate_class, service_type) over the requested UTC window and upstream, summed
+// across hours and whitelisted/non-whitelisted rows. RateClass is the price class within the
+// unit (chatbot tier, video resolution; "" when the request carries none), so a cost
+// reconciliation can line each class up against a vendor's tiered statement.
 type HourlyUsageSum struct {
 	Upstream              string `json:"upstream"`
 	Model                 string `json:"model"`
 	Unit                  string `json:"unit"`
+	RateClass             string `json:"rateClass"`
 	ServiceType           string `json:"serviceType"`
 	RequestCount          int64  `json:"requestCount"`
 	InputCount            int64  `json:"inputCount"`
@@ -84,15 +87,15 @@ type HourlyUsageSum struct {
 	CacheWriteInputTokens int64  `json:"cacheWriteInputTokens"`
 }
 
-// SumHourlyUsageByModel returns the per-(upstream, model, unit, service_type) usage totals
-// over the half-open UTC window [startUTC, endUTC). When upstream is non-empty, results are
+// SumHourlyUsageByModel returns the per-(upstream, model, unit, rate_class, service_type) usage
+// totals over the half-open UTC window [startUTC, endUTC). When upstream is non-empty, results are
 // filtered to that vendor; when empty, all upstreams are returned (the caller groups by
 // upstream). The caller supplies exact UTC hour boundaries derived from the statement's own
 // timezone and period, so a whole-hour-offset timezone's day is reconstructed exactly from
 // the hourly buckets. Whitelisted traffic is included (it is on the vendor statement).
 func (d *DB) SumHourlyUsageByModel(upstream string, startUTC, endUTC time.Time) ([]HourlyUsageSum, error) {
 	q := d.db.Model(&model.HourlyUsageStat{}).
-		Select("upstream, model, unit, service_type, "+
+		Select("upstream, model, unit, rate_class, service_type, "+
 			"COALESCE(SUM(request_count),0) as request_count, "+
 			"COALESCE(SUM(input_count),0) as input_count, "+
 			"COALESCE(SUM(output_count),0) as output_count, "+
@@ -103,8 +106,8 @@ func (d *DB) SumHourlyUsageByModel(upstream string, startUTC, endUTC time.Time) 
 		q = q.Where("upstream = ?", upstream)
 	}
 	var rows []HourlyUsageSum
-	err := q.Group("upstream, model, unit, service_type").
-		Order("upstream, model, unit").
+	err := q.Group("upstream, model, unit, rate_class, service_type").
+		Order("upstream, model, unit, rate_class").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to sum hourly usage: %w", err)

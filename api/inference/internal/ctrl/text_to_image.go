@@ -250,7 +250,7 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 		metricModel := c.metricModel(ctx)
 		monitor.RecordTokens("text-to-image", metricModel, 0, imageNum)
 		monitor.RecordWhitelistTokens("text-to-image", metricModel, 0, imageNum)
-		c.recordWhitelistedUsage(reqModel, 0, imageNum, 0, 0)
+		c.recordWhitelistedUsage(reqModel, 0, imageNum, 0, 0, "")
 		return nil
 	}
 
