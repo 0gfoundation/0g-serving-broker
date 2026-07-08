@@ -102,7 +102,6 @@ func (d *DB) UpdateOutputFee(requestHash, userAddress, outputFee, fee, unsettled
 			return err
 		}
 
-
 		return nil
 	})
 }
@@ -122,18 +121,23 @@ func (d *DB) UpdateRequestFeesAndCount(requestHash, outputFee, fee string, outpu
 }
 
 // UpdateRequestWithAccurateTokens updates the request with accurate token counts from LLM response
-// This replaces the estimated values with actual values provided by the LLM
-func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, totalFee string, inputCount, outputCount int64) error {
+// This replaces the estimated values with actual values provided by the LLM.
+// unit is the authoritative billing unit for the counts ("tokens"/"seconds"); cachedInputTokens
+// and cacheWriteInputTokens are the reconciliation cache sub-categories (0 when not applicable).
+func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, totalFee string, inputCount, outputCount int64, unit string, cachedInputTokens, cacheWriteInputTokens int64) error {
 	return d.db.
 		Where(&model.Request{
 			RequestHash: requestHash,
 		}).
 		Updates(&model.Request{
-			InputFee:    inputFee,
-			OutputFee:   outputFee,
-			Fee:         totalFee,
-			InputCount:  inputCount,
-			OutputCount: outputCount,
+			InputFee:              inputFee,
+			OutputFee:             outputFee,
+			Fee:                   totalFee,
+			InputCount:            inputCount,
+			OutputCount:           outputCount,
+			Unit:                  unit,
+			CachedInputTokens:     cachedInputTokens,
+			CacheWriteInputTokens: cacheWriteInputTokens,
 		}).Error
 }
 
@@ -190,7 +194,7 @@ func (d *DB) UpdateRequestsSkipUntil(requestHashes []string, skipUntil *time.Tim
 	if len(requestHashes) == 0 {
 		return nil
 	}
-	
+
 	return d.db.Model(&model.Request{}).
 		Where("request_hash IN ?", requestHashes).
 		Update("skip_until", skipUntil).Error
@@ -222,6 +226,6 @@ func (d *DB) DeleteRequestsByHashes(requestHashes []string) error {
 	if len(requestHashes) == 0 {
 		return nil
 	}
-	
+
 	return d.db.Where("request_hash IN ?", requestHashes).Delete(&model.Request{}).Error
 }

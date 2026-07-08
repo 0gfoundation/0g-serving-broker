@@ -667,6 +667,19 @@ type UserUsageStatsConfig struct {
 	PruneInterval time.Duration `yaml:"pruneInterval"`
 }
 
+// ReconciliationConfig bounds the growth of the hourly_usage_stat rollup that backs
+// broker↔provider reconciliation. Unlike user_daily_stat, the rollup is always written
+// (the settlement path and whitelist path populate it unconditionally), so the pruner
+// always runs; there is no enable flag. See docs/design/provider-reconciliation.md.
+type ReconciliationConfig struct {
+	// RetentionDays is how long to keep hourly rows. Reconciliation only needs to reach
+	// back to the most recent vendor statement period, so a modest window suffices.
+	// Unset (0) defaults to 90; set a negative value to disable pruning (keep forever).
+	RetentionDays int `yaml:"retentionDays"`
+	// PruneInterval is how often the pruner runs. Defaults to 24h.
+	PruneInterval time.Duration `yaml:"pruneInterval"`
+}
+
 // LoRAConfig configures LoRA adapter serving for fine-tuned models.
 // When enabled, the inference broker can serve fine-tuned LoRA adapters
 // via ServerlessLLM, with per-user access control and automatic adapter
@@ -777,6 +790,7 @@ type Config struct {
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
+	Reconciliation      ReconciliationConfig    `yaml:"reconciliation"`
 	// AllowTokenBilledSpeechToText opens the billing path for token-billed
 	// speech-to-text models (gpt-4o-transcribe, gpt-4o-mini-transcribe).
 	// Defaults to false.
@@ -1609,6 +1623,16 @@ func loadConfig(cfg *Config) error {
 		if cfg.UserUsageStats.PruneInterval == 0 {
 			cfg.UserUsageStats.PruneInterval = 24 * time.Hour
 		}
+	}
+
+	// Reconciliation hourly-rollup retention defaults. The rollup is always written, so
+	// default to a bounded 90-day retention pruned daily. Unset (0) → 90; a negative
+	// value disables pruning (keep forever) via the RetentionDays > 0 gate in main.
+	if cfg.Reconciliation.RetentionDays == 0 {
+		cfg.Reconciliation.RetentionDays = 90
+	}
+	if cfg.Reconciliation.PruneInterval == 0 {
+		cfg.Reconciliation.PruneInterval = 24 * time.Hour
 	}
 
 	return nil

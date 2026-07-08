@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -86,6 +87,19 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 		perWallet = make(map[userModelKey]*userModelAgg)
 	}
 
+	// Hourly rollup for reconciliation, keyed by the request's created_at hour (UTC) —
+	// NOT the settlement day daily_stat uses. Unlike daily_stat this keeps raw
+	// input/output counts with the per-request unit, so STT seconds and image counts
+	// are preserved (no token-skip). All rows here are non-whitelisted; whitelisted
+	// traffic has no request row and is counted via DB.AccumulateHourlyUsage instead.
+	type hourlyKey struct {
+		hour     time.Time
+		upstream string
+		model    string
+		unit     string
+	}
+	hourly := make(map[hourlyKey]*model.HourlyUsageStat)
+
 	for _, req := range requests {
 		totalRequests++
 		if !skipTokenAccumulation {
@@ -93,6 +107,38 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 			outputTokens += req.OutputCount
 		}
 		hashes = append(hashes, req.RequestHash)
+
+		if req.CreatedAt != nil {
+			hourlyModel := req.ModelName
+			if hourlyModel == "" {
+				hourlyModel = opts.FallbackModel
+			}
+			if hourlyModel == "" {
+				hourlyModel = unknownModelLabel
+			}
+			hk := hourlyKey{
+				hour:     req.CreatedAt.UTC().Truncate(time.Hour),
+				upstream: req.Upstream,
+				model:    hourlyModel,
+				unit:     req.Unit,
+			}
+			agg := hourly[hk]
+			if agg == nil {
+				agg = &model.HourlyUsageStat{
+					Hour:        hk.hour,
+					Upstream:    hk.upstream,
+					Model:       hk.model,
+					Unit:        hk.unit,
+					ServiceType: opts.ServiceType,
+				}
+				hourly[hk] = agg
+			}
+			agg.RequestCount++
+			agg.InputCount += req.InputCount
+			agg.OutputCount += req.OutputCount
+			agg.CachedInputTokens += req.CachedInputTokens
+			agg.CacheWriteInputTokens += req.CacheWriteInputTokens
+		}
 
 		if opts.RecordPerWallet {
 			modelName := req.ModelName
@@ -165,6 +211,16 @@ func (d *DB) AccumulateAndDeleteRequests(requests []*model.Request, opts Accumul
 			   output_tokens = user_daily_stat.output_tokens + new_vals.output_tokens`)
 			if err := tx.Exec(b.String(), args...).Error; err != nil {
 				return fmt.Errorf("failed to accumulate user daily stats: %w", err)
+			}
+		}
+
+		if len(hourly) > 0 {
+			rows := make([]model.HourlyUsageStat, 0, len(hourly))
+			for _, agg := range hourly {
+				rows = append(rows, *agg)
+			}
+			if err := upsertHourlyUsage(tx, rows); err != nil {
+				return err
 			}
 		}
 

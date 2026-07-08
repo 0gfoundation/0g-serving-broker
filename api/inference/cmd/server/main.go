@@ -298,6 +298,42 @@ func Main() {
 		logger.Infof("user_daily_stat retention pruner started: %d-day retention, every %s", retentionDays, interval)
 	}
 
+	// Retention pruner for the reconciliation hourly rollup (hourly_usage_stat). Unlike
+	// the per-wallet stats above it has no enable flag — the rollup is always written —
+	// so the pruner runs whenever a positive retention is configured (default 90 days).
+	// A negative RetentionDays disables it (keep forever).
+	var reconcilePruneCancel context.CancelFunc
+	if config.Reconciliation.RetentionDays > 0 {
+		retentionDays := config.Reconciliation.RetentionDays
+		interval := config.Reconciliation.PruneInterval
+		var pruneCtx context.Context
+		pruneCtx, reconcilePruneCancel = context.WithCancel(ctx)
+		go func() {
+			prune := func() {
+				removed, err := db.PruneHourlyUsageStat(retentionDays)
+				if err != nil {
+					logger.Errorf("hourly_usage_stat prune failed: %v", err)
+					return
+				}
+				if removed > 0 {
+					logger.Infof("hourly_usage_stat prune: removed %d rows older than %d days", removed, retentionDays)
+				}
+			}
+			prune() // run once at startup
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pruneCtx.Done():
+					return
+				case <-ticker.C:
+					prune()
+				}
+			}
+		}()
+		logger.Infof("hourly_usage_stat retention pruner started: %d-day retention, every %s", retentionDays, interval)
+	}
+
 	proxy := proxy.New(ctrl, engine, config.AllowOrigins, config.Monitor.Enable, config.ConcurrencyLimit, logger)
 	if err := proxy.Start(); err != nil {
 		panic(err)
@@ -358,6 +394,11 @@ func Main() {
 	// Stop the per-wallet usage retention pruner
 	if pruneCancel != nil {
 		pruneCancel()
+	}
+
+	// Stop the reconciliation hourly-rollup retention pruner
+	if reconcilePruneCancel != nil {
+		reconcilePruneCancel()
 	}
 
 	// Shutdown LoRA event watcher and manager

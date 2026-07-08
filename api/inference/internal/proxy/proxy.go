@@ -693,7 +693,21 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			IsWhitelisted: true,
 			Nonce:         uuid.New().String(),
 			ServiceName:   svcType,
+			// Stamp reconciliation dimensions so whitelisted traffic (which is never
+			// persisted or settled) can still be counted into the hourly rollup.
+			Upstream: p.ctrl.Service.ProviderIdentity,
+			Unit:     constant.DefaultBillingUnitForService(svcType),
 		}
+		if whitelistReq.Upstream == "" {
+			whitelistReq.Upstream = constant.UpstreamSelf
+		}
+		// Stamp the receive time so the reconciliation rollup buckets whitelisted traffic
+		// by request-start hour (matching billable rows' created_at), not by response
+		// completion — otherwise a slow request crossing an hour boundary would land in a
+		// different hour on the whitelisted vs billed path. The row is never persisted, so
+		// this only feeds recordWhitelistedUsage's bucketing.
+		receivedAt := time.Now()
+		whitelistReq.CreatedAt = &receivedAt
 		whitelistReq.RequestHash = whitelistReq.Nonce
 		whitelistReq.ModelName = modelName
 
@@ -765,6 +779,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	req.Nonce = uuid.New().String()
 	req.RequestHash = req.Nonce
 	req.ServiceName = svcType
+	// Reconciliation dimensions (see docs/design/provider-reconciliation.md).
+	// Upstream is the billing counterparty that served this request; for a single
+	// centralized upstream it is providerIdentity, and "self" for decentralized.
+	// Unit is the default billing unit for the service type; the STT token-billed
+	// path corrects it to tokens where counts are finalized.
+	req.Upstream = p.ctrl.Service.ProviderIdentity
+	if req.Upstream == "" {
+		req.Upstream = constant.UpstreamSelf
+	}
+	req.Unit = constant.DefaultBillingUnitForService(svcType)
 	req.ModelName = ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type"))
 	if req.ModelName == "" {
 		req.ModelName = p.ctrl.Service.ModelType

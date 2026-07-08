@@ -24,6 +24,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -411,6 +412,25 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	}
 
+	// Whitelisted traffic bypasses billing/settlement (so it never enters the hourly
+	// rollup via settlement) but still hits the upstream; count it for reconciliation.
+	if reqModel.IsWhitelisted {
+		// Always record the request, even when the upstream response carried no parseable
+		// usage (malformed/partial): the request still hit the upstream, and whitelisted
+		// traffic has no other capture (no request row), so dropping it would make it
+		// permanently invisible to reconciliation — the exact leak this is meant to catch.
+		// Unknown token counts are recorded as 0 (RequestCount still 1).
+		var input, output, cached, cacheWrite int64
+		if usage != nil {
+			input, output = int64(usage.PromptTokens), int64(usage.CompletionTokens)
+			if usage.PromptTokensDetails != nil {
+				cached = int64(usage.PromptTokensDetails.CachedTokens)
+			}
+			cacheWrite = int64(usage.CacheWriteTokens + usage.CacheWrite1hTokens)
+		}
+		c.recordWhitelistedUsage(reqModel, input, output, cached, cacheWrite)
+	}
+
 	if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
 		var tlsState *tls.ConnectionState
@@ -731,9 +751,23 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 		return errors.Wrap(err, "Error calculating total fee")
 	}
 
+	// Reconciliation sub-categories: record the reported cache read/write token counts
+	// regardless of whether cache billing discounts them, so reconciliation can align
+	// token definitions and the cost dimension against vendor statements. Cache-write is
+	// the sum of both TTL tiers (5-minute + 1-hour); see Usage.CacheWriteTokens.
+	reportedCached := 0
+	if usage.PromptTokensDetails != nil {
+		reportedCached = usage.PromptTokensDetails.CachedTokens
+		if reportedCached > usage.PromptTokens {
+			reportedCached = usage.PromptTokens
+		}
+	}
+	reportedCacheWrite := usage.CacheWriteTokens + usage.CacheWrite1hTokens
+
 	// Update the request with accurate token counts and fees
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(),
-		int64(usage.PromptTokens), int64(usage.CompletionTokens)); err != nil {
+		int64(usage.PromptTokens), int64(usage.CompletionTokens),
+		constant.BillingUnitTokens, int64(reportedCached), int64(reportedCacheWrite)); err != nil {
 		return errors.Wrap(err, "Error updating request with accurate tokens")
 	}
 

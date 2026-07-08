@@ -22,6 +22,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -358,9 +359,11 @@ func (c *Ctrl) handleNonStreamingSpeechToText(ctx *gin.Context, resp *http.Respo
 		_ = c.signChatWithKey(reqBody, body, chatKey)
 	}
 
-	// Skip billing for whitelisted users, but record whitelist traffic metrics
+	// Skip billing for whitelisted users, but record whitelist traffic metrics and
+	// count the usage into the reconciliation rollup (it hit the upstream).
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(transcriptionResp.Usage, c.metricModel(ctx))
+		c.recordWhitelistedSTT(reqModel, transcriptionResp.Usage)
 		return nil
 	}
 
@@ -514,9 +517,11 @@ func (c *Ctrl) handleStreamingSpeechToText(ctx *gin.Context, resp *http.Response
 		}
 	}
 
-	// Skip billing for whitelisted users, but record whitelist traffic metrics
+	// Skip billing for whitelisted users, but record whitelist traffic metrics and
+	// count the usage into the reconciliation rollup (it hit the upstream).
 	if reqModel.IsWhitelisted {
 		recordWhitelistUsageMetrics(usage, c.metricModel(ctx))
+		c.recordWhitelistedSTT(reqModel, usage)
 		return nil
 	}
 
@@ -583,11 +588,10 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 		return errors.Wrap(err, "calculate duration fee")
 	}
 
-	// Persist seconds in input_count and 0 in output_count. There is no
-	// per-row unit discriminator; operators identify duration-billed rows
-	// by the service the row belongs to (whisper services bill seconds).
+	// Persist seconds in input_count and 0 in output_count, tagged with the seconds
+	// unit so reconciliation interprets the count correctly (whisper bills by seconds).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
-		int64(seconds), 0); err != nil {
+		int64(seconds), 0, constant.BillingUnitSeconds, 0, 0); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
@@ -665,8 +669,10 @@ func (c *Ctrl) billSpeechToTextByTokensCore(ctx context.Context, usage *SpeechTo
 		return err
 	}
 
+	// gpt-4o-transcribe bills by tokens, so tag this row's unit as tokens (overriding
+	// the seconds default stamped at request creation for the STT service type).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFeeStr, outputFeeStr, totalFeeStr,
-		int64(usage.InputTokens), int64(usage.OutputTokens)); err != nil {
+		int64(usage.InputTokens), int64(usage.OutputTokens), constant.BillingUnitTokens, 0, 0); err != nil {
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 
@@ -770,6 +776,24 @@ func classifyUsageForMetrics(u *SpeechToTextUsage) (seconds, inputTokens, output
 		return int64(billableSeconds(u)), 0, 0
 	}
 	return 0, int64(u.InputTokens), int64(u.OutputTokens)
+}
+
+// recordWhitelistedSTT counts a whitelisted speech-to-text request into the hourly
+// reconciliation rollup. It tags the unit explicitly (seconds for whisper, tokens for
+// gpt-4o-transcribe) because the billing path that normally corrects the unit is skipped
+// for whitelisted traffic.
+func (c *Ctrl) recordWhitelistedSTT(reqModel model.Request, usage *SpeechToTextUsage) {
+	seconds, inputTokens, outputTokens := classifyUsageForMetrics(usage)
+	// Token-shaped usage → tokens unit; otherwise keep the seconds default (also used when
+	// no usage was parseable). Always record: the request hit the upstream, and dropping a
+	// zero/unparseable one would make it permanently invisible to reconciliation.
+	if inputTokens > 0 || outputTokens > 0 {
+		reqModel.Unit = constant.BillingUnitTokens
+		c.recordWhitelistedUsage(reqModel, inputTokens, outputTokens, 0, 0)
+		return
+	}
+	reqModel.Unit = constant.BillingUnitSeconds
+	c.recordWhitelistedUsage(reqModel, seconds, 0, 0, 0)
 }
 
 // recordWhitelistUsageMetrics writes a usage object into both the general and
