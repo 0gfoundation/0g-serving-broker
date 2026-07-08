@@ -192,11 +192,14 @@ type sdkResult struct {
 	ErrType  string                 `json:"errorType"`
 }
 
-// nodeScenarioTimeout bounds the Node subprocess. It is kept comfortably
-// above run.js's own per-request SDK timeout (30s) so a genuine SDK-side
-// timeout always wins the race and produces a parseable JSON result line,
-// rather than this deadline firing first and SIGKILLing the process mid-write.
-const nodeScenarioTimeout = 45 * time.Second
+// nodeScenarioTimeout bounds the Node subprocess. Most scenarios make one SDK
+// request (30s timeout each, see run.js), but "ratelimit" makes two
+// sequential requests, each with its own independent 30s budget — so the
+// worst case is ~60s, not 30s. This is kept comfortably above that worst case
+// so a genuine SDK-side timeout always wins the race and produces a
+// parseable JSON result line, rather than this deadline firing first and
+// SIGKILLing the process mid-write.
+const nodeScenarioTimeout = 75 * time.Second
 
 // runNodeSDKScenario execs the real openai npm SDK (as a Node subprocess)
 // against baseURL for the given scenario, asserting only that the client
