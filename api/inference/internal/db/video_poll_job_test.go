@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -484,5 +486,86 @@ func TestDeleteExpiredVideoPollJobs_OnlyTerminalPastRetention(t *testing.T) {
 	}
 	if !remainingHashes["still-pending"] {
 		t.Errorf("still-pending should NEVER be deleted by this sweep regardless of age")
+	}
+}
+
+// backdateRequestCreatedAt pushes a Request row's created_at into the past — gorm sets it on
+// create, so this must go through a direct UpdateColumn like the VideoPollJob backdating helper
+// above.
+func backdateRequestCreatedAt(t *testing.T, d *DB, requestHash string, createdAt time.Time) {
+	t.Helper()
+	if err := d.db.Model(&model.Request{}).
+		Where("request_hash = ?", requestHash).
+		UpdateColumn("created_at", createdAt).Error; err != nil {
+		t.Fatalf("backdate request %s: %v", requestHash, err)
+	}
+}
+
+// TestPruneRequest_ExcludesActiveVideoPollJobRequest is a regression test for the race the
+// RowsAffected check on CompleteVideoPollJobWithBilling can only detect, not prevent: a
+// zero-output Request row old enough to prune must NOT be deleted while its linked
+// VideoPollJob is still pending/polling — e.g. broker downtime made the row look old enough to
+// prune before the scanner ever got a chance to reclaim and resolve the stale job on restart.
+func TestPruneRequest_ExcludesActiveVideoPollJobRequest(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "still-polling")
+
+	now := time.Now()
+	backdateRequestCreatedAt(t, d, "still-polling", now.Add(-2*time.Hour))
+	if err := d.CreateVideoPollJob(newVideoPollJob("still-polling", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	if err := d.PruneRequest(1 * time.Hour); err != nil {
+		t.Fatalf("PruneRequest: %v", err)
+	}
+
+	if _, err := d.GetRequest("still-polling"); err != nil {
+		t.Fatalf("GetRequest: request with an active video poll job must survive PruneRequest, got: %v", err)
+	}
+}
+
+// TestPruneRequest_DeletesUnrelatedOldZeroOutputRequest is the sibling happy-path check: a plain
+// old zero-output request with no video_poll_job at all is pruned exactly as before — the new
+// exclusion must not accidentally protect everything.
+func TestPruneRequest_DeletesUnrelatedOldZeroOutputRequest(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "plain-old")
+
+	backdateRequestCreatedAt(t, d, "plain-old", time.Now().Add(-2*time.Hour))
+
+	if err := d.PruneRequest(1 * time.Hour); err != nil {
+		t.Fatalf("PruneRequest: %v", err)
+	}
+
+	if _, err := d.GetRequest("plain-old"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("GetRequest error = %v, want gorm.ErrRecordNotFound (should have been pruned)", err)
+	}
+}
+
+// TestPruneRequest_DeletesRequestWithTerminalVideoPollJob confirms the exclusion is scoped to
+// non-terminal jobs only: once a VideoPollJob has resolved to completed/failed/timed_out, its
+// Request row is eligible for pruning like any other old zero-output row (a completed job's
+// Request row won't actually be zero-output — this covers failed/timed_out, whose rows are
+// deliberately left at zero-output forever per FailVideoPollJob/TimeOutVideoPollJob).
+func TestPruneRequest_DeletesRequestWithTerminalVideoPollJob(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "long-failed")
+
+	now := time.Now()
+	backdateRequestCreatedAt(t, d, "long-failed", now.Add(-2*time.Hour))
+	if err := d.CreateVideoPollJob(newVideoPollJob("long-failed", model.VideoPollStatusFailed, now, now.Add(20*time.Minute))); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	if err := d.PruneRequest(1 * time.Hour); err != nil {
+		t.Fatalf("PruneRequest: %v", err)
+	}
+
+	if _, err := d.GetRequest("long-failed"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("GetRequest error = %v, want gorm.ErrRecordNotFound (a failed job's row must still be prunable)", err)
 	}
 }
