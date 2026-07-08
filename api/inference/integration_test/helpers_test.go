@@ -240,7 +240,7 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 
-	p := proxy.New(c, engine, []string{"*"}, false, config.ConcurrencyLimitConfig{}, logger)
+	p := proxy.New(c, engine, []string{"*"}, false, cfg.ConcurrencyLimit, logger)
 	if err := p.Start(); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
