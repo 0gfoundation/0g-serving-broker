@@ -6,10 +6,17 @@ name: OpenAI SDK Contract Test
 # (SSE framing, response/error JSON shape, header casing). Deliberately kept
 # out of the default push/pull_request CI (see ci.yml) since it is not on the
 # hot path for every PR — run on demand or nightly instead.
+#
+# TEMPORARY: this suite has never run in real CI (needs Docker for a MySQL
+# testcontainer, unavailable in the sandbox it was developed in), so `push`
+# on main is enabled here to get one real signal right after this PR merges.
+# Revert to schedule-only once that run is confirmed green — see PR #584.
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: '0 3 * * *'
+  push:
+    branches: [main]
+  # schedule:
+  #   - cron: '0 3 * * *'
 
 permissions:
   contents: read
