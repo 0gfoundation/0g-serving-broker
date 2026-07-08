@@ -4,19 +4,13 @@ name: OpenAI SDK Contract Test
 # SDK (over a real TCP socket) against a mocked OpenAI-shaped upstream, to
 # catch wire-level incompatibilities the Go-only integration suite cannot see
 # (SSE framing, response/error JSON shape, header casing). Deliberately kept
-# out of the default push/pull_request CI (see ci.yml) since it is not on the
-# hot path for every PR — run on demand or nightly instead.
-#
-# TEMPORARY: this suite has never run in real CI (needs Docker for a MySQL
-# testcontainer, unavailable in the sandbox it was developed in), so `push`
-# on main is enabled here to get one real signal right after this PR merges.
-# Revert to schedule-only once that run is confirmed green — see PR #584.
+# out of the default pull_request CI (see ci.yml) so it never blocks/slows a
+# PR review — but at well under a minute end to end, it's cheap enough to run
+# right after every merge to main instead of waiting for a nightly cron.
 on:
   workflow_dispatch: {}
   push:
     branches: [main]
-  # schedule:
-  #   - cron: '0 3 * * *'
 
 permissions:
   contents: read
