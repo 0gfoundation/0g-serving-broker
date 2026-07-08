@@ -18,6 +18,25 @@
 
 const OpenAI = require("openai");
 
+// expectError runs makeRequest(), expecting it to throw, and captures the
+// SDK-visible error shape. extraFields optionally derives additional fields
+// (e.g. an `instanceof` check) from the caught error. Standalone (not a
+// `scenarios` method) because main() calls scenario functions detached from
+// their object (`const fn = scenarios[scenario]; ... await fn()`), so a
+// `this.expectError()` call from within a scenario would not resolve.
+async function expectError(makeRequest, extraFields) {
+  try {
+    await makeRequest();
+  } catch (err) {
+    return {
+      errorType: err.constructor.name,
+      status: err.status,
+      ...(extraFields ? extraFields(err) : {}),
+    };
+  }
+  throw new Error("expected request to fail, but it succeeded");
+}
+
 async function main() {
   const scenario = process.env.SCENARIO;
   const baseURL = process.env.BASE_URL;
@@ -126,34 +145,33 @@ async function main() {
     },
 
     async unauthorized() {
-      try {
-        await client.chat.completions.create(
-          { model, messages: [{ role: "user", content: "Hi" }] },
-          { timeout, headers: { Authorization: "Bearer app-sk-invalidtoken" } },
-        );
-      } catch (err) {
-        return {
-          errorType: err.constructor.name,
-          status: err.status,
-          isAuthError: err instanceof OpenAI.AuthenticationError,
-        };
-      }
-      throw new Error("expected request with invalid auth to fail");
+      return expectError(
+        () =>
+          client.chat.completions.create(
+            { model, messages: [{ role: "user", content: "Hi" }] },
+            { timeout, headers: { Authorization: "Bearer app-sk-invalidtoken" } },
+          ),
+        (err) => ({ isAuthError: err instanceof OpenAI.AuthenticationError }),
+      );
     },
 
     async badrequest() {
-      try {
-        // messages must be an array; this violates the OpenAI request schema
-        // before the broker ever reaches the upstream.
-        await client.chat.completions.create({ model, messages: "not-an-array" }, authedOpts);
-      } catch (err) {
-        return {
-          errorType: err.constructor.name,
-          status: err.status,
-          isBadRequest: err instanceof OpenAI.BadRequestError,
-        };
-      }
-      throw new Error("expected malformed request to fail");
+      // A model that does not match the broker's configured model (or any of
+      // its aliases) is rejected by ctrl.EnforceConfiguredModel before the
+      // upstream is ever called — the same rejection TestChatbot_
+      // ModelEnforcement exercises in the Go-only integration suite. (A
+      // structurally-invalid field like messages:"not-an-array" is NOT
+      // rejected: the broker's translation pipeline decodes bodies into a
+      // generic map and never type-checks `messages`, so it would just
+      // forward untouched and get a normal 200 back.)
+      return expectError(
+        () =>
+          client.chat.completions.create(
+            { model: `${model}-does-not-exist`, messages: [{ role: "user", content: "Hi" }] },
+            authedOpts,
+          ),
+        (err) => ({ isBadRequest: err instanceof OpenAI.BadRequestError }),
+      );
     },
 
     async ratelimit() {
@@ -161,29 +179,10 @@ async function main() {
       // scenario's env, so the first call consumes the only token and the
       // second is rejected.
       await client.chat.completions.create({ model, messages: [{ role: "user", content: "Hi" }] }, authedOpts);
-      try {
-        await client.chat.completions.create({ model, messages: [{ role: "user", content: "Hi" }] }, authedOpts);
-      } catch (err) {
-        return {
-          errorType: err.constructor.name,
-          status: err.status,
-          isRateLimit: err instanceof OpenAI.RateLimitError,
-        };
-      }
-      throw new Error("expected second rapid request to be rate-limited");
-    },
-
-    async insufficientbalance() {
-      try {
-        await client.chat.completions.create({ model, messages: [{ role: "user", content: "Hi" }] }, authedOpts);
-      } catch (err) {
-        // No dedicated 402 mapping exists in the broker today (see issue
-        // #577 findings) — this scenario records the actual SDK-visible
-        // status/type rather than asserting a specific one, so the contract
-        // test documents current behavior instead of silently masking it.
-        return { errorType: err.constructor.name, status: err.status };
-      }
-      throw new Error("expected request from a zero-balance user to fail");
+      return expectError(
+        () => client.chat.completions.create({ model, messages: [{ role: "user", content: "Hi" }] }, authedOpts),
+        (err) => ({ isRateLimit: err instanceof OpenAI.RateLimitError }),
+      );
     },
 
     async maxtokens() {

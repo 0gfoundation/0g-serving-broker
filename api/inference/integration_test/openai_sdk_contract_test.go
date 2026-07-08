@@ -21,13 +21,21 @@ package integration_test
 //
 //	cd api/inference/integration_test/openai_sdk_client && npm ci
 //	cd api && go test -tags openaicontract ./inference/integration_test/... -run TestOpenAISDK -v
+//
+// Not covered: insufficient-balance (HTTP 402-equivalent) mapping. Any
+// balance low enough to fail validation unconditionally drives
+// ctrl.validateBalanceAdequacy into its live-contract resync branch
+// (SyncUserAccount -> contract.GetUserAccount), which this lightweight
+// harness's bare *providercontract.ProviderContract (no chain client wired
+// up) cannot serve without panicking. Exercising that path needs either a
+// real/fake chain client or making Ctrl.contract mockable — out of scope
+// here; tracked as a follow-up rather than shipped as a test that panics.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"io"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,12 +45,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/crypto"
-
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
-	"github.com/0glabs/0g-serving-broker/inference/contract"
-	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 // ==========================================================================
@@ -58,9 +62,11 @@ import (
 // The default (non-stream, no tools) response echoes the exact body it
 // received back to the client under "_debug_received_body". The broker's
 // response sanitizer (#184) is a fixed denylist (see sanitize.go), so this
-// extra field survives untouched — giving the contract test visibility into
-// what reached the upstream AFTER translation, without instrumenting
-// production code.
+// extra field survives untouched today — giving the contract test visibility
+// into what reached the upstream AFTER translation, without instrumenting
+// production code. (This is not structurally immune: a future denylist entry
+// that happens to collide with a translated field name would strip it from
+// this echo too. Not a concern for max_tokens/reasoning_effort today.)
 func newContractMockUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(contractMockUpstreamHandler())
@@ -184,8 +190,13 @@ type sdkResult struct {
 	Result   map[string]interface{} `json:"result"`
 	Error    string                 `json:"error"`
 	ErrType  string                 `json:"errorType"`
-	Status   float64                `json:"status"`
 }
+
+// nodeScenarioTimeout bounds the Node subprocess. It is kept comfortably
+// above run.js's own per-request SDK timeout (30s) so a genuine SDK-side
+// timeout always wins the race and produces a parseable JSON result line,
+// rather than this deadline firing first and SIGKILLing the process mid-write.
+const nodeScenarioTimeout = 45 * time.Second
 
 // runNodeSDKScenario execs the real openai npm SDK (as a Node subprocess)
 // against baseURL for the given scenario, asserting only that the client
@@ -195,7 +206,7 @@ func runNodeSDKScenario(t *testing.T, baseURL, authHeader, scenario string) sdkR
 	t.Helper()
 	dir := nodeClientDir(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeScenarioTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "node", "run.js")
@@ -224,6 +235,33 @@ func runNodeSDKScenario(t *testing.T, baseURL, authHeader, scenario string) sdkR
 // ==========================================================================
 // Test environment wiring: real TCP listener in front of the in-process engine
 // ==========================================================================
+
+// setupContractEnv builds the plain (non-TLS) mock upstream, a broker
+// configured as a TargetSeparated single-model ("gpt-4o") chatbot service,
+// and a real TCP listener in front of it — the setup shared by most
+// scenarios in this file. extraCfg (may be nil) layers scenario-specific
+// config on top of that base. Returns the proxy base URL and a valid session
+// auth header for the seeded default user.
+//
+// TestOpenAISDK_ResponseHeaders_ZGResKey needs a TLS mock and a centralized
+// provider instead, so it does not use this helper.
+func setupContractEnv(t *testing.T, extraCfg func(*config.Config)) (baseURL, authHeader string) {
+	t.Helper()
+	mockUpstream := newContractMockUpstream(t)
+	t.Cleanup(mockUpstream.Close)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockUpstream.URL
+		cfg.Service.Type = "chatbot"
+		cfg.Service.ModelType = "gpt-4o"
+		cfg.Service.TargetSeparated = true
+		if extraCfg != nil {
+			extraCfg(cfg)
+		}
+	})
+	srv := startRealListener(t, env)
+	return srv.URL + "/v1/proxy", createAuthHeader(t, env.privateKey, env.providerAddr)
+}
 
 // startRealListener wraps env.engine in a real TCP httptest.Server so the
 // Node OpenAI SDK subprocess can hit it over an actual socket (the whole
@@ -254,19 +292,9 @@ func chatContractModelInfo(supportedParameters ...string) *config.ModelInfo {
 // ==========================================================================
 
 func TestOpenAISDK_NonStreamChatCompletion(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
+	baseURL, authHeader := setupContractEnv(t, nil)
 
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
-	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
-
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "nonstream")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "nonstream")
 	if !res.OK {
 		t.Fatalf("nonstream scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
@@ -276,19 +304,9 @@ func TestOpenAISDK_NonStreamChatCompletion(t *testing.T) {
 }
 
 func TestOpenAISDK_StreamChatCompletion(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
+	baseURL, authHeader := setupContractEnv(t, nil)
 
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
-	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
-
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "stream")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "stream")
 	if !res.OK {
 		t.Fatalf("stream scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
@@ -306,19 +324,9 @@ func TestOpenAISDK_StreamChatCompletion(t *testing.T) {
 // ==========================================================================
 
 func TestOpenAISDK_ToolCalling(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
+	baseURL, authHeader := setupContractEnv(t, nil)
 
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
-	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
-
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "toolcall")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "toolcall")
 	if !res.OK {
 		t.Fatalf("toolcall scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
@@ -329,24 +337,15 @@ func TestOpenAISDK_ToolCalling(t *testing.T) {
 // ==========================================================================
 
 func TestOpenAISDK_ModelsList(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
-
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
+	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
 		// A native reasoning toggle causes the router to advertise the
 		// portable reasoning_effort too (see AdvertisedSupportedParameters) —
 		// checked below as a models-endpoint proof that the design doc's
 		// documented behavior is what a real client sees.
 		cfg.Service.ModelInfo = chatContractModelInfo("chat_template_kwargs", "max_tokens")
 	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
 
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "models")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "models")
 	if !res.OK {
 		t.Fatalf("models scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
@@ -377,18 +376,9 @@ func TestOpenAISDK_ModelsList(t *testing.T) {
 // ==========================================================================
 
 func TestOpenAISDK_ErrorMapping_Unauthorized(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
+	baseURL, _ := setupContractEnv(t, nil)
 
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
-	})
-	srv := startRealListener(t, env)
-
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", "", "unauthorized")
+	res := runNodeSDKScenario(t, baseURL, "", "unauthorized")
 	if !res.OK {
 		t.Fatalf("unauthorized scenario failed unexpectedly: %s (%s)", res.Error, res.ErrType)
 	}
@@ -401,20 +391,18 @@ func TestOpenAISDK_ErrorMapping_Unauthorized(t *testing.T) {
 	}
 }
 
+// TestOpenAISDK_ErrorMapping_BadRequest sends a model name the broker isn't
+// configured to serve. This is the genuine broker-side rejection path
+// (ctrl.EnforceConfiguredModel, exercised the same way as
+// TestChatbot_ModelEnforcement in chatbot_test.go): the broker decodes the
+// body into a generic map for its translation pipeline and never type-checks
+// individual fields like `messages`, so a structurally-wrong field (e.g.
+// messages as a string) would NOT be rejected — it would forward untouched
+// and come back 200.
 func TestOpenAISDK_ErrorMapping_BadRequest(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
+	baseURL, authHeader := setupContractEnv(t, nil)
 
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
-	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
-
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "badrequest")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "badrequest")
 	if !res.OK {
 		t.Fatalf("badrequest scenario failed unexpectedly: %s (%s)", res.Error, res.ErrType)
 	}
@@ -425,22 +413,13 @@ func TestOpenAISDK_ErrorMapping_BadRequest(t *testing.T) {
 }
 
 func TestOpenAISDK_ErrorMapping_RateLimit(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
-
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
+	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
 		// Burst=1 means the second rapid request always trips the limiter,
 		// independent of scheduling jitter between the two SDK calls.
 		cfg.ConcurrencyLimit = config.ConcurrencyLimitConfig{PerUserRPM: 1, PerUserBurst: 1}
 	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
 
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "ratelimit")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "ratelimit")
 	if !res.OK {
 		t.Fatalf("ratelimit scenario failed unexpectedly: %s (%s)", res.Error, res.ErrType)
 	}
@@ -453,81 +432,19 @@ func TestOpenAISDK_ErrorMapping_RateLimit(t *testing.T) {
 	}
 }
 
-// TestOpenAISDK_ErrorMapping_InsufficientBalance documents (rather than
-// asserts a specific outcome for) what an SDK client actually observes when a
-// user's locked balance cannot cover the request. The broker has no dedicated
-// HTTP 402 mapping today — insufficientBalance in ctrl/request.go returns a
-// plain error, which the generic broker-error handler maps to 400 (see
-// common/errors.HTTPError's default) — so this intentionally records the
-// real status/type instead of asserting 402, which would currently fail.
-// Surfacing this here is itself a finding worth following up on separately.
-func TestOpenAISDK_ErrorMapping_InsufficientBalance(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
-
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
-	})
-	srv := startRealListener(t, env)
-
-	// A second user, seeded with zero balance, distinct from the default
-	// env.userAddr (which setupTestEnv funds with 1000 0G).
-	poorKey, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	poorAddr := crypto.PubkeyToAddress(poorKey.PublicKey)
-	zero := "0"
-	if err := env.db.CreateUserAccounts([]model.User{{
-		User:                 poorAddr.Hex(),
-		LockBalance:          &zero,
-		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
-	}}); err != nil && !strings.Contains(err.Error(), "Duplicate") {
-		t.Fatalf("create zero-balance user: %v", err)
-	}
-	env.ctrl.SeedContractAccountCache(poorAddr.Hex(), &contract.Account{
-		User:          poorAddr,
-		Balance:       big.NewInt(0),
-		PendingRefund: big.NewInt(0),
-		Generation:    big.NewInt(0),
-		RevokedBitmap: big.NewInt(0),
-		Acknowledged:  true,
-	})
-
-	authHeader := createAuthHeader(t, poorKey, env.providerAddr)
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "insufficientbalance")
-	if !res.OK {
-		t.Fatalf("insufficientbalance scenario failed unexpectedly: %s (%s)", res.Error, res.ErrType)
-	}
-	t.Logf("insufficient-balance request surfaced to the SDK as errorType=%v status=%v (no dedicated 402 mapping exists today)",
-		res.Result["errorType"], res.Result["status"])
-}
-
 // ==========================================================================
 // Request-body translation, exercised end-to-end via the mock's echo field
 // ==========================================================================
 
 func TestOpenAISDK_MaxTokensTranslation(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
-
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
+	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
 		// Advertises max_tokens but not max_completion_tokens: a client's
 		// max_completion_tokens must be renamed to max_tokens before it
 		// reaches the upstream (see ctrl.TranslateMaxTokens).
 		cfg.Service.ModelInfo = chatContractModelInfo("max_tokens")
 	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
 
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "maxtokens")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "maxtokens")
 	if !res.OK {
 		t.Fatalf("maxtokens scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
@@ -544,22 +461,13 @@ func TestOpenAISDK_MaxTokensTranslation(t *testing.T) {
 }
 
 func TestOpenAISDK_ReasoningEffortTranslation(t *testing.T) {
-	mockUpstream := newContractMockUpstream(t)
-	t.Cleanup(mockUpstream.Close)
-
-	env := setupTestEnv(t, func(cfg *config.Config) {
-		cfg.Service.TargetURL = mockUpstream.URL
-		cfg.Service.Type = "chatbot"
-		cfg.Service.ModelType = "gpt-4o"
-		cfg.Service.TargetSeparated = true
+	baseURL, authHeader := setupContractEnv(t, func(cfg *config.Config) {
 		// Qwen3/GLM-on-vLLM dialect: thinking toggle nested under
 		// chat_template_kwargs.enable_thinking (see ctrl.applyNativeReasoning).
 		cfg.Service.ModelInfo = chatContractModelInfo("chat_template_kwargs")
 	})
-	srv := startRealListener(t, env)
-	authHeader := createAuthHeader(t, env.privateKey, env.providerAddr)
 
-	res := runNodeSDKScenario(t, srv.URL+"/v1/proxy", authHeader, "reasoning")
+	res := runNodeSDKScenario(t, baseURL, authHeader, "reasoning")
 	if !res.OK {
 		t.Fatalf("reasoning scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
@@ -582,9 +490,9 @@ func TestOpenAISDK_ReasoningEffortTranslation(t *testing.T) {
 
 func TestOpenAISDK_ResponseHeaders_ZGResKey(t *testing.T) {
 	// ZG-Res-Key is only set for centralized providers (or non-separated
-	// targets) — see chatbot.go — so this mirrors
-	// TestCentralizedProvider_NonStream's TLS setup rather than the plain
-	// mock used elsewhere in this file.
+	// targets) — see chatbot.go — so this needs a TLS mock and a centralized
+	// provider config, unlike the rest of this file; it does not use
+	// setupContractEnv. Mirrors TestCentralizedProvider_NonStream's TLS setup.
 	mockUpstream := newContractMockUpstreamTLS(t)
 	t.Cleanup(mockUpstream.Close)
 
