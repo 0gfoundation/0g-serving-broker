@@ -355,6 +355,14 @@ func Main() {
 		}
 	}
 
+	// Initialize the video-generation poll-to-completion scheduler if enabled. See
+	// docs/design/video-generation-async-billing.md.
+	if config.VideoPoll.Enabled {
+		if err := ctrl.InitVideoPollScheduler(config.VideoPoll); err != nil {
+			logger.Errorf("Failed to initialize video poll scheduler: %v", err)
+		}
+	}
+
 	h := handler.New(ctrl, proxy, logger)
 	h.Register(engine)
 
@@ -411,6 +419,9 @@ func Main() {
 
 	// Shutdown async processing (drain queue, wait for workers)
 	ctrl.ShutdownAsync()
+
+	// Shutdown the video poll scheduler (wait for any in-flight poll to finish)
+	ctrl.ShutdownVideoPollScheduler()
 
 	// Price processor teardown is handled by the defer registered at
 	// goroutine startup — this guarantees it joins before contract.Close()

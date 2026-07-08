@@ -787,6 +787,7 @@ type Config struct {
 	PriceFeed           PriceFeedConfig         `yaml:"priceFeed"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
+	VideoPoll           VideoPollConfig         `yaml:"videoPoll"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
@@ -877,6 +878,41 @@ type AsyncConfig struct {
 	JobTimeout time.Duration `yaml:"jobTimeout"`
 	// Deprecated: use JobTimeout. Removed after config.DeprecationRemovalDate.
 	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
+}
+
+// VideoPollConfig defines the background scheduler that polls a video-generation job to
+// completion when its create response is non-terminal (queued/in_progress), billing the
+// actual delivered duration instead of the requested one. See
+// docs/design/video-generation-async-billing.md.
+type VideoPollConfig struct {
+	Enabled bool `yaml:"enabled"` // Enable the poll-to-completion scheduler (default: true)
+
+	MaxConcurrentPolls int `yaml:"maxConcurrentPolls"` // Worker pool size for the poll scheduler (default: 10)
+
+	// PollInterval: fixed delay between poll attempts for a given job. A fixed interval is
+	// sufficient given providers already recommend one (e.g. DashScope's 5-15s);
+	// exponential backoff is unneeded complexity for a bounded-attempts poll.
+	PollInterval time.Duration `yaml:"pollInterval"`
+
+	// MaxPollDuration: ceiling from job creation to forced timed_out. Must stay comfortably
+	// under the 1-hour zero-output Request prune threshold (settlement_tee.go) so a still
+	// in-flight job's placeholder Request row is never pruned out from under it.
+	MaxPollDuration time.Duration `yaml:"maxPollDuration"`
+
+	// ScanInterval: how often the scheduler queries for due rows.
+	ScanInterval time.Duration `yaml:"scanInterval"`
+
+	// LeaseWindow: how far into the future a claimed row's NextPollAt is pushed while a poll
+	// round-trip is in flight. A row whose lease expires without a status update (worker
+	// crash) becomes claimable again — see db.ClaimDueVideoPollJobs.
+	LeaseWindow time.Duration `yaml:"leaseWindow"`
+
+	// RetentionTTL: how long to keep terminal (completed/failed/timed_out) rows before the
+	// cleanup pass deletes them.
+	RetentionTTL time.Duration `yaml:"retentionTTL"`
+
+	// CleanupInterval: how often the retention sweep (DeleteExpiredVideoPollJobs) runs.
+	CleanupInterval time.Duration `yaml:"cleanupInterval"`
 }
 
 // ProviderHttpConfig defines HTTP client timeouts for broker→provider communication.
@@ -1772,6 +1808,16 @@ func GetConfig() *Config {
 				ResultTTL:         30 * time.Minute,
 				CleanupInterval:   60 * time.Second,
 				JobTimeout:        15 * time.Minute,
+			},
+			VideoPoll: VideoPollConfig{
+				Enabled:            true,
+				MaxConcurrentPolls: 10,
+				PollInterval:       10 * time.Second,
+				MaxPollDuration:    20 * time.Minute,
+				ScanInterval:       5 * time.Second,
+				LeaseWindow:        30 * time.Second,
+				RetentionTTL:       30 * time.Minute,
+				CleanupInterval:    5 * time.Minute,
 			},
 			ProviderHttp: ProviderHttpConfig{
 				TotalTimeout:          15 * time.Minute,

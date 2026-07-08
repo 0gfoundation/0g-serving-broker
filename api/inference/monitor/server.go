@@ -53,6 +53,13 @@ var (
 	// it must be alertable rather than a silent skip.
 	VideoBillingSkippedTotal prometheus.Counter
 
+	// VideoPollTimedOutTotal counts video-generation poll jobs (see
+	// docs/design/video-generation-async-billing.md) that hit their
+	// MaxPollDuration ceiling without the provider ever reaching a terminal
+	// state. A non-zero value is a genuine reconciliation gap candidate — the
+	// provider may have delivered a video the broker never billed for.
+	VideoPollTimedOutTotal prometheus.Counter
+
 	// RequestRejectedTotal counts requests rejected before they reach the
 	// upstream, labeled by a low-cardinality `reason` (see the Rejection*
 	// constants). This is the primary signal for the "high RPS, near-zero
@@ -350,6 +357,14 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	VideoPollTimedOutTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "broker_video_poll_timed_out_total",
+			Help:        "Video-generation poll jobs that hit MaxPollDuration without the provider reaching a terminal state (potential reconciliation gap).",
+			ConstLabels: constLabels,
+		},
+	)
+
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
@@ -373,6 +388,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(WhitelistOutputTokensTotal)
 	prometheus.MustRegister(WhitelistAudioSecondsTotal)
 	prometheus.MustRegister(VideoBillingSkippedTotal)
+	prometheus.MustRegister(VideoPollTimedOutTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
 }
@@ -669,6 +685,15 @@ func RecordVideoBillingSkipped() {
 		return
 	}
 	VideoBillingSkippedTotal.Inc()
+}
+
+// RecordVideoPollTimedOut increments the counter of video poll jobs that hit
+// MaxPollDuration without the provider ever reaching a terminal state.
+func RecordVideoPollTimedOut() {
+	if VideoPollTimedOutTotal == nil {
+		return
+	}
+	VideoPollTimedOutTotal.Inc()
 }
 
 // RecordRejection increments the rejected-request counter for the given reason.

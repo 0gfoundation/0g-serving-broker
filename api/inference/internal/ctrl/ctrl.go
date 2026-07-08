@@ -35,16 +35,30 @@ type asyncDB interface {
 	CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error
 }
 
+// videoPollDB is the interface for database operations used by the video-generation
+// poll-to-completion scheduler. The real *db.DB satisfies this interface. Tests can inject a
+// mock implementation. See docs/design/video-generation-async-billing.md.
+type videoPollDB interface {
+	CreateVideoPollJob(job model.VideoPollJob) error
+	ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]model.VideoPollJob, error)
+	RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error
+	CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, fee string, outputCount int64) error
+	FailVideoPollJob(id uint64, errMsg string) error
+	TimeOutVideoPollJob(id uint64, errMsg string) error
+	DeleteExpiredVideoPollJobs(retention time.Duration) error
+}
+
 type Ctrl struct {
-	mu       sync.RWMutex
-	db       *db.DB
-	asyncDB  asyncDB
-	contract *providercontract.ProviderContract
-	svcCache *cache.Cache
-	logger   log.Logger
+	mu          sync.RWMutex
+	db          *db.DB
+	asyncDB     asyncDB
+	videoPollDB videoPollDB
+	contract    *providercontract.ProviderContract
+	svcCache    *cache.Cache
+	logger      log.Logger
 
 	autoSettleBufferTime time.Duration
-	minSettlementFee    *big.Int
+	minSettlementFee     *big.Int
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
@@ -117,6 +131,15 @@ type Ctrl struct {
 	asyncEnabled    bool
 	asyncCancel     context.CancelFunc // cancels worker and cleanup goroutines
 	asyncWg         sync.WaitGroup     // tracks running worker goroutines
+
+	// Video-generation poll-to-completion scheduler (see
+	// docs/design/video-generation-async-billing.md). All scheduling state lives in the
+	// video_poll_job table, not in memory — the scanner goroutines below are stateless
+	// pollers, not per-job workers, so a restart loses nothing.
+	videoPollEnabled bool
+	videoPollCfg     config.VideoPollConfig
+	videoPollCancel  context.CancelFunc
+	videoPollWg      sync.WaitGroup
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
@@ -209,6 +232,7 @@ func New(
 		minSettlementFee:     minSettlementFee,
 		db:                   db,
 		asyncDB:              db,
+		videoPollDB:          db,
 		contract:             contract,
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,

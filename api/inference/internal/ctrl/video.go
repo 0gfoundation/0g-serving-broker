@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -60,9 +61,51 @@ func parseMultipartField(bodyStr, fieldName string) string {
 // same seconds/size shape is also the broker's request edge contract, so the
 // struct doubles as the request-fallback parse — see resolveVideoBilling.
 type videoResponseFields struct {
+	ID      string      `json:"id"`
+	Status  string      `json:"status"`
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
 	Usage   *videoUsage `json:"usage"`
+}
+
+// OpenAI Video API job status values. A create or poll response reporting one of the two
+// non-terminal values defers billing to the background poll scheduler (see
+// docs/design/video-generation-async-billing.md); anything else (including an absent/unknown
+// status, which is how a provider/shim that returns the finished result synchronously looks)
+// preserves the original create-time-only billing behavior unchanged.
+const (
+	videoStatusQueued     = "queued"
+	videoStatusInProgress = "in_progress"
+	videoStatusCompleted  = "completed"
+	videoStatusFailed     = "failed"
+)
+
+// videoBillingAction is what a create/poll response's status implies should happen next.
+type videoBillingAction int
+
+const (
+	// videoActionBillNow covers an explicit "completed" status AND the absent/unrecognized
+	// case — the latter is how a provider/shim that blocks until completion and returns the
+	// finished result synchronously looks, which must keep billing immediately unchanged.
+	videoActionBillNow videoBillingAction = iota
+	// videoActionDeferToPoll: status is queued/in_progress — genuinely async, no actual
+	// output yet. Defer to the background poll scheduler.
+	videoActionDeferToPoll
+	// videoActionSkipFailed: status is failed — nothing was generated, nothing to bill.
+	videoActionSkipFailed
+)
+
+// classifyVideoStatus maps a create/poll response's status field to the billing action it
+// implies. Pure and total: every input string, including "", produces a defined action.
+func classifyVideoStatus(status string) videoBillingAction {
+	switch status {
+	case videoStatusFailed:
+		return videoActionSkipFailed
+	case videoStatusQueued, videoStatusInProgress:
+		return videoActionDeferToPoll
+	default:
+		return videoActionBillNow
+	}
 }
 
 // videoUsage is the optional usage block of a video response. output_video_duration
@@ -292,9 +335,42 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return nil
 	}
 
+	contentType := ctx.Request.Header.Get("Content-Type")
+
+	var respFields videoResponseFields
+	_ = json.Unmarshal(body, &respFields)
+
+	switch classifyVideoStatus(respFields.Status) {
+	case videoActionSkipFailed:
+		// Provider failed immediately at create time — nothing was generated, nothing to
+		// bill, and there is no job to poll.
+		c.logger.Infof("video generation failed at create time for request %s; not billing", reqModel.RequestHash)
+		return nil
+
+	case videoActionDeferToPoll:
+		// Genuinely async: the create response has no actual output yet (the OpenAI Video
+		// API's real contract). Defer billing to the background poll scheduler instead of
+		// guessing from the requested duration — see
+		// docs/design/video-generation-async-billing.md.
+		//
+		// Only pass chatKey through when this service actually signs (mirrors the
+		// ZG-Res-Key-advertise / signChatWithKey condition above): a TargetSeparated,
+		// non-centralized service never signs — the remote TEE does — so the scheduler
+		// must not attempt to re-sign under a key the client was never given.
+		pollChatKey := ""
+		if !c.Service.TargetSeparated {
+			pollChatKey = chatKey
+		}
+		return c.deferVideoBillingToPoll(ctx, respFields.ID, pollChatKey, outputPrice, contentType, reqBody, reqModel)
+	}
+
+	// videoActionBillNow: either the provider/shim blocked until completion (today's default
+	// assumption for any provider/shim that doesn't send a status field at all), or it
+	// explicitly reported completed. Bill now — unchanged from before the poll scheduler.
+
 	// Resolve billable seconds/size, preferring the upstream response (actual
 	// output) and falling back to the client request.
-	seconds, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type"))
+	seconds, size, source := resolveVideoBilling(body, reqBody, contentType)
 	if source == "" {
 		// Returning here would serve the video FREE — make it loud + metered,
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
@@ -322,6 +398,54 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	}
 
 	monitor.RecordTokens("video-generation", c.metricModel(ctx), 0, outputCount)
+	return nil
+}
+
+// deferVideoBillingToPoll registers a VideoPollJob so the background scheduler bills this
+// request once the provider reaches a terminal state, instead of guessing from the requested
+// duration. Called when a create response reports status=queued/in_progress — the real
+// OpenAI Video API contract. See docs/design/video-generation-async-billing.md.
+func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey, outputPrice, contentType string, reqBody []byte, reqModel model.Request) error {
+	if providerJobID == "" {
+		// Can't track a job with no id to poll. Guessing a fee here is no safer than
+		// giving up: either way the operator must fix their provider/translator, and this
+		// codebase's precedent (the sibling "billing indeterminate" case just above) is to
+		// serve free + log loudly rather than bill blind.
+		c.logger.Errorf("video generation is non-terminal but the response has no id to poll; cannot track this job, NOT billing request %s (free output)", reqModel.RequestHash)
+		monitor.RecordVideoBillingSkipped()
+		return nil
+	}
+	if !c.videoPollEnabled {
+		// Still register the job (best-effort, in case the scheduler is enabled later) but
+		// make the operator misconfiguration loud rather than silently never billing.
+		c.logger.Errorf("video generation for request %s is non-terminal but the VideoPoll scheduler is disabled (videoPoll.enabled=false); this request will never be billed until it is enabled", reqModel.RequestHash)
+	}
+
+	var resolvedModel string
+	if v, exists := ctx.Get(CtxKeyResolvedModel); exists {
+		if s, ok := v.(string); ok {
+			resolvedModel = s
+		}
+	}
+
+	now := time.Now()
+	job := model.VideoPollJob{
+		ProviderJobID:      providerJobID,
+		RequestHash:        reqModel.RequestHash,
+		PollURL:            c.Service.TargetURL + "/videos/" + providerJobID,
+		RequestBody:        reqBody,
+		RequestContentType: contentType,
+		OutputPrice:        outputPrice,
+		ChatKey:            chatKey,
+		ResolvedModel:      resolvedModel,
+		MetricModel:        c.metricModel(ctx),
+		Status:             model.VideoPollStatusPending,
+		NextPollAt:         now.Add(c.videoPollCfg.PollInterval),
+		ExpiresAt:          now.Add(c.videoPollCfg.MaxPollDuration),
+	}
+	if err := c.videoPollDB.CreateVideoPollJob(job); err != nil {
+		return errors.Wrap(err, "create video poll job")
+	}
 	return nil
 }
 
