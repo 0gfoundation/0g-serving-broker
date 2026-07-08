@@ -120,11 +120,37 @@ func (d *DB) UpdateRequestFeesAndCount(requestHash, outputFee, fee string, outpu
 		}).Error
 }
 
+// UpdateRequestVideoBilling finalizes a video-generation request for reconciliation. The fee
+// stays the resolution-weighted amount (videoOutputUnits × price), but the recorded count is
+// the RAW output seconds, with the resolution carried as rateClass. This decouples the money
+// (weighted) from the reconciliation count (raw seconds + resolution class), so a per-second
+// cost reconciliation can group by resolution against a vendor's tiered statement — the earlier
+// "video_units" count folded resolution into the number and lost the raw seconds. unit is the
+// billing unit ("seconds"); rateClass is "res:<size>" (empty when the resolution is unknown,
+// which GORM's struct Updates skips, leaving the column's empty-string default — the baseline
+// class). See docs/design/provider-reconciliation.md.
+func (d *DB) UpdateRequestVideoBilling(requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error {
+	return d.db.
+		Where(&model.Request{
+			RequestHash: requestHash,
+		}).
+		Updates(&model.Request{
+			OutputFee:   outputFee,
+			Fee:         fee,
+			OutputCount: seconds,
+			Unit:        unit,
+			RateClass:   rateClass,
+		}).Error
+}
+
 // UpdateRequestWithAccurateTokens updates the request with accurate token counts from LLM response
 // This replaces the estimated values with actual values provided by the LLM.
 // unit is the authoritative billing unit for the counts ("tokens"/"seconds"); cachedInputTokens
-// and cacheWriteInputTokens are the reconciliation cache sub-categories (0 when not applicable).
-func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, totalFee string, inputCount, outputCount int64, unit string, cachedInputTokens, cacheWriteInputTokens int64) error {
+// and cacheWriteInputTokens are the reconciliation cache sub-categories (0 when not applicable);
+// rateClass is the applied price class within the unit ("tier:<=32000"). An untiered request
+// passes "" — GORM's struct Updates skips it, which is correct here: the column already defaults
+// to the empty string and no other path writes it, so it stays empty as intended.
+func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, totalFee string, inputCount, outputCount int64, unit string, cachedInputTokens, cacheWriteInputTokens int64, rateClass string) error {
 	return d.db.
 		Where(&model.Request{
 			RequestHash: requestHash,
@@ -138,6 +164,7 @@ func (d *DB) UpdateRequestWithAccurateTokens(requestHash, inputFee, outputFee, t
 			Unit:                  unit,
 			CachedInputTokens:     cachedInputTokens,
 			CacheWriteInputTokens: cacheWriteInputTokens,
+			RateClass:             rateClass,
 		}).Error
 }
 

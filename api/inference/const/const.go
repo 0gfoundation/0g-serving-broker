@@ -44,12 +44,6 @@ const (
 	BillingUnitTokens  = "tokens"
 	BillingUnitSeconds = "seconds"
 	BillingUnitImages  = "images"
-	// BillingUnitVideoUnits labels the video-generation output count. It is NOT raw
-	// seconds: the broker bills video by resolution-weighted "effective output units"
-	// (seconds × size-ratio, see ctrl.videoOutputUnits), so it is neither tokens nor
-	// seconds. A per-second reconciliation against a video vendor's statement would need
-	// raw seconds recorded separately (deferred; no video vendor is reconciled today).
-	BillingUnitVideoUnits = "video_units"
 )
 
 // UpstreamSelf labels a request served by the provider's own engine (decentralized /
@@ -63,10 +57,10 @@ func DefaultBillingUnitForService(serviceType string) string {
 	switch serviceType {
 	case ServiceTypeTextToImage, ServiceTypeImageEditing:
 		return BillingUnitImages
-	case ServiceTypeSpeechToText:
+	case ServiceTypeSpeechToText, ServiceTypeVideoGeneration:
+		// Video bills the raw output seconds (resolution folded into rate_class, not the
+		// unit); whisper STT also bills by seconds. See docs/design/provider-reconciliation.md.
 		return BillingUnitSeconds
-	case ServiceTypeVideoGeneration:
-		return BillingUnitVideoUnits
 	default:
 		// chatbot bills in tokens.
 		return BillingUnitTokens

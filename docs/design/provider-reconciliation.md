@@ -144,7 +144,7 @@ and with the `upstream`, `model`, and `unit` dimensions added:
 | `upstream` | VARCHAR | Part of primary key; vendor label from `Request.Upstream` |
 | `model` | VARCHAR | Part of primary key; the served model |
 | `unit` | VARCHAR | Part of primary key; the authoritative billing unit for the count columns (`tokens` / `seconds` / `images`) |
-| `rate_class` | VARCHAR | Part of primary key; **reserved** pricing-tier dimension (input-length tier, resolution, …). Written empty (`""`) in Phase 1; populated in Phase 2 with the cost dimension that consumes it. Reserving the PK column now avoids a later primary-key-altering migration. |
+| `rate_class` | VARCHAR | Part of primary key; the mutually-exclusive, whole-request price class within a `unit` (chatbot input-length tier `tier:<=32000`, video resolution `res:1080p`). Populated in Phase 2 (was reserved-empty in Phase 1); `""` when the request carries no price class (untiered chatbot, per-image, whisper seconds). Being in the PK from the start avoided a primary-key-altering migration. See [the cost dimension](#cost-dimension-reconciliation-a-generic-rate_class-dimension--raw-base-unit). |
 | `is_whitelisted` | BOOL | Part of primary key; whitelisted traffic is counted here (it hits the upstream) but tagged so settlement-side views still exclude it — see [Definitional alignment](#whitelisted-traffic-must-be-counted-even-though-it-is-not-billed) |
 | `service_type` | VARCHAR | Informational context (`chatbot` / `speech-to-text` / `text-to-image` / …) |
 | `request_count` | BIGINT | Always recorded (unit-agnostic) |
@@ -186,7 +186,7 @@ lossy token-column skip `daily_stat` makes for STT (#530):
 | speech-to-text (whisper) | `seconds` | seconds | 0 |
 | speech-to-text (gpt-4o-transcribe) | `tokens` | input tokens | output tokens |
 | text-to-image / image-editing | `images` | 0 | image count |
-| video-generation | `video_units` | 0 | resolution-weighted units (seconds × size-ratio) |
+| video-generation | `seconds` | 0 | raw output seconds (resolution carried in `rate_class`) |
 
 Reconciliation interprets the counts from `unit`: a `tokens` statement (MiniMax) is compared
 token-for-token, an `images` statement against `output_count`, a `seconds` statement against
@@ -399,49 +399,54 @@ mutates billing state.
   > The only sliver of unique value — a continuous *cached-price vs on-chain-price* consistency
   > check that does not wait for a statement — can be added later as a tiny standalone check if
   > price-cache drift proves to be a real risk.
-- **Phase 2 — cross-provider reconciliation at scale.** Persist each run into a
-  `reconciliation_report` table for trend analysis, wire the Prometheus metrics and bounded
-  summary log, and — when multi-upstream routing lands — stamp `Request.Upstream` from the
-  routing layer. No reconciliation-schema change is required at that point, only the change
-  to how `upstream` is populated.
+- **Phase 2 — the cost (`rate_class`) dimension ✅ implemented; multi-upstream stamping still
+  gated.** The `rate_class` dimension (see below) is now populated and grouped in the report.
+  The remaining Phase 2 item — stamping `Request.Upstream` from the routing layer when
+  multi-upstream routing lands — is unchanged: no reconciliation-schema change, only how
+  `upstream` is populated. (A persisted `reconciliation_report` trend table and
+  Prometheus/summary-log observability were considered and **dropped**: the operator runs the
+  report on demand and compares it against the vendor statement by hand, so a persisted time
+  series and usage metrics add infrastructure without changing that workflow.)
 
-## Open questions / future work
+## Cost-dimension reconciliation: a generic `rate_class` dimension + raw base unit ✅ implemented
 
-### Cost-dimension reconciliation: a generic `rate_class` dimension + raw base unit
+The hourly rollup records usage counts, not fees. To reconcile against a **tiered** vendor
+statement — where the same base unit is billed at a different effective rate depending on a
+mutually-exclusive, whole-request attribute — the report groups usage by that attribute
+(`rate_class`) so each class lines up against a statement line. Consistent with the report-only
+model, the broker does no money math: it emits counts grouped by `rate_class`, and the operator
+compares. Two pricing wrinkles share the same shape, and one mechanism covers both:
 
-The hourly rollup records only usage counts, not fees, so it supports the **usage**
-dimensions (tokens / requests / images) but not a **cost/money** reconciliation against a
-vendor statement. Two pricing wrinkles share the *same shape* — "the same base unit is
-billed at a different effective rate depending on a mutually-exclusive, whole-request
-attribute" — and one mechanism (`rate_class`) covers both:
+| Case | base unit | attribute that changes the rate | `rate_class` value |
+|------|-----------|---------------------------------|--------------------|
+| Chatbot tiered pricing (`TieredPricingConfig`) | token | input-length tier (0–32k / 32k+ …) | `tier:<=32000`, `tier:unbounded` |
+| Video generation | **second** | resolution (1024² / 1080p …) | `res:1080p` |
 
-| Case | base unit | attribute that changes the rate |
-|------|-----------|---------------------------------|
-| Chatbot tiered pricing (`TieredPricingConfig`) | token | input-length tier (0–32k / 32k+ …) |
-| Video generation | **second** | resolution (1024² / 1080p …) |
+`rate_class` is the mutually-exclusive, whole-request price class within a unit — **not** the
+coexisting token sub-categories (cache read/write live in their own columns, since one request
+has all of them at once; likewise a future realtime request's audio-vs-text tokens are
+columns/units, not `rate_class`).
 
-The generic fix groups by **`rate_class`** (values like `tier:<=32000`, `res:1080p`) to
-compare against a vendor's tiered statement. `rate_class` is the mutually-exclusive,
-whole-request price class within a unit — **not** the coexisting token sub-categories (cache
-read/write live in their own columns, since one request has all of them at once; likewise a
-future realtime request's audio-vs-text tokens are columns/units, not `rate_class`).
-
-The `rate_class` PK column is **already reserved** (written empty in Phase 1), so no
-primary-key-altering migration is needed later. Phase 2 only has to start populating it and
-build the consumer:
-- **Chatbot tiered**: `input_count` is already raw tokens — stamp the applied input-length
-  tier (from the same `getTierMultipliers` match billing uses) as `rate_class`.
-- **Video**: the rollup currently stores the resolution-**weighted** `video_units`, which has
-  folded resolution in and lost the raw seconds. Switch to **raw seconds** (from
-  `resolveVideoBilling`) with resolution as `rate_class` — at which point the awkward
-  `video_units` unit can revert to `seconds`.
+How it is populated (`Request.RateClass`, server-set at billing time, then carried into the
+hourly rollup and grouped in the report):
+- **Chatbot tiered**: `input_count` is already raw tokens. The applied input-length tier is
+  stamped from `matchedTierRateClass`, which mirrors the `getTierMultipliers` match billing uses
+  exactly, so the reconciliation label can never drift from the billed tier. Whitelisted chatbot
+  traffic is stamped the same way (unbilled by the broker but still billed by the vendor at the
+  tiered rate). Untiered models leave it `""`.
+- **Video**: the rollup now stores **raw seconds** (from `resolveVideoBilling`) with resolution
+  as `rate_class` (`res:<size>`), and the unit reverted from the old resolution-weighted
+  `video_units` to `seconds`. The resolution-weighted amount survives only as the fee (billing
+  is unchanged) and the output-count metric — it is no longer the stored reconciliation count,
+  which had folded resolution in and lost the raw seconds.
 - **Cache-write TTL** (5m vs 1h) is a coexisting sub-category, not a `rate_class`; if per-TTL
   cost matters, split `cache_write_input_tokens` into two columns rather than using
   `rate_class`.
 
-Deferred until a **cost/money** reconciliation against a vendor statement is actually needed;
-the usage-dimension report shipped here is unaffected (tier/resolution change only the price,
-never the token/second counts).
+The usage-dimension report is unaffected (tier/resolution change only the price, never the
+token/second counts) — the `rate_class` grouping is purely additive.
+
+## Open questions / future work
 
 ### Other
 

@@ -421,14 +421,21 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		// permanently invisible to reconciliation — the exact leak this is meant to catch.
 		// Unknown token counts are recorded as 0 (RequestCount still 1).
 		var input, output, cached, cacheWrite int64
+		var rateClass string
 		if usage != nil {
 			input, output = int64(usage.PromptTokens), int64(usage.CompletionTokens)
 			if usage.PromptTokensDetails != nil {
 				cached = int64(usage.PromptTokensDetails.CachedTokens)
 			}
 			cacheWrite = int64(usage.CacheWriteTokens + usage.CacheWrite1hTokens)
+			// Stamp the applied input-length tier so whitelisted chatbot traffic (unbilled by
+			// the broker, but still billed by the vendor at the tiered rate) reconciles per-tier
+			// like billable traffic. Best-effort: a pricing lookup failure just leaves it "".
+			if prices, err := c.GetBillingPrices(ctx); err == nil {
+				rateClass = matchedTierRateClass(c.effectiveTiers(prices.Tiers), usage.PromptTokens)
+			}
 		}
-		c.recordWhitelistedUsage(reqModel, input, output, cached, cacheWrite)
+		c.recordWhitelistedUsage(reqModel, input, output, cached, cacheWrite, rateClass)
 	}
 
 	if c.Service.IsCentralized() {
@@ -557,6 +564,42 @@ func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, in
 	// Fallback: promptTokens exceeds all bounded tiers, use the last tier
 	last := tiers[len(tiers)-1]
 	return last.InputMultiplier, last.OutputMultiplier
+}
+
+// effectiveTiers applies the tier fallback used everywhere tiers are consumed: a model's own
+// tiers win; when it has none, the service-level tieredPricing applies if enabled.
+func (c *Ctrl) effectiveTiers(tiers []config.PricingTier) []config.PricingTier {
+	if len(tiers) == 0 && c.tieredPricing.Enabled {
+		return c.tieredPricing.Tiers
+	}
+	return tiers
+}
+
+// matchedTierRateClass returns the reconciliation rate_class label for the tier that
+// getTierMultipliers would select for promptTokens — the mutually-exclusive input-length
+// price class the request billed at ("tier:<=32000", or "tier:unbounded" for the catch-all).
+// It mirrors getTierMultipliers' matching exactly so the reconciliation label can never drift
+// from the tier actually billed. Returns "" when there are no tiers (untiered model → no
+// price class), which leaves the request's rate_class empty. See
+// docs/design/provider-reconciliation.md.
+func matchedTierRateClass(tiers []config.PricingTier, promptTokens int) string {
+	if len(tiers) == 0 {
+		return ""
+	}
+	for _, tier := range tiers {
+		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
+			return tierLabel(tier)
+		}
+	}
+	return tierLabel(tiers[len(tiers)-1])
+}
+
+// tierLabel renders a single tier's rate_class label from its input-token bound.
+func tierLabel(tier config.PricingTier) string {
+	if tier.MaxInputTokens == 0 {
+		return "tier:unbounded"
+	}
+	return fmt.Sprintf("tier:<=%d", tier.MaxInputTokens)
 }
 
 // inputFeeBreakdown is the result of splitting a request's prompt tokens into
@@ -699,9 +742,7 @@ func computeInputFee(inputPrice string, usage *Usage, cacheBilling config.CacheT
 func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputPrice string, requestHash string, inputPrice string, tiers []config.PricingTier, cacheBilling config.CacheTokenBillingConfig) error {
 	// Resolve the effective tier set: model-specific tiers win; otherwise fall
 	// back to the service-level tieredPricing when enabled.
-	if len(tiers) == 0 && c.tieredPricing.Enabled {
-		tiers = c.tieredPricing.Tiers
-	}
+	tiers = c.effectiveTiers(tiers)
 	// Apply tiered pricing: adjust base prices by tier multiplier before any fee calculation.
 	// This ensures cache token billing and all other modifiers use the correct tiered price.
 	if len(tiers) > 0 {
@@ -764,10 +805,16 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	}
 	reportedCacheWrite := usage.CacheWriteTokens + usage.CacheWrite1hTokens
 
+	// Reconciliation cost dimension: stamp the applied input-length tier as rate_class so a
+	// cost reconciliation can group usage the way a tiered vendor statement does. Derived from
+	// the same tier match billing used above, so the label can never drift from the billed
+	// tier; "" for an untiered model.
+	rateClass := matchedTierRateClass(tiers, usage.PromptTokens)
+
 	// Update the request with accurate token counts and fees
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFee.String(), outputFee.String(), totalFee.String(),
 		int64(usage.PromptTokens), int64(usage.CompletionTokens),
-		constant.BillingUnitTokens, int64(reportedCached), int64(reportedCacheWrite)); err != nil {
+		constant.BillingUnitTokens, int64(reportedCached), int64(reportedCacheWrite), rateClass); err != nil {
 		return errors.Wrap(err, "Error updating request with accurate tokens")
 	}
 

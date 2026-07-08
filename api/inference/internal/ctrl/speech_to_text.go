@@ -591,7 +591,7 @@ func (c *Ctrl) billSpeechToTextByDuration(ctx context.Context, usage *SpeechToTe
 	// Persist seconds in input_count and 0 in output_count, tagged with the seconds
 	// unit so reconciliation interprets the count correctly (whisper bills by seconds).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, feeStr, "0", feeStr,
-		int64(seconds), 0, constant.BillingUnitSeconds, 0, 0); err != nil {
+		int64(seconds), 0, constant.BillingUnitSeconds, 0, 0, ""); err != nil {
 		return errors.Wrap(err, "update request with duration usage")
 	}
 
@@ -672,7 +672,7 @@ func (c *Ctrl) billSpeechToTextByTokensCore(ctx context.Context, usage *SpeechTo
 	// gpt-4o-transcribe bills by tokens, so tag this row's unit as tokens (overriding
 	// the seconds default stamped at request creation for the STT service type).
 	if err := c.db.UpdateRequestWithAccurateTokens(requestHash, inputFeeStr, outputFeeStr, totalFeeStr,
-		int64(usage.InputTokens), int64(usage.OutputTokens), constant.BillingUnitTokens, 0, 0); err != nil {
+		int64(usage.InputTokens), int64(usage.OutputTokens), constant.BillingUnitTokens, 0, 0, ""); err != nil {
 		return errors.Wrap(err, "update request with accurate tokens")
 	}
 
@@ -789,11 +789,11 @@ func (c *Ctrl) recordWhitelistedSTT(reqModel model.Request, usage *SpeechToTextU
 	// zero/unparseable one would make it permanently invisible to reconciliation.
 	if inputTokens > 0 || outputTokens > 0 {
 		reqModel.Unit = constant.BillingUnitTokens
-		c.recordWhitelistedUsage(reqModel, inputTokens, outputTokens, 0, 0)
+		c.recordWhitelistedUsage(reqModel, inputTokens, outputTokens, 0, 0, "")
 		return
 	}
 	reqModel.Unit = constant.BillingUnitSeconds
-	c.recordWhitelistedUsage(reqModel, seconds, 0, 0, 0)
+	c.recordWhitelistedUsage(reqModel, seconds, 0, 0, 0, "")
 }
 
 // recordWhitelistUsageMetrics writes a usage object into both the general and

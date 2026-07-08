@@ -23,10 +23,17 @@ type Request struct {
 	// label, e.g. "minimax"; "self" for decentralized providers with no external vendor).
 	Upstream string `gorm:"type:varchar(64);not null;default:''" json:"upstream"`
 	// Unit is the authoritative billing unit for InputCount/OutputCount: "tokens",
-	// "seconds" (whisper STT), or "images" (text-to-image). service_type alone is
-	// insufficient because STT splits between seconds (whisper) and tokens
+	// "seconds" (whisper STT / video), or "images" (text-to-image). service_type alone
+	// is insufficient because STT splits between seconds (whisper) and tokens
 	// (gpt-4o-transcribe).
 	Unit string `gorm:"type:varchar(16);not null;default:''" json:"unit"`
+	// RateClass is the mutually-exclusive, whole-request price class within a Unit — the
+	// attribute that changes the effective rate while the base unit stays the same
+	// (chatbot input-length tier "tier:<=32000", video resolution "res:1080p"). It lets a
+	// cost reconciliation group usage the way a vendor's tiered statement does. Empty when
+	// the request carries no price class (untiered chatbot, per-image, whisper seconds).
+	// See docs/design/provider-reconciliation.md.
+	RateClass string `gorm:"type:varchar(64);not null;default:''" json:"rateClass"`
 	// CachedInputTokens is the cache-read subset of InputCount (prompt_tokens_details
 	// .cached_tokens). CacheWriteInputTokens is the cache-creation (write) subset. Both
 	// are 0 when not reported/applicable. Recorded so reconciliation can align token

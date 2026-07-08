@@ -15,6 +15,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -199,6 +200,31 @@ func videoOutputCount(seconds int64, sizeRatio float64) int64 {
 // engine's maxBillableUnits — far above any real clip (15s × 8 ratio = 120).
 const maxVideoOutputUnits = 1 << 40
 
+// resolutionRateClass renders the reconciliation rate_class for a resolved video resolution —
+// the mutually-exclusive price class within the seconds unit (a vendor charges more per second
+// at a higher resolution). Returns "" for an unknown resolution (the baseline class). Lowercased
+// and trimmed to match how billing normalizes resolution multiplier keys, so the reconciliation
+// label lines up with the billed tier. See docs/design/provider-reconciliation.md.
+//
+// size is fully client/upstream-controlled free text, so the label is hardened against ever
+// making the billing UPDATE error out (which would serve the request free): ToValidUTF8 scrubs
+// invalid byte sequences (a raw or mid-codepoint-truncated multi-byte value would otherwise be
+// rejected by utf8mb4 strict mode), and the length cap is applied on rune boundaries — never a
+// byte offset — so it can't split a codepoint. varchar(64) is 64 characters, so "res:" (4) plus
+// a 60-rune resolution fits exactly. The multiplier lookup already tolerates any string, so
+// scrubbing/truncating an absurd input only loses reconciliation precision, never billing.
+func resolutionRateClass(size string) string {
+	res := strings.ToLower(strings.ToValidUTF8(strings.TrimSpace(size), ""))
+	if res == "" {
+		return ""
+	}
+	const maxResRunes = 60 // 64-character column budget minus the "res:" prefix
+	if r := []rune(res); len(r) > maxResRunes {
+		res = string(r[:maxResRunes])
+	}
+	return "res:" + res
+}
+
 // videoOutputUnits computes the billable effective-output count for a video
 // request. For a multi-model provider whose resolved model carries a per-model
 // billing block, it uses that model's shape (per_video_second resolution ratios
@@ -277,18 +303,23 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	if reqModel.IsWhitelisted {
 		// Whitelist traffic is unbilled; record metrics + reconciliation count only.
-		var outputCount int64
+		var seconds int64
+		var rateClass string
 		if sec, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); source != "" {
-			outputCount = c.videoOutputUnits(ctx, sec, size)
+			seconds = sec
+			rateClass = resolutionRateClass(size)
+			outputCount := c.videoOutputUnits(ctx, sec, size)
 			metricModel := c.metricModel(ctx)
 			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
 		} else {
 			c.logger.Warnf("whitelist video: no usable seconds in response or request for %s; recording request count only", reqModel.RequestHash)
 		}
-		// Always record the request (outputCount 0 when unresolved): it hit the upstream and
-		// has no other capture, so dropping it would make it invisible to reconciliation.
-		c.recordWhitelistedUsage(reqModel, 0, outputCount, 0, 0)
+		// Record the RAW seconds with resolution as rate_class — same basis as the billable
+		// path — so whitelisted video reconciles per-second too. Always record (seconds 0 when
+		// unresolved): it hit the upstream and has no other capture, so dropping it would make
+		// it invisible to reconciliation.
+		c.recordWhitelistedUsage(reqModel, 0, seconds, 0, 0, rateClass)
 		return nil
 	}
 
@@ -310,6 +341,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		c.logger.Warnf("video billed on REQUESTED duration (upstream did not report actual output) for request %s; configure the upstream/shim to echo seconds or usage.output_video_duration", reqModel.RequestHash)
 	}
 
+	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
 	outputCount := c.videoOutputUnits(ctx, seconds, size)
 
 	outputFee, err := util.Multiply(outputPrice, outputCount)
@@ -317,8 +349,13 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return errors.Wrap(err, "calculate output fee for video generation")
 	}
 
-	if err := c.db.UpdateRequestFeesAndCount(reqModel.RequestHash, outputFee.String(), outputFee.String(), outputCount); err != nil {
-		return errors.Wrap(err, "update request fees and count in database")
+	// Reconciliation records the RAW seconds (unit=seconds) with the resolution as rate_class,
+	// not the resolution-weighted units — so a per-second cost reconciliation can group by
+	// resolution against a video vendor's tiered statement. The weighted units live only in
+	// the fee above and the metric below.
+	if err := c.db.UpdateRequestVideoBilling(reqModel.RequestHash, outputFee.String(), outputFee.String(),
+		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
+		return errors.Wrap(err, "update request video billing in database")
 	}
 
 	monitor.RecordTokens("video-generation", c.metricModel(ctx), 0, outputCount)

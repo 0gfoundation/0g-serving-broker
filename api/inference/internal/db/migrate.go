@@ -326,6 +326,19 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&HourlyUsageStat{})
 			},
 		},
+		{
+			ID: "add-rate-class-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				// Phase 2 cost dimension: the per-request price class within a unit
+				// (chatbot input-length tier, video resolution). The hourly_usage_stat
+				// PK already reserves rate_class, so only the source column is new. See
+				// docs/design/provider-reconciliation.md.
+				type Request struct {
+					RateClass string `gorm:"type:varchar(64);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")
