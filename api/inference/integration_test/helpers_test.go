@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration || openaicontract
 
 package integration_test
 
