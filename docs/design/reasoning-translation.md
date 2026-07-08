@@ -48,6 +48,28 @@ does not declare the Anthropic surface (`requiresAnthropicBudgetTokens` in
 neither get `reasoning_effort` translated nor advertised — a client on the
 Anthropic surface sets `thinking` (with `budget_tokens`) directly, as normal.
 
+Two edge cases in that check are deliberate, not oversights:
+
+- **A model that omits `supportedFormats` entirely is treated as NOT requiring
+  `budget_tokens`.** `supportedFormats` is documented elsewhere as "omitted ⇒
+  unconstrained, accepts every surface," which would argue for the opposite
+  default. But most `thinking`-advertising models today are MiniMax/Zhipu-style
+  and legitimately omit `supportedFormats`; defaulting the other way would
+  silently stop translating `reasoning_effort` for all of them. A genuinely
+  Anthropic-native model must set `supportedFormats: ["anthropic"]` explicitly —
+  which it needs anyway for `enforceRequestFormat` to reject stray
+  `/chat/completions` requests against it.
+- **The check is model-wide, not scoped to the current request's surface.** A
+  model declaring *both* `openai` and `anthropic` in `supportedFormats`, with
+  `thinking` meant only as the OpenAI-surface (type-only) toggle, would have
+  `thinking` excluded on both surfaces. This can't be fixed by threading the
+  request surface through, because `AdvertisedSupportedParameters` feeds one
+  static list into `GET /v1/models` regardless of surface — there is no way to
+  advertise "works via `/chat/completions` but not `/v1/messages`" — so
+  translation is kept at the same model-wide granularity as advertisement (see
+  the `/v1/models` advertisement invariant below). No shipped config combines
+  `thinking` with a dual-surface declaration today.
+
 A request reaching the broker carries the portable `reasoning_effort`. The broker
 is the only component that knows which upstream a given model maps to, so the
 translation belongs here.
@@ -129,6 +151,16 @@ Because `supportedParameters` advertises both names, a client may send
 
 This keeps the explicit/advanced path authoritative and prevents the broker from
 writing two conflicting controls into one upstream body.
+
+For an object-shaped native control, "set" means a specific sub-field is
+present, not merely that the container key exists — e.g. `chat_template_kwargs`
+checks its nested `enable_thinking`, so a client's *other* kwargs in that
+container don't block translation. OpenRouter's `reasoning` object extends this
+to three sub-fields: `enabled` (the one the broker itself writes), `effort`
+(OpenRouter's own low/medium/high control), and `max_tokens` (which itself
+implies reasoning is on) — any of the three being present counts as explicit,
+so the broker never layers a derived `enabled: false` next to a client's own
+`effort: "high"` in the same object.
 
 When translation does occur, the broker removes `reasoning_effort` from the
 outgoing body: it has been consumed and re-expressed natively, and a Qwen/vLLM

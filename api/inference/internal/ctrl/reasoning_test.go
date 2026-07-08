@@ -262,6 +262,33 @@ func TestNativeReasoningParam_AnthropicThinkingExcluded(t *testing.T) {
 	}
 }
 
+// TestRequiresAnthropicBudgetTokens_TrimsAndFoldsCase verifies the match is
+// case-insensitive and whitespace-tolerant, mirroring proxy.go's formatAllowed
+// (ModelInfo.Validate accepts a raw config value like " Anthropic" without
+// normalizing the stored string, so the two checks must tolerate it the same way).
+func TestRequiresAnthropicBudgetTokens_TrimsAndFoldsCase(t *testing.T) {
+	tests := []struct {
+		name    string
+		formats []string
+		want    bool
+	}{
+		{"exact match", []string{"anthropic"}, true},
+		{"case drift", []string{"Anthropic"}, true},
+		{"leading whitespace", []string{" anthropic"}, true},
+		{"trailing whitespace", []string{"anthropic "}, true},
+		{"case and whitespace drift", []string{" Anthropic "}, true},
+		{"openai only", []string{"openai"}, false},
+		{"nil formats", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := requiresAnthropicBudgetTokens(tt.formats); got != tt.want {
+				t.Errorf("requiresAnthropicBudgetTokens(%v) = %v, want %v", tt.formats, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTranslateReasoning_AnthropicThinkingPassthrough(t *testing.T) {
 	c := &Ctrl{
 		Service: config.Service{
@@ -380,7 +407,10 @@ func TestTranslateReasoning_OpenRouterReasoningObject(t *testing.T) {
 
 func TestTranslateReasoning_OpenRouterPreservesExistingReasoningFields(t *testing.T) {
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "reasoning")
-	body := []byte(`{"model":"deepseek-v4-flash","reasoning_effort":"high","reasoning":{"max_tokens":2000},"messages":[]}`)
+	// "exclude" (response-visibility control) does not itself address the on/off
+	// concept, so it must not count as an explicit native set — translation still
+	// applies and the field is preserved through the merge.
+	body := []byte(`{"model":"deepseek-v4-flash","reasoning_effort":"high","reasoning":{"exclude":true},"messages":[]}`)
 
 	got, err := c.TranslateReasoning(body, "deepseek-v4-flash")
 	if err != nil {
@@ -391,11 +421,52 @@ func TestTranslateReasoning_OpenRouterPreservesExistingReasoningFields(t *testin
 		t.Fatalf("invalid json: %v", err)
 	}
 	r, _ := out["reasoning"].(map[string]interface{})
-	if r["max_tokens"] != float64(2000) {
-		t.Errorf("existing reasoning.max_tokens must be preserved, got %v", r)
+	if r["exclude"] != true {
+		t.Errorf("existing reasoning.exclude must be preserved, got %v", r)
 	}
 	if r["enabled"] != true {
 		t.Errorf("reasoning.enabled = %v, want true", r["enabled"])
+	}
+	if _, ok := out[reasoningEffortKey]; ok {
+		t.Errorf("reasoning_effort should be removed from outgoing body")
+	}
+}
+
+// TestTranslateReasoning_OpenRouterEffortAndMaxTokensAreExplicit verifies that
+// "effort" and "max_tokens" — OpenRouter's own on/off-implying sub-fields — are
+// treated as an explicit native set just like "enabled", so the broker never
+// layers a derived enabled:false next to a client's own effort:"high" (or vice
+// versa): that would send OpenRouter contradictory reasoning hints.
+func TestTranslateReasoning_OpenRouterEffortAndMaxTokensAreExplicit(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "reasoning")
+	tests := []struct {
+		name string
+		sub  string
+	}{
+		{"effort", `"effort":"high"`},
+		{"max_tokens", `"max_tokens":2000`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A stale/conflicting reasoning_effort must not override the client's
+			// own explicit OpenRouter-native control.
+			body := []byte(`{"model":"deepseek-v4-flash","reasoning_effort":"none","reasoning":{` + tt.sub + `},"messages":[]}`)
+			got, err := c.TranslateReasoning(body, "deepseek-v4-flash")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			r, _ := out["reasoning"].(map[string]interface{})
+			if _, ok := r["enabled"]; ok {
+				t.Errorf("must not derive enabled alongside client's explicit %s, got reasoning=%v", tt.name, r)
+			}
+			if out[reasoningEffortKey] != "none" {
+				t.Errorf("reasoning_effort should be preserved when native param wins, got %v", out[reasoningEffortKey])
+			}
+		})
 	}
 }
 

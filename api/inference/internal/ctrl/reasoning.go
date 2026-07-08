@@ -79,9 +79,39 @@ const (
 // nativeParamThinking). "thinking" is therefore excluded as a translation
 // target — and left off the advertised-parameters addition below — for any
 // model that declares the Anthropic surface.
+//
+// The check is model-wide, not scoped to the surface of the current request:
+// AdvertisedSupportedParameters feeds one static supportedParameters list into
+// GET /v1/models regardless of surface, so there is no way to advertise
+// "reasoning_effort works via /chat/completions but not /v1/messages" — and
+// this function must stay in lockstep with that (see the "translate ⇔
+// advertise" invariant on AdvertisedSupportedParameters) rather than being
+// finer-grained than what can actually be advertised. A model declaring BOTH
+// "openai" and "anthropic" in supportedFormats with "thinking" meant only as
+// the OpenAI-surface toggle is not supported today; no shipped config does
+// this (glm-5.2 and the OpenRouter GLM-5 entry, the only dual-surface entries
+// with a reasoning dialect, use chat_template_kwargs / reasoning instead).
+//
+// A model that omits supportedFormats entirely is treated as NOT requiring
+// budget_tokens (this returns false), even though nil/empty is documented
+// elsewhere (ModelInfo.SupportedFormats, proxy.go's formatAllowed) as
+// "unconstrained — accepts every surface." That default favors the common
+// case: most configured models with a "thinking" toggle today are MiniMax/
+// Zhipu-style (OpenAI surface) and legitimately omit supportedFormats: flipping
+// this default would silently stop translating reasoning_effort for all of
+// them. A genuinely Anthropic-native model (e.g. claude-opus-4-8) MUST set
+// supportedFormats: ["anthropic"] explicitly for this exclusion to apply —
+// which matches how such a model is deployed in practice anyway, since
+// enforceRequestFormat needs the same declaration to reject stray
+// /chat/completions requests against it.
+//
+// Matching is case-insensitive and whitespace-trimmed, mirroring
+// proxy.go's formatAllowed, since ModelInfo.Validate accepts (and does not
+// normalize) a raw config value like " Anthropic" as long as it trims/folds to
+// a known format.
 func requiresAnthropicBudgetTokens(formats []string) bool {
 	for _, f := range formats {
-		if strings.EqualFold(f, config.APIFormatAnthropic) {
+		if strings.EqualFold(strings.TrimSpace(f), config.APIFormatAnthropic) {
 			return true
 		}
 	}
@@ -129,11 +159,15 @@ func AdvertisedSupportedParameters(params []string, formats []string) []string {
 	anthropicThinking := requiresAnthropicBudgetTokens(formats)
 	hasNative, hasEffort := false, false
 	for _, p := range params {
-		if isNativeReasoningParam(p) && !(p == nativeParamThinking && anthropicThinking) {
-			hasNative = true
-		}
 		if p == reasoningEffortKey {
 			hasEffort = true
+			continue
+		}
+		if p == nativeParamThinking && anthropicThinking {
+			continue
+		}
+		if isNativeReasoningParam(p) {
+			hasNative = true
 		}
 	}
 	if !hasNative || hasEffort {
@@ -178,15 +212,24 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 		_, present := kw[enableThinkingKey]
 		return present
 	case nativeParamReasoning:
-		// OpenRouter: the client may set unrelated sub-fields (e.g. max_tokens)
-		// without addressing the toggle itself; only "enabled" makes the native
-		// control explicit, mirroring chat_template_kwargs's nested-key check.
+		// OpenRouter: "enabled" is the sub-field the broker itself writes, but a
+		// client may instead address the same on/off concept via "effort" (its
+		// own low|medium|high control) or "max_tokens" (implies reasoning is on).
+		// Treating only "enabled" as explicit would let the broker layer a
+		// derived "enabled": false next to a client's "effort": "high" in the
+		// same object — a contradictory hint to OpenRouter. Any of the three
+		// sub-fields being present means the client already addressed reasoning
+		// natively, mirroring chat_template_kwargs's nested-key check.
 		r, ok := bodyMap[nativeParamReasoning].(map[string]interface{})
 		if !ok {
 			return false
 		}
-		_, present := r["enabled"]
-		return present
+		for _, sub := range []string{"enabled", "effort", "max_tokens"} {
+			if _, present := r[sub]; present {
+				return true
+			}
+		}
+		return false
 	default:
 		// Top-level params (enable_thinking, thinking): present iff the key exists.
 		_, present := bodyMap[nativeParam]
