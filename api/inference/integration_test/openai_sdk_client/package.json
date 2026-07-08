@@ -1,0 +1,10 @@
+{
+  "name": "openai-sdk-contract-client",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real OpenAI SDK client used by the Go openaicontract test suite to exercise the broker's wire-level OpenAI compatibility.",
+  "main": "run.js",
+  "dependencies": {
+    "openai": "5.8.2"
+  }
+}
