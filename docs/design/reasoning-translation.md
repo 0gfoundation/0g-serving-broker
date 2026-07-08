@@ -21,6 +21,7 @@ same on/off concept. The dialects actually seen in the model catalog:
 | Qwen3 / GLM on vLLM    | `chat_template_kwargs` | `chat_template_kwargs.enable_thinking` = `bool`   |
 | DeepSeek / Qwen on DashScope | `enable_thinking`| top-level `enable_thinking` = `bool`              |
 | MiniMax                | `thinking`             | `thinking` = `{"type": "enabled"｜"disabled"}`    |
+| OpenRouter             | `reasoning`            | `reasoning` = `{"enabled": bool}`                 |
 
 Note the **advertised name is not always the toggle key**: a vLLM model advertises
 the container `chat_template_kwargs` and the toggle lives in its nested
@@ -33,6 +34,19 @@ reasoning in context — not an on/off switch. The DashScope on/off toggle is th
 top-level `enable_thinking` above. Likewise MiniMax's `reasoning_split` only
 controls how reasoning is returned (separate field vs inline `<think>` tags), so
 it is not a target either.
+
+**`thinking` on the Anthropic surface is intentionally NOT a translation
+target**, even though the same name is a target on the OpenAI surface (MiniMax /
+Zhipu GLM). Anthropic's own `/v1/messages` `thinking` control is `{"type":
+"enabled", "budget_tokens": N}` — `budget_tokens` is mandatory (≥1024, must be
+less than the request's `max_tokens`) and the broker has no basis to compute it.
+Writing `{"type": "enabled"}` without it would be rejected by the upstream. The
+broker distinguishes the two dialects by the model's `supportedFormats`: a
+`thinking` advertisement is only treated as a target when `supportedFormats`
+does not declare the Anthropic surface (`requiresAnthropicBudgetTokens` in
+`reasoning.go`). Affected models (e.g. `claude-opus-4-8`, `claude-sonnet-5`)
+neither get `reasoning_effort` translated nor advertised — a client on the
+Anthropic surface sets `thinking` (with `budget_tokens`) directly, as normal.
 
 A request reaching the broker carries the portable `reasoning_effort`. The broker
 is the only component that knows which upstream a given model maps to, so the
@@ -83,6 +97,8 @@ case "enable_thinking":      // DashScope: top-level bool
     bodyMap["enable_thinking"] = on
 case "thinking":             // MiniMax: object
     bodyMap["thinking"] = map[string]any{"type": onOff(on)} // "enabled"｜"disabled"
+case "reasoning":            // OpenRouter: object
+    bodyMap["reasoning"]["enabled"] = on
 }
 ```
 

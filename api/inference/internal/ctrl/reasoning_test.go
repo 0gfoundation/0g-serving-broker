@@ -240,6 +240,58 @@ func TestNativeReasoningParam_PreserveThinkingNotAToggle(t *testing.T) {
 	}
 }
 
+func TestNativeReasoningParam_AnthropicThinkingExcluded(t *testing.T) {
+	// Genuine Anthropic /v1/messages "thinking" requires a mandatory budget_tokens
+	// sub-field the broker does not compute — distinct from MiniMax/Zhipu's
+	// type-only "thinking" on the OpenAI surface — so it must not be picked as a
+	// reasoning_effort translation target.
+	c := &Ctrl{
+		Service: config.Service{
+			Type:      "chatbot",
+			ModelType: "claude-opus-4-8",
+			ModelInfo: &config.ModelInfo{
+				SupportedParameters: []string{"max_tokens", "thinking"},
+				SupportedFormats:    []string{"anthropic"},
+			},
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	if got := c.nativeReasoningParam("claude-opus-4-8"); got != "" {
+		t.Errorf("nativeReasoningParam() = %q, want \"\" (Anthropic-surface thinking requires budget_tokens)", got)
+	}
+}
+
+func TestTranslateReasoning_AnthropicThinkingPassthrough(t *testing.T) {
+	c := &Ctrl{
+		Service: config.Service{
+			Type:      "chatbot",
+			ModelType: "claude-opus-4-8",
+			ModelInfo: &config.ModelInfo{
+				SupportedParameters: []string{"max_tokens", "thinking"},
+				SupportedFormats:    []string{"anthropic"},
+			},
+		},
+		logger:         testLogger(),
+		whitelistUsers: make(map[string]struct{}),
+	}
+	body := []byte(`{"model":"claude-opus-4-8","reasoning_effort":"high","messages":[]}`)
+	got, err := c.TranslateReasoning(body, "claude-opus-4-8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if _, ok := out["thinking"]; ok {
+		t.Errorf("must not synthesize an incomplete thinking object (missing required budget_tokens), got %v", out["thinking"])
+	}
+	if out[reasoningEffortKey] != "high" {
+		t.Errorf("reasoning_effort should pass through untouched, got %v", out[reasoningEffortKey])
+	}
+}
+
 func TestTranslateReasoning_TopLevelEnableThinking(t *testing.T) {
 	// DashScope dialect: top-level enable_thinking bool (not nested).
 	c := newTestCtrlForReasoning(t, "reasoning_effort", "enable_thinking")
@@ -289,6 +341,83 @@ func TestTranslateReasoning_MiniMaxThinkingObject(t *testing.T) {
 				t.Errorf("thinking.type = %v, want %q", th["type"], tt.wantType)
 			}
 		})
+	}
+}
+
+func TestTranslateReasoning_OpenRouterReasoningObject(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "reasoning")
+	tests := []struct {
+		effort string
+		want   bool
+	}{
+		{"high", true},
+		{"none", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.effort, func(t *testing.T) {
+			body := []byte(`{"model":"deepseek-v4-flash","reasoning_effort":"` + tt.effort + `","messages":[]}`)
+			got, err := c.TranslateReasoning(body, "deepseek-v4-flash")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(got, &out); err != nil {
+				t.Fatalf("invalid json: %v", err)
+			}
+			r, ok := out["reasoning"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("reasoning = %v, want object", out["reasoning"])
+			}
+			if r["enabled"] != tt.want {
+				t.Errorf("reasoning.enabled = %v, want %v", r["enabled"], tt.want)
+			}
+			if _, ok := out[reasoningEffortKey]; ok {
+				t.Errorf("reasoning_effort should be removed from outgoing body")
+			}
+		})
+	}
+}
+
+func TestTranslateReasoning_OpenRouterPreservesExistingReasoningFields(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "reasoning")
+	body := []byte(`{"model":"deepseek-v4-flash","reasoning_effort":"high","reasoning":{"max_tokens":2000},"messages":[]}`)
+
+	got, err := c.TranslateReasoning(body, "deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	r, _ := out["reasoning"].(map[string]interface{})
+	if r["max_tokens"] != float64(2000) {
+		t.Errorf("existing reasoning.max_tokens must be preserved, got %v", r)
+	}
+	if r["enabled"] != true {
+		t.Errorf("reasoning.enabled = %v, want true", r["enabled"])
+	}
+}
+
+func TestTranslateReasoning_OpenRouterExplicitNativeWins(t *testing.T) {
+	c := newTestCtrlForReasoning(t, "reasoning_effort", "reasoning")
+	// Client sets reasoning directly AND a high effort; explicit native must win.
+	body := []byte(`{"model":"deepseek-v4-flash","reasoning_effort":"high","reasoning":{"enabled":false},"messages":[]}`)
+
+	got, err := c.TranslateReasoning(body, "deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	r, _ := out["reasoning"].(map[string]interface{})
+	if r["enabled"] != false {
+		t.Errorf("reasoning.enabled = %v, want false — explicit native must win", r["enabled"])
+	}
+	if out[reasoningEffortKey] != "high" {
+		t.Errorf("reasoning_effort should be preserved when native param wins")
 	}
 }
 
@@ -387,9 +516,10 @@ func TestTranslateReasoning_MultiModel_WildcardEntry(t *testing.T) {
 
 func TestAdvertisedSupportedParameters(t *testing.T) {
 	tests := []struct {
-		name string
-		in   []string
-		want []string
+		name    string
+		in      []string
+		formats []string
+		want    []string
 	}{
 		{
 			name: "native toggle present, reasoning_effort appended",
@@ -400,6 +530,11 @@ func TestAdvertisedSupportedParameters(t *testing.T) {
 			name: "nested container toggle also triggers",
 			in:   []string{"chat_template_kwargs"},
 			want: []string{"chat_template_kwargs", "reasoning_effort"},
+		},
+		{
+			name: "OpenRouter object toggle also triggers",
+			in:   []string{"reasoning"},
+			want: []string{"reasoning", "reasoning_effort"},
 		},
 		{
 			name: "reasoning_effort already advertised, unchanged",
@@ -416,16 +551,28 @@ func TestAdvertisedSupportedParameters(t *testing.T) {
 			in:   []string{"temperature", "top_p"},
 			want: []string{"temperature", "top_p"},
 		},
+		{
+			name:    "MiniMax/Zhipu thinking on the OpenAI surface, reasoning_effort appended",
+			in:      []string{"temperature", "thinking"},
+			formats: []string{"openai"},
+			want:    []string{"temperature", "thinking", "reasoning_effort"},
+		},
+		{
+			name:    "Anthropic-surface thinking (requires budget_tokens) NOT treated as a target, unchanged",
+			in:      []string{"max_tokens", "thinking"},
+			formats: []string{"anthropic"},
+			want:    []string{"max_tokens", "thinking"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AdvertisedSupportedParameters(tt.in)
+			got := AdvertisedSupportedParameters(tt.in, tt.formats)
 			if len(got) != len(tt.want) {
-				t.Fatalf("AdvertisedSupportedParameters(%v) = %v, want %v", tt.in, got, tt.want)
+				t.Fatalf("AdvertisedSupportedParameters(%v, %v) = %v, want %v", tt.in, tt.formats, got, tt.want)
 			}
 			for i := range tt.want {
 				if got[i] != tt.want[i] {
-					t.Fatalf("AdvertisedSupportedParameters(%v) = %v, want %v", tt.in, got, tt.want)
+					t.Fatalf("AdvertisedSupportedParameters(%v, %v) = %v, want %v", tt.in, tt.formats, got, tt.want)
 				}
 			}
 		})
@@ -434,7 +581,7 @@ func TestAdvertisedSupportedParameters(t *testing.T) {
 
 func TestAdvertisedSupportedParameters_DoesNotMutateInput(t *testing.T) {
 	in := []string{"temperature", "enable_thinking"}
-	_ = AdvertisedSupportedParameters(in)
+	_ = AdvertisedSupportedParameters(in, nil)
 	if len(in) != 2 {
 		t.Errorf("input slice was mutated: %v", in)
 	}
