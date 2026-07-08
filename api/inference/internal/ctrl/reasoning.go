@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
 // reasoningEffortKey is the portable OpenAI field the broker translates FROM. It
@@ -35,7 +36,7 @@ const reasoningEffortKey = "reasoning_effort"
 // "enable_thinking" instead.
 func isNativeReasoningParam(name string) bool {
 	switch name {
-	case nativeParamChatTemplateKwargs, nativeParamEnableThinking, nativeParamThinking:
+	case nativeParamChatTemplateKwargs, nativeParamEnableThinking, nativeParamThinking, nativeParamReasoning:
 		return true
 	default:
 		return false
@@ -52,6 +53,12 @@ const (
 	nativeParamEnableThinking = "enable_thinking"
 	// nativeParamThinking is MiniMax's object control: {"type": "enabled"|"disabled"}.
 	nativeParamThinking = "thinking"
+	// nativeParamReasoning is OpenRouter's unified object control:
+	// {"enabled": bool}. OpenRouter also accepts an "effort" (low|medium|high) or
+	// "max_tokens" sub-field for finer-grained control, but the broker's intent is
+	// only ever binary (see reasoningIntent), so "enabled" is the only sub-field
+	// the broker writes.
+	nativeParamReasoning = "reasoning"
 
 	// enableThinkingKey is the toggle key NESTED under chat_template_kwargs (the
 	// vLLM/SGLang dialect). It coincidentally shares the literal "enable_thinking"
@@ -60,6 +67,33 @@ const (
 	// so they are deliberately kept as separate constants.
 	enableThinkingKey = "enable_thinking"
 )
+
+// requiresAnthropicBudgetTokens reports whether formats declare the genuine
+// Anthropic /v1/messages surface (config.APIFormatAnthropic). On that surface
+// the native "thinking" control is Anthropic's own — {"type": "enabled",
+// "budget_tokens": N} — where budget_tokens is mandatory and the broker has no
+// basis to compute it, unlike MiniMax/Zhipu's plain {"type": "enabled"} on the
+// OpenAI surface: same advertised name ("thinking"), incompatible dialects.
+// "thinking" is therefore excluded as a translation target for any model that
+// declares the Anthropic surface, and left off the advertised-parameters
+// addition in AdvertisedSupportedParameters.
+//
+// This check is model-wide (keyed on config, not the current request's
+// surface) and an omitted supportedFormats is treated as NOT requiring
+// budget_tokens — two deliberate scope decisions with edge cases; see
+// docs/design/reasoning-translation.md for the full rationale and what's
+// intentionally left unhandled. Matching is case-insensitive and
+// whitespace-trimmed, mirroring proxy.go's formatAllowed, since
+// ModelInfo.Validate accepts (and does not normalize) a raw config value like
+// " Anthropic" as long as it trims/folds to a known format.
+func requiresAnthropicBudgetTokens(formats []string) bool {
+	for _, f := range formats {
+		if strings.EqualFold(strings.TrimSpace(f), config.APIFormatAnthropic) {
+			return true
+		}
+	}
+	return false
+}
 
 // reasoningIntent is the binary thinking on/off decision derived from the
 // client's reasoning_effort. Unset means the client expressed no preference, so
@@ -88,22 +122,29 @@ func normalizeReasoningEffort(effort string) reasoningIntent {
 
 // AdvertisedSupportedParameters returns supportedParameters as it should appear in
 // the GET /v1/models response. When the model advertises a native thinking toggle
-// the broker can translate into (chat_template_kwargs / enable_thinking / thinking)
-// but not the portable "reasoning_effort" itself, reasoning_effort is appended so
-// OpenAI-schema clients discover they can use it — the broker accepts it via
-// translation (see TranslateReasoning).
+// the broker can translate into (chat_template_kwargs / enable_thinking / thinking /
+// reasoning) but not the portable "reasoning_effort" itself, reasoning_effort is
+// appended so OpenAI-schema clients discover they can use it — the broker accepts
+// it via translation (see TranslateReasoning). formats is the model's
+// SupportedFormats: a "thinking" advertisement on the Anthropic surface is not
+// counted (see requiresAnthropicBudgetTokens) since the broker cannot translate it.
 //
 // The input slice is never mutated, and the config value used by nativeReasoningParam
 // for detection is unaffected: only the advertised view gains the field, keeping
 // "broker can translate reasoning_effort" ⇔ "reasoning_effort is advertised" true.
-func AdvertisedSupportedParameters(params []string) []string {
+func AdvertisedSupportedParameters(params []string, formats []string) []string {
+	anthropicThinking := requiresAnthropicBudgetTokens(formats)
 	hasNative, hasEffort := false, false
 	for _, p := range params {
-		if isNativeReasoningParam(p) {
-			hasNative = true
-		}
 		if p == reasoningEffortKey {
 			hasEffort = true
+			continue
+		}
+		if p == nativeParamThinking && anthropicThinking {
+			continue
+		}
+		if isNativeReasoningParam(p) {
+			hasNative = true
 		}
 	}
 	if !hasNative || hasEffort {
@@ -116,13 +157,18 @@ func AdvertisedSupportedParameters(params []string) []string {
 
 // nativeReasoningParam returns the upstream-native thinking control the given
 // model advertises in supportedParameters (e.g. "enable_thinking"), or "" if it
-// advertises none the broker can translate to.
+// advertises none the broker can translate to. A "thinking" advertisement on the
+// Anthropic surface is skipped — see requiresAnthropicBudgetTokens.
 func (c *Ctrl) nativeReasoningParam(model string) string {
 	mi := c.Service.EffectiveModelInfo(model)
 	if mi == nil {
 		return ""
 	}
+	anthropicThinking := requiresAnthropicBudgetTokens(mi.SupportedFormats)
 	for _, p := range mi.SupportedParameters {
+		if p == nativeParamThinking && anthropicThinking {
+			continue
+		}
 		if isNativeReasoningParam(p) {
 			return p
 		}
@@ -142,6 +188,25 @@ func nativeReasoningParamSet(bodyMap map[string]interface{}, nativeParam string)
 		}
 		_, present := kw[enableThinkingKey]
 		return present
+	case nativeParamReasoning:
+		// OpenRouter: "enabled" is the sub-field the broker itself writes, but a
+		// client may instead address the same on/off concept via "effort" (its
+		// own low|medium|high control) or "max_tokens" (implies reasoning is on).
+		// Treating only "enabled" as explicit would let the broker layer a
+		// derived "enabled": false next to a client's "effort": "high" in the
+		// same object — a contradictory hint to OpenRouter. Any of the three
+		// sub-fields being present means the client already addressed reasoning
+		// natively, mirroring chat_template_kwargs's nested-key check.
+		r, ok := bodyMap[nativeParamReasoning].(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for _, sub := range []string{"enabled", "effort", "max_tokens"} {
+			if _, present := r[sub]; present {
+				return true
+			}
+		}
+		return false
 	default:
 		// Top-level params (enable_thinking, thinking): present iff the key exists.
 		_, present := bodyMap[nativeParam]
@@ -178,6 +243,16 @@ func applyNativeReasoning(bodyMap map[string]interface{}, nativeParam string, on
 			thinkingType = "enabled"
 		}
 		bodyMap[nativeParamThinking] = map[string]interface{}{"type": thinkingType}
+		return true
+	case nativeParamReasoning:
+		// OpenRouter: object {"enabled": bool}. Preserve any other sub-fields the
+		// client already set (e.g. max_tokens), mirroring chat_template_kwargs.
+		r, ok := bodyMap[nativeParamReasoning].(map[string]interface{})
+		if !ok {
+			r = map[string]interface{}{}
+			bodyMap[nativeParamReasoning] = r
+		}
+		r["enabled"] = on
 		return true
 	}
 	return false
