@@ -3,6 +3,7 @@
 package db
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -185,6 +186,75 @@ func TestRescheduleVideoPollJob(t *testing.T) {
 	}
 	if !got.NextPollAt.Equal(next) {
 		t.Errorf("NextPollAt = %v, want %v", got.NextPollAt, next)
+	}
+}
+
+// TestRescheduleVideoPollJob_DoesNotClobberAlreadyResolvedJob is a regression test for the
+// stale-lease-reclaim race: a late/slow worker's Reschedule call must not resurrect a job
+// another worker already completed.
+func TestRescheduleVideoPollJob_DoesNotClobberAlreadyResolvedJob(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "race-1")
+
+	now := time.Now()
+	if err := d.CreateVideoPollJob(newVideoPollJob("race-1", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	d.db.Where("request_hash = ?", "race-1").First(&created)
+
+	// Worker A completes the job first.
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, "race-1", "5000", "5000", 5); err != nil {
+		t.Fatalf("CompleteVideoPollJobWithBilling: %v", err)
+	}
+
+	// Worker B's stale, late-arriving non-terminal response tries to reschedule the same job.
+	if err := d.RescheduleVideoPollJob(created.ID, now.Add(10*time.Second)); err != nil {
+		t.Fatalf("RescheduleVideoPollJob (stale worker): %v", err)
+	}
+
+	got, err := d.GetVideoPollJob(created.ID)
+	if err != nil {
+		t.Fatalf("GetVideoPollJob: %v", err)
+	}
+	if got.Status != model.VideoPollStatusCompleted {
+		t.Errorf("Status = %q, want completed (stale Reschedule must not clobber it back to pending)", got.Status)
+	}
+}
+
+// TestCompleteVideoPollJobWithBilling_SecondCallIsRejected is a regression test: if two
+// workers both reclaim the same stale-leased job and both observe a completed response, the
+// second CompleteVideoPollJobWithBilling call must not touch the Request row again (which
+// could otherwise overwrite the first worker's fee with a second, possibly different, value).
+func TestCompleteVideoPollJobWithBilling_SecondCallIsRejected(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "race-2")
+
+	now := time.Now()
+	if err := d.CreateVideoPollJob(newVideoPollJob("race-2", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	d.db.Where("request_hash = ?", "race-2").First(&created)
+
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, "race-2", "5000", "5000", 5); err != nil {
+		t.Fatalf("first CompleteVideoPollJobWithBilling: %v", err)
+	}
+
+	// Second worker's duplicate completion, with a DIFFERENT (wrong) fee — must be rejected.
+	err := d.CompleteVideoPollJobWithBilling(created.ID, "race-2", "9999", "9999", 99)
+	if !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+		t.Fatalf("second CompleteVideoPollJobWithBilling error = %v, want ErrVideoPollJobAlreadyResolved", err)
+	}
+
+	gotReq, err := d.GetRequest("race-2")
+	if err != nil {
+		t.Fatalf("GetRequest: %v", err)
+	}
+	if gotReq.Fee != "5000" || gotReq.OutputCount != 5 {
+		t.Errorf("request fee/count = (%s, %d), want (5000, 5) — the second call's wrong values must not have overwritten the first", gotReq.Fee, gotReq.OutputCount)
 	}
 }
 

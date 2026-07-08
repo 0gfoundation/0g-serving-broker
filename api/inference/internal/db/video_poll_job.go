@@ -1,11 +1,19 @@
 package db
 
 import (
+	"errors"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"gorm.io/gorm"
 )
+
+// ErrVideoPollJobAlreadyResolved is returned by CompleteVideoPollJobWithBilling when the job
+// was no longer in "polling" state at write time — another worker already resolved it (a
+// stale-lease reclaim race, see ClaimDueVideoPollJobs). Callers should treat this as an
+// expected, benign outcome, not a failure: the Request row was deliberately NOT touched a
+// second time, so no double billing occurred.
+var ErrVideoPollJobAlreadyResolved = errors.New("video poll job already resolved by another worker")
 
 // CreateVideoPollJob persists a new video poll job. Called once, right after a POST /videos
 // create call returns a non-terminal (queued/in_progress) status.
@@ -70,9 +78,14 @@ func (d *DB) ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]mode
 
 // RescheduleVideoPollJob returns a claimed job to pending with a fresh NextPollAt, after a
 // poll round-trip observed a non-terminal state.
+//
+// Guarded on status='polling': if a stale-lease reclaim (see ClaimDueVideoPollJobs) already let
+// another worker resolve this job (completed/failed/timed_out) before this call runs, that
+// worker's terminal write must not be clobbered back to pending. A 0-rows-affected outcome here
+// is exactly that — a lost race, not an error — so it is not treated as one.
 func (d *DB) RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error {
 	return d.db.Model(&model.VideoPollJob{}).
-		Where("id = ?", id).
+		Where("id = ? AND status = ?", id, model.VideoPollStatusPolling).
 		Updates(map[string]interface{}{
 			"status":       model.VideoPollStatusPending,
 			"next_poll_at": nextPollAt,
@@ -84,17 +97,29 @@ func (d *DB) RescheduleVideoPollJob(id uint64, nextPollAt time.Time) error {
 // either write fails, both roll back, so a result is never marked resolved without the fee
 // that goes with it landing too.
 //
+// The VideoPollJob update is guarded on status='polling' and its RowsAffected checked BEFORE
+// touching the Request row: if a stale-lease reclaim let another worker already resolve this
+// job, RowsAffected is 0 and the transaction returns ErrVideoPollJobAlreadyResolved WITHOUT
+// ever running the Request fee update — otherwise two workers racing on the same reclaimed job
+// could each write a (possibly different) fee to the same Request row.
+//
 // Retries up to 3 times with backoff for transient DB errors, since by this point the
-// expensive provider work is already done.
+// expensive provider work is already done. A lost race also gets retried up to 3 times (each
+// attempt cheaply re-observes RowsAffected==0), which is harmless — no mutation occurs — just
+// slightly wasteful; not worth special-casing out of the shared retry helper.
 func (d *DB) CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, fee string, outputCount int64) error {
 	return withRetry(3, func() error {
 		return d.db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&model.VideoPollJob{}).
-				Where("id = ?", id).
+			res := tx.Model(&model.VideoPollJob{}).
+				Where("id = ? AND status = ?", id, model.VideoPollStatusPolling).
 				Updates(map[string]interface{}{
 					"status": model.VideoPollStatusCompleted,
-				}).Error; err != nil {
-				return err
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return ErrVideoPollJobAlreadyResolved
 			}
 			return tx.Model(&model.Request{}).
 				Where("request_hash = ?", requestHash).
@@ -111,9 +136,12 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, requestHash, outputFee, 
 // attempt hit a non-retryable error. Bills nothing; the linked Request row keeps its
 // zero-output default and is excluded from settlement (ListRequest's ExcludeZeroOutput) until
 // pruned.
+//
+// Guarded on status='polling' for the same reason as RescheduleVideoPollJob: a stale-lease
+// reclaim must not let a late write flip an already-resolved job back to failed.
 func (d *DB) FailVideoPollJob(id uint64, errMsg string) error {
 	return d.db.Model(&model.VideoPollJob{}).
-		Where("id = ?", id).
+		Where("id = ? AND status = ?", id, model.VideoPollStatusPolling).
 		Updates(map[string]interface{}{
 			"status":        model.VideoPollStatusFailed,
 			"error_message": errMsg,
@@ -124,9 +152,15 @@ func (d *DB) FailVideoPollJob(id uint64, errMsg string) error {
 // observed. Unlike FailVideoPollJob, this is a genuine reconciliation gap candidate — the
 // provider may have delivered a video the broker never billed for — and callers should log it
 // loudly rather than treat it as routine.
+//
+// Guarded on status IN (pending, polling): a job already resolved (completed/failed) by a
+// concurrent poll must not be overwritten with a spurious timeout.
 func (d *DB) TimeOutVideoPollJob(id uint64, errMsg string) error {
 	return d.db.Model(&model.VideoPollJob{}).
-		Where("id = ?", id).
+		Where("id = ? AND status IN ?", id, []model.VideoPollStatus{
+			model.VideoPollStatusPending,
+			model.VideoPollStatusPolling,
+		}).
 		Updates(map[string]interface{}{
 			"status":        model.VideoPollStatusTimedOut,
 			"error_message": errMsg,

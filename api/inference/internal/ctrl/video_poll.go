@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -37,7 +39,7 @@ func (c *Ctrl) InitVideoPollScheduler(cfg config.VideoPollConfig) error {
 		c.runVideoPollCleanup(ctx)
 	}()
 
-	c.videoPollEnabled = true
+	c.videoPollEnabled.Store(true)
 	c.logger.Infof("Video-generation poll scheduler initialized: maxConcurrentPolls=%d, pollInterval=%v, maxPollDuration=%v, scanInterval=%v, cleanupInterval=%v",
 		cfg.MaxConcurrentPolls, cfg.PollInterval, cfg.MaxPollDuration, cfg.ScanInterval, cfg.CleanupInterval)
 	return nil
@@ -49,17 +51,16 @@ func (c *Ctrl) InitVideoPollScheduler(cfg config.VideoPollConfig) error {
 // returns simply waits for the next broker start — see ClaimDueVideoPollJobs' crash-recovery
 // semantics (an unclaimed or stale-leased row is picked up exactly like a fresh one).
 func (c *Ctrl) ShutdownVideoPollScheduler() {
-	if !c.videoPollEnabled {
+	if !c.videoPollEnabled.CompareAndSwap(true, false) {
 		return
 	}
-	c.videoPollEnabled = false
 	c.videoPollCancel()
 	c.videoPollWg.Wait()
 }
 
 // IsVideoPollEnabled reports whether the scheduler is running.
 func (c *Ctrl) IsVideoPollEnabled() bool {
-	return c.videoPollEnabled
+	return c.videoPollEnabled.Load()
 }
 
 func (c *Ctrl) runVideoPollScanner(ctx context.Context) {
@@ -142,25 +143,34 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 
 	if fields.Status == videoStatusFailed {
 		c.logger.Infof("video poll job %d (request %s): provider reported failed", job.ID, job.RequestHash)
+		monitor.RecordVideoGenerationFailed()
 		if err := c.videoPollDB.FailVideoPollJob(job.ID, "provider reported status=failed"); err != nil {
 			c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
 		}
 		return
 	}
 
-	seconds, size, source := resolveVideoBilling(body, job.RequestBody, job.RequestContentType)
 	// Deliberately NOT classifyVideoStatus here: that function's default case treats an
 	// absent/unrecognized status as "bill now", which is right for a CREATE response (that's
 	// how a shim that blocks until completion and never plays the status game looks) but
 	// wrong mid-poll — this job only exists because its create response already said
 	// queued/in_progress, so an intermediate malformed/empty poll response is far more
-	// likely a transient hiccup than a genuine synchronous completion. Only an explicit
-	// "completed" status, or the response actually reporting a real duration, ends the poll.
-	terminal := fields.Status == videoStatusCompleted || source == videoSourceResponse
-	if !terminal {
+	// likely a transient hiccup than a genuine synchronous completion.
+	//
+	// Only an EXPLICIT "completed" status ends the poll — NOT merely resolveVideoBilling
+	// finding a usable duration. A real OpenAI-Video-API-shaped job resource commonly echoes
+	// the requested top-level "seconds" as part of the object on every GET, including while
+	// still queued/in_progress (videoResponseFields.Seconds doubles as both the request-edge
+	// field and the actual-output field — see its doc comment). Treating that echo as
+	// "actual output present" would end the poll on the very first non-terminal response and
+	// bill the requested duration, defeating the entire point of polling for providers that
+	// behave exactly like the real async contract this feature targets.
+	if fields.Status != videoStatusCompleted {
 		c.rescheduleVideoPollJob(job)
 		return
 	}
+
+	seconds, size, source := resolveVideoBilling(body, job.RequestBody, job.RequestContentType)
 
 	if source == "" {
 		// Reported completed but no usable duration anywhere (response nor the original
@@ -208,6 +218,13 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	}
 
 	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.RequestHash, outputFee.String(), outputFee.String(), outputCount); err != nil {
+		if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
+			// Benign: a stale-lease reclaim let another worker resolve this job first (see
+			// ClaimDueVideoPollJobs' crash-recovery semantics). The Request row was
+			// deliberately not touched a second time, so nothing was double-billed.
+			c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate billing", job.ID)
+			return
+		}
 		c.logger.Errorf("video poll job %d (request %s): complete with billing: %v", job.ID, job.RequestHash, err)
 		return
 	}
@@ -251,11 +268,23 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Warnf("video poll job %d: poll returned status %d (will retry): %s", job.ID, resp.StatusCode, string(respBody))
+		// Bounded: an error body can be arbitrarily large (or, from a misbehaving
+		// intermediary, echo back request content), and this logs on every retry until the
+		// job resolves — truncate rather than writing the full body to broker logs each time.
+		c.logger.Warnf("video poll job %d: poll returned status %d (will retry): %s", job.ID, resp.StatusCode, truncateForLog(respBody, 500))
 		return nil, false
 	}
 
 	return respBody, true
+}
+
+// truncateForLog bounds a byte slice to at most max bytes for log output, appending a marker
+// when truncated so the reader knows the body was cut, not naturally short.
+func truncateForLog(b []byte, max int) string {
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "...(truncated)"
 }
 
 // rescheduleVideoPollJob returns a claimed job to pending for another attempt after

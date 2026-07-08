@@ -320,6 +320,15 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	if reqModel.IsWhitelisted {
 		// Whitelist traffic is unbilled; record metrics + reconciliation count only.
+		//
+		// Known limitation: this branch does NOT defer to the poll scheduler. A whitelisted
+		// request against a genuinely async provider (status=queued/in_progress) has no
+		// actual duration yet here, so resolveVideoBilling falls to the "no usable seconds"
+		// warning below with outputCount permanently 0 — unlike paying users, whitelisted
+		// usage on an async provider is never corrected once the job actually completes.
+		// Accepted for now since whitelisted traffic only affects metrics/reconciliation
+		// counts, not revenue; extending polling to whitelisted jobs is unscoped follow-up
+		// work (see docs/design/video-generation-async-billing.md).
 		var outputCount int64
 		if sec, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); source != "" {
 			outputCount = c.videoOutputUnits(ctx, sec, size)
@@ -345,6 +354,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// Provider failed immediately at create time — nothing was generated, nothing to
 		// bill, and there is no job to poll.
 		c.logger.Infof("video generation failed at create time for request %s; not billing", reqModel.RequestHash)
+		monitor.RecordVideoGenerationFailed()
 		return nil
 
 	case videoActionDeferToPoll:
@@ -354,9 +364,10 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// docs/design/video-generation-async-billing.md.
 		//
 		// Only pass chatKey through when this service actually signs (mirrors the
-		// ZG-Res-Key-advertise / signChatWithKey condition above): a TargetSeparated,
-		// non-centralized service never signs — the remote TEE does — so the scheduler
-		// must not attempt to re-sign under a key the client was never given.
+		// signChatWithKey condition above, NOT the broader ZG-Res-Key-advertise condition,
+		// which also covers IsCentralized()): a TargetSeparated service never runs
+		// signChatWithKey — the remote TEE signs instead — so the scheduler must not attempt
+		// to re-sign under a key the client was never given a matching signature for.
 		pollChatKey := ""
 		if !c.Service.TargetSeparated {
 			pollChatKey = chatKey
@@ -415,10 +426,24 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		monitor.RecordVideoBillingSkipped()
 		return nil
 	}
-	if !c.videoPollEnabled {
+	// pollInterval/maxPollDuration fall back to these constants (matching the config
+	// package's own documented defaults) when the scheduler was never initialized —
+	// c.videoPollCfg is then still its Go zero value, and using it directly for
+	// NextPollAt/ExpiresAt would set both to `now`, marking the job pre-expired the instant
+	// an operator enables the scheduler later and defeating the "best-effort registration"
+	// this branch claims to provide.
+	pollInterval := c.videoPollCfg.PollInterval
+	maxPollDuration := c.videoPollCfg.MaxPollDuration
+	if !c.videoPollEnabled.Load() {
 		// Still register the job (best-effort, in case the scheduler is enabled later) but
 		// make the operator misconfiguration loud rather than silently never billing.
 		c.logger.Errorf("video generation for request %s is non-terminal but the VideoPoll scheduler is disabled (videoPoll.enabled=false); this request will never be billed until it is enabled", reqModel.RequestHash)
+		if pollInterval <= 0 {
+			pollInterval = defaultVideoPollInterval
+		}
+		if maxPollDuration <= 0 {
+			maxPollDuration = defaultVideoPollMaxDuration
+		}
 	}
 
 	var resolvedModel string
@@ -440,14 +465,26 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		ResolvedModel:      resolvedModel,
 		MetricModel:        c.metricModel(ctx),
 		Status:             model.VideoPollStatusPending,
-		NextPollAt:         now.Add(c.videoPollCfg.PollInterval),
-		ExpiresAt:          now.Add(c.videoPollCfg.MaxPollDuration),
+		NextPollAt:         now.Add(pollInterval),
+		ExpiresAt:          now.Add(maxPollDuration),
 	}
 	if err := c.videoPollDB.CreateVideoPollJob(job); err != nil {
+		// Same "loud + metered, not silent" precedent as the empty-ID case above: a
+		// transient DB error here means this request is unbilled with no other capture.
+		monitor.RecordVideoBillingSkipped()
 		return errors.Wrap(err, "create video poll job")
 	}
 	return nil
 }
+
+// Fallback scheduling constants for deferVideoBillingToPoll when the poll scheduler was never
+// initialized (c.videoPollCfg is still its zero value). Mirror config.go's documented
+// VideoPollConfig defaults so a job registered while disabled gets a sane window if an
+// operator enables the scheduler afterward, instead of NextPollAt==ExpiresAt==now.
+const (
+	defaultVideoPollInterval    = 10 * time.Second
+	defaultVideoPollMaxDuration = 20 * time.Minute
+)
 
 // ensureMultipartWaitField ensures the "wait" field is present in a multipart/form-data body.
 // If missing, appends wait=false before the closing boundary.

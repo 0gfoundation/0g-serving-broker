@@ -136,7 +136,14 @@ type Ctrl struct {
 	// docs/design/video-generation-async-billing.md). All scheduling state lives in the
 	// video_poll_job table, not in memory — the scanner goroutines below are stateless
 	// pollers, not per-job workers, so a restart loses nothing.
-	videoPollEnabled bool
+	//
+	// videoPollEnabled is an atomic.Bool (not a plain bool) because, unlike asyncEnabled
+	// (guarded by asyncMu), it is read from arbitrary request-handling goroutines
+	// (deferVideoBillingToPoll) concurrently with Init/ShutdownVideoPollScheduler writing it.
+	// videoPollCfg itself is written once at startup before any request traffic is served and
+	// never mutated again, matching the same already-unguarded, accepted pattern as
+	// asyncResultTTL/asyncJobTimeout above.
+	videoPollEnabled atomic.Bool
 	videoPollCfg     config.VideoPollConfig
 	videoPollCancel  context.CancelFunc
 	videoPollWg      sync.WaitGroup

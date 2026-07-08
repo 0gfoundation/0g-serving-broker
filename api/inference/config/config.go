@@ -904,7 +904,13 @@ type VideoPollConfig struct {
 
 	// LeaseWindow: how far into the future a claimed row's NextPollAt is pushed while a poll
 	// round-trip is in flight. A row whose lease expires without a status update (worker
-	// crash) becomes claimable again — see db.ClaimDueVideoPollJobs.
+	// crash) becomes claimable again — see db.ClaimDueVideoPollJobs. Must stay comfortably
+	// above the per-poll HTTP timeout (hardcoded to 30s in video_poll.go's
+	// doVideoPollRequest) PLUS the time to parse/bill/write the result — if the two are close,
+	// an ordinary slow (not crashed) provider response can let a second worker reclaim and
+	// re-poll the same job while the first is still finishing, a race the terminal-write
+	// status guards (db.RescheduleVideoPollJob et al.) tolerate but that still wastes a
+	// duplicate provider round-trip.
 	LeaseWindow time.Duration `yaml:"leaseWindow"`
 
 	// RetentionTTL: how long to keep terminal (completed/failed/timed_out) rows before the
@@ -1433,6 +1439,22 @@ func loadConfig(cfg *Config) error {
 		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
 	}
 
+	// videoPoll.maxPollDuration must stay comfortably under the zero-output Request row
+	// prune threshold (hardcoded to 1 hour in ctrl/settlement_tee.go's SettleFeesWithTEE) or
+	// a still-in-flight poll job's placeholder Request row can be pruned out from under it —
+	// CompleteVideoPollJobWithBilling's fee UPDATE would then silently affect zero rows
+	// (GORM does not error on that), permanently losing the fee with no signal anywhere. This
+	// was previously only a doc comment; refuse to boot instead of a startup-time footgun an
+	// operator is likely to overlook, matching this function's existing token-billed-STT gate
+	// above.
+	if cfg.VideoPoll.Enabled && cfg.VideoPoll.MaxPollDuration >= 45*time.Minute {
+		return fmt.Errorf(
+			"invalid config: videoPoll.maxPollDuration (%v) must stay comfortably under the 1-hour zero-output Request prune threshold — "+
+				"set it below 45m, or a still-polling job's Request row can be pruned before it completes, silently losing the fee",
+			cfg.VideoPoll.MaxPollDuration,
+		)
+	}
+
 	// Token-billed STT startup gate. Until #530 lands a per-row billing-unit
 	// discriminator, deploying a known token-billed STT model without
 	// explicit operator opt-in would silently mix seconds (whisper) and
@@ -1815,7 +1837,7 @@ func GetConfig() *Config {
 				PollInterval:       10 * time.Second,
 				MaxPollDuration:    20 * time.Minute,
 				ScanInterval:       5 * time.Second,
-				LeaseWindow:        30 * time.Second,
+				LeaseWindow:        90 * time.Second, // 3x the 30s poll HTTP timeout, leaving margin for parse/bill/write
 				RetentionTTL:       30 * time.Minute,
 				CleanupInterval:    5 * time.Minute,
 			},

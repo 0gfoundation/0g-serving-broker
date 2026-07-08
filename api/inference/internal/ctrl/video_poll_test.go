@@ -187,7 +187,7 @@ func TestClassifyVideoStatus(t *testing.T) {
 func TestDeferVideoBillingToPoll_HappyPath(t *testing.T) {
 	store := newMockVideoPollDB()
 	c := newTestVideoPollCtrl(store, "https://translator.example")
-	c.videoPollEnabled = true
+	c.videoPollEnabled.Store(true)
 
 	ctx := newTestGinContext()
 	reqModel := model.Request{RequestHash: "req-1"}
@@ -232,7 +232,7 @@ func TestDeferVideoBillingToPoll_HappyPath(t *testing.T) {
 func TestDeferVideoBillingToPoll_NoID(t *testing.T) {
 	store := newMockVideoPollDB()
 	c := newTestVideoPollCtrl(store, "https://translator.example")
-	c.videoPollEnabled = true
+	c.videoPollEnabled.Store(true)
 
 	ctx := newTestGinContext()
 	reqModel := model.Request{RequestHash: "req-2"}
@@ -248,7 +248,7 @@ func TestDeferVideoBillingToPoll_NoID(t *testing.T) {
 func TestDeferVideoBillingToPoll_SchedulerDisabled_StillRegisters(t *testing.T) {
 	store := newMockVideoPollDB()
 	c := newTestVideoPollCtrl(store, "https://translator.example")
-	c.videoPollEnabled = false // misconfiguration: async provider but scheduler off
+	c.videoPollEnabled.Store(false) // misconfiguration: async provider but scheduler off
 
 	ctx := newTestGinContext()
 	reqModel := model.Request{RequestHash: "req-3"}
@@ -299,6 +299,38 @@ func TestPollVideoJob_CompletedBillsActualDuration(t *testing.T) {
 	got := store.get(1)
 	if got.Status != model.VideoPollStatusCompleted {
 		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+}
+
+// TestPollVideoJob_QueuedWithEchoedSeconds_NotTreatedAsTerminal is a regression test: a real
+// OpenAI-Video-API-shaped job resource commonly echoes the requested "seconds" as part of the
+// object on every GET, including while still queued/in_progress — status is the ONLY valid
+// terminal signal mid-poll. Before this fix, resolveVideoBilling finding that echoed seconds
+// (source=="response") was (incorrectly) enough to end the poll and bill the echoed/requested
+// value on the very first non-terminal response, defeating the entire feature for exactly the
+// providers it targets.
+func TestPollVideoJob_QueuedWithEchoedSeconds_NotTreatedAsTerminal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"queued","seconds":5,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	job := newPendingJob(1, server.URL)
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusPending {
+		t.Fatalf("Status = %q, want pending (rescheduled) — a queued status with echoed seconds must NOT end the poll", got.Status)
+	}
+	if store.rescheduleCalled != 1 {
+		t.Errorf("rescheduleCalled = %d, want 1", store.rescheduleCalled)
+	}
+	if store.lastCompleteOutputCount != 0 {
+		t.Errorf("CompleteVideoPollJobWithBilling must not have been called; lastCompleteOutputCount = %d", store.lastCompleteOutputCount)
 	}
 }
 

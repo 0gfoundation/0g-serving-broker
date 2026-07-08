@@ -60,6 +60,14 @@ var (
 	// provider may have delivered a video the broker never billed for.
 	VideoPollTimedOutTotal prometheus.Counter
 
+	// VideoGenerationFailedTotal counts video-generation requests where the provider
+	// itself reported a terminal status=failed (create time or mid-poll) — a clean,
+	// expected-shape failure distinct from VideoBillingSkippedTotal (which fires when a
+	// 200/"completed" response can't be parsed for a duration). Kept as its own counter
+	// rather than folded into VideoBillingSkippedTotal so a spike in provider-side
+	// generation failures is independently alertable from a broker-side parsing gap.
+	VideoGenerationFailedTotal prometheus.Counter
+
 	// RequestRejectedTotal counts requests rejected before they reach the
 	// upstream, labeled by a low-cardinality `reason` (see the Rejection*
 	// constants). This is the primary signal for the "high RPS, near-zero
@@ -365,6 +373,14 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	VideoGenerationFailedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "broker_video_generation_failed_total",
+			Help:        "Video-generation requests where the provider reported a terminal status=failed (create time or mid-poll).",
+			ConstLabels: constLabels,
+		},
+	)
+
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
@@ -389,6 +405,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(WhitelistAudioSecondsTotal)
 	prometheus.MustRegister(VideoBillingSkippedTotal)
 	prometheus.MustRegister(VideoPollTimedOutTotal)
+	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
 }
@@ -694,6 +711,15 @@ func RecordVideoPollTimedOut() {
 		return
 	}
 	VideoPollTimedOutTotal.Inc()
+}
+
+// RecordVideoGenerationFailed increments the counter of video-generation requests where the
+// provider reported a terminal status=failed, at create time or mid-poll.
+func RecordVideoGenerationFailed() {
+	if VideoGenerationFailedTotal == nil {
+		return
+	}
+	VideoGenerationFailedTotal.Inc()
 }
 
 // RecordRejection increments the rejected-request counter for the given reason.
