@@ -15,6 +15,15 @@ import (
 // second time, so no double billing occurred.
 var ErrVideoPollJobAlreadyResolved = errors.New("video poll job already resolved by another worker")
 
+// ErrVideoPollJobRequestMissing is returned by CompleteVideoPollJobWithBilling when the linked
+// Request row no longer exists at write time (e.g. deleted by the zero-output prune sweep).
+// Unlike ErrVideoPollJobAlreadyResolved, this is NOT benign: it means a real fee was computed
+// but has nowhere to land. The whole transaction — including the VideoPollJob's own
+// completed-status write — is rolled back so the job is left claimable again rather than
+// silently marked completed with the fee lost; callers should log this loudly as a
+// reconciliation gap, not retry it (the Request row will not reappear).
+var ErrVideoPollJobRequestMissing = errors.New("video poll job's linked request row no longer exists; fee was not recorded")
+
 // CreateVideoPollJob persists a new video poll job. Called once, right after a POST /videos
 // create call returns a non-terminal (queued/in_progress) status.
 func (d *DB) CreateVideoPollJob(job model.VideoPollJob) error {
@@ -22,18 +31,20 @@ func (d *DB) CreateVideoPollJob(job model.VideoPollJob) error {
 }
 
 // withRetryUnless behaves like withRetry (same attempt count and backoff), except it returns
-// immediately, without sleeping or reattempting, the moment fn returns an error matching
-// noRetryOn via errors.Is. Use this instead of the shared withRetry when a specific outcome is
-// known to be deterministic — retrying it cannot change the result, so blindly reattempting
+// immediately, without sleeping or reattempting, the moment fn returns an error matching any of
+// noRetryOn via errors.Is. Use this instead of the shared withRetry when specific outcomes are
+// known to be deterministic — retrying them cannot change the result, so blindly reattempting
 // only adds latency (backoff sleeps + repeated transaction round trips) for no benefit.
-func withRetryUnless(maxAttempts int, noRetryOn error, fn func() error) error {
+func withRetryUnless(maxAttempts int, fn func() error, noRetryOn ...error) error {
 	var err error
 	for i := 0; i < maxAttempts; i++ {
 		if err = fn(); err == nil {
 			return nil
 		}
-		if errors.Is(err, noRetryOn) {
-			return err
+		for _, sentinel := range noRetryOn {
+			if errors.Is(err, sentinel) {
+				return err
+			}
 		}
 		if i < maxAttempts-1 {
 			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
@@ -136,15 +147,23 @@ func (d *DB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt tim
 // workers racing on the same reclaimed job could each write a (possibly different) fee to the
 // same Request row.
 //
+// The Request update's RowsAffected is checked too: an UPDATE matching zero rows still reports
+// Error == nil (there is simply nothing to update), so without this check a missing Request row
+// (e.g. pruned by the zero-output sweep while this job was still in flight) would let the
+// VideoPollJob side commit as completed while the fee silently never lands anywhere. Returning
+// ErrVideoPollJobRequestMissing instead rolls back the whole transaction, including the
+// VideoPollJob completed-status write, so the job is left in its prior claimed state rather than
+// falsely marked completed.
+//
 // Retries up to 3 times with backoff for transient DB errors, since by this point the
-// expensive provider work is already done. ErrVideoPollJobAlreadyResolved is deterministic —
-// once lost, a retry of the identical guarded UPDATE cannot win — so it is NOT retried: the
-// transaction closure returns ErrVideoPollJobAlreadyResolved directly (unwrapped), and
-// withRetryUnless matches it via errors.Is and returns immediately, saving the ~1.5s of
-// pointless backoff+reattempts a blind 3x retry would otherwise spend on an outcome that can
-// never change.
+// expensive provider work is already done. Both ErrVideoPollJobAlreadyResolved and
+// ErrVideoPollJobRequestMissing are deterministic — once hit, a retry of the identical guarded
+// UPDATE cannot change the outcome — so neither is retried: the transaction closure returns them
+// directly (unwrapped), and withRetryUnless matches via errors.Is and returns immediately,
+// saving the ~1.5s of pointless backoff+reattempts a blind 3x retry would otherwise spend on an
+// outcome that can never change.
 func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error {
-	return withRetryUnless(3, ErrVideoPollJobAlreadyResolved, func() error {
+	return withRetryUnless(3, func() error {
 		return d.db.Transaction(func(tx *gorm.DB) error {
 			res := tx.Model(&model.VideoPollJob{}).
 				Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
@@ -157,7 +176,7 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 			if res.RowsAffected == 0 {
 				return ErrVideoPollJobAlreadyResolved
 			}
-			return tx.Model(&model.Request{}).
+			reqRes := tx.Model(&model.Request{}).
 				Where("request_hash = ?", requestHash).
 				Updates(map[string]interface{}{
 					"output_fee":   outputFee,
@@ -165,9 +184,16 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 					"output_count": seconds,
 					"unit":         unit,
 					"rate_class":   rateClass,
-				}).Error
+				})
+			if reqRes.Error != nil {
+				return reqRes.Error
+			}
+			if reqRes.RowsAffected == 0 {
+				return ErrVideoPollJobRequestMissing
+			}
+			return nil
 		})
-	})
+	}, ErrVideoPollJobAlreadyResolved, ErrVideoPollJobRequestMissing)
 }
 
 // FailVideoPollJob marks a job failed — the provider reported a terminal failure, or a poll

@@ -151,8 +151,15 @@ type Ctrl struct {
 	// videoPollCfg itself is written once at startup before any request traffic is served and
 	// never mutated again, matching the same already-unguarded, accepted pattern as
 	// asyncResultTTL/asyncJobTimeout above.
+	// videoPollCtx is the parent context for in-flight poll HTTP requests (doVideoPollRequest);
+	// it is canceled by videoPollCancel in ShutdownVideoPollScheduler so a slow/hung poll
+	// round-trip is interrupted immediately at shutdown instead of running to its own
+	// PollRequestTimeout. Left nil when the scheduler was never initialized (e.g. some unit
+	// tests construct a *Ctrl directly) — callers must fall back to context.Background() via
+	// videoPollBaseCtx rather than assume it is always set.
 	videoPollEnabled atomic.Bool
 	videoPollCfg     config.VideoPollConfig
+	videoPollCtx     context.Context
 	videoPollCancel  context.CancelFunc
 	videoPollWg      sync.WaitGroup
 

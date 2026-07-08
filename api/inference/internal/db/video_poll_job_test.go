@@ -361,6 +361,40 @@ func TestCompleteVideoPollJobWithBilling_UpdatesJobAndRequest(t *testing.T) {
 	}
 }
 
+// TestCompleteVideoPollJobWithBilling_MissingRequestRollsBackAndErrors is a regression test:
+// if the linked Request row is gone by the time billing runs (e.g. pruned mid-flight by the
+// zero-output sweep), the call must return ErrVideoPollJobRequestMissing AND roll back the
+// VideoPollJob's own completed-status write — a computed fee must never be silently dropped
+// with the job left looking successfully completed.
+func TestCompleteVideoPollJobWithBilling_MissingRequestRollsBackAndErrors(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	// Deliberately do NOT seed a Request row for this hash.
+
+	now := time.Now()
+	job := newVideoPollJob("no-such-request", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))
+	if err := d.CreateVideoPollJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	if err := d.db.Where("request_hash = ?", "no-such-request").First(&created).Error; err != nil {
+		t.Fatalf("fetch created job: %v", err)
+	}
+
+	err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "no-such-request", "8000", "8000", 8, constant.BillingUnitSeconds, "res:1280x720")
+	if !errors.Is(err, ErrVideoPollJobRequestMissing) {
+		t.Fatalf("CompleteVideoPollJobWithBilling error = %v, want ErrVideoPollJobRequestMissing", err)
+	}
+
+	gotJob, err := d.GetVideoPollJob(created.ID)
+	if err != nil {
+		t.Fatalf("GetVideoPollJob: %v", err)
+	}
+	if gotJob.Status != model.VideoPollStatusPolling {
+		t.Errorf("job Status = %q, want unchanged polling (rolled back, not falsely marked completed)", gotJob.Status)
+	}
+}
+
 func TestFailAndTimeOutVideoPollJob(t *testing.T) {
 	d := setupTestDB(t)
 	migrateVideoPollTables(t, d)

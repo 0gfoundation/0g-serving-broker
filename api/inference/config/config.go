@@ -1455,18 +1455,40 @@ func loadConfig(cfg *Config) error {
 		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
 	}
 
+	// VideoPollConfig defaults, applied regardless of Enabled and regardless of whether the
+	// caller pre-populated GetConfig()'s defaults (loadConfig is also exercised directly against
+	// a bare zero-value Config by unit tests unrelated to video polling) — same
+	// unset-field-gets-a-default pattern as the UserUsageStats/Reconciliation blocks above, so
+	// the cross-field invariants below always see real values, never zero-value fields that
+	// merely mean "caller didn't set this."
+	if cfg.VideoPoll.MaxPollDuration == 0 {
+		cfg.VideoPoll.MaxPollDuration = 20 * time.Minute
+	}
+	if cfg.VideoPoll.LeaseWindow == 0 {
+		cfg.VideoPoll.LeaseWindow = 90 * time.Second
+	}
+	if cfg.VideoPoll.PollRequestTimeout == 0 {
+		cfg.VideoPoll.PollRequestTimeout = 30 * time.Second
+	}
+
 	// Two VideoPollConfig cross-field invariants (see VideoPollConfig.MaxPollDuration and
 	// .LeaseWindow doc comments for the full rationale) were previously enforced only by
 	// comment; refuse to boot instead of a startup-time footgun an operator is likely to
 	// overlook, matching this function's existing token-billed-STT gate above.
-	if maxAllowedPollDuration := ZeroOutputRequestPruneThreshold * 3 / 4; cfg.VideoPoll.Enabled && cfg.VideoPoll.MaxPollDuration >= maxAllowedPollDuration {
+	//
+	// Enforced unconditionally, NOT gated on cfg.VideoPoll.Enabled: deferVideoBillingToPoll
+	// (video.go) uses MaxPollDuration/LeaseWindow to compute a VideoPollJob's ExpiresAt
+	// regardless of whether the scheduler is currently running, so a disabled scheduler with an
+	// out-of-range value would let an unvalidated ExpiresAt slip through and only bite later,
+	// once the scheduler is re-enabled.
+	if maxAllowedPollDuration := ZeroOutputRequestPruneThreshold * 3 / 4; cfg.VideoPoll.MaxPollDuration >= maxAllowedPollDuration {
 		return fmt.Errorf(
 			"invalid config: videoPoll.maxPollDuration (%v) must stay comfortably under ZeroOutputRequestPruneThreshold (%v) — "+
 				"set it below %v, or a still-polling job's Request row can be pruned before it completes, silently losing the fee",
 			cfg.VideoPoll.MaxPollDuration, ZeroOutputRequestPruneThreshold, maxAllowedPollDuration,
 		)
 	}
-	if cfg.VideoPoll.Enabled && cfg.VideoPoll.LeaseWindow <= cfg.VideoPoll.PollRequestTimeout {
+	if cfg.VideoPoll.LeaseWindow <= cfg.VideoPoll.PollRequestTimeout {
 		return fmt.Errorf(
 			"invalid config: videoPoll.leaseWindow (%v) must be greater than videoPoll.pollRequestTimeout (%v) — "+
 				"otherwise an ordinary slow (not crashed) poll response can let a second worker reclaim and re-poll "+

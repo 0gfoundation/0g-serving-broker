@@ -40,6 +40,7 @@ func (c *Ctrl) InitVideoPollScheduler(cfg config.VideoPollConfig) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	c.videoPollCtx = ctx
 	c.videoPollCancel = cancel
 
 	c.videoPollWg.Add(1)
@@ -61,10 +62,14 @@ func (c *Ctrl) InitVideoPollScheduler(cfg config.VideoPollConfig) error {
 }
 
 // ShutdownVideoPollScheduler stops the scanner and cleanup goroutines and waits for any
-// in-flight poll round-trip to finish. Unlike ShutdownAsync there is no queue to drain: all
-// scheduling state lives in the video_poll_job table, so any row not claimed by the time this
-// returns simply waits for the next broker start — see ClaimDueVideoPollJobs' crash-recovery
-// semantics (an unclaimed or stale-leased row is picked up exactly like a fresh one).
+// in-flight poll round-trip to unwind. Canceling videoPollCancel here also cancels
+// videoPollCtx, the parent context doVideoPollRequest derives its per-request timeout from, so
+// an in-flight HTTP poll is interrupted immediately rather than running to its own
+// PollRequestTimeout — shutdown latency is bounded by that cancellation propagating, not by the
+// configured timeout. Unlike ShutdownAsync there is no queue to drain: all scheduling state
+// lives in the video_poll_job table, so any row not claimed by the time this returns simply
+// waits for the next broker start — see ClaimDueVideoPollJobs' crash-recovery semantics (an
+// unclaimed or stale-leased row is picked up exactly like a fresh one).
 func (c *Ctrl) ShutdownVideoPollScheduler() {
 	if !c.videoPollEnabled.CompareAndSwap(true, false) {
 		return
@@ -76,6 +81,16 @@ func (c *Ctrl) ShutdownVideoPollScheduler() {
 // IsVideoPollEnabled reports whether the scheduler is running.
 func (c *Ctrl) IsVideoPollEnabled() bool {
 	return c.videoPollEnabled.Load()
+}
+
+// videoPollBaseCtx returns the scheduler's cancelable context (canceled on shutdown), or
+// context.Background() if the scheduler was never initialized with one — a *Ctrl built
+// directly (as several unit tests do) has a nil videoPollCtx.
+func (c *Ctrl) videoPollBaseCtx() context.Context {
+	if c.videoPollCtx != nil {
+		return c.videoPollCtx
+	}
+	return context.Background()
 }
 
 func (c *Ctrl) runVideoPollScanner(ctx context.Context) {
@@ -221,6 +236,45 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		return
 	}
 
+	// Commit the billing write BEFORE signing. In the stale-lease-reclaim race this job is
+	// designed to survive, two workers can both reach this point for the same job; only one of
+	// them wins the attempts-fenced CompleteVideoPollJobWithBilling below. Signing first (as
+	// this code used to) would let the LOSING worker's signChatWithKey call still land in the
+	// chatKey cache (last-write-wins) after the winner's own signature — binding the signature
+	// the client eventually fetches to a response body that may not byte-for-byte match what
+	// was actually billed. Gating the sign call on this call succeeding means only the worker
+	// that actually wrote the fee ever signs.
+	//
+	// Reconciliation records the RAW seconds (unit=seconds) with the resolution as rate_class,
+	// not the resolution-weighted units — same convention as the sync path (video.go). The
+	// weighted units live only in outputFee above and the RecordTokens metric below.
+	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.Attempts, job.RequestHash, outputFee.String(), outputFee.String(),
+		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
+		if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
+			// Benign: a stale-lease reclaim let another worker resolve this job first (see
+			// ClaimDueVideoPollJobs' crash-recovery semantics). The Request row was
+			// deliberately not touched a second time, so nothing was double-billed, and this
+			// (losing) worker must not sign either — the winner already did.
+			c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate billing", job.ID)
+			return
+		}
+		if errors.Is(err, db.ErrVideoPollJobRequestMissing) {
+			// Not benign: a real fee was computed but the linked Request row is gone (e.g.
+			// pruned while this job was still in flight) — the write rolled back entirely, so
+			// the job is still claimed by us. Fail it explicitly instead of leaving it to spin
+			// until MaxPollDuration: retrying cannot make the Request row reappear.
+			c.logger.Errorf("video poll job %d (request %s): linked request row no longer exists; fee %s was computed but NOT recorded — reconciliation gap",
+				job.ID, job.RequestHash, outputFee.String())
+			monitor.RecordVideoBillingSkipped()
+			if failErr := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "linked request row no longer exists"); failErr != nil {
+				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, failErr)
+			}
+			return
+		}
+		c.logger.Errorf("video poll job %d (request %s): complete with billing: %v", job.ID, job.RequestHash, err)
+		return
+	}
+
 	if job.ChatKey != "" {
 		// Re-sign under the SAME chatKey already returned to the client via the create
 		// response's ZG-Res-Key header, overwriting the placeholder signature made over
@@ -230,22 +284,6 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		if err := c.signChatWithKey(job.RequestBody, body, job.ChatKey); err != nil {
 			c.logger.Warnf("video poll job %d: failed to sign completed response (TEE verification will be unavailable): %v", job.ID, err)
 		}
-	}
-
-	// Reconciliation records the RAW seconds (unit=seconds) with the resolution as rate_class,
-	// not the resolution-weighted units — same convention as the sync path (video.go). The
-	// weighted units live only in outputFee above and the RecordTokens metric below.
-	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.Attempts, job.RequestHash, outputFee.String(), outputFee.String(),
-		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
-		if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
-			// Benign: a stale-lease reclaim let another worker resolve this job first (see
-			// ClaimDueVideoPollJobs' crash-recovery semantics). The Request row was
-			// deliberately not touched a second time, so nothing was double-billed.
-			c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate billing", job.ID)
-			return
-		}
-		c.logger.Errorf("video poll job %d (request %s): complete with billing: %v", job.ID, job.RequestHash, err)
-		return
 	}
 
 	metricModel := job.MetricModel
@@ -260,7 +298,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 // interval" (bounded by ExpiresAt), not an immediate failure — a single blip should not lose a
 // job that would otherwise have billed correctly on the next attempt.
 func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool) {
-	pollCtx, cancel := context.WithTimeout(context.Background(), c.videoPollCfg.PollRequestTimeout)
+	pollCtx, cancel := context.WithTimeout(c.videoPollBaseCtx(), c.videoPollCfg.PollRequestTimeout)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(pollCtx, http.MethodGet, job.PollURL, nil)

@@ -154,17 +154,21 @@ func Main() {
 	ctrl := ctrl.New(db, contract, config, svcCache, teeService, priceCache, logger)
 
 	// Record the video-generation poll config and, if enabled, start the poll-to-completion
-	// scheduler BEFORE the first SettleFeesWithTEE/PruneRequest pass below, not after.
-	// PruneRequest deletes zero-output Request rows older than 1 hour; a still-in-flight
-	// VideoPollJob's placeholder Request row crossing that age during broker downtime must
-	// have a chance to resume polling (or be timed out with a loud log) before the prune
-	// sweep can silently delete it out from under the job — see
-	// docs/design/video-generation-async-billing.md. ctrl.New() above already fully
-	// initializes httpClient/Service/videoPollDB, so nothing later in main.go needs to run
-	// first for this to be safe. Called unconditionally (not gated on
-	// config.VideoPoll.Enabled): InitVideoPollScheduler itself only starts goroutines when
-	// enabled, but always records cfg so a video-gen request accepted while disabled still
-	// schedules against the operator's real configured values, not a hardcoded fallback.
+	// scheduler before serving traffic. ctrl.New() above already fully initializes
+	// httpClient/Service/videoPollDB, so nothing later in main.go needs to run first for this
+	// to be safe. Called unconditionally (not gated on config.VideoPoll.Enabled):
+	// InitVideoPollScheduler itself only starts goroutines when enabled, but always records
+	// cfg so a video-gen request accepted while disabled still schedules against the
+	// operator's real configured values, not a hardcoded fallback.
+	//
+	// This call's position relative to SettleFeesWithTEE/PruneRequest below does NOT, by
+	// itself, protect an in-flight VideoPollJob's placeholder Request row from PruneRequest's
+	// zero-output sweep: SettleFeesWithTEE runs synchronously to completion while the
+	// scheduler's scan/claim/resume loop runs in independent goroutines, so starting the
+	// scheduler first establishes no happens-before ordering against the sweep. What actually
+	// protects that row is config.go's boot-time invariant that VideoPollConfig.MaxPollDuration
+	// stays under 3/4 of ZeroOutputRequestPruneThreshold, enforced unconditionally regardless
+	// of Enabled — see docs/design/video-generation-async-billing.md.
 	if err := ctrl.InitVideoPollScheduler(config.VideoPoll); err != nil {
 		logger.Errorf("Failed to initialize video poll scheduler: %v", err)
 	}

@@ -389,6 +389,65 @@ videoPoll:
 	}
 }
 
+// TestLoadConfig_VideoPoll_RejectsMaxPollDurationEvenWhenDisabled is a regression test: both
+// VideoPoll invariants must be enforced regardless of videoPoll.enabled. deferVideoBillingToPoll
+// (video.go) computes a VideoPollJob's ExpiresAt from MaxPollDuration/LeaseWindow no matter
+// whether the scheduler is currently running, so an out-of-range value accepted while disabled
+// would only bite later, once an operator re-enables the scheduler — by then the bad ExpiresAt
+// is already baked into whatever jobs were created in the meantime.
+func TestLoadConfig_VideoPoll_RejectsMaxPollDurationEvenWhenDisabled(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+videoPoll:
+  enabled: false
+  maxPollDuration: "50m"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "maxPollDuration") {
+		t.Fatalf("expected videoPoll.maxPollDuration rejection even with enabled=false, got: %v", err)
+	}
+}
+
+// TestLoadConfig_VideoPoll_UnsetFieldsGetSaneDefaults is a regression test for loadConfig's
+// VideoPoll defaulting: a config that mentions videoPoll only to flip enabled (or a bare
+// zero-value Config passed to loadConfig directly, as many unrelated tests in this package do)
+// must not trip the cross-field invariants on zero-valued fields — loadConfig fills sane
+// defaults first, the same unset-field-gets-a-default pattern used for
+// UserUsageStats/Reconciliation above.
+func TestLoadConfig_VideoPoll_UnsetFieldsGetSaneDefaults(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("expected a config with no videoPoll block to load cleanly, got: %v", err)
+	}
+	if cfg.VideoPoll.MaxPollDuration != 20*time.Minute {
+		t.Errorf("MaxPollDuration = %v, want 20m default", cfg.VideoPoll.MaxPollDuration)
+	}
+	if cfg.VideoPoll.LeaseWindow != 90*time.Second {
+		t.Errorf("LeaseWindow = %v, want 90s default", cfg.VideoPoll.LeaseWindow)
+	}
+	if cfg.VideoPoll.PollRequestTimeout != 30*time.Second {
+		t.Errorf("PollRequestTimeout = %v, want 30s default", cfg.VideoPoll.PollRequestTimeout)
+	}
+}
+
 func TestLoadConfig_ProviderTypeStandard_AllowsModelPricing(t *testing.T) {
 	// Multi-model pricing is supported for standard forwarders, same as centralized.
 	configPath := writeTestConfig(t, `

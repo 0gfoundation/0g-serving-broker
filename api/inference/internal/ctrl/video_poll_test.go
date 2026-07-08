@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/patrickmn/go-cache"
+
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
@@ -184,6 +188,26 @@ func newTestVideoPollCtrl(store *mockVideoPollDB, providerURL string) *Ctrl {
 	if providerURL != "" {
 		c.Service.TargetURL = providerURL
 	}
+	return c
+}
+
+// newTestVideoPollCtrlWithSigning is newTestVideoPollCtrl plus a real signing key and svcCache,
+// for tests that exercise pollVideoJob's job.ChatKey != "" re-signing branch (signChatWithKey
+// needs a real teeService.ProviderSigner, and asserting on the cached ChatSignature needs a
+// real svcCache — mirrors newChatbotTestCtrl in chatbot_test.go).
+func newTestVideoPollCtrlWithSigning(t *testing.T, store *mockVideoPollDB, providerURL string) *Ctrl {
+	t.Helper()
+	c := newTestVideoPollCtrl(store, providerURL)
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate signing key: %v", err)
+	}
+	c.teeService = &teeutil.TeeService{
+		ProviderSigner: privateKey,
+		Address:        crypto.PubkeyToAddress(privateKey.PublicKey),
+	}
+	c.svcCache = cache.New(5*time.Minute, 10*time.Minute)
+	c.chatCacheExpiration = 5 * time.Minute
 	return c
 }
 
@@ -542,6 +566,90 @@ func TestPollVideoJob_MultiModelPricing(t *testing.T) {
 	}
 	if store.lastCompleteRateClass != "res:1920x1080" {
 		t.Errorf("rateClass = %q, want res:1920x1080", store.lastCompleteRateClass)
+	}
+}
+
+// TestPollVideoJob_SignsOnlyAfterBillingSucceeds is a regression test for the sign/bill
+// ordering fix: signChatWithKey must only run once CompleteVideoPollJobWithBilling has actually
+// committed, so the cached ChatSignature a client later fetches is guaranteed to correspond to
+// the response body that was actually billed.
+func TestPollVideoJob_SignsOnlyAfterBillingSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrlWithSigning(t, store, "")
+	job := newPendingJob(1, server.URL)
+	job.ChatKey = "chat-key-1"
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusCompleted {
+		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+	if _, ok := c.svcCache.Get(c.chatCacheKey("chat-key-1")); !ok {
+		t.Error("expected a ChatSignature to be cached after billing succeeded")
+	}
+}
+
+// TestPollVideoJob_LostRaceOnComplete_DoesNotSign extends
+// TestPollVideoJob_LostRaceOnComplete_IsBenignNotError: when CompleteVideoPollJobWithBilling
+// loses the attempts-fencing race (ErrVideoPollJobAlreadyResolved), this (losing) worker must
+// not sign either — the winning worker already produced the signature that corresponds to what
+// was actually billed. Before the sign/bill reordering fix, signChatWithKey ran unconditionally
+// before the billing call and would have overwritten the winner's correct signature with one
+// bound to whatever body this stale worker happened to observe.
+func TestPollVideoJob_LostRaceOnComplete_DoesNotSign(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrlWithSigning(t, store, "")
+	job := newPendingJob(1, server.URL) // job.Attempts == 0: this call's stale claim
+	job.ChatKey = "chat-key-1"
+	stored := job
+	stored.Attempts = 1 // the row has since been reclaimed by another worker
+	store.jobs[1] = &stored
+
+	c.pollVideoJob(job)
+
+	if _, ok := c.svcCache.Get(c.chatCacheKey("chat-key-1")); ok {
+		t.Error("stale worker must not have signed after losing the billing race")
+	}
+}
+
+// TestPollVideoJob_RequestMissing_FailsJobAndDoesNotSign is a regression test for
+// CompleteVideoPollJobWithBilling's RowsAffected check on the Request update: if the linked
+// Request row is gone by the time billing runs (e.g. pruned mid-flight), the job must be
+// explicitly failed — not left to spin until MaxPollDuration — and, since no fee was ever
+// recorded, the response must not be signed either.
+func TestPollVideoJob_RequestMissing_FailsJobAndDoesNotSign(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	store.errOnComplete = db.ErrVideoPollJobRequestMissing
+	c := newTestVideoPollCtrlWithSigning(t, store, "")
+	job := newPendingJob(1, server.URL)
+	job.ChatKey = "chat-key-1"
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusFailed {
+		t.Fatalf("Status = %q, want failed (a missing Request row must not leave the job spinning)", got.Status)
+	}
+	if _, ok := c.svcCache.Get(c.chatCacheKey("chat-key-1")); ok {
+		t.Error("must not have signed when the fee was never recorded")
 	}
 }
 
