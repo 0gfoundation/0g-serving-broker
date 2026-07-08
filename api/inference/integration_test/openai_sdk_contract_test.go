@@ -61,6 +61,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/handler"
+	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
 // ==========================================================================
@@ -281,6 +282,17 @@ func setupContractEnv(t *testing.T, extraCfg func(*config.Config)) (baseURL, aut
 	// latter (see async_job_test.go for the same pattern). Registering it
 	// unconditionally here is a no-op for the other callers.
 	handler.New(env.ctrl, env.proxy, newTestLogger()).Register(env.engine)
+	// setupTestEnv's own SeedServiceCache call (helpers_test.go) never sets
+	// ModelType, so GetModels' single-model path would report id:"" instead
+	// of "gpt-4o" — confirmed by a real CI run of this exact test (see PR
+	// #584). Re-seed with it set; mirrors the other fields already seeded.
+	env.ctrl.SeedServiceCache(model.Service{
+		Type:                  "chatbot",
+		ModelType:             "gpt-4o",
+		OutputPrice:           "100",
+		InputPrice:            "0",
+		TeeSignerAcknowledged: true,
+	})
 	srv := startRealListener(t, env)
 	return srv.URL + "/v1/proxy", createAuthHeader(t, env.privateKey, env.providerAddr)
 }
