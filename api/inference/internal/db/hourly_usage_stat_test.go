@@ -78,6 +78,52 @@ func TestHourlyBucketingByCreatedAt(t *testing.T) {
 	}
 }
 
+// TestHourlyBucketingByRateClass verifies the settlement rollup keys on rate_class: two
+// chatbot requests in the same (hour, upstream, model, unit) but different input-length tiers
+// land in SEPARATE rows, and the reconciliation query groups by rate_class so each tier can be
+// compared against a vendor's tiered statement line.
+func TestHourlyBucketingByRateClass(t *testing.T) {
+	d := setupTestDB(t)
+	migrateUsageTables(t, d)
+
+	h := time.Date(2026, 6, 29, 8, 0, 0, 0, time.UTC)
+	batch := []*model.Request{
+		{Model: model.Model{CreatedAt: &h}, UserAddress: "0xUser", Nonce: "r1", RequestHash: "r1", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", RateClass: "tier:<=32000", InputCount: 100, OutputCount: 40},
+		{Model: model.Model{CreatedAt: &h}, UserAddress: "0xUser", Nonce: "r2", RequestHash: "r2", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", RateClass: "tier:<=32000", InputCount: 50, OutputCount: 20},
+		{Model: model.Model{CreatedAt: &h}, UserAddress: "0xUser", Nonce: "r3", RequestHash: "r3", Upstream: "minimax", ModelName: "MiniMax-M3", Unit: "tokens", RateClass: "tier:unbounded", InputCount: 90000, OutputCount: 300},
+	}
+	if err := d.db.Create(&batch).Error; err != nil {
+		t.Fatalf("seed requests: %v", err)
+	}
+	if err := d.AccumulateAndDeleteRequests(batch, AccumulateOptions{ServiceType: constant.ServiceTypeChatbot}); err != nil {
+		t.Fatalf("accumulate: %v", err)
+	}
+
+	// Two distinct rows: the two <=32000 requests merge, the unbounded one stays separate.
+	var rows []model.HourlyUsageStat
+	if err := d.db.Where("rate_class <> ''").Find(&rows).Error; err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rate_class rows = %d, want 2 (tiers stored separately)", len(rows))
+	}
+
+	sums, err := d.SumHourlyUsageByModel("minimax", h, h.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if len(sums) != 2 {
+		t.Fatalf("groups = %d, want 2 (grouped by rate_class)", len(sums))
+	}
+	byClass := map[string]int64{}
+	for _, s := range sums {
+		byClass[s.RateClass] = s.InputCount
+	}
+	if byClass["tier:<=32000"] != 150 || byClass["tier:unbounded"] != 90000 {
+		t.Errorf("per-tier input = %v, want tier:<=32000=150 tier:unbounded=90000", byClass)
+	}
+}
+
 // TestHourlySTTKeepsSeconds verifies STT rows keep raw seconds in input_count (unit
 // "seconds"), unlike daily_stat which zeroes the token columns for STT.
 func TestHourlySTTKeepsSeconds(t *testing.T) {

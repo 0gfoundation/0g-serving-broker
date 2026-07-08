@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
 
@@ -205,7 +206,7 @@ func TestRescheduleVideoPollJob_DoesNotClobberAlreadyResolvedJob(t *testing.T) {
 	d.db.Where("request_hash = ?", "race-1").First(&created)
 
 	// Worker A completes the job first.
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-1", "5000", "5000", 5); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-1", "5000", "5000", 5, constant.BillingUnitSeconds, "res:1280x720"); err != nil {
 		t.Fatalf("CompleteVideoPollJobWithBilling: %v", err)
 	}
 
@@ -239,12 +240,12 @@ func TestCompleteVideoPollJobWithBilling_SecondCallIsRejected(t *testing.T) {
 	var created model.VideoPollJob
 	d.db.Where("request_hash = ?", "race-2").First(&created)
 
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-2", "5000", "5000", 5); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-2", "5000", "5000", 5, constant.BillingUnitSeconds, "res:1280x720"); err != nil {
 		t.Fatalf("first CompleteVideoPollJobWithBilling: %v", err)
 	}
 
 	// Second worker's duplicate completion, with a DIFFERENT (wrong) fee — must be rejected.
-	err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-2", "9999", "9999", 99)
+	err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "race-2", "9999", "9999", 99, constant.BillingUnitSeconds, "res:1920x1080")
 	if !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
 		t.Fatalf("second CompleteVideoPollJobWithBilling error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
@@ -253,8 +254,8 @@ func TestCompleteVideoPollJobWithBilling_SecondCallIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRequest: %v", err)
 	}
-	if gotReq.Fee != "5000" || gotReq.OutputCount != 5 {
-		t.Errorf("request fee/count = (%s, %d), want (5000, 5) — the second call's wrong values must not have overwritten the first", gotReq.Fee, gotReq.OutputCount)
+	if gotReq.Fee != "5000" || gotReq.OutputCount != 5 || gotReq.RateClass != "res:1280x720" {
+		t.Errorf("request fee/count/rateClass = (%s, %d, %s), want (5000, 5, res:1280x720) — the second call's wrong values must not have overwritten the first", gotReq.Fee, gotReq.OutputCount, gotReq.RateClass)
 	}
 }
 
@@ -313,7 +314,7 @@ func TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling(t *testin
 	}
 
 	// Worker B, using the CURRENT Attempts value, now legitimately completes the job.
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, 2, "fence-1", "5000", "5000", 5); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 2, "fence-1", "5000", "5000", 5, constant.BillingUnitSeconds, "res:1280x720"); err != nil {
 		t.Fatalf("CompleteVideoPollJobWithBilling (worker B, correct attempts): %v", err)
 	}
 	gotFinal, _ := d.GetVideoPollJob(created.ID)
@@ -337,7 +338,7 @@ func TestCompleteVideoPollJobWithBilling_UpdatesJobAndRequest(t *testing.T) {
 		t.Fatalf("fetch created job: %v", err)
 	}
 
-	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "complete-1", "8000", "8000", 8); err != nil {
+	if err := d.CompleteVideoPollJobWithBilling(created.ID, 0, "complete-1", "8000", "8000", 8, constant.BillingUnitSeconds, "res:1280x720"); err != nil {
 		t.Fatalf("CompleteVideoPollJobWithBilling: %v", err)
 	}
 
@@ -353,8 +354,10 @@ func TestCompleteVideoPollJobWithBilling_UpdatesJobAndRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRequest: %v", err)
 	}
-	if gotReq.OutputFee != "8000" || gotReq.Fee != "8000" || gotReq.OutputCount != 8 {
-		t.Errorf("request fees/count = (%s, %s, %d), want (8000, 8000, 8)", gotReq.OutputFee, gotReq.Fee, gotReq.OutputCount)
+	if gotReq.OutputFee != "8000" || gotReq.Fee != "8000" || gotReq.OutputCount != 8 ||
+		gotReq.Unit != constant.BillingUnitSeconds || gotReq.RateClass != "res:1280x720" {
+		t.Errorf("request fees/count/unit/rateClass = (%s, %s, %d, %s, %s), want (8000, 8000, 8, seconds, res:1280x720)",
+			gotReq.OutputFee, gotReq.Fee, gotReq.OutputCount, gotReq.Unit, gotReq.RateClass)
 	}
 }
 

@@ -46,7 +46,11 @@ type videoPollDB interface {
 	// the specific claim this caller is acting on (i.e. what ClaimDueVideoPollJobs returned),
 	// not a value re-read from the row. See db.RescheduleVideoPollJob's doc comment.
 	RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt time.Time) error
-	CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error
+	// seconds/unit/rateClass mirror UpdateRequestVideoBilling's convention (video.go's sync
+	// path): the Request row stores raw output seconds with the resolution as rate_class, not
+	// the resolution-weighted billable count. See db.CompleteVideoPollJobWithBilling's doc
+	// comment.
+	CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error
 	FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 	TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 	DeleteExpiredVideoPollJobs(retention time.Duration) error

@@ -22,7 +22,7 @@ import (
 // request that crosses an hour boundary lands in the same hour on both paths; falls back to
 // now only if unset. Best-effort: a failure is logged, not propagated — the client already
 // received its response.
-func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, outputCount, cachedInputTokens, cacheWriteInputTokens int64) {
+func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, outputCount, cachedInputTokens, cacheWriteInputTokens int64, rateClass string) {
 	upstream := reqModel.Upstream
 	if upstream == "" {
 		upstream = c.Service.ProviderIdentity
@@ -50,6 +50,7 @@ func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, output
 		Upstream:              upstream,
 		Model:                 modelName,
 		Unit:                  unit,
+		RateClass:             rateClass,
 		IsWhitelisted:         true,
 		ServiceType:           reqModel.ServiceName,
 		RequestCount:          1,
@@ -64,7 +65,7 @@ func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, output
 }
 
 // UnitTotals is the broker's usage summed across all models for one billing unit
-// ("tokens" / "seconds" / "images" / "video_units") over the report window.
+// ("tokens" / "seconds" / "images") over the report window.
 type UnitTotals struct {
 	RequestCount          int64 `json:"requestCount"`
 	InputCount            int64 `json:"inputCount"`

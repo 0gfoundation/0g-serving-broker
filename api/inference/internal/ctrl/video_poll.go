@@ -13,6 +13,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/internal/db"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
@@ -231,7 +232,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		}
 	}
 
-	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.Attempts, job.RequestHash, outputFee.String(), outputFee.String(), outputCount); err != nil {
+	// Reconciliation records the RAW seconds (unit=seconds) with the resolution as rate_class,
+	// not the resolution-weighted units — same convention as the sync path (video.go). The
+	// weighted units live only in outputFee above and the RecordTokens metric below.
+	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.Attempts, job.RequestHash, outputFee.String(), outputFee.String(),
+		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
 		if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
 			// Benign: a stale-lease reclaim let another worker resolve this job first (see
 			// ClaimDueVideoPollJobs' crash-recovery semantics). The Request row was

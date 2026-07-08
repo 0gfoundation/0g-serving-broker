@@ -108,6 +108,45 @@ func TestReconcile_Integration(t *testing.T) {
 	}
 }
 
+// TestReconcile_Integration_RateClass runs the full Reconcile() against a real DB with rows
+// that differ only by rate_class, asserting the cost dimension survives the query→Scan→report
+// seam: the same (model, unit) split into one per-model row per tier, while the unit total sums
+// across tiers.
+func TestReconcile_Integration_RateClass(t *testing.T) {
+	c := setupReconcileCtrl(t)
+	h := time.Date(2026, 6, 29, 3, 0, 0, 0, time.UTC)
+	seed := func(rateClass string, req, in int64) {
+		row := model.HourlyUsageStat{Hour: h, Upstream: "minimax", Model: "MiniMax-M3", Unit: "tokens", RateClass: rateClass, ServiceType: "chatbot", RequestCount: req, InputCount: in}
+		if err := c.db.AccumulateHourlyUsage(row); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	seed("tier:<=32000", 4, 400)
+	seed("tier:unbounded", 1, 90000)
+
+	rep, err := c.Reconcile("minimax", "2026-06-29", "2026-06-29", "Z")
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(rep.Upstreams) != 1 {
+		t.Fatalf("upstreams = %d, want 1", len(rep.Upstreams))
+	}
+	up := rep.Upstreams[0]
+	if tok := up.TotalsByUnit["tokens"]; tok == nil || tok.RequestCount != 5 || tok.InputCount != 90400 {
+		t.Errorf("tokens totals = %+v, want req=5 in=90400 (summed across tiers)", up.TotalsByUnit["tokens"])
+	}
+	if len(up.PerModel) != 2 {
+		t.Fatalf("PerModel = %d, want 2 (one per rate_class)", len(up.PerModel))
+	}
+	byClass := map[string]int64{}
+	for _, m := range up.PerModel {
+		byClass[m.RateClass] = m.InputCount
+	}
+	if byClass["tier:<=32000"] != 400 || byClass["tier:unbounded"] != 90000 {
+		t.Errorf("per-tier input = %v, want tier:<=32000=400 tier:unbounded=90000", byClass)
+	}
+}
+
 // TestReconcile_Integration_AllUpstreams verifies the no-upstream (fleet) query groups by
 // upstream against a real DB.
 func TestReconcile_Integration_AllUpstreams(t *testing.T) {

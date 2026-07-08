@@ -35,12 +35,18 @@ The OpenAI input is `reasoning_effort`. It is normalized to a binary on/off inte
 | `"reasoning_effort": "high"` | `"chat_template_kwargs": {"enable_thinking": true}` | Qwen3 / GLM on vLLM (`chat_template_kwargs`) |
 | `"reasoning_effort": "none"` | `"chat_template_kwargs": {"enable_thinking": false}` | Qwen3 / GLM on vLLM (`chat_template_kwargs`) |
 | `"reasoning_effort": "high"` | `"enable_thinking": true` | DashScope / Aliyun (top-level `enable_thinking`) |
-| `"reasoning_effort": "high"` | `"thinking": {"type": "enabled"}` | MiniMax (`thinking`) |
-| `"reasoning_effort": "none"` | `"thinking": {"type": "disabled"}` | MiniMax (`thinking`) |
+| `"reasoning_effort": "high"` | `"thinking": {"type": "enabled"}` | MiniMax / Zhipu GLM (`thinking`, OpenAI surface) |
+| `"reasoning_effort": "none"` | `"thinking": {"type": "disabled"}` | MiniMax / Zhipu GLM (`thinking`, OpenAI surface) |
+| `"reasoning_effort": "high"` | `"reasoning": {"enabled": true}` | OpenRouter (`reasoning`) |
+| `"reasoning_effort": "none"` | `"reasoning": {"enabled": false}` | OpenRouter (`reasoning`) |
 
 **Not translated:** `preserve_thinking` (a DashScope *multi-turn* context flag, not an
 on/off toggle) and MiniMax's `reasoning_split` (output-format control). Advertising
-either does not trigger reasoning translation.
+either does not trigger reasoning translation. Nor is `thinking` translated on a model
+whose `supportedFormats` declares the genuine Anthropic `/v1/messages` surface: that
+dialect's `thinking` requires a mandatory `budget_tokens` sub-field the broker cannot
+compute, unlike the type-only `thinking` above — see
+[reasoning-translation.md](reasoning-translation.md) for the full rule.
 
 Full design: [reasoning-translation.md](reasoning-translation.md).
 
@@ -64,17 +70,19 @@ All translations above follow the same contract:
 Because the broker *accepts* `reasoning_effort` via translation, it should also
 *advertise* it — otherwise an OpenAI-schema client can't discover the portable knob and
 is pushed toward the leaky upstream-native field. This is automatic:
-`AdvertisedSupportedParameters` (in `reasoning.go`) augments the `supported_parameters`
-served by `GET /v1/models` — when a model advertises a native thinking toggle
-(`chat_template_kwargs` / `enable_thinking` / `thinking`) but not `reasoning_effort`, the
-handler appends `reasoning_effort`.
+`AdvertisedSupportedParameters(params, formats)` (in `reasoning.go`) augments the
+`supported_parameters` served by `GET /v1/models` — when a model advertises a native
+thinking toggle (`chat_template_kwargs` / `enable_thinking` / `thinking` / `reasoning`)
+but not `reasoning_effort`, the handler appends `reasoning_effort`.
 
 This keeps **"broker can translate `reasoning_effort`" ⇔ "`reasoning_effort` is
-advertised"** true with no per-provider config work, and it can't drift because the same
-`isNativeReasoningParam` set drives both translation and advertisement. The augmentation
-applies only to the advertised view; the config value the broker reads for *detection* is
-untouched. A model whose upstream genuinely accepts `reasoning_effort` natively simply
-lists it in config and no augmentation is needed.
+advertised"** true with no per-provider config work: the same `isNativeReasoningParam`
+set drives both translation and advertisement, *and* both consult the same `formats`
+input, so the `thinking`-on-Anthropic exclusion above can't drift between the two either
+— a model that isn't translated is also not advertised. The augmentation applies only to
+the advertised view; the config value the broker reads for *detection* is untouched. A
+model whose upstream genuinely accepts `reasoning_effort` natively simply lists it in
+config and no augmentation is needed.
 
 ## Where it runs
 

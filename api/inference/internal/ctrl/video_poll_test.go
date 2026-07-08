@@ -29,10 +29,14 @@ type mockVideoPollDB struct {
 	errOnReschedule  error
 	rescheduleCalled int
 
-	// lastCompleteOutputCount/lastCompleteFee capture the most recent
-	// CompleteVideoPollJobWithBilling call's arguments for assertions.
-	lastCompleteOutputCount int64
-	lastCompleteFee         string
+	// lastCompleteSeconds/lastCompleteFee/lastCompleteUnit/lastCompleteRateClass capture the
+	// most recent CompleteVideoPollJobWithBilling call's arguments for assertions.
+	// lastCompleteSeconds is the RAW seconds argument (the Request.OutputCount value under the
+	// rate_class convention), not the resolution-weighted billable unit count.
+	lastCompleteSeconds   int64
+	lastCompleteFee       string
+	lastCompleteUnit      string
+	lastCompleteRateClass string
 }
 
 func newMockVideoPollDB() *mockVideoPollDB {
@@ -93,8 +97,9 @@ func (m *mockVideoPollDB) RescheduleVideoPollJob(id uint64, claimAttempts int, n
 }
 
 // CompleteVideoPollJobWithBilling replicates the real db.DB's guard + ErrVideoPollJobAlreadyResolved
-// sentinel on a lost race — see RescheduleVideoPollJob's comment above.
-func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error {
+// sentinel on a lost race — see RescheduleVideoPollJob's comment above. seconds/unit/rateClass
+// mirror the real db.DB's raw-seconds-plus-rate_class convention (see its doc comment).
+func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error {
 	if m.errOnComplete != nil {
 		return m.errOnComplete
 	}
@@ -108,8 +113,10 @@ func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttemp
 		return db.ErrVideoPollJobAlreadyResolved
 	}
 	j.Status = model.VideoPollStatusCompleted
-	m.lastCompleteOutputCount = outputCount
+	m.lastCompleteSeconds = seconds
 	m.lastCompleteFee = fee
+	m.lastCompleteUnit = unit
+	m.lastCompleteRateClass = rateClass
 	return nil
 }
 
@@ -330,8 +337,8 @@ func TestPollVideoJob_LostRaceOnComplete_IsBenignNotError(t *testing.T) {
 	if got.Status != model.VideoPollStatusPolling {
 		t.Fatalf("Status = %q, want unchanged polling (the stale completion must not have been able to write anything)", got.Status)
 	}
-	if store.lastCompleteOutputCount != 0 || store.lastCompleteFee != "" {
-		t.Errorf("billing was written despite the lost race: outputCount=%d fee=%q", store.lastCompleteOutputCount, store.lastCompleteFee)
+	if store.lastCompleteSeconds != 0 || store.lastCompleteFee != "" {
+		t.Errorf("billing was written despite the lost race: seconds=%d fee=%q", store.lastCompleteSeconds, store.lastCompleteFee)
 	}
 }
 
@@ -381,8 +388,8 @@ func TestPollVideoJob_QueuedWithEchoedSeconds_NotTreatedAsTerminal(t *testing.T)
 	if store.rescheduleCalled != 1 {
 		t.Errorf("rescheduleCalled = %d, want 1", store.rescheduleCalled)
 	}
-	if store.lastCompleteOutputCount != 0 {
-		t.Errorf("CompleteVideoPollJobWithBilling must not have been called; lastCompleteOutputCount = %d", store.lastCompleteOutputCount)
+	if store.lastCompleteSeconds != 0 {
+		t.Errorf("CompleteVideoPollJobWithBilling must not have been called; lastCompleteSeconds = %d", store.lastCompleteSeconds)
 	}
 }
 
@@ -520,15 +527,21 @@ func TestPollVideoJob_MultiModelPricing(t *testing.T) {
 	if got.Status != model.VideoPollStatusCompleted {
 		t.Fatalf("Status = %q, want completed", got.Status)
 	}
-	// ceil(5 * 2.25) = 12 units, at 1000/unit = 12000. This confirms ResolvedModel survived
-	// the job round trip into the synthetic gin.Context the scheduler builds and selected the
-	// per-model resolution ratio — NOT the single-model DefaultVideoSizeRatios fallback,
-	// which would produce a different count for this resolution.
-	if store.lastCompleteOutputCount != 12 {
-		t.Errorf("outputCount = %d, want 12 (per-model ratio not applied — ResolvedModel plumbing broken?)", store.lastCompleteOutputCount)
-	}
+	// Fee: ceil(5 * 2.25) = 12 weighted units, at 1000/unit = 12000. This confirms ResolvedModel
+	// survived the job round trip into the synthetic gin.Context the scheduler builds and
+	// selected the per-model resolution ratio — NOT the single-model DefaultVideoSizeRatios
+	// fallback, which would produce a different fee for this resolution.
 	if store.lastCompleteFee != "12000" {
-		t.Errorf("fee = %q, want 12000", store.lastCompleteFee)
+		t.Errorf("fee = %q, want 12000 (per-model ratio not applied — ResolvedModel plumbing broken?)", store.lastCompleteFee)
+	}
+	// The stored Request.OutputCount is the RAW seconds (5), not the weighted unit count (12)
+	// — the rate_class convention (video.go's sync path) folds resolution into rate_class
+	// instead of the count.
+	if store.lastCompleteSeconds != 5 {
+		t.Errorf("seconds = %d, want 5 (raw seconds, not the resolution-weighted unit count)", store.lastCompleteSeconds)
+	}
+	if store.lastCompleteRateClass != "res:1920x1080" {
+		t.Errorf("rateClass = %q, want res:1920x1080", store.lastCompleteRateClass)
 	}
 }
 
@@ -562,7 +575,7 @@ func TestPollVideoJob_ForwarderGzipLeak_SanitizedBeforeParseAndSign(t *testing.T
 	if got.Status != model.VideoPollStatusCompleted {
 		t.Fatalf("Status = %q, want completed — a gzip-compressed body (despite Accept-Encoding: identity) must still be decoded and recognized", got.Status)
 	}
-	if store.lastCompleteOutputCount == 0 {
+	if store.lastCompleteSeconds == 0 {
 		t.Errorf("outputCount = 0, want > 0 — billing must have run against the decoded body")
 	}
 }

@@ -327,6 +327,19 @@ func (d *DB) Migrate() error {
 			},
 		},
 		{
+			ID: "add-rate-class-to-request",
+			Migrate: func(tx *gorm.DB) error {
+				// Phase 2 cost dimension: the per-request price class within a unit
+				// (chatbot input-length tier, video resolution). The hourly_usage_stat
+				// PK already reserves rate_class, so only the source column is new. See
+				// docs/design/provider-reconciliation.md.
+				type Request struct {
+					RateClass string `gorm:"type:varchar(64);not null;default:''"`
+				}
+				return tx.AutoMigrate(&Request{})
+			},
+		},
+		{
 			ID: "create-video-poll-job",
 			Migrate: func(tx *gorm.DB) error {
 				// Tracks a POST /videos call that returned a non-terminal (queued/in_progress)

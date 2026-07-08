@@ -141,6 +141,17 @@ func TestVideoGenerationFlow(t *testing.T) {
 		if latestReq.Fee != "500" {
 			t.Errorf("expected fee=500, got %s", latestReq.Fee)
 		}
+		// Reconciliation wiring (UpdateRequestVideoBilling): the count is the RAW seconds under
+		// the seconds unit, with the resolution carried as rate_class — not the resolution-
+		// weighted "video_units". Here the size ratio is the 1.0 baseline, so outputCount==5
+		// coincides with the weighted units; the unit/rate_class assertions are what prove the
+		// video-billing path (not the generic fees-and-count path) ran.
+		if latestReq.Unit != "seconds" {
+			t.Errorf("expected unit=seconds, got %q", latestReq.Unit)
+		}
+		if latestReq.RateClass != "res:720x1280" {
+			t.Errorf("expected rateClass=res:720x1280, got %q", latestReq.RateClass)
+		}
 	})
 
 	t.Run("Step2_PollVideoStatus", func(t *testing.T) {
@@ -314,6 +325,33 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for whitelist user, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Whitelisted video is unbilled (no request row) but must still land in the reconciliation
+	// rollup with the RAW seconds under the seconds unit and the resolution as rate_class — the
+	// same basis as billable video — so it reconciles per-second too. The mock response carries
+	// seconds=5, size=720x1280. Per-row properties (unit/rate_class) are asserted rather than
+	// accumulating counts, since this package shares one DB across tests.
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	end := time.Now().UTC().Add(2 * time.Hour)
+	sums, err := env.db.SumHourlyUsageByModel("", start, end)
+	if err != nil {
+		t.Fatalf("sum hourly usage: %v", err)
+	}
+	var found bool
+	for _, s := range sums {
+		if s.Model == "sora-2" {
+			found = true
+			if s.Unit != "seconds" || s.RateClass != "res:720x1280" {
+				t.Errorf("whitelist rollup unit/rateClass = %q/%q, want seconds/res:720x1280", s.Unit, s.RateClass)
+			}
+			if s.OutputCount <= 0 {
+				t.Errorf("whitelist rollup outputCount = %d, want > 0 (raw seconds)", s.OutputCount)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a hourly_usage_stat row for whitelisted video (model sora-2)")
 	}
 }
 

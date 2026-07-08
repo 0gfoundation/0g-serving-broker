@@ -121,6 +121,13 @@ func (d *DB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt tim
 // either write fails, both roll back, so a result is never marked resolved without the fee
 // that goes with it landing too.
 //
+// seconds/unit/rateClass mirror UpdateRequestVideoBilling's convention (the sync video path,
+// video.go): the Request row stores the RAW output seconds (unit=seconds) with the resolution
+// as rate_class, not the resolution-weighted billable count — that weighted count only feeds
+// outputFee/fee above and the caller's metric. Keeping the poll path's Request row shape
+// identical to the sync path's is what lets reconciliation treat polled and
+// synchronously-billed video requests the same way.
+//
 // The VideoPollJob update is guarded on status='polling' AND attempts=claimAttempts (see
 // RescheduleVideoPollJob's doc comment on why attempts, not just status, fences a stale
 // writer) and its RowsAffected checked BEFORE touching the Request row: if this caller no
@@ -136,7 +143,7 @@ func (d *DB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt tim
 // withRetryUnless matches it via errors.Is and returns immediately, saving the ~1.5s of
 // pointless backoff+reattempts a blind 3x retry would otherwise spend on an outcome that can
 // never change.
-func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, outputCount int64) error {
+func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error {
 	return withRetryUnless(3, ErrVideoPollJobAlreadyResolved, func() error {
 		return d.db.Transaction(func(tx *gorm.DB) error {
 			res := tx.Model(&model.VideoPollJob{}).
@@ -155,7 +162,9 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 				Updates(map[string]interface{}{
 					"output_fee":   outputFee,
 					"fee":          fee,
-					"output_count": outputCount,
+					"output_count": seconds,
+					"unit":         unit,
+					"rate_class":   rateClass,
 				}).Error
 		})
 	})

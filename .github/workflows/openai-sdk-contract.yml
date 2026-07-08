@@ -1,0 +1,47 @@
+name: OpenAI SDK Contract Test
+
+# Contract test for issue #577: drives the broker with the REAL openai npm
+# SDK (over a real TCP socket) against a mocked OpenAI-shaped upstream, to
+# catch wire-level incompatibilities the Go-only integration suite cannot see
+# (SSE framing, response/error JSON shape, header casing). Runs on PRs too
+# (visible as a check) but lives in its own workflow rather than ci.yml's
+# validate/integration-test jobs, so it isn't a required check and can't
+# block a merge — at well under a minute end to end it's cheap enough to run
+# on every PR and again on every merge to main.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  openai-sdk-contract:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        submodules: recursive
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version: '1.24'
+        cache-dependency-path: api/go.sum
+
+    - name: Set up Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: '22'
+
+    - name: Install OpenAI SDK client dependencies
+      working-directory: api/inference/integration_test/openai_sdk_client
+      run: npm ci
+
+    - name: OpenAI SDK contract test
+      working-directory: api
+      run: go test -tags openaicontract ./inference/integration_test/... -run TestOpenAISDK -timeout 600s -v
