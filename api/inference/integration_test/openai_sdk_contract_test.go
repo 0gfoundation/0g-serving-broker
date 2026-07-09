@@ -22,6 +22,11 @@ package integration_test
 //	cd api/inference/integration_test/openai_sdk_client && npm ci
 //	cd api && go test -tags openaicontract ./inference/integration_test/... -run TestOpenAISDK -v
 //
+// Covers chatbot (non-stream/stream/tool-calling/models/error-mapping/
+// translation/headers), text-to-image generation, image editing, and
+// speech-to-text transcription. Video generation is deliberately NOT covered
+// here — under active development elsewhere at the time of writing.
+//
 // Not covered: insufficient-balance (HTTP 402-equivalent) mapping. Any
 // balance low enough to fail validation unconditionally drives
 // ctrl.validateBalanceAdequacy into its live-contract resync branch
@@ -219,8 +224,18 @@ const nodeScenarioTimeout = 75 * time.Second
 // runNodeSDKScenario execs the real openai npm SDK (as a Node subprocess)
 // against baseURL for the given scenario, asserting only that the client
 // produced a well-formed result line — per-scenario assertions on the result
-// live in the calling test.
+// live in the calling test. Uses run.js's default model (gpt-4o); scenarios
+// against a differently-typed single-model service (image/audio) need
+// runNodeSDKScenarioWithModel instead.
 func runNodeSDKScenario(t *testing.T, baseURL, authHeader, scenario string) sdkResult {
+	t.Helper()
+	return runNodeSDKScenarioWithModel(t, baseURL, authHeader, scenario, "gpt-4o")
+}
+
+// runNodeSDKScenarioWithModel is runNodeSDKScenario with an explicit model,
+// for scenarios against a service configured with a non-chatbot ModelType
+// (e.g. "dall-e-3", "whisper-1").
+func runNodeSDKScenarioWithModel(t *testing.T, baseURL, authHeader, scenario, model string) sdkResult {
 	t.Helper()
 	dir := nodeClientDir(t)
 
@@ -233,6 +248,7 @@ func runNodeSDKScenario(t *testing.T, baseURL, authHeader, scenario string) sdkR
 		"BASE_URL="+baseURL,
 		"AUTH_HEADER="+authHeader,
 		"SCENARIO="+scenario,
+		"MODEL="+model,
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -305,6 +321,122 @@ func startRealListener(t *testing.T, env *testEnv) *httptest.Server {
 	srv := httptest.NewServer(env.engine)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// ==========================================================================
+// Mock upstreams + env setup for image / speech-to-text scenarios
+//
+// Unlike chatbot, these service types are each their own single-model
+// broker config (Service.Type is singular per env, mirroring
+// text_to_image_test.go / image_editing_test.go), so each gets its own
+// mock upstream and setup helper rather than sharing setupContractEnv.
+// ==========================================================================
+
+// newContractMockImageGenUpstream mocks POST /images/generations, the JSON
+// body client.images.generate() sends.
+func newContractMockImageGenUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/images/generations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": 1234567890,
+			"data": []map[string]interface{}{
+				{"url": "https://example.com/image1.png", "revised_prompt": "a cute cat"},
+			},
+		})
+	}))
+}
+
+// newContractMockImageEditUpstream mocks POST /images/edits, the
+// multipart/form-data body client.images.edit() sends (unlike generate,
+// which is JSON — the SDK switches encodings because edit uploads a file).
+func newContractMockImageEditUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/images/edits" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": 1234567890,
+			"data": []map[string]interface{}{
+				{"url": "https://example.com/edited1.png"},
+			},
+		})
+	}))
+}
+
+// newContractMockSpeechToTextUpstream mocks POST /audio/transcriptions, the
+// multipart/form-data body client.audio.transcriptions.create() sends.
+// Responds with the whisper-family usage shape ({"type":"duration",...}) so
+// the broker bills off real usage rather than falling back to a word-count
+// estimate (see SpeechToTextUsage in speech_to_text.go).
+func newContractMockSpeechToTextUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/audio/transcriptions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text":  "Hello world",
+			"usage": map[string]interface{}{"type": "duration", "seconds": 5},
+		})
+	}))
+}
+
+func setupImageGenContractEnv(t *testing.T) (baseURL, authHeader string) {
+	t.Helper()
+	mockUpstream := newContractMockImageGenUpstream(t)
+	t.Cleanup(mockUpstream.Close)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockUpstream.URL
+		cfg.Service.Type = "text-to-image"
+		cfg.Service.ModelType = "dall-e-3"
+		cfg.Service.TargetSeparated = true
+	})
+	srv := startRealListener(t, env)
+	return srv.URL + "/v1/proxy", createAuthHeader(t, env.privateKey, env.providerAddr)
+}
+
+func setupImageEditContractEnv(t *testing.T) (baseURL, authHeader string) {
+	t.Helper()
+	mockUpstream := newContractMockImageEditUpstream(t)
+	t.Cleanup(mockUpstream.Close)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockUpstream.URL
+		cfg.Service.Type = "image-editing"
+		cfg.Service.ModelType = "dall-e-2"
+		cfg.Service.TargetSeparated = true
+	})
+	srv := startRealListener(t, env)
+	return srv.URL + "/v1/proxy", createAuthHeader(t, env.privateKey, env.providerAddr)
+}
+
+func setupSpeechToTextContractEnv(t *testing.T) (baseURL, authHeader string) {
+	t.Helper()
+	mockUpstream := newContractMockSpeechToTextUpstream(t)
+	t.Cleanup(mockUpstream.Close)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockUpstream.URL
+		cfg.Service.Type = "speech-to-text"
+		cfg.Service.ModelType = "whisper-1"
+		cfg.Service.TargetSeparated = true
+	})
+	srv := startRealListener(t, env)
+	return srv.URL + "/v1/proxy", createAuthHeader(t, env.privateKey, env.providerAddr)
 }
 
 func chatContractModelInfo(supportedParameters ...string) *config.ModelInfo {
@@ -571,5 +703,47 @@ func TestOpenAISDK_ResponseHeaders_ZGResKey(t *testing.T) {
 	}
 	if zgResKey, _ := res.Result["zgResKey"].(string); zgResKey == "" {
 		t.Error("expected the SDK's raw response (.withResponse()) to expose a non-empty ZG-Res-Key header")
+	}
+}
+
+// ==========================================================================
+// Image generation / editing, speech-to-text
+// ==========================================================================
+
+func TestOpenAISDK_ImageGeneration(t *testing.T) {
+	baseURL, authHeader := setupImageGenContractEnv(t)
+
+	res := runNodeSDKScenarioWithModel(t, baseURL, authHeader, "imagegenerate", "dall-e-3")
+	if !res.OK {
+		t.Fatalf("imagegenerate scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+	urls, _ := res.Result["urls"].([]interface{})
+	if len(urls) != 1 || urls[0] != "https://example.com/image1.png" {
+		t.Errorf("unexpected urls: %v", urls)
+	}
+}
+
+func TestOpenAISDK_ImageEditing(t *testing.T) {
+	baseURL, authHeader := setupImageEditContractEnv(t)
+
+	res := runNodeSDKScenarioWithModel(t, baseURL, authHeader, "imageedit", "dall-e-2")
+	if !res.OK {
+		t.Fatalf("imageedit scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+	urls, _ := res.Result["urls"].([]interface{})
+	if len(urls) != 1 || urls[0] != "https://example.com/edited1.png" {
+		t.Errorf("unexpected urls: %v", urls)
+	}
+}
+
+func TestOpenAISDK_Transcription(t *testing.T) {
+	baseURL, authHeader := setupSpeechToTextContractEnv(t)
+
+	res := runNodeSDKScenarioWithModel(t, baseURL, authHeader, "transcription", "whisper-1")
+	if !res.OK {
+		t.Fatalf("transcription scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+	if got := res.Result["text"]; got != "Hello world" {
+		t.Errorf("text = %v, want %q", got, "Hello world")
 	}
 }
