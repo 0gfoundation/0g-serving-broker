@@ -187,7 +187,11 @@ func TestRescheduleVideoPollJob(t *testing.T) {
 	if got.Status != model.VideoPollStatusPending {
 		t.Errorf("Status = %q, want pending", got.Status)
 	}
-	if !got.NextPollAt.Equal(next) {
+	// MySQL's `datetime` column (no fractional-seconds precision) truncates sub-second
+	// precision on write, so comparing against the DB round-trip must tolerate that —
+	// truncate both sides to second resolution, which is all NextPollAt's scheduling
+	// semantics ever depend on.
+	if !got.NextPollAt.Truncate(time.Second).Equal(next.Truncate(time.Second)) {
 		t.Errorf("NextPollAt = %v, want %v", got.NextPollAt, next)
 	}
 }

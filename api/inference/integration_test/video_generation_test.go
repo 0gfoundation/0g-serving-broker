@@ -78,6 +78,26 @@ func TestVideoGenerationFlow(t *testing.T) {
 		cfg.Service.ModelType = "sora-2"
 	})
 
+	// The mock provider's create response is non-terminal (status=queued), so billing is
+	// deferred to the background poll scheduler (see deferVideoBillingToPoll, video.go) — it
+	// must be initialized here for this flow to ever get billed at all, mirroring how
+	// TestAsyncTextToImageFlow initializes InitAsyncProcessing itself rather than relying on
+	// setupTestEnv. Intervals are short so the test doesn't need a long sleep.
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    20 * time.Second,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
 	t.Run("Step1_CreateVideo", func(t *testing.T) {
 		boundary := "----TestBoundary"
 		fields := map[string]string{
@@ -125,16 +145,34 @@ func TestVideoGenerationFlow(t *testing.T) {
 			t.Error("expected Provider header to be set")
 		}
 
-		// Verify DB request record: outputCount = ceil(5 × 1.0) = 5, fee = 5 × 100 = 500
-		requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
-		if err != nil {
-			t.Fatalf("list requests: %v", err)
+		// A request record is created immediately (Init state, unbilled) even though the
+		// create response was non-terminal — deferVideoBillingToPoll registers a
+		// VideoPollJob but doesn't fabricate a fee. Actual billing only lands once the
+		// background poll scheduler observes the provider's job as completed, so poll for it
+		// with a timeout instead of asserting it synchronously (mirrors
+		// TestAsyncTextToImageFlow's Step2_PollUntilCompleted pattern).
+		var latestReq model.Request
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+			if err != nil {
+				t.Fatalf("list requests: %v", err)
+			}
+			userRequests := filterRequestsByUser(requests, env.userAddr)
+			if len(userRequests) == 0 {
+				t.Fatal("expected at least 1 request record in DB for this user")
+			}
+			latestReq = userRequests[len(userRequests)-1]
+			if latestReq.OutputCount != 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for the video poll scheduler to bill the request")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		userRequests := filterRequestsByUser(requests, env.userAddr)
-		if len(userRequests) == 0 {
-			t.Fatal("expected at least 1 request record in DB for this user")
-		}
-		latestReq := userRequests[len(userRequests)-1]
+
+		// outputCount = ceil(5 × 1.0) = 5, fee = 5 × 100 = 500
 		if latestReq.OutputCount != 5 {
 			t.Errorf("expected outputCount=5, got %d", latestReq.OutputCount)
 		}
