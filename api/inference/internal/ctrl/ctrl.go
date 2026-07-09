@@ -66,14 +66,22 @@ type videoPollDB interface {
 	DeleteExpiredVideoPollJobs(retention time.Duration) error
 }
 
+// reconciliationDB is the interface for database operations used by whitelisted-usage
+// reconciliation recording (recordWhitelistedUsage). The real *db.DB satisfies this
+// interface. Tests can inject a mock implementation.
+type reconciliationDB interface {
+	AccumulateHourlyUsage(row model.HourlyUsageStat) error
+}
+
 type Ctrl struct {
-	mu          sync.RWMutex
-	db          *db.DB
-	asyncDB     asyncDB
-	videoPollDB videoPollDB
-	contract    *providercontract.ProviderContract
-	svcCache    *cache.Cache
-	logger      log.Logger
+	mu               sync.RWMutex
+	db               *db.DB
+	asyncDB          asyncDB
+	videoPollDB      videoPollDB
+	reconciliationDB reconciliationDB
+	contract         *providercontract.ProviderContract
+	svcCache         *cache.Cache
+	logger           log.Logger
 
 	autoSettleBufferTime time.Duration
 	minSettlementFee     *big.Int
@@ -265,6 +273,7 @@ func New(
 		db:                   db,
 		asyncDB:              db,
 		videoPollDB:          db,
+		reconciliationDB:     db,
 		contract:             contract,
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
@@ -293,16 +302,16 @@ func New(
 			Timeout: cfg.ProviderHttp.TotalTimeout, // Overall request timeout
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
-				MaxIdleConns:          200,                                                                        // Increased total idle connections to handle more concurrent users
-				MaxIdleConnsPerHost:   200,                                                                        // Idle connections per host (critical for single backend)
-				MaxConnsPerHost:       500,                                                                        // Limit max active connections to prevent resource exhaustion
-				IdleConnTimeout:       90 * time.Second,                                                           // How long idle connections stay open
-				TLSHandshakeTimeout:   10 * time.Second,                                                           // TLS handshake timeout
+				MaxIdleConns:          200,                                    // Increased total idle connections to handle more concurrent users
+				MaxIdleConnsPerHost:   200,                                    // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       500,                                    // Limit max active connections to prevent resource exhaustion
+				IdleConnTimeout:       90 * time.Second,                       // How long idle connections stay open
+				TLSHandshakeTimeout:   10 * time.Second,                       // TLS handshake timeout
 				ResponseHeaderTimeout: cfg.ProviderHttp.ResponseHeaderTimeout, // Time to wait for response headers
-				ExpectContinueTimeout: 1 * time.Second,                                                            // Time to wait for 100-continue response
-				DisableKeepAlives:     false,                                                                      // Enable connection reuse (critical)
-				DisableCompression:    false,                                                                      // Allow gzip compression
-				ForceAttemptHTTP2:     false,                                                                      // Use HTTP/1.1 for stability
+				ExpectContinueTimeout: 1 * time.Second,                        // Time to wait for 100-continue response
+				DisableKeepAlives:     false,                                  // Enable connection reuse (critical)
+				DisableCompression:    false,                                  // Allow gzip compression
+				ForceAttemptHTTP2:     false,                                  // Use HTTP/1.1 for stability
 			},
 		},
 		// Initialize whitelist users map

@@ -203,11 +203,32 @@ func (m *mockVideoPollDB) get(id uint64) model.VideoPollJob {
 	return *m.jobs[id]
 }
 
+// mockReconciliationDB implements reconciliationDB, recording every AccumulateHourlyUsage call
+// for assertions — lets whitelisted-poll tests exercise recordWhitelistedUsage's happy path
+// (previously impossible without a real DB, since c.db is nil in this mock-only harness; see
+// the "lost race only" tests' doc comments for why that gap existed).
+type mockReconciliationDB struct {
+	mu    sync.Mutex
+	calls []model.HourlyUsageStat
+	err   error
+}
+
+func (m *mockReconciliationDB) AccumulateHourlyUsage(row model.HourlyUsageStat) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
+	m.calls = append(m.calls, row)
+	return nil
+}
+
 func newTestVideoPollCtrl(store *mockVideoPollDB, providerURL string) *Ctrl {
 	c := &Ctrl{
-		logger:      testLogger(),
-		videoPollDB: store,
-		httpClient:  &http.Client{Timeout: 5 * time.Second},
+		logger:           testLogger(),
+		videoPollDB:      store,
+		reconciliationDB: &mockReconciliationDB{},
+		httpClient:       &http.Client{Timeout: 5 * time.Second},
 		videoPollCfg: config.VideoPollConfig{
 			PollInterval:       10 * time.Second,
 			MaxPollDuration:    20 * time.Minute,
@@ -767,6 +788,148 @@ func TestPollVideoJob_Whitelisted_LostRaceOnTimeout_DoesNotRecordUsage(t *testin
 	got := store.get(1)
 	if got.Status != model.VideoPollStatusPolling {
 		t.Errorf("Status = %q, want unchanged polling (the stale timeout must not have won)", got.Status)
+	}
+}
+
+// TestPollVideoJob_Whitelisted_Completed_RecordsUsageAndSigns is the happy-path counterpart to
+// TestPollVideoJob_Whitelisted_LostRaceOnComplete_DoesNotRecordUsageOrSign: the worker that
+// actually wins CompleteVideoPollJobWhitelisted must sign the response AND record the resolved
+// duration/rate class into hourly_usage_stat exactly once. Made possible by the reconciliationDB
+// interface extraction — c.reconciliationDB is a mock here, so recordWhitelistedUsage no longer
+// dereferences a nil *db.DB.
+func TestPollVideoJob_Whitelisted_Completed_RecordsUsageAndSigns(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrlWithSigning(t, store, "")
+	recon := c.reconciliationDB.(*mockReconciliationDB)
+	job := newPendingJob(1, server.URL)
+	job.IsWhitelisted = true
+	job.ChatKey = "chat-key-1"
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusCompleted {
+		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+	if store.whitelistedCompleteCalled != 1 {
+		t.Errorf("whitelistedCompleteCalled = %d, want 1", store.whitelistedCompleteCalled)
+	}
+	if _, ok := c.svcCache.Get(c.chatCacheKey("chat-key-1")); !ok {
+		t.Error("expected a ChatSignature to be cached after the whitelisted completion won")
+	}
+	if len(recon.calls) != 1 {
+		t.Fatalf("AccumulateHourlyUsage calls = %d, want 1", len(recon.calls))
+	}
+	row := recon.calls[0]
+	if !row.IsWhitelisted {
+		t.Error("IsWhitelisted = false, want true")
+	}
+	if row.ServiceType != "video-generation" {
+		t.Errorf("ServiceType = %q, want video-generation", row.ServiceType)
+	}
+	if row.Unit != constant.BillingUnitSeconds {
+		t.Errorf("Unit = %q, want %q", row.Unit, constant.BillingUnitSeconds)
+	}
+	if row.OutputCount != 8 {
+		t.Errorf("OutputCount = %d, want 8 (the resolved actual duration, not the requested 5)", row.OutputCount)
+	}
+	if row.RateClass != "res:1280x720" {
+		t.Errorf("RateClass = %q, want res:1280x720", row.RateClass)
+	}
+}
+
+// TestPollVideoJob_Whitelisted_Failed_RecordsZeroUsage is the happy-path counterpart to
+// TestPollVideoJob_Whitelisted_LostRaceOnFail_DoesNotRecordUsage: a worker that actually wins
+// FailVideoPollJob for a provider-reported failure must record zero usage exactly once, so the
+// whitelisted request still appears in reconciliation (it hit the upstream) without being
+// mistaken for billable output.
+func TestPollVideoJob_Whitelisted_Failed_RecordsZeroUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"failed"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	recon := c.reconciliationDB.(*mockReconciliationDB)
+	job := newPendingJob(1, server.URL)
+	job.IsWhitelisted = true
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusFailed {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if len(recon.calls) != 1 {
+		t.Fatalf("AccumulateHourlyUsage calls = %d, want 1", len(recon.calls))
+	}
+	if row := recon.calls[0]; row.OutputCount != 0 {
+		t.Errorf("OutputCount = %d, want 0 (provider reported failed, no output was produced)", row.OutputCount)
+	}
+}
+
+// TestPollVideoJob_Whitelisted_TimedOut_RecordsZeroUsage is the happy-path counterpart to
+// TestPollVideoJob_Whitelisted_LostRaceOnTimeout_DoesNotRecordUsage.
+func TestPollVideoJob_Whitelisted_TimedOut_RecordsZeroUsage(t *testing.T) {
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	recon := c.reconciliationDB.(*mockReconciliationDB)
+	job := newPendingJob(1, "")
+	job.IsWhitelisted = true
+	job.ExpiresAt = time.Now().Add(-1 * time.Minute) // already expired
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusTimedOut {
+		t.Fatalf("Status = %q, want timed_out", got.Status)
+	}
+	if len(recon.calls) != 1 {
+		t.Fatalf("AccumulateHourlyUsage calls = %d, want 1", len(recon.calls))
+	}
+	if row := recon.calls[0]; row.OutputCount != 0 {
+		t.Errorf("OutputCount = %d, want 0 (never reached a terminal state)", row.OutputCount)
+	}
+}
+
+// TestPollVideoJob_Whitelisted_UnresolvableCompleted_RecordsZeroUsage covers the "completed but
+// no usable duration anywhere" branch: the provider says completed, but neither its response nor
+// the original request carries a positive seconds value, so the job is failed rather than billed
+// on a guess — and, for a whitelisted job, that failure must still record zero usage exactly once.
+func TestPollVideoJob_Whitelisted_UnresolvableCompleted_RecordsZeroUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	recon := c.reconciliationDB.(*mockReconciliationDB)
+	job := newPendingJob(1, server.URL)
+	job.IsWhitelisted = true
+	job.RequestBody = []byte(`{"size":"1280x720"}`) // no seconds anywhere
+	store.jobs[1] = &job
+
+	c.pollVideoJob(job)
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusFailed {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if len(recon.calls) != 1 {
+		t.Fatalf("AccumulateHourlyUsage calls = %d, want 1", len(recon.calls))
+	}
+	if row := recon.calls[0]; row.OutputCount != 0 {
+		t.Errorf("OutputCount = %d, want 0 (no resolvable duration)", row.OutputCount)
 	}
 }
 
