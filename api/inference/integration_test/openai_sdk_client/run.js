@@ -220,6 +220,40 @@ async function main() {
       }
       return { zgResKey, id: data.id };
     },
+
+    async imagegenerate() {
+      const result = await client.images.generate(
+        { model, prompt: "a cute cat playing piano", n: 1, size: "1024x1024" },
+        authedOpts,
+      );
+      const urls = result.data.map((d) => d.url);
+      if (!urls[0]) {
+        throw new Error(`expected an image url, got ${JSON.stringify(result.data)}`);
+      }
+      return { urls };
+    },
+
+    async imageedit() {
+      // client.images.edit sends multipart/form-data (unlike generate, which is
+      // JSON) — OpenAI.toFile wraps the raw bytes as an Uploadable the SDK can
+      // stream as a file part, mirroring how a real caller uploads an image.
+      const image = await OpenAI.toFile(Buffer.from("fake-png-bytes"), "image.png", { type: "image/png" });
+      const result = await client.images.edit({ model, image, prompt: "make it blue", n: 1 }, authedOpts);
+      const urls = result.data.map((d) => d.url);
+      if (!urls[0]) {
+        throw new Error(`expected an edited image url, got ${JSON.stringify(result.data)}`);
+      }
+      return { urls };
+    },
+
+    async transcription() {
+      const file = await OpenAI.toFile(Buffer.from("fake-wav-bytes"), "audio.wav", { type: "audio/wav" });
+      const result = await client.audio.transcriptions.create({ model, file }, authedOpts);
+      if (result.text !== "Hello world") {
+        throw new Error(`unexpected transcription text: ${JSON.stringify(result.text)}`);
+      }
+      return { text: result.text };
+    },
   };
 
   const fn = scenarios[scenario];
