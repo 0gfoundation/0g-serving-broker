@@ -351,29 +351,39 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	billingAction := classifyVideoStatus(respFields.Status)
 
 	if reqModel.IsWhitelisted {
-		// Whitelist traffic is unbilled; record metrics + reconciliation count only.
-		//
-		// Gated on the SAME classifyVideoStatus check paying users use, for the same reason:
-		// resolveVideoBilling cannot tell a genuinely non-terminal response (status=queued/
-		// in_progress, which may still echo the REQUESTED seconds/size — see actualSeconds'
-		// doc comment) apart from a real completed one that reports actual output in the same
-		// fields. Calling it unconditionally would silently mislabel the requested duration as
-		// actual output in the reconciliation rollup — wrong data, not just missing data.
-		// Recording 0 instead is honest: it says "unresolved," not "wrong." Same guard covers
-		// an explicit failed status, which must not record a generated duration either.
-		//
-		// Known limitation: this branch does NOT defer to the poll scheduler, so unlike paying
-		// users, whitelisted usage on an async provider is never corrected once the job
-		// actually completes — it stays permanently 0 in the reconciliation rollup. Accepted
-		// for now since whitelisted traffic only affects metrics/reconciliation counts, not
-		// revenue; extending polling to whitelisted jobs is unscoped follow-up work (see
-		// docs/design/video-generation-async-billing.md).
+		switch billingAction {
+		case videoActionSkipFailed:
+			// Provider failed immediately at create time — nothing was generated. Record a
+			// zero-usage row now (not deferred: there is no job to poll), so this hit still
+			// shows up in reconciliation rather than vanishing.
+			c.logger.Infof("whitelist video generation failed at create time for request %s; recording zero usage", reqModel.RequestHash)
+			monitor.RecordVideoGenerationFailed()
+			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+			return nil
+
+		case videoActionDeferToPoll:
+			// Genuinely async: defer to the SAME poll scheduler paying users use.
+			// deferVideoBillingToPoll checks reqModel.IsWhitelisted itself and creates a job
+			// that records into hourly_usage_stat on resolution instead of billing a Request
+			// row — see its doc comment and model.VideoPollJob.IsWhitelisted. Deliberately NOT
+			// recording anything here: writing an "unresolved" row now and a "corrected" one
+			// later would mean moving a unit of count between two hourly_usage_stat rows
+			// (RateClass is part of its primary key), since the correct destination row is
+			// only known once the real rate_class is. Waiting until resolution avoids that —
+			// see docs/design/video-generation-async-billing.md.
+			pollChatKey := ""
+			if !c.Service.TargetSeparated {
+				pollChatKey = chatKey
+			}
+			return c.deferVideoBillingToPoll(ctx, respFields.ID, pollChatKey, outputPrice, contentType, reqBody, reqModel)
+		}
+
+		// videoActionBillNow: provider reported completed (or omitted status entirely, the
+		// synchronous-shim case) — resolveVideoBilling's result is trustworthy right now, so
+		// record it immediately instead of deferring.
 		var seconds int64
 		var rateClass string
-		if billingAction != videoActionBillNow {
-			c.logger.Warnf("whitelist video: create/poll response for %s is non-terminal or failed (status=%q); recording request count only, not the echoed/requested duration",
-				reqModel.RequestHash, respFields.Status)
-		} else if sec, size, source := resolveVideoBilling(body, reqBody, contentType); source != "" {
+		if sec, size, source := resolveVideoBilling(body, reqBody, contentType); source != "" {
 			seconds = sec
 			rateClass = resolutionRateClass(size)
 			outputCount := c.videoOutputUnits(ctx, sec, size)
@@ -384,9 +394,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			c.logger.Warnf("whitelist video: no usable seconds in response or request for %s; recording request count only", reqModel.RequestHash)
 		}
 		// Record the RAW seconds with resolution as rate_class — same basis as the billable
-		// path — so whitelisted video reconciles per-second too. Always record (seconds 0 when
-		// unresolved): it hit the upstream and has no other capture, so dropping it would make
-		// it invisible to reconciliation.
+		// path — so whitelisted video reconciles per-second too.
 		c.recordWhitelistedUsage(reqModel, 0, seconds, 0, 0, rateClass)
 		return nil
 	}
@@ -460,10 +468,19 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	return nil
 }
 
-// deferVideoBillingToPoll registers a VideoPollJob so the background scheduler bills this
+// deferVideoBillingToPoll registers a VideoPollJob so the background scheduler resolves this
 // request once the provider reaches a terminal state, instead of guessing from the requested
 // duration. Called when a create response reports status=queued/in_progress — the real
 // OpenAI Video API contract. See docs/design/video-generation-async-billing.md.
+//
+// Whitelisted-aware via reqModel.IsWhitelisted: a whitelisted job's completion writes to the
+// hourly_usage_stat reconciliation rollup instead of billing a Request row (there is none —
+// see proxy.go), and — unlike a paying user's Request row, which already exists as a zero-fee
+// placeholder the moment this function returns — nothing is written to hourly_usage_stat here.
+// Every early-return failure path below therefore calls recordWhitelistedUsage with a
+// zero-usage row itself for the whitelisted case, so this request is never simply invisible to
+// reconciliation; a paying user has no equivalent call because its placeholder Request row
+// already covers the same "hit the upstream but never resolved" visibility.
 func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey, outputPrice, contentType string, reqBody []byte, reqModel model.Request) error {
 	if providerJobID == "" {
 		// Can't track a job with no id to poll. Guessing a fee here is no safer than
@@ -472,6 +489,9 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// serve free + log loudly rather than bill blind.
 		c.logger.Errorf("video generation is non-terminal but the response has no id to poll; cannot track this job, NOT billing request %s (free output)", reqModel.RequestHash)
 		monitor.RecordVideoBillingSkipped()
+		if reqModel.IsWhitelisted {
+			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+		}
 		return nil
 	}
 	if !c.videoPollEnabled.Load() {
@@ -507,6 +527,7 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		ChatKey:            chatKey,
 		ResolvedModel:      resolvedModel,
 		MetricModel:        c.metricModel(ctx),
+		IsWhitelisted:      reqModel.IsWhitelisted,
 		Status:             model.VideoPollStatusPending,
 		NextPollAt:         now.Add(pollInterval),
 		ExpiresAt:          now.Add(maxPollDuration),
@@ -515,6 +536,9 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// Same "loud + metered, not silent" precedent as the empty-ID case above: a
 		// transient DB error here means this request is unbilled with no other capture.
 		monitor.RecordVideoBillingSkipped()
+		if reqModel.IsWhitelisted {
+			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
+		}
 		return errors.Wrap(err, "create video poll job")
 	}
 	return nil

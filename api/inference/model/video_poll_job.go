@@ -68,6 +68,17 @@ type VideoPollJob struct {
 	// MetricModel is the bounded label captured at create time for Prometheus metrics,
 	// mirroring ResolvedModel's reasoning: metricModel() also expects a *gin.Context.
 	MetricModel string `gorm:"type:varchar(255)" json:"-"`
+	// IsWhitelisted marks a job created for whitelisted (unbilled) traffic. Whitelisted
+	// requests create no Request row (see proxy.go), so RequestHash here is just a unique
+	// nonce with nothing to reference — completion for these jobs writes to the
+	// hourly_usage_stat reconciliation rollup (recordWhitelistedUsage) instead of a Request
+	// row, and deliberately writes it only ONCE, at resolution time, rather than eagerly at
+	// create time: HourlyUsageStat is a pre-aggregated rollup keyed in part by RateClass, so
+	// an eager "unresolved" write followed by a "corrected" write would require moving a unit
+	// of count from one aggregate row to another rather than just updating a value in place.
+	// Writing once, only once the real outcome (completed/failed/timed_out) is known, avoids
+	// that entirely. See docs/design/video-generation-async-billing.md.
+	IsWhitelisted bool `gorm:"type:tinyint(1);not null;default:0" json:"-"`
 
 	Status VideoPollStatus `gorm:"type:varchar(16);not null;default:'pending';index" json:"status"`
 	// Attempts counts poll round-trips so far; informational only (a fixed poll interval is

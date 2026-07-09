@@ -367,6 +367,18 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&VideoPollJob{})
 			},
 		},
+		{
+			ID: "add-is-whitelisted-to-video-poll-job",
+			Migrate: func(tx *gorm.DB) error {
+				// Lets a whitelisted (unbilled) video-generation job be polled to completion
+				// too, without a Request row to reference — see model.VideoPollJob's
+				// IsWhitelisted doc comment and docs/design/video-generation-async-billing.md.
+				type VideoPollJob struct {
+					IsWhitelisted bool `gorm:"type:tinyint(1);not null;default:0"`
+				}
+				return tx.AutoMigrate(&VideoPollJob{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

@@ -145,11 +145,32 @@ func (c *Ctrl) runVideoPollCleanup(ctx context.Context) {
 	}
 }
 
-// pollVideoJob issues one GET to job.PollURL and advances the job's state: bills and marks
-// completed on a terminal "completed" response, marks failed on a terminal "failed" response
-// or an unresolvable "completed" response, and reschedules on anything else — unless
-// job.ExpiresAt has already passed, in which case it is forced to timed_out regardless of
-// what this poll would have returned.
+// recordWhitelistedVideoPollUsage records a resolved (or zero, on failure/timeout) whitelisted
+// video job into the hourly_usage_stat reconciliation rollup. The original ephemeral
+// whitelistReq (proxy.go) never reaches this background scheduler and is never persisted —
+// whitelisted traffic creates no Request row — so this reconstructs the minimal model.Request
+// recordWhitelistedUsage needs from the job row itself: ModelName from ResolvedModel (empty is
+// fine — recordWhitelistedUsage falls back to c.Service.ModelType) and CreatedAt from the job's
+// own creation time (its bucket hour IS the original request's, since the job is created in
+// the same call that received the request). Upstream/Unit are deliberately left for
+// recordWhitelistedUsage's own fallback (c.Service.ProviderIdentity / DefaultBillingUnitForService)
+// rather than threaded through here — they are broker-config-level values, not per-request, so
+// recomputing them fresh is exactly what the original whitelistReq would have resolved to
+// anyway.
+func (c *Ctrl) recordWhitelistedVideoPollUsage(job model.VideoPollJob, seconds int64, rateClass string) {
+	c.recordWhitelistedUsage(model.Request{
+		Model:       model.Model{CreatedAt: job.CreatedAt},
+		ServiceName: "video-generation",
+		ModelName:   job.ResolvedModel,
+	}, 0, seconds, 0, 0, rateClass)
+}
+
+// pollVideoJob issues one GET to job.PollURL and advances the job's state: bills (or, for
+// job.IsWhitelisted, records reconciliation usage) and marks completed on a terminal
+// "completed" response, marks failed on a terminal "failed" response or an unresolvable
+// "completed" response, and reschedules on anything else — unless job.ExpiresAt has already
+// passed, in which case it is forced to timed_out regardless of what this poll would have
+// returned.
 func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	if time.Now().After(job.ExpiresAt) {
 		c.logger.Errorf("video poll job %d (request %s) timed out after %d attempts without reaching a terminal state; "+
@@ -157,7 +178,15 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			job.ID, job.RequestHash, job.Attempts)
 		monitor.RecordVideoPollTimedOut()
 		if err := c.videoPollDB.TimeOutVideoPollJob(job.ID, job.Attempts, "exceeded MaxPollDuration without reaching a terminal state"); err != nil {
-			c.logger.Errorf("video poll job %d: mark timed_out: %v", job.ID, err)
+			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
+				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate timeout handling", job.ID)
+			} else {
+				c.logger.Errorf("video poll job %d: mark timed_out: %v", job.ID, err)
+			}
+		} else if job.IsWhitelisted {
+			// Only the worker that actually won the guarded write (err == nil, not a lost
+			// race) records usage — otherwise two racing workers could both record it.
+			c.recordWhitelistedVideoPollUsage(job, 0, "")
 		}
 		return
 	}
@@ -175,7 +204,13 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		c.logger.Infof("video poll job %d (request %s): provider reported failed", job.ID, job.RequestHash)
 		monitor.RecordVideoGenerationFailed()
 		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "provider reported status=failed"); err != nil {
-			c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
+			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
+				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate failure handling", job.ID)
+			} else {
+				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
+			}
+		} else if job.IsWhitelisted {
+			c.recordWhitelistedVideoPollUsage(job, 0, "")
 		}
 		return
 	}
@@ -210,7 +245,13 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			job.ID, job.RequestHash)
 		monitor.RecordVideoBillingSkipped()
 		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "completed with no resolvable duration"); err != nil {
-			c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
+			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
+				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate failure handling", job.ID)
+			} else {
+				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
+			}
+		} else if job.IsWhitelisted {
+			c.recordWhitelistedVideoPollUsage(job, 0, "")
 		}
 		return
 	}
@@ -228,6 +269,34 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		pollCtx.Set(CtxKeyResolvedModel, job.ResolvedModel)
 	}
 	outputCount := c.videoOutputUnits(pollCtx, seconds, size)
+	rateClass := resolutionRateClass(size)
+
+	if job.IsWhitelisted {
+		// Commit the completion write BEFORE signing/recording usage, for the same reason as
+		// the paying-user path below: only the worker that actually wins the attempts-fenced
+		// write may act on the result, or two racing workers could both record usage / sign.
+		if err := c.videoPollDB.CompleteVideoPollJobWhitelisted(job.ID, job.Attempts); err != nil {
+			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
+				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate whitelist usage recording", job.ID)
+				return
+			}
+			c.logger.Errorf("video poll job %d (request %s): complete whitelisted job: %v", job.ID, job.RequestHash, err)
+			return
+		}
+		if job.ChatKey != "" {
+			if err := c.signChatWithKey(job.RequestBody, body, job.ChatKey); err != nil {
+				c.logger.Warnf("video poll job %d: failed to sign completed response (TEE verification will be unavailable): %v", job.ID, err)
+			}
+		}
+		c.recordWhitelistedVideoPollUsage(job, seconds, rateClass)
+		metricModel := job.MetricModel
+		if metricModel == "" {
+			metricModel = c.Service.ModelType
+		}
+		monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
+		monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
+		return
+	}
 
 	outputFee, err := util.Multiply(job.OutputPrice, outputCount)
 	if err != nil {
@@ -249,7 +318,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	// not the resolution-weighted units — same convention as the sync path (video.go). The
 	// weighted units live only in outputFee above and the RecordTokens metric below.
 	if err := c.videoPollDB.CompleteVideoPollJobWithBilling(job.ID, job.Attempts, job.RequestHash, outputFee.String(), outputFee.String(),
-		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
+		seconds, constant.BillingUnitSeconds, rateClass); err != nil {
 		if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
 			// Benign: a stale-lease reclaim let another worker resolve this job first (see
 			// ClaimDueVideoPollJobs' crash-recovery semantics). The Request row was
@@ -266,7 +335,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			c.logger.Errorf("video poll job %d (request %s): linked request row no longer exists; fee %s was computed but NOT recorded — reconciliation gap",
 				job.ID, job.RequestHash, outputFee.String())
 			monitor.RecordVideoBillingSkipped()
-			if failErr := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "linked request row no longer exists"); failErr != nil {
+			if failErr := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "linked request row no longer exists"); failErr != nil && !errors.Is(failErr, db.ErrVideoPollJobAlreadyResolved) {
 				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, failErr)
 			}
 			return

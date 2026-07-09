@@ -197,20 +197,33 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 }
 
 // FailVideoPollJob marks a job failed — the provider reported a terminal failure, or a poll
-// attempt hit a non-retryable error. Bills nothing; the linked Request row keeps its
-// zero-output default and is excluded from settlement (ListRequest's ExcludeZeroOutput) until
-// pruned.
+// attempt hit a non-retryable error. Bills nothing; the linked Request row (when one exists —
+// see IsWhitelisted) keeps its zero-output default and is excluded from settlement
+// (ListRequest's ExcludeZeroOutput) until pruned.
 //
 // Guarded on status='polling' AND attempts=claimAttempts for the same reason as
 // RescheduleVideoPollJob: a stale-lease reclaim must not let a late write from a superseded
 // claim flip an already-resolved (or actively-being-worked-by-someone-else) job to failed.
+//
+// Returns ErrVideoPollJobAlreadyResolved (not nil) when the guard matches zero rows — needed so
+// a whitelisted-job caller can tell "I actually won this write, safe to record zero usage now"
+// from "someone else already resolved this, recording usage here would double-count" — an
+// unconditional nil return (this function's behavior before whitelisted jobs existed) can't
+// distinguish the two.
 func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
-	return d.db.Model(&model.VideoPollJob{}).
+	res := d.db.Model(&model.VideoPollJob{}).
 		Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
 		Updates(map[string]interface{}{
 			"status":        model.VideoPollStatusFailed,
 			"error_message": errMsg,
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrVideoPollJobAlreadyResolved
+	}
+	return nil
 }
 
 // TimeOutVideoPollJob marks a job timed_out: ExpiresAt passed before a terminal state was
@@ -220,9 +233,10 @@ func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 //
 // Guarded on status IN (pending, polling) AND attempts=claimAttempts: a job already resolved,
 // OR reclaimed by a newer worker, by a concurrent poll must not be overwritten with a spurious
-// timeout from a superseded claim.
+// timeout from a superseded claim. Returns ErrVideoPollJobAlreadyResolved on a lost race — see
+// FailVideoPollJob's doc comment for why this distinction matters now.
 func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
-	return d.db.Model(&model.VideoPollJob{}).
+	res := d.db.Model(&model.VideoPollJob{}).
 		Where("id = ? AND status IN ? AND attempts = ?", id, []model.VideoPollStatus{
 			model.VideoPollStatusPending,
 			model.VideoPollStatusPolling,
@@ -230,7 +244,42 @@ func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) er
 		Updates(map[string]interface{}{
 			"status":        model.VideoPollStatusTimedOut,
 			"error_message": errMsg,
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrVideoPollJobAlreadyResolved
+	}
+	return nil
+}
+
+// CompleteVideoPollJobWhitelisted marks a whitelisted job completed WITHOUT touching any
+// Request row — whitelisted traffic creates no Request row to begin with (see proxy.go), so
+// there is nothing to bill. The caller (ctrl.pollVideoJob) is responsible for writing the
+// resolved usage into the hourly_usage_stat reconciliation rollup, and must do so only AFTER
+// this call succeeds — same rationale as CompleteVideoPollJobWithBilling's sign-after-commit
+// ordering: two workers racing on the same reclaimed job must not both record usage.
+//
+// Guarded on status='polling' AND attempts=claimAttempts, identical fencing to
+// CompleteVideoPollJobWithBilling. Retries transient DB errors since the expensive provider
+// poll round-trip is already done; ErrVideoPollJobAlreadyResolved is deterministic (a retry of
+// the same guarded UPDATE cannot change the outcome) and is not retried.
+func (d *DB) CompleteVideoPollJobWhitelisted(id uint64, claimAttempts int) error {
+	return withRetryUnless(3, func() error {
+		res := d.db.Model(&model.VideoPollJob{}).
+			Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
+			Updates(map[string]interface{}{
+				"status": model.VideoPollStatusCompleted,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrVideoPollJobAlreadyResolved
+		}
+		return nil
+	}, ErrVideoPollJobAlreadyResolved)
 }
 
 // DeleteExpiredVideoPollJobs deletes terminal (completed/failed/timed_out) rows older than

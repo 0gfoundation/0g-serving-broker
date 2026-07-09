@@ -26,12 +26,13 @@ type mockVideoPollDB struct {
 	jobs map[uint64]*model.VideoPollJob
 	next uint64
 
-	errOnCreate      error
-	errOnComplete    error
-	errOnFail        error
-	errOnTimeout     error
-	errOnReschedule  error
-	rescheduleCalled int
+	errOnCreate              error
+	errOnComplete            error
+	errOnCompleteWhitelisted error
+	errOnFail                error
+	errOnTimeout             error
+	errOnReschedule          error
+	rescheduleCalled         int
 
 	// lastCompleteSeconds/lastCompleteFee/lastCompleteUnit/lastCompleteRateClass capture the
 	// most recent CompleteVideoPollJobWithBilling call's arguments for assertions.
@@ -41,6 +42,10 @@ type mockVideoPollDB struct {
 	lastCompleteFee       string
 	lastCompleteUnit      string
 	lastCompleteRateClass string
+
+	// whitelistedCompleteCalled counts CompleteVideoPollJobWhitelisted calls that actually won
+	// the guarded write (excludes lost-race calls) — see its doc comment below.
+	whitelistedCompleteCalled int
 }
 
 func newMockVideoPollDB() *mockVideoPollDB {
@@ -124,7 +129,11 @@ func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttemp
 	return nil
 }
 
-// FailVideoPollJob replicates the real db.DB's guard — see RescheduleVideoPollJob's comment above.
+// FailVideoPollJob replicates the real db.DB's guard AND its RowsAffected-based
+// ErrVideoPollJobAlreadyResolved sentinel on a lost race (see RescheduleVideoPollJob's comment
+// above, and db.FailVideoPollJob's doc comment) — a plain nil return on a lost race would give
+// false confidence that a whitelisted-job caller can tell "I won this write" from "someone else
+// already resolved it."
 func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
 	if m.errOnFail != nil {
 		return m.errOnFail
@@ -136,14 +145,15 @@ func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg 
 		return fmt.Errorf("job not found: %d", id)
 	}
 	if j.Status != model.VideoPollStatusPolling || j.Attempts != claimAttempts {
-		return nil // lost race — benign no-op
+		return db.ErrVideoPollJobAlreadyResolved
 	}
 	j.Status = model.VideoPollStatusFailed
 	j.ErrorMessage = errMsg
 	return nil
 }
 
-// TimeOutVideoPollJob replicates the real db.DB's guard — see RescheduleVideoPollJob's comment above.
+// TimeOutVideoPollJob replicates the real db.DB's guard AND lost-race sentinel — see
+// FailVideoPollJob's comment above.
 func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
 	if m.errOnTimeout != nil {
 		return m.errOnTimeout
@@ -155,10 +165,31 @@ func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, errM
 		return fmt.Errorf("job not found: %d", id)
 	}
 	if (j.Status != model.VideoPollStatusPending && j.Status != model.VideoPollStatusPolling) || j.Attempts != claimAttempts {
-		return nil // lost race — benign no-op
+		return db.ErrVideoPollJobAlreadyResolved
 	}
 	j.Status = model.VideoPollStatusTimedOut
 	j.ErrorMessage = errMsg
+	return nil
+}
+
+// CompleteVideoPollJobWhitelisted replicates the real db.DB's guard + lost-race sentinel — see
+// FailVideoPollJob's comment above. whitelistedCompleteCalled counts how many times this
+// actually won the guarded write (excludes lost-race calls), for assertions.
+func (m *mockVideoPollDB) CompleteVideoPollJobWhitelisted(id uint64, claimAttempts int) error {
+	if m.errOnCompleteWhitelisted != nil {
+		return m.errOnCompleteWhitelisted
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return fmt.Errorf("job not found: %d", id)
+	}
+	if j.Status != model.VideoPollStatusPolling || j.Attempts != claimAttempts {
+		return db.ErrVideoPollJobAlreadyResolved
+	}
+	j.Status = model.VideoPollStatusCompleted
+	m.whitelistedCompleteCalled++
 	return nil
 }
 
@@ -280,6 +311,38 @@ func TestDeferVideoBillingToPoll_HappyPath(t *testing.T) {
 	}
 	if !job.ExpiresAt.After(job.NextPollAt) {
 		t.Errorf("ExpiresAt (%v) should be after NextPollAt (%v)", job.ExpiresAt, job.NextPollAt)
+	}
+	if job.IsWhitelisted {
+		t.Error("IsWhitelisted = true, want false for a non-whitelisted reqModel")
+	}
+}
+
+// TestDeferVideoBillingToPoll_Whitelisted_SetsIsWhitelisted is a regression test: a whitelisted
+// request against a genuinely async provider must create a VideoPollJob with IsWhitelisted set,
+// so pollVideoJob later records the resolved outcome into hourly_usage_stat (recordWhitelistedUsage)
+// instead of billing a Request row that, for whitelisted traffic, does not exist — see
+// model.VideoPollJob.IsWhitelisted's doc comment.
+func TestDeferVideoBillingToPoll_Whitelisted_SetsIsWhitelisted(t *testing.T) {
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "https://translator.example")
+	c.videoPollEnabled.Store(true)
+
+	ctx := newTestGinContext()
+	reqModel := model.Request{RequestHash: "req-wl-1", IsWhitelisted: true}
+
+	if err := c.deferVideoBillingToPoll(ctx, "job-abc", "", "500", "application/json", []byte(`{"seconds":5}`), reqModel); err != nil {
+		t.Fatalf("deferVideoBillingToPoll: %v", err)
+	}
+
+	if len(store.jobs) != 1 {
+		t.Fatalf("expected 1 job created, got %d", len(store.jobs))
+	}
+	var job model.VideoPollJob
+	for _, j := range store.jobs {
+		job = *j
+	}
+	if !job.IsWhitelisted {
+		t.Error("IsWhitelisted = false, want true for a whitelisted reqModel")
 	}
 }
 
@@ -621,6 +684,89 @@ func TestPollVideoJob_LostRaceOnComplete_DoesNotSign(t *testing.T) {
 
 	if _, ok := c.svcCache.Get(c.chatCacheKey("chat-key-1")); ok {
 		t.Error("stale worker must not have signed after losing the billing race")
+	}
+}
+
+// TestPollVideoJob_Whitelisted_LostRaceOnComplete_DoesNotRecordUsageOrSign mirrors
+// TestPollVideoJob_LostRaceOnComplete_DoesNotSign for a whitelisted job: a stale worker that
+// loses CompleteVideoPollJobWhitelisted's attempts-fencing race must return immediately,
+// without signing AND without calling recordWhitelistedUsage (which would double-count the
+// winner's own recording). This is deliberately the only whitelisted-completion scenario
+// exercised as a pure unit test: the successful-write path calls recordWhitelistedUsage, which
+// dereferences c.db — nil in this mock-only harness (see the AsyncTextToImage/chatbot/etc.
+// whitelisted paths, none of which unit-test that call either) — so the happy path is covered
+// by the integration suite (TestVideoGeneration_WhitelistUser_AsyncProvider) instead, against a
+// real DB. A lost race returns before ever reaching that call, so it stays safely testable here
+// and specifically proves the fencing that makes the happy path double-count-safe.
+func TestPollVideoJob_Whitelisted_LostRaceOnComplete_DoesNotRecordUsageOrSign(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"completed","seconds":8,"size":"1280x720"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrlWithSigning(t, store, "")
+	job := newPendingJob(1, server.URL) // job.Attempts == 0: this call's stale claim
+	job.IsWhitelisted = true
+	job.ChatKey = "chat-key-1"
+	stored := job
+	stored.Attempts = 1 // the row has since been reclaimed by another worker
+	store.jobs[1] = &stored
+
+	c.pollVideoJob(job) // must not panic: recordWhitelistedUsage must not be reached
+
+	if _, ok := c.svcCache.Get(c.chatCacheKey("chat-key-1")); ok {
+		t.Error("stale worker must not have signed after losing the whitelisted completion race")
+	}
+	if store.whitelistedCompleteCalled != 0 {
+		t.Errorf("whitelistedCompleteCalled = %d, want 0 (the stale worker must not have won the write)", store.whitelistedCompleteCalled)
+	}
+}
+
+// TestPollVideoJob_Whitelisted_LostRaceOnFail_DoesNotRecordUsage is the failed-status
+// counterpart: FailVideoPollJob losing its fencing race must not let this (losing) worker
+// reach recordWhitelistedUsage either. Also a regression test for FailVideoPollJob's own
+// RowsAffected/ErrVideoPollJobAlreadyResolved fix — before that, a lost race there returned
+// nil indistinguishably from a real win, which would have double-recorded usage.
+func TestPollVideoJob_Whitelisted_LostRaceOnFail_DoesNotRecordUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"job-1","status":"failed"}`))
+	}))
+	defer server.Close()
+
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	job := newPendingJob(1, server.URL)
+	job.IsWhitelisted = true
+	stored := job
+	stored.Attempts = 1 // reclaimed by another worker
+	store.jobs[1] = &stored
+
+	c.pollVideoJob(job) // must not panic: recordWhitelistedUsage must not be reached
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusPolling {
+		t.Errorf("Status = %q, want unchanged polling (the stale fail must not have won)", got.Status)
+	}
+}
+
+// TestPollVideoJob_Whitelisted_LostRaceOnTimeout_DoesNotRecordUsage is the timeout counterpart
+// — see TestPollVideoJob_Whitelisted_LostRaceOnFail_DoesNotRecordUsage's comment.
+func TestPollVideoJob_Whitelisted_LostRaceOnTimeout_DoesNotRecordUsage(t *testing.T) {
+	store := newMockVideoPollDB()
+	c := newTestVideoPollCtrl(store, "")
+	job := newPendingJob(1, "")
+	job.IsWhitelisted = true
+	job.ExpiresAt = time.Now().Add(-1 * time.Minute) // already expired
+	stored := job
+	stored.Attempts = 1 // reclaimed by another worker
+	store.jobs[1] = &stored
+
+	c.pollVideoJob(job) // must not panic: recordWhitelistedUsage must not be reached
+
+	got := store.get(1)
+	if got.Status != model.VideoPollStatusPolling {
+		t.Errorf("Status = %q, want unchanged polling (the stale timeout must not have won)", got.Status)
 	}
 }
 

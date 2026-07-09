@@ -51,6 +51,16 @@ type videoPollDB interface {
 	// the resolution-weighted billable count. See db.CompleteVideoPollJobWithBilling's doc
 	// comment.
 	CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error
+	// CompleteVideoPollJobWhitelisted is CompleteVideoPollJobWithBilling's counterpart for
+	// whitelisted jobs (model.VideoPollJob.IsWhitelisted): it never touches a Request row —
+	// whitelisted traffic creates none — the caller records usage into hourly_usage_stat
+	// itself, only after this call succeeds. See db.CompleteVideoPollJobWhitelisted's doc
+	// comment.
+	CompleteVideoPollJobWhitelisted(id uint64, claimAttempts int) error
+	// FailVideoPollJob/TimeOutVideoPollJob return ErrVideoPollJobAlreadyResolved (not nil) on a
+	// lost fencing race, distinguishing "I actually won this write" from "someone else already
+	// resolved it" — needed so a whitelisted-job caller knows when it is safe to record usage
+	// without double-counting. See db.FailVideoPollJob's doc comment.
 	FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 	TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 	DeleteExpiredVideoPollJobs(retention time.Duration) error

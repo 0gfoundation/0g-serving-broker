@@ -432,6 +432,16 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 // are never corrected by the poll scheduler. The fix guards this branch with the same
 // classifyVideoStatus check the paying-user path uses; a non-terminal status now records 0
 // (honest "unresolved") instead of a wrong non-zero value.
+// TestVideoGeneration_WhitelistUser_AsyncProvider is a regression test for the poll-scheduler
+// extension to whitelisted traffic: a whitelisted request against a genuinely async provider
+// (create response status=queued) must NOT have the echoed/requested duration recorded as if
+// it were actual output (see TestOpenAISDK-adjacent history / the "wrong data" bug this
+// replaced), but it also must not be permanently stuck at 0 either — deferVideoBillingToPoll
+// now registers a VideoPollJob for whitelisted jobs too, and the poll scheduler records the
+// REAL resolved duration into hourly_usage_stat once the provider job completes, exactly like
+// a paying user's Request row gets corrected. Uses size=1792x1024, a rate_class no other test
+// in this file uses, so this test's hourly_usage_stat row can never accumulate with another
+// test's contribution (this package shares one DB across tests).
 func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
 	mockProvider := newMockVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
@@ -449,6 +459,21 @@ func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
 		}
 	})
 	env.privateKey = privateKey
+
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    20 * time.Second,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
 
 	lockBalance := "0"
 	if err := env.db.CreateUserAccounts([]model.User{{
@@ -471,7 +496,7 @@ func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
 	})
 
 	boundary := "----WLAsyncBoundary"
-	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n720x1280\r\n--%s--",
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1792x1024\r\n--%s--",
 		boundary, boundary, boundary, boundary)
 
 	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
@@ -485,31 +510,42 @@ func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
 		t.Fatalf("expected 200 for whitelist user, got %d: %s", w.Code, w.Body.String())
 	}
 
-	start := time.Now().UTC().Add(-2 * time.Hour)
-	end := time.Now().UTC().Add(2 * time.Hour)
-	sums, err := env.db.SumHourlyUsageByModel("", start, end)
-	if err != nil {
-		t.Fatalf("sum hourly usage: %v", err)
-	}
-	// hourly_usage_stat's primary key includes rate_class, so this test's row (rate_class="",
-	// unresolved) and TestVideoGeneration_WhitelistUser's row (rate_class="res:720x1280", from
-	// the sync mock, sharing this same DB) are distinct rows even though both are model
-	// "sora-2" — match on rate_class=="" specifically rather than flagging any "sora-2" row,
-	// to avoid tripping over that unrelated test's correctly-populated row.
-	var found bool
-	for _, s := range sums {
-		if s.Model == "sora-2" && s.RateClass == "" {
-			found = true
-			// The create response echoed seconds=5, size=720x1280 while status=queued. Must
-			// NOT be recorded as if actual: output_count stays 0 rather than the wrong 5 a
-			// pre-fix broker would have written.
-			if s.OutputCount != 0 {
-				t.Errorf("whitelist rollup outputCount = %d, want 0 (non-terminal response must not be mistaken for actual output)", s.OutputCount)
+	// Immediately after create, nothing has been written yet — deferVideoBillingToPoll
+	// deliberately does not record an "unresolved" row (see model.VideoPollJob.IsWhitelisted's
+	// doc comment on why: correcting it later would mean moving a unit of count between two
+	// hourly_usage_stat rows keyed in part by rate_class). Poll for the scheduler's eventual,
+	// single, correct write instead of asserting synchronously.
+	deadline := time.Now().Add(10 * time.Second)
+	var outputCount int64
+	for {
+		start := time.Now().UTC().Add(-2 * time.Hour)
+		end := time.Now().UTC().Add(2 * time.Hour)
+		sums, err := env.db.SumHourlyUsageByModel("", start, end)
+		if err != nil {
+			t.Fatalf("sum hourly usage: %v", err)
+		}
+		found := false
+		for _, s := range sums {
+			if s.Model == "sora-2" && s.RateClass == "res:1792x1024" {
+				found = true
+				outputCount = s.OutputCount
+				break
 			}
 		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the video poll scheduler to record whitelisted usage")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if !found {
-		t.Error("expected a hourly_usage_stat row for whitelisted video (model sora-2, unresolved rate_class), even with 0 output_count — a whitelisted request must still be visible to reconciliation")
+
+	// The mock's completed GET response (newMockVideoProvider) reports no seconds/size of its
+	// own, so resolveVideoBilling falls back to the original request's seconds=5 — the REAL
+	// resolved duration, not a guess made before the provider ever ran.
+	if outputCount != 5 {
+		t.Errorf("whitelist rollup outputCount = %d, want 5 (the real resolved duration, recorded once — not the echoed value recorded early, not stuck at 0)", outputCount)
 	}
 }
 

@@ -304,9 +304,12 @@ func TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling(t *testin
 
 	// Worker A's stale, late-arriving response now tries to fail the job using the Attempts
 	// value it originally observed (1) — must be rejected even though status still says
-	// 'polling' at this exact moment (worker B hasn't written yet).
-	if err := d.FailVideoPollJob(created.ID, staleAttempts, "worker A: provider reported status=failed"); err != nil {
-		t.Fatalf("FailVideoPollJob (stale worker A): %v", err)
+	// 'polling' at this exact moment (worker B hasn't written yet). Returns
+	// ErrVideoPollJobAlreadyResolved (not nil): the RowsAffected check added so a
+	// whitelisted-job caller can tell "I won this write" from "someone else already resolved
+	// it" applies to every caller, not just whitelisted ones.
+	if err := d.FailVideoPollJob(created.ID, staleAttempts, "worker A: provider reported status=failed"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+		t.Fatalf("FailVideoPollJob (stale worker A) error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
 
 	got, err := d.GetVideoPollJob(created.ID)
@@ -573,5 +576,103 @@ func TestPruneRequest_DeletesRequestWithTerminalVideoPollJob(t *testing.T) {
 
 	if _, err := d.GetRequest("long-failed"); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("GetRequest error = %v, want gorm.ErrRecordNotFound (a failed job's row must still be prunable)", err)
+	}
+}
+
+// TestCompleteVideoPollJobWhitelisted_MarksCompletedWithoutRequest confirms
+// CompleteVideoPollJobWhitelisted never touches (or requires) a Request row — whitelisted
+// traffic creates none (see proxy.go). Deliberately does NOT call seedVideoRequest: if this
+// method secretly depended on a Request row existing, this test would fail loudly rather than
+// mask it behind an unnecessarily-seeded row.
+func TestCompleteVideoPollJobWhitelisted_MarksCompletedWithoutRequest(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+
+	now := time.Now()
+	job := newVideoPollJob("wl-1", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))
+	job.IsWhitelisted = true
+	if err := d.CreateVideoPollJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	if err := d.db.Where("request_hash = ?", "wl-1").First(&created).Error; err != nil {
+		t.Fatalf("fetch created job: %v", err)
+	}
+
+	if err := d.CompleteVideoPollJobWhitelisted(created.ID, 0); err != nil {
+		t.Fatalf("CompleteVideoPollJobWhitelisted: %v", err)
+	}
+
+	got, err := d.GetVideoPollJob(created.ID)
+	if err != nil {
+		t.Fatalf("GetVideoPollJob: %v", err)
+	}
+	if got.Status != model.VideoPollStatusCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+}
+
+// TestCompleteVideoPollJobWhitelisted_SecondCallIsRejected mirrors
+// TestCompleteVideoPollJobWithBilling_SecondCallIsRejected: two workers racing on the same
+// reclaimed whitelisted job must not both win — the second call must be rejected, which is
+// what lets the ctrl-layer caller (pollVideoJob) know it must not double-record usage.
+func TestCompleteVideoPollJobWhitelisted_SecondCallIsRejected(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+
+	now := time.Now()
+	job := newVideoPollJob("wl-2", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))
+	job.IsWhitelisted = true
+	if err := d.CreateVideoPollJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	d.db.Where("request_hash = ?", "wl-2").First(&created)
+
+	if err := d.CompleteVideoPollJobWhitelisted(created.ID, 0); err != nil {
+		t.Fatalf("first CompleteVideoPollJobWhitelisted: %v", err)
+	}
+
+	if err := d.CompleteVideoPollJobWhitelisted(created.ID, 0); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+		t.Fatalf("second CompleteVideoPollJobWhitelisted error = %v, want ErrVideoPollJobAlreadyResolved", err)
+	}
+}
+
+// TestTimeOutVideoPollJob_StaleClaimRejected is TimeOutVideoPollJob's counterpart to
+// TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling — same fencing guard, same
+// ErrVideoPollJobAlreadyResolved sentinel on a lost race.
+func TestTimeOutVideoPollJob_StaleClaimRejected(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoPollTables(t, d)
+	seedVideoRequest(t, d, "fence-timeout")
+
+	now := time.Now()
+	job := newVideoPollJob("fence-timeout", model.VideoPollStatusPolling, now.Add(-time.Minute), now.Add(20*time.Minute))
+	job.Attempts = 1
+	if err := d.CreateVideoPollJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	var created model.VideoPollJob
+	d.db.Where("request_hash = ?", "fence-timeout").First(&created)
+	staleAttempts := created.Attempts
+
+	claimed, err := d.ClaimDueVideoPollJobs(10, 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimDueVideoPollJobs (reclaim): %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].Attempts != 2 {
+		t.Fatalf("expected the reclaim to bump attempts to 2, got claimed=%+v", claimed)
+	}
+
+	if err := d.TimeOutVideoPollJob(created.ID, staleAttempts, "stale worker: exceeded MaxPollDuration"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+		t.Fatalf("TimeOutVideoPollJob (stale claim) error = %v, want ErrVideoPollJobAlreadyResolved", err)
+	}
+
+	got, err := d.GetVideoPollJob(created.ID)
+	if err != nil {
+		t.Fatalf("GetVideoPollJob: %v", err)
+	}
+	if got.Status != model.VideoPollStatusPolling {
+		t.Errorf("Status = %q, want unchanged polling — the stale timeout must not have won", got.Status)
 	}
 }
