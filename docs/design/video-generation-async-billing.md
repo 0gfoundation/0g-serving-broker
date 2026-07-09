@@ -128,6 +128,7 @@ state. One row per `POST /videos` call that returned a non-terminal status.
 | `NextPollAt` | `datetime`, indexed | When a scheduler worker is next allowed to poll this row. The scan query is `status IN (pending) AND next_poll_at <= now()`. |
 | `ExpiresAt` | `datetime`, indexed | Hard ceiling — `created_at + MaxPollDuration`. Past this, the job is marked `timed_out` regardless of provider state. |
 | `ErrorMessage` | `text` | Set on `failed`/`timed_out`. |
+| `IsWhitelisted` | `tinyint(1)` | Set when the originating request was whitelisted (unbilled). See [Whitelisted (unbilled) traffic](#whitelisted-unbilled-traffic). |
 
 `status='polling'` additionally has an implicit lease: a row claimed by a worker is only
 considered "stuck" (eligible for another worker to reclaim) if `next_poll_at` has passed without
@@ -204,6 +205,31 @@ reason it is already fine that chatbot/image billing finalizes after the respons
 the client (`video.go:266` writes before `video.go:295` bills) — content delivery has never been
 gated on billing completion in this codebase, and gating it here would reintroduce the latency
 this design exists to avoid.
+
+## Whitelisted (unbilled) traffic
+
+Whitelisted requests bypass billing entirely and create no `Request` row (see `proxy.go`), but
+the broker still needs to count them for reconciliation against a provider's vendor statement
+(`hourly_usage_stat`, see `docs/design/provider-reconciliation.md`) — otherwise every whitelisted
+hit on a genuinely async provider would be invisible, understating usage. A whitelisted request
+against a non-terminal (`queued`/`in_progress`) create response gets a `VideoPollJob` row exactly
+like a paying user's, with `IsWhitelisted=true`, and the poll scheduler resolves it the same way.
+
+The one deliberate difference from the paying-user path is **when** the reconciliation row is
+written. A paying user's `Request` row already exists (with an estimated fee) the moment create
+returns, and completion simply updates it in place. `hourly_usage_stat` cannot be updated the same
+way: it is a pre-aggregated rollup whose primary key includes `RateClass`, so an eager "unresolved"
+write at create time followed by a "corrected" write at completion would mean moving a unit of
+count from one aggregate row to another (decrement one, increment a different one) rather than
+updating a value in place — the *destination* row is only known once the real `RateClass` is.
+
+Whitelisted jobs sidestep this entirely by writing to `hourly_usage_stat` exactly once, only at
+resolution time (`completed`/`failed`/`timed_out`), when the final `RateClass` is already known.
+Nothing is written at create time; every terminal outcome — including every early-return failure
+before a `VideoPollJob` even exists (no provider job id, a transient `CreateVideoPollJob` error) —
+records a usage row (zero seconds on failure/timeout, the real resolved seconds on completion), so
+a whitelisted request that hit the upstream is never simply invisible to reconciliation, and never
+needs correcting after the fact.
 
 ## Configuration
 

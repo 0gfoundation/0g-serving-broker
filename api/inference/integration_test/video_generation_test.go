@@ -422,26 +422,16 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 	}
 }
 
-// TestVideoGeneration_WhitelistUser_AsyncProvider is a regression test: a whitelisted request
-// against a genuinely async provider (create response status=queued, echoing the REQUESTED
-// seconds/size — the exact shape newMockVideoProvider and the real OpenAI Video API use) must
-// NOT have that echoed value recorded as if it were actual output. Before this fix, the
-// whitelist branch called resolveVideoBilling unconditionally and could not tell an echoed
-// request value apart from real completed output — silently corrupting the reconciliation
-// rollup with the wrong (requested, not actual) duration, permanently, since whitelisted jobs
-// are never corrected by the poll scheduler. The fix guards this branch with the same
-// classifyVideoStatus check the paying-user path uses; a non-terminal status now records 0
-// (honest "unresolved") instead of a wrong non-zero value.
 // TestVideoGeneration_WhitelistUser_AsyncProvider is a regression test for the poll-scheduler
 // extension to whitelisted traffic: a whitelisted request against a genuinely async provider
-// (create response status=queued) must NOT have the echoed/requested duration recorded as if
-// it were actual output (see TestOpenAISDK-adjacent history / the "wrong data" bug this
-// replaced), but it also must not be permanently stuck at 0 either — deferVideoBillingToPoll
-// now registers a VideoPollJob for whitelisted jobs too, and the poll scheduler records the
-// REAL resolved duration into hourly_usage_stat once the provider job completes, exactly like
-// a paying user's Request row gets corrected. Uses size=1792x1024, a rate_class no other test
-// in this file uses, so this test's hourly_usage_stat row can never accumulate with another
-// test's contribution (this package shares one DB across tests).
+// (create response status=queued, echoing the REQUESTED seconds/size — the exact shape
+// newMockVideoProvider and the real OpenAI Video API use) must NOT have that echoed value
+// recorded as if it were actual output, but it also must not be permanently stuck at 0 either
+// — deferVideoBillingToPoll now registers a VideoPollJob for whitelisted jobs too, and the poll
+// scheduler records the REAL resolved duration into hourly_usage_stat once the provider job
+// completes, exactly like a paying user's Request row gets corrected. Uses size=1792x1024, a
+// rate_class no other test in this file uses, so this test's hourly_usage_stat row can never
+// accumulate with another test's contribution (this package shares one DB across tests).
 func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
 	mockProvider := newMockVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
