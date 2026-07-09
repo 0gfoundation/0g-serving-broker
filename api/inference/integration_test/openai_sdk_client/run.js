@@ -46,11 +46,18 @@ async function main() {
 
   if (!baseURL) throw new Error("BASE_URL env var is required");
 
-  // Mirrors the working pattern in api/inference/integration/all-in-one/
-  // test-serving-capability.js: apiKey is left empty on the client (the
-  // broker does not use OpenAI-style API keys) and the real session-token
-  // Authorization header is passed per-request instead.
-  const client = new OpenAI({ baseURL, apiKey: "", maxRetries: 0 });
+  // The broker does not use OpenAI-style API keys — the real session-token
+  // Authorization header is passed per-request instead (authedOpts below),
+  // which overrides whatever the client would otherwise send. apiKey here is
+  // just a placeholder to satisfy the SDK's own credential validation: openai
+  // 6.x throws "Missing credentials" at construction time for apiKey: "" (an
+  // empty string was accepted by 5.x, the version this suite originally
+  // pinned — see the video-generation scenarios' commit for why the bump to
+  // 6.x was needed). Every scenario except `unauthorized` supplies a real
+  // per-request Authorization header that wins over this placeholder;
+  // `unauthorized` hardcodes its own (invalid) header and never falls back
+  // to this value either.
+  const client = new OpenAI({ baseURL, apiKey: "unused-placeholder", maxRetries: 0 });
   const authedOpts = { timeout, headers: authHeader ? { Authorization: authHeader } : {} };
 
   const scenarios = {

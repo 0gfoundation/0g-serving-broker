@@ -187,11 +187,13 @@ func TestRescheduleVideoPollJob(t *testing.T) {
 	if got.Status != model.VideoPollStatusPending {
 		t.Errorf("Status = %q, want pending", got.Status)
 	}
-	// MySQL's `datetime` column (no fractional-seconds precision) truncates sub-second
-	// precision on write, so comparing against the DB round-trip must tolerate that —
-	// truncate both sides to second resolution, which is all NextPollAt's scheduling
-	// semantics ever depend on.
-	if !got.NextPollAt.Truncate(time.Second).Equal(next.Truncate(time.Second)) {
+	// MySQL's `datetime` column (no fractional-seconds precision) ROUNDS sub-second
+	// precision on write (confirmed against a real CI run — not truncate/floor, which an
+	// earlier version of this comparison wrongly assumed and which fails whenever the
+	// fractional part is >= 0.5s), so comparing against the DB round-trip must tolerate
+	// that with time.Round, not time.Truncate — second resolution is all NextPollAt's
+	// scheduling semantics ever depend on anyway.
+	if !got.NextPollAt.Equal(next.Round(time.Second)) {
 		t.Errorf("NextPollAt = %v, want %v", got.NextPollAt, next)
 	}
 }
