@@ -348,33 +348,25 @@ func (d *DB) Migrate() error {
 				// model.VideoPollJob and docs/design/video-generation-async-billing.md.
 				type VideoPollJob struct {
 					model.Model
-					ID                 uint64    `gorm:"primaryKey;autoIncrement"`
-					ProviderJobID      string    `gorm:"type:varchar(255);not null;index"`
-					RequestHash        string    `gorm:"type:varchar(255);not null;uniqueIndex"`
-					PollURL            string    `gorm:"type:text;not null"`
-					RequestBody        []byte    `gorm:"type:mediumblob"`
-					RequestContentType string    `gorm:"type:varchar(255)"`
-					OutputPrice        string    `gorm:"type:varchar(255);not null"`
-					ChatKey            string    `gorm:"type:varchar(64)"`
-					ResolvedModel      string    `gorm:"type:varchar(255)"`
-					MetricModel        string    `gorm:"type:varchar(255)"`
-					Status             string    `gorm:"type:varchar(16);not null;default:'pending';index"`
-					Attempts           int       `gorm:"type:int;not null;default:0"`
-					NextPollAt         time.Time `gorm:"type:datetime;not null;index"`
-					ExpiresAt          time.Time `gorm:"type:datetime;not null;index"`
-					ErrorMessage       string    `gorm:"type:text"`
-				}
-				return tx.AutoMigrate(&VideoPollJob{})
-			},
-		},
-		{
-			ID: "add-is-whitelisted-to-video-poll-job",
-			Migrate: func(tx *gorm.DB) error {
-				// Lets a whitelisted (unbilled) video-generation job be polled to completion
-				// too, without a Request row to reference — see model.VideoPollJob's
-				// IsWhitelisted doc comment and docs/design/video-generation-async-billing.md.
-				type VideoPollJob struct {
-					IsWhitelisted bool `gorm:"type:tinyint(1);not null;default:0"`
+					ID                 uint64 `gorm:"primaryKey;autoIncrement"`
+					ProviderJobID      string `gorm:"type:varchar(255);not null;index"`
+					RequestHash        string `gorm:"type:varchar(255);not null;uniqueIndex"`
+					PollURL            string `gorm:"type:text;not null"`
+					RequestBody        []byte `gorm:"type:mediumblob"`
+					RequestContentType string `gorm:"type:varchar(255)"`
+					OutputPrice        string `gorm:"type:varchar(255);not null"`
+					ChatKey            string `gorm:"type:varchar(64)"`
+					ResolvedModel      string `gorm:"type:varchar(255)"`
+					MetricModel        string `gorm:"type:varchar(255)"`
+					// IsWhitelisted lets a whitelisted (unbilled) video-generation job be polled
+					// to completion too, without a Request row to reference — see
+					// model.VideoPollJob's IsWhitelisted doc comment.
+					IsWhitelisted bool      `gorm:"type:tinyint(1);not null;default:0"`
+					Status        string    `gorm:"type:varchar(16);not null;default:'pending';index"`
+					Attempts      int       `gorm:"type:int;not null;default:0"`
+					NextPollAt    time.Time `gorm:"type:datetime;not null;index"`
+					ExpiresAt     time.Time `gorm:"type:datetime;not null;index"`
+					ErrorMessage  string    `gorm:"type:text"`
 				}
 				return tx.AutoMigrate(&VideoPollJob{})
 			},
