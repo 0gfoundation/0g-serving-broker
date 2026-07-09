@@ -254,6 +254,50 @@ async function main() {
       }
       return { text: result.text };
     },
+
+    async videocreate() {
+      // client.videos.create sends multipart/form-data (like images.edit) — the
+      // SDK's own VideoSeconds/VideoSize enums are used here rather than
+      // arbitrary values, matching what a real caller's typed code would send.
+      const video = await client.videos.create(
+        { model, prompt: "a cat playing piano on stage", seconds: "8", size: "720x1280" },
+        authedOpts,
+      );
+      if (!video.id) {
+        throw new Error(`expected a video id, got ${JSON.stringify(video)}`);
+      }
+      if (video.status !== "completed") {
+        throw new Error(`unexpected status: ${JSON.stringify(video.status)}`);
+      }
+      return { id: video.id, status: video.status, seconds: video.seconds, size: video.size };
+    },
+
+    async videoretrieve() {
+      const created = await client.videos.create(
+        { model, prompt: "a cat playing piano on stage", seconds: "8", size: "720x1280" },
+        authedOpts,
+      );
+      const video = await client.videos.retrieve(created.id, authedOpts);
+      if (video.id !== created.id) {
+        throw new Error(`retrieve returned id ${video.id}, want ${created.id}`);
+      }
+      if (video.status !== "completed") {
+        throw new Error(`unexpected retrieved status: ${JSON.stringify(video.status)}`);
+      }
+      return { id: video.id, status: video.status };
+    },
+
+    async videodownload() {
+      const created = await client.videos.create(
+        { model, prompt: "a cat playing piano on stage", seconds: "8", size: "720x1280" },
+        authedOpts,
+      );
+      // downloadContent resolves to a fetch-like Response (unlike every other
+      // scenario's JSON-decoded result) — the SDK's binary-download contract.
+      const response = await client.videos.downloadContent(created.id, {}, authedOpts);
+      const bodyText = Buffer.from(await response.arrayBuffer()).toString("utf8");
+      return { contentType: response.headers.get("content-type"), bodyText };
+    },
   };
 
   const fn = scenarios[scenario];
