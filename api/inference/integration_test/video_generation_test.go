@@ -311,8 +311,33 @@ func TestVideoEndpoints_RequireAuth(t *testing.T) {
 // Whitelist user test
 // ==========================================================================
 
+// newMockSyncVideoProvider returns a provider that reports the finished result directly on
+// create (status=completed, no polling needed) — used to exercise the whitelist billing
+// branch's happy path (videoActionBillNow), as opposed to newMockVideoProvider's genuinely
+// async (status=queued) create response.
+func newMockSyncVideoProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/videos" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "video-sync-001",
+				"status":  "completed",
+				"object":  "video",
+				"model":   "sora-2",
+				"seconds": 5,
+				"size":    "720x1280",
+			})
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
 func TestVideoGeneration_WhitelistUser(t *testing.T) {
-	mockProvider := newMockVideoProvider(t)
+	mockProvider := newMockSyncVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	privateKey, _ := crypto.GenerateKey()
@@ -367,9 +392,13 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 
 	// Whitelisted video is unbilled (no request row) but must still land in the reconciliation
 	// rollup with the RAW seconds under the seconds unit and the resolution as rate_class — the
-	// same basis as billable video — so it reconciles per-second too. The mock response carries
-	// seconds=5, size=720x1280. Per-row properties (unit/rate_class) are asserted rather than
-	// accumulating counts, since this package shares one DB across tests.
+	// same basis as billable video — so it reconciles per-second too. This mock reports
+	// status=completed directly on create (videoActionBillNow), so resolveVideoBilling's
+	// result (seconds=5, size=720x1280) is trustworthy — contrast with
+	// TestVideoGeneration_WhitelistUser_AsyncProvider below, where the create response is
+	// non-terminal and the same fields must NOT be recorded. Per-row properties (unit/
+	// rate_class) are asserted rather than accumulating counts, since this package shares one
+	// DB across tests.
 	start := time.Now().UTC().Add(-2 * time.Hour)
 	end := time.Now().UTC().Add(2 * time.Hour)
 	sums, err := env.db.SumHourlyUsageByModel("", start, end)
@@ -390,6 +419,97 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected a hourly_usage_stat row for whitelisted video (model sora-2)")
+	}
+}
+
+// TestVideoGeneration_WhitelistUser_AsyncProvider is a regression test: a whitelisted request
+// against a genuinely async provider (create response status=queued, echoing the REQUESTED
+// seconds/size — the exact shape newMockVideoProvider and the real OpenAI Video API use) must
+// NOT have that echoed value recorded as if it were actual output. Before this fix, the
+// whitelist branch called resolveVideoBilling unconditionally and could not tell an echoed
+// request value apart from real completed output — silently corrupting the reconciliation
+// rollup with the wrong (requested, not actual) duration, permanently, since whitelisted jobs
+// are never corrected by the poll scheduler. The fix guards this branch with the same
+// classifyVideoStatus check the paying-user path uses; a non-terminal status now records 0
+// (honest "unresolved") instead of a wrong non-zero value.
+func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
+	mockProvider := newMockVideoProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	privateKey, _ := crypto.GenerateKey()
+	userAddr := crypto.PubkeyToAddress(privateKey.PublicKey)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Whitelist = config.WhitelistConfig{
+			Enabled:       true,
+			UserAddresses: []string{userAddr.Hex()},
+		}
+	})
+	env.privateKey = privateKey
+
+	lockBalance := "0"
+	if err := env.db.CreateUserAccounts([]model.User{{
+		User:                 userAddr.Hex(),
+		LockBalance:          &lockBalance,
+		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+	}}); err != nil {
+		if !strings.Contains(err.Error(), "Duplicate") {
+			t.Fatalf("create whitelist test user: %v", err)
+		}
+	}
+
+	env.ctrl.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
+		User:          userAddr,
+		Balance:       big.NewInt(0),
+		PendingRefund: big.NewInt(0),
+		Generation:    big.NewInt(0),
+		RevokedBitmap: big.NewInt(0),
+		Acknowledged:  false,
+	})
+
+	boundary := "----WLAsyncBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n720x1280\r\n--%s--",
+		boundary, boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for whitelist user, got %d: %s", w.Code, w.Body.String())
+	}
+
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	end := time.Now().UTC().Add(2 * time.Hour)
+	sums, err := env.db.SumHourlyUsageByModel("", start, end)
+	if err != nil {
+		t.Fatalf("sum hourly usage: %v", err)
+	}
+	// hourly_usage_stat's primary key includes rate_class, so this test's row (rate_class="",
+	// unresolved) and TestVideoGeneration_WhitelistUser's row (rate_class="res:720x1280", from
+	// the sync mock, sharing this same DB) are distinct rows even though both are model
+	// "sora-2" — match on rate_class=="" specifically rather than flagging any "sora-2" row,
+	// to avoid tripping over that unrelated test's correctly-populated row.
+	var found bool
+	for _, s := range sums {
+		if s.Model == "sora-2" && s.RateClass == "" {
+			found = true
+			// The create response echoed seconds=5, size=720x1280 while status=queued. Must
+			// NOT be recorded as if actual: output_count stays 0 rather than the wrong 5 a
+			// pre-fix broker would have written.
+			if s.OutputCount != 0 {
+				t.Errorf("whitelist rollup outputCount = %d, want 0 (non-terminal response must not be mistaken for actual output)", s.OutputCount)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a hourly_usage_stat row for whitelisted video (model sora-2, unresolved rate_class), even with 0 output_count — a whitelisted request must still be visible to reconciliation")
 	}
 }
 

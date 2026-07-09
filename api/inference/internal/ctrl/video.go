@@ -344,20 +344,36 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		}
 	}
 
+	contentType := ctx.Request.Header.Get("Content-Type")
+
+	var respFields videoResponseFields
+	_ = json.Unmarshal(body, &respFields)
+	billingAction := classifyVideoStatus(respFields.Status)
+
 	if reqModel.IsWhitelisted {
 		// Whitelist traffic is unbilled; record metrics + reconciliation count only.
 		//
-		// Known limitation: this branch does NOT defer to the poll scheduler. A whitelisted
-		// request against a genuinely async provider (status=queued/in_progress) has no
-		// actual duration yet here, so resolveVideoBilling falls to the "no usable seconds"
-		// warning below with seconds permanently 0 — unlike paying users, whitelisted usage
-		// on an async provider is never corrected once the job actually completes. Accepted
+		// Gated on the SAME classifyVideoStatus check paying users use, for the same reason:
+		// resolveVideoBilling cannot tell a genuinely non-terminal response (status=queued/
+		// in_progress, which may still echo the REQUESTED seconds/size — see actualSeconds'
+		// doc comment) apart from a real completed one that reports actual output in the same
+		// fields. Calling it unconditionally would silently mislabel the requested duration as
+		// actual output in the reconciliation rollup — wrong data, not just missing data.
+		// Recording 0 instead is honest: it says "unresolved," not "wrong." Same guard covers
+		// an explicit failed status, which must not record a generated duration either.
+		//
+		// Known limitation: this branch does NOT defer to the poll scheduler, so unlike paying
+		// users, whitelisted usage on an async provider is never corrected once the job
+		// actually completes — it stays permanently 0 in the reconciliation rollup. Accepted
 		// for now since whitelisted traffic only affects metrics/reconciliation counts, not
 		// revenue; extending polling to whitelisted jobs is unscoped follow-up work (see
 		// docs/design/video-generation-async-billing.md).
 		var seconds int64
 		var rateClass string
-		if sec, size, source := resolveVideoBilling(body, reqBody, ctx.Request.Header.Get("Content-Type")); source != "" {
+		if billingAction != videoActionBillNow {
+			c.logger.Warnf("whitelist video: create/poll response for %s is non-terminal or failed (status=%q); recording request count only, not the echoed/requested duration",
+				reqModel.RequestHash, respFields.Status)
+		} else if sec, size, source := resolveVideoBilling(body, reqBody, contentType); source != "" {
 			seconds = sec
 			rateClass = resolutionRateClass(size)
 			outputCount := c.videoOutputUnits(ctx, sec, size)
@@ -375,12 +391,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return nil
 	}
 
-	contentType := ctx.Request.Header.Get("Content-Type")
-
-	var respFields videoResponseFields
-	_ = json.Unmarshal(body, &respFields)
-
-	switch classifyVideoStatus(respFields.Status) {
+	switch billingAction {
 	case videoActionSkipFailed:
 		// Provider failed immediately at create time — nothing was generated, nothing to
 		// bill, and there is no job to poll.
