@@ -787,6 +787,7 @@ type Config struct {
 	PriceFeed           PriceFeedConfig         `yaml:"priceFeed"`
 	Whitelist           WhitelistConfig         `yaml:"whitelist"`
 	Async               AsyncConfig             `yaml:"async"`
+	VideoPoll           VideoPollConfig         `yaml:"videoPoll"`
 	ProviderHttp        ProviderHttpConfig      `yaml:"providerHttp"`
 	ConcurrencyLimit    ConcurrencyLimitConfig  `yaml:"concurrencyLimit"`
 	UserUsageStats      UserUsageStatsConfig    `yaml:"userUsageStats"`
@@ -877,6 +878,76 @@ type AsyncConfig struct {
 	JobTimeout time.Duration `yaml:"jobTimeout"`
 	// Deprecated: use JobTimeout. Removed after config.DeprecationRemovalDate.
 	JobTimeoutMinutes int `yaml:"jobTimeoutMinutes,omitempty"`
+}
+
+// ZeroOutputRequestPruneThreshold is how old a zero-output Request row must be before
+// ctrl.SettleFeesWithTEE's periodic prune pass deletes it (db.PruneRequest). Exported here,
+// rather than left as a local literal in settlement_tee.go, for discoverability.
+//
+// VideoPollConfig.MaxPollDuration does NOT need to stay under this value: a still in-flight
+// (pending/polling) VideoPollJob's Request row is excluded from this prune sweep
+// unconditionally, regardless of age — see db.PruneRequest's doc comment. An earlier boot-time
+// invariant tied MaxPollDuration to this constant before that exclusion existed; it was
+// removed once the exclusion made it redundant.
+const ZeroOutputRequestPruneThreshold = 1 * time.Hour
+
+// VideoPollConfig defines the background scheduler that polls a video-generation job to
+// completion when its create response is non-terminal (queued/in_progress), billing the
+// actual delivered duration instead of the requested one. See
+// docs/design/video-generation-async-billing.md.
+type VideoPollConfig struct {
+	Enabled bool `yaml:"enabled"` // Enable the poll-to-completion scheduler (default: true)
+
+	// MaxConcurrentPolls: worker pool size for the poll scheduler (default: 10). Feeds a GORM
+	// Limit(n) in db.ClaimDueVideoPollJobs; boot-validated positive below (n<=0 either stalls
+	// the scheduler or removes the LIMIT clause entirely).
+	MaxConcurrentPolls int `yaml:"maxConcurrentPolls"`
+
+	// PollInterval: fixed delay between poll attempts for a given job. A fixed interval is
+	// sufficient given providers already recommend one (e.g. DashScope's 5-15s);
+	// exponential backoff is unneeded complexity for a bounded-attempts poll. Boot-validated
+	// positive below.
+	PollInterval time.Duration `yaml:"pollInterval"`
+
+	// MaxPollDuration: ceiling from job creation to forced timed_out. Not bounded against
+	// ZeroOutputRequestPruneThreshold — a still in-flight (pending/polling) job's Request row
+	// is excluded from that prune sweep unconditionally regardless of age (db.PruneRequest), so
+	// this can be set as high as a slow provider needs without risking the row being pruned out
+	// from under it.
+	MaxPollDuration time.Duration `yaml:"maxPollDuration"`
+
+	// ScanInterval: how often the scheduler queries for due rows. Feeds time.NewTicker
+	// directly (video_poll.go's runVideoPollScanner); boot-validated positive below — a
+	// non-positive duration panics the ticker in an unrecovered background goroutine.
+	ScanInterval time.Duration `yaml:"scanInterval"`
+
+	// LeaseWindow: how far into the future a claimed row's NextPollAt is pushed while a poll
+	// round-trip is in flight. A row whose lease expires without a status update (worker
+	// crash) becomes claimable again — see db.ClaimDueVideoPollJobs. Must stay comfortably
+	// above PollRequestTimeout plus the time to parse/bill/write the result — if the two are
+	// close, an ordinary slow (not crashed) provider response can let a second worker reclaim
+	// and re-poll the same job while the first is still finishing. The terminal-write
+	// attempts-fenced guards (db.RescheduleVideoPollJob et al.) make this race safe against
+	// double-billing regardless, but it still wastes a duplicate provider round-trip — see the
+	// boot-time validation enforcing LeaseWindow > PollRequestTimeout below.
+	LeaseWindow time.Duration `yaml:"leaseWindow"`
+
+	// PollRequestTimeout: per-poll-attempt HTTP timeout (context deadline for the single GET
+	// to the provider/translator). Was previously a value hardcoded in video_poll.go with only
+	// a comment tying it to LeaseWindow; now config-driven and boot-validated against
+	// LeaseWindow directly (see loadConfig), the same treatment MaxPollDuration already gets
+	// against the settlement prune threshold — a doc-only coupling between two independently
+	// configurable values is exactly the kind of footgun an operator can silently drift apart.
+	PollRequestTimeout time.Duration `yaml:"pollRequestTimeout"`
+
+	// RetentionTTL: how long to keep terminal (completed/failed/timed_out) rows before the
+	// cleanup pass deletes them.
+	RetentionTTL time.Duration `yaml:"retentionTTL"`
+
+	// CleanupInterval: how often the retention sweep (DeleteExpiredVideoPollJobs) runs. Feeds
+	// time.NewTicker directly (video_poll.go's runVideoPollCleanup); boot-validated positive
+	// below — see ScanInterval's doc comment for why.
+	CleanupInterval time.Duration `yaml:"cleanupInterval"`
 }
 
 // ProviderHttpConfig defines HTTP client timeouts for broker→provider communication.
@@ -1397,6 +1468,77 @@ func loadConfig(cfg *Config) error {
 		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
 	}
 
+	// VideoPollConfig defaults, applied regardless of Enabled and regardless of whether the
+	// caller pre-populated GetConfig()'s defaults (loadConfig is also exercised directly against
+	// a bare zero-value Config by unit tests unrelated to video polling) — same
+	// unset-field-gets-a-default pattern as the UserUsageStats/Reconciliation blocks above, so
+	// the cross-field invariants below always see real values, never zero-value fields that
+	// merely mean "caller didn't set this."
+	if cfg.VideoPoll.MaxPollDuration == 0 {
+		cfg.VideoPoll.MaxPollDuration = 20 * time.Minute
+	}
+	if cfg.VideoPoll.LeaseWindow == 0 {
+		cfg.VideoPoll.LeaseWindow = 90 * time.Second
+	}
+	if cfg.VideoPoll.PollRequestTimeout == 0 {
+		cfg.VideoPoll.PollRequestTimeout = 30 * time.Second
+	}
+	if cfg.VideoPoll.MaxConcurrentPolls == 0 {
+		cfg.VideoPoll.MaxConcurrentPolls = 10
+	}
+	if cfg.VideoPoll.PollInterval == 0 {
+		cfg.VideoPoll.PollInterval = 10 * time.Second
+	}
+	if cfg.VideoPoll.ScanInterval == 0 {
+		cfg.VideoPoll.ScanInterval = 5 * time.Second
+	}
+	if cfg.VideoPoll.CleanupInterval == 0 {
+		cfg.VideoPoll.CleanupInterval = 5 * time.Minute
+	}
+
+	// MaxPollDuration just needs to be positive (a sanity check, not a cross-field invariant —
+	// see its doc comment for why it no longer needs to stay under
+	// ZeroOutputRequestPruneThreshold). LeaseWindow must exceed PollRequestTimeout (see
+	// LeaseWindow's doc comment) — this one IS a real cross-field invariant. Both refuse to
+	// boot instead of a startup-time footgun an operator is likely to overlook, matching this
+	// function's existing token-billed-STT gate above.
+	//
+	// Enforced unconditionally, NOT gated on cfg.VideoPoll.Enabled: deferVideoBillingToPoll
+	// (video.go) uses MaxPollDuration/LeaseWindow to compute a VideoPollJob's ExpiresAt
+	// regardless of whether the scheduler is currently running, so a disabled scheduler with an
+	// out-of-range value would let an unvalidated ExpiresAt slip through and only bite later,
+	// once the scheduler is re-enabled.
+	if cfg.VideoPoll.MaxPollDuration <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.maxPollDuration (%v) must be positive", cfg.VideoPoll.MaxPollDuration)
+	}
+	if cfg.VideoPoll.LeaseWindow <= cfg.VideoPoll.PollRequestTimeout {
+		return fmt.Errorf(
+			"invalid config: videoPoll.leaseWindow (%v) must be greater than videoPoll.pollRequestTimeout (%v) — "+
+				"otherwise an ordinary slow (not crashed) poll response can let a second worker reclaim and re-poll "+
+				"the same job while the first is still finishing, wasting a duplicate provider round-trip",
+			cfg.VideoPoll.LeaseWindow, cfg.VideoPoll.PollRequestTimeout,
+		)
+	}
+	// ScanInterval/CleanupInterval feed time.NewTicker directly (video_poll.go's
+	// runVideoPollScanner/runVideoPollCleanup), which panics on a non-positive duration — in an
+	// unrecovered background goroutine, that crashes the whole broker process, not just the
+	// video-poll feature. MaxConcurrentPolls feeds a GORM Limit(n): n==0 stalls the scheduler
+	// (claims nothing, forever), and n<0 removes the LIMIT clause entirely, defeating the
+	// documented bounded-concurrency guarantee. PollInterval reaching zero would busy-loop
+	// rescheduling. All four must be positive for the same "refuse to boot" reason as above.
+	if cfg.VideoPoll.MaxConcurrentPolls <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.maxConcurrentPolls (%d) must be positive", cfg.VideoPoll.MaxConcurrentPolls)
+	}
+	if cfg.VideoPoll.PollInterval <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.pollInterval (%v) must be positive", cfg.VideoPoll.PollInterval)
+	}
+	if cfg.VideoPoll.ScanInterval <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.scanInterval (%v) must be positive", cfg.VideoPoll.ScanInterval)
+	}
+	if cfg.VideoPoll.CleanupInterval <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.cleanupInterval (%v) must be positive", cfg.VideoPoll.CleanupInterval)
+	}
+
 	// Token-billed STT startup gate. Until #530 lands a per-row billing-unit
 	// discriminator, deploying a known token-billed STT model without
 	// explicit operator opt-in would silently mix seconds (whisper) and
@@ -1772,6 +1914,17 @@ func GetConfig() *Config {
 				ResultTTL:         30 * time.Minute,
 				CleanupInterval:   60 * time.Second,
 				JobTimeout:        15 * time.Minute,
+			},
+			VideoPoll: VideoPollConfig{
+				Enabled:            true,
+				MaxConcurrentPolls: 10,
+				PollInterval:       10 * time.Second,
+				MaxPollDuration:    20 * time.Minute,
+				ScanInterval:       5 * time.Second,
+				LeaseWindow:        90 * time.Second, // 3x PollRequestTimeout, leaving margin for parse/bill/write
+				PollRequestTimeout: 30 * time.Second,
+				RetentionTTL:       30 * time.Minute,
+				CleanupInterval:    5 * time.Minute,
 			},
 			ProviderHttp: ProviderHttpConfig{
 				TotalTimeout:          15 * time.Minute,

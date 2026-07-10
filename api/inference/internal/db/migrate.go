@@ -339,6 +339,42 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&Request{})
 			},
 		},
+		{
+			ID: "create-video-poll-job",
+			Migrate: func(tx *gorm.DB) error {
+				// Tracks a POST /videos call that returned a non-terminal (queued/in_progress)
+				// status, polled to completion by a background scheduler so the fee reflects
+				// the actual delivered duration instead of the requested one. See
+				// model.VideoPollJob and docs/design/video-generation-async-billing.md.
+				type VideoPollJob struct {
+					model.Model
+					ID                 uint64 `gorm:"primaryKey;autoIncrement"`
+					ProviderJobID      string `gorm:"type:varchar(255);not null;index"`
+					RequestHash        string `gorm:"type:varchar(255);not null;uniqueIndex"`
+					PollURL            string `gorm:"type:text;not null"`
+					RequestBody        []byte `gorm:"type:mediumblob"`
+					RequestContentType string `gorm:"type:varchar(255)"`
+					OutputPrice        string `gorm:"type:varchar(255);not null"`
+					ChatKey            string `gorm:"type:varchar(64)"`
+					ResolvedModel      string `gorm:"type:varchar(255)"`
+					MetricModel        string `gorm:"type:varchar(255)"`
+					// IsWhitelisted lets a whitelisted (unbilled) video-generation job be polled
+					// to completion too, without a Request row to reference — see
+					// model.VideoPollJob's IsWhitelisted doc comment.
+					IsWhitelisted bool `gorm:"type:tinyint(1);not null;default:0"`
+					// Status/NextPollAt share a composite index (idx_status_next_poll_at) instead
+					// of one each — db.ClaimDueVideoPollJobs' hot query filters on both and sorts
+					// on NextPollAt, which only a composite index serves efficiently. See
+					// model.VideoPollJob's doc comments on these two fields.
+					Status       string    `gorm:"type:varchar(16);not null;default:'pending';index:idx_status_next_poll_at,priority:1"`
+					Attempts     int       `gorm:"type:int;not null;default:0"`
+					NextPollAt   time.Time `gorm:"type:datetime;not null;index:idx_status_next_poll_at,priority:2"`
+					ExpiresAt    time.Time `gorm:"type:datetime;not null;index"`
+					ErrorMessage string    `gorm:"type:text"`
+				}
+				return tx.AutoMigrate(&VideoPollJob{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

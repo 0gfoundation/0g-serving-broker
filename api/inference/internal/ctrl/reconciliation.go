@@ -59,7 +59,7 @@ func (c *Ctrl) recordWhitelistedUsage(reqModel model.Request, inputCount, output
 		CachedInputTokens:     cachedInputTokens,
 		CacheWriteInputTokens: cacheWriteInputTokens,
 	}
-	if err := c.db.AccumulateHourlyUsage(row); err != nil {
+	if err := c.reconciliationDB.AccumulateHourlyUsage(row); err != nil {
 		c.logger.Warnf("failed to record whitelisted usage for reconciliation (upstream=%s model=%s): %v", upstream, modelName, err)
 	}
 }

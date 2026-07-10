@@ -78,6 +78,26 @@ func TestVideoGenerationFlow(t *testing.T) {
 		cfg.Service.ModelType = "sora-2"
 	})
 
+	// The mock provider's create response is non-terminal (status=queued), so billing is
+	// deferred to the background poll scheduler (see deferVideoBillingToPoll, video.go) — it
+	// must be initialized here for this flow to ever get billed at all, mirroring how
+	// TestAsyncTextToImageFlow initializes InitAsyncProcessing itself rather than relying on
+	// setupTestEnv. Intervals are short so the test doesn't need a long sleep.
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    20 * time.Second,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
 	t.Run("Step1_CreateVideo", func(t *testing.T) {
 		boundary := "----TestBoundary"
 		fields := map[string]string{
@@ -125,16 +145,34 @@ func TestVideoGenerationFlow(t *testing.T) {
 			t.Error("expected Provider header to be set")
 		}
 
-		// Verify DB request record: outputCount = ceil(5 × 1.0) = 5, fee = 5 × 100 = 500
-		requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
-		if err != nil {
-			t.Fatalf("list requests: %v", err)
+		// A request record is created immediately (Init state, unbilled) even though the
+		// create response was non-terminal — deferVideoBillingToPoll registers a
+		// VideoPollJob but doesn't fabricate a fee. Actual billing only lands once the
+		// background poll scheduler observes the provider's job as completed, so poll for it
+		// with a timeout instead of asserting it synchronously (mirrors
+		// TestAsyncTextToImageFlow's Step2_PollUntilCompleted pattern).
+		var latestReq model.Request
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+			if err != nil {
+				t.Fatalf("list requests: %v", err)
+			}
+			userRequests := filterRequestsByUser(requests, env.userAddr)
+			if len(userRequests) == 0 {
+				t.Fatal("expected at least 1 request record in DB for this user")
+			}
+			latestReq = userRequests[len(userRequests)-1]
+			if latestReq.OutputCount != 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for the video poll scheduler to bill the request")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		userRequests := filterRequestsByUser(requests, env.userAddr)
-		if len(userRequests) == 0 {
-			t.Fatal("expected at least 1 request record in DB for this user")
-		}
-		latestReq := userRequests[len(userRequests)-1]
+
+		// outputCount = ceil(5 × 1.0) = 5, fee = 5 × 100 = 500
 		if latestReq.OutputCount != 5 {
 			t.Errorf("expected outputCount=5, got %d", latestReq.OutputCount)
 		}
@@ -223,6 +261,206 @@ func TestVideoGenerationFlow(t *testing.T) {
 }
 
 // ==========================================================================
+// Terminal states: failed / timed_out — the design doc's other billing-critical edges
+// alongside "completed" (docs/design/video-generation-async-billing.md). Both must drive the
+// real HTTP → scheduler → DB round trip to the actual terminal VideoPollJob status (not just
+// "hasn't been billed yet", which is equally true of a job still legitimately polling) and
+// confirm the linked Request row is never billed.
+// ==========================================================================
+
+func TestVideoGenerationFlow_ProviderReportsFailed(t *testing.T) {
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/videos":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-fail-001", "status": "queued", "object": "video", "model": "sora-2",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/video-fail-001":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-fail-001", "status": "failed", "object": "video",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    20 * time.Second,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	boundary := "----FailBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s--",
+		boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	requestHash := userRequests[0].RequestHash
+
+	deadline := time.Now().Add(10 * time.Second)
+	var job model.VideoPollJob
+	for {
+		var jobErr error
+		job, jobErr = env.db.GetVideoPollJobByRequestHash(requestHash)
+		if jobErr == nil && job.Status == model.VideoPollStatusFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the video poll job to resolve to failed (last status=%q, err=%v)", job.Status, jobErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	requests, _, err = env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests = filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected still exactly 1 request record, got %d", len(userRequests))
+	}
+	if userRequests[0].Fee != "0" || userRequests[0].OutputCount != 0 {
+		t.Errorf("expected a failed job to bill nothing, got fee=%s outputCount=%d", userRequests[0].Fee, userRequests[0].OutputCount)
+	}
+}
+
+func TestVideoGenerationFlow_TimesOutWithoutTerminalState(t *testing.T) {
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/videos":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-stuck-001", "status": "queued", "object": "video", "model": "sora-2",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/video-stuck-001":
+			// Never resolves — simulates a provider that hangs indefinitely in
+			// queued/in_progress, exactly the case MaxPollDuration exists to bound.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-stuck-001", "status": "in_progress", "object": "video",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       30 * time.Millisecond,
+		// MaxPollDuration deliberately tiny so the provider's perpetual "in_progress" trips
+		// it quickly; PollInterval/ScanInterval scaled down to match.
+		MaxPollDuration:    100 * time.Millisecond,
+		ScanInterval:       30 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	boundary := "----TimeoutBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s--",
+		boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	requestHash := userRequests[0].RequestHash
+
+	deadline := time.Now().Add(10 * time.Second)
+	var job model.VideoPollJob
+	for {
+		var jobErr error
+		job, jobErr = env.db.GetVideoPollJobByRequestHash(requestHash)
+		if jobErr == nil && job.Status == model.VideoPollStatusTimedOut {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the video poll job to resolve to timed_out (last status=%q, err=%v)", job.Status, jobErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	requests, _, err = env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests = filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected still exactly 1 request record, got %d", len(userRequests))
+	}
+	if userRequests[0].Fee != "0" || userRequests[0].OutputCount != 0 {
+		t.Errorf("expected a timed-out job to bill nothing, got fee=%s outputCount=%d", userRequests[0].Fee, userRequests[0].OutputCount)
+	}
+}
+
+// ==========================================================================
 // Auth enforcement test
 // ==========================================================================
 
@@ -273,8 +511,33 @@ func TestVideoEndpoints_RequireAuth(t *testing.T) {
 // Whitelist user test
 // ==========================================================================
 
+// newMockSyncVideoProvider returns a provider that reports the finished result directly on
+// create (status=completed, no polling needed) — used to exercise the whitelist billing
+// branch's happy path (videoActionBillNow), as opposed to newMockVideoProvider's genuinely
+// async (status=queued) create response.
+func newMockSyncVideoProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/videos" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "video-sync-001",
+				"status":  "completed",
+				"object":  "video",
+				"model":   "sora-2",
+				"seconds": 5,
+				"size":    "720x1280",
+			})
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
 func TestVideoGeneration_WhitelistUser(t *testing.T) {
-	mockProvider := newMockVideoProvider(t)
+	mockProvider := newMockSyncVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	privateKey, _ := crypto.GenerateKey()
@@ -329,9 +592,13 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 
 	// Whitelisted video is unbilled (no request row) but must still land in the reconciliation
 	// rollup with the RAW seconds under the seconds unit and the resolution as rate_class — the
-	// same basis as billable video — so it reconciles per-second too. The mock response carries
-	// seconds=5, size=720x1280. Per-row properties (unit/rate_class) are asserted rather than
-	// accumulating counts, since this package shares one DB across tests.
+	// same basis as billable video — so it reconciles per-second too. This mock reports
+	// status=completed directly on create (videoActionBillNow), so resolveVideoBilling's
+	// result (seconds=5, size=720x1280) is trustworthy — contrast with
+	// TestVideoGeneration_WhitelistUser_AsyncProvider below, where the create response is
+	// non-terminal and the same fields must NOT be recorded. Per-row properties (unit/
+	// rate_class) are asserted rather than accumulating counts, since this package shares one
+	// DB across tests.
 	start := time.Now().UTC().Add(-2 * time.Hour)
 	end := time.Now().UTC().Add(2 * time.Hour)
 	sums, err := env.db.SumHourlyUsageByModel("", start, end)
@@ -352,6 +619,123 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected a hourly_usage_stat row for whitelisted video (model sora-2)")
+	}
+}
+
+// TestVideoGeneration_WhitelistUser_AsyncProvider is a regression test for the poll-scheduler
+// extension to whitelisted traffic: a whitelisted request against a genuinely async provider
+// (create response status=queued, echoing the REQUESTED seconds/size — the exact shape
+// newMockVideoProvider and the real OpenAI Video API use) must NOT have that echoed value
+// recorded as if it were actual output, but it also must not be permanently stuck at 0 either
+// — deferVideoBillingToPoll now registers a VideoPollJob for whitelisted jobs too, and the poll
+// scheduler records the REAL resolved duration into hourly_usage_stat once the provider job
+// completes, exactly like a paying user's Request row gets corrected. Uses size=1792x1024, a
+// rate_class no other test in this file uses, so this test's hourly_usage_stat row can never
+// accumulate with another test's contribution (this package shares one DB across tests).
+func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
+	mockProvider := newMockVideoProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	privateKey, _ := crypto.GenerateKey()
+	userAddr := crypto.PubkeyToAddress(privateKey.PublicKey)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Whitelist = config.WhitelistConfig{
+			Enabled:       true,
+			UserAddresses: []string{userAddr.Hex()},
+		}
+	})
+	env.privateKey = privateKey
+
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    20 * time.Second,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	lockBalance := "0"
+	if err := env.db.CreateUserAccounts([]model.User{{
+		User:                 userAddr.Hex(),
+		LockBalance:          &lockBalance,
+		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+	}}); err != nil {
+		if !strings.Contains(err.Error(), "Duplicate") {
+			t.Fatalf("create whitelist test user: %v", err)
+		}
+	}
+
+	env.ctrl.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
+		User:          userAddr,
+		Balance:       big.NewInt(0),
+		PendingRefund: big.NewInt(0),
+		Generation:    big.NewInt(0),
+		RevokedBitmap: big.NewInt(0),
+		Acknowledged:  false,
+	})
+
+	boundary := "----WLAsyncBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1792x1024\r\n--%s--",
+		boundary, boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for whitelist user, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Immediately after create, nothing has been written yet — deferVideoBillingToPoll
+	// deliberately does not record an "unresolved" row (see model.VideoPollJob.IsWhitelisted's
+	// doc comment on why: correcting it later would mean moving a unit of count between two
+	// hourly_usage_stat rows keyed in part by rate_class). Poll for the scheduler's eventual,
+	// single, correct write instead of asserting synchronously.
+	deadline := time.Now().Add(10 * time.Second)
+	var outputCount int64
+	for {
+		start := time.Now().UTC().Add(-2 * time.Hour)
+		end := time.Now().UTC().Add(2 * time.Hour)
+		sums, err := env.db.SumHourlyUsageByModel("", start, end)
+		if err != nil {
+			t.Fatalf("sum hourly usage: %v", err)
+		}
+		found := false
+		for _, s := range sums {
+			if s.Model == "sora-2" && s.RateClass == "res:1792x1024" {
+				found = true
+				outputCount = s.OutputCount
+				break
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the video poll scheduler to record whitelisted usage")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The mock's completed GET response (newMockVideoProvider) reports no seconds/size of its
+	// own, so resolveVideoBilling falls back to the original request's seconds=5 — the REAL
+	// resolved duration, not a guess made before the provider ever ran.
+	if outputCount != 5 {
+		t.Errorf("whitelist rollup outputCount = %d, want 5 (the real resolved duration, recorded once — not the echoed value recorded early, not stuck at 0)", outputCount)
 	}
 }
 
