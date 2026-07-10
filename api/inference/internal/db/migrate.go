@@ -361,12 +361,16 @@ func (d *DB) Migrate() error {
 					// IsWhitelisted lets a whitelisted (unbilled) video-generation job be polled
 					// to completion too, without a Request row to reference — see
 					// model.VideoPollJob's IsWhitelisted doc comment.
-					IsWhitelisted bool      `gorm:"type:tinyint(1);not null;default:0"`
-					Status        string    `gorm:"type:varchar(16);not null;default:'pending';index"`
-					Attempts      int       `gorm:"type:int;not null;default:0"`
-					NextPollAt    time.Time `gorm:"type:datetime;not null;index"`
-					ExpiresAt     time.Time `gorm:"type:datetime;not null;index"`
-					ErrorMessage  string    `gorm:"type:text"`
+					IsWhitelisted bool `gorm:"type:tinyint(1);not null;default:0"`
+					// Status/NextPollAt share a composite index (idx_status_next_poll_at) instead
+					// of one each — db.ClaimDueVideoPollJobs' hot query filters on both and sorts
+					// on NextPollAt, which only a composite index serves efficiently. See
+					// model.VideoPollJob's doc comments on these two fields.
+					Status       string    `gorm:"type:varchar(16);not null;default:'pending';index:idx_status_next_poll_at,priority:1"`
+					Attempts     int       `gorm:"type:int;not null;default:0"`
+					NextPollAt   time.Time `gorm:"type:datetime;not null;index:idx_status_next_poll_at,priority:2"`
+					ExpiresAt    time.Time `gorm:"type:datetime;not null;index"`
+					ErrorMessage string    `gorm:"type:text"`
 				}
 				return tx.AutoMigrate(&VideoPollJob{})
 			},

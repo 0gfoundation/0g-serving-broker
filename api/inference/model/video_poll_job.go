@@ -80,14 +80,26 @@ type VideoPollJob struct {
 	// that entirely. See docs/design/video-generation-async-billing.md.
 	IsWhitelisted bool `gorm:"type:tinyint(1);not null;default:0" json:"-"`
 
-	Status VideoPollStatus `gorm:"type:varchar(16);not null;default:'pending';index" json:"status"`
+	// Status is the leading column of idx_status_next_poll_at (see NextPollAt) — every hot
+	// query filters on Status, so no separate single-column index is needed on top of that
+	// composite; a standalone index here would just be redundant write overhead.
+	Status VideoPollStatus `gorm:"type:varchar(16);not null;default:'pending';index:idx_status_next_poll_at,priority:1" json:"status"`
 	// Attempts counts poll round-trips so far; informational only (a fixed poll interval is
 	// used, not backoff — see the design doc).
 	Attempts int `gorm:"type:int;not null;default:0" json:"attempts"`
 	// NextPollAt is when a scheduler worker may next claim this row. Claiming sets it to
 	// now()+leaseWindow so a crashed worker's claim becomes reclaimable automatically once
 	// the lease elapses, without a separate crash-recovery pass.
-	NextPollAt time.Time `gorm:"type:datetime;not null;index" json:"nextPollAt"`
+	//
+	// Composite-indexed with Status (idx_status_next_poll_at) rather than each getting its
+	// own single-column index: db.ClaimDueVideoPollJobs' hot query
+	// (WHERE status IN (...) AND next_poll_at <= ? ORDER BY next_poll_at ASC) filters on
+	// both and sorts on this column, which only a composite index serves efficiently — two
+	// single-column indexes force MySQL to either pick one and filter the rest by row lookup,
+	// or index-merge, and can't use either index for the ORDER BY. Every current query
+	// against NextPollAt already includes Status in the same WHERE, so the composite fully
+	// subsumes what the old standalone index provided.
+	NextPollAt time.Time `gorm:"type:datetime;not null;index:idx_status_next_poll_at,priority:2" json:"nextPollAt"`
 	// ExpiresAt is the hard ceiling (created_at + MaxPollDuration). Past this the job is
 	// marked timed_out regardless of provider state.
 	ExpiresAt    time.Time `gorm:"type:datetime;not null;index" json:"expiresAt"`
