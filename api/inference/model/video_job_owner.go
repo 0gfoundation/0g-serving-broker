@@ -19,5 +19,9 @@ type VideoJobOwner struct {
 	Model
 	ID            uint64 `gorm:"primaryKey;autoIncrement" json:"-"`
 	ProviderJobID string `gorm:"type:varchar(255);not null;uniqueIndex" json:"-"`
-	UserAddress   string `gorm:"type:varchar(255);not null;index" json:"-"`
+	// UserAddress is deliberately NOT indexed: every current query (GetVideoJobOwner,
+	// DeleteExpiredVideoJobOwners) filters on ProviderJobID or CreatedAt, never on this column
+	// alone — add an index here only once a real query needs it (e.g. an admin "list jobs by
+	// user" endpoint).
+	UserAddress string `gorm:"type:varchar(255);not null" json:"-"`
 }
