@@ -580,6 +580,21 @@ func TestVideoEndpoints_OwnershipEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate other user key: %v", err)
 	}
+	otherAddr := crypto.PubkeyToAddress(otherKey.PublicKey)
+	// Seed the cache the same way setupTestEnv seeds the main user — ValidateSession's
+	// fallback path (validateTokenRevocation -> contract.GetUserAccount) hits this test
+	// harness's bare, non-chain-wired *providercontract.ProviderContract for any address not
+	// already cached, which panics instead of erroring cleanly. This user's own session must
+	// still be valid so the 403 below is proven to come from AuthorizeVideoJobAccess, not from
+	// a failed/broken session.
+	env.ctrl.SeedContractAccountCache(otherAddr.Hex(), &contract.Account{
+		User:          otherAddr,
+		Balance:       big.NewInt(1e18),
+		PendingRefund: big.NewInt(0),
+		Generation:    big.NewInt(0),
+		RevokedBitmap: big.NewInt(0),
+		Acknowledged:  true,
+	})
 
 	t.Run("creator can check status", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
@@ -712,6 +727,17 @@ func TestVideoEndpoints_OwnershipEnforced_WhitelistedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate other user key: %v", err)
 	}
+	otherAddr := crypto.PubkeyToAddress(otherKey.PublicKey)
+	// Seed the cache the same way as above — otherwise ValidateSession's fallback path panics
+	// on this test harness's non-chain-wired *providercontract.ProviderContract.
+	env.ctrl.SeedContractAccountCache(otherAddr.Hex(), &contract.Account{
+		User:          otherAddr,
+		Balance:       big.NewInt(1e18),
+		PendingRefund: big.NewInt(0),
+		Generation:    big.NewInt(0),
+		RevokedBitmap: big.NewInt(0),
+		Acknowledged:  true,
+	})
 
 	t.Run("whitelisted creator can check status", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
