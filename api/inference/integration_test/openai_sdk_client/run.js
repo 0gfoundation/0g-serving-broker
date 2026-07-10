@@ -46,11 +46,18 @@ async function main() {
 
   if (!baseURL) throw new Error("BASE_URL env var is required");
 
-  // Mirrors the working pattern in api/inference/integration/all-in-one/
-  // test-serving-capability.js: apiKey is left empty on the client (the
-  // broker does not use OpenAI-style API keys) and the real session-token
-  // Authorization header is passed per-request instead.
-  const client = new OpenAI({ baseURL, apiKey: "", maxRetries: 0 });
+  // The broker does not use OpenAI-style API keys — the real session-token
+  // Authorization header is passed per-request instead (authedOpts below),
+  // which overrides whatever the client would otherwise send. apiKey here is
+  // just a placeholder to satisfy the SDK's own credential validation: openai
+  // 6.x throws "Missing credentials" at construction time for apiKey: "" (an
+  // empty string was accepted by 5.x, the version this suite originally
+  // pinned — see the video-generation scenarios' commit for why the bump to
+  // 6.x was needed). Every scenario except `unauthorized` supplies a real
+  // per-request Authorization header that wins over this placeholder;
+  // `unauthorized` hardcodes its own (invalid) header and never falls back
+  // to this value either.
+  const client = new OpenAI({ baseURL, apiKey: "unused-placeholder", maxRetries: 0 });
   const authedOpts = { timeout, headers: authHeader ? { Authorization: authHeader } : {} };
 
   const scenarios = {
@@ -253,6 +260,50 @@ async function main() {
         throw new Error(`unexpected transcription text: ${JSON.stringify(result.text)}`);
       }
       return { text: result.text };
+    },
+
+    async videocreate() {
+      // client.videos.create sends multipart/form-data (like images.edit) — the
+      // SDK's own VideoSeconds/VideoSize enums are used here rather than
+      // arbitrary values, matching what a real caller's typed code would send.
+      const video = await client.videos.create(
+        { model, prompt: "a cat playing piano on stage", seconds: "8", size: "720x1280" },
+        authedOpts,
+      );
+      if (!video.id) {
+        throw new Error(`expected a video id, got ${JSON.stringify(video)}`);
+      }
+      if (video.status !== "completed") {
+        throw new Error(`unexpected status: ${JSON.stringify(video.status)}`);
+      }
+      return { id: video.id, status: video.status, seconds: video.seconds, size: video.size };
+    },
+
+    async videoretrieve() {
+      const created = await client.videos.create(
+        { model, prompt: "a cat playing piano on stage", seconds: "8", size: "720x1280" },
+        authedOpts,
+      );
+      const video = await client.videos.retrieve(created.id, authedOpts);
+      if (video.id !== created.id) {
+        throw new Error(`retrieve returned id ${video.id}, want ${created.id}`);
+      }
+      if (video.status !== "completed") {
+        throw new Error(`unexpected retrieved status: ${JSON.stringify(video.status)}`);
+      }
+      return { id: video.id, status: video.status };
+    },
+
+    async videodownload() {
+      const created = await client.videos.create(
+        { model, prompt: "a cat playing piano on stage", seconds: "8", size: "720x1280" },
+        authedOpts,
+      );
+      // downloadContent resolves to a fetch-like Response (unlike every other
+      // scenario's JSON-decoded result) — the SDK's binary-download contract.
+      const response = await client.videos.downloadContent(created.id, {}, authedOpts);
+      const bodyText = Buffer.from(await response.arrayBuffer()).toString("utf8");
+      return { contentType: response.headers.get("content-type"), bodyText };
     },
   };
 

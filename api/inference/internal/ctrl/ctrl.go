@@ -35,16 +35,56 @@ type asyncDB interface {
 	CompleteAsyncJobWithBilling(jobID string, responseBody []byte, responseHeaders []byte, expiresAt *time.Time, requestHash string, outputFee string, totalFee string, outputCount int64) error
 }
 
+// videoPollDB is the interface for database operations used by the video-generation
+// poll-to-completion scheduler. The real *db.DB satisfies this interface. Tests can inject a
+// mock implementation. See docs/design/video-generation-async-billing.md.
+type videoPollDB interface {
+	CreateVideoPollJob(job model.VideoPollJob) error
+	ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]model.VideoPollJob, error)
+	// claimAttempts fences every write below against a stale worker whose lease already
+	// expired and was reclaimed by someone else: it must be the Attempts value observed on
+	// the specific claim this caller is acting on (i.e. what ClaimDueVideoPollJobs returned),
+	// not a value re-read from the row. See db.RescheduleVideoPollJob's doc comment.
+	RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt time.Time) error
+	// seconds/unit/rateClass mirror UpdateRequestVideoBilling's convention (video.go's sync
+	// path): the Request row stores raw output seconds with the resolution as rate_class, not
+	// the resolution-weighted billable count. See db.CompleteVideoPollJobWithBilling's doc
+	// comment.
+	CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, requestHash, outputFee, fee string, seconds int64, unit, rateClass string) error
+	// CompleteVideoPollJobWhitelisted is CompleteVideoPollJobWithBilling's counterpart for
+	// whitelisted jobs (model.VideoPollJob.IsWhitelisted): it never touches a Request row —
+	// whitelisted traffic creates none — the caller records usage into hourly_usage_stat
+	// itself, only after this call succeeds. See db.CompleteVideoPollJobWhitelisted's doc
+	// comment.
+	CompleteVideoPollJobWhitelisted(id uint64, claimAttempts int) error
+	// FailVideoPollJob/TimeOutVideoPollJob return ErrVideoPollJobAlreadyResolved (not nil) on a
+	// lost fencing race, distinguishing "I actually won this write" from "someone else already
+	// resolved it" — needed so a whitelisted-job caller knows when it is safe to record usage
+	// without double-counting. See db.FailVideoPollJob's doc comment.
+	FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
+	TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error
+	DeleteExpiredVideoPollJobs(retention time.Duration) error
+}
+
+// reconciliationDB is the interface for database operations used by whitelisted-usage
+// reconciliation recording (recordWhitelistedUsage). The real *db.DB satisfies this
+// interface. Tests can inject a mock implementation.
+type reconciliationDB interface {
+	AccumulateHourlyUsage(row model.HourlyUsageStat) error
+}
+
 type Ctrl struct {
-	mu       sync.RWMutex
-	db       *db.DB
-	asyncDB  asyncDB
-	contract *providercontract.ProviderContract
-	svcCache *cache.Cache
-	logger   log.Logger
+	mu               sync.RWMutex
+	db               *db.DB
+	asyncDB          asyncDB
+	videoPollDB      videoPollDB
+	reconciliationDB reconciliationDB
+	contract         *providercontract.ProviderContract
+	svcCache         *cache.Cache
+	logger           log.Logger
 
 	autoSettleBufferTime time.Duration
-	minSettlementFee    *big.Int
+	minSettlementFee     *big.Int
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
@@ -117,6 +157,29 @@ type Ctrl struct {
 	asyncEnabled    bool
 	asyncCancel     context.CancelFunc // cancels worker and cleanup goroutines
 	asyncWg         sync.WaitGroup     // tracks running worker goroutines
+
+	// Video-generation poll-to-completion scheduler (see
+	// docs/design/video-generation-async-billing.md). All scheduling state lives in the
+	// video_poll_job table, not in memory — the scanner goroutines below are stateless
+	// pollers, not per-job workers, so a restart loses nothing.
+	//
+	// videoPollEnabled is an atomic.Bool (not a plain bool) because, unlike asyncEnabled
+	// (guarded by asyncMu), it is read from arbitrary request-handling goroutines
+	// (deferVideoBillingToPoll) concurrently with Init/ShutdownVideoPollScheduler writing it.
+	// videoPollCfg itself is written once at startup before any request traffic is served and
+	// never mutated again, matching the same already-unguarded, accepted pattern as
+	// asyncResultTTL/asyncJobTimeout above.
+	// videoPollCtx is the parent context for in-flight poll HTTP requests (doVideoPollRequest);
+	// it is canceled by videoPollCancel in ShutdownVideoPollScheduler so a slow/hung poll
+	// round-trip is interrupted immediately at shutdown instead of running to its own
+	// PollRequestTimeout. Left nil when the scheduler was never initialized (e.g. some unit
+	// tests construct a *Ctrl directly) — callers must fall back to context.Background() via
+	// videoPollBaseCtx rather than assume it is always set.
+	videoPollEnabled atomic.Bool
+	videoPollCfg     config.VideoPollConfig
+	videoPollCtx     context.Context
+	videoPollCancel  context.CancelFunc
+	videoPollWg      sync.WaitGroup
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager
@@ -209,6 +272,8 @@ func New(
 		minSettlementFee:     minSettlementFee,
 		db:                   db,
 		asyncDB:              db,
+		videoPollDB:          db,
+		reconciliationDB:     db,
 		contract:             contract,
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
@@ -237,16 +302,16 @@ func New(
 			Timeout: cfg.ProviderHttp.TotalTimeout, // Overall request timeout
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
-				MaxIdleConns:          200,                                                                        // Increased total idle connections to handle more concurrent users
-				MaxIdleConnsPerHost:   200,                                                                        // Idle connections per host (critical for single backend)
-				MaxConnsPerHost:       500,                                                                        // Limit max active connections to prevent resource exhaustion
-				IdleConnTimeout:       90 * time.Second,                                                           // How long idle connections stay open
-				TLSHandshakeTimeout:   10 * time.Second,                                                           // TLS handshake timeout
+				MaxIdleConns:          200,                                    // Increased total idle connections to handle more concurrent users
+				MaxIdleConnsPerHost:   200,                                    // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       500,                                    // Limit max active connections to prevent resource exhaustion
+				IdleConnTimeout:       90 * time.Second,                       // How long idle connections stay open
+				TLSHandshakeTimeout:   10 * time.Second,                       // TLS handshake timeout
 				ResponseHeaderTimeout: cfg.ProviderHttp.ResponseHeaderTimeout, // Time to wait for response headers
-				ExpectContinueTimeout: 1 * time.Second,                                                            // Time to wait for 100-continue response
-				DisableKeepAlives:     false,                                                                      // Enable connection reuse (critical)
-				DisableCompression:    false,                                                                      // Allow gzip compression
-				ForceAttemptHTTP2:     false,                                                                      // Use HTTP/1.1 for stability
+				ExpectContinueTimeout: 1 * time.Second,                        // Time to wait for 100-continue response
+				DisableKeepAlives:     false,                                  // Enable connection reuse (critical)
+				DisableCompression:    false,                                  // Allow gzip compression
+				ForceAttemptHTTP2:     false,                                  // Use HTTP/1.1 for stability
 			},
 		},
 		// Initialize whitelist users map

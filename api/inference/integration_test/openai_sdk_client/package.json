@@ -5,6 +5,6 @@
   "description": "Real OpenAI SDK client used by the Go openaicontract test suite to exercise the broker's wire-level OpenAI compatibility.",
   "main": "run.js",
   "dependencies": {
-    "openai": "5.8.2"
+    "openai": "6.45.0"
   }
 }

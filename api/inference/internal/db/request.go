@@ -185,14 +185,34 @@ func (d *DB) CreateRequest(req model.Request) error {
 	return nil
 }
 
+// PruneRequest deletes zero-output requests older than pruneThreshold, EXCLUDING any request
+// still referenced by a non-terminal (pending/polling) video_poll_job.
+//
+// Without this exclusion, this sweep — which runs on its own recurring ticker
+// (event.SettlementProcessor's forceSettleInterval) for the lifetime of the process, entirely
+// independent of the video-poll scanner — can delete a video-generation request's placeholder
+// Request row while a VideoPollJob is still actively trying to resolve it: e.g. the broker was
+// down long enough that the row is already older than pruneThreshold by the time it restarts,
+// and this sweep (called synchronously from main.go, see InitVideoPollScheduler's neighboring
+// call) can run before the scanner's own ticker gets a chance to reclaim and time out the stale
+// job on its own terms. Once such a row is deleted, CompleteVideoPollJobWithBilling's Request
+// update later has nothing to update and the fee is unrecoverable — see its
+// ErrVideoPollJobRequestMissing doc comment, which turns THAT failure mode loud but cannot undo
+// it. Excluding non-terminal jobs' rows here removes the race instead of just detecting it.
 func (d *DB) PruneRequest(pruneThreshold time.Duration) error {
-	// Delete requests where output_count == 0 and creation time is older than threshold
-	if pruneThreshold > 0 {
-		cutoffTime := time.Now().Add(-pruneThreshold)
-		return d.db.Where("output_count = 0 AND created_at <= ?", cutoffTime).
-			Delete(&model.Request{}).Error
+	if pruneThreshold <= 0 {
+		return nil
 	}
-	return nil
+	cutoffTime := time.Now().Add(-pruneThreshold)
+	activeVideoPollRequests := d.db.Model(&model.VideoPollJob{}).
+		Select("request_hash").
+		Where("status IN ?", []model.VideoPollStatus{
+			model.VideoPollStatusPending,
+			model.VideoPollStatusPolling,
+		})
+	return d.db.Where("output_count = 0 AND created_at <= ?", cutoffTime).
+		Where("request_hash NOT IN (?)", activeVideoPollRequests).
+		Delete(&model.Request{}).Error
 }
 
 // CalculateUnsettledFee calculates unsettled fee using SUM aggregation for optimal performance

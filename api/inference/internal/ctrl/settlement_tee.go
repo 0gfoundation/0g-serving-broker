@@ -12,6 +12,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/util"
+	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	providercontract "github.com/0glabs/0g-serving-broker/inference/internal/contract"
@@ -24,12 +25,12 @@ import (
 type SettlementStatus uint8
 
 const (
-	SettlementSuccess        SettlementStatus = 0 // Full settlement success
-	SettlementPartial        SettlementStatus = 1 // Partial settlement (insufficient balance)
+	SettlementSuccess          SettlementStatus = 0 // Full settlement success
+	SettlementPartial          SettlementStatus = 1 // Partial settlement (insufficient balance)
 	SettlementProviderMismatch SettlementStatus = 2 // Provider mismatch
-	SettlementNoSigner       SettlementStatus = 3 // TEE signer not acknowledged
-	SettlementInvalidNonce   SettlementStatus = 4 // Invalid or duplicate nonce
-	SettlementInvalidSig     SettlementStatus = 5 // Signature verification failed
+	SettlementNoSigner         SettlementStatus = 3 // TEE signer not acknowledged
+	SettlementInvalidNonce     SettlementStatus = 4 // Invalid or duplicate nonce
+	SettlementInvalidSig       SettlementStatus = 5 // Signature verification failed
 )
 
 // String returns the string representation of SettlementStatus
@@ -164,9 +165,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		c.logger.Warnf("Failed to clear expired skipUntil for users: %v", err)
 	}
 
-	// Prune old requests with zero output
-	pruneThreshold := 1 * time.Hour // Prune requests older than 1 hours with zero output
-	if err := c.db.PruneRequest(pruneThreshold); err != nil {
+	// Prune old requests with zero output. Safe for a still in-flight video-poll job's
+	// placeholder Request row regardless of how large VideoPollConfig.MaxPollDuration is set:
+	// db.PruneRequest excludes any row referenced by a pending/polling VideoPollJob
+	// unconditionally, not by comparing ages against this threshold — see its doc comment.
+	if err := c.db.PruneRequest(config.ZeroOutputRequestPruneThreshold); err != nil {
 		c.logger.Warnf("Failed to prune old zero-output requests: %v", err)
 	}
 
@@ -174,25 +177,25 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 	const maxSettlementRounds = 1
 	for round := 1; round <= maxSettlementRounds; round++ {
 		c.logger.Infof("Settlement round %d/%d", round, maxSettlementRounds)
-		
+
 		// Get unprocessed requests (excluding those with active skipUntil)
 		reqs, _, err := c.db.ListRequest(model.RequestListOptions{
-			Processed:             false,
-			Sort:                  model.PtrOf("created_at ASC"),
-			ExcludeZeroOutput:     true,
-			IncludeSkipped:        false,
+			Processed:         false,
+			Sort:              model.PtrOf("created_at ASC"),
+			ExcludeZeroOutput: true,
+			IncludeSkipped:    false,
 		})
 		if err != nil {
 			return errors.Wrap(err, "list request from db")
 		}
-		
+
 		if len(reqs) == 0 {
 			c.logger.Infof("No more requests to settle after %d rounds", round)
 			return nil
 		}
 
 		c.logger.Infof("Processing settlement for %d requests", len(reqs))
-		
+
 		// Process settlement batch
 		batch, err := c.createSettlementBatch(reqs)
 		if err != nil {
@@ -248,11 +251,11 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, error) {
 	// Group requests by user
 	userRequestsMap := c.groupRequestsByUser(reqs)
-	
+
 	// Create initial settlements for all users
 	var settlements []contract.TEESettlementData
 	userSettlementMap := make(map[common.Address]*UserRequests)
-	
+
 	for userAddr, userReqs := range userRequestsMap {
 		settlement, err := c.createUserSettlement(userAddr, userReqs)
 		if err != nil {
@@ -271,11 +274,11 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 
 	// Process results and create outcomes
 	outcomes := make([]*SettlementOutcome, 0, len(settlements))
-	
+
 	for i, settlement := range settlements {
 		userReqs := userSettlementMap[settlement.User]
 		result := previewResults[i]
-		
+
 		outcome := &SettlementOutcome{
 			User:            settlement.User,
 			OriginalRequest: settlement,
@@ -287,29 +290,29 @@ func (c *Ctrl) createSettlementBatch(reqs []model.Request) (*SettlementBatch, er
 			// Full settlement - all requests will be settled
 			outcome.AdjustedRequest = &settlement
 			outcome.SettledRequests = userReqs.Requests
-			
+
 		case SettlementPartial:
 			// Partial settlement - adjust and split requests
 			adjustedSettlement, settledRequests := c.adjustForPartialSettlement(settlement, userReqs, result.UnsettledAmount)
-			
+
 			// Set user-level skip_until since user will have insufficient balance after this settlement
 			userSkipUntil := time.Now().Add(constant.SkipUntilDuration)
 			if err := c.db.UpdateUserSkipUntil(settlement.User.Hex(), &userSkipUntil); err != nil {
 				c.logger.Infof("Error setting skip_until for user %s: %v", settlement.User.Hex(), err)
 			} else {
-				c.logger.Infof("User %s will have insufficient balance after settlement, skipping until %v", 
+				c.logger.Infof("User %s will have insufficient balance after settlement, skipping until %v",
 					settlement.User.Hex(), userSkipUntil)
 			}
-			
+
 			// Set outcome based on settlement result
 			outcome.AdjustedRequest = adjustedSettlement
 			outcome.SettledRequests = settledRequests
 			outcome.UnsettledAmount = result.UnsettledAmount
-			
+
 			// Mark unsettled requests with skipUntil for forceSettlement
 			unsettledRequests := c.getUnsettledRequests(userReqs.Requests, settledRequests)
 			c.markRequestsWithSkipUntil(c.getRequestHashes(unsettledRequests), constant.SkipUntilDuration)
-			
+
 		default:
 			// Failed settlement - no adjustment needed
 			outcome.UnsettledAmount = settlement.TotalFee
@@ -345,20 +348,20 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 	}
 
 	c.logger.Infof("Batch previewing %d settlements", len(settlements))
-	
+
 	// Initialize results for all settlements
 	results := make([]*PreviewResult, len(settlements))
-	
+
 	// Process in batches to avoid gas limit issues (same as executeBatches)
 	for i := 0; i < len(settlements); i += constant.TEESettlementBatchSize {
 		end := i + constant.TEESettlementBatchSize
 		if end > len(settlements) {
 			end = len(settlements)
 		}
-		
+
 		batch := settlements[i:end]
 		c.logger.Infof("Previewing settlement batch %d-%d (size: %d)", i+1, end, len(batch))
-		
+
 		result, err := c.contract.Contract.InferenceServing.PreviewSettlementResults(callOpts, batch)
 		if err != nil {
 			c.logger.Infof("Batch preview settlements failed for batch %d-%d: %v", i+1, end, err)
@@ -392,7 +395,7 @@ func (c *Ctrl) batchPreviewSettlements(settlements []contract.TEESettlementData)
 		for j := 0; j < len(batch); j++ {
 			settlementIdx := i + j
 			settlement := settlements[settlementIdx]
-			
+
 			if status, isFailed := failureMap[settlement.User]; isFailed {
 				results[settlementIdx] = &PreviewResult{
 					Status:          status,
@@ -675,7 +678,7 @@ func (c *Ctrl) processOutcomes(outcomes []*SettlementOutcome) {
 
 func (c *Ctrl) groupRequestsByUser(reqs []model.Request) map[string]*UserRequests {
 	userRequestsMap := make(map[string]*UserRequests)
-	
+
 	for _, req := range reqs {
 		fee, err := util.ConvertToBigInt(req.Fee)
 		if err != nil {
@@ -694,7 +697,7 @@ func (c *Ctrl) groupRequestsByUser(reqs []model.Request) map[string]*UserRequest
 			}
 		}
 	}
-	
+
 	return userRequestsMap
 }
 
@@ -731,13 +734,13 @@ func (c *Ctrl) getRequestsWithinBudget(requests []*model.Request, budget *big.In
 	var result []*model.Request
 	remaining := new(big.Int).Set(budget)
 	actualTotalFee := big.NewInt(0)
-	
+
 	for _, req := range requests {
 		fee, err := util.ConvertToBigInt(req.Fee)
 		if err != nil {
 			continue
 		}
-		
+
 		if remaining.Cmp(fee) >= 0 {
 			result = append(result, req)
 			remaining.Sub(remaining, fee)
@@ -746,7 +749,7 @@ func (c *Ctrl) getRequestsWithinBudget(requests []*model.Request, budget *big.In
 			break
 		}
 	}
-	
+
 	return result, actualTotalFee
 }
 
@@ -755,14 +758,14 @@ func (c *Ctrl) getUnsettledRequests(allRequests, settledRequests []*model.Reques
 	for _, req := range settledRequests {
 		settledMap[req.RequestHash] = true
 	}
-	
+
 	var unsettled []*model.Request
 	for _, req := range allRequests {
 		if !settledMap[req.RequestHash] {
 			unsettled = append(unsettled, req)
 		}
 	}
-	
+
 	return unsettled
 }
 
@@ -852,9 +855,9 @@ func (c *Ctrl) executeBatches(ctx context.Context, settlements []contract.TEESet
 func (c *Ctrl) getUserRequestsForAddress(userAddress string) (*UserRequests, error) {
 	// Query database for all unprocessed requests for this user
 	reqs, _, err := c.db.ListRequest(model.RequestListOptions{
-		Processed:         false,
-		IncludeSkipped:    true, // Include skipped requests for permanent failures
-		Sort:              model.PtrOf("created_at ASC"),
+		Processed:      false,
+		IncludeSkipped: true, // Include skipped requests for permanent failures
+		Sort:           model.PtrOf("created_at ASC"),
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "list requests for user")
@@ -863,12 +866,12 @@ func (c *Ctrl) getUserRequestsForAddress(userAddress string) (*UserRequests, err
 	// Filter for this specific user and calculate total fee
 	var userRequests []*model.Request
 	totalFee := big.NewInt(0)
-	
+
 	for _, req := range reqs {
 		if req.UserAddress == userAddress {
 			reqCopy := req
 			userRequests = append(userRequests, &reqCopy)
-			
+
 			fee, err := util.ConvertToBigInt(req.Fee)
 			if err != nil {
 				c.logger.Infof("Error parsing fee for request %s: %v", req.RequestHash, err)
