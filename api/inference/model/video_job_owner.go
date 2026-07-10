@@ -18,6 +18,14 @@ package model
 type VideoJobOwner struct {
 	Model
 	ID            uint64 `gorm:"primaryKey;autoIncrement" json:"-"`
+	// ProviderJobID's global uniqueIndex assumes different upstreams' job id namespaces don't
+	// collide with each other. That assumption is NOT enforced anywhere — it holds today only
+	// because there is exactly one upstream. A colliding id from a second upstream would have
+	// its CreateVideoJobOwner insert rejected (see isDuplicateKeyError's log line in video.go),
+	// silently denying that job's real creator access to their own job. Solving this for real
+	// needs an API-boundary decision (e.g. a client-facing job id namespaced by upstream), not a
+	// schema change here — see the Upstream field below for why it can't just become part of a
+	// composite key.
 	ProviderJobID string `gorm:"type:varchar(255);not null;uniqueIndex" json:"-"`
 	// UserAddress is deliberately NOT indexed: every current query (GetVideoJobOwner,
 	// DeleteExpiredVideoJobOwners) filters on ProviderJobID or CreatedAt, never on this column
