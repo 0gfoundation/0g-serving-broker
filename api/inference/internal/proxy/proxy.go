@@ -489,30 +489,33 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			}
 
 			// A valid session alone only proves "some broker user," not "the user who
-			// created THIS job" — video status/content passthrough (today the only
-			// AuthRequiredPrefixes user) must additionally verify the caller is the job's own
-			// creator before forwarding to the provider. See issue #591.
+			// created THIS job" — video status/content passthrough must additionally verify
+			// the caller is the job's own creator before forwarding to the provider. See
+			// issue #591.
 			//
-			// Deliberately NOT gated on svcType: isAuthRequired above is computed purely from
-			// AuthRequiredPrefixes' path match, independent of svcType, so a broker configured
-			// for a different service (e.g. chatbot) would still reach this branch for a
-			// request whose path happens to match "/videos/" — gating the check itself on
-			// svcType would skip it entirely for such a broker and forward unchecked. Since
-			// CreateVideoJobOwner is only ever called from handleVideoGenerationResponse
-			// (reached only when svcType IS video-generation), a non-video broker has no
-			// VideoJobOwner rows to begin with, so running this unconditionally just means
-			// AuthorizeVideoJobAccess correctly fail-closed-denies such a request instead of
-			// silently bypassing it.
-			jobID := extractVideoJobID(targetPath)
-			if jobID == "" {
-				ctx.Set("ignoreError", true)
-				p.handleBrokerError(ctx, errors.NewBadRequest("missing video job id"), "extract video job id")
-				return
-			}
-			if err := p.ctrl.AuthorizeVideoJobAccess(jobID, userAddress); err != nil {
-				ctx.Set("ignoreError", true)
-				p.handleBrokerError(ctx, err, "authorize video job access")
-				return
+			// Gated on the video path prefix, NOT on svcType or "falls into isAuthRequired":
+			// AuthRequiredPrefixes is a generic "auth-required, no billing" list (see its own
+			// doc comment) that today happens to contain only "/videos/", so checking svcType
+			// wouldn't help — a broker configured for a different service (e.g. chatbot) can
+			// still reach this branch for a request whose path matches "/videos/", and gating
+			// on svcType would skip the check entirely for such a broker and forward
+			// unchecked. But checking the video prefix explicitly (rather than assuming every
+			// AuthRequiredPrefixes entry is a video path) means a future non-video prefix
+			// added there — a fine-tuning task status endpoint, say — just gets session
+			// validation and passes through here, instead of being misrouted into
+			// extractVideoJobID and rejected with a nonsensical "missing video job id".
+			if strings.HasPrefix(strings.ToLower(targetPath), videoStatusPathPrefix) {
+				jobID := extractVideoJobID(targetPath)
+				if jobID == "" {
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, errors.NewBadRequest("missing video job id"), "extract video job id")
+					return
+				}
+				if err := p.ctrl.AuthorizeVideoJobAccess(jobID, userAddress); err != nil {
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, err, "authorize video job access")
+					return
+				}
 			}
 
 			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",
@@ -862,6 +865,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 }
 
+// videoStatusPathPrefix identifies video status/content requests within AuthRequiredPrefixes.
+// AuthRequiredPrefixes itself is generic (any path needing session validation without billing,
+// per its own doc comment) — the video-ownership check in proxyHTTPRequest must gate on this
+// prefix explicitly rather than assume every AuthRequiredPrefixes entry is a video path, so a
+// future non-video prefix added there (e.g. a fine-tuning task status endpoint) isn't
+// misrouted into extractVideoJobID and rejected with a nonsensical "missing video job id".
+const videoStatusPathPrefix = "/videos/"
+
 // extractVideoJobID pulls the {id} segment out of a video status/content path
 // (/videos/{id} or /videos/{id}/content), for the ownership check gating those endpoints —
 // see issue #591. Returns "" if targetPath doesn't actually have a "/videos/" prefix or the id
@@ -870,11 +881,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 // always called after) but preserves the id segment's original casing, since provider job ids
 // may be case-sensitive.
 func extractVideoJobID(targetPath string) string {
-	const prefix = "/videos/"
-	if len(targetPath) <= len(prefix) || !strings.EqualFold(targetPath[:len(prefix)], prefix) {
+	if len(targetPath) <= len(videoStatusPathPrefix) || !strings.EqualFold(targetPath[:len(videoStatusPathPrefix)], videoStatusPathPrefix) {
 		return ""
 	}
-	rest := targetPath[len(prefix):]
+	rest := targetPath[len(videoStatusPathPrefix):]
 	if idx := strings.Index(rest, "/"); idx != -1 {
 		rest = rest[:idx]
 	}
