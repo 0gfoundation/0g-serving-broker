@@ -261,6 +261,206 @@ func TestVideoGenerationFlow(t *testing.T) {
 }
 
 // ==========================================================================
+// Terminal states: failed / timed_out — the design doc's other billing-critical edges
+// alongside "completed" (docs/design/video-generation-async-billing.md). Both must drive the
+// real HTTP → scheduler → DB round trip to the actual terminal VideoPollJob status (not just
+// "hasn't been billed yet", which is equally true of a job still legitimately polling) and
+// confirm the linked Request row is never billed.
+// ==========================================================================
+
+func TestVideoGenerationFlow_ProviderReportsFailed(t *testing.T) {
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/videos":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-fail-001", "status": "queued", "object": "video", "model": "sora-2",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/video-fail-001":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-fail-001", "status": "failed", "object": "video",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    20 * time.Second,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	boundary := "----FailBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s--",
+		boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	requestHash := userRequests[0].RequestHash
+
+	deadline := time.Now().Add(10 * time.Second)
+	var job model.VideoPollJob
+	for {
+		var jobErr error
+		job, jobErr = env.db.GetVideoPollJobByRequestHash(requestHash)
+		if jobErr == nil && job.Status == model.VideoPollStatusFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the video poll job to resolve to failed (last status=%q, err=%v)", job.Status, jobErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	requests, _, err = env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests = filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected still exactly 1 request record, got %d", len(userRequests))
+	}
+	if userRequests[0].Fee != "0" || userRequests[0].OutputCount != 0 {
+		t.Errorf("expected a failed job to bill nothing, got fee=%s outputCount=%d", userRequests[0].Fee, userRequests[0].OutputCount)
+	}
+}
+
+func TestVideoGenerationFlow_TimesOutWithoutTerminalState(t *testing.T) {
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/videos":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-stuck-001", "status": "queued", "object": "video", "model": "sora-2",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/video-stuck-001":
+			// Never resolves — simulates a provider that hangs indefinitely in
+			// queued/in_progress, exactly the case MaxPollDuration exists to bound.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "video-stuck-001", "status": "in_progress", "object": "video",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 10,
+		PollInterval:       30 * time.Millisecond,
+		// MaxPollDuration deliberately tiny so the provider's perpetual "in_progress" trips
+		// it quickly; PollInterval/ScanInterval scaled down to match.
+		MaxPollDuration:    100 * time.Millisecond,
+		ScanInterval:       30 * time.Millisecond,
+		LeaseWindow:        10 * time.Second,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Minute,
+		CleanupInterval:    time.Minute,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(func() { env.ctrl.ShutdownVideoPollScheduler() })
+
+	boundary := "----TimeoutBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s--",
+		boundary, boundary, boundary)
+
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	requests, _, err := env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests := filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected 1 request record, got %d", len(userRequests))
+	}
+	requestHash := userRequests[0].RequestHash
+
+	deadline := time.Now().Add(10 * time.Second)
+	var job model.VideoPollJob
+	for {
+		var jobErr error
+		job, jobErr = env.db.GetVideoPollJobByRequestHash(requestHash)
+		if jobErr == nil && job.Status == model.VideoPollStatusTimedOut {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the video poll job to resolve to timed_out (last status=%q, err=%v)", job.Status, jobErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	requests, _, err = env.ctrl.ListRequest(model.RequestListOptions{})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	userRequests = filterRequestsByUser(requests, env.userAddr)
+	if len(userRequests) != 1 {
+		t.Fatalf("expected still exactly 1 request record, got %d", len(userRequests))
+	}
+	if userRequests[0].Fee != "0" || userRequests[0].OutputCount != 0 {
+		t.Errorf("expected a timed-out job to bill nothing, got fee=%s outputCount=%d", userRequests[0].Fee, userRequests[0].OutputCount)
+	}
+}
+
+// ==========================================================================
 // Auth enforcement test
 // ==========================================================================
 

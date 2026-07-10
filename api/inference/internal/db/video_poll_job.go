@@ -304,3 +304,12 @@ func (d *DB) GetVideoPollJob(id uint64) (model.VideoPollJob, error) {
 	err := d.db.Where("id = ?", id).First(&job).Error
 	return job, err
 }
+
+// GetVideoPollJobByRequestHash retrieves a job by its linked Request's hash — the one
+// identifier an outside-the-package integration test can know without reaching into the
+// broker's own auto-increment ID. Used by tests and diagnostics.
+func (d *DB) GetVideoPollJobByRequestHash(requestHash string) (model.VideoPollJob, error) {
+	var job model.VideoPollJob
+	err := d.db.Where("request_hash = ?", requestHash).First(&job).Error
+	return job, err
+}
