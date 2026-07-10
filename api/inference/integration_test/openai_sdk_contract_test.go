@@ -59,6 +59,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,6 +67,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -413,9 +415,20 @@ func newContractMockSpeechToTextUpstream(t *testing.T) *httptest.Server {
 // SDK wire compatibility (does the real SDK parse our JSON into a Video
 // object, does downloadContent's fetch-Response contract work), which the
 // synchronous case demonstrates just as well with far less setup.
+// contractVideoJobIDSeq gives each newContractMockVideoUpstream call a distinct job id.
+// Required since model.VideoJobOwner.ProviderJobID is uniquely indexed (issue #591) and
+// TestOpenAISDK_VideoCreate/Retrieve/DownloadContent each independently create a video via the
+// real SDK against the same shared test DB (this file's own TestMain-provisioned container,
+// separate from video_generation_test.go's under the `integration` build tag — hence its own
+// counter here rather than reusing that file's mockVideoJobIDSeq) — a shared hardcoded id
+// would collide on that unique index (a duplicate insert is silently logged and dropped, so
+// whichever of these three tests runs after the first would have its own creator incorrectly
+// fail the ownership check on its own job).
+var contractVideoJobIDSeq atomic.Int64
+
 func newContractMockVideoUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
-	const videoID = "video-contract-001"
+	videoID := fmt.Sprintf("video-contract-%03d", contractVideoJobIDSeq.Add(1))
 	completedVideo := func() map[string]interface{} {
 		return map[string]interface{}{
 			"id":         videoID,

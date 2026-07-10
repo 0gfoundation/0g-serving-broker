@@ -91,6 +91,62 @@ func TestAuthRequiredPrefixes_MatchesVideoSubpaths(t *testing.T) {
 	}
 }
 
+// TestVideoStatusPathPrefixGate is a regression test for the AuthRequiredPrefixes/video-check
+// coupling: AuthRequiredPrefixes is a generic "auth-required, no billing" list (its own doc
+// comment says so), so the video ownership check inside proxyHTTPRequest's isAuthRequired
+// branch must gate on videoStatusPathPrefix explicitly, not on "matched AuthRequiredPrefixes."
+// A hypothetical future non-video entry (e.g. a fine-tuning task status endpoint) must fail
+// this check so it isn't misrouted into extractVideoJobID and rejected with a nonsensical
+// "missing video job id".
+func TestVideoStatusPathPrefixGate(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/videos/video-123", true},
+		{"/videos/video-123/content", true},
+		{"/videos/", true},
+		{"/Videos/video-123", true},         // case-insensitive, matching AuthRequiredPrefixes' own match
+		{"/finetune/tasks/task-123", false}, // hypothetical future AuthRequiredPrefixes entry
+		{"/attestation/report", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := strings.HasPrefix(strings.ToLower(tt.path), videoStatusPathPrefix)
+			if got != tt.want {
+				t.Errorf("videoStatusPathPrefix match(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// ==========================================================================
+// extractVideoJobID (issue #591's ownership check)
+// ==========================================================================
+
+func TestExtractVideoJobID(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/videos/video-123", "video-123"},
+		{"/videos/video-123/content", "video-123"},
+		{"/Videos/video-123", "video-123"}, // AuthRequiredPrefixes matches case-insensitively
+		{"/videos/", ""},                   // no id segment
+		{"/videos", ""},                    // no trailing slash at all
+		{"/images/video-123", ""},          // wrong prefix entirely
+		{"/videos/weird-id-with/multiple/slashes", "weird-id-with"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := extractVideoJobID(tt.path); got != tt.want {
+				t.Errorf("extractVideoJobID(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 // ==========================================================================
 // ServiceType constant
 // ==========================================================================

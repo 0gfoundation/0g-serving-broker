@@ -375,6 +375,23 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&VideoPollJob{})
 			},
 		},
+		{
+			ID: "create-video-job-owner",
+			Migrate: func(tx *gorm.DB) error {
+				// Maps a provider-assigned video-generation job id to its creator address, so
+				// GET /videos/{id} and GET /videos/{id}/content can verify the caller created
+				// the job before forwarding to the provider. See model.VideoJobOwner and
+				// issue #591.
+				type VideoJobOwner struct {
+					model.Model
+					ID            uint64 `gorm:"primaryKey;autoIncrement"`
+					ProviderJobID string `gorm:"type:varchar(255);not null;uniqueIndex"`
+					UserAddress   string `gorm:"type:varchar(255);not null"`
+					Upstream      string `gorm:"type:varchar(64);not null;default:''"`
+				}
+				return tx.AutoMigrate(&VideoJobOwner{})
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

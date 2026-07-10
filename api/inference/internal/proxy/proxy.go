@@ -481,11 +481,41 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 		if isAuthRequired {
 			// Validate session but skip billing
-			_, err := p.ctrl.ValidateSession(ctx)
+			userAddress, err := p.ctrl.ValidateSession(ctx)
 			if err != nil {
 				ctx.Set("ignoreError", true)
 				p.handleBrokerError(ctx, err, "validate session")
 				return
+			}
+
+			// A valid session alone only proves "some broker user," not "the user who
+			// created THIS job" — video status/content passthrough must additionally verify
+			// the caller is the job's own creator before forwarding to the provider. See
+			// issue #591.
+			//
+			// Gated on the video path prefix, NOT on svcType or "falls into isAuthRequired":
+			// AuthRequiredPrefixes is a generic "auth-required, no billing" list (see its own
+			// doc comment) that today happens to contain only "/videos/", so checking svcType
+			// wouldn't help — a broker configured for a different service (e.g. chatbot) can
+			// still reach this branch for a request whose path matches "/videos/", and gating
+			// on svcType would skip the check entirely for such a broker and forward
+			// unchecked. But checking the video prefix explicitly (rather than assuming every
+			// AuthRequiredPrefixes entry is a video path) means a future non-video prefix
+			// added there — a fine-tuning task status endpoint, say — just gets session
+			// validation and passes through here, instead of being misrouted into
+			// extractVideoJobID and rejected with a nonsensical "missing video job id".
+			if strings.HasPrefix(strings.ToLower(targetPath), videoStatusPathPrefix) {
+				jobID := extractVideoJobID(targetPath)
+				if jobID == "" {
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, errors.NewBadRequest("missing video job id"), "extract video job id")
+					return
+				}
+				if err := p.ctrl.AuthorizeVideoJobAccess(jobID, userAddress); err != nil {
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, err, "authorize video job access")
+					return
+				}
 			}
 
 			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",
@@ -833,6 +863,32 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, prices.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
 	}
+}
+
+// videoStatusPathPrefix identifies video status/content requests within AuthRequiredPrefixes.
+// AuthRequiredPrefixes itself is generic (any path needing session validation without billing,
+// per its own doc comment) — the video-ownership check in proxyHTTPRequest must gate on this
+// prefix explicitly rather than assume every AuthRequiredPrefixes entry is a video path, so a
+// future non-video prefix added there (e.g. a fine-tuning task status endpoint) isn't
+// misrouted into extractVideoJobID and rejected with a nonsensical "missing video job id".
+const videoStatusPathPrefix = "/videos/"
+
+// extractVideoJobID pulls the {id} segment out of a video status/content path
+// (/videos/{id} or /videos/{id}/content), for the ownership check gating those endpoints —
+// see issue #591. Returns "" if targetPath doesn't actually have a "/videos/" prefix or the id
+// segment is empty; the caller treats either as a request to reject, not to let through
+// unchecked. Case-insensitive on the prefix (matching the AuthRequiredPrefixes match this is
+// always called after) but preserves the id segment's original casing, since provider job ids
+// may be case-sensitive.
+func extractVideoJobID(targetPath string) string {
+	if len(targetPath) <= len(videoStatusPathPrefix) || !strings.EqualFold(targetPath[:len(videoStatusPathPrefix)], videoStatusPathPrefix) {
+		return ""
+	}
+	rest := targetPath[len(videoStatusPathPrefix):]
+	if idx := strings.Index(rest, "/"); idx != -1 {
+		rest = rest[:idx]
+	}
+	return rest
 }
 
 // handleImageServeRoute serves broker-stored image bytes at

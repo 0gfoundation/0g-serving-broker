@@ -332,6 +332,39 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		body = c.sanitizeForwarderResponseBody(ctx, body, resp.Header.Get("Content-Encoding"))
 	}
 
+	var respFields videoResponseFields
+	_ = json.Unmarshal(body, &respFields)
+	billingAction := classifyVideoStatus(respFields.Status)
+
+	// Record who created this job BEFORE writing the response to the client (below) and
+	// before branching on billing outcome, so the ownership check gating GET /videos/{id} and
+	// .../content (proxy.go's AuthRequiredPrefixes path — see issue #591) is guaranteed to
+	// already exist by the time the client could possibly have this id in hand and try to use
+	// it — a client that polls immediately after receiving the create response must never lose
+	// a race against this write. Covers every combination this function can produce:
+	// sync-completed or deferred-to-poll, whitelisted or paying, even a create response that
+	// itself reports failed. Best-effort: a failure here has no response error to propagate to
+	// (the client hasn't received anything yet, but this function still returns the response
+	// normally below) — log loudly instead, since under AuthorizeVideoJobAccess's fail-closed
+	// default a write failure here silently locks the job's own creator out of checking its
+	// status later, not just an attacker.
+	if respFields.ID != "" {
+		if err := c.videoJobOwnerDB.CreateVideoJobOwner(respFields.ID, reqModel.UserAddress, reqModel.Upstream); err != nil {
+			if isDuplicateKeyError(err) {
+				// Distinct from a transient DB error: ProviderJobID's uniqueIndex rejected
+				// this insert, meaning some OTHER address is already recorded as this job
+				// id's owner. If the provider ever reissues an id, the real, current creator
+				// is now silently and permanently locked out of their own job — this needs an
+				// operator's attention, not just a retry, so it gets its own log line instead
+				// of reading like an ordinary connection blip.
+				c.logger.Errorf("video generation: job owner for %s (request %s) NOT recorded — provider job id already has a DIFFERENT recorded owner; this job's real creator will be denied access to it: %v",
+					respFields.ID, reqModel.RequestHash, err)
+			} else {
+				c.logger.Errorf("video generation: failed to record job owner for %s (request %s): %v", respFields.ID, reqModel.RequestHash, err)
+			}
+		}
+	}
+
 	if _, err := ctx.Writer.Write(body); err != nil {
 		c.handleBrokerError(ctx, err, "write video generation response")
 		return err
@@ -345,10 +378,6 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	}
 
 	contentType := ctx.Request.Header.Get("Content-Type")
-
-	var respFields videoResponseFields
-	_ = json.Unmarshal(body, &respFields)
-	billingAction := classifyVideoStatus(respFields.Status)
 
 	if reqModel.IsWhitelisted {
 		switch billingAction {
