@@ -481,11 +481,29 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 		if isAuthRequired {
 			// Validate session but skip billing
-			_, err := p.ctrl.ValidateSession(ctx)
+			userAddress, err := p.ctrl.ValidateSession(ctx)
 			if err != nil {
 				ctx.Set("ignoreError", true)
 				p.handleBrokerError(ctx, err, "validate session")
 				return
+			}
+
+			// A valid session alone only proves "some broker user," not "the user who
+			// created THIS job" — video status/content passthrough (today the only
+			// AuthRequiredPrefixes user) must additionally verify the caller is the job's own
+			// creator before forwarding to the provider. See issue #591.
+			if svcType == constant.ServiceTypeVideoGeneration {
+				jobID := extractVideoJobID(targetPath)
+				if jobID == "" {
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, errors.NewBadRequest("missing video job id"), "extract video job id")
+					return
+				}
+				if err := p.ctrl.AuthorizeVideoJobAccess(jobID, userAddress); err != nil {
+					ctx.Set("ignoreError", true)
+					p.handleBrokerError(ctx, err, "authorize video job access")
+					return
+				}
 			}
 
 			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",
@@ -833,6 +851,25 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	if err := p.ctrl.ProcessHTTPRequest(ctx, svcType, httpReq, req, prices.OutputPrice, true); err != nil {
 		p.logger.Errorf("process http request failed: %v", err)
 	}
+}
+
+// extractVideoJobID pulls the {id} segment out of a video status/content path
+// (/videos/{id} or /videos/{id}/content), for the ownership check gating those endpoints —
+// see issue #591. Returns "" if targetPath doesn't actually have a "/videos/" prefix or the id
+// segment is empty; the caller treats either as a request to reject, not to let through
+// unchecked. Case-insensitive on the prefix (matching the AuthRequiredPrefixes match this is
+// always called after) but preserves the id segment's original casing, since provider job ids
+// may be case-sensitive.
+func extractVideoJobID(targetPath string) string {
+	const prefix = "/videos/"
+	if len(targetPath) <= len(prefix) || !strings.EqualFold(targetPath[:len(prefix)], prefix) {
+		return ""
+	}
+	rest := targetPath[len(prefix):]
+	if idx := strings.Index(rest, "/"); idx != -1 {
+		rest = rest[:idx]
+	}
+	return rest
 }
 
 // handleImageServeRoute serves broker-stored image bytes at

@@ -350,6 +350,22 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	_ = json.Unmarshal(body, &respFields)
 	billingAction := classifyVideoStatus(respFields.Status)
 
+	// Record who created this job BEFORE branching on billing outcome, so the ownership check
+	// gating GET /videos/{id} and .../content (proxy.go's AuthRequiredPrefixes path — see
+	// issue #591) covers every combination this function can produce: sync-completed or
+	// deferred-to-poll, whitelisted or paying, even a create response that itself reports
+	// failed. The client already has respFields.ID from the raw create response regardless of
+	// what happens next, so ownership must exist before that id could ever be queried.
+	// Best-effort: the create response was already written to the client above, so there is
+	// nothing to propagate a failure to here — but log loudly, since under AuthorizeVideoJobAccess's
+	// fail-closed default a write failure here silently locks the job's own creator out of
+	// checking its status later, not just an attacker.
+	if respFields.ID != "" {
+		if err := c.videoJobOwnerDB.CreateVideoJobOwner(respFields.ID, reqModel.UserAddress); err != nil {
+			c.logger.Errorf("video generation: failed to record job owner for %s (request %s): %v", respFields.ID, reqModel.RequestHash, err)
+		}
+	}
+
 	if reqModel.IsWhitelisted {
 		switch billingAction {
 		case videoActionSkipFailed:

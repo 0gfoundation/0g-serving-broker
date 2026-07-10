@@ -92,6 +92,33 @@ func TestAuthRequiredPrefixes_MatchesVideoSubpaths(t *testing.T) {
 }
 
 // ==========================================================================
+// extractVideoJobID (issue #591's ownership check)
+// ==========================================================================
+
+func TestExtractVideoJobID(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/videos/video-123", "video-123"},
+		{"/videos/video-123/content", "video-123"},
+		{"/Videos/video-123", "video-123"}, // AuthRequiredPrefixes matches case-insensitively
+		{"/videos/", ""},                   // no id segment
+		{"/videos", ""},                    // no trailing slash at all
+		{"/images/video-123", ""},          // wrong prefix entirely
+		{"/videos/weird-id-with/multiple/slashes", "weird-id-with"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := extractVideoJobID(tt.path); got != tt.want {
+				t.Errorf("extractVideoJobID(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// ==========================================================================
 // ServiceType constant
 // ==========================================================================
 

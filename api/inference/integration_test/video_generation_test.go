@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,9 +25,20 @@ import (
 // Mock video provider
 // ==========================================================================
 
-func newMockVideoProvider(t *testing.T) *httptest.Server {
+// mockVideoJobIDSeq gives each newMockVideoProvider call a distinct job id. Required since
+// model.VideoJobOwner.ProviderJobID is uniquely indexed (issue #591) and this package shares
+// one DB across every test in it — a hardcoded id shared by multiple tests that each
+// successfully create a video job would collide on that unique index (a duplicate insert is
+// silently logged and dropped, so the SECOND such test's own creator would incorrectly fail
+// its own later ownership check).
+var mockVideoJobIDSeq atomic.Int64
+
+// newMockVideoProvider returns a genuinely async mock (create response status=queued) and the
+// unique job id it will use for every request in this server's lifetime.
+func newMockVideoProvider(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	jobID := fmt.Sprintf("video-test-%03d", mockVideoJobIDSeq.Add(1))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
 		switch {
@@ -34,7 +46,7 @@ func newMockVideoProvider(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":      "video-test-001",
+				"id":      jobID,
 				"status":  "queued",
 				"object":  "video",
 				"model":   "sora-2",
@@ -42,17 +54,17 @@ func newMockVideoProvider(t *testing.T) *httptest.Server {
 				"size":    "720x1280",
 			})
 
-		case r.Method == "GET" && path == "/videos/video-test-001":
+		case r.Method == "GET" && path == "/videos/"+jobID:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":     "video-test-001",
+				"id":     jobID,
 				"status": "completed",
 				"object": "video",
 				"model":  "sora-2",
 			})
 
-		case r.Method == "GET" && path == "/videos/video-test-001/content":
+		case r.Method == "GET" && path == "/videos/"+jobID+"/content":
 			w.Header().Set("Content-Type", "video/mp4")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("fake-video-binary-content"))
@@ -62,6 +74,7 @@ func newMockVideoProvider(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+	return server, jobID
 }
 
 // ==========================================================================
@@ -69,7 +82,7 @@ func newMockVideoProvider(t *testing.T) *httptest.Server {
 // ==========================================================================
 
 func TestVideoGenerationFlow(t *testing.T) {
-	mockProvider := newMockVideoProvider(t)
+	mockProvider, jobID := newMockVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	env := setupTestEnv(t, func(cfg *config.Config) {
@@ -128,8 +141,8 @@ func TestVideoGenerationFlow(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("parse response: %v", err)
 		}
-		if resp["id"] != "video-test-001" {
-			t.Errorf("expected id=video-test-001, got %v", resp["id"])
+		if resp["id"] != jobID {
+			t.Errorf("expected id=%s, got %v", jobID, resp["id"])
 		}
 		if resp["status"] != "queued" {
 			t.Errorf("expected status=queued, got %v", resp["status"])
@@ -193,7 +206,7 @@ func TestVideoGenerationFlow(t *testing.T) {
 	})
 
 	t.Run("Step2_PollVideoStatus", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/v1/proxy/videos/video-test-001", nil)
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
 		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
 
 		w := httptest.NewRecorder()
@@ -207,8 +220,8 @@ func TestVideoGenerationFlow(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("parse response: %v", err)
 		}
-		if resp["id"] != "video-test-001" {
-			t.Errorf("expected id=video-test-001, got %v", resp["id"])
+		if resp["id"] != jobID {
+			t.Errorf("expected id=%s, got %v", jobID, resp["id"])
 		}
 		if resp["status"] != "completed" {
 			t.Errorf("expected status=completed, got %v", resp["status"])
@@ -226,7 +239,7 @@ func TestVideoGenerationFlow(t *testing.T) {
 	})
 
 	t.Run("Step3_DownloadVideoContent", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/v1/proxy/videos/video-test-001/content", nil)
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID+"/content", nil)
 		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
 
 		w := httptest.NewRecorder()
@@ -465,7 +478,7 @@ func TestVideoGenerationFlow_TimesOutWithoutTerminalState(t *testing.T) {
 // ==========================================================================
 
 func TestVideoEndpoints_RequireAuth(t *testing.T) {
-	mockProvider := newMockVideoProvider(t)
+	mockProvider, _ := newMockVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	env := setupTestEnv(t, func(cfg *config.Config) {
@@ -505,6 +518,220 @@ func TestVideoEndpoints_RequireAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ==========================================================================
+// Ownership enforcement (issue #591): a valid broker session alone must not be enough to
+// read another user's video job status/content — the caller must be the job's own creator.
+// ==========================================================================
+
+func TestVideoEndpoints_OwnershipEnforced(t *testing.T) {
+	const jobID = "video-owner-001"
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/videos":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": jobID, "status": "completed", "object": "video", "model": "sora-2",
+				"seconds": 5, "size": "720x1280",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/"+jobID:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": jobID, "status": "completed", "object": "video",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/"+jobID+"/content":
+			w.Header().Set("Content-Type", "video/mp4")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("fake-video-binary-content"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(mockProvider.Close)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	// env.privateKey/env.userAddr (from setupTestEnv) creates the job synchronously — no
+	// poll scheduler needed since the create response already reports completed.
+	boundary := "----OwnerBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s--",
+		boundary, boundary, boundary)
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 creating the job, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// A different, unrelated user — a fresh key never involved in creating this job, but
+	// with a perfectly valid broker session (the exact scenario ValidateSession alone cannot
+	// distinguish from the real creator).
+	otherKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate other user key: %v", err)
+	}
+
+	t.Run("creator can check status", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 for the job's own creator, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("creator can download content", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID+"/content", nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 for the job's own creator, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("different user denied status", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, otherKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for a different authenticated user, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("different user denied content", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID+"/content", nil)
+		req.Header.Set("Authorization", createAuthHeader(t, otherKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for a different authenticated user, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("unknown job id denied (fail-closed)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/never-created-job", nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for an unrecorded job id, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// TestVideoEndpoints_OwnershipEnforced_WhitelistedJob is the whitelisted-traffic counterpart
+// to TestVideoEndpoints_OwnershipEnforced: ownership must be recorded and enforced even though
+// a whitelisted request never creates a Request row (see model.VideoJobOwner's doc comment on
+// why it doesn't rely on Request at all).
+func TestVideoEndpoints_OwnershipEnforced_WhitelistedJob(t *testing.T) {
+	const jobID = "video-owner-wl-001"
+	mockProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/videos":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": jobID, "status": "completed", "object": "video", "model": "sora-2",
+				"seconds": 5, "size": "720x1280",
+			})
+		case r.Method == "GET" && r.URL.Path == "/videos/"+jobID:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": jobID, "status": "completed", "object": "video",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(mockProvider.Close)
+
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate whitelisted user key: %v", err)
+	}
+	userAddr := crypto.PubkeyToAddress(privateKey.PublicKey)
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Whitelist = config.WhitelistConfig{
+			Enabled:       true,
+			UserAddresses: []string{userAddr.Hex()},
+		}
+	})
+	env.privateKey = privateKey
+
+	lockBalance := "0"
+	if err := env.db.CreateUserAccounts([]model.User{{
+		User:                 userAddr.Hex(),
+		LockBalance:          &lockBalance,
+		LastBalanceCheckTime: model.PtrOf(time.Now().UTC()),
+	}}); err != nil {
+		if !strings.Contains(err.Error(), "Duplicate") {
+			t.Fatalf("create whitelist test user: %v", err)
+		}
+	}
+	env.ctrl.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
+		User:          userAddr,
+		Balance:       big.NewInt(0),
+		PendingRefund: big.NewInt(0),
+		Generation:    big.NewInt(0),
+		RevokedBitmap: big.NewInt(0),
+		Acknowledged:  false,
+	})
+
+	boundary := "----OwnerWLBoundary"
+	body := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n--%s\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n5\r\n--%s--",
+		boundary, boundary, boundary)
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", createAuthHeader(t, privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for whitelisted create, got %d: %s", w.Code, w.Body.String())
+	}
+
+	otherKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate other user key: %v", err)
+	}
+
+	t.Run("whitelisted creator can check status", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 for the whitelisted job's own creator, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("different user denied even for a whitelisted job", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/v1/proxy/videos/"+jobID, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, otherKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for a different user on a whitelisted job, got %d: %s", w.Code, w.Body.String())
+		}
+	})
 }
 
 // ==========================================================================
@@ -633,7 +860,7 @@ func TestVideoGeneration_WhitelistUser(t *testing.T) {
 // rate_class no other test in this file uses, so this test's hourly_usage_stat row can never
 // accumulate with another test's contribution (this package shares one DB across tests).
 func TestVideoGeneration_WhitelistUser_AsyncProvider(t *testing.T) {
-	mockProvider := newMockVideoProvider(t)
+	mockProvider, _ := newMockVideoProvider(t)
 	t.Cleanup(func() { mockProvider.Close() })
 
 	privateKey, _ := crypto.GenerateKey()

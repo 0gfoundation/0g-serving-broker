@@ -73,12 +73,22 @@ type reconciliationDB interface {
 	AccumulateHourlyUsage(row model.HourlyUsageStat) error
 }
 
+// videoJobOwnerDB is the interface for persisting and looking up the (provider job id ->
+// creator address) mapping that authorizes GET /videos/{id} and GET /videos/{id}/content —
+// see model.VideoJobOwner and issue #591. The real *db.DB satisfies this interface. Tests can
+// inject a mock implementation.
+type videoJobOwnerDB interface {
+	CreateVideoJobOwner(providerJobID, userAddress string) error
+	GetVideoJobOwner(providerJobID string) (model.VideoJobOwner, error)
+}
+
 type Ctrl struct {
 	mu               sync.RWMutex
 	db               *db.DB
 	asyncDB          asyncDB
 	videoPollDB      videoPollDB
 	reconciliationDB reconciliationDB
+	videoJobOwnerDB  videoJobOwnerDB
 	contract         *providercontract.ProviderContract
 	svcCache         *cache.Cache
 	logger           log.Logger
@@ -274,6 +284,7 @@ func New(
 		asyncDB:              db,
 		videoPollDB:          db,
 		reconciliationDB:     db,
+		videoJobOwnerDB:      db,
 		contract:             contract,
 		Service:              cfg.Service,
 		cacheTokenBilling:    cfg.CacheTokenBilling,
