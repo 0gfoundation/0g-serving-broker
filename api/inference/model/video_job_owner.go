@@ -26,10 +26,13 @@ type VideoJobOwner struct {
 	UserAddress string `gorm:"type:varchar(255);not null" json:"-"`
 	// Upstream is the billing counterparty that served this job (same convention as
 	// Request.Upstream / HourlyUsageStat.Upstream — the provider identity string, or "self"
-	// for decentralized providers). Not yet load-bearing: today a broker instance has exactly
-	// one upstream, so ProviderJobID alone is already unique. Recorded now so that once
-	// multi-upstream routing exists, the uniqueness scope can be widened to
-	// (Upstream, ProviderJobID) without a data migration — two different vendors' job ids are
-	// not guaranteed distinct, but a single vendor's ids still must be.
+	// for decentralized providers). Purely informational for now, deliberately NOT part of any
+	// key: GetVideoJobOwner is looked up by ProviderJobID alone because that's the only thing
+	// an incoming GET /videos/{id} request actually carries — there is no upstream context
+	// available at lookup time to combine it with (you'd need to already know the upstream to
+	// query by it, but the lookup is what tells you the upstream). So ProviderJobID must stay
+	// globally unique regardless of how many upstreams exist, not just "for now." Upstream is
+	// recorded here in case a future multi-upstream routing layer needs to know which vendor a
+	// given job id belongs to (e.g. to route a status check to the right target).
 	Upstream string `gorm:"type:varchar(64);not null;default:''" json:"-"`
 }
