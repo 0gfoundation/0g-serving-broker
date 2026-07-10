@@ -891,6 +891,23 @@ type AsyncConfig struct {
 // removed once the exclusion made it redundant.
 const ZeroOutputRequestPruneThreshold = 1 * time.Hour
 
+// VideoJobOwnerRetention is how old a model.VideoJobOwner row (the provider job id -> creator
+// address mapping gating GET /videos/{id} and .../content, see issue #591) must be before
+// ctrl.SettleFeesWithTEE's periodic prune pass deletes it (db.DeleteExpiredVideoJobOwners).
+// Exported as a constant for now rather than a config field — a config knob is a planned
+// follow-up once real usage data suggests operators need to tune it.
+//
+// 7 days is a deliberate multiple of the client-facing retrieval window mainstream
+// video-generation vendors document today: the target vendor for this integration (Alibaba
+// HappyHorse/DashScope-style) expires both the task id and the result URL at 24 hours, and
+// every other mainstream vendor surveyed (OpenAI Sora, Google Veo, Kling, MiniMax/Hailuo,
+// Runway) clusters in the same 24-48 hour range for how long a client can still query/download
+// a result — none of that is a config knob here, it's the provider's own contract, so setting
+// this shorter than that window would mean the broker's own bookkeeping locks out a legitimate
+// creator before the provider itself would have. The row is small (two varchar columns + an
+// index), so the cost of keeping generous margin is negligible.
+const VideoJobOwnerRetention = 7 * 24 * time.Hour
+
 // VideoPollConfig defines the background scheduler that polls a video-generation job to
 // completion when its create response is non-terminal (queued/in_progress), billing the
 // actual delivered duration instead of the requested one. See

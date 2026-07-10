@@ -5,6 +5,7 @@ package db
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -70,5 +71,46 @@ func TestCreateVideoJobOwner_DuplicateProviderJobIDRejected(t *testing.T) {
 	}
 	if owner.UserAddress != "0xUserA" {
 		t.Errorf("UserAddress = %q, want 0xUserA (unchanged by the rejected duplicate)", owner.UserAddress)
+	}
+}
+
+// TestDeleteExpiredVideoJobOwners_DeletesOldRows guards config.VideoJobOwnerRetention's
+// cleanup path: a row older than the retention window must actually be removed, not just
+// silently ignored.
+func TestDeleteExpiredVideoJobOwners_DeletesOldRows(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoJobOwnerTable(t, d)
+
+	if err := d.CreateVideoJobOwner("job-old", "0xUserA"); err != nil {
+		t.Fatalf("CreateVideoJobOwner: %v", err)
+	}
+
+	// retention=0 means cutoff=now, and the row's created_at is strictly before that.
+	if err := d.DeleteExpiredVideoJobOwners(0); err != nil {
+		t.Fatalf("DeleteExpiredVideoJobOwners: %v", err)
+	}
+
+	if _, err := d.GetVideoJobOwner("job-old"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("GetVideoJobOwner after cleanup error = %v, want gorm.ErrRecordNotFound", err)
+	}
+}
+
+// TestDeleteExpiredVideoJobOwners_KeepsFreshRows is the sibling regression test: a row well
+// within the retention window must survive the sweep — proving the cleanup isn't accidentally
+// unconditional.
+func TestDeleteExpiredVideoJobOwners_KeepsFreshRows(t *testing.T) {
+	d := setupTestDB(t)
+	migrateVideoJobOwnerTable(t, d)
+
+	if err := d.CreateVideoJobOwner("job-fresh", "0xUserA"); err != nil {
+		t.Fatalf("CreateVideoJobOwner: %v", err)
+	}
+
+	if err := d.DeleteExpiredVideoJobOwners(24 * time.Hour); err != nil {
+		t.Fatalf("DeleteExpiredVideoJobOwners: %v", err)
+	}
+
+	if _, err := d.GetVideoJobOwner("job-fresh"); err != nil {
+		t.Fatalf("GetVideoJobOwner after cleanup: %v, want the fresh row to survive", err)
 	}
 }

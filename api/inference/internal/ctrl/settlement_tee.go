@@ -173,6 +173,16 @@ func (c *Ctrl) SettleFeesWithTEE(ctx context.Context) error {
 		c.logger.Warnf("Failed to prune old zero-output requests: %v", err)
 	}
 
+	// Prune old video job ownership records (see model.VideoJobOwner and issue #591).
+	// Unconditional — NOT gated on VideoPoll.Enabled: these rows are written for every
+	// video-generation create response regardless of whether the poll scheduler is running
+	// (sync-completed jobs never touch VideoPollJob at all), so tying cleanup to that
+	// scheduler's own enablement would leave this table unbounded on a broker that has no
+	// genuinely async video providers and disables polling.
+	if err := c.videoJobOwnerDB.DeleteExpiredVideoJobOwners(config.VideoJobOwnerRetention); err != nil {
+		c.logger.Warnf("Failed to prune old video job owner records: %v", err)
+	}
+
 	// Main settlement loop with limited iterations
 	const maxSettlementRounds = 1
 	for round := 1; round <= maxSettlementRounds; round++ {

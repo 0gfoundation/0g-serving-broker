@@ -3,6 +3,7 @@ package ctrl
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -32,6 +33,10 @@ func (m *mockVideoJobOwnerDB) GetVideoJobOwner(providerJobID string) (model.Vide
 		return model.VideoJobOwner{}, errors.New("record not found")
 	}
 	return model.VideoJobOwner{ProviderJobID: providerJobID, UserAddress: addr}, nil
+}
+
+func (m *mockVideoJobOwnerDB) DeleteExpiredVideoJobOwners(retention time.Duration) error {
+	return nil
 }
 
 func newTestOwnershipCtrl(store *mockVideoJobOwnerDB) *Ctrl {

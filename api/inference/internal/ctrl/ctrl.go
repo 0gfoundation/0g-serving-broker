@@ -80,6 +80,7 @@ type reconciliationDB interface {
 type videoJobOwnerDB interface {
 	CreateVideoJobOwner(providerJobID, userAddress string) error
 	GetVideoJobOwner(providerJobID string) (model.VideoJobOwner, error)
+	DeleteExpiredVideoJobOwners(retention time.Duration) error
 }
 
 type Ctrl struct {
