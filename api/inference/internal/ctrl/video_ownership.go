@@ -19,11 +19,11 @@ import (
 func (c *Ctrl) AuthorizeVideoJobAccess(providerJobID, userAddress string) error {
 	owner, err := c.videoJobOwnerDB.GetVideoJobOwner(providerJobID)
 	if err != nil {
-		c.logger.Warnf("video job access denied for job %s: no recorded owner (%v)", providerJobID, err)
+		c.logger.Warnf("video job access denied for job %s: no recorded owner (%v), caller=%s", providerJobID, err, userAddress)
 		return errors.NewForbidden("you do not have permission to access this video job")
 	}
 	if !strings.EqualFold(owner.UserAddress, userAddress) {
-		c.logger.Warnf("video job access denied for job %s: caller does not match the recorded owner", providerJobID)
+		c.logger.Warnf("video job access denied for job %s: caller=%s does not match the recorded owner", providerJobID, userAddress)
 		return errors.NewForbidden("you do not have permission to access this video job")
 	}
 	return nil
