@@ -166,9 +166,8 @@ func Main() {
 	// zero-output sweep: SettleFeesWithTEE runs synchronously to completion while the
 	// scheduler's scan/claim/resume loop runs in independent goroutines, so starting the
 	// scheduler first establishes no happens-before ordering against the sweep. What actually
-	// protects that row is config.go's boot-time invariant that VideoPollConfig.MaxPollDuration
-	// stays under 3/4 of ZeroOutputRequestPruneThreshold, enforced unconditionally regardless
-	// of Enabled — see docs/design/video-generation-async-billing.md.
+	// protects that row is db.PruneRequest's own exclusion of any Request row still referenced
+	// by a pending/polling VideoPollJob, unconditional on the row's age — see its doc comment.
 	if err := ctrl.InitVideoPollScheduler(config.VideoPoll); err != nil {
 		logger.Errorf("Failed to initialize video poll scheduler: %v", err)
 	}

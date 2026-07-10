@@ -317,11 +317,12 @@ service:
 	}
 }
 
-// TestLoadConfig_VideoPoll_RejectsMaxPollDurationNearPruneThreshold guards
-// docs/design/video-generation-async-billing.md's core invariant: a still-polling job's
-// placeholder Request row must never be old enough for the zero-output prune sweep
-// (ZeroOutputRequestPruneThreshold) to delete it out from under CompleteVideoPollJobWithBilling.
-func TestLoadConfig_VideoPoll_RejectsMaxPollDurationNearPruneThreshold(t *testing.T) {
+// TestLoadConfig_VideoPoll_AllowsLargeMaxPollDuration is a regression test: MaxPollDuration no
+// longer needs to stay under ZeroOutputRequestPruneThreshold — a still in-flight (pending/
+// polling) VideoPollJob's Request row is excluded from PruneRequest's zero-output sweep
+// unconditionally, regardless of age (see db.PruneRequest's doc comment) — so a value that
+// would have tripped the old cross-field check must load cleanly.
+func TestLoadConfig_VideoPoll_AllowsLargeMaxPollDuration(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -332,13 +333,13 @@ service:
   model: "gpt-4"
 videoPoll:
   enabled: true
-  maxPollDuration: "50m"
+  maxPollDuration: "2h"
   leaseWindow: "90s"
   pollRequestTimeout: "30s"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
-	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "maxPollDuration") {
-		t.Fatalf("expected videoPoll.maxPollDuration rejection, got: %v", err)
+	if err := loadConfig(&Config{}); err != nil {
+		t.Fatalf("expected a large videoPoll.maxPollDuration to load cleanly, got: %v", err)
 	}
 }
 
@@ -389,13 +390,12 @@ videoPoll:
 	}
 }
 
-// TestLoadConfig_VideoPoll_RejectsMaxPollDurationEvenWhenDisabled is a regression test: both
-// VideoPoll invariants must be enforced regardless of videoPoll.enabled. deferVideoBillingToPoll
-// (video.go) computes a VideoPollJob's ExpiresAt from MaxPollDuration/LeaseWindow no matter
-// whether the scheduler is currently running, so an out-of-range value accepted while disabled
-// would only bite later, once an operator re-enables the scheduler — by then the bad ExpiresAt
-// is already baked into whatever jobs were created in the meantime.
-func TestLoadConfig_VideoPoll_RejectsMaxPollDurationEvenWhenDisabled(t *testing.T) {
+// TestLoadConfig_VideoPoll_RejectsNonPositiveMaxPollDurationEvenWhenDisabled is a regression
+// test for the remaining MaxPollDuration sanity check (must be positive): enforced regardless
+// of videoPoll.enabled. deferVideoBillingToPoll (video.go) computes a VideoPollJob's ExpiresAt
+// from MaxPollDuration no matter whether the scheduler is currently running, so a bad value
+// accepted while disabled would only bite later, once an operator re-enables the scheduler.
+func TestLoadConfig_VideoPoll_RejectsNonPositiveMaxPollDurationEvenWhenDisabled(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -406,7 +406,7 @@ service:
   model: "gpt-4"
 videoPoll:
   enabled: false
-  maxPollDuration: "50m"
+  maxPollDuration: "-5m"
   leaseWindow: "90s"
   pollRequestTimeout: "30s"
 `)

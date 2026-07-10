@@ -882,10 +882,13 @@ type AsyncConfig struct {
 
 // ZeroOutputRequestPruneThreshold is how old a zero-output Request row must be before
 // ctrl.SettleFeesWithTEE's periodic prune pass deletes it (db.PruneRequest). Exported here,
-// rather than left as a local literal in settlement_tee.go, specifically so
-// VideoPollConfig.MaxPollDuration's boot-time validation below can reference the SAME value
-// instead of an independently-hardcoded "1 hour" that could silently drift from the real
-// threshold if either were changed without the other.
+// rather than left as a local literal in settlement_tee.go, for discoverability.
+//
+// VideoPollConfig.MaxPollDuration does NOT need to stay under this value: a still in-flight
+// (pending/polling) VideoPollJob's Request row is excluded from this prune sweep
+// unconditionally, regardless of age — see db.PruneRequest's doc comment. An earlier boot-time
+// invariant tied MaxPollDuration to this constant before that exclusion existed; it was
+// removed once the exclusion made it redundant.
 const ZeroOutputRequestPruneThreshold = 1 * time.Hour
 
 // VideoPollConfig defines the background scheduler that polls a video-generation job to
@@ -902,9 +905,11 @@ type VideoPollConfig struct {
 	// exponential backoff is unneeded complexity for a bounded-attempts poll.
 	PollInterval time.Duration `yaml:"pollInterval"`
 
-	// MaxPollDuration: ceiling from job creation to forced timed_out. Must stay comfortably
-	// under the 1-hour zero-output Request prune threshold (settlement_tee.go) so a still
-	// in-flight job's placeholder Request row is never pruned out from under it.
+	// MaxPollDuration: ceiling from job creation to forced timed_out. Not bounded against
+	// ZeroOutputRequestPruneThreshold — a still in-flight (pending/polling) job's Request row
+	// is excluded from that prune sweep unconditionally regardless of age (db.PruneRequest), so
+	// this can be set as high as a slow provider needs without risking the row being pruned out
+	// from under it.
 	MaxPollDuration time.Duration `yaml:"maxPollDuration"`
 
 	// ScanInterval: how often the scheduler queries for due rows.
@@ -1471,22 +1476,20 @@ func loadConfig(cfg *Config) error {
 		cfg.VideoPoll.PollRequestTimeout = 30 * time.Second
 	}
 
-	// Two VideoPollConfig cross-field invariants (see VideoPollConfig.MaxPollDuration and
-	// .LeaseWindow doc comments for the full rationale) were previously enforced only by
-	// comment; refuse to boot instead of a startup-time footgun an operator is likely to
-	// overlook, matching this function's existing token-billed-STT gate above.
+	// MaxPollDuration just needs to be positive (a sanity check, not a cross-field invariant —
+	// see its doc comment for why it no longer needs to stay under
+	// ZeroOutputRequestPruneThreshold). LeaseWindow must exceed PollRequestTimeout (see
+	// LeaseWindow's doc comment) — this one IS a real cross-field invariant. Both refuse to
+	// boot instead of a startup-time footgun an operator is likely to overlook, matching this
+	// function's existing token-billed-STT gate above.
 	//
 	// Enforced unconditionally, NOT gated on cfg.VideoPoll.Enabled: deferVideoBillingToPoll
 	// (video.go) uses MaxPollDuration/LeaseWindow to compute a VideoPollJob's ExpiresAt
 	// regardless of whether the scheduler is currently running, so a disabled scheduler with an
 	// out-of-range value would let an unvalidated ExpiresAt slip through and only bite later,
 	// once the scheduler is re-enabled.
-	if maxAllowedPollDuration := ZeroOutputRequestPruneThreshold * 3 / 4; cfg.VideoPoll.MaxPollDuration >= maxAllowedPollDuration {
-		return fmt.Errorf(
-			"invalid config: videoPoll.maxPollDuration (%v) must stay comfortably under ZeroOutputRequestPruneThreshold (%v) — "+
-				"set it below %v, or a still-polling job's Request row can be pruned before it completes, silently losing the fee",
-			cfg.VideoPoll.MaxPollDuration, ZeroOutputRequestPruneThreshold, maxAllowedPollDuration,
-		)
+	if cfg.VideoPoll.MaxPollDuration <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.maxPollDuration (%v) must be positive", cfg.VideoPoll.MaxPollDuration)
 	}
 	if cfg.VideoPoll.LeaseWindow <= cfg.VideoPoll.PollRequestTimeout {
 		return fmt.Errorf(
