@@ -446,6 +446,120 @@ service:
 	if cfg.VideoPoll.PollRequestTimeout != 30*time.Second {
 		t.Errorf("PollRequestTimeout = %v, want 30s default", cfg.VideoPoll.PollRequestTimeout)
 	}
+	if cfg.VideoPoll.MaxConcurrentPolls != 10 {
+		t.Errorf("MaxConcurrentPolls = %d, want 10 default", cfg.VideoPoll.MaxConcurrentPolls)
+	}
+	if cfg.VideoPoll.PollInterval != 10*time.Second {
+		t.Errorf("PollInterval = %v, want 10s default", cfg.VideoPoll.PollInterval)
+	}
+	if cfg.VideoPoll.ScanInterval != 5*time.Second {
+		t.Errorf("ScanInterval = %v, want 5s default", cfg.VideoPoll.ScanInterval)
+	}
+	if cfg.VideoPoll.CleanupInterval != 5*time.Minute {
+		t.Errorf("CleanupInterval = %v, want 5m default", cfg.VideoPoll.CleanupInterval)
+	}
+}
+
+// TestLoadConfig_VideoPoll_RejectsNonPositiveScanCleanupPollIntervalsAndConcurrency is a
+// regression test for a real crash risk: ScanInterval/CleanupInterval feed time.NewTicker
+// directly (video_poll.go's runVideoPollScanner/runVideoPollCleanup), which panics on a
+// non-positive duration in an unrecovered background goroutine — taking down the whole broker
+// process, not just video polling. A negative MaxConcurrentPolls silently removes the GORM
+// Limit clause entirely, defeating the documented bounded-concurrency guarantee. Table-driven:
+// each bad field must be rejected independently.
+//
+// Deliberately does NOT test a zero value for any of these fields: 0 is this codebase's
+// established "unset, use the default" sentinel for every VideoPollConfig duration/int field
+// (same as MaxPollDuration/LeaseWindow/PollRequestTimeout) — see
+// TestLoadConfig_VideoPoll_UnsetFieldsGetSaneDefaults, which already covers that a bare
+// zero-value Config defaults all of them rather than erroring. Only a NEGATIVE value is a true
+// misconfiguration here.
+func TestLoadConfig_VideoPoll_RejectsNonPositiveScanCleanupPollIntervalsAndConcurrency(t *testing.T) {
+	tests := []struct {
+		name       string
+		videoPoll  string
+		wantErrSub string
+	}{
+		{
+			name: "maxConcurrentPolls negative",
+			videoPoll: `
+videoPoll:
+  enabled: true
+  maxConcurrentPolls: -1
+  pollInterval: "10s"
+  maxPollDuration: "20m"
+  scanInterval: "5s"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+  cleanupInterval: "5m"
+`,
+			wantErrSub: "maxConcurrentPolls",
+		},
+		{
+			name: "pollInterval negative",
+			videoPoll: `
+videoPoll:
+  enabled: true
+  maxConcurrentPolls: 10
+  pollInterval: "-10s"
+  maxPollDuration: "20m"
+  scanInterval: "5s"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+  cleanupInterval: "5m"
+`,
+			wantErrSub: "pollInterval",
+		},
+		{
+			name: "scanInterval negative",
+			videoPoll: `
+videoPoll:
+  enabled: true
+  maxConcurrentPolls: 10
+  pollInterval: "10s"
+  maxPollDuration: "20m"
+  scanInterval: "-5s"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+  cleanupInterval: "5m"
+`,
+			wantErrSub: "scanInterval",
+		},
+		{
+			name: "cleanupInterval negative",
+			videoPoll: `
+videoPoll:
+  enabled: true
+  maxConcurrentPolls: 10
+  pollInterval: "10s"
+  maxPollDuration: "20m"
+  scanInterval: "5s"
+  leaseWindow: "90s"
+  pollRequestTimeout: "30s"
+  cleanupInterval: "-5m"
+`,
+			wantErrSub: "cleanupInterval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+`+tt.videoPoll)
+			t.Setenv("CONFIG_FILE", configPath)
+			err := loadConfig(&Config{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("expected an error containing %q, got: %v", tt.wantErrSub, err)
+			}
+		})
+	}
 }
 
 func TestLoadConfig_ProviderTypeStandard_AllowsModelPricing(t *testing.T) {

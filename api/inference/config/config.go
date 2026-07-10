@@ -898,11 +898,15 @@ const ZeroOutputRequestPruneThreshold = 1 * time.Hour
 type VideoPollConfig struct {
 	Enabled bool `yaml:"enabled"` // Enable the poll-to-completion scheduler (default: true)
 
-	MaxConcurrentPolls int `yaml:"maxConcurrentPolls"` // Worker pool size for the poll scheduler (default: 10)
+	// MaxConcurrentPolls: worker pool size for the poll scheduler (default: 10). Feeds a GORM
+	// Limit(n) in db.ClaimDueVideoPollJobs; boot-validated positive below (n<=0 either stalls
+	// the scheduler or removes the LIMIT clause entirely).
+	MaxConcurrentPolls int `yaml:"maxConcurrentPolls"`
 
 	// PollInterval: fixed delay between poll attempts for a given job. A fixed interval is
 	// sufficient given providers already recommend one (e.g. DashScope's 5-15s);
-	// exponential backoff is unneeded complexity for a bounded-attempts poll.
+	// exponential backoff is unneeded complexity for a bounded-attempts poll. Boot-validated
+	// positive below.
 	PollInterval time.Duration `yaml:"pollInterval"`
 
 	// MaxPollDuration: ceiling from job creation to forced timed_out. Not bounded against
@@ -912,7 +916,9 @@ type VideoPollConfig struct {
 	// from under it.
 	MaxPollDuration time.Duration `yaml:"maxPollDuration"`
 
-	// ScanInterval: how often the scheduler queries for due rows.
+	// ScanInterval: how often the scheduler queries for due rows. Feeds time.NewTicker
+	// directly (video_poll.go's runVideoPollScanner); boot-validated positive below — a
+	// non-positive duration panics the ticker in an unrecovered background goroutine.
 	ScanInterval time.Duration `yaml:"scanInterval"`
 
 	// LeaseWindow: how far into the future a claimed row's NextPollAt is pushed while a poll
@@ -938,7 +944,9 @@ type VideoPollConfig struct {
 	// cleanup pass deletes them.
 	RetentionTTL time.Duration `yaml:"retentionTTL"`
 
-	// CleanupInterval: how often the retention sweep (DeleteExpiredVideoPollJobs) runs.
+	// CleanupInterval: how often the retention sweep (DeleteExpiredVideoPollJobs) runs. Feeds
+	// time.NewTicker directly (video_poll.go's runVideoPollCleanup); boot-validated positive
+	// below — see ScanInterval's doc comment for why.
 	CleanupInterval time.Duration `yaml:"cleanupInterval"`
 }
 
@@ -1475,6 +1483,18 @@ func loadConfig(cfg *Config) error {
 	if cfg.VideoPoll.PollRequestTimeout == 0 {
 		cfg.VideoPoll.PollRequestTimeout = 30 * time.Second
 	}
+	if cfg.VideoPoll.MaxConcurrentPolls == 0 {
+		cfg.VideoPoll.MaxConcurrentPolls = 10
+	}
+	if cfg.VideoPoll.PollInterval == 0 {
+		cfg.VideoPoll.PollInterval = 10 * time.Second
+	}
+	if cfg.VideoPoll.ScanInterval == 0 {
+		cfg.VideoPoll.ScanInterval = 5 * time.Second
+	}
+	if cfg.VideoPoll.CleanupInterval == 0 {
+		cfg.VideoPoll.CleanupInterval = 5 * time.Minute
+	}
 
 	// MaxPollDuration just needs to be positive (a sanity check, not a cross-field invariant —
 	// see its doc comment for why it no longer needs to stay under
@@ -1498,6 +1518,25 @@ func loadConfig(cfg *Config) error {
 				"the same job while the first is still finishing, wasting a duplicate provider round-trip",
 			cfg.VideoPoll.LeaseWindow, cfg.VideoPoll.PollRequestTimeout,
 		)
+	}
+	// ScanInterval/CleanupInterval feed time.NewTicker directly (video_poll.go's
+	// runVideoPollScanner/runVideoPollCleanup), which panics on a non-positive duration — in an
+	// unrecovered background goroutine, that crashes the whole broker process, not just the
+	// video-poll feature. MaxConcurrentPolls feeds a GORM Limit(n): n==0 stalls the scheduler
+	// (claims nothing, forever), and n<0 removes the LIMIT clause entirely, defeating the
+	// documented bounded-concurrency guarantee. PollInterval reaching zero would busy-loop
+	// rescheduling. All four must be positive for the same "refuse to boot" reason as above.
+	if cfg.VideoPoll.MaxConcurrentPolls <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.maxConcurrentPolls (%d) must be positive", cfg.VideoPoll.MaxConcurrentPolls)
+	}
+	if cfg.VideoPoll.PollInterval <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.pollInterval (%v) must be positive", cfg.VideoPoll.PollInterval)
+	}
+	if cfg.VideoPoll.ScanInterval <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.scanInterval (%v) must be positive", cfg.VideoPoll.ScanInterval)
+	}
+	if cfg.VideoPoll.CleanupInterval <= 0 {
+		return fmt.Errorf("invalid config: videoPoll.cleanupInterval (%v) must be positive", cfg.VideoPoll.CleanupInterval)
 	}
 
 	// Token-billed STT startup gate. Until #530 lands a per-row billing-unit
