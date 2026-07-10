@@ -23,7 +23,7 @@ func TestCreateAndGetVideoJobOwner(t *testing.T) {
 	d := setupTestDB(t)
 	migrateVideoJobOwnerTable(t, d)
 
-	if err := d.CreateVideoJobOwner("job-1", "0xUserA"); err != nil {
+	if err := d.CreateVideoJobOwner("job-1", "0xUserA", "minimax"); err != nil {
 		t.Fatalf("CreateVideoJobOwner: %v", err)
 	}
 
@@ -36,6 +36,9 @@ func TestCreateAndGetVideoJobOwner(t *testing.T) {
 	}
 	if owner.UserAddress != "0xUserA" {
 		t.Errorf("UserAddress = %q, want 0xUserA", owner.UserAddress)
+	}
+	if owner.Upstream != "minimax" {
+		t.Errorf("Upstream = %q, want minimax", owner.Upstream)
 	}
 }
 
@@ -57,10 +60,10 @@ func TestCreateVideoJobOwner_DuplicateProviderJobIDRejected(t *testing.T) {
 	d := setupTestDB(t)
 	migrateVideoJobOwnerTable(t, d)
 
-	if err := d.CreateVideoJobOwner("job-dup", "0xUserA"); err != nil {
+	if err := d.CreateVideoJobOwner("job-dup", "0xUserA", "minimax"); err != nil {
 		t.Fatalf("first CreateVideoJobOwner: %v", err)
 	}
-	if err := d.CreateVideoJobOwner("job-dup", "0xUserB"); err == nil {
+	if err := d.CreateVideoJobOwner("job-dup", "0xUserB", "minimax"); err == nil {
 		t.Fatal("expected the second CreateVideoJobOwner with the same provider job id to fail (uniqueIndex)")
 	}
 
@@ -81,7 +84,7 @@ func TestDeleteExpiredVideoJobOwners_DeletesOldRows(t *testing.T) {
 	d := setupTestDB(t)
 	migrateVideoJobOwnerTable(t, d)
 
-	if err := d.CreateVideoJobOwner("job-old", "0xUserA"); err != nil {
+	if err := d.CreateVideoJobOwner("job-old", "0xUserA", "minimax"); err != nil {
 		t.Fatalf("CreateVideoJobOwner: %v", err)
 	}
 
@@ -102,7 +105,7 @@ func TestDeleteExpiredVideoJobOwners_KeepsFreshRows(t *testing.T) {
 	d := setupTestDB(t)
 	migrateVideoJobOwnerTable(t, d)
 
-	if err := d.CreateVideoJobOwner("job-fresh", "0xUserA"); err != nil {
+	if err := d.CreateVideoJobOwner("job-fresh", "0xUserA", "minimax"); err != nil {
 		t.Fatalf("CreateVideoJobOwner: %v", err)
 	}
 

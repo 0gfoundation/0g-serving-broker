@@ -349,7 +349,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// default a write failure here silently locks the job's own creator out of checking its
 	// status later, not just an attacker.
 	if respFields.ID != "" {
-		if err := c.videoJobOwnerDB.CreateVideoJobOwner(respFields.ID, reqModel.UserAddress); err != nil {
+		if err := c.videoJobOwnerDB.CreateVideoJobOwner(respFields.ID, reqModel.UserAddress, reqModel.Upstream); err != nil {
 			if isDuplicateKeyError(err) {
 				// Distinct from a transient DB error: ProviderJobID's uniqueIndex rejected
 				// this insert, meaning some OTHER address is already recorded as this job

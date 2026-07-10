@@ -387,6 +387,7 @@ func (d *DB) Migrate() error {
 					ID            uint64 `gorm:"primaryKey;autoIncrement"`
 					ProviderJobID string `gorm:"type:varchar(255);not null;uniqueIndex"`
 					UserAddress   string `gorm:"type:varchar(255);not null"`
+					Upstream      string `gorm:"type:varchar(64);not null;default:''"`
 				}
 				return tx.AutoMigrate(&VideoJobOwner{})
 			},

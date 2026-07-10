@@ -24,4 +24,12 @@ type VideoJobOwner struct {
 	// alone — add an index here only once a real query needs it (e.g. an admin "list jobs by
 	// user" endpoint).
 	UserAddress string `gorm:"type:varchar(255);not null" json:"-"`
+	// Upstream is the billing counterparty that served this job (same convention as
+	// Request.Upstream / HourlyUsageStat.Upstream — the provider identity string, or "self"
+	// for decentralized providers). Not yet load-bearing: today a broker instance has exactly
+	// one upstream, so ProviderJobID alone is already unique. Recorded now so that once
+	// multi-upstream routing exists, the uniqueness scope can be widened to
+	// (Upstream, ProviderJobID) without a data migration — two different vendors' job ids are
+	// not guaranteed distinct, but a single vendor's ids still must be.
+	Upstream string `gorm:"type:varchar(64);not null;default:''" json:"-"`
 }

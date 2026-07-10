@@ -78,7 +78,7 @@ type reconciliationDB interface {
 // see model.VideoJobOwner and issue #591. The real *db.DB satisfies this interface. Tests can
 // inject a mock implementation.
 type videoJobOwnerDB interface {
-	CreateVideoJobOwner(providerJobID, userAddress string) error
+	CreateVideoJobOwner(providerJobID, userAddress, upstream string) error
 	GetVideoJobOwner(providerJobID string) (model.VideoJobOwner, error)
 	DeleteExpiredVideoJobOwners(retention time.Duration) error
 }

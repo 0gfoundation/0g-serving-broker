@@ -19,7 +19,7 @@ func newMockVideoJobOwnerDB() *mockVideoJobOwnerDB {
 	return &mockVideoJobOwnerDB{owners: make(map[string]string)}
 }
 
-func (m *mockVideoJobOwnerDB) CreateVideoJobOwner(providerJobID, userAddress string) error {
+func (m *mockVideoJobOwnerDB) CreateVideoJobOwner(providerJobID, userAddress, upstream string) error {
 	m.owners[providerJobID] = userAddress
 	return nil
 }

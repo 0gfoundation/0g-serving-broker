@@ -9,10 +9,11 @@ import (
 // CreateVideoJobOwner records the (provider job id -> creator address) mapping used to
 // authorize GET /videos/{id} and GET /videos/{id}/content — see model.VideoJobOwner and
 // issue #591.
-func (d *DB) CreateVideoJobOwner(providerJobID, userAddress string) error {
+func (d *DB) CreateVideoJobOwner(providerJobID, userAddress, upstream string) error {
 	return d.db.Create(&model.VideoJobOwner{
 		ProviderJobID: providerJobID,
 		UserAddress:   userAddress,
+		Upstream:      upstream,
 	}).Error
 }
 
