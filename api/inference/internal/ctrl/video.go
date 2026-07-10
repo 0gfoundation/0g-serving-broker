@@ -350,7 +350,18 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// status later, not just an attacker.
 	if respFields.ID != "" {
 		if err := c.videoJobOwnerDB.CreateVideoJobOwner(respFields.ID, reqModel.UserAddress); err != nil {
-			c.logger.Errorf("video generation: failed to record job owner for %s (request %s): %v", respFields.ID, reqModel.RequestHash, err)
+			if isDuplicateKeyError(err) {
+				// Distinct from a transient DB error: ProviderJobID's uniqueIndex rejected
+				// this insert, meaning some OTHER address is already recorded as this job
+				// id's owner. If the provider ever reissues an id, the real, current creator
+				// is now silently and permanently locked out of their own job — this needs an
+				// operator's attention, not just a retry, so it gets its own log line instead
+				// of reading like an ordinary connection blip.
+				c.logger.Errorf("video generation: job owner for %s (request %s) NOT recorded — provider job id already has a DIFFERENT recorded owner; this job's real creator will be denied access to it: %v",
+					respFields.ID, reqModel.RequestHash, err)
+			} else {
+				c.logger.Errorf("video generation: failed to record job owner for %s (request %s): %v", respFields.ID, reqModel.RequestHash, err)
+			}
 		}
 	}
 

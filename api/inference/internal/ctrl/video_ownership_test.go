@@ -106,6 +106,41 @@ func TestAuthorizeVideoJobAccess_DBErrorDenied(t *testing.T) {
 	assertForbidden(t, err)
 }
 
+func TestTruncateAddr(t *testing.T) {
+	tests := []struct {
+		addr string
+		want string
+	}{
+		{"", ""},
+		{"0x1234", "0x1234"}, // <= 12 chars, returned unchanged
+		{"0x123456789012345678901234", "0x1234…1234"},
+	}
+	for _, tt := range tests {
+		if got := truncateAddr(tt.addr); got != tt.want {
+			t.Errorf("truncateAddr(%q) = %q, want %q", tt.addr, got, tt.want)
+		}
+	}
+}
+
+func TestIsDuplicateKeyError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", errors.New("connection reset"), false},
+		{"MySQL duplicate entry", errors.New("Error 1062: Duplicate entry 'job-1' for key 'video_job_owner.provider_job_id'"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDuplicateKeyError(tt.err); got != tt.want {
+				t.Errorf("isDuplicateKeyError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func assertForbidden(t *testing.T, err error) {
 	t.Helper()
 	var httpErr *errors.HTTPError
