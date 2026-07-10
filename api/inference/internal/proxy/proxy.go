@@ -492,18 +492,27 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// created THIS job" — video status/content passthrough (today the only
 			// AuthRequiredPrefixes user) must additionally verify the caller is the job's own
 			// creator before forwarding to the provider. See issue #591.
-			if svcType == constant.ServiceTypeVideoGeneration {
-				jobID := extractVideoJobID(targetPath)
-				if jobID == "" {
-					ctx.Set("ignoreError", true)
-					p.handleBrokerError(ctx, errors.NewBadRequest("missing video job id"), "extract video job id")
-					return
-				}
-				if err := p.ctrl.AuthorizeVideoJobAccess(jobID, userAddress); err != nil {
-					ctx.Set("ignoreError", true)
-					p.handleBrokerError(ctx, err, "authorize video job access")
-					return
-				}
+			//
+			// Deliberately NOT gated on svcType: isAuthRequired above is computed purely from
+			// AuthRequiredPrefixes' path match, independent of svcType, so a broker configured
+			// for a different service (e.g. chatbot) would still reach this branch for a
+			// request whose path happens to match "/videos/" — gating the check itself on
+			// svcType would skip it entirely for such a broker and forward unchecked. Since
+			// CreateVideoJobOwner is only ever called from handleVideoGenerationResponse
+			// (reached only when svcType IS video-generation), a non-video broker has no
+			// VideoJobOwner rows to begin with, so running this unconditionally just means
+			// AuthorizeVideoJobAccess correctly fail-closed-denies such a request instead of
+			// silently bypassing it.
+			jobID := extractVideoJobID(targetPath)
+			if jobID == "" {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, errors.NewBadRequest("missing video job id"), "extract video job id")
+				return
+			}
+			if err := p.ctrl.AuthorizeVideoJobAccess(jobID, userAddress); err != nil {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, err, "authorize video job access")
+				return
 			}
 
 			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",

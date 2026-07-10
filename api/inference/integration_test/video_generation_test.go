@@ -734,6 +734,33 @@ func TestVideoEndpoints_OwnershipEnforced_WhitelistedJob(t *testing.T) {
 	})
 }
 
+// TestVideoEndpoints_OwnershipEnforced_NonVideoServiceType is a regression test: the ownership
+// check must not be skippable just because THIS broker instance happens to be configured for a
+// different service type. proxy.go's AuthRequiredPrefixes path match (the gate that reaches the
+// ownership-check branch at all) is service-type-agnostic — AddHTTPRoute registers a single
+// catch-all route regardless of svcType — so a broker configured for e.g. chatbot still routes
+// a GET /videos/{id} request through the exact same code path a video-generation broker does.
+// An earlier version of this check was gated on svcType=="video-generation", which meant such a
+// broker forwarded the request completely unchecked instead of denying it — reproducing the
+// exact hole issue #591 exists to close, just on a differently-configured broker. The provider's
+// TargetURL is deliberately unreachable: a correct fix denies before ever attempting to forward.
+func TestVideoEndpoints_OwnershipEnforced_NonVideoServiceType(t *testing.T) {
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.Type = "chatbot"
+		cfg.Service.ModelType = "gpt-4"
+		cfg.Service.TargetURL = "http://127.0.0.1:1" // must never be reached
+	})
+
+	req := httptest.NewRequest("GET", "/v1/proxy/videos/never-created-job", nil)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for a video-status request on a non-video-configured broker, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ==========================================================================
 // Whitelist user test
 // ==========================================================================
@@ -741,15 +768,18 @@ func TestVideoEndpoints_OwnershipEnforced_WhitelistedJob(t *testing.T) {
 // newMockSyncVideoProvider returns a provider that reports the finished result directly on
 // create (status=completed, no polling needed) — used to exercise the whitelist billing
 // branch's happy path (videoActionBillNow), as opposed to newMockVideoProvider's genuinely
-// async (status=queued) create response.
+// async (status=queued) create response. The job id is unique per call for the same reason as
+// newMockVideoProvider's (see mockVideoJobIDSeq's doc comment): model.VideoJobOwner.ProviderJobID
+// is uniquely indexed and this package shares one DB across every test.
 func newMockSyncVideoProvider(t *testing.T) *httptest.Server {
 	t.Helper()
+	jobID := fmt.Sprintf("video-sync-%03d", mockVideoJobIDSeq.Add(1))
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && r.URL.Path == "/videos" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":      "video-sync-001",
+				"id":      jobID,
 				"status":  "completed",
 				"object":  "video",
 				"model":   "sora-2",
