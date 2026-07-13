@@ -12,14 +12,16 @@ import (
 	fineTuningServer "github.com/0glabs/0g-serving-broker/fine-tuning/cmd/server"
 	providerEvent "github.com/0glabs/0g-serving-broker/inference/cmd/event"
 	providerServer "github.com/0glabs/0g-serving-broker/inference/cmd/server"
+	videoTranslatorServer "github.com/0glabs/0g-serving-broker/videotranslator/cmd/server"
 )
 
 func main() {
 	applets := map[string]func(){
-		"0g-inference-server":   providerServer.Main,
-		"0g-inference-event":    providerEvent.Main,
-		"0g-fine-tuning-server": fineTuningServer.Main,
-		"0g-controller":         controllerServer.Main,
+		"0g-inference-server":           providerServer.Main,
+		"0g-inference-event":            providerEvent.Main,
+		"0g-fine-tuning-server":         fineTuningServer.Main,
+		"0g-controller":                 controllerServer.Main,
+		"0g-dashscope-video-translator": videoTranslatorServer.Main,
 	}
 
 	names := []string{}

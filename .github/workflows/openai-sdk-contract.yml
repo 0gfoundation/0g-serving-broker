@@ -45,3 +45,11 @@ jobs:
     - name: OpenAI SDK contract test
       working-directory: api
       run: go test -tags openaicontract ./inference/integration_test/... -run TestOpenAISDK -timeout 600s -v
+
+    - name: Install video translator OpenAI SDK client dependencies
+      working-directory: api/videotranslator/integration_test/openai_sdk_client
+      run: npm ci
+
+    - name: Video translator OpenAI SDK contract test
+      working-directory: api
+      run: go test -tags openaicontract ./videotranslator/integration_test/... -timeout 120s -v
