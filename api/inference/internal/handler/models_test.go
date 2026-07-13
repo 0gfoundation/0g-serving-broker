@@ -510,6 +510,52 @@ func TestGetModels_ImagePricingUSD(t *testing.T) {
 	}
 }
 
+// TestGetModels_VideoPricingUSD pins the single-model USD video-generation
+// shape: the per-second price surfaces under pricing_usd.video (not
+// pricing_usd.completion, which would misread a per-effective-second video
+// rate as a per-token rate), mirroring TestGetModels_ImagePricingUSD.
+func TestGetModels_VideoPricingUSD(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "wan2.7",
+			Type:        "video-generation",
+			InputPrice:  "0",
+			OutputPrice: "126963160000000000",
+			// USD per 1M effective-seconds: 0.02 × 1e6 → per-second USD is 0.02.
+			InputPriceUSDPerMillionTokens:  "0",
+			OutputPriceUSDPerMillionTokens: "20000",
+		},
+		serviceConfig:  config.Service{},
+		priceFeedIsUSD: true,
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present for USD video-generation service")
+	}
+	if m.PricingUSD.Video != "0.02" {
+		t.Errorf("pricing_usd.video = %q, want 0.02", m.PricingUSD.Video)
+	}
+	if m.PricingUSD.Prompt != "0" {
+		t.Errorf("pricing_usd.prompt = %q, want 0 for video service", m.PricingUSD.Prompt)
+	}
+	if m.PricingUSD.Completion != "0" {
+		t.Errorf("pricing_usd.completion = %q, want 0 for video service", m.PricingUSD.Completion)
+	}
+}
+
 func TestGetModels_ServiceError(t *testing.T) {
 	mock := &mockModelsCtrl{
 		serviceErr: errors.New("contract unreachable"),

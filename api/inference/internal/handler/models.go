@@ -526,6 +526,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// from going undiagnosed.
 	var priceFeedOut *PriceFeedState
 	isImageType := svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing
+	isVideoType := svc.Type == constant.ServiceTypeVideoGeneration
 	switch {
 	case isImageType && svc.OutputPriceUSDPerMillionTokens != "":
 		// Image bills per generated image, not per token: surface the per-image
@@ -538,6 +539,19 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				svc.OutputPriceUSDPerMillionTokens, imageErr)
 		} else {
 			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Image: image}
+		}
+	case isVideoType && svc.OutputPriceUSDPerMillionTokens != "":
+		// Video bills per effective output second, not per token: surface the
+		// per-second USD under `video` (mirrors the native pricing.video and the
+		// multi-model modelPricing path's mp.OutputPriceUSDPerSecond). Deriving
+		// with the same ÷1e6 used by the wei conversion keeps pricing_usd.video
+		// consistent with pricing.video — same derivation as the image case above.
+		video, videoErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
+		if videoErr != nil {
+			h.logger.Warnf("GetModels: derive per-second USD price from %q failed (omitting PricingUSD block): %v",
+				svc.OutputPriceUSDPerMillionTokens, videoErr)
+		} else {
+			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
 		}
 	case svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "":
 		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)

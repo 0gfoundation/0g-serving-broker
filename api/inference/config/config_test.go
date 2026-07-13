@@ -1965,7 +1965,7 @@ priceFeed:
 	t.Setenv("CONFIG_FILE", configPath)
 	cfg := &Config{}
 	err := loadConfig(cfg)
-	if err == nil || !strings.Contains(err.Error(), "without modelPricing configured") {
+	if err == nil || !strings.Contains(err.Error(), "not valid alongside service.modelPricing") {
 		t.Errorf("expected error rejecting service-level outputPriceUSDPerSecond alongside modelPricing, got %v", err)
 	}
 }
