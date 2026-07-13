@@ -99,6 +99,70 @@ func TestCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	}
 }
 
+func TestCreateVideo_BodySizeLimit(t *testing.T) {
+	t.Run("oversized body is rejected before reaching dashscope", func(t *testing.T) {
+		called := false
+		mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		}))
+		defer mockDashScope.Close()
+
+		client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+		h := NewVideoHandler(client, newTestLogger(t))
+
+		gin.SetMode(gin.TestMode)
+		engine := gin.New()
+		engine.POST("/videos", h.CreateVideo)
+
+		// A prompt well over maxCreateVideoBodyBytes (1 MiB) — simulates a
+		// client disguising a field as an oversized part rather than the tiny
+		// text HappyHorse's own prompt limit (~2,500-5,000 characters) allows.
+		body, contentType := newMultipartBody(t, map[string]string{
+			"model":  "happyhorse",
+			"prompt": strings.Repeat("a", 2<<20), // 2 MiB
+		})
+		req := httptest.NewRequest(http.MethodPost, "/videos", body)
+		req.Header.Set("Content-Type", contentType)
+
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+		if called {
+			t.Error("dashscope was called with an oversized request body")
+		}
+	})
+
+	t.Run("body within the limit is unaffected", func(t *testing.T) {
+		mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(dashscope.CreateResponse{
+				Output: dashscope.CreateOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusPending},
+			})
+		}))
+		defer mockDashScope.Close()
+
+		client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+		h := NewVideoHandler(client, newTestLogger(t))
+
+		gin.SetMode(gin.TestMode)
+		engine := gin.New()
+		engine.POST("/videos", h.CreateVideo)
+
+		body, contentType := newMultipartBody(t, map[string]string{"model": "happyhorse", "prompt": "a cat"})
+		req := httptest.NewRequest(http.MethodPost, "/videos", body)
+		req.Header.Set("Content-Type", contentType)
+
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestCreateVideo_JSONBody(t *testing.T) {
 	t.Run("valid JSON body is translated", func(t *testing.T) {
 		var gotReq dashscope.CreateRequest

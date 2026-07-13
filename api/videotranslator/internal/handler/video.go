@@ -46,8 +46,29 @@ type jsonCreateVideoRequest struct {
 	Seed    json.Number `json:"seed"`
 }
 
+// maxCreateVideoBodyBytes bounds the total POST /videos request body.
+// HappyHorse's own prompt limit is documented at ~5,000 non-Chinese / 2,500
+// Chinese characters (a few KB at most in UTF-8), and model/seconds/size/seed
+// are all tiny — this is generous relative to today's actual fields, not a
+// deliberately roomy budget. Without a cap, a client sending one of these
+// fields as an oversized multipart file part (filename set) forces Go's
+// multipart parser down its disk-spill path with no upper bound, consuming
+// real disk I/O/space for the request's duration even though the temp file
+// itself is cleaned up afterward (net/http's finishRequest always calls
+// MultipartForm.RemoveAll — so this bounds transient resource use during the
+// request, not a leak).
+//
+// NOTE: raise this (and ParseMultipartForm's in-memory budget alongside it)
+// if/when image-to-video support adds a real file upload to this same
+// request (e.g. an "input_reference" image, mirroring the real OpenAI Video
+// API's field of the same name) — don't preemptively raise it now, since
+// DashScope's own size limit for a reference image isn't confirmed yet.
+const maxCreateVideoBodyBytes = 1 << 20 // 1 MiB
+
 // CreateVideo handles POST /videos.
 func (h *VideoHandler) CreateVideo(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCreateVideoBodyBytes)
+
 	req, err := parseCreateVideoRequest(c.Request)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
