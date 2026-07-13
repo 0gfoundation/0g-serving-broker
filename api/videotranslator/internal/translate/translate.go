@@ -196,6 +196,11 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 			Duration:   duration,
 			Resolution: resolution,
 			Ratio:      ratio,
+			// Always disabled: HappyHorse defaults to stamping a "HappyHorse"
+			// watermark, which no paying customer of this service wants. Not
+			// client-configurable — the OpenAI Video API has no field for it,
+			// and there's no reason a specific request would want it back on.
+			Watermark: false,
 		},
 	}
 }

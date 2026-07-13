@@ -37,11 +37,18 @@ type CreateInput struct {
 // dimensions) and Ratio is one of a fixed set of aspect-ratio strings
 // (e.g. "16:9") — both derived from the client's pixel-dimension "size"
 // field by translate.sizeToDashScopeParams, since the OpenAI-facing request
-// has no separate ratio concept.
+// has no separate ratio concept. Watermark has no client-facing equivalent
+// either — DashScope defaults it to true (adds a "HappyHorse" watermark);
+// translate.ToDashScopeCreateRequest always sets it to false, a fixed
+// deployment-level choice rather than something derived from client input,
+// so the field has no "omitempty": Go's zero value for bool already IS the
+// value we want on every request, but the tag would otherwise make that
+// look like an accidentally-unset field rather than an intentional one.
 type CreateParameters struct {
 	Duration   int64  `json:"duration,omitempty"`
 	Resolution string `json:"resolution,omitempty"`
 	Ratio      string `json:"ratio,omitempty"`
+	Watermark  bool   `json:"watermark"`
 }
 
 // CreateResponse is the response to a create-task call.

@@ -157,6 +157,9 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 			if got.Parameters.Duration != tt.wantDuration {
 				t.Errorf("Duration = %d, want %d", got.Parameters.Duration, tt.wantDuration)
 			}
+			if got.Parameters.Watermark != false {
+				t.Errorf("Watermark = %v, want false (always disabled, regardless of request content)", got.Parameters.Watermark)
+			}
 		})
 	}
 }

@@ -237,6 +237,9 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 	if capture.gotCreateBody.Parameters.Ratio != "16:9" {
 		t.Errorf("dashscope create request ratio = %q, want 16:9 (derived from the SDK's size:\"1280x720\")", capture.gotCreateBody.Parameters.Ratio)
 	}
+	if capture.gotCreateBody.Parameters.Watermark != false {
+		t.Errorf("dashscope create request watermark = %v, want false (always disabled, not something the SDK's typed params can even express)", capture.gotCreateBody.Parameters.Watermark)
+	}
 }
 
 // ==========================================================================
