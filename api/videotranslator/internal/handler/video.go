@@ -7,6 +7,8 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -56,8 +58,7 @@ func (h *VideoHandler) CreateVideo(c *gin.Context) {
 	dsReq := translate.ToDashScopeCreateRequest(req)
 	dsResp, err := h.client.CreateTask(c.Request.Context(), authHeader, dsReq)
 	if err != nil {
-		h.logger.Errorf("dashscope create task failed: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to create video generation task"}})
+		h.writeDashScopeError(c, "dashscope create task failed", "failed to create video generation task", err)
 		return
 	}
 
@@ -71,8 +72,7 @@ func (h *VideoHandler) GetVideo(c *gin.Context) {
 
 	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
 	if err != nil {
-		h.logger.Errorf("dashscope get task failed for %s: %v", taskID, err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to get video generation task"}})
+		h.writeDashScopeError(c, fmt.Sprintf("dashscope get task failed for %s", taskID), "failed to get video generation task", err)
 		return
 	}
 	if !translate.IsRecognizedDashScopeStatus(dsResp.Output.TaskStatus) {
@@ -93,8 +93,7 @@ func (h *VideoHandler) GetVideoContent(c *gin.Context) {
 
 	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
 	if err != nil {
-		h.logger.Errorf("dashscope get task failed for %s: %v", taskID, err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to get video generation task"}})
+		h.writeDashScopeError(c, fmt.Sprintf("dashscope get task failed for %s", taskID), "failed to get video generation task", err)
 		return
 	}
 	if dsResp.Output.VideoURL == "" {
@@ -119,6 +118,32 @@ func (h *VideoHandler) GetVideoContent(c *gin.Context) {
 	if _, err := io.Copy(c.Writer, contentResp.Body); err != nil {
 		h.logger.Warnf("stream video content failed for %s: %v", taskID, err)
 	}
+}
+
+// writeDashScopeError maps a dashscope client error to the HTTP response
+// the caller sees. A DashScope 4xx (*dashscope.APIError with a 4xx status —
+// the vendor rejected the request outright: bad auth, bad model/parameter,
+// quota) surfaces the vendor's own status/code/message, since that's the
+// caller's own request being rejected, not a translator or connectivity
+// problem — this also lets an OpenAI-SDK client classify it correctly
+// (e.g. 401 -> AuthenticationError, 429 -> RateLimitError), matching how
+// FromGetTaskResponse already propagates Code/Message for a task that fails
+// asynchronously. Anything else (5xx, or a plain transport/connectivity
+// error with no structured vendor response at all) is reported as 502
+// without vendor detail — there isn't any reliable detail to give.
+func (h *VideoHandler) writeDashScopeError(c *gin.Context, logContext, fallbackMessage string, err error) {
+	var apiErr *dashscope.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
+		message := apiErr.Message
+		if message == "" {
+			message = fmt.Sprintf("dashscope rejected the request (status %d)", apiErr.StatusCode)
+		}
+		h.logger.Errorf("%s: dashscope rejected request: status %d code=%q message=%q", logContext, apiErr.StatusCode, apiErr.Code, apiErr.Message)
+		c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
+		return
+	}
+	h.logger.Errorf("%s: %v", logContext, err)
+	c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
 }
 
 // parseCreateVideoRequest reads a create request from either a

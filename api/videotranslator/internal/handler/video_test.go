@@ -352,3 +352,87 @@ func TestCreateVideo_DashScopeErrorReturnsBadGateway(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadGateway)
 	}
 }
+
+func TestCreateVideo_DashScope4xxPropagatesVendorError(t *testing.T) {
+	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"code":    "InvalidParameter",
+			"message": "duration must be between 3 and 15 seconds",
+		})
+	}))
+	defer mockDashScope.Close()
+
+	client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+	h := NewVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/videos", h.CreateVideo)
+
+	body, contentType := newMultipartBody(t, map[string]string{"model": "happyhorse", "prompt": "x", "seconds": "999"})
+	req := httptest.NewRequest(http.MethodPost, "/videos", body)
+	req.Header.Set("Content-Type", contentType)
+
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (DashScope's own 4xx, not a generic 502)", rec.Code, http.StatusBadRequest)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("error missing from response: %+v", resp)
+	}
+	if errObj["code"] != "InvalidParameter" {
+		t.Errorf("error.code = %v, want InvalidParameter", errObj["code"])
+	}
+	if errObj["message"] != "duration must be between 3 and 15 seconds" {
+		t.Errorf("error.message = %v, want the vendor's own message", errObj["message"])
+	}
+}
+
+func TestGetVideo_DashScope4xxPropagatesVendorError(t *testing.T) {
+	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{
+			"code":    "Throttling",
+			"message": "requests per second exceeds the limit",
+		})
+	}))
+	defer mockDashScope.Close()
+
+	client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+	h := NewVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/videos/:id", h.GetVideo)
+
+	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc", nil)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d (DashScope's own 4xx, not a generic 502)", rec.Code, http.StatusTooManyRequests)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("error missing from response: %+v", resp)
+	}
+	if errObj["code"] != "Throttling" {
+		t.Errorf("error.code = %v, want Throttling", errObj["code"])
+	}
+}

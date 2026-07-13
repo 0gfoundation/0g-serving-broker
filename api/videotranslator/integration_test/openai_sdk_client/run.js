@@ -18,6 +18,25 @@
 
 const OpenAI = require("openai");
 
+// expectError runs makeRequest(), expecting it to throw, and captures the
+// SDK-visible error shape. err.error is the parsed {"code","message"} body
+// the translator sends (see handler.writeDashScopeError); the SDK also
+// lifts "code" onto the error object itself (see core/error.ts's APIError
+// constructor), which is what a real caller would actually branch on.
+async function expectError(makeRequest) {
+  try {
+    await makeRequest();
+  } catch (err) {
+    return {
+      errorType: err.constructor.name,
+      status: err.status,
+      code: err.code,
+      message: err.error && err.error.message,
+    };
+  }
+  throw new Error("expected request to fail, but it succeeded");
+}
+
 async function main() {
   const scenario = process.env.SCENARIO;
   const baseURL = process.env.BASE_URL;
@@ -58,6 +77,17 @@ async function main() {
         authedOpts,
       );
       return { id: video.id, status: video.status };
+    },
+
+    async createExpectError() {
+      // The Go test's mock DashScope server is configured to reject every
+      // create call with a specific 4xx + code/message; this proves that
+      // status/code/message survive translation and the real SDK classifies
+      // it as the corresponding typed error (e.g. BadRequestError,
+      // RateLimitError), not a generic failure.
+      return expectError(() =>
+        client.videos.create({ model: "happyhorse", prompt: "a cat", seconds: "4" }, authedOpts),
+      );
     },
 
     async retrieve() {

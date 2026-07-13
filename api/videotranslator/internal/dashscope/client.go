@@ -141,6 +141,34 @@ func (c *Client) FetchContent(ctx context.Context, videoURL string) (*http.Respo
 	return resp, nil
 }
 
+// APIError is returned by do() for any non-200 DashScope response. Callers
+// can errors.As this to distinguish a request DashScope rejected outright
+// (4xx — bad auth, bad model/parameter, quota) from a genuine transport/5xx
+// failure, rather than treating every upstream error the same way (see
+// handler.writeDashScopeError, the caller that matters).
+type APIError struct {
+	StatusCode int
+	Code       string
+	Message    string
+	// Body is the raw response body, kept for logging when Code/Message
+	// couldn't be parsed out of it (a non-JSON or differently-shaped error
+	// page, e.g. from a proxy/load balancer in front of DashScope).
+	Body string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("dashscope status %d: code=%q message=%q", e.StatusCode, e.Code, e.Message)
+}
+
+// errorBody is the JSON shape DashScope returns for a request-level (HTTP
+// non-2xx) failure — distinct from a task-level failure, which is reported
+// as output.code/output.message inside an otherwise-200 get-task response
+// once task_status reaches FAILED.
+type errorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func (c *Client) do(httpReq *http.Request, out interface{}) error {
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -153,7 +181,13 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 		return fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+		apiErr := &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		var eb errorBody
+		if json.Unmarshal(respBody, &eb) == nil {
+			apiErr.Code = eb.Code
+			apiErr.Message = eb.Message
+		}
+		return apiErr
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("decode response: %w", err)

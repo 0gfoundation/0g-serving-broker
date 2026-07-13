@@ -71,6 +71,17 @@ func newMockDashScopeCreate(t *testing.T, taskID string, capture *mockDashScopeC
 	}))
 }
 
+// newMockDashScope4xx returns a mock that rejects every request (create or
+// get-task alike) with the given status and DashScope-shaped error body.
+func newMockDashScope4xx(t *testing.T, status int, code, message string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "message": message})
+	}))
+}
+
 // newMockDashScopeGetTask returns a mock that answers every get-task call
 // with the given fixed response, regardless of task ID.
 func newMockDashScopeGetTask(t *testing.T, resp dashscope.GetTaskResponse) *httptest.Server {
@@ -264,6 +275,54 @@ func TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam(t *testing.T) {
 	}
 	if *capture.gotCreateBody.Parameters.Seed != 42 {
 		t.Errorf("dashscope create request seed = %d, want 42", *capture.gotCreateBody.Parameters.Seed)
+	}
+}
+
+// TestOpenAISDK_CreateVideo_DashScope4xxIsBadRequestError proves DashScope's
+// own status/code/message survive translation and the real SDK classifies
+// them as the right typed error — not a generic failure, and not the
+// translator's own 502 default that would previously have masked this.
+func TestOpenAISDK_CreateVideo_DashScope4xxIsBadRequestError(t *testing.T) {
+	mockDashScope := newMockDashScope4xx(t, http.StatusBadRequest, "InvalidParameter", "duration must be between 3 and 15 seconds")
+	t.Cleanup(mockDashScope.Close)
+
+	baseURL := startTranslator(t, mockDashScope.URL)
+
+	res := runNodeSDKScenario(t, baseURL, "", "createExpectError", "")
+	if !res.OK {
+		t.Fatalf("createExpectError scenario failed unexpectedly: %s (%s)", res.Error, res.ErrType)
+	}
+	if isBad, _ := res.Result["errorType"].(string); isBad != "BadRequestError" {
+		t.Errorf("errorType = %v, want BadRequestError (status 400 mapped by the real SDK)", res.Result["errorType"])
+	}
+	if status, _ := res.Result["status"].(float64); status != http.StatusBadRequest {
+		t.Errorf("status = %v, want %d", res.Result["status"], http.StatusBadRequest)
+	}
+	if res.Result["code"] != "InvalidParameter" {
+		t.Errorf("code = %v, want InvalidParameter (DashScope's own error code, not lost behind a generic 502)", res.Result["code"])
+	}
+	if res.Result["message"] != "duration must be between 3 and 15 seconds" {
+		t.Errorf("message = %v, want DashScope's own message", res.Result["message"])
+	}
+}
+
+// TestOpenAISDK_CreateVideo_DashScope429IsRateLimitError does the same for a
+// 429, confirming the mapping isn't special-cased to 400 only.
+func TestOpenAISDK_CreateVideo_DashScope429IsRateLimitError(t *testing.T) {
+	mockDashScope := newMockDashScope4xx(t, http.StatusTooManyRequests, "Throttling", "requests per second exceeds the limit")
+	t.Cleanup(mockDashScope.Close)
+
+	baseURL := startTranslator(t, mockDashScope.URL)
+
+	res := runNodeSDKScenario(t, baseURL, "", "createExpectError", "")
+	if !res.OK {
+		t.Fatalf("createExpectError scenario failed unexpectedly: %s (%s)", res.Error, res.ErrType)
+	}
+	if isRL, _ := res.Result["errorType"].(string); isRL != "RateLimitError" {
+		t.Errorf("errorType = %v, want RateLimitError (status 429 mapped by the real SDK)", res.Result["errorType"])
+	}
+	if res.Result["code"] != "Throttling" {
+		t.Errorf("code = %v, want Throttling", res.Result["code"])
 	}
 }
 

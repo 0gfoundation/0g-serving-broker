@@ -3,6 +3,7 @@ package dashscope
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,69 @@ func TestGetTask_EscapesTaskID(t *testing.T) {
 		// query. Assert both together above; this just documents the shape.
 		t.Errorf("server saw Path = %q, want it to contain the literal task ID as a single path segment", gotPath)
 	}
+}
+
+func TestCreateTask_APIError(t *testing.T) {
+	t.Run("parses code and message from a DashScope 4xx", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"code":       "InvalidApiKey",
+				"message":    "Invalid API-key provided.",
+				"request_id": "req-1",
+			})
+		}))
+		defer server.Close()
+
+		client := NewClient(server.URL, server.Client())
+		_, err := client.CreateTask(context.Background(), "Bearer bad-key", CreateRequest{Model: "happyhorse"})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("error = %v, want it to unwrap to *APIError (via errors.As)", err)
+		}
+		if apiErr.StatusCode != http.StatusUnauthorized {
+			t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusUnauthorized)
+		}
+		if apiErr.Code != "InvalidApiKey" {
+			t.Errorf("Code = %q, want InvalidApiKey", apiErr.Code)
+		}
+		if apiErr.Message != "Invalid API-key provided." {
+			t.Errorf("Message = %q, want %q", apiErr.Message, "Invalid API-key provided.")
+		}
+	})
+
+	t.Run("non-JSON error body still yields an APIError with the status code", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html>upstream proxy error</html>"))
+		}))
+		defer server.Close()
+
+		client := NewClient(server.URL, server.Client())
+		_, err := client.CreateTask(context.Background(), "", CreateRequest{Model: "happyhorse"})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("error = %v, want it to unwrap to *APIError (via errors.As)", err)
+		}
+		if apiErr.StatusCode != http.StatusBadGateway {
+			t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadGateway)
+		}
+		if apiErr.Code != "" || apiErr.Message != "" {
+			t.Errorf("Code/Message = %q/%q, want both empty (non-JSON body)", apiErr.Code, apiErr.Message)
+		}
+		if !strings.Contains(apiErr.Body, "upstream proxy error") {
+			t.Errorf("Body = %q, want it to contain the raw response for logging", apiErr.Body)
+		}
+	})
 }
 
 func TestFetchContent(t *testing.T) {
