@@ -25,11 +25,15 @@ const (
 	getTaskPathFmt = "/api/v1/tasks/%s"
 )
 
-// contentFetchTimeout bounds a full video content download via FetchContent.
+// ContentFetchTimeout bounds a full video content download via FetchContent.
 // It's deliberately longer than the API-call client's own timeout: a status
 // check or job creation is small and fast, but streaming an actual video
-// file can legitimately take longer.
-const contentFetchTimeout = 5 * time.Minute
+// file can legitimately take longer. Exported so cmd/server can derive its
+// inbound WriteTimeout from it with an explicit margin — GetVideoContent's
+// request lifetime is GetTask's round trip plus up to this entire budget,
+// so the inbound deadline must be comfortably larger than this value, not
+// coincidentally equal to it.
+const ContentFetchTimeout = 5 * time.Minute
 
 // defaultTransport mirrors the tuned Transport the broker's own shared HTTP
 // client uses (see inference/internal/ctrl/ctrl.go) — DashScope video jobs
@@ -68,7 +72,7 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: defaultTransport()}
 	}
-	contentClient := &http.Client{Timeout: contentFetchTimeout, Transport: httpClient.Transport}
+	contentClient := &http.Client{Timeout: ContentFetchTimeout, Transport: httpClient.Transport}
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), httpClient: httpClient, contentClient: contentClient}
 }
 

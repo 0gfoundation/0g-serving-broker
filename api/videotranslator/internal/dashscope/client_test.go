@@ -40,8 +40,8 @@ func TestNewClient_Defaults(t *testing.T) {
 		if client.contentClient.Transport != client.httpClient.Transport {
 			t.Error("contentClient.Transport != httpClient.Transport, want them to share the same pooled Transport")
 		}
-		if client.contentClient.Timeout != contentFetchTimeout {
-			t.Errorf("contentClient.Timeout = %v, want %v", client.contentClient.Timeout, contentFetchTimeout)
+		if client.contentClient.Timeout != ContentFetchTimeout {
+			t.Errorf("contentClient.Timeout = %v, want %v", client.contentClient.Timeout, ContentFetchTimeout)
 		}
 	})
 

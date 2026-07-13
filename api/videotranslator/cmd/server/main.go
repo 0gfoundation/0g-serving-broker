@@ -20,14 +20,25 @@ import (
 // http.ListenAndServe with none of these set (no timeout at all), letting a
 // slow or hung client connection pin a goroutine/socket indefinitely — these
 // mirror the kind of defaults the broker's own HTTP surface expects.
-// WriteTimeout is generous relative to Read*: GetVideoContent streams a full
-// video file through this connection, not just a small JSON response.
 const (
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 30 * time.Second
-	writeTimeout      = 5 * time.Minute
 	idleTimeout       = 120 * time.Second
+
+	// writeTimeoutMargin covers GetVideoContent's work beyond the content
+	// download itself: the GetTask round trip that precedes it, and the
+	// io.Copy transfer of already-fetched bytes back to the client.
+	writeTimeoutMargin = 2 * time.Minute
 )
+
+// writeTimeout is deliberately larger than dashscope.ContentFetchTimeout,
+// not equal to it: WriteTimeout is a hard deadline measured from when the
+// inbound request arrived and spans GetVideoContent's entire handling
+// (GetTask, then FetchContent, then the copy back to the client). If the
+// two were equal, a content download that used close to its own budget
+// would leave ~zero headroom for everything around it, truncating a
+// download that would otherwise have succeeded.
+const writeTimeout = dashscope.ContentFetchTimeout + writeTimeoutMargin
 
 // Main starts the video translator HTTP server. It blocks until the server
 // exits.
