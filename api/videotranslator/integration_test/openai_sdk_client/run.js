@@ -55,6 +55,13 @@ async function main() {
       const error = video.error || null;
       return { id: video.id, status: video.status, usage, error };
     },
+
+    async downloadContent() {
+      if (!videoID) throw new Error("VIDEO_ID env var is required for the downloadContent scenario");
+      const response = await client.videos.downloadContent(videoID, {}, authedOpts);
+      const buf = Buffer.from(await response.arrayBuffer());
+      return { byteLength: buf.length, text: buf.toString("utf8"), contentType: response.headers.get("content-type") };
+    },
   };
 
   const fn = scenarios[scenario];

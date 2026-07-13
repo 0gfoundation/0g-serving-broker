@@ -7,6 +7,7 @@ package translate
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 
@@ -55,6 +56,20 @@ type Error struct {
 	Message string `json:"message,omitempty"`
 }
 
+// IsRecognizedDashScopeStatus reports whether status is one of the
+// task_status values this package maps explicitly. StatusFromDashScope
+// collapses everything else to "failed" too (see its doc), but callers that
+// want to log/alert on a genuinely-unrecognized status — as opposed to a
+// real DashScope-reported failure — should check this first.
+func IsRecognizedDashScopeStatus(status string) bool {
+	switch status {
+	case dashscope.TaskStatusPending, dashscope.TaskStatusRunning, dashscope.TaskStatusSucceeded, dashscope.TaskStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // StatusFromDashScope maps a DashScope output.task_status to the OpenAI
 // Video API status. A status DashScope hasn't documented maps to "failed"
 // rather than passing through unrecognized — an unmapped status left as-is
@@ -75,13 +90,22 @@ func StatusFromDashScope(status string) string {
 	}
 }
 
+// maxDashScopeSeconds bounds the parsed "seconds" value, mirroring the
+// overflow guard inference/internal/ctrl/video.go's ceilSeconds already
+// applies to the same class of client-supplied duration string — without it,
+// an absurd-but-finite value (e.g. "1e20") overflows the float-to-int64
+// conversion below into an implementation-defined (in practice, garbage
+// negative) result that would be sent to DashScope as-is.
+const maxDashScopeSeconds = 1 << 40
+
 // ToDashScopeCreateRequest builds the DashScope create-task body from an
-// OpenAI-shaped create request. A non-positive or unparsable Seconds yields
-// a zero Duration (omitted from the request) rather than an error — DashScope
-// treats duration as optional, so it's left for the vendor's own default.
+// OpenAI-shaped create request. A non-positive, unparsable, or excessive
+// Seconds yields a zero Duration (omitted from the request) rather than an
+// error — DashScope treats duration as optional, so it's left for the
+// vendor's own default.
 func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 	var duration int64
-	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
+	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) && s <= float64(maxDashScopeSeconds) {
 		duration = int64(math.Ceil(s))
 	}
 	return dashscope.CreateRequest{
@@ -114,18 +138,33 @@ func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) V
 // is renamed to usage.output_video_duration, the field the broker's
 // resolveVideoBilling already recognizes.
 func FromGetTaskResponse(resp dashscope.GetTaskResponse) VideoResponse {
+	status := StatusFromDashScope(resp.Output.TaskStatus)
 	out := VideoResponse{
 		ID:     resp.Output.TaskID,
 		Object: "video",
-		Status: StatusFromDashScope(resp.Output.TaskStatus),
+		Status: status,
 	}
 
 	if resp.Usage != nil && string(resp.Usage.VideoDuration) != "" {
 		out.Usage = &Usage{OutputVideoDuration: resp.Usage.VideoDuration}
 	}
 
-	if resp.Output.TaskStatus == dashscope.TaskStatusFailed {
-		out.Error = &Error{Code: resp.Output.Code, Message: resp.Output.Message}
+	// Populate Error whenever the MAPPED status is "failed" — not just when
+	// DashScope's raw task_status literally equals FAILED. Without this, an
+	// unrecognized status (IsRecognizedDashScopeStatus false) that
+	// StatusFromDashScope defaults to "failed" would report a terminal
+	// failure with a bare {"status":"failed"} and no diagnostic info at all,
+	// leaving no way to tell "the vendor rejected this" from "this
+	// translator didn't recognize a real DashScope status".
+	if status == StatusFailed {
+		if resp.Output.TaskStatus == dashscope.TaskStatusFailed {
+			out.Error = &Error{Code: resp.Output.Code, Message: resp.Output.Message}
+		} else {
+			out.Error = &Error{
+				Code:    "unrecognized_dashscope_status",
+				Message: fmt.Sprintf("dashscope reported unrecognized task_status %q", resp.Output.TaskStatus),
+			}
+		}
 	}
 
 	return out

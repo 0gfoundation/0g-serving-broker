@@ -7,6 +7,7 @@ package handler
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
@@ -71,8 +72,50 @@ func (h *VideoHandler) GetVideo(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to get video generation task"}})
 		return
 	}
+	if !translate.IsRecognizedDashScopeStatus(dsResp.Output.TaskStatus) {
+		h.logger.Errorf("dashscope get task %s: unrecognized task_status %q, mapping to failed", taskID, dsResp.Output.TaskStatus)
+	}
 
 	c.JSON(http.StatusOK, translate.FromGetTaskResponse(*dsResp))
+}
+
+// GetVideoContent handles GET /videos/{id}/content: it looks up the task's
+// current state to find DashScope's asset URL, then streams the video bytes
+// back through the translator rather than redirecting the client to it —
+// keeping the vendor's asset host hidden from the client, consistent with
+// this service never exposing DashScope directly.
+func (h *VideoHandler) GetVideoContent(c *gin.Context) {
+	taskID := c.Param("id")
+	authHeader := c.GetHeader("Authorization")
+
+	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
+	if err != nil {
+		h.logger.Errorf("dashscope get task failed for %s: %v", taskID, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to get video generation task"}})
+		return
+	}
+	if dsResp.Output.VideoURL == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "video content not available (task not completed, or upstream reported no asset)"}})
+		return
+	}
+
+	contentResp, err := h.client.FetchContent(c.Request.Context(), dsResp.Output.VideoURL)
+	if err != nil {
+		h.logger.Errorf("fetch video content failed for %s: %v", taskID, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to fetch video content"}})
+		return
+	}
+	defer contentResp.Body.Close()
+
+	contentType := contentResp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "video/mp4"
+	}
+	c.Header("Content-Type", contentType)
+	c.Status(http.StatusOK)
+	if _, err := io.Copy(c.Writer, contentResp.Body); err != nil {
+		h.logger.Warnf("stream video content failed for %s: %v", taskID, err)
+	}
 }
 
 // parseCreateVideoRequest reads a create request from either a

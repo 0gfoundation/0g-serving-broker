@@ -29,6 +29,27 @@ func TestStatusFromDashScope(t *testing.T) {
 	}
 }
 
+func TestIsRecognizedDashScopeStatus(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{dashscope.TaskStatusPending, true},
+		{dashscope.TaskStatusRunning, true},
+		{dashscope.TaskStatusSucceeded, true},
+		{dashscope.TaskStatusFailed, true},
+		{"SOME_NEW_STATUS", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			if got := IsRecognizedDashScopeStatus(tt.status); got != tt.want {
+				t.Errorf("IsRecognizedDashScopeStatus(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestToDashScopeCreateRequest(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -64,6 +85,16 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 			name:         "empty seconds omitted",
 			req:          CreateVideoRequest{Seconds: ""},
 			wantDuration: 0,
+		},
+		{
+			name:         "excessive finite seconds omitted rather than overflowing int64",
+			req:          CreateVideoRequest{Seconds: "1e20"},
+			wantDuration: 0,
+		},
+		{
+			name:         "seconds exactly at the bound is honored",
+			req:          CreateVideoRequest{Seconds: "1099511627776"}, // 1<<40
+			wantDuration: maxDashScopeSeconds,
 		},
 	}
 
@@ -178,6 +209,18 @@ func TestFromGetTaskResponse(t *testing.T) {
 				ID:     "task-123",
 				Object: "video",
 				Status: StatusCompleted,
+			},
+		},
+		{
+			name: "unrecognized status defaults to failed WITH a synthetic diagnostic error",
+			resp: dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: "SOME_NEW_STATUS"},
+			},
+			want: VideoResponse{
+				ID:     "task-123",
+				Object: "video",
+				Status: StatusFailed,
+				Error:  &Error{Code: "unrecognized_dashscope_status", Message: `dashscope reported unrecognized task_status "SOME_NEW_STATUS"`},
 			},
 		},
 	}

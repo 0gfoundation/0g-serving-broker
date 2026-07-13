@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -175,6 +176,99 @@ func TestGetVideo_TranslatesFailedStatus(t *testing.T) {
 	}
 	if errObj["code"] != "InvalidParameter" {
 		t.Errorf("error.code = %v, want InvalidParameter", errObj["code"])
+	}
+}
+
+func TestGetVideoContent_StreamsBytes(t *testing.T) {
+	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			videoURL := "http://" + r.Host + "/asset.mp4"
+			json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: videoURL},
+			})
+		case r.URL.Path == "/asset.mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("fake video bytes"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockDashScope.Close()
+
+	client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+	h := NewVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/videos/:id/content", h.GetVideoContent)
+
+	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc/content", nil)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Errorf("Content-Type = %q, want video/mp4", got)
+	}
+	if rec.Body.String() != "fake video bytes" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "fake video bytes")
+	}
+}
+
+func TestGetVideoContent_NotReadyReturns404(t *testing.T) {
+	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
+			Output: dashscope.TaskOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusRunning},
+		})
+	}))
+	defer mockDashScope.Close()
+
+	client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+	h := NewVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/videos/:id/content", h.GetVideoContent)
+
+	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc/content", nil)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (no video_url yet)", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestGetVideoContent_FetchErrorReturnsBadGateway(t *testing.T) {
+	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			videoURL := "http://" + r.Host + "/asset.mp4"
+			json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: videoURL},
+			})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer mockDashScope.Close()
+
+	client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+	h := NewVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/videos/:id/content", h.GetVideoContent)
+
+	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc/content", nil)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadGateway)
 	}
 }
 

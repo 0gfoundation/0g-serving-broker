@@ -81,6 +81,31 @@ func newMockDashScopeGetTask(t *testing.T, resp dashscope.GetTaskResponse) *http
 	}))
 }
 
+// newMockDashScopeCompletedWithAsset returns a mock that answers a get-task
+// call with a SUCCEEDED status whose video_url points back at this same
+// server's own /asset.mp4 path (serving assetBytes) — exercising the full
+// GetVideoContent flow (get-task to discover the URL, then fetch it) end to
+// end through a real TCP round trip.
+func newMockDashScopeCompletedWithAsset(t *testing.T, taskID string, assetBytes []byte) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: taskID, TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: srv.URL + "/asset.mp4"},
+			})
+		case r.URL.Path == "/asset.mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write(assetBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return srv
+}
+
 // ==========================================================================
 // Translator engine + real TCP listener
 // ==========================================================================
@@ -101,6 +126,7 @@ func startTranslator(t *testing.T, dashscopeBaseURL string) string {
 	engine := gin.New()
 	engine.POST("/videos", h.CreateVideo)
 	engine.GET("/videos/:id", h.GetVideo)
+	engine.GET("/videos/:id/content", h.GetVideoContent)
 
 	srv := httptest.NewServer(engine)
 	t.Cleanup(srv.Close)
@@ -262,5 +288,35 @@ func TestOpenAISDK_RetrieveVideo_Failed(t *testing.T) {
 	}
 	if errObj["message"] != "prompt violates content policy" {
 		t.Errorf("error.message = %v, want %q", errObj["message"], "prompt violates content policy")
+	}
+}
+
+// ==========================================================================
+// GET /videos/{id}/content via client.videos.downloadContent()
+// ==========================================================================
+
+// TestOpenAISDK_DownloadContent exercises the fix for the gap the self-review
+// found: earlier, this translator had no /content route at all, so a
+// completed (and billed) video's bytes were unreachable through any code
+// path a real client actually uses. This drives the exact call
+// (videos.downloadContent()) the real SDK offers for that purpose, end to
+// end through a real TCP round trip and a two-hop mock (get-task, then the
+// asset URL it reports).
+func TestOpenAISDK_DownloadContent(t *testing.T) {
+	assetBytes := []byte("fake video bytes")
+	mockDashScope := newMockDashScopeCompletedWithAsset(t, "task-abc123", assetBytes)
+	t.Cleanup(mockDashScope.Close)
+
+	baseURL := startTranslator(t, mockDashScope.URL)
+
+	res := runNodeSDKScenario(t, baseURL, "", "downloadContent", "task-abc123")
+	if !res.OK {
+		t.Fatalf("downloadContent scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+	if got := res.Result["text"]; got != string(assetBytes) {
+		t.Errorf("downloaded content = %q, want %q", got, string(assetBytes))
+	}
+	if got, _ := res.Result["byteLength"].(float64); int(got) != len(assetBytes) {
+		t.Errorf("byteLength = %v, want %d", res.Result["byteLength"], len(assetBytes))
 	}
 }
