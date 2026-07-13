@@ -11,6 +11,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/dashscope"
 )
@@ -37,16 +38,21 @@ type CreateVideoRequest struct {
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for
-// both POST /videos and GET /videos/{id}.
+// both POST /videos and GET /videos/{id}. CreatedAt/ExpiresAt are Unix
+// seconds, derived from DashScope's submit_time (see parseDashScopeTime) —
+// zero/omitted when that wasn't available to parse.
 type VideoResponse struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Model   string `json:"model,omitempty"`
-	Status  string `json:"status"`
-	Seconds string `json:"seconds,omitempty"`
-	Size    string `json:"size,omitempty"`
-	Usage   *Usage `json:"usage,omitempty"`
-	Error   *Error `json:"error,omitempty"`
+	ID        string `json:"id"`
+	Object    string `json:"object"`
+	Model     string `json:"model,omitempty"`
+	Status    string `json:"status"`
+	Seconds   string `json:"seconds,omitempty"`
+	Size      string `json:"size,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+	CreatedAt int64  `json:"created_at,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
+	Usage     *Usage `json:"usage,omitempty"`
+	Error     *Error `json:"error,omitempty"`
 }
 
 // Usage carries the actual output duration DashScope reported, renamed to
@@ -189,6 +195,36 @@ func sizeToDashScopeParams(size string) (resolution, ratio string) {
 	return resolution, ratio
 }
 
+// dashScopeTimeLayout matches DashScope's documented timestamp format for
+// submit_time/end_time — "YYYY-MM-DD HH:mm:ss.SSS" (e.g.
+// "2026-04-20 17:55:17.075") — always in UTC+8 per the docs, regardless of
+// deployment region.
+const dashScopeTimeLayout = "2006-01-02 15:04:05.000"
+
+// dashScopeTimeZone is UTC+8, DashScope's documented timestamp zone.
+var dashScopeTimeZone = time.FixedZone("UTC+8", 8*60*60)
+
+// dashScopeTaskIDValidity is how long a task_id can be queried before
+// DashScope starts reporting task_status UNKNOWN for it (per the docs) —
+// used to derive expires_at from submit_time, since DashScope doesn't
+// report an expiry timestamp directly.
+const dashScopeTaskIDValidity = 24 * time.Hour
+
+// parseDashScopeTime parses a DashScope submit_time/end_time string into
+// Unix epoch seconds. Returns 0, false for an empty or unparsable value —
+// e.g. end_time before a task reaches a terminal state, not necessarily a
+// malformed one.
+func parseDashScopeTime(raw string) (int64, bool) {
+	if raw == "" {
+		return 0, false
+	}
+	t, err := time.ParseInLocation(dashScopeTimeLayout, raw, dashScopeTimeZone)
+	if err != nil {
+		return 0, false
+	}
+	return t.Unix(), true
+}
+
 // parseSize parses a "WIDTHxHEIGHT" string (case-insensitive on the
 // separator) into strictly-positive pixel dimensions.
 func parseSize(size string) (width, height int, ok bool) {
@@ -233,9 +269,10 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 }
 
 // FromCreateResponse translates a DashScope create-task response into the
-// OpenAI shape. DashScope's create response doesn't echo duration/resolution,
-// so those are echoed back from the client's own request — matching how the
-// real OpenAI Video API's create response mirrors what was asked for.
+// OpenAI shape. DashScope's create response doesn't echo
+// duration/resolution/prompt at all, so those are echoed back from the
+// client's own request — matching how the real OpenAI Video API's create
+// response mirrors what was asked for.
 func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) VideoResponse {
 	return VideoResponse{
 		ID:      resp.Output.TaskID,
@@ -244,6 +281,7 @@ func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) V
 		Status:  StatusFromDashScope(resp.Output.TaskStatus),
 		Seconds: req.Seconds,
 		Size:    req.Size,
+		Prompt:  req.Prompt,
 	}
 }
 
@@ -259,6 +297,17 @@ func FromGetTaskResponse(resp dashscope.GetTaskResponse) VideoResponse {
 		ID:     resp.Output.TaskID,
 		Object: "video",
 		Status: status,
+		Prompt: resp.Output.OrigPrompt,
+	}
+
+	// created_at/expires_at are derived from submit_time — DashScope never
+	// reports an expiry directly, but documents a fixed 24h task_id query
+	// window from submission. Both stay zero (omitted) if submit_time isn't
+	// present/parsable, rather than reporting a misleading time derived from
+	// "now".
+	if createdAt, ok := parseDashScopeTime(resp.Output.SubmitTime); ok {
+		out.CreatedAt = createdAt
+		out.ExpiresAt = createdAt + int64(dashScopeTaskIDValidity.Seconds())
 	}
 
 	if resp.Usage != nil && string(resp.Usage.OutputVideoDuration) != "" {

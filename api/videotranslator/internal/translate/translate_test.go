@@ -2,6 +2,7 @@ package translate
 
 import (
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/dashscope"
 )
@@ -49,6 +50,36 @@ func TestIsRecognizedDashScopeStatus(t *testing.T) {
 		t.Run(tt.status, func(t *testing.T) {
 			if got := IsRecognizedDashScopeStatus(tt.status); got != tt.want {
 				t.Errorf("IsRecognizedDashScopeStatus(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDashScopeTime(t *testing.T) {
+	t.Run("valid timestamp parses as UTC+8", func(t *testing.T) {
+		got, ok := parseDashScopeTime("2026-04-20 17:55:17.075")
+		if !ok {
+			t.Fatal("parseDashScopeTime() ok = false, want true")
+		}
+		want := time.Date(2026, 4, 20, 17, 55, 17, 75_000_000, time.FixedZone("UTC+8", 8*3600)).Unix()
+		if got != want {
+			t.Errorf("parseDashScopeTime() = %d, want %d", got, want)
+		}
+	})
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"empty", ""},
+		{"unparsable", "not-a-timestamp"},
+		{"wrong format (missing fractional seconds)", "2026-04-20 17:55:17"},
+		{"date only", "2026-04-20"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, ok := parseDashScopeTime(tt.raw); ok {
+				t.Errorf("parseDashScopeTime(%q) ok = true, want false", tt.raw)
 			}
 		})
 	}
@@ -228,6 +259,7 @@ func TestFromCreateResponse(t *testing.T) {
 		Status:  StatusQueued,
 		Seconds: "5",
 		Size:    "720p",
+		Prompt:  "a cat",
 	}
 	if got != want {
 		t.Errorf("FromCreateResponse() = %+v, want %+v", got, want)
@@ -235,11 +267,54 @@ func TestFromCreateResponse(t *testing.T) {
 }
 
 func TestFromGetTaskResponse(t *testing.T) {
+	wantSubmitTime := time.Date(2026, 4, 20, 17, 55, 17, 75_000_000, time.FixedZone("UTC+8", 8*3600))
+
 	tests := []struct {
 		name string
 		resp dashscope.GetTaskResponse
 		want VideoResponse
 	}{
+		{
+			name: "orig_prompt and submit_time populate prompt/created_at/expires_at",
+			resp: dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{
+					TaskID:     "task-123",
+					TaskStatus: dashscope.TaskStatusRunning,
+					OrigPrompt: "a cat playing piano",
+					SubmitTime: "2026-04-20 17:55:17.075",
+				},
+			},
+			want: VideoResponse{
+				ID:        "task-123",
+				Object:    "video",
+				Status:    StatusInProgress,
+				Prompt:    "a cat playing piano",
+				CreatedAt: wantSubmitTime.Unix(),
+				ExpiresAt: wantSubmitTime.Unix() + int64(24*time.Hour/time.Second),
+			},
+		},
+		{
+			name: "missing submit_time leaves created_at/expires_at at zero",
+			resp: dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending},
+			},
+			want: VideoResponse{
+				ID:     "task-123",
+				Object: "video",
+				Status: StatusQueued,
+			},
+		},
+		{
+			name: "unparsable submit_time leaves created_at/expires_at at zero",
+			resp: dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending, SubmitTime: "not-a-timestamp"},
+			},
+			want: VideoResponse{
+				ID:     "task-123",
+				Object: "video",
+				Status: StatusQueued,
+			},
+		},
 		{
 			name: "succeeded with usage renames video_duration to output_video_duration",
 			resp: dashscope.GetTaskResponse{
@@ -349,6 +424,15 @@ func TestFromGetTaskResponse(t *testing.T) {
 			got := FromGetTaskResponse(tt.resp)
 			if got.ID != tt.want.ID || got.Object != tt.want.Object || got.Status != tt.want.Status {
 				t.Errorf("FromGetTaskResponse() = %+v, want %+v", got, tt.want)
+			}
+			if got.Prompt != tt.want.Prompt {
+				t.Errorf("Prompt = %q, want %q", got.Prompt, tt.want.Prompt)
+			}
+			if got.CreatedAt != tt.want.CreatedAt {
+				t.Errorf("CreatedAt = %d, want %d", got.CreatedAt, tt.want.CreatedAt)
+			}
+			if got.ExpiresAt != tt.want.ExpiresAt {
+				t.Errorf("ExpiresAt = %d, want %d", got.ExpiresAt, tt.want.ExpiresAt)
 			}
 			if (got.Usage == nil) != (tt.want.Usage == nil) {
 				t.Errorf("Usage presence = %v, want %v", got.Usage != nil, tt.want.Usage != nil)

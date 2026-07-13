@@ -95,10 +95,19 @@ async function main() {
       const video = await client.videos.retrieve(videoID, authedOpts);
       // `usage` isn't part of the official Video type (it's a broker-only
       // billing extension the translator adds — see translate.FromGetTaskResponse),
-      // so it's read as a plain field rather than a typed one.
+      // so it's read as a plain field rather than a typed one. prompt/created_at/
+      // expires_at ARE part of the official typed Video interface, unlike usage.
       const usage = video.usage || null;
       const error = video.error || null;
-      return { id: video.id, status: video.status, usage, error };
+      return {
+        id: video.id,
+        status: video.status,
+        usage,
+        error,
+        prompt: video.prompt,
+        created_at: video.created_at,
+        expires_at: video.expires_at,
+      };
     },
 
     async downloadContent() {

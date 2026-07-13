@@ -77,13 +77,22 @@ type GetTaskResponse struct {
 }
 
 // TaskOutput is the output block of a get-task response. Code/Message are
-// populated by DashScope only when TaskStatus is FAILED.
+// populated by DashScope only when TaskStatus is FAILED. SubmitTime and
+// EndTime are "YYYY-MM-DD HH:mm:ss.SSS" strings in UTC+8 (DashScope's
+// documented format, not Unix time) — see translate.parseDashScopeTime.
+// EndTime, like the usage block, is only populated once the task reaches a
+// terminal state; SubmitTime is expected to be present from submission
+// onward (unconfirmed for the earliest PENDING responses against a live
+// API — see the package doc).
 type TaskOutput struct {
 	TaskID     string `json:"task_id"`
 	TaskStatus string `json:"task_status"`
 	VideoURL   string `json:"video_url,omitempty"`
 	Code       string `json:"code,omitempty"`
 	Message    string `json:"message,omitempty"`
+	OrigPrompt string `json:"orig_prompt,omitempty"`
+	SubmitTime string `json:"submit_time,omitempty"`
+	EndTime    string `json:"end_time,omitempty"`
 }
 
 // TaskUsage is the actual-output usage DashScope reports once a task

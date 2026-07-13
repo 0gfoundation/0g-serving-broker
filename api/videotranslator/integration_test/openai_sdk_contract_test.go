@@ -332,8 +332,14 @@ func TestOpenAISDK_CreateVideo_DashScope429IsRateLimitError(t *testing.T) {
 
 func TestOpenAISDK_RetrieveVideo_Completed(t *testing.T) {
 	mockDashScope := newMockDashScopeGetTask(t, dashscope.GetTaskResponse{
-		Output: dashscope.TaskOutput{TaskID: "task-abc123", TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: "https://x/y.mp4"},
-		Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5"},
+		Output: dashscope.TaskOutput{
+			TaskID:     "task-abc123",
+			TaskStatus: dashscope.TaskStatusSucceeded,
+			VideoURL:   "https://x/y.mp4",
+			OrigPrompt: "a cat playing piano",
+			SubmitTime: "2026-04-20 17:55:17.075",
+		},
+		Usage: &dashscope.TaskUsage{OutputVideoDuration: "5"},
 	})
 	t.Cleanup(mockDashScope.Close)
 
@@ -353,6 +359,22 @@ func TestOpenAISDK_RetrieveVideo_Completed(t *testing.T) {
 	if usage["output_video_duration"] != float64(5) {
 		t.Errorf("usage.output_video_duration = %v, want 5 (renamed from dashscope's usage.video_duration — the field the broker's resolveVideoBilling recognizes)",
 			usage["output_video_duration"])
+	}
+
+	// prompt/created_at/expires_at ARE part of the official typed Video
+	// interface (unlike usage) — this proves the real SDK actually reads
+	// them as such, not just that a Go JSON decoder can find the keys.
+	if res.Result["prompt"] != "a cat playing piano" {
+		t.Errorf("prompt = %v, want %q (from dashscope's orig_prompt)", res.Result["prompt"], "a cat playing piano")
+	}
+	wantCreatedAt := time.Date(2026, 4, 20, 17, 55, 17, 0, time.FixedZone("UTC+8", 8*3600)).Unix()
+	gotCreatedAt, _ := res.Result["created_at"].(float64)
+	if int64(gotCreatedAt) != wantCreatedAt {
+		t.Errorf("created_at = %v, want %d (from dashscope's submit_time)", res.Result["created_at"], wantCreatedAt)
+	}
+	gotExpiresAt, _ := res.Result["expires_at"].(float64)
+	if int64(gotExpiresAt) != wantCreatedAt+int64(24*time.Hour/time.Second) {
+		t.Errorf("expires_at = %v, want created_at + 24h (%d)", res.Result["expires_at"], wantCreatedAt+int64(24*time.Hour/time.Second))
 	}
 }
 
