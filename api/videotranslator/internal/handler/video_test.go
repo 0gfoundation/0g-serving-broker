@@ -99,6 +99,83 @@ func TestCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	}
 }
 
+func TestCreateVideo_JSONBody(t *testing.T) {
+	t.Run("valid JSON body is translated", func(t *testing.T) {
+		var gotReq dashscope.CreateRequest
+		mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+				t.Fatalf("decode dashscope request: %v", err)
+			}
+			json.NewEncoder(w).Encode(dashscope.CreateResponse{
+				Output: dashscope.CreateOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusPending},
+			})
+		}))
+		defer mockDashScope.Close()
+
+		client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+		h := NewVideoHandler(client, newTestLogger(t))
+
+		gin.SetMode(gin.TestMode)
+		engine := gin.New()
+		engine.POST("/videos", h.CreateVideo)
+
+		// Deliberately mixes a numeric JSON literal (seconds) with the seed
+		// undocumented-param convention (also a numeric literal) to exercise
+		// json.Number handling on both fields via the JSON (not multipart)
+		// request path.
+		bodyJSON := `{"model":"happyhorse","prompt":"a cat","seconds":5,"size":"1280x720","seed":42}`
+		req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(bodyJSON))
+		req.Header.Set("Content-Type", "application/json")
+
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if gotReq.Model != "happyhorse" || gotReq.Input.Prompt != "a cat" {
+			t.Errorf("dashscope create request = %+v", gotReq)
+		}
+		if gotReq.Parameters.Duration != 5 {
+			t.Errorf("dashscope create request duration = %d, want 5 (from JSON seconds:5)", gotReq.Parameters.Duration)
+		}
+		if gotReq.Parameters.Resolution != "720P" || gotReq.Parameters.Ratio != "16:9" {
+			t.Errorf("dashscope create request resolution/ratio = %q/%q, want 720P/16:9", gotReq.Parameters.Resolution, gotReq.Parameters.Ratio)
+		}
+		if gotReq.Parameters.Seed == nil || *gotReq.Parameters.Seed != 42 {
+			t.Errorf("dashscope create request seed = %v, want 42", gotReq.Parameters.Seed)
+		}
+	})
+
+	t.Run("malformed JSON body is a 400, not forwarded to dashscope", func(t *testing.T) {
+		called := false
+		mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		}))
+		defer mockDashScope.Close()
+
+		client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+		h := NewVideoHandler(client, newTestLogger(t))
+
+		gin.SetMode(gin.TestMode)
+		engine := gin.New()
+		engine.POST("/videos", h.CreateVideo)
+
+		req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(`{"model":`))
+		req.Header.Set("Content-Type", "application/json")
+
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+		if called {
+			t.Error("dashscope was called with a malformed request body")
+		}
+	})
+}
+
 func TestCreateVideo_SeedPassthrough(t *testing.T) {
 	tests := []struct {
 		name     string

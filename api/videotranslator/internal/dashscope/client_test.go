@@ -9,7 +9,49 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNewClient_Defaults(t *testing.T) {
+	t.Run("empty baseURL falls back to the public DashScope endpoint", func(t *testing.T) {
+		client := NewClient("", &http.Client{})
+		if client.baseURL != defaultBaseURL {
+			t.Errorf("baseURL = %q, want %q", client.baseURL, defaultBaseURL)
+		}
+	})
+
+	t.Run("nil httpClient gets a tuned default with a 30s timeout", func(t *testing.T) {
+		client := NewClient("https://example.com", nil)
+		if client.httpClient == nil {
+			t.Fatal("httpClient is nil, want a default client")
+		}
+		if client.httpClient.Timeout != 30*time.Second {
+			t.Errorf("httpClient.Timeout = %v, want 30s", client.httpClient.Timeout)
+		}
+		transport, ok := client.httpClient.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("httpClient.Transport = %T, want *http.Transport", client.httpClient.Transport)
+		}
+		if transport.MaxIdleConnsPerHost != 200 {
+			t.Errorf("MaxIdleConnsPerHost = %d, want 200 (the tuned default, not Go's DefaultTransport value of 2)", transport.MaxIdleConnsPerHost)
+		}
+		// contentClient shares the same Transport as httpClient (for connection
+		// pooling) but has its own, longer timeout for streaming video content.
+		if client.contentClient.Transport != client.httpClient.Transport {
+			t.Error("contentClient.Transport != httpClient.Transport, want them to share the same pooled Transport")
+		}
+		if client.contentClient.Timeout != contentFetchTimeout {
+			t.Errorf("contentClient.Timeout = %v, want %v", client.contentClient.Timeout, contentFetchTimeout)
+		}
+	})
+
+	t.Run("trailing slash on baseURL is trimmed", func(t *testing.T) {
+		client := NewClient("https://example.com/", &http.Client{})
+		if client.baseURL != "https://example.com" {
+			t.Errorf("baseURL = %q, want trailing slash trimmed", client.baseURL)
+		}
+	})
+}
 
 func TestGetTask_EscapesTaskID(t *testing.T) {
 	var gotPath, gotRawQuery string
