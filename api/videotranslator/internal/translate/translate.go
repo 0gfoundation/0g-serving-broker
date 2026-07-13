@@ -24,12 +24,16 @@ const (
 )
 
 // CreateVideoRequest is the OpenAI-shaped POST /videos request as parsed
-// from the broker's forwarded body (multipart/form-data or JSON).
+// from the broker's forwarded body (multipart/form-data or JSON). Seed has
+// no official OpenAI Video API field — a client can only set it via the
+// SDK's documented "undocumented request params" escape hatch, which sends
+// it through as a plain extra field the broker relays unmodified.
 type CreateVideoRequest struct {
 	Model   string
 	Prompt  string
 	Seconds string
 	Size    string
+	Seed    string
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for
@@ -105,6 +109,28 @@ func StatusFromDashScope(status string) string {
 // conversion below into an implementation-defined (in practice, garbage
 // negative) result that would be sent to DashScope as-is.
 const maxDashScopeSeconds = 1 << 40
+
+// maxDashScopeSeed is HappyHorse's documented upper bound for "seed": an
+// integer in [0, 2147483647].
+const maxDashScopeSeed = 2147483647
+
+// parseDashScopeSeed parses a client-supplied seed string into DashScope's
+// expected integer range. Empty, unparsable, non-integral (e.g. "5.5"), or
+// out-of-range values yield nil — omitted from the request, letting
+// DashScope pick its own random seed — rather than rejecting the whole
+// create request over one malformed optional field (mirrors how an invalid
+// "seconds" is handled).
+func parseDashScopeSeed(raw string) *int64 {
+	if raw == "" {
+		return nil
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsInf(f, 0) || f != math.Trunc(f) || f < 0 || f > maxDashScopeSeed {
+		return nil
+	}
+	seed := int64(f)
+	return &seed
+}
 
 // dashScopeRatios are HappyHorse's documented aspect-ratio values, each
 // paired with its numeric width/height for nearest-match snapping in
@@ -201,6 +227,7 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 			// client-configurable — the OpenAI Video API has no field for it,
 			// and there's no reason a specific request would want it back on.
 			Watermark: false,
+			Seed:      parseDashScopeSeed(req.Seed),
 		},
 	}
 }

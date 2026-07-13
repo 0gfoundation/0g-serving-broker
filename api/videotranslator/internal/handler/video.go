@@ -33,12 +33,15 @@ func NewVideoHandler(client *dashscope.Client, logger log.Logger) *VideoHandler 
 // jsonCreateVideoRequest is the JSON-shaped variant of a create request
 // (the broker's own request-side parsing tolerates both multipart and JSON —
 // see resolveVideoBilling/videoSecondsSizeFromRequest in inference/internal/ctrl/video.go
-// — so this mirrors that).
+// — so this mirrors that). Seed has no official OpenAI Video API field — a
+// client can only set it via the SDK's "undocumented request params" escape
+// hatch, which the broker relays through as an ordinary extra field.
 type jsonCreateVideoRequest struct {
 	Model   string      `json:"model"`
 	Prompt  string      `json:"prompt"`
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
+	Seed    json.Number `json:"seed"`
 }
 
 // CreateVideo handles POST /videos.
@@ -132,6 +135,7 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 			Prompt:  r.FormValue("prompt"),
 			Seconds: r.FormValue("seconds"),
 			Size:    r.FormValue("size"),
+			Seed:    r.FormValue("seed"),
 		}, nil
 	}
 
@@ -144,5 +148,6 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		Prompt:  jr.Prompt,
 		Seconds: jr.Seconds.String(),
 		Size:    jr.Size,
+		Seed:    jr.Seed.String(),
 	}, nil
 }

@@ -242,6 +242,31 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 	}
 }
 
+// TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam proves the real SDK's
+// own documented escape hatch for undocumented request params (there is no
+// "seed" field in VideoCreateParams — the OpenAI Video API doesn't have
+// one) actually reaches the translator and gets validated/forwarded to
+// DashScope, not silently dropped somewhere in the SDK's own encoding.
+func TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam(t *testing.T) {
+	capture := &mockDashScopeCapture{}
+	mockDashScope := newMockDashScopeCreate(t, "task-abc123", capture)
+	t.Cleanup(mockDashScope.Close)
+
+	baseURL := startTranslator(t, mockDashScope.URL)
+
+	res := runNodeSDKScenario(t, baseURL, "", "createWithSeed", "")
+	if !res.OK {
+		t.Fatalf("createWithSeed scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+
+	if capture.gotCreateBody.Parameters.Seed == nil {
+		t.Fatal("dashscope create request has no seed; want 42 (sent via the SDK's undocumented-param escape hatch)")
+	}
+	if *capture.gotCreateBody.Parameters.Seed != 42 {
+		t.Errorf("dashscope create request seed = %d, want 42", *capture.gotCreateBody.Parameters.Seed)
+	}
+}
+
 // ==========================================================================
 // GET /videos/{id} via client.videos.retrieve()
 // ==========================================================================

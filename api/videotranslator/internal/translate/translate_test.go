@@ -87,6 +87,36 @@ func TestSizeToDashScopeParams(t *testing.T) {
 	}
 }
 
+func ptrInt64(v int64) *int64 { return &v }
+
+func TestParseDashScopeSeed(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want *int64
+	}{
+		{"empty omitted", "", nil},
+		{"zero is a valid explicit seed, not omitted", "0", ptrInt64(0)},
+		{"positive integer", "42", ptrInt64(42)},
+		{"upper bound honored", "2147483647", ptrInt64(2147483647)},
+		{"over upper bound omitted", "2147483648", nil},
+		{"negative omitted", "-1", nil},
+		{"non-integral omitted", "5.5", nil},
+		{"unparsable omitted", "not-a-number", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseDashScopeSeed(tt.raw)
+			if (got == nil) != (tt.want == nil) {
+				t.Fatalf("parseDashScopeSeed(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+			if got != nil && *got != *tt.want {
+				t.Errorf("parseDashScopeSeed(%q) = %d, want %d", tt.raw, *got, *tt.want)
+			}
+		})
+	}
+}
+
 func TestToDashScopeCreateRequest(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -94,6 +124,7 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 		wantDuration   int64
 		wantResolution string
 		wantRatio      string
+		wantSeed       *int64
 	}{
 		{
 			name:           "integer seconds and size mapped to resolution/ratio",
@@ -101,6 +132,18 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 			wantDuration:   5,
 			wantResolution: "720P",
 			wantRatio:      "16:9",
+		},
+		{
+			name:         "valid seed is forwarded",
+			req:          CreateVideoRequest{Seconds: "5", Seed: "42"},
+			wantDuration: 5,
+			wantSeed:     ptrInt64(42),
+		},
+		{
+			name:         "out-of-range seed omitted rather than rejecting the request",
+			req:          CreateVideoRequest{Seconds: "5", Seed: "-1"},
+			wantDuration: 5,
+			wantSeed:     nil,
 		},
 		{
 			name:         "float seconds rounds up",
@@ -159,6 +202,11 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 			}
 			if got.Parameters.Watermark != false {
 				t.Errorf("Watermark = %v, want false (always disabled, regardless of request content)", got.Parameters.Watermark)
+			}
+			if (got.Parameters.Seed == nil) != (tt.wantSeed == nil) {
+				t.Fatalf("Seed = %v, want %v", got.Parameters.Seed, tt.wantSeed)
+			} else if got.Parameters.Seed != nil && *got.Parameters.Seed != *tt.wantSeed {
+				t.Errorf("Seed = %d, want %d", *got.Parameters.Seed, *tt.wantSeed)
 			}
 		})
 	}

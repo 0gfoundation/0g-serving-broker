@@ -45,6 +45,21 @@ async function main() {
       return { id: video.id, object: video.object, status: video.status, model: video.model, seconds: video.seconds, size: video.size };
     },
 
+    async createWithSeed() {
+      // "seed" has no field in the SDK's typed VideoCreateParams — this
+      // exercises the SDK's own documented "undocumented request params"
+      // escape hatch (see its README's "Making custom/undocumented
+      // requests" section): the library doesn't validate at runtime that
+      // the request matches the type, so this extra property is sent as-is
+      // in the multipart body, same as a real caller would do with
+      // `// @ts-expect-error` in TypeScript.
+      const video = await client.videos.create(
+        { model: "happyhorse", prompt: "a cat", seconds: "4", seed: 42 },
+        authedOpts,
+      );
+      return { id: video.id, status: video.status };
+    },
+
     async retrieve() {
       if (!videoID) throw new Error("VIDEO_ID env var is required for the retrieve scenario");
       const video = await client.videos.retrieve(videoID, authedOpts);

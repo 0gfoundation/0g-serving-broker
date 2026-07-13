@@ -44,11 +44,17 @@ type CreateInput struct {
 // so the field has no "omitempty": Go's zero value for bool already IS the
 // value we want on every request, but the tag would otherwise make that
 // look like an accidentally-unset field rather than an intentional one.
+// Seed IS client-suppliable (via the OpenAI SDK's documented "undocumented
+// request params" escape hatch — see translate.CreateVideoRequest.Seed) but
+// has no official OpenAI Video API field, so it's a *int64: nil omits it
+// (DashScope picks a random seed) — a plain int64 with omitempty would
+// incorrectly drop an explicit, valid seed of 0.
 type CreateParameters struct {
 	Duration   int64  `json:"duration,omitempty"`
 	Resolution string `json:"resolution,omitempty"`
 	Ratio      string `json:"ratio,omitempty"`
 	Watermark  bool   `json:"watermark"`
+	Seed       *int64 `json:"seed,omitempty"`
 }
 
 // CreateResponse is the response to a create-task call.

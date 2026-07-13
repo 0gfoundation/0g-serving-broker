@@ -99,6 +99,62 @@ func TestCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	}
 }
 
+func TestCreateVideo_SeedPassthrough(t *testing.T) {
+	tests := []struct {
+		name     string
+		seed     string
+		wantSeed *int64
+	}{
+		{"valid seed forwarded", "42", ptrInt64(42)},
+		{"invalid seed omitted, not rejected", "not-a-number", nil},
+		{"absent seed omitted", "", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotReq dashscope.CreateRequest
+			mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+					t.Fatalf("decode dashscope request: %v", err)
+				}
+				json.NewEncoder(w).Encode(dashscope.CreateResponse{
+					Output: dashscope.CreateOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusPending},
+				})
+			}))
+			defer mockDashScope.Close()
+
+			client := dashscope.NewClient(mockDashScope.URL, mockDashScope.Client())
+			h := NewVideoHandler(client, newTestLogger(t))
+
+			gin.SetMode(gin.TestMode)
+			engine := gin.New()
+			engine.POST("/videos", h.CreateVideo)
+
+			fields := map[string]string{"model": "happyhorse", "prompt": "x"}
+			if tt.seed != "" {
+				fields["seed"] = tt.seed
+			}
+			body, contentType := newMultipartBody(t, fields)
+			req := httptest.NewRequest(http.MethodPost, "/videos", body)
+			req.Header.Set("Content-Type", contentType)
+
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if (gotReq.Parameters.Seed == nil) != (tt.wantSeed == nil) {
+				t.Fatalf("Seed = %v, want %v", gotReq.Parameters.Seed, tt.wantSeed)
+			} else if gotReq.Parameters.Seed != nil && *gotReq.Parameters.Seed != *tt.wantSeed {
+				t.Errorf("Seed = %d, want %d", *gotReq.Parameters.Seed, *tt.wantSeed)
+			}
+		})
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }
+
 func TestGetVideo_TranslatesCompletedStatusAndUsage(t *testing.T) {
 	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
