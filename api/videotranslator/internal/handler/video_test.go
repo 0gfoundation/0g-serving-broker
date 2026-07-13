@@ -103,7 +103,7 @@ func TestGetVideo_TranslatesCompletedStatusAndUsage(t *testing.T) {
 	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
 			Output: dashscope.TaskOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: "https://x/y.mp4"},
-			Usage:  &dashscope.TaskUsage{VideoDuration: "5"},
+			Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5"},
 		})
 	}))
 	defer mockDashScope.Close()

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/dashscope"
 )
@@ -57,13 +58,16 @@ type Error struct {
 }
 
 // IsRecognizedDashScopeStatus reports whether status is one of the
-// task_status values this package maps explicitly. StatusFromDashScope
-// collapses everything else to "failed" too (see its doc), but callers that
-// want to log/alert on a genuinely-unrecognized status — as opposed to a
-// real DashScope-reported failure — should check this first.
+// task_status values this package maps explicitly (including the documented
+// CANCELED/UNKNOWN terminal values, not just PENDING/RUNNING/SUCCEEDED/FAILED).
+// StatusFromDashScope collapses everything else to "failed" too (see its
+// doc), but callers that want to log/alert on a genuinely-unrecognized
+// status — as opposed to any of these documented outcomes — should check
+// this first.
 func IsRecognizedDashScopeStatus(status string) bool {
 	switch status {
-	case dashscope.TaskStatusPending, dashscope.TaskStatusRunning, dashscope.TaskStatusSucceeded, dashscope.TaskStatusFailed:
+	case dashscope.TaskStatusPending, dashscope.TaskStatusRunning, dashscope.TaskStatusSucceeded,
+		dashscope.TaskStatusFailed, dashscope.TaskStatusCanceled, dashscope.TaskStatusUnknown:
 		return true
 	default:
 		return false
@@ -71,10 +75,14 @@ func IsRecognizedDashScopeStatus(status string) bool {
 }
 
 // StatusFromDashScope maps a DashScope output.task_status to the OpenAI
-// Video API status. A status DashScope hasn't documented maps to "failed"
-// rather than passing through unrecognized — an unmapped status left as-is
-// would have the broker (or a future poller) wait forever on a task whose
-// terminal state it can never recognize.
+// Video API status. CANCELED and UNKNOWN (the latter returned once a
+// task_id ages past its 24-hour query validity) both map to "failed" —
+// OpenAI's Video API has no equivalent third terminal state, and both are
+// non-recoverable from the caller's point of view. A status DashScope hasn't
+// documented at all ALSO maps to "failed" rather than passing through
+// unrecognized — an unmapped status left as-is would have the broker (or a
+// future poller) wait forever on a task whose terminal state it can never
+// recognize.
 func StatusFromDashScope(status string) string {
 	switch status {
 	case dashscope.TaskStatusPending:
@@ -83,7 +91,7 @@ func StatusFromDashScope(status string) string {
 		return StatusInProgress
 	case dashscope.TaskStatusSucceeded:
 		return StatusCompleted
-	case dashscope.TaskStatusFailed:
+	case dashscope.TaskStatusFailed, dashscope.TaskStatusCanceled, dashscope.TaskStatusUnknown:
 		return StatusFailed
 	default:
 		return StatusFailed
@@ -98,6 +106,78 @@ func StatusFromDashScope(status string) string {
 // negative) result that would be sent to DashScope as-is.
 const maxDashScopeSeconds = 1 << 40
 
+// dashScopeRatios are HappyHorse's documented aspect-ratio values, each
+// paired with its numeric width/height for nearest-match snapping in
+// sizeToDashScopeParams. Order doesn't matter (snapping compares all of
+// them), but 16:9 first mirrors the vendor's own default.
+var dashScopeRatios = []struct {
+	label string
+	value float64
+}{
+	{"16:9", 16.0 / 9.0},
+	{"9:16", 9.0 / 16.0},
+	{"1:1", 1.0},
+	{"4:3", 4.0 / 3.0},
+	{"3:4", 3.0 / 4.0},
+	{"4:5", 4.0 / 5.0},
+	{"5:4", 5.0 / 4.0},
+	{"9:21", 9.0 / 21.0},
+	{"21:9", 21.0 / 9.0},
+}
+
+// dashScopeResolutionThreshold is the larger-side pixel count at or below
+// which sizeToDashScopeParams snaps to "720P" (above it, "1080P"). HappyHorse
+// only accepts this coarse two-tier enum, never exact pixel dimensions.
+// Chosen so OpenAI's own documented Video sizes split cleanly along it: the
+// 720x1280/1280x720 pair (max side 1280) snaps to 720P, and the
+// 1024x1792/1792x1024 pair (max side 1792) snaps to 1080P.
+const dashScopeResolutionThreshold = 1280
+
+// sizeToDashScopeParams derives HappyHorse's "resolution" ("720P"/"1080P")
+// and "ratio" (e.g. "16:9") parameters from the client's pixel-dimension
+// "size" field (e.g. "1280x720") — there is no direct equivalent on the
+// OpenAI-facing side, since HappyHorse's own resolution vocabulary is a
+// coarse enum, not exact pixel dimensions. An empty or unparsable size
+// yields empty strings for both (omitted from the request, so DashScope
+// applies its own defaults: 1080P, 16:9).
+func sizeToDashScopeParams(size string) (resolution, ratio string) {
+	width, height, ok := parseSize(size)
+	if !ok {
+		return "", ""
+	}
+
+	if width > dashScopeResolutionThreshold || height > dashScopeResolutionThreshold {
+		resolution = "1080P"
+	} else {
+		resolution = "720P"
+	}
+
+	target := float64(width) / float64(height)
+	bestDiff := math.MaxFloat64
+	for _, r := range dashScopeRatios {
+		if diff := math.Abs(r.value - target); diff < bestDiff {
+			bestDiff = diff
+			ratio = r.label
+		}
+	}
+	return resolution, ratio
+}
+
+// parseSize parses a "WIDTHxHEIGHT" string (case-insensitive on the
+// separator) into strictly-positive pixel dimensions.
+func parseSize(size string) (width, height int, ok bool) {
+	parts := strings.SplitN(strings.ToLower(size), "x", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	w, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+	h, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errW != nil || errH != nil || w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
+}
+
 // ToDashScopeCreateRequest builds the DashScope create-task body from an
 // OpenAI-shaped create request. A non-positive, unparsable, or excessive
 // Seconds yields a zero Duration (omitted from the request) rather than an
@@ -108,12 +188,14 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) && s <= float64(maxDashScopeSeconds) {
 		duration = int64(math.Ceil(s))
 	}
+	resolution, ratio := sizeToDashScopeParams(req.Size)
 	return dashscope.CreateRequest{
 		Model: req.Model,
 		Input: dashscope.CreateInput{Prompt: req.Prompt},
 		Parameters: dashscope.CreateParameters{
 			Duration:   duration,
-			Resolution: req.Size,
+			Resolution: resolution,
+			Ratio:      ratio,
 		},
 	}
 }
@@ -134,9 +216,11 @@ func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) V
 }
 
 // FromGetTaskResponse translates a DashScope get-task response into the
-// OpenAI shape. This is the critical path for billing: usage.video_duration
-// is renamed to usage.output_video_duration, the field the broker's
-// resolveVideoBilling already recognizes.
+// OpenAI shape. This is the critical path for billing: DashScope's
+// usage.output_video_duration is exactly the field name the broker's
+// resolveVideoBilling already recognizes — confirmed against HappyHorse's
+// docs, so no renaming is actually needed here (an earlier, pre-confirmation
+// guess had assumed a "video_duration" field name that doesn't exist).
 func FromGetTaskResponse(resp dashscope.GetTaskResponse) VideoResponse {
 	status := StatusFromDashScope(resp.Output.TaskStatus)
 	out := VideoResponse{
@@ -145,8 +229,8 @@ func FromGetTaskResponse(resp dashscope.GetTaskResponse) VideoResponse {
 		Status: status,
 	}
 
-	if resp.Usage != nil && string(resp.Usage.VideoDuration) != "" {
-		out.Usage = &Usage{OutputVideoDuration: resp.Usage.VideoDuration}
+	if resp.Usage != nil && string(resp.Usage.OutputVideoDuration) != "" {
+		out.Usage = &Usage{OutputVideoDuration: resp.Usage.OutputVideoDuration}
 	}
 
 	// Populate Error whenever the MAPPED status is "failed" — not just when
@@ -154,12 +238,17 @@ func FromGetTaskResponse(resp dashscope.GetTaskResponse) VideoResponse {
 	// unrecognized status (IsRecognizedDashScopeStatus false) that
 	// StatusFromDashScope defaults to "failed" would report a terminal
 	// failure with a bare {"status":"failed"} and no diagnostic info at all,
-	// leaving no way to tell "the vendor rejected this" from "this
+	// leaving no way to tell "the vendor rejected/canceled this" from "this
 	// translator didn't recognize a real DashScope status".
 	if status == StatusFailed {
-		if resp.Output.TaskStatus == dashscope.TaskStatusFailed {
+		switch resp.Output.TaskStatus {
+		case dashscope.TaskStatusFailed:
 			out.Error = &Error{Code: resp.Output.Code, Message: resp.Output.Message}
-		} else {
+		case dashscope.TaskStatusCanceled:
+			out.Error = &Error{Code: "dashscope_task_canceled", Message: "dashscope reported task_status CANCELED"}
+		case dashscope.TaskStatusUnknown:
+			out.Error = &Error{Code: "dashscope_task_unknown", Message: "dashscope reported task_status UNKNOWN (task expired past its 24h validity, or never existed)"}
+		default:
 			out.Error = &Error{
 				Code:    "unrecognized_dashscope_status",
 				Message: fmt.Sprintf("dashscope reported unrecognized task_status %q", resp.Output.TaskStatus),

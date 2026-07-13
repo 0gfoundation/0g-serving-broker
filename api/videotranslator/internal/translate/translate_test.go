@@ -16,7 +16,9 @@ func TestStatusFromDashScope(t *testing.T) {
 		{"running maps to in_progress", dashscope.TaskStatusRunning, StatusInProgress},
 		{"succeeded maps to completed", dashscope.TaskStatusSucceeded, StatusCompleted},
 		{"failed maps to failed", dashscope.TaskStatusFailed, StatusFailed},
-		{"unknown status defaults to failed", "SOME_NEW_STATUS", StatusFailed},
+		{"canceled maps to failed", dashscope.TaskStatusCanceled, StatusFailed},
+		{"unknown (expired task_id) maps to failed", dashscope.TaskStatusUnknown, StatusFailed},
+		{"unrecognized status defaults to failed", "SOME_NEW_STATUS", StatusFailed},
 		{"empty status defaults to failed", "", StatusFailed},
 	}
 
@@ -38,6 +40,8 @@ func TestIsRecognizedDashScopeStatus(t *testing.T) {
 		{dashscope.TaskStatusRunning, true},
 		{dashscope.TaskStatusSucceeded, true},
 		{dashscope.TaskStatusFailed, true},
+		{dashscope.TaskStatusCanceled, true},
+		{dashscope.TaskStatusUnknown, true},
 		{"SOME_NEW_STATUS", false},
 		{"", false},
 	}
@@ -50,16 +54,53 @@ func TestIsRecognizedDashScopeStatus(t *testing.T) {
 	}
 }
 
+func TestSizeToDashScopeParams(t *testing.T) {
+	tests := []struct {
+		name           string
+		size           string
+		wantResolution string
+		wantRatio      string
+	}{
+		// The two size pairs the real OpenAI Video API documents, split
+		// cleanly across HappyHorse's two resolution tiers.
+		{"1280x720 (openai landscape 720-tier)", "1280x720", "720P", "16:9"},
+		{"720x1280 (openai portrait 720-tier)", "720x1280", "720P", "9:16"},
+		{"1792x1024 (openai landscape 1080-tier)", "1792x1024", "1080P", "16:9"},
+		{"1024x1792 (openai portrait 1080-tier)", "1024x1792", "1080P", "9:16"},
+		{"square", "1024x1024", "720P", "1:1"},
+		{"case-insensitive separator", "1280X720", "720P", "16:9"},
+		{"empty size yields no override", "", "", ""},
+		{"unparsable size yields no override", "not-a-size", "", ""},
+		{"zero dimension yields no override", "0x720", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolution, ratio := sizeToDashScopeParams(tt.size)
+			if resolution != tt.wantResolution {
+				t.Errorf("resolution = %q, want %q", resolution, tt.wantResolution)
+			}
+			if ratio != tt.wantRatio {
+				t.Errorf("ratio = %q, want %q", ratio, tt.wantRatio)
+			}
+		})
+	}
+}
+
 func TestToDashScopeCreateRequest(t *testing.T) {
 	tests := []struct {
-		name         string
-		req          CreateVideoRequest
-		wantDuration int64
+		name           string
+		req            CreateVideoRequest
+		wantDuration   int64
+		wantResolution string
+		wantRatio      string
 	}{
 		{
-			name:         "integer seconds",
-			req:          CreateVideoRequest{Model: "happyhorse", Prompt: "a cat", Seconds: "5", Size: "720p"},
-			wantDuration: 5,
+			name:           "integer seconds and size mapped to resolution/ratio",
+			req:            CreateVideoRequest{Model: "happyhorse", Prompt: "a cat", Seconds: "5", Size: "1280x720"},
+			wantDuration:   5,
+			wantResolution: "720P",
+			wantRatio:      "16:9",
 		},
 		{
 			name:         "float seconds rounds up",
@@ -107,8 +148,11 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 			if got.Input.Prompt != tt.req.Prompt {
 				t.Errorf("Prompt = %q, want %q", got.Input.Prompt, tt.req.Prompt)
 			}
-			if got.Parameters.Resolution != tt.req.Size {
-				t.Errorf("Resolution = %q, want %q", got.Parameters.Resolution, tt.req.Size)
+			if got.Parameters.Resolution != tt.wantResolution {
+				t.Errorf("Resolution = %q, want %q", got.Parameters.Resolution, tt.wantResolution)
+			}
+			if got.Parameters.Ratio != tt.wantRatio {
+				t.Errorf("Ratio = %q, want %q", got.Parameters.Ratio, tt.wantRatio)
 			}
 			if got.Parameters.Duration != tt.wantDuration {
 				t.Errorf("Duration = %d, want %d", got.Parameters.Duration, tt.wantDuration)
@@ -149,7 +193,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 			name: "succeeded with usage renames video_duration to output_video_duration",
 			resp: dashscope.GetTaskResponse{
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: "https://x/y.mp4"},
-				Usage:  &dashscope.TaskUsage{VideoDuration: "5"},
+				Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5"},
 			},
 			want: VideoResponse{
 				ID:     "task-123",
@@ -162,7 +206,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 			name: "float video_duration preserved",
 			resp: dashscope.GetTaskResponse{
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusSucceeded},
-				Usage:  &dashscope.TaskUsage{VideoDuration: "5.5"},
+				Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5.5"},
 			},
 			want: VideoResponse{
 				ID:     "task-123",
@@ -221,6 +265,30 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "unrecognized_dashscope_status", Message: `dashscope reported unrecognized task_status "SOME_NEW_STATUS"`},
+			},
+		},
+		{
+			name: "canceled maps to failed with a distinct diagnostic code",
+			resp: dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusCanceled},
+			},
+			want: VideoResponse{
+				ID:     "task-123",
+				Object: "video",
+				Status: StatusFailed,
+				Error:  &Error{Code: "dashscope_task_canceled", Message: "dashscope reported task_status CANCELED"},
+			},
+		},
+		{
+			name: "unknown (expired task_id) maps to failed with a distinct diagnostic code",
+			resp: dashscope.GetTaskResponse{
+				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusUnknown},
+			},
+			want: VideoResponse{
+				ID:     "task-123",
+				Object: "video",
+				Status: StatusFailed,
+				Error:  &Error{Code: "dashscope_task_unknown", Message: "dashscope reported task_status UNKNOWN (task expired past its 24h validity, or never existed)"},
 			},
 		},
 	}

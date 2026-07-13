@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+// defaultBaseURL is the legacy China (Beijing) domain — still fully
+// functional per DashScope's docs, but only correct for that region. The
+// model, endpoint, and API key must all belong to the same region (e.g.
+// Singapore's dashscope-intl.aliyuncs.com, or one of the newer
+// workspace-specific *.maas.aliyuncs.com domains); operators outside China
+// MUST override this via DASHSCOPE_BASE_URL rather than relying on this
+// default.
 const (
 	defaultBaseURL = "https://dashscope.aliyuncs.com"
 	createPath     = "/api/v1/services/aigc/video-generation/video-synthesis"

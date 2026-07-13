@@ -227,6 +227,16 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 	if capture.gotCreateBody.Parameters.Duration != 4 {
 		t.Errorf("dashscope create request duration = %d, want 4 (from the SDK's seconds:\"4\")", capture.gotCreateBody.Parameters.Duration)
 	}
+	// run.js's create scenario requests size "1280x720" — HappyHorse has no
+	// pixel-dimension concept, so this must arrive as its own coarse
+	// resolution tier ("720P") plus a separately-derived aspect ratio
+	// ("16:9"), not the raw "1280x720" string DashScope wouldn't recognize.
+	if capture.gotCreateBody.Parameters.Resolution != "720P" {
+		t.Errorf("dashscope create request resolution = %q, want 720P (derived from the SDK's size:\"1280x720\")", capture.gotCreateBody.Parameters.Resolution)
+	}
+	if capture.gotCreateBody.Parameters.Ratio != "16:9" {
+		t.Errorf("dashscope create request ratio = %q, want 16:9 (derived from the SDK's size:\"1280x720\")", capture.gotCreateBody.Parameters.Ratio)
+	}
 }
 
 // ==========================================================================
@@ -236,7 +246,7 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 func TestOpenAISDK_RetrieveVideo_Completed(t *testing.T) {
 	mockDashScope := newMockDashScopeGetTask(t, dashscope.GetTaskResponse{
 		Output: dashscope.TaskOutput{TaskID: "task-abc123", TaskStatus: dashscope.TaskStatusSucceeded, VideoURL: "https://x/y.mp4"},
-		Usage:  &dashscope.TaskUsage{VideoDuration: "5"},
+		Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5"},
 	})
 	t.Cleanup(mockDashScope.Close)
 
