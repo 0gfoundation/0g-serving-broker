@@ -900,7 +900,10 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 		// is the effective output second; input side is 0.
 		normalized, err := normalizeUSDPerUnitPrice(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerSecond", i), entry.OutputPriceUSDPerSecond)
 		if err != nil {
-			return fmt.Errorf("model '%s': %w", entry.Model, err)
+			// %w trails (not leads) so the wrapped error's own "invalid config: ..."
+			// prefix stays first, matching every other error in this file/package;
+			// "for model '%s'" matches the sibling required-field check just above.
+			return fmt.Errorf("%w for model '%s'", err, entry.Model)
 		}
 		entry.OutputPriceUSDPerMillionTokens = normalized
 		entry.InputPriceUSDPerMillionTokens = "0"
