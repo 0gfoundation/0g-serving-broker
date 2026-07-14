@@ -315,6 +315,19 @@ type Service struct {
 	// yield wei-per-image. Mirrors OutputPriceUSDPerSecond for video. See validate.
 	OutputPriceUSDPerImage string `yaml:"outputPriceUSDPerImage"`
 
+	// OutputPriceUSDPerSecond is the USD price per effective output second for a
+	// USD-denominated single-model video-generation service (decimal string, e.g.
+	// "0.4" = $0.40 per effective second). It is REQUIRED — and the per-1M-token
+	// USD fields are forbidden — for that service type under USD denomination when
+	// no modelPricing entries are configured, because video bills per output
+	// second, not per token. At config load it is normalized into
+	// OutputPriceUSDPerMillionTokens (×1e6, with the input side fixed at "0"), same
+	// as OutputPriceUSDPerImage, so the existing token-shaped USD machinery prices
+	// and advertises it unchanged. When modelPricing is configured, per-model
+	// ModelPricingEntry.OutputPriceUSDPerSecond carries the price instead and this
+	// field must be left empty. See validate.
+	OutputPriceUSDPerSecond string `yaml:"outputPriceUSDPerSecond"`
+
 	// ModelPricing defines per-model pricing for centralized providers that serve multiple models.
 	// When configured, the broker validates requested models against this allowlist
 	// and bills at model-specific rates instead of the single on-chain price.
@@ -1044,6 +1057,26 @@ func validateUSDPriceString(field, value string) error {
 	return nil
 }
 
+// normalizeUSDPerUnitPrice validates a USD-per-unit decimal string (fieldPath
+// names it for error messages, e.g. "service.outputPriceUSDPerImage") and
+// normalizes it into the per-1M-unit representation the shared USD pipeline
+// (price feed, on-chain ceiling, wei conversion) consumes: value × 1e6. Shared
+// by every per-unit (not per-token) USD price — image, single-model video,
+// and per-model video — so the normalization math lives in exactly one place.
+// Parses the TRIMMED value (validateUSDPriceString trims before validating,
+// so a whitespace-padded string that passes validation can't slip a nil into
+// the multiply).
+func normalizeUSDPerUnitPrice(fieldPath, raw string) (string, error) {
+	if err := validateUSDPriceString(fieldPath, raw); err != nil {
+		return "", err
+	}
+	perUnit, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	if !ok {
+		return "", fmt.Errorf("invalid config: %s %q is not a valid decimal", fieldPath, raw)
+	}
+	return ratToDecimalString(new(big.Rat).Mul(perUnit, big.NewRat(1_000_000, 1))), nil
+}
+
 // validatePricingTiers validates an ordered tier list: multipliers >= 1,
 // maxInputTokens >= 0, the unbounded (0) tier last, and strictly ascending
 // order. An empty slice is valid (no tiers). prefix labels errors (e.g.
@@ -1689,6 +1722,12 @@ func loadConfig(cfg *Config) error {
 	// use service.outputPriceUSDPerImage instead of the per-1M-token fields.
 	isImageType := cfg.Service.Type == constant.ServiceTypeTextToImage ||
 		cfg.Service.Type == constant.ServiceTypeImageEditing
+	// Video generation bills per effective output second. A single-model video
+	// service (no modelPricing) uses service.outputPriceUSDPerSecond instead of
+	// the per-1M-token fields; a multi-model video service carries the USD price
+	// per entry instead (see the multiModelUSD branch below).
+	isVideoType := cfg.Service.Type == constant.ServiceTypeVideoGeneration
+	multiModelUSD := len(cfg.Service.ModelPricing) > 0
 	switch cfg.Service.PriceDenomination {
 	case constant.PriceDenominationNative:
 		if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
@@ -1697,11 +1736,17 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.OutputPriceUSDPerImage != "" {
 			return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid when priceDenomination is '%s'", constant.PriceDenominationUSD)
 		}
+		if cfg.Service.OutputPriceUSDPerSecond != "" {
+			return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid when priceDenomination is '%s'", constant.PriceDenominationUSD)
+		}
 	case constant.PriceDenominationUSD:
 		if cfg.Service.InputPrice != "" || cfg.Service.OutputPrice != "" {
 			return fmt.Errorf("invalid config: service.inputPrice / service.outputPrice must be empty when priceDenomination is '%s' (use the USD fields)", constant.PriceDenominationUSD)
 		}
 		if isImageType {
+			if cfg.Service.OutputPriceUSDPerSecond != "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
+			}
 			// USD image service: outputPriceUSDPerImage is mandatory; the per-1M-token
 			// fields are forbidden (image bills per image, not per token).
 			if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
@@ -1710,27 +1755,48 @@ func loadConfig(cfg *Config) error {
 			if cfg.Service.OutputPriceUSDPerImage == "" {
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is required for service type '%s' when priceDenomination is '%s'", cfg.Service.Type, constant.PriceDenominationUSD)
 			}
-			if err := validateUSDPriceString("service.outputPriceUSDPerImage", cfg.Service.OutputPriceUSDPerImage); err != nil {
+			normalized, err := normalizeUSDPerUnitPrice("service.outputPriceUSDPerImage", cfg.Service.OutputPriceUSDPerImage)
+			if err != nil {
 				return err
 			}
-			// Normalize per-image USD into the per-1M-unit representation the shared USD
-			// pipeline consumes: the "unit" is one image, the input side is 0. Parse the
-			// trimmed value (validateUSDPriceString trims before validating) so a padded
-			// string that passed validation can't slip a nil into the multiply.
-			perImage, ok := new(big.Rat).SetString(strings.TrimSpace(cfg.Service.OutputPriceUSDPerImage))
-			if !ok {
-				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage %q is not a valid decimal", cfg.Service.OutputPriceUSDPerImage)
+			cfg.Service.OutputPriceUSDPerMillionTokens = normalized
+			cfg.Service.InputPriceUSDPerMillionTokens = "0"
+		} else if isVideoType && !multiModelUSD {
+			// USD single-model video service: outputPriceUSDPerSecond is mandatory; the
+			// per-1M-token and per-image fields are forbidden (video bills per effective
+			// output second, not per token or per image).
+			if cfg.Service.InputPriceUSDPerMillionTokens != "" || cfg.Service.OutputPriceUSDPerMillionTokens != "" {
+				return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens / service.outputPriceUSDPerMillionTokens must be empty for service type '%s' under USD denomination (use service.outputPriceUSDPerSecond)", cfg.Service.Type)
 			}
-			cfg.Service.OutputPriceUSDPerMillionTokens = ratToDecimalString(new(big.Rat).Mul(perImage, big.NewRat(1_000_000, 1)))
+			if cfg.Service.OutputPriceUSDPerImage != "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)
+			}
+			if cfg.Service.OutputPriceUSDPerSecond == "" {
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is required for service type '%s' when priceDenomination is '%s' and no modelPricing is configured", cfg.Service.Type, constant.PriceDenominationUSD)
+			}
+			normalized, err := normalizeUSDPerUnitPrice("service.outputPriceUSDPerSecond", cfg.Service.OutputPriceUSDPerSecond)
+			if err != nil {
+				return err
+			}
+			cfg.Service.OutputPriceUSDPerMillionTokens = normalized
 			cfg.Service.InputPriceUSDPerMillionTokens = "0"
 		} else {
 			if cfg.Service.OutputPriceUSDPerImage != "" {
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)
 			}
+			if cfg.Service.OutputPriceUSDPerSecond != "" {
+				// Reaching this branch with isVideoType true already implies
+				// multiModelUSD (the isVideoType && !multiModelUSD case is peeled
+				// off by the "else if" above), so it's the modelPricing conflict,
+				// not a wrong-service-type error.
+				if isVideoType {
+					return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is not valid alongside service.modelPricing (per-model entries carry the USD price instead)")
+				}
+				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
+			}
 			// With multi-model pricing the per-model entries carry the USD prices and
 			// the service-level USD fields are derived (max-over-models) later in this
 			// function, so they may legitimately be empty here.
-			multiModelUSD := len(cfg.Service.ModelPricing) > 0
 			if !multiModelUSD && (cfg.Service.InputPriceUSDPerMillionTokens == "" || cfg.Service.OutputPriceUSDPerMillionTokens == "") {
 				return fmt.Errorf("invalid config: service.inputPriceUSDPerMillionTokens and service.outputPriceUSDPerMillionTokens are required when priceDenomination is '%s'", constant.PriceDenominationUSD)
 			}

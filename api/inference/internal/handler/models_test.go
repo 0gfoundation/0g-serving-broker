@@ -510,6 +510,52 @@ func TestGetModels_ImagePricingUSD(t *testing.T) {
 	}
 }
 
+// TestGetModels_VideoPricingUSD pins the single-model USD video-generation
+// shape: the per-second price surfaces under pricing_usd.video (not
+// pricing_usd.completion, which would misread a per-effective-second video
+// rate as a per-token rate), mirroring TestGetModels_ImagePricingUSD.
+func TestGetModels_VideoPricingUSD(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "wan2.7",
+			Type:        "video-generation",
+			InputPrice:  "0",
+			OutputPrice: "126963160000000000",
+			// USD per 1M effective-seconds: 0.02 × 1e6 → per-second USD is 0.02.
+			InputPriceUSDPerMillionTokens:  "0",
+			OutputPriceUSDPerMillionTokens: "20000",
+		},
+		serviceConfig:  config.Service{},
+		priceFeedIsUSD: true,
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present for USD video-generation service")
+	}
+	if m.PricingUSD.Video != "0.02" {
+		t.Errorf("pricing_usd.video = %q, want 0.02", m.PricingUSD.Video)
+	}
+	if m.PricingUSD.Prompt != "0" {
+		t.Errorf("pricing_usd.prompt = %q, want 0 for video service", m.PricingUSD.Prompt)
+	}
+	if m.PricingUSD.Completion != "0" {
+		t.Errorf("pricing_usd.completion = %q, want 0 for video service", m.PricingUSD.Completion)
+	}
+}
+
 func TestGetModels_ServiceError(t *testing.T) {
 	mock := &mockModelsCtrl{
 		serviceErr: errors.New("contract unreachable"),
@@ -1070,6 +1116,116 @@ func TestGetModels_MultiModel_PerModelInfoAndFallback(t *testing.T) {
 	}
 	if mini.ServingDomain != "api.openai.com" {
 		t.Errorf("gpt-4o-mini serving_domain = %q, want api.openai.com", mini.ServingDomain)
+	}
+}
+
+// TestGetModels_MultiModelVideoPricingUSD pins the multi-model USD
+// video-generation shape to match the single-model one (TestGetModels_VideoPricingUSD):
+// pricing_usd.prompt/completion report "0", not the Go zero-value "" — the two
+// paths advertise a conceptually identical "this bills per second, not per
+// token" pricing_usd shape and must not diverge in their JSON output.
+func TestGetModels_MultiModelVideoPricingUSD(t *testing.T) {
+	svcCfg := config.Service{
+		ProviderType:      "centralized",
+		ProviderIdentity:  "alibaba",
+		TargetURL:         "https://dashscope.aliyuncs.com",
+		ModelType:         "wan2.7",
+		Type:              "video-generation",
+		PriceDenomination: "USD",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model:                          "wan2.7",
+				OutputPriceUSDPerSecond:        "0.02",
+				OutputPriceUSDPerMillionTokens: "20000",
+				InputPriceUSDPerMillionTokens:  "0",
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "wan2.7", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present for multi-model USD video-generation service")
+	}
+	if m.PricingUSD.Video != "0.02" {
+		t.Errorf("pricing_usd.video = %q, want 0.02", m.PricingUSD.Video)
+	}
+	if m.PricingUSD.Prompt != "0" {
+		t.Errorf("pricing_usd.prompt = %q, want 0 (matching the single-model video shape), not empty", m.PricingUSD.Prompt)
+	}
+	if m.PricingUSD.Completion != "0" {
+		t.Errorf("pricing_usd.completion = %q, want 0 (matching the single-model video shape), not empty", m.PricingUSD.Completion)
+	}
+}
+
+// TestGetModels_MultiModelVideoPricingUSD_NormalizesDisplay pins that
+// pricing_usd.video for the multi-model path is derived from the normalized
+// OutputPriceUSDPerMillionTokens (same as the single-model path), not echoed
+// from the raw operator string. A raw echo would let two numerically
+// identical prices render differently (e.g. "0.0200" vs "0.02") depending only
+// on whether a request landed on the single- or multi-model pricing shape.
+func TestGetModels_MultiModelVideoPricingUSD_NormalizesDisplay(t *testing.T) {
+	svcCfg := config.Service{
+		ProviderType:      "centralized",
+		ProviderIdentity:  "alibaba",
+		TargetURL:         "https://dashscope.aliyuncs.com",
+		ModelType:         "wan2.7",
+		Type:              "video-generation",
+		PriceDenomination: "USD",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model: "wan2.7",
+				// Raw operator string carries a trailing zero; the normalized
+				// per-million representation does not, and display must follow
+				// the normalized value.
+				OutputPriceUSDPerSecond:        "0.0200",
+				OutputPriceUSDPerMillionTokens: "20000",
+				InputPriceUSDPerMillionTokens:  "0",
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "wan2.7", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present")
+	}
+	if m.PricingUSD.Video != "0.02" {
+		t.Errorf("pricing_usd.video = %q, want normalized 0.02 (not raw 0.0200)", m.PricingUSD.Video)
 	}
 }
 

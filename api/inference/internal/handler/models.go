@@ -137,14 +137,15 @@ type ModelPricingUSD struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
 	// Image is the USD price per generated image for a USD-denominated
-	// image-generation / image-editing model (decimal string). Mutually
-	// exclusive with the per-token prompt/completion fields above; derived from
+	// image-generation / image-editing model (decimal string), derived from
 	// OutputPriceUSDPerMillionTokens with the same ÷1e6 the wei conversion uses,
-	// so it stays consistent with the native pricing.image value.
+	// so it stays consistent with the native pricing.image value. Set alongside
+	// Prompt/Completion (both reported as "0", not omitted — an image bills per
+	// image, not per token, so there's no per-token rate to report).
 	Image string `json:"image,omitempty"`
 	// Video is the USD price per effective output second for a USD-denominated
-	// video-generation model (decimal string). Mutually exclusive with the
-	// per-token prompt/completion fields above.
+	// video-generation model (decimal string). Set alongside Prompt/Completion
+	// (both reported as "0", not omitted), same convention as Image above.
 	Video string `json:"video,omitempty"`
 }
 
@@ -168,6 +169,31 @@ type ModelListResponse struct {
 	Object    string          `json:"object"`
 	Data      []ModelObject   `json:"data"`
 	PriceFeed *PriceFeedState `json:"price_feed,omitempty"`
+}
+
+// derivePerUnitUSD derives a per-unit USD display value (per-image or
+// per-effective-output-second) from the normalized per-1M-unit representation
+// the shared USD pipeline uses, via the same ÷1e6 the wei conversion applies —
+// shared by the image, single-model video, and multi-model video pricing_usd
+// cases so the "derive, warn-and-omit on error" logic lives in one place.
+// Config validation already accepted the underlying USD string, so a
+// conversion failure here signals a regression, not a config error: logs a
+// warning and returns ok=false rather than failing the whole /v1/models
+// response. model, when non-empty, is included in the log line to identify
+// which entry failed in a multi-model service.
+func (h *Handler) derivePerUnitUSD(unitLabel, millionTokens, model string) (string, bool) {
+	value, err := pricefeed.USDPerMillionStringToPerToken(millionTokens)
+	if err != nil {
+		if model != "" {
+			h.logger.Warnf("GetModels: derive per-%s USD price from %q failed (omitting PricingUSD block) for model %q: %v",
+				unitLabel, millionTokens, model, err)
+		} else {
+			h.logger.Warnf("GetModels: derive per-%s USD price from %q failed (omitting PricingUSD block): %v",
+				unitLabel, millionTokens, err)
+		}
+		return "", false
+	}
+	return value, true
 }
 
 // GetModels returns the list of models served by this broker.
@@ -317,11 +343,16 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
 				// USD video: bill unit is the effective output second, not a token.
-				// Surface the per-second USD (operator value) and, when the feed is
-				// up, the rate-converted wei-per-second under `video`. The bridged
-				// OutputPriceUSDPerMillionTokens (= perSec×1e6) converts back to
-				// wei-per-second via the shared ÷1e6 helper.
-				obj.PricingUSD = &ModelPricingUSD{Video: mp.OutputPriceUSDPerSecond}
+				// Surface the per-second USD and, when the feed is up, the
+				// rate-converted wei-per-second under `video`. Deriving the display
+				// value from OutputPriceUSDPerMillionTokens via the shared ÷1e6
+				// helper (rather than echoing the raw operator string) matches the
+				// single-model video/image path's normalized-and-trimmed formatting,
+				// so numerically identical prices render identically regardless of
+				// which pricing shape (single- or multi-model) served the request.
+				if video, ok := h.derivePerUnitUSD("second", mp.OutputPriceUSDPerMillionTokens, mp.Model); ok {
+					obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
+				}
 				if ratUSDPerOG != nil {
 					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
 						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
@@ -526,18 +557,26 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	// from going undiagnosed.
 	var priceFeedOut *PriceFeedState
 	isImageType := svc.Type == constant.ServiceTypeTextToImage || svc.Type == constant.ServiceTypeImageEditing
+	isVideoType := svc.Type == constant.ServiceTypeVideoGeneration
 	switch {
 	case isImageType && svc.OutputPriceUSDPerMillionTokens != "":
 		// Image bills per generated image, not per token: surface the per-image
 		// USD under `image` (mirrors the native pricing.image) and report the
 		// per-token prompt/completion as 0. Deriving with the same ÷1e6 used by
 		// the wei conversion keeps pricing_usd.image consistent with pricing.image.
-		image, imageErr := pricefeed.USDPerMillionStringToPerToken(svc.OutputPriceUSDPerMillionTokens)
-		if imageErr != nil {
-			h.logger.Warnf("GetModels: derive per-image USD price from %q failed (omitting PricingUSD block): %v",
-				svc.OutputPriceUSDPerMillionTokens, imageErr)
-		} else {
+		if image, ok := h.derivePerUnitUSD("image", svc.OutputPriceUSDPerMillionTokens, ""); ok {
 			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Image: image}
+		}
+	case isVideoType && svc.OutputPriceUSDPerMillionTokens != "":
+		// Video bills per effective output second, not per token: surface the
+		// per-second USD under `video` (mirrors the native pricing.video and the
+		// multi-model modelPricing path, which derives its display value the
+		// same ÷1e6 way — see the isUSD && ServiceTypeVideoGeneration branch
+		// above). Deriving with the same ÷1e6 used by the wei conversion keeps
+		// pricing_usd.video consistent with pricing.video — same derivation as
+		// the image case above.
+		if video, ok := h.derivePerUnitUSD("second", svc.OutputPriceUSDPerMillionTokens, ""); ok {
+			obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
 		}
 	case svc.InputPriceUSDPerMillionTokens != "" && svc.OutputPriceUSDPerMillionTokens != "":
 		prompt, promptErr := pricefeed.USDPerMillionStringToPerToken(svc.InputPriceUSDPerMillionTokens)

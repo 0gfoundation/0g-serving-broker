@@ -1828,6 +1828,205 @@ service:
 	}
 }
 
+func TestLoadConfig_USDPerSecond_SingleModelVideo(t *testing.T) {
+	// USD single-model video (no modelPricing): operator gives
+	// outputPriceUSDPerSecond; loadConfig normalizes it into the per-1M-unit
+	// representation the shared USD pipeline consumes (×1e6), input side 0.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  outputPriceUSDPerSecond: "0.02"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("USD single-model video should be allowed, got: %v", err)
+	}
+	if cfg.Service.OutputPriceUSDPerSecond != "0.02" {
+		t.Errorf("raw per-second preserved: got %q want 0.02", cfg.Service.OutputPriceUSDPerSecond)
+	}
+	if cfg.Service.OutputPriceUSDPerMillionTokens != "20000" {
+		t.Errorf("normalized output: got %q want 20000", cfg.Service.OutputPriceUSDPerMillionTokens)
+	}
+	if cfg.Service.InputPriceUSDPerMillionTokens != "0" {
+		t.Errorf("normalized input: got %q want 0", cfg.Service.InputPriceUSDPerMillionTokens)
+	}
+}
+
+func TestLoadConfig_USDPerSecond_RequiredForSingleModelVideo(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "outputPriceUSDPerSecond is required") {
+		t.Errorf("expected error requiring outputPriceUSDPerSecond for single-model USD video, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDPerSecond_RejectsPerMillionTokensForVideo(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSDPerMillionTokens: "0"
+  outputPriceUSDPerMillionTokens: "20000"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "use service.outputPriceUSDPerSecond") {
+		t.Errorf("expected error rejecting per-1M-token USD fields for single-model video, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDPerSecond_RejectedForNonVideo(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "http://backend:8000"
+  type: "chatbot"
+  model: "gpt-4"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  inputPriceUSDPerMillionTokens: "0.50"
+  outputPriceUSDPerMillionTokens: "1.50"
+  outputPriceUSDPerSecond: "0.02"
+priceFeed:
+  sources: ["coingecko"]
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "outputPriceUSDPerSecond is only valid for service type") {
+		t.Errorf("expected error rejecting outputPriceUSDPerSecond for chatbot, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDPerSecond_RejectedWhenModelPricingConfigured(t *testing.T) {
+	// A video service with modelPricing carries USD prices per-entry
+	// (ModelPricingEntry.OutputPriceUSDPerSecond); the service-level field is
+	// meaningless there and must be rejected rather than silently ignored.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  providerType: "centralized"
+  providerIdentity: "alibaba"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  outputPriceUSDPerSecond: "0.02"
+  modelPricing:
+    - model: "wan2.7"
+      outputPriceUSDPerSecond: "0.02"
+      billing:
+        mode: "per_video_second"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "not valid alongside service.modelPricing") {
+		t.Errorf("expected error rejecting service-level outputPriceUSDPerSecond alongside modelPricing, got %v", err)
+	}
+}
+
+func TestLoadConfig_USDPerSecond_RejectedForChatbotWithModelPricing(t *testing.T) {
+	// Regression: a stray service.outputPriceUSDPerSecond on a chatbot service
+	// must be rejected with the generic "only valid for service type
+	// video-generation" message, not the video-specific "not valid alongside
+	// service.modelPricing" wording — chatbot modelPricing entries never carry
+	// outputPriceUSDPerSecond in the first place, so that message would be
+	// factually wrong here (the field is invalid regardless of modelPricing).
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  outputPriceUSDPerSecond: "0.02"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPriceUSDPerMillionTokens: "0.50"
+      outputPriceUSDPerMillionTokens: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "only valid for service type 'video-generation'") {
+		t.Errorf("expected the generic video-only rejection, got %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "not valid alongside service.modelPricing") {
+		t.Errorf("chatbot must not get the video-specific 'alongside modelPricing' message, got %v", err)
+	}
+}
+
+func TestLoadConfig_NativeRejectsPerSecond(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "video-generation"
+  model: "wan2.7"
+  verifiability: "TeeML"
+  outputPrice: "5000000000000"
+  outputPriceUSDPerSecond: "0.02"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "outputPriceUSDPerSecond is only valid when priceDenomination is") {
+		t.Errorf("expected error rejecting outputPriceUSDPerSecond under NATIVE, got %v", err)
+	}
+}
+
 func TestService_IsCentralized(t *testing.T) {
 	tests := []struct {
 		name         string
