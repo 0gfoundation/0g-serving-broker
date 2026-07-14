@@ -321,7 +321,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				// up, the rate-converted wei-per-second under `video`. The bridged
 				// OutputPriceUSDPerMillionTokens (= perSec×1e6) converts back to
 				// wei-per-second via the shared ÷1e6 helper.
-				obj.PricingUSD = &ModelPricingUSD{Video: mp.OutputPriceUSDPerSecond}
+				obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: mp.OutputPriceUSDPerSecond}
 				if ratUSDPerOG != nil {
 					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
 						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {

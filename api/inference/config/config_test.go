@@ -1970,6 +1970,44 @@ priceFeed:
 	}
 }
 
+func TestLoadConfig_USDPerSecond_RejectedForChatbotWithModelPricing(t *testing.T) {
+	// Regression: a stray service.outputPriceUSDPerSecond on a chatbot service
+	// must be rejected with the generic "only valid for service type
+	// video-generation" message, not the video-specific "not valid alongside
+	// service.modelPricing" wording — chatbot modelPricing entries never carry
+	// outputPriceUSDPerSecond in the first place, so that message would be
+	// factually wrong here (the field is invalid regardless of modelPricing).
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  type: "chatbot"
+  model: "gpt-4o"
+  providerType: "centralized"
+  providerIdentity: "openai"
+  verifiability: "TeeML"
+  priceDenomination: "USD"
+  outputPriceUSDPerSecond: "0.02"
+  modelPricing:
+    - model: "gpt-4o"
+      inputPriceUSDPerMillionTokens: "0.50"
+      outputPriceUSDPerMillionTokens: "1.50"
+priceFeed:
+  sources: ["coingecko"]
+  updateInterval: "1h"
+  stalenessThreshold: "2h"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "only valid for service type 'video-generation'") {
+		t.Errorf("expected the generic video-only rejection, got %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "not valid alongside service.modelPricing") {
+		t.Errorf("chatbot must not get the video-specific 'alongside modelPricing' message, got %v", err)
+	}
+}
+
 func TestLoadConfig_NativeRejectsPerSecond(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

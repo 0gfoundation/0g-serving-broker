@@ -1119,6 +1119,62 @@ func TestGetModels_MultiModel_PerModelInfoAndFallback(t *testing.T) {
 	}
 }
 
+// TestGetModels_MultiModelVideoPricingUSD pins the multi-model USD
+// video-generation shape to match the single-model one (TestGetModels_VideoPricingUSD):
+// pricing_usd.prompt/completion report "0", not the Go zero-value "" — the two
+// paths advertise a conceptually identical "this bills per second, not per
+// token" pricing_usd shape and must not diverge in their JSON output.
+func TestGetModels_MultiModelVideoPricingUSD(t *testing.T) {
+	svcCfg := config.Service{
+		ProviderType:      "centralized",
+		ProviderIdentity:  "alibaba",
+		TargetURL:         "https://dashscope.aliyuncs.com",
+		ModelType:         "wan2.7",
+		Type:              "video-generation",
+		PriceDenomination: "USD",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model:                          "wan2.7",
+				OutputPriceUSDPerSecond:        "0.02",
+				OutputPriceUSDPerMillionTokens: "20000",
+				InputPriceUSDPerMillionTokens:  "0",
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "wan2.7", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present for multi-model USD video-generation service")
+	}
+	if m.PricingUSD.Video != "0.02" {
+		t.Errorf("pricing_usd.video = %q, want 0.02", m.PricingUSD.Video)
+	}
+	if m.PricingUSD.Prompt != "0" {
+		t.Errorf("pricing_usd.prompt = %q, want 0 (matching the single-model video shape), not empty", m.PricingUSD.Prompt)
+	}
+	if m.PricingUSD.Completion != "0" {
+		t.Errorf("pricing_usd.completion = %q, want 0 (matching the single-model video shape), not empty", m.PricingUSD.Completion)
+	}
+}
+
 func TestParseTeeVerifier(t *testing.T) {
 	tests := []struct {
 		name           string
