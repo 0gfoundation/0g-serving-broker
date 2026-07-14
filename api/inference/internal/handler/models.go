@@ -137,14 +137,15 @@ type ModelPricingUSD struct {
 	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
 	// Image is the USD price per generated image for a USD-denominated
-	// image-generation / image-editing model (decimal string). Mutually
-	// exclusive with the per-token prompt/completion fields above; derived from
+	// image-generation / image-editing model (decimal string), derived from
 	// OutputPriceUSDPerMillionTokens with the same ÷1e6 the wei conversion uses,
-	// so it stays consistent with the native pricing.image value.
+	// so it stays consistent with the native pricing.image value. Set alongside
+	// Prompt/Completion (both reported as "0", not omitted — an image bills per
+	// image, not per token, so there's no per-token rate to report).
 	Image string `json:"image,omitempty"`
 	// Video is the USD price per effective output second for a USD-denominated
-	// video-generation model (decimal string). Mutually exclusive with the
-	// per-token prompt/completion fields above.
+	// video-generation model (decimal string). Set alongside Prompt/Completion
+	// (both reported as "0", not omitted), same convention as Image above.
 	Video string `json:"video,omitempty"`
 }
 
@@ -317,11 +318,19 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 
 			if isUSD && svc.Type == constant.ServiceTypeVideoGeneration {
 				// USD video: bill unit is the effective output second, not a token.
-				// Surface the per-second USD (operator value) and, when the feed is
-				// up, the rate-converted wei-per-second under `video`. The bridged
-				// OutputPriceUSDPerMillionTokens (= perSec×1e6) converts back to
-				// wei-per-second via the shared ÷1e6 helper.
-				obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: mp.OutputPriceUSDPerSecond}
+				// Surface the per-second USD and, when the feed is up, the
+				// rate-converted wei-per-second under `video`. Deriving the display
+				// value from OutputPriceUSDPerMillionTokens via the shared ÷1e6
+				// helper (rather than echoing the raw operator string) matches the
+				// single-model video/image path's normalized-and-trimmed formatting,
+				// so numerically identical prices render identically regardless of
+				// which pricing shape (single- or multi-model) served the request.
+				if video, err := pricefeed.USDPerMillionStringToPerToken(mp.OutputPriceUSDPerMillionTokens); err == nil {
+					obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
+				} else {
+					h.logger.Warnf("GetModels: derive per-second USD price from %q failed (omitting PricingUSD block) for model %q: %v",
+						mp.OutputPriceUSDPerMillionTokens, mp.Model, err)
+				}
 				if ratUSDPerOG != nil {
 					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
 						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {

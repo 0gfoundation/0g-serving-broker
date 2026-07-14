@@ -900,7 +900,7 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 		// is the effective output second; input side is 0.
 		normalized, err := normalizeUSDPerUnitPrice(fmt.Sprintf("service.modelPricing[%d].outputPriceUSDPerSecond", i), entry.OutputPriceUSDPerSecond)
 		if err != nil {
-			return fmt.Errorf("%w (model '%s')", err, entry.Model)
+			return fmt.Errorf("model '%s': %w", entry.Model, err)
 		}
 		entry.OutputPriceUSDPerMillionTokens = normalized
 		entry.InputPriceUSDPerMillionTokens = "0"

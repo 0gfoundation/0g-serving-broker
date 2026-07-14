@@ -1785,7 +1785,11 @@ func loadConfig(cfg *Config) error {
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerImage is only valid for image service types ('%s' / '%s'), got '%s'", constant.ServiceTypeTextToImage, constant.ServiceTypeImageEditing, cfg.Service.Type)
 			}
 			if cfg.Service.OutputPriceUSDPerSecond != "" {
-				if isVideoType && multiModelUSD {
+				// Reaching this branch with isVideoType true already implies
+				// multiModelUSD (the isVideoType && !multiModelUSD case is peeled
+				// off by the "else if" above), so it's the modelPricing conflict,
+				// not a wrong-service-type error.
+				if isVideoType {
 					return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is not valid alongside service.modelPricing (per-model entries carry the USD price instead)")
 				}
 				return fmt.Errorf("invalid config: service.outputPriceUSDPerSecond is only valid for service type '%s', got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)

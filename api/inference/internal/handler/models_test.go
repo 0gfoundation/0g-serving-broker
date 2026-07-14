@@ -1175,6 +1175,60 @@ func TestGetModels_MultiModelVideoPricingUSD(t *testing.T) {
 	}
 }
 
+// TestGetModels_MultiModelVideoPricingUSD_NormalizesDisplay pins that
+// pricing_usd.video for the multi-model path is derived from the normalized
+// OutputPriceUSDPerMillionTokens (same as the single-model path), not echoed
+// from the raw operator string. A raw echo would let two numerically
+// identical prices render differently (e.g. "0.0200" vs "0.02") depending only
+// on whether a request landed on the single- or multi-model pricing shape.
+func TestGetModels_MultiModelVideoPricingUSD_NormalizesDisplay(t *testing.T) {
+	svcCfg := config.Service{
+		ProviderType:      "centralized",
+		ProviderIdentity:  "alibaba",
+		TargetURL:         "https://dashscope.aliyuncs.com",
+		ModelType:         "wan2.7",
+		Type:              "video-generation",
+		PriceDenomination: "USD",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model: "wan2.7",
+				// Raw operator string carries a trailing zero; the normalized
+				// per-million representation does not, and display must follow
+				// the normalized value.
+				OutputPriceUSDPerSecond:        "0.0200",
+				OutputPriceUSDPerMillionTokens: "20000",
+				InputPriceUSDPerMillionTokens:  "0",
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "wan2.7", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present")
+	}
+	if m.PricingUSD.Video != "0.02" {
+		t.Errorf("pricing_usd.video = %q, want normalized 0.02 (not raw 0.0200)", m.PricingUSD.Video)
+	}
+}
+
 func TestParseTeeVerifier(t *testing.T) {
 	tests := []struct {
 		name           string
