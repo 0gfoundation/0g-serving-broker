@@ -679,6 +679,12 @@ func TestGetModels_StandardHidesUpstreamAndTeeMarker(t *testing.T) {
 		},
 		serviceConfig: config.Service{
 			ProviderType: "standard",
+			// Set even though standard providers hide it externally: this
+			// confirms the hiding is gated on IsCentralized() (provider class),
+			// not on ProviderIdentity being empty — a standard provider may now
+			// set it for internal reconciliation tagging (see config.go's
+			// providerType=='standard' validation block) without it leaking here.
+			ProviderIdentity: "openai",
 			// Upstream URL must never leak as serving_domain.
 			TargetURL: "https://secret-upstream:8000",
 		},

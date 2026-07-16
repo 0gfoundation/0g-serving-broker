@@ -261,9 +261,15 @@ service:
 	}
 }
 
-func TestLoadConfig_ProviderTypeStandard_RejectsProviderIdentity(t *testing.T) {
-	// A standard provider hides its upstream, so a providerIdentity is rejected
-	// rather than silently ignored.
+func TestLoadConfig_ProviderTypeStandard_AllowsProviderIdentity(t *testing.T) {
+	// A standard provider hides its upstream from every EXTERNAL surface
+	// (GET /v1/models, on-chain additionalInfo, the TEE-signed routing proof —
+	// see TestGetModels_StandardHidesUpstreamAndTeeMarker and
+	// TestBuildAdditionalInfo_ProviderTypeGating), but providerIdentity is no
+	// longer rejected at config load: an operator may set it for internal-only
+	// reconciliation tagging (Ctrl.recordWhitelistedUsage / proxy.go's Upstream
+	// field), which otherwise falls back to "self" and can't tell one standard
+	// deployment's real upstream apart from another's.
 	configPath := writeTestConfig(t, `
 service:
   servingUrl: "http://example.com"
@@ -273,11 +279,39 @@ service:
   type: "chatbot"
   model: "gpt-4"
   providerType: "standard"
-  providerIdentity: "openai"
+  providerIdentity: "DashScope"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
-	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "providerIdentity must not be set") {
-		t.Fatalf("expected providerIdentity rejection, got: %v", err)
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	// Normalized the same way as centralized's providerIdentity (lowercased).
+	if cfg.Service.ProviderIdentity != "dashscope" {
+		t.Errorf("expected providerIdentity normalized to 'dashscope', got %q", cfg.Service.ProviderIdentity)
+	}
+	if cfg.Service.IsCentralized() {
+		t.Error("standard provider must not report IsCentralized just because providerIdentity is set")
+	}
+}
+
+func TestLoadConfig_ProviderTypeStandard_RejectsInvalidProviderIdentityFormat(t *testing.T) {
+	// Same format rule as centralized (lowercase alphanumeric + hyphens) applies
+	// when a standard provider chooses to set providerIdentity.
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "http://example.com"
+  targetUrl: "https://backend:8000"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "gpt-4"
+  providerType: "standard"
+  providerIdentity: "dash scope!"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+	if err := loadConfig(&Config{}); err == nil || !strings.Contains(err.Error(), "must be lowercase alphanumeric") {
+		t.Fatalf("expected providerIdentity format rejection, got: %v", err)
 	}
 }
 
