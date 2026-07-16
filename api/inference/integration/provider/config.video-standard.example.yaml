@@ -1,0 +1,127 @@
+# Example: multi-model video-generation service running in `standard`
+# provider mode, forwarding to Alibaba DashScope's HappyHorse video-generation
+# API, with two model versions (1.1 / 1.0) and resolution-tiered (720p vs
+# 1080p) pricing per model via the per_video_second billing mode.
+#
+# `standard` (constant.ProviderTypeStandard): no TEE verification, the broker
+# is a pure forwarder to targetUrl, and it never advertises WHO it forwards to
+# (service.providerIdentity must be left unset — config validation rejects it
+# otherwise). See config.go's providerType=='standard' validation block for
+# the exact constraints this file satisfies.
+#
+# CAUTION (standard + video-generation): the broker only fully hides the
+# upstream when the response returns the finished asset via the OpenAI-style
+# GET /videos/{id}/content pattern (broker-proxied). If DashScope's response
+# instead embeds a direct asset URL (e.g. {"output":{"video_url":"https://
+# dashscope-upstream-host/..."}}), that host is visible to the client — the
+# broker does not rewrite URL values inside the response body. Confirm which
+# shape your upstream actually returns before relying on `standard` to fully
+# hide it (see docs/design/video-generation-async-billing.md).
+
+interval:
+  autoSettleBufferTime: "60s"
+  forceSettlementProcessor: "10m"
+  settlementProcessor: "5m"
+
+network:
+  url: "https://evmrpc-testnet.0g.ai"
+  chainID: 16602
+  privateKeys:
+    - <Private_Key>
+  transactionLimit: 5000000
+  gasEstimationBuffer: 100000
+
+# Required because service.priceDenomination is "USD" below: at least one
+# rate source, so the live 0G/USD rate can be computed and cached.
+priceFeed:
+  sources:
+    - "coingecko"
+    - "binance"
+  updateInterval: "5m"
+  # coinGeckoApiKey: <CoinGecko API Key>  # strongly recommended in production — the anonymous tier rate-limits hard
+  # coinGeckoKeyType: "demo"
+
+service:
+  type: "video-generation"
+  providerType: "standard"
+  # Required even in multi-model mode: the on-chain-advertised default model.
+  # Must match one of the modelPricing[].model entries below.
+  model: "happyhorse-1.1"
+  # Required for `standard`: the upstream this broker forwards to. No
+  # providerIdentity is set here — a standard provider never advertises which
+  # upstream it hides behind.
+  targetUrl: "https://dashscope.aliyuncs.com"
+  servingUrl: <Serving URL>
+
+  # USD-denominated: modelPricing[].outputPriceUSDPerSecond below is USD per
+  # EFFECTIVE output second (i.e. already resolution-scaled — see billing
+  # below), normalized against the live 0G/USD rate from priceFeed above at
+  # billing/display time. To use NATIVE (neuron) pricing instead, drop
+  # priceDenomination and set modelPricing[].outputPrice (integer wei string)
+  # in place of outputPriceUSDPerSecond.
+  priceDenomination: "USD"
+
+  modelPricing:
+    - model: "happyhorse-1.1"
+      # TODO: replace with the EXACT model identifier DashScope's video API
+      # expects. video-generation has no upstreamModel rewrite (that's
+      # chatbot-only — see ModelPricingEntry.UpstreamModel), so whatever
+      # string is set here is forwarded to targetUrl byte-for-byte in the
+      # outgoing request body.
+      canonicalId: "happyhorse-1.1"
+      # Baseline price (multiplier 1.0) — this example treats 720p as the
+      # baseline and 1080p as a 1.5x premium; adjust to match DashScope's
+      # actual published rate card for this model.
+      outputPriceUSDPerSecond: "0.35"
+      billing:
+        mode: per_video_second
+        resolutionMultipliers:
+          "720p": 1.0
+          "1080p": 1.5
+      modelInfo:
+        name: "HappyHorse 1.1"
+        description: "Alibaba DashScope HappyHorse video-generation model, v1.1"
+        architecture:
+          modality: "text->video"
+          inputModalities: ["text"]
+          outputModalities: ["video"]
+        supportedParameters:
+          - prompt
+          - size
+          - seconds
+
+    - model: "happyhorse-1.0"
+      # TODO: same as above — set to DashScope's exact model identifier.
+      canonicalId: "happyhorse-1.0"
+      outputPriceUSDPerSecond: "0.28"
+      billing:
+        mode: per_video_second
+        resolutionMultipliers:
+          "720p": 1.0
+          "1080p": 1.5
+      modelInfo:
+        name: "HappyHorse 1.0"
+        description: "Alibaba DashScope HappyHorse video-generation model, v1.0"
+        architecture:
+          modality: "text->video"
+          inputModalities: ["text"]
+          outputModalities: ["video"]
+        supportedParameters:
+          - prompt
+          - size
+          - seconds
+
+# Optional: rate limiting and concurrency configuration (RPM applies to every
+# service type; video-generation has no dedicated per-minute dimension of its
+# own today, unlike TPM for chatbot/speech-to-text or IPM for image).
+# concurrencyLimit:
+#   maxGlobalConcurrent: 20
+#   maxPerUserConcurrent: 5
+#   perUserRPM: 30
+#   perUserBurst: 5
+
+# Optional: HTTP client timeouts for broker→provider communication. Video
+# generation can take minutes upstream — tune generously.
+# providerHttp:
+#   totalTimeout: "15m"
+#   responseHeaderTimeout: "15m"
