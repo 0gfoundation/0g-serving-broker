@@ -376,7 +376,9 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool)
 		return nil, false
 	}
 	httpReq.Header.Set("Accept-Encoding", "identity")
-	for k, v := range c.Service.AdditionalSecret {
+	// Per-model secret keyed on the job's resolved model, so a poll to an upstream
+	// with per-model API keys uses the same key the create request used.
+	for k, v := range c.Service.EffectiveAdditionalSecret(job.ResolvedModel) {
 		httpReq.Header.Set(k, v)
 	}
 

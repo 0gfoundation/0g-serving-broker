@@ -277,8 +277,14 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// inspectable; the broker serves it to the client uncompressed.
 	req.Header.Set("Accept-Encoding", "identity")
 
-	// may need additional secret to access the target service
-	if additionalSecret := c.Service.AdditionalSecret; additionalSecret != nil {
+	// may need additional secret to access the target service. Resolve per-model
+	// so a multi-model upstream that requires a different API key per model (e.g.
+	// dgrid) gets the right key; CtxKeyResolvedModel is always set by this point
+	// (resolved earlier or defaulted to ModelType), and a single-model provider
+	// resolves to the service-level map unchanged.
+	resolvedModel, _ := ctx.Get(CtxKeyResolvedModel)
+	resolvedModelStr, _ := resolvedModel.(string)
+	if additionalSecret := c.Service.EffectiveAdditionalSecret(resolvedModelStr); additionalSecret != nil {
 		for k, v := range additionalSecret {
 			req.Header.Set(k, v)
 		}

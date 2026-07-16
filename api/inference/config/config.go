@@ -1253,6 +1253,37 @@ func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{}
 	}
 }
 
+// EffectiveAdditionalSecret returns the outbound secret headers for a request
+// resolved to the given model: the service-level service.additionalSecret with
+// the resolved model's per-entry additionalSecret overlaid key-by-key (the
+// per-model value wins on a key set at both levels). A "" model (single-model
+// providers, or paths with no resolved model) yields the service-level map
+// unchanged. Returns nil when neither level configures any header.
+func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
+	svc := s.AdditionalSecret
+	var entry map[string]string
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil {
+			entry = e.AdditionalSecret
+		}
+	}
+	switch {
+	case len(entry) == 0:
+		return svc
+	case len(svc) == 0:
+		return entry
+	default:
+		out := make(map[string]string, len(svc)+len(entry))
+		for k, v := range svc {
+			out[k] = v
+		}
+		for k, v := range entry {
+			out[k] = v
+		}
+		return out
+	}
+}
+
 // deepMergeInjectFields returns a new map equal to base with override applied on
 // top: nested map[string]interface{} values are merged recursively (override's
 // leaf wins), every other value type (scalars, slices) is replaced wholesale by

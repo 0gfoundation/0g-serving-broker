@@ -144,6 +144,17 @@ type ModelPricingEntry struct {
 	// and it is only supported for the chatbot service type. Empty/unset means the
 	// service-level list applies unchanged.
 	StripBodyFields []string `yaml:"stripBodyFields"`
+
+	// AdditionalSecret is the per-model counterpart of service.additionalSecret:
+	// outbound header name/value pairs (typically the upstream API key, e.g.
+	// Authorization: "Bearer sk-...") attached to requests resolved to THIS model.
+	// It OVERRIDES the service-level map key-by-key (see
+	// Service.EffectiveAdditionalSecret): keys only at the service level still
+	// apply, keys set here win. The motivating case is an upstream (e.g. dgrid)
+	// that requires a DIFFERENT API key per model — the service-level key can no
+	// longer be shared, so each model carries its own. Empty/unset means the
+	// service-level map applies unchanged.
+	AdditionalSecret map[string]string `yaml:"additionalSecret"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults

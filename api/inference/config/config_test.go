@@ -3349,3 +3349,37 @@ service:
 		t.Fatalf("expected per-entry upstreamModel rejection for speech-to-text, got: %v", err)
 	}
 }
+
+func TestEffectiveAdditionalSecret(t *testing.T) {
+	s := &Service{
+		AdditionalSecret: map[string]string{
+			"Authorization": "Bearer svc-key",
+			"X-Common":      "shared",
+		},
+		ModelPricing: []ModelPricingEntry{
+			{Model: "m-override", AdditionalSecret: map[string]string{"Authorization": "Bearer m-key"}},
+			{Model: "m-plain"},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Per-model key overrides the service-level one; unlisted service keys persist.
+	got := s.EffectiveAdditionalSecret("m-override")
+	if got["Authorization"] != "Bearer m-key" || got["X-Common"] != "shared" {
+		t.Errorf("m-override merge = %v; want Authorization overridden, X-Common kept", got)
+	}
+	// A model without its own secret gets the service-level map unchanged.
+	if got := s.EffectiveAdditionalSecret("m-plain"); got["Authorization"] != "Bearer svc-key" {
+		t.Errorf("m-plain = %v; want service-level Authorization", got)
+	}
+	// Empty model (single-model / unresolved paths) yields the service-level map.
+	if got := s.EffectiveAdditionalSecret(""); got["Authorization"] != "Bearer svc-key" {
+		t.Errorf("empty model = %v; want service-level Authorization", got)
+	}
+	// Merge must not mutate the service-level map (only "m-override" carries m-key).
+	if s.AdditionalSecret["Authorization"] != "Bearer svc-key" {
+		t.Errorf("service map mutated: %v", s.AdditionalSecret)
+	}
+}
