@@ -1229,6 +1229,234 @@ func TestGetModels_MultiModelVideoPricingUSD_NormalizesDisplay(t *testing.T) {
 	}
 }
 
+// TestGetModels_VideoVariants_PerVideoSecond_Native pins the NATIVE
+// per_video_second variants shape (issue #595): 720p (multiplier 1.0) and
+// 1080p (multiplier 1.5) resolve to unit_price = multiplier * outputPrice
+// (1e18 and 1.5e18 respectively), and the base pricing.video field is
+// unchanged (backward compatible).
+func TestGetModels_VideoVariants_PerVideoSecond_Native(t *testing.T) {
+	svcCfg := config.Service{
+		Type: "video-generation",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model:       "some-video-model",
+				OutputPrice: "1000000000000000000", // 1 OG per effective second
+				Billing: &config.BillingConfig{
+					Mode: config.BillingModePerVideoSecond,
+					ResolutionMultipliers: map[string]float64{
+						"720p":  1.0,
+						"1080p": 1.5,
+					},
+				},
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "some-video-model", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.Pricing.Video != "1000000000000000000" {
+		t.Errorf("pricing.video = %q, want unchanged base price 1000000000000000000", m.Pricing.Video)
+	}
+	if len(m.Pricing.Variants) != 2 {
+		t.Fatalf("expected 2 variants, got %d: %+v", len(m.Pricing.Variants), m.Pricing.Variants)
+	}
+	// sortVariantsByResolution orders lexicographically: "1080p" < "720p".
+	v1080, v720 := m.Pricing.Variants[0], m.Pricing.Variants[1]
+	if v1080.Dimensions["resolution"] != "1080p" || v1080.Unit != "video_second" || v1080.UnitPrice != "1500000000000000000" {
+		t.Errorf("variants[0] = %+v, want {1080p, video_second, 1500000000000000000}", v1080)
+	}
+	if v720.Dimensions["resolution"] != "720p" || v720.Unit != "video_second" || v720.UnitPrice != "1000000000000000000" {
+		t.Errorf("variants[1] = %+v, want {720p, video_second, 1000000000000000000}", v720)
+	}
+}
+
+// TestGetModels_VideoVariants_PerVideoSecond_USD mirrors the NATIVE test
+// above under USD denomination: both pricing.variants (wei, derived via the
+// live rate) and pricing_usd.variants (decimal USD) must reflect the 1.0 /
+// 1.5 resolution multipliers.
+func TestGetModels_VideoVariants_PerVideoSecond_USD(t *testing.T) {
+	rate, _ := new(big.Rat).SetString("1")
+	svcCfg := config.Service{
+		Type:              "video-generation",
+		PriceDenomination: "USD",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model:                          "some-video-model",
+				OutputPriceUSDPerSecond:        "0.4",
+				OutputPriceUSDPerMillionTokens: "400000", // 0.4 * 1e6, as loadConfig would normalize
+				InputPriceUSDPerMillionTokens:  "0",
+				Billing: &config.BillingConfig{
+					Mode: config.BillingModePerVideoSecond,
+					ResolutionMultipliers: map[string]float64{
+						"720p":  1.0,
+						"1080p": 1.5,
+					},
+				},
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:        model.Service{ModelType: "some-video-model", Type: "video-generation"},
+		serviceConfig:  svcCfg,
+		priceFeedIsUSD: true,
+		priceFeedSnapshot: pricefeed.Snapshot{
+			RateUSDPerOG: rate,
+			LastUpdate:   time.Now(),
+			Populated:    true,
+		},
+		priceFeedThreshold:      5 * time.Minute,
+		priceFeedUpdateInterval: time.Hour,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if m.PricingUSD == nil {
+		t.Fatal("expected pricing_usd to be present")
+	}
+	if len(m.PricingUSD.Variants) != 2 {
+		t.Fatalf("expected 2 USD variants, got %d: %+v", len(m.PricingUSD.Variants), m.PricingUSD.Variants)
+	}
+	if got := m.PricingUSD.Variants[0]; got.Dimensions["resolution"] != "1080p" || got.UnitPrice != "0.6" {
+		t.Errorf("pricing_usd.variants[0] = %+v, want {1080p, ..., 0.6}", got)
+	}
+	if got := m.PricingUSD.Variants[1]; got.Dimensions["resolution"] != "720p" || got.UnitPrice != "0.4" {
+		t.Errorf("pricing_usd.variants[1] = %+v, want {720p, ..., 0.4}", got)
+	}
+
+	// NATIVE side: rate is 1 USD/OG, so wei == usd * 1e18 exactly (before
+	// quantization, which is a no-op here since the values are already
+	// multiples of the quantum).
+	if len(m.Pricing.Variants) != 2 {
+		t.Fatalf("expected 2 native variants, got %d: %+v", len(m.Pricing.Variants), m.Pricing.Variants)
+	}
+	if got := m.Pricing.Variants[0]; got.Dimensions["resolution"] != "1080p" || got.UnitPrice != "600000000000000000" {
+		t.Errorf("pricing.variants[0] = %+v, want {1080p, ..., 600000000000000000}", got)
+	}
+	if got := m.Pricing.Variants[1]; got.Dimensions["resolution"] != "720p" || got.UnitPrice != "400000000000000000" {
+		t.Errorf("pricing.variants[1] = %+v, want {720p, ..., 400000000000000000}", got)
+	}
+}
+
+// TestGetModels_VideoVariants_PerUnitTable pins the per_unit_table (bucketed)
+// shape: each configured (resolution, duration) row bills units * outputPrice
+// exactly, and the row's dimensions carry both resolution and duration_seconds.
+func TestGetModels_VideoVariants_PerUnitTable(t *testing.T) {
+	svcCfg := config.Service{
+		Type: "video-generation",
+		ModelPricing: []config.ModelPricingEntry{
+			{
+				Model:       "minimax-video",
+				OutputPrice: "100000000000000000", // 0.1 OG per unit
+				Billing: &config.BillingConfig{
+					Mode: config.BillingModePerUnitTable,
+					Table: []config.BillingUnitTier{
+						{Resolution: "768p", Duration: 6, Units: 6},
+						{Resolution: "1080p", Duration: 6, Units: 12},
+					},
+				},
+			},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "minimax-video", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	m := resp.Data[0]
+
+	if len(m.Pricing.Variants) != 2 {
+		t.Fatalf("expected 2 variants (table order preserved), got %d: %+v", len(m.Pricing.Variants), m.Pricing.Variants)
+	}
+	v0, v1 := m.Pricing.Variants[0], m.Pricing.Variants[1]
+	if v0.Dimensions["resolution"] != "768p" || v0.Dimensions["duration_seconds"] != "6" || v0.Unit != "video_clip" || v0.UnitPrice != "600000000000000000" {
+		t.Errorf("variants[0] = %+v, want {768p, 6, video_clip, 600000000000000000}", v0)
+	}
+	if v1.Dimensions["resolution"] != "1080p" || v1.Dimensions["duration_seconds"] != "6" || v1.Unit != "video_clip" || v1.UnitPrice != "1200000000000000000" {
+		t.Errorf("variants[1] = %+v, want {1080p, 6, video_clip, 1200000000000000000}", v1)
+	}
+}
+
+// TestGetModels_VideoVariants_OmittedWithoutBilling asserts a video model with
+// no per-model Billing block configured (the flat/service-level
+// videoSizeRatios fallback path) omits `variants` entirely rather than
+// emitting an empty array — no behavior change for models that don't opt in.
+func TestGetModels_VideoVariants_OmittedWithoutBilling(t *testing.T) {
+	svcCfg := config.Service{
+		Type: "video-generation",
+		ModelPricing: []config.ModelPricingEntry{
+			{Model: "flat-video-model", OutputPrice: "1000000000000000000"},
+		},
+	}
+	if err := svcCfg.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	mock := &mockModelsCtrl{
+		service:       model.Service{ModelType: "flat-video-model", Type: "video-generation"},
+		serviceConfig: svcCfg,
+	}
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("parse raw: %v", err)
+	}
+	data, _ := raw["data"].([]interface{})
+	m, _ := data[0].(map[string]interface{})
+	pricing, _ := m["pricing"].(map[string]interface{})
+	if _, exists := pricing["variants"]; exists {
+		t.Errorf("pricing.variants key should be absent when no Billing is configured, got: %v", pricing["variants"])
+	}
+}
+
 func TestParseTeeVerifier(t *testing.T) {
 	tests := []struct {
 		name           string

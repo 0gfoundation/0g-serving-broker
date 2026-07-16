@@ -156,13 +156,16 @@ func USDPerMillionStringToPerToken(s string) (string, error) {
 	perToken := new(big.Rat).Quo(perMillion, new(big.Rat).SetInt(tokensPerMillion))
 	// FloatString pads to the requested precision; strip the noise.
 	out := perToken.FloatString(18)
-	return trimTrailingZeros(out), nil
+	return TrimTrailingZeros(out), nil
 }
 
-// trimTrailingZeros removes trailing zeros after a decimal point and, if
+// TrimTrailingZeros removes trailing zeros after a decimal point and, if
 // that leaves a bare decimal point, drops it too.  "0.500000" -> "0.5",
-// "1.000000" -> "1", "10" -> "10" (unchanged).
-func trimTrailingZeros(s string) string {
+// "1.000000" -> "1", "10" -> "10" (unchanged). Exported so other packages
+// formatting their own big.Rat-derived decimal strings (e.g. handler.models'
+// per-resolution USD variant prices) get identical trimming behavior instead
+// of a second, potentially-diverging implementation.
+func TrimTrailingZeros(s string) string {
 	if !strings.ContainsRune(s, '.') {
 		return s
 	}
