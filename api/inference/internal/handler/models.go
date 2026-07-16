@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -127,6 +129,11 @@ type ModelPricing struct {
 	Video             string                  `json:"video,omitempty"`
 	TieredPricing     []ModelPricingTier      `json:"tiered_pricing,omitempty"`
 	CacheTokenBilling *ModelCacheTokenBilling `json:"cache_token_billing,omitempty"`
+	// Variants lists NATIVE (wei) per-resolution/per-bucket prices for a
+	// non-flat billing shape (video-generation today). Omitted when the model
+	// has no per-model billing config with resolution/table variance — see
+	// ModelPriceVariant.
+	Variants []ModelPriceVariant `json:"variants,omitempty"`
 }
 
 // ModelPricingUSD holds per-token USD pricing as trimmed decimal strings.
@@ -147,6 +154,39 @@ type ModelPricingUSD struct {
 	// video-generation model (decimal string). Set alongside Prompt/Completion
 	// (both reported as "0", not omitted), same convention as Image above.
 	Video string `json:"video,omitempty"`
+	// Variants is the USD counterpart of ModelPricing.Variants — same rows,
+	// UnitPrice expressed as a USD decimal string instead of wei.
+	Variants []ModelPriceVariant `json:"variants,omitempty"`
+}
+
+// unitVideoSecond and unitVideoClip are the two currently-supported values of
+// ModelPriceVariant.Unit. They are the GET /v1/models projection of
+// config.BillingModePerVideoSecond / config.BillingModePerUnitTable and must
+// stay in sync with that enum. This is a closed vocabulary — new values
+// should be added deliberately (and documented, since the router repo's
+// catalog ingestion depends on recognizing them) rather than left as free
+// text, because Unit tells the consumer how to USE UnitPrice (multiply by a
+// requested quantity vs. treat as an already-final total), which is
+// computation, not just display.
+const (
+	unitVideoSecond = "video_second"
+	unitVideoClip   = "video_clip"
+)
+
+// ModelPriceVariant is one priced (dimension...) combination for a model
+// whose billing varies by request shape (resolution, duration, ...) rather
+// than a single flat rate. Modality-agnostic by design: Dimensions is an open
+// map so video ("resolution", "duration_seconds") and, later, image/audio can
+// each name their own axes without a schema change; Unit is a closed,
+// registered vocabulary (see unitVideoSecond/unitVideoClip) telling the
+// consumer how UnitPrice must be used; UnitPrice is the final, already-
+// computed price for one Unit at these Dimensions — never a raw multiplier —
+// so a consumer never needs to reimplement BillingConfig.OutputUnits'
+// rounding/lookup rules to get an accurate number.
+type ModelPriceVariant struct {
+	Dimensions map[string]string `json:"dimensions"`
+	Unit       string            `json:"unit"`
+	UnitPrice  string            `json:"unit_price"`
 }
 
 // PriceFeedState surfaces the live 0G/USD rate and its freshness.  Present
@@ -194,6 +234,142 @@ func (h *Handler) derivePerUnitUSD(unitLabel, millionTokens, model string) (stri
 		return "", false
 	}
 	return value, true
+}
+
+// sortVariantsByResolution orders variants by their "resolution" dimension so
+// the JSON response is deterministic across requests — Go map iteration
+// (BillingConfig.ResolutionMultipliers) is randomized, and per_unit_table
+// rows are already in configured (slice) order so they're left as-is by
+// callers that don't need this.
+func sortVariantsByResolution(variants []ModelPriceVariant) {
+	sort.Slice(variants, func(i, j int) bool {
+		return variants[i].Dimensions["resolution"] < variants[j].Dimensions["resolution"]
+	})
+}
+
+// videoPriceVariantsNative builds the NATIVE (wei) `variants` rows for a
+// video-generation model's per-model billing config, or nil when none is
+// configured (defensive — config validation requires Billing on every
+// multi-model video entry, see validateVideoModelEntry, but this must not
+// panic if that invariant is ever violated).
+//
+// per_video_second yields one row per configured resolution multiplier:
+// UnitPrice = floor(multiplier * basePriceWei), a per-effective-second RATE.
+// Floor matches the "never overstate what will be charged" direction already
+// used by pricefeed.USDPerMillionToWeiPerToken's quantization. This is a
+// display rate, not a request quote — the request-time billing path applies
+// ceil() once over the WHOLE requested duration (see
+// BillingConfig.OutputUnits), which is a different, per-request computation.
+//
+// per_unit_table yields one row per configured (resolution, duration)
+// bucket: UnitPrice = units * basePriceWei exactly — units is already an
+// integer, so no rounding is involved.
+func videoPriceVariantsNative(billing *config.BillingConfig, basePriceWei string) []ModelPriceVariant {
+	if billing == nil || basePriceWei == "" {
+		return nil
+	}
+	base, ok := new(big.Int).SetString(basePriceWei, 10)
+	if !ok {
+		return nil
+	}
+	switch billing.Mode {
+	case config.BillingModePerVideoSecond:
+		if len(billing.ResolutionMultipliers) == 0 {
+			return nil
+		}
+		variants := make([]ModelPriceVariant, 0, len(billing.ResolutionMultipliers))
+		for res, mult := range billing.ResolutionMultipliers {
+			rat := new(big.Rat).SetFloat64(mult)
+			if rat == nil {
+				// mult is NaN/Inf — config validation already rejects mult <= 0,
+				// so this should be unreachable; skip rather than panic.
+				continue
+			}
+			rat.Mul(rat, new(big.Rat).SetInt(base))
+			price := new(big.Int).Quo(rat.Num(), rat.Denom())
+			variants = append(variants, ModelPriceVariant{
+				Dimensions: map[string]string{"resolution": res},
+				Unit:       unitVideoSecond,
+				UnitPrice:  price.String(),
+			})
+		}
+		sortVariantsByResolution(variants)
+		return variants
+	case config.BillingModePerUnitTable:
+		if len(billing.Table) == 0 {
+			return nil
+		}
+		variants := make([]ModelPriceVariant, 0, len(billing.Table))
+		for _, t := range billing.Table {
+			price := new(big.Int).Mul(base, big.NewInt(t.Units))
+			variants = append(variants, ModelPriceVariant{
+				Dimensions: map[string]string{
+					"resolution":       t.Resolution,
+					"duration_seconds": strconv.FormatInt(t.Duration, 10),
+				},
+				Unit:      unitVideoClip,
+				UnitPrice: price.String(),
+			})
+		}
+		return variants
+	default:
+		return nil
+	}
+}
+
+// videoPriceVariantsUSD is the USD counterpart of videoPriceVariantsNative. It
+// operates on the already-derived per-unit USD decimal string (e.g. "0.4",
+// from derivePerUnitUSD) rather than a wei integer, and formats results with
+// pricefeed.TrimTrailingZeros so a variant's unit_price renders identically to
+// the base pricing_usd.video value for the same magnitude.
+func videoPriceVariantsUSD(billing *config.BillingConfig, baseUSD string) []ModelPriceVariant {
+	if billing == nil || baseUSD == "" {
+		return nil
+	}
+	base, ok := new(big.Rat).SetString(baseUSD)
+	if !ok {
+		return nil
+	}
+	switch billing.Mode {
+	case config.BillingModePerVideoSecond:
+		if len(billing.ResolutionMultipliers) == 0 {
+			return nil
+		}
+		variants := make([]ModelPriceVariant, 0, len(billing.ResolutionMultipliers))
+		for res, mult := range billing.ResolutionMultipliers {
+			rat := new(big.Rat).SetFloat64(mult)
+			if rat == nil {
+				continue
+			}
+			rat.Mul(rat, base)
+			variants = append(variants, ModelPriceVariant{
+				Dimensions: map[string]string{"resolution": res},
+				Unit:       unitVideoSecond,
+				UnitPrice:  pricefeed.TrimTrailingZeros(rat.FloatString(18)),
+			})
+		}
+		sortVariantsByResolution(variants)
+		return variants
+	case config.BillingModePerUnitTable:
+		if len(billing.Table) == 0 {
+			return nil
+		}
+		variants := make([]ModelPriceVariant, 0, len(billing.Table))
+		for _, t := range billing.Table {
+			rat := new(big.Rat).Mul(base, new(big.Rat).SetInt64(t.Units))
+			variants = append(variants, ModelPriceVariant{
+				Dimensions: map[string]string{
+					"resolution":       t.Resolution,
+					"duration_seconds": strconv.FormatInt(t.Duration, 10),
+				},
+				Unit:      unitVideoClip,
+				UnitPrice: pricefeed.TrimTrailingZeros(rat.FloatString(18)),
+			})
+		}
+		return variants
+	default:
+		return nil
+	}
 }
 
 // GetModels returns the list of models served by this broker.
@@ -352,11 +528,13 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				// which pricing shape (single- or multi-model) served the request.
 				if video, ok := h.derivePerUnitUSD("second", mp.OutputPriceUSDPerMillionTokens, mp.Model); ok {
 					obj.PricingUSD = &ModelPricingUSD{Prompt: "0", Completion: "0", Video: video}
+					obj.PricingUSD.Variants = videoPriceVariantsUSD(mp.Billing, video)
 				}
 				if ratUSDPerOG != nil {
 					if outRat, err := pricefeed.ParseUSDPerMillion(mp.OutputPriceUSDPerMillionTokens); err == nil {
 						if wei, err := pricefeed.USDPerMillionToWeiPerToken(outRat, ratUSDPerOG); err == nil {
 							obj.Pricing.Video = wei.String()
+							obj.Pricing.Variants = videoPriceVariantsNative(mp.Billing, wei.String())
 						}
 					}
 				}
@@ -395,6 +573,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				// `video` (not the token `completion` field, which would mislead
 				// OpenAI-compatible clients into a per-token reading).
 				obj.Pricing.Video = mp.OutputPrice
+				obj.Pricing.Variants = videoPriceVariantsNative(mp.Billing, mp.OutputPrice)
 			} else {
 				obj.Pricing.Prompt = mp.InputPrice
 				obj.Pricing.Completion = mp.OutputPrice
