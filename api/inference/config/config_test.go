@@ -3349,3 +3349,54 @@ service:
 		t.Fatalf("expected per-entry upstreamModel rejection for speech-to-text, got: %v", err)
 	}
 }
+
+func TestEffectiveAdditionalSecret(t *testing.T) {
+	s := &Service{
+		AdditionalSecret: map[string]string{
+			"Authorization": "Bearer svc-key",
+			"X-Common":      "shared",
+		},
+		ModelPricing: []ModelPricingEntry{
+			{Model: "m-own", AdditionalSecret: map[string]string{"Authorization": "Bearer m-key"}},
+			{Model: "m-plain"},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A per-model secret REPLACES the service-level map wholesale: only the
+	// model's own headers apply, and the service-level X-Common does NOT ride
+	// along (that stale-header leak is the whole point of wholesale replace).
+	got := s.EffectiveAdditionalSecret("m-own")
+	if got["Authorization"] != "Bearer m-key" {
+		t.Errorf("m-own Authorization = %q; want per-model key", got["Authorization"])
+	}
+	if _, ok := got["X-Common"]; ok {
+		t.Errorf("m-own leaked service-level X-Common: %v; want wholesale replace", got)
+	}
+	// A model without its own secret falls back to the service-level map.
+	if got := s.EffectiveAdditionalSecret("m-plain"); got["Authorization"] != "Bearer svc-key" || got["X-Common"] != "shared" {
+		t.Errorf("m-plain = %v; want full service-level map", got)
+	}
+	// Empty model (single-model / unresolved paths) yields the service-level map.
+	if got := s.EffectiveAdditionalSecret(""); got["Authorization"] != "Bearer svc-key" {
+		t.Errorf("empty model = %v; want service-level Authorization", got)
+	}
+
+	// Entry-only case: no service-level map, per-model provides the secret.
+	sEntryOnly := &Service{
+		ModelPricing: []ModelPricingEntry{
+			{Model: "m1", AdditionalSecret: map[string]string{"Authorization": "Bearer m1-key"}},
+		},
+	}
+	if err := sEntryOnly.BuildModelPricingMap(); err != nil {
+		t.Fatal(err)
+	}
+	if got := sEntryOnly.EffectiveAdditionalSecret("m1"); got["Authorization"] != "Bearer m1-key" {
+		t.Errorf("entry-only m1 = %v; want per-model key", got)
+	}
+	if got := sEntryOnly.EffectiveAdditionalSecret(""); got != nil {
+		t.Errorf("entry-only empty model = %v; want nil (no service-level map)", got)
+	}
+}
