@@ -1152,14 +1152,30 @@ func validatePricingTiers(prefix string, tiers []PricingTier) error {
 	return nil
 }
 
+// maxTierMultiplier caps the effective tier price ratio (numerator/denominator).
+// It mirrors the 0g-router's clampTierMultiplier cap so the broker never accepts
+// a config the router will silently clamp — otherwise the broker would settle at
+// the configured ratio while the router charges the user the capped ratio, and
+// the operator eats the difference. Real tiers express small context-length
+// ratios (~2–8x), so 1000x is far above any legitimate value.
+const maxTierMultiplier = 1000
+
+// maxTierMultiplierDenominator bounds the fraction denominator. Real fractions
+// have tiny denominators (3/2, 5/2, 10/3); the bound keeps num (<= den*1000) and
+// den small enough that the int64 cross-multiplication in maxTierMultipliers
+// (n*inDen vs inNum*d) cannot overflow.
+const maxTierMultiplierDenominator = 1_000_000
+
 // validateTierMultiplier enforces the tier multiplier fraction rules for one
-// side (input/output): the denominator, when set, must be >= 1 (0/unset means
-// 1); and the effective fraction must be >= 1x (numerator >= denominator). A
-// tier is a surcharge over the base (lowest-tier) price, never a discount below
-// it — the base price is what registers on-chain, so a sub-1x tier would bill
-// below the advertised floor. Rejecting numerator < denominator also catches a
-// transposed fraction (e.g. 2/3 when 3/2 was intended). Mirrors
-// validateWriteMultiplier for the cache-write premium.
+// side (input/output): the denominator, when set, must be >= 1 (0/unset means 1)
+// and within maxTierMultiplierDenominator; and the effective fraction must be
+// >= 1x (numerator >= denominator) and <= maxTierMultiplier. A tier is a
+// surcharge over the base (lowest-tier) price, never a discount below it — the
+// base price is what registers on-chain, so a sub-1x tier would bill below the
+// advertised floor. Rejecting numerator < denominator also catches a transposed
+// fraction (e.g. 2/3 when 3/2 was intended). The upper bound keeps the config in
+// lockstep with the router's billing cap. Mirrors validateWriteMultiplier for
+// the cache-write premium.
 func validateTierMultiplier(prefix string, i int, side string, num, den int64) error {
 	if num < 1 {
 		return fmt.Errorf("invalid config: %s[%d].%sMultiplier must be >= 1, got %d", prefix, i, side, num)
@@ -1167,8 +1183,18 @@ func validateTierMultiplier(prefix string, i int, side string, num, den int64) e
 	if den < 0 {
 		return fmt.Errorf("invalid config: %s[%d].%sMultiplierDenominator must be >= 0 (0 = unset = 1), got %d", prefix, i, side, den)
 	}
-	if den > 0 && num < den {
+	if den > maxTierMultiplierDenominator {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplierDenominator %d exceeds max %d", prefix, i, side, den, maxTierMultiplierDenominator)
+	}
+	effDen := den
+	if effDen == 0 {
+		effDen = 1
+	}
+	if num < effDen {
 		return fmt.Errorf("invalid config: %s[%d].%sMultiplier fraction is a surcharge and must be >= 1x (numerator >= denominator), got %d/%d", prefix, i, side, num, den)
+	}
+	if num > effDen*maxTierMultiplier {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplier effective ratio must be <= %dx, got %d/%d", prefix, i, side, maxTierMultiplier, num, den)
 	}
 	return nil
 }

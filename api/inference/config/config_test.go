@@ -3455,6 +3455,8 @@ func TestValidatePricingTiers_FractionalMultipliers(t *testing.T) {
 		{"negative denominator", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 3, InputMultiplierDenominator: -1, OutputMultiplier: 1}}},
 		{"zero numerator", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 0, OutputMultiplier: 1}}},
 		{"output sub-1x", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 1, OutputMultiplier: 3, OutputMultiplierDenominator: 4}}},
+		{"effective ratio over cap", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 1001, OutputMultiplier: 1}}},
+		{"denominator over cap", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 2000001, InputMultiplierDenominator: 2000000, OutputMultiplier: 1}}},
 	}
 	for _, c := range invalid {
 		if err := validatePricingTiers("t", c.tiers); err == nil {
