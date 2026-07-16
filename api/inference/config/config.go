@@ -20,6 +20,18 @@ import (
 // This prevents issues with the colon-delimited routing proof text format.
 var validProviderIdentity = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// normalizeProviderIdentity lowercases *identity in place and validates it
+// against validProviderIdentity. Shared by the centralized (required) and
+// standard (optional) providerType branches so both apply the identical
+// format rule instead of drifting.
+func normalizeProviderIdentity(identity *string) error {
+	*identity = strings.ToLower(*identity)
+	if !validProviderIdentity.MatchString(*identity) {
+		return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", *identity)
+	}
+	return nil
+}
+
 // validProviderCountry matches a two-letter ISO 3166-1 alpha-2 country code.
 // Format-only check (not validated against the full code list) — the value is a
 // display hint, so enforcing two ASCII letters is enough to keep it well-formed.
@@ -1649,9 +1661,8 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.ProviderIdentity == "" {
 			return fmt.Errorf("invalid config: service.providerIdentity is required when providerType is 'centralized'")
 		}
-		cfg.Service.ProviderIdentity = strings.ToLower(cfg.Service.ProviderIdentity)
-		if !validProviderIdentity.MatchString(cfg.Service.ProviderIdentity) {
-			return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", cfg.Service.ProviderIdentity)
+		if err := normalizeProviderIdentity(&cfg.Service.ProviderIdentity); err != nil {
+			return err
 		}
 		// Centralized providers always behave as TargetSeparated (shared external backend)
 		cfg.Service.TargetSeparated = true
@@ -1662,11 +1673,23 @@ func loadConfig(cfg *Config) error {
 		}
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
-		// A standard provider deliberately hides its upstream: it never publishes a
-		// provider identity, so reject one rather than silently ignoring it (which
-		// would mislead an operator into thinking it is advertised).
+		// Unlike centralized, providerIdentity is OPTIONAL here, not required —
+		// and setting it does NOT publish it. A standard provider still hides its
+		// upstream from every EXTERNAL surface (GET /v1/models, on-chain
+		// additionalInfo, the TEE-signed routing proof) — those are gated on
+		// IsCentralized(), not on providerIdentity being empty, so they stay hidden
+		// regardless. What setting it DOES do is flow into internal-only
+		// bookkeeping that has no external gate: reconciliation's per-upstream
+		// usage rollup (Ctrl.recordWhitelistedUsage) and the per-request Upstream
+		// tag used for cost reconciliation (proxy.go), both of which fall back to
+		// "self" when this is empty — indistinguishable from every OTHER standard
+		// deployment. An operator running several standard providers behind
+		// different real upstreams can set this to tell their own reconciliation
+		// data apart, without it ever reaching a client or the chain.
 		if cfg.Service.ProviderIdentity != "" {
-			return fmt.Errorf("invalid config: service.providerIdentity must not be set when providerType is 'standard' (a standard provider hides its upstream identity)")
+			if err := normalizeProviderIdentity(&cfg.Service.ProviderIdentity); err != nil {
+				return err
+			}
 		}
 		// A standard provider forwards to an external upstream and never signs, so it
 		// always behaves as TargetSeparated (no broker signature, no ZG-Res-Key).
