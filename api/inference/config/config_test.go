@@ -3434,3 +3434,31 @@ func TestEffectiveAdditionalSecret(t *testing.T) {
 		t.Errorf("entry-only empty model = %v; want nil (no service-level map)", got)
 	}
 }
+
+func TestValidatePricingTiers_FractionalMultipliers(t *testing.T) {
+	valid := [][]PricingTier{
+		{{MaxInputTokens: 0, InputMultiplier: 1, OutputMultiplier: 1}}, // legacy 1x, no denominator
+		{{MaxInputTokens: 32000, InputMultiplier: 1, OutputMultiplier: 1}, {MaxInputTokens: 0, InputMultiplier: 3, InputMultiplierDenominator: 2, OutputMultiplier: 5, OutputMultiplierDenominator: 2}}, // 1.5x / 2.5x
+		{{MaxInputTokens: 0, InputMultiplier: 2, InputMultiplierDenominator: 2, OutputMultiplier: 2, OutputMultiplierDenominator: 2}},                                                                   // 2/2 = 1x exactly
+	}
+	for i, tiers := range valid {
+		if err := validatePricingTiers("t", tiers); err != nil {
+			t.Errorf("valid set %d rejected: %v", i, err)
+		}
+	}
+
+	invalid := []struct {
+		name  string
+		tiers []PricingTier
+	}{
+		{"sub-1x fraction (2/3)", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 2, InputMultiplierDenominator: 3, OutputMultiplier: 1}}},
+		{"negative denominator", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 3, InputMultiplierDenominator: -1, OutputMultiplier: 1}}},
+		{"zero numerator", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 0, OutputMultiplier: 1}}},
+		{"output sub-1x", []PricingTier{{MaxInputTokens: 0, InputMultiplier: 1, OutputMultiplier: 3, OutputMultiplierDenominator: 4}}},
+	}
+	for _, c := range invalid {
+		if err := validatePricingTiers("t", c.tiers); err == nil {
+			t.Errorf("%s: expected rejection, got nil", c.name)
+		}
+	}
+}

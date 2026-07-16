@@ -45,7 +45,7 @@ func TestMatchedTierRateClass(t *testing.T) {
 }
 
 // TestMatchedTierRateClass_TracksMultipliers is a property check: whichever tier
-// getTierMultipliers selects, matchedTierRateClass must label that same tier — they can never
+// matchedTier selects, matchedTierRateClass must label that same tier — they can never
 // disagree, or the reconciliation label would misattribute the billed cost.
 func TestMatchedTierRateClass_TracksMultipliers(t *testing.T) {
 	tiers := []config.PricingTier{
@@ -54,7 +54,7 @@ func TestMatchedTierRateClass_TracksMultipliers(t *testing.T) {
 		{MaxInputTokens: 0, InputMultiplier: 8, OutputMultiplier: 16},
 	}
 	for _, pt := range []int{0, 1, 1000, 1001, 5000, 5001, 100000} {
-		inMul, _ := getTierMultipliers(tiers, pt)
+		inMul, _ := matchedTier(tiers, pt).EffectiveInputMultiplier()
 		label := matchedTierRateClass(tiers, pt)
 		var wantMul int64
 		switch label {
@@ -68,7 +68,7 @@ func TestMatchedTierRateClass_TracksMultipliers(t *testing.T) {
 			t.Fatalf("promptTokens=%d produced unexpected label %q", pt, label)
 		}
 		if inMul != wantMul {
-			t.Errorf("promptTokens=%d: label %q implies inputMultiplier %d, but getTierMultipliers returned %d",
+			t.Errorf("promptTokens=%d: label %q implies inputMultiplier %d, but matchedTier returned %d",
 				pt, label, wantMul, inMul)
 		}
 	}
