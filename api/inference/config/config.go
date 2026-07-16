@@ -264,7 +264,7 @@ type Service struct {
 	// acknowledgements.
 	CanonicalID      string            `yaml:"canonicalId"`
 	Verifiability    string            `yaml:"verifiability"`
-	AdditionalSecret map[string]string `yaml:"additionalSecret"`
+	AdditionalSecret map[string]string `yaml:"additionalSecret" json:"-"` // json:"-": secret headers (upstream API key) never marshaled
 	VerifierURL      string            `yaml:"verifierUrl"`
 	TargetTeeAddress string            `yaml:"targetTeeAddress"`
 	TargetSeparated  bool              `yaml:"targetSeparated"`
@@ -1254,34 +1254,33 @@ func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{}
 }
 
 // EffectiveAdditionalSecret returns the outbound secret headers for a request
-// resolved to the given model: the service-level service.additionalSecret with
-// the resolved model's per-entry additionalSecret overlaid key-by-key (the
-// per-model value wins on a key set at both levels). A "" model (single-model
-// providers, or paths with no resolved model) yields the service-level map
-// unchanged. Returns nil when neither level configures any header.
+// resolved to the given model. Resolution is all-or-nothing, NOT a key-by-key
+// merge: if the resolved model's per-entry additionalSecret is non-empty it is
+// used wholesale (the service-level map does not contribute); otherwise the
+// service-level service.additionalSecret applies. A "" model (single-model
+// providers, or paths with no resolved model) yields the service-level map.
+// Returns nil when the applicable level configures no header.
+//
+// Wholesale replacement is deliberate for a credentials field: a merge would
+// (a) let a stale service-level header (e.g. Authorization) ride along to a
+// model whose per-entry block sets a differently-named auth header, and (b)
+// interact badly with HTTP header canonicalization — a service-level
+// "Authorization" and a per-model "authorization" are distinct Go map keys but
+// collapse to one header at Set time, making which value wins non-deterministic.
+// Replacing wholesale means a per-model block is self-contained: it must list
+// EVERY header that model's upstream needs.
+//
+// Wildcard note: GetModelPricing folds any unenumerated model onto the "*"
+// entry, so on a serve-all deployment every unlisted model shares the wildcard
+// entry's secret (or the service-level map if the wildcard sets none) —
+// per-model keys are only possible for explicitly enumerated entries.
 func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
-	svc := s.AdditionalSecret
-	var entry map[string]string
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil {
-			entry = e.AdditionalSecret
+		if e := s.GetModelPricing(model); e != nil && len(e.AdditionalSecret) > 0 {
+			return e.AdditionalSecret
 		}
 	}
-	switch {
-	case len(entry) == 0:
-		return svc
-	case len(svc) == 0:
-		return entry
-	default:
-		out := make(map[string]string, len(svc)+len(entry))
-		for k, v := range svc {
-			out[k] = v
-		}
-		for k, v := range entry {
-			out[k] = v
-		}
-		return out
-	}
+	return s.AdditionalSecret
 }
 
 // deepMergeInjectFields returns a new map equal to base with override applied on

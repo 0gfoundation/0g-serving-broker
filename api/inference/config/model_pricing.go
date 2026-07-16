@@ -148,13 +148,14 @@ type ModelPricingEntry struct {
 	// AdditionalSecret is the per-model counterpart of service.additionalSecret:
 	// outbound header name/value pairs (typically the upstream API key, e.g.
 	// Authorization: "Bearer sk-...") attached to requests resolved to THIS model.
-	// It OVERRIDES the service-level map key-by-key (see
-	// Service.EffectiveAdditionalSecret): keys only at the service level still
-	// apply, keys set here win. The motivating case is an upstream (e.g. dgrid)
-	// that requires a DIFFERENT API key per model — the service-level key can no
-	// longer be shared, so each model carries its own. Empty/unset means the
-	// service-level map applies unchanged.
-	AdditionalSecret map[string]string `yaml:"additionalSecret"`
+	// When set it REPLACES the service-level map wholesale for this model (NOT a
+	// key-by-key merge) — see Service.EffectiveAdditionalSecret for why — so a
+	// per-model block must list every header that model's upstream needs.
+	// Empty/unset means the service-level map applies. The motivating case is an
+	// upstream (e.g. dgrid) that requires a DIFFERENT API key per model, where the
+	// service-level key can no longer be shared. json:"-" keeps the secret out of
+	// any accidental struct marshal (defense-in-depth; nothing marshals it today).
+	AdditionalSecret map[string]string `yaml:"additionalSecret" json:"-"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
@@ -717,6 +718,32 @@ func validateModelPricing(cfg *Config) error {
 	// (stdlib log: the structured logger isn't initialized at config-load time.)
 	if hasWildcard {
 		log.Printf("[CONFIG] service.modelPricing has a wildcard %q entry: the model allowlist is DISABLED — every model this upstream can serve is reachable and billed at the wildcard entry's price. Ensure that price covers the most expensive model you expose.", ModelWildcard)
+	}
+
+	// Per-model additionalSecret is all-or-nothing per entry (see
+	// EffectiveAdditionalSecret): an entry with none falls back to the service-level
+	// key. That fallback is correct for a shared-key catalog but indistinguishable
+	// from "operator forgot this model's key" on an upstream that needs a distinct
+	// key per model (e.g. dgrid). Warn loudly at load — once, not per request — for
+	// every concrete entry missing its own secret when some sibling defines one, so
+	// a silent per-request auth-to-wrong-account mismatch becomes an operator-visible
+	// config line. A wildcard entry is exempt: it is a catch-all whose secret (or the
+	// service-level map) intentionally covers every unenumerated model.
+	anyEntryHasSecret := false
+	for i := range svc.ModelPricing {
+		if len(svc.ModelPricing[i].AdditionalSecret) > 0 && svc.ModelPricing[i].Model != ModelWildcard {
+			anyEntryHasSecret = true
+			break
+		}
+	}
+	if anyEntryHasSecret {
+		for i := range svc.ModelPricing {
+			entry := &svc.ModelPricing[i]
+			if entry.Model == ModelWildcard || len(entry.AdditionalSecret) > 0 {
+				continue
+			}
+			log.Printf("[CONFIG] service.modelPricing model %q has no additionalSecret while other models do; it will use the service-level additionalSecret (or none) upstream — confirm this is intended, not a missing per-model key.", entry.Model)
+		}
 	}
 
 	// Build the derived lookup map (single source of truth; also detects duplicate

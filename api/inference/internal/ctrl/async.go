@@ -361,7 +361,13 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 
-	// Set additional secret headers if configured (overrides any stored headers)
+	// Set additional secret headers if configured (overrides any stored headers).
+	// Uses the service-level map directly, NOT EffectiveAdditionalSecret: this path
+	// only serves text-to-image / image-editing (SubmitAsyncJob rejects other
+	// types), and modelPricing is rejected at config load for those service types
+	// (see validateModelPricing), so a per-model additionalSecret can never exist
+	// here — there is no resolved model to key on. If image multi-model is ever
+	// wired, plumb the resolved model in and switch to EffectiveAdditionalSecret.
 	if c.Service.AdditionalSecret != nil {
 		for k, v := range c.Service.AdditionalSecret {
 			httpReq.Header.Set(k, v)
