@@ -399,6 +399,18 @@ type Config struct {
 	// non-REJECT verdict is treated as settleable.
 	Assay struct {
 		Enabled bool `yaml:"enabled"`
+		// VerifierPubkey is the verifier's Ed25519 public key (64 hex chars).
+		// When set, a ZG-Verdict is only acted on if its ZG-Verdict-Sig
+		// verifies over the verdict + this request's hash — the verdict is a
+		// settlement input, so it must be authenticated, not just read off a
+		// plaintext header. Empty = legacy trust-the-header mode.
+		VerifierPubkey string `yaml:"verifierPubkey"`
+		// StrictVerdict (requires VerifierPubkey): treat a missing or
+		// badly-signed verdict as INVALID_SIG and exclude the request from
+		// settlement, so stripping the header can't launder a REJECT. Off by
+		// default (fail-open Tier-1: unauthenticated verdicts are ignored but
+		// the request still settles).
+		StrictVerdict bool `yaml:"strictVerdict"`
 	} `yaml:"assay"`
 	RevenueTransfer struct {
 		TargetAddress string        `yaml:"targetAddress"`

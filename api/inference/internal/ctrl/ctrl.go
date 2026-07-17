@@ -2,6 +2,9 @@ package ctrl
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
+	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
@@ -44,7 +47,7 @@ type Ctrl struct {
 	logger   log.Logger
 
 	autoSettleBufferTime time.Duration
-	minSettlementFee    *big.Int
+	minSettlementFee     *big.Int
 
 	Service           config.Service
 	cacheTokenBilling config.CacheTokenBillingConfig
@@ -56,6 +59,16 @@ type Ctrl struct {
 	// per request and excludes REJECT'd requests from settlement. Set from
 	// cfg.Assay.Enabled; off by default so the path is fully inert until opted in.
 	assayVerdictFilter bool
+	// assayVerifierPubkey, when non-nil, is the Ed25519 key the verifier signs
+	// verdicts with (cfg.Assay.VerifierPubkey). A verdict is then only recorded
+	// if ZG-Verdict-Sig verifies over the verdict + request hash — the verdict
+	// decides settlement, so it must be authenticated. nil = legacy
+	// trust-the-header mode.
+	assayVerifierPubkey ed25519.PublicKey
+	// assayStrictVerdict records INVALID_SIG (settlement-excluded) for
+	// responses whose verdict is missing/unverifiable, so header stripping
+	// can't launder a REJECT. Only meaningful with assayVerifierPubkey set.
+	assayStrictVerdict bool
 
 	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
 	// because the requests.input_count column conflates seconds (whisper)
@@ -205,6 +218,22 @@ func New(
 		}
 	}
 
+	// Parse the Assay verifier's verdict-signing key up front: a malformed key
+	// with verification "on" must fail loudly at boot, not silently downgrade
+	// to trusting unauthenticated verdicts on the settlement path.
+	var assayPubkey ed25519.PublicKey
+	if cfg.Assay.VerifierPubkey != "" {
+		raw, err := hex.DecodeString(strings.TrimPrefix(cfg.Assay.VerifierPubkey, "0x"))
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			panic(fmt.Sprintf("assay.verifierPubkey must be %d hex bytes (ed25519 public key), got %q",
+				ed25519.PublicKeySize, cfg.Assay.VerifierPubkey))
+		}
+		assayPubkey = ed25519.PublicKey(raw)
+	}
+	if cfg.Assay.StrictVerdict && assayPubkey == nil {
+		panic("assay.strictVerdict requires assay.verifierPubkey to be set")
+	}
+
 	p := &Ctrl{
 		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
 		minSettlementFee:     minSettlementFee,
@@ -217,6 +246,8 @@ func New(
 		priceFeed:            cfg.PriceFeed,
 		concurrencyLimit:     cfg.ConcurrencyLimit,
 		assayVerdictFilter:   cfg.Assay.Enabled,
+		assayVerifierPubkey:  assayPubkey,
+		assayStrictVerdict:   cfg.Assay.StrictVerdict,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,
@@ -238,16 +269,16 @@ func New(
 			Timeout: cfg.ProviderHttp.TotalTimeout, // Overall request timeout
 			Transport: &http.Transport{
 				// Connection pool settings for high concurrency scenarios
-				MaxIdleConns:          200,                                                                        // Increased total idle connections to handle more concurrent users
-				MaxIdleConnsPerHost:   200,                                                                        // Idle connections per host (critical for single backend)
-				MaxConnsPerHost:       500,                                                                        // Limit max active connections to prevent resource exhaustion
-				IdleConnTimeout:       90 * time.Second,                                                           // How long idle connections stay open
-				TLSHandshakeTimeout:   10 * time.Second,                                                           // TLS handshake timeout
+				MaxIdleConns:          200,                                    // Increased total idle connections to handle more concurrent users
+				MaxIdleConnsPerHost:   200,                                    // Idle connections per host (critical for single backend)
+				MaxConnsPerHost:       500,                                    // Limit max active connections to prevent resource exhaustion
+				IdleConnTimeout:       90 * time.Second,                       // How long idle connections stay open
+				TLSHandshakeTimeout:   10 * time.Second,                       // TLS handshake timeout
 				ResponseHeaderTimeout: cfg.ProviderHttp.ResponseHeaderTimeout, // Time to wait for response headers
-				ExpectContinueTimeout: 1 * time.Second,                                                            // Time to wait for 100-continue response
-				DisableKeepAlives:     false,                                                                      // Enable connection reuse (critical)
-				DisableCompression:    false,                                                                      // Allow gzip compression
-				ForceAttemptHTTP2:     false,                                                                      // Use HTTP/1.1 for stability
+				ExpectContinueTimeout: 1 * time.Second,                        // Time to wait for 100-continue response
+				DisableKeepAlives:     false,                                  // Enable connection reuse (critical)
+				DisableCompression:    false,                                  // Allow gzip compression
+				ForceAttemptHTTP2:     false,                                  // Use HTTP/1.1 for stability
 			},
 		},
 		// Initialize whitelist users map

@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,17 +36,61 @@ import (
 // REJECT'd requests from the TEE-signed batch. No-op when the integration is
 // disabled, for whitelisted (unbilled) traffic, or when the upstream set no
 // verdict header (fail-open).
+//
+// The verdict is a settlement input, so when assay.verifierPubkey is
+// configured it is only acted on if the verifier's Ed25519 signature
+// (ZG-Verdict-Sig) verifies over the verdict + this request's hash — an
+// unauthenticated plaintext header must not decide who gets paid. The hash
+// (sent upstream as ZG-Request-Hash) makes each signature single-use, so a
+// PASS captured from one response can't be replayed onto another. In strict
+// mode a missing/unverifiable verdict is recorded as INVALID_SIG (excluded
+// from settlement like REJECT); otherwise it is ignored (fail-open).
 func (c *Ctrl) recordAssayVerdict(resp *http.Response, reqModel model.Request) {
 	if !c.assayVerdictFilter || reqModel.IsWhitelisted {
 		return
 	}
 	verdict := resp.Header.Get(constant.HeaderZGVerdict)
+
+	if c.assayVerifierPubkey != nil {
+		sig := resp.Header.Get(constant.HeaderZGVerdictSig)
+		if verdict == "" || !verifyAssayVerdictSig(c.assayVerifierPubkey, verdict, reqModel.RequestHash, sig) {
+			if !c.assayStrictVerdict {
+				if verdict != "" {
+					c.logger.Warnf("Assay: dropping unauthenticated verdict %q for request %s (bad/missing %s)",
+						verdict, reqModel.RequestHash, constant.HeaderZGVerdictSig)
+				}
+				return
+			}
+			c.logger.Warnf("Assay: verdict %q for request %s failed signature verification; recording %s",
+				verdict, reqModel.RequestHash, constant.AssayVerdictInvalidSig)
+			verdict = constant.AssayVerdictInvalidSig
+		}
+	}
+
 	if verdict == "" {
 		return
 	}
 	if err := c.db.UpdateRequestVerdict(reqModel.RequestHash, verdict); err != nil {
 		c.logger.Warnf("Assay: failed to record verdict %q for request %s: %v", verdict, reqModel.RequestHash, err)
 	}
+}
+
+// verifyAssayVerdictSig checks the verifier's Ed25519 signature over the
+// domain-separated verdict payload. Pure so it can be unit-tested without a
+// Ctrl. Payload layout must match the verifier's signer
+// (pipeline/verifier_node/serve_verifier.py in 0g-assay):
+//
+//	"assay-verdict-v1|" + verdict + "|" + requestHash
+func verifyAssayVerdictSig(pubkey ed25519.PublicKey, verdict, requestHash, sigB64 string) bool {
+	if sigB64 == "" {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	payload := constant.AssayVerdictDomain + "|" + verdict + "|" + requestHash
+	return ed25519.Verify(pubkey, []byte(payload), sig)
 }
 
 // ChatSignature, SigningAlgo, ChatPrefix, and the chat-signing helpers

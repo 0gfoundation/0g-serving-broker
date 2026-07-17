@@ -44,11 +44,32 @@ const (
 	// per-request LDD audit result (one of the AssayVerdict* values below).
 	HeaderZGVerdict = "ZG-Verdict"
 
+	// HeaderZGVerdictSig is the verifier's Ed25519 signature (base64) over
+	// AssayVerdictDomain + "|" + verdict + "|" + requestHash. It binds the
+	// verdict to this broker request so the settlement-affecting header can't
+	// be forged or replayed by whatever sits at targetUrl.
+	HeaderZGVerdictSig = "ZG-Verdict-Sig"
+
+	// HeaderZGRequestHash is sent BY the broker ON the upstream request: the
+	// request's settlement hash. The verifier folds it into the signed verdict
+	// payload, making each signature single-use.
+	HeaderZGRequestHash = "ZG-Request-Hash"
+
+	// AssayVerdictDomain domain-separates verdict signatures from the GPU
+	// node's commitment signatures ("assay-commitment-v1").
+	AssayVerdictDomain = "assay-verdict-v1"
+
 	// Assay verdict values reported via HeaderZGVerdict. UNVERIFIED means the
-	// request was sampled out of auditing; only REJECT is acted on at settlement.
+	// request was sampled out of auditing; REJECT and INVALID_SIG are acted on
+	// at settlement.
 	AssayVerdictPass       = "PASS"
 	AssayVerdictReject     = "REJECT"
 	AssayVerdictUnverified = "UNVERIFIED"
+	// AssayVerdictInvalidSig is recorded locally (never sent by the verifier)
+	// when assay.strictVerdict is on and a response's verdict is missing or
+	// fails signature verification — such requests are excluded from
+	// settlement like REJECTs.
+	AssayVerdictInvalidSig = "INVALID_SIG"
 )
 
 // KnownCentralizedProviderURLs maps provider identity to their default API base URLs.

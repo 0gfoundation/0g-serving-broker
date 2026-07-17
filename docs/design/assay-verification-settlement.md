@@ -76,9 +76,10 @@ sequenceDiagram
 
     U->>B: POST /v1/chat/completions
     B->>DB: CreateRequest (RequestHash = nonce, fee = 0)
-    B->>V: forward request (targetUrl)
-    V-->>B: 200 OK + header ZG-Verdict: PASS|REJECT|UNVERIFIED
+    B->>V: forward request (targetUrl) + header ZG-Request-Hash
+    V-->>B: 200 OK + headers ZG-Verdict, ZG-Verdict-Sig
     Note over B: handleChargingResponse / handleChargingStreamResponse
+    B->>B: verify Ed25519 sig over "assay-verdict-v1|verdict|hash"
     B->>DB: recordAssayVerdict → UpdateRequestVerdict(hash, verdict)
     B->>DB: bill: UpdateRequestWithAccurateTokens(hash, fees…)
     B-->>U: sanitized response
@@ -87,8 +88,40 @@ sequenceDiagram
 `recordAssayVerdict` is a no-op when the integration is disabled, for whitelisted
 (unbilled) traffic, or when no `ZG-Verdict` header is present (**fail-open**).
 
-Relevant code: [`recordAssayVerdict`](../../api/inference/internal/ctrl/chatbot.go),
-[`UpdateRequestVerdict`](../../api/inference/internal/db/request.go).
+### Verdict authentication
+
+The verdict decides settlement, so it must not remain an unauthenticated
+plaintext header — otherwise whatever sits at `targetUrl` (a misconfigured
+upstream, an interposed proxy, a non-TDX process posing as the verifier)
+controls who gets paid. When `assay.verifierPubkey` is configured, the broker
+only acts on a verdict whose `ZG-Verdict-Sig` (Ed25519, base64) verifies over
+
+```
+"assay-verdict-v1" + "|" + verdict + "|" + RequestHash
+```
+
+The broker sends `RequestHash` upstream as `ZG-Request-Hash` and the verifier
+folds it into the signed payload, making every signature **single-use**: a
+`PASS` captured from one response cannot be replayed onto another request, and
+a `REJECT` cannot be rewritten to `PASS` without breaking the signature. The
+domain prefix separates verdict signatures from the GPU node's commitment
+signatures (`assay-commitment-v1`).
+
+Two failure modes, chosen by `assay.strictVerdict`:
+
+- **strict off (default)**: an unauthenticated verdict is *ignored* (logged;
+  the request settles under fail-open). Protects revenue, but a
+  header-stripping attacker can still launder a REJECT — acceptable only under
+  Tier-1's detection-not-deterrence posture (§10).
+- **strict on**: a missing/unverifiable verdict is recorded as `INVALID_SIG`
+  and the request is **excluded from settlement** like a REJECT. Stripping the
+  header now costs the request's revenue instead of laundering it.
+
+Relevant code: [`recordAssayVerdict` / `verifyAssayVerdictSig`](../../api/inference/internal/ctrl/chatbot.go),
+[`UpdateRequestVerdict`](../../api/inference/internal/db/request.go); verifier-side
+signer: `_sign_verdict` in `pipeline/verifier_node/serve_verifier.py` (0g-assay
+repo; key via `--verdict-key` / `$ASSAY_VERDICT_KEY`, pubkey surfaced on the
+verifier's `/health` as `verdict_pubkey`).
 
 ---
 
@@ -227,27 +260,40 @@ The feature is **off by default**. Enable it in the inference broker config:
 ```yaml
 # config.yaml
 assay:
-  enabled: true   # record ZG-Verdict and exclude REJECT'd requests from settlement
+  enabled: true          # record ZG-Verdict and exclude REJECT'd requests from settlement
+  # Ed25519 pubkey (64 hex chars) the verifier signs verdicts with; read it off
+  # the verifier's /health ("verdict_pubkey"). When set, a verdict is only
+  # acted on if ZG-Verdict-Sig verifies (see §3, Verdict authentication).
+  verifierPubkey: "c3e3…"
+  # strict mode: missing/unverifiable verdict -> INVALID_SIG, excluded from
+  # settlement (requires verifierPubkey). Default false (fail-open).
+  strictVerdict: false
 ```
 
-Wiring: `cfg.Assay.Enabled` → `Ctrl.assayVerdictFilter`
-([config.go](../../api/inference/config/config.go),
-[ctrl.go](../../api/inference/internal/ctrl/ctrl.go)).
+Wiring: `cfg.Assay.*` → `Ctrl.assayVerdictFilter` / `assayVerifierPubkey` /
+`assayStrictVerdict` ([config.go](../../api/inference/config/config.go),
+[ctrl.go](../../api/inference/internal/ctrl/ctrl.go)). A malformed pubkey — or
+`strictVerdict` without a pubkey — panics at boot rather than silently
+downgrading to trusting unauthenticated verdicts.
 
 Prerequisite: the broker's service `targetUrl` must point at the Assay verifier
-(which emits `ZG-Verdict`). No other deployment change is required.
+(which emits `ZG-Verdict` and, when signing is available, `ZG-Verdict-Sig`).
+Pin the verifier's key with `--verdict-key` on the verifier so the pubkey
+survives restarts.
 
 ### Behavior matrix
 
-| `ZG-Verdict` | `assay.enabled=false` | `assay.enabled=true` |
-|--------------|-----------------------|----------------------|
-| `PASS`       | settled               | settled              |
-| `UNVERIFIED` | settled               | settled (fail-open)  |
-| *(absent)*   | settled               | settled (fail-open)  |
-| `REJECT`     | settled               | **excluded** (parked, not billed) |
+| `ZG-Verdict` | sig | `enabled=false` | `enabled=true`, no pubkey | + `verifierPubkey` | + `strictVerdict` |
+|--------------|-----|-----------------|---------------------------|--------------------|-------------------|
+| `PASS`       | valid   | settled | settled | settled | settled |
+| `UNVERIFIED` | valid   | settled | settled (fail-open) | settled (fail-open) | settled (fail-open) |
+| *(absent)*   | —       | settled | settled (fail-open) | settled (fail-open) | **excluded** (`INVALID_SIG`) |
+| `REJECT`     | valid   | settled | **excluded** | **excluded** | **excluded** |
+| any          | bad/missing | settled | *(trusted as-is)* | ignored → settled | **excluded** (`INVALID_SIG`) |
 
-Fail-open is intentional: a missing or non-`REJECT` verdict never blocks revenue.
-Only an explicit `REJECT` withholds settlement.
+Fail-open is intentional in the default modes: a missing or non-`REJECT`
+verdict never blocks revenue. Strict mode inverts that for unauthenticated
+responses so signature stripping cannot launder a `REJECT`.
 
 ---
 
@@ -256,7 +302,10 @@ Only an explicit `REJECT` withholds settlement.
 - **Smart contract** — untouched. `REJECT` exclusion happens before signing.
 - **GPU node** — untouched. It is upstream of the verdict; the broker never
   contacts it.
-- **Verifier** — no change required for Tier-1; it already emits `ZG-Verdict`.
+- **Verifier** — emits `ZG-Verdict` as before; to support verdict
+  authentication (§3) it additionally signs each verdict (`ZG-Verdict-Sig`)
+  with the key from `--verdict-key`. An older verifier without signing still
+  works in the no-pubkey / non-strict configurations.
 - **Existing settlement paths** — inert when `assay.enabled=false`.
 
 ---
@@ -326,6 +375,17 @@ curl -si http://VERIFIER_HOST:8200/v1/chat/completions \
 
 ## 10. Limitations & future work
 
+- **Tier-1 is detection, not economic deterrence.** Be explicit about what
+  enabling this buys: with sampling at rate *r* and fail-open settlement, a
+  provider that cheats on **every** request still collects ≈ (1 − *r*) of its
+  revenue — only the requests that were both sampled *and* REJECT'd are
+  withheld (at *r* = 0.1, ~90% of cheated revenue still settles). There is no
+  penalty, slashing, or reputational consequence on-chain yet. "Verification
+  enabled" therefore means *cheating is detectable and evidenced*, *not*
+  *cheating is unprofitable*. The economics flip only when detection feeds an
+  attribution + penalty mechanism (stake slashing, eviction, or retroactive
+  clawback), which is future work. Until then, treat verdict data as an audit
+  trail and an operational signal, not as revenue protection.
 - **Disposition of rejected rows.** They are parked via `skip_until`
   (`SkipUntilDuration`), so they reappear and are re-filtered each cycle —
   effectively never settled, never deleted. If a permanent disposition is
