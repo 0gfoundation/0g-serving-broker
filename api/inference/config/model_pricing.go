@@ -531,25 +531,27 @@ func (s *Service) IsModelAllowed(model string) bool {
 	return ok
 }
 
-// maxTierMultipliers returns the highest input/output multipliers across the
-// effective tier set for this entry (the entry's own tiers, or serviceTiers
-// when the entry has none). Returns (1, 1) when no tiers apply. Used to size
-// the on-chain advertised ceiling so it covers the worst-case tiered price.
-func (e *ModelPricingEntry) maxTierMultipliers(serviceTiers []PricingTier) (int64, int64) {
+// maxTierMultipliers returns the highest input/output multiplier fractions
+// (each as numerator/denominator) across the effective tier set for this entry
+// (the entry's own tiers, or serviceTiers when the entry has none). Returns
+// (1/1, 1/1) when no tiers apply. Used to size the on-chain advertised ceiling
+// so it covers the worst-case tiered price. Fractions are compared by
+// cross-multiplication (all denominators are >= 1 via Effective*Multiplier).
+func (e *ModelPricingEntry) maxTierMultipliers(serviceTiers []PricingTier) (inNum, inDen, outNum, outDen int64) {
 	tiers := e.Tiers
 	if len(tiers) == 0 {
 		tiers = serviceTiers
 	}
-	maxIn, maxOut := int64(1), int64(1)
+	inNum, inDen, outNum, outDen = 1, 1, 1, 1
 	for _, t := range tiers {
-		if t.InputMultiplier > maxIn {
-			maxIn = t.InputMultiplier
+		if n, d := t.EffectiveInputMultiplier(); n*inDen > inNum*d { // n/d > inNum/inDen
+			inNum, inDen = n, d
 		}
-		if t.OutputMultiplier > maxOut {
-			maxOut = t.OutputMultiplier
+		if n, d := t.EffectiveOutputMultiplier(); n*outDen > outNum*d {
+			outNum, outDen = n, d
 		}
 	}
-	return maxIn, maxOut
+	return inNum, inDen, outNum, outDen
 }
 
 // MaxModelPricesNative returns the maximum tier-adjusted InputPrice and
@@ -562,15 +564,17 @@ func (s *Service) MaxModelPricesNative(serviceTiers []PricingTier) (maxInput, ma
 	maxOut := big.NewInt(0)
 	for i := range s.ModelPricing {
 		entry := &s.ModelPricing[i]
-		mulIn, mulOut := entry.maxTierMultipliers(serviceTiers)
+		inNum, inDen, outNum, outDen := entry.maxTierMultipliers(serviceTiers)
 		if v, ok := new(big.Int).SetString(entry.InputPrice, 10); ok {
-			v.Mul(v, big.NewInt(mulIn))
+			v.Mul(v, big.NewInt(inNum))
+			v.Div(v, big.NewInt(inDen))
 			if v.Cmp(maxIn) > 0 {
 				maxIn = v
 			}
 		}
 		if v, ok := new(big.Int).SetString(entry.OutputPrice, 10); ok {
-			v.Mul(v, big.NewInt(mulOut))
+			v.Mul(v, big.NewInt(outNum))
+			v.Div(v, big.NewInt(outDen))
 			if v.Cmp(maxOut) > 0 {
 				maxOut = v
 			}
@@ -590,15 +594,15 @@ func (s *Service) MaxModelUSDPrices(serviceTiers []PricingTier) (maxInput, maxOu
 	maxOut := new(big.Rat)
 	for i := range s.ModelPricing {
 		entry := &s.ModelPricing[i]
-		mulIn, mulOut := entry.maxTierMultipliers(serviceTiers)
+		inNum, inDen, outNum, outDen := entry.maxTierMultipliers(serviceTiers)
 		if r, ok := new(big.Rat).SetString(entry.InputPriceUSDPerMillionTokens); ok {
-			r.Mul(r, new(big.Rat).SetInt64(mulIn))
+			r.Mul(r, big.NewRat(inNum, inDen))
 			if r.Cmp(maxIn) > 0 {
 				maxIn = r
 			}
 		}
 		if r, ok := new(big.Rat).SetString(entry.OutputPriceUSDPerMillionTokens); ok {
-			r.Mul(r, new(big.Rat).SetInt64(mulOut))
+			r.Mul(r, big.NewRat(outNum, outDen))
 			if r.Cmp(maxOut) > 0 {
 				maxOut = r
 			}

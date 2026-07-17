@@ -71,11 +71,37 @@ type ModelRateLimits struct {
 	ImagesPerMinute   int `json:"images_per_minute,omitempty"`
 }
 
-// ModelPricingTier represents a single tier in tiered pricing.
+// ModelPricingTier represents a single tier in tiered pricing. The multipliers
+// are fractions: the effective input multiplier is InputMultiplier /
+// InputMultiplierDenominator. The denominator fields are omitted when 1 (the
+// integer-multiple case) so output for legacy integer-only tiers is unchanged;
+// a consumer that ignores them must treat a missing denominator as 1.
 type ModelPricingTier struct {
-	MaxInputTokens   int   `json:"max_input_tokens"`
-	InputMultiplier  int64 `json:"input_multiplier"`
-	OutputMultiplier int64 `json:"output_multiplier"`
+	MaxInputTokens              int   `json:"max_input_tokens"`
+	InputMultiplier             int64 `json:"input_multiplier"`
+	OutputMultiplier            int64 `json:"output_multiplier"`
+	InputMultiplierDenominator  int64 `json:"input_multiplier_denominator,omitempty"`
+	OutputMultiplierDenominator int64 `json:"output_multiplier_denominator,omitempty"`
+}
+
+// toModelPricingTier maps a config tier to its /v1/models representation,
+// carrying the multiplier denominators only when they are not 1 so legacy
+// integer-only tiers render exactly as before.
+func toModelPricingTier(t config.PricingTier) ModelPricingTier {
+	inNum, inDen := t.EffectiveInputMultiplier()
+	outNum, outDen := t.EffectiveOutputMultiplier()
+	mt := ModelPricingTier{
+		MaxInputTokens:   t.MaxInputTokens,
+		InputMultiplier:  inNum,
+		OutputMultiplier: outNum,
+	}
+	if inDen != 1 {
+		mt.InputMultiplierDenominator = inDen
+	}
+	if outDen != 1 {
+		mt.OutputMultiplierDenominator = outDen
+	}
+	return mt
 }
 
 // ModelCacheTokenBilling holds cache token billing info for display.
@@ -590,11 +616,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 			if len(tiers) > 0 {
 				out := make([]ModelPricingTier, len(tiers))
 				for j, t := range tiers {
-					out[j] = ModelPricingTier{
-						MaxInputTokens:   t.MaxInputTokens,
-						InputMultiplier:  t.InputMultiplier,
-						OutputMultiplier: t.OutputMultiplier,
-					}
+					out[j] = toModelPricingTier(t)
 				}
 				obj.Pricing.TieredPricing = out
 			}
@@ -670,11 +692,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	if tieredCfg.Enabled && len(tieredCfg.Tiers) > 0 {
 		tiers := make([]ModelPricingTier, len(tieredCfg.Tiers))
 		for i, t := range tieredCfg.Tiers {
-			tiers[i] = ModelPricingTier{
-				MaxInputTokens:   t.MaxInputTokens,
-				InputMultiplier:  t.InputMultiplier,
-				OutputMultiplier: t.OutputMultiplier,
-			}
+			tiers[i] = toModelPricingTier(t)
 		}
 		obj.Pricing.TieredPricing = tiers
 	}

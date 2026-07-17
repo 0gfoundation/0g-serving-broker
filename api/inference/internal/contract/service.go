@@ -91,11 +91,23 @@ func buildAdditionalInfo(service config.Service, imageName, imageDigest string, 
 	if tieredPricing.Enabled && len(tieredPricing.Tiers) > 0 {
 		tiers := make([]map[string]interface{}, len(tieredPricing.Tiers))
 		for i, t := range tieredPricing.Tiers {
-			tiers[i] = map[string]interface{}{
+			inNum, inDen := t.EffectiveInputMultiplier()
+			outNum, outDen := t.EffectiveOutputMultiplier()
+			tier := map[string]interface{}{
 				"maxInputTokens":   t.MaxInputTokens,
-				"inputMultiplier":  t.InputMultiplier,
-				"outputMultiplier": t.OutputMultiplier,
+				"inputMultiplier":  inNum,
+				"outputMultiplier": outNum,
 			}
+			// Publish denominators only when the multiplier is a non-integer
+			// fraction, so a legacy integer-only tier's on-chain info is unchanged;
+			// consumers treat a missing denominator as 1.
+			if inDen != 1 {
+				tier["inputMultiplierDenominator"] = inDen
+			}
+			if outDen != 1 {
+				tier["outputMultiplierDenominator"] = outDen
+			}
+			tiers[i] = tier
 		}
 		additionalInfo["tieredPricing"] = map[string]interface{}{
 			"tiers": tiers,

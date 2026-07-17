@@ -549,21 +549,38 @@ func (c *Ctrl) finalizeResponseWithUsage(ctx context.Context, usage *Usage, outp
 	return c.updateAccountWithUsage(ctx, usage, outputPrice, requestHash, inputPrice, tiers, cacheBilling)
 }
 
-// getTierMultipliers returns the input and output price multipliers for the given prompt token count.
+// matchedTier returns the pricing tier selected for the given prompt token count.
 // Tiers are matched in order; the first tier whose MaxInputTokens >= promptTokens (or MaxInputTokens == 0
 // for unbounded) is selected. If promptTokens exceeds all bounded tiers, the last tier is used as a
 // fallback (e.g., if the final tier has MaxInputTokens == 0, it always matches as the catch-all).
-// This function should only be called when len(tiers) > 0; config validation ensures
-// that tier lists always have valid multipliers (>= 1).
-func getTierMultipliers(tiers []config.PricingTier, promptTokens int) (int64, int64) {
+// This function should only be called when len(tiers) > 0. It is the single tier matcher: both the
+// billing apply path and matchedTierRateClass go through it so the billed tier and its rate_class
+// label can never drift.
+func matchedTier(tiers []config.PricingTier, promptTokens int) config.PricingTier {
 	for _, tier := range tiers {
 		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
-			return tier.InputMultiplier, tier.OutputMultiplier
+			return tier
 		}
 	}
 	// Fallback: promptTokens exceeds all bounded tiers, use the last tier
-	last := tiers[len(tiers)-1]
-	return last.InputMultiplier, last.OutputMultiplier
+	return tiers[len(tiers)-1]
+}
+
+// applyTierMultiplier returns price*num/den as a decimal string, computed in
+// integer big.Int (multiply-then-divide) to avoid precision loss, matching
+// addTierFee's cache-write fraction math. A 1x fraction (num == den) returns the
+// price unchanged. den is guaranteed >= 1 by PricingTier.Effective*Multiplier.
+func applyTierMultiplier(price string, num, den int64) (string, error) {
+	if num == den {
+		return price, nil
+	}
+	base, ok := new(big.Int).SetString(price, 10)
+	if !ok {
+		return "", fmt.Errorf("tiered pricing: failed to parse price %q as big.Int", price)
+	}
+	base.Mul(base, big.NewInt(num))
+	base.Div(base, big.NewInt(den))
+	return base.String(), nil
 }
 
 // effectiveTiers applies the tier fallback used everywhere tiers are consumed: a model's own
@@ -576,22 +593,17 @@ func (c *Ctrl) effectiveTiers(tiers []config.PricingTier) []config.PricingTier {
 }
 
 // matchedTierRateClass returns the reconciliation rate_class label for the tier that
-// getTierMultipliers would select for promptTokens — the mutually-exclusive input-length
+// matchedTier selects for promptTokens — the mutually-exclusive input-length
 // price class the request billed at ("tier:<=32000", or "tier:unbounded" for the catch-all).
-// It mirrors getTierMultipliers' matching exactly so the reconciliation label can never drift
-// from the tier actually billed. Returns "" when there are no tiers (untiered model → no
-// price class), which leaves the request's rate_class empty. See
+// It goes through the same matchedTier matcher as billing so the reconciliation label can
+// never drift from the tier actually billed. Returns "" when there are no tiers (untiered
+// model → no price class), which leaves the request's rate_class empty. See
 // docs/design/provider-reconciliation.md.
 func matchedTierRateClass(tiers []config.PricingTier, promptTokens int) string {
 	if len(tiers) == 0 {
 		return ""
 	}
-	for _, tier := range tiers {
-		if tier.MaxInputTokens == 0 || promptTokens <= tier.MaxInputTokens {
-			return tierLabel(tier)
-		}
-	}
-	return tierLabel(tiers[len(tiers)-1])
+	return tierLabel(matchedTier(tiers, promptTokens))
 }
 
 // tierLabel renders a single tier's rate_class label from its input-token bound.
@@ -746,24 +758,19 @@ func (c *Ctrl) updateAccountWithUsage(ctx context.Context, usage *Usage, outputP
 	// Apply tiered pricing: adjust base prices by tier multiplier before any fee calculation.
 	// This ensures cache token billing and all other modifiers use the correct tiered price.
 	if len(tiers) > 0 {
-		inputMul, outputMul := getTierMultipliers(tiers, usage.PromptTokens)
-		if inputMul > 1 {
-			base, ok := new(big.Int).SetString(inputPrice, 10)
-			if !ok {
-				return fmt.Errorf("tiered pricing: failed to parse inputPrice %q as big.Int", inputPrice)
-			}
-			inputPrice = new(big.Int).Mul(base, big.NewInt(inputMul)).String()
+		tier := matchedTier(tiers, usage.PromptTokens)
+		inNum, inDen := tier.EffectiveInputMultiplier()
+		outNum, outDen := tier.EffectiveOutputMultiplier()
+		var err error
+		if inputPrice, err = applyTierMultiplier(inputPrice, inNum, inDen); err != nil {
+			return err
 		}
-		if outputMul > 1 {
-			base, ok := new(big.Int).SetString(outputPrice, 10)
-			if !ok {
-				return fmt.Errorf("tiered pricing: failed to parse outputPrice %q as big.Int", outputPrice)
-			}
-			outputPrice = new(big.Int).Mul(base, big.NewInt(outputMul)).String()
+		if outputPrice, err = applyTierMultiplier(outputPrice, outNum, outDen); err != nil {
+			return err
 		}
-		if inputMul > 1 || outputMul > 1 {
-			c.logger.Infof("Tiered pricing: prompt_tokens=%d, inputMultiplier=%d, outputMultiplier=%d, effectiveInputPrice=%s, effectiveOutputPrice=%s",
-				usage.PromptTokens, inputMul, outputMul, inputPrice, outputPrice)
+		if inNum != inDen || outNum != outDen {
+			c.logger.Infof("Tiered pricing: prompt_tokens=%d, inputMultiplier=%d/%d, outputMultiplier=%d/%d, effectiveInputPrice=%s, effectiveOutputPrice=%s",
+				usage.PromptTokens, inNum, inDen, outNum, outDen, inputPrice, outputPrice)
 		}
 	}
 

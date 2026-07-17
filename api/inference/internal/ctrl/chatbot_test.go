@@ -926,37 +926,65 @@ func TestGetTierMultipliers_NeverExceedsCeiling(t *testing.T) {
 	tierSets := [][]config.PricingTier{
 		{{MaxInputTokens: 1000, InputMultiplier: 1, OutputMultiplier: 1}, {MaxInputTokens: 0, InputMultiplier: 4, OutputMultiplier: 3}},
 		{{MaxInputTokens: 256000, InputMultiplier: 1, OutputMultiplier: 1}, {MaxInputTokens: 1000000, InputMultiplier: 2, OutputMultiplier: 2}, {MaxInputTokens: 0, InputMultiplier: 8, OutputMultiplier: 6}},
-		{{MaxInputTokens: 0, InputMultiplier: 1, OutputMultiplier: 1}},                                                                 // flat
-		{{MaxInputTokens: 500, InputMultiplier: 0, OutputMultiplier: 0}, {MaxInputTokens: 0, InputMultiplier: 3, OutputMultiplier: 5}}, // sub-1 first tier
+		{{MaxInputTokens: 0, InputMultiplier: 1, OutputMultiplier: 1}}, // flat
+		// Fractional tiers: 3/2 = 1.5x, 5/2 = 2.5x — the case int64 multipliers couldn't express.
+		{
+			{MaxInputTokens: 32000, InputMultiplier: 1, OutputMultiplier: 1},
+			{MaxInputTokens: 0, InputMultiplier: 3, InputMultiplierDenominator: 2, OutputMultiplier: 5, OutputMultiplierDenominator: 2},
+		},
 	}
-	// effMul mirrors updateAccountWithUsage: multipliers <= 1 are no-ops.
-	effMul := func(m int64) int64 {
-		if m <= 1 {
-			return 1
+	// ceilFrac mirrors (*ModelPricingEntry).maxTierMultipliers: the max effective
+	// fraction over the set, floored at 1/1. Compared by cross-multiplication.
+	ceilFrac := func(get func(config.PricingTier) (int64, int64), tiers []config.PricingTier) (num, den int64) {
+		num, den = 1, 1
+		for _, tr := range tiers {
+			if n, d := get(tr); n*den > num*d {
+				num, den = n, d
+			}
 		}
-		return m
+		return
 	}
 	for ti, tiers := range tierSets {
-		// Ceiling multiplier = max over the set, floored at 1 (same as
-		// (*ModelPricingEntry).maxTierMultipliers).
-		ceilIn, ceilOut := int64(1), int64(1)
-		for _, tr := range tiers {
-			if tr.InputMultiplier > ceilIn {
-				ceilIn = tr.InputMultiplier
-			}
-			if tr.OutputMultiplier > ceilOut {
-				ceilOut = tr.OutputMultiplier
-			}
-		}
+		ceilInN, ceilInD := ceilFrac(config.PricingTier.EffectiveInputMultiplier, tiers)
+		ceilOutN, ceilOutD := ceilFrac(config.PricingTier.EffectiveOutputMultiplier, tiers)
 		// Sweep prompt-token counts across every boundary and beyond the last tier.
 		for tok := 0; tok <= 1_200_000; tok += 50_000 {
-			in, out := getTierMultipliers(tiers, tok)
-			if effMul(in) > ceilIn {
-				t.Errorf("set %d tok=%d: effective input mult %d exceeds ceiling %d", ti, tok, effMul(in), ceilIn)
+			tier := matchedTier(tiers, tok)
+			inN, inD := tier.EffectiveInputMultiplier()
+			outN, outD := tier.EffectiveOutputMultiplier()
+			if inN*ceilInD > ceilInN*inD { // inN/inD > ceilInN/ceilInD
+				t.Errorf("set %d tok=%d: billed input %d/%d exceeds ceiling %d/%d", ti, tok, inN, inD, ceilInN, ceilInD)
 			}
-			if effMul(out) > ceilOut {
-				t.Errorf("set %d tok=%d: effective output mult %d exceeds ceiling %d", ti, tok, effMul(out), ceilOut)
+			if outN*ceilOutD > ceilOutN*outD {
+				t.Errorf("set %d tok=%d: billed output %d/%d exceeds ceiling %d/%d", ti, tok, outN, outD, ceilOutN, ceilOutD)
 			}
 		}
+	}
+}
+
+func TestApplyTierMultiplier(t *testing.T) {
+	cases := []struct {
+		price    string
+		num, den int64
+		want     string
+	}{
+		{"100", 1, 1, "100"}, // 1x unchanged
+		{"100", 3, 2, "150"}, // 1.5x
+		{"100", 5, 2, "250"}, // 2.5x
+		{"100", 2, 1, "200"}, // legacy integer 2x (den defaults handled by caller)
+		{"7", 3, 2, "10"},    // 7*3/2 = 10 (floor of 10.5), truncation like addTierFee
+		{"1000000000000000000", 3, 2, "1500000000000000000"}, // wei-scale, exact
+	}
+	for _, c := range cases {
+		got, err := applyTierMultiplier(c.price, c.num, c.den)
+		if err != nil {
+			t.Fatalf("applyTierMultiplier(%s, %d, %d): %v", c.price, c.num, c.den, err)
+		}
+		if got != c.want {
+			t.Errorf("applyTierMultiplier(%s, %d/%d) = %s; want %s", c.price, c.num, c.den, got, c.want)
+		}
+	}
+	if _, err := applyTierMultiplier("not-a-number", 3, 2); err == nil {
+		t.Error("expected error for unparseable price")
 	}
 }

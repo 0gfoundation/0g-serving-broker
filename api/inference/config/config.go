@@ -653,10 +653,42 @@ type TieredPricingConfig struct {
 // Tiers must be ordered by MaxInputTokens ascending.
 // The first tier whose MaxInputTokens >= promptTokens is selected.
 // Use MaxInputTokens: 0 to represent an unbounded upper tier.
+//
+// The input/output multipliers are fractions: numerator (InputMultiplier) over
+// denominator (InputMultiplierDenominator), so non-integer multiples like 1.5x
+// (3/2) or 2.5x (5/2) are expressible. A zero/unset denominator defaults to 1,
+// so a tier configured with only inputMultiplier keeps its integer-multiple
+// meaning (backward compatible). Billing applies the fraction as
+// price*num/den in integer big.Int to avoid precision loss (see
+// applyTierMultiplier), mirroring cacheTokenBilling's writeMultiplier fraction.
 type PricingTier struct {
-	MaxInputTokens   int   `yaml:"maxInputTokens"`   // Upper bound of input tokens for this tier (0 = unlimited)
-	InputMultiplier  int64 `yaml:"inputMultiplier"`  // Multiplier for input price in this tier
-	OutputMultiplier int64 `yaml:"outputMultiplier"` // Multiplier for output price in this tier
+	MaxInputTokens              int   `yaml:"maxInputTokens"`              // Upper bound of input tokens for this tier (0 = unlimited)
+	InputMultiplier             int64 `yaml:"inputMultiplier"`             // Input price multiplier numerator for this tier
+	OutputMultiplier            int64 `yaml:"outputMultiplier"`            // Output price multiplier numerator for this tier
+	InputMultiplierDenominator  int64 `yaml:"inputMultiplierDenominator"`  // Input multiplier denominator (0/unset = 1, i.e. integer multiple)
+	OutputMultiplierDenominator int64 `yaml:"outputMultiplierDenominator"` // Output multiplier denominator (0/unset = 1)
+}
+
+// EffectiveInputMultiplier returns the tier's input-price multiplier as a
+// num/den fraction, with the denominator defaulting to 1 when unset (or
+// non-positive) so a legacy integer-only tier keeps its meaning. den is always
+// >= 1, so callers can divide without a zero check.
+func (t PricingTier) EffectiveInputMultiplier() (num, den int64) {
+	den = t.InputMultiplierDenominator
+	if den <= 0 {
+		den = 1
+	}
+	return t.InputMultiplier, den
+}
+
+// EffectiveOutputMultiplier is the output-side counterpart of
+// EffectiveInputMultiplier. den is always >= 1.
+func (t PricingTier) EffectiveOutputMultiplier() (num, den int64) {
+	den = t.OutputMultiplierDenominator
+	if den <= 0 {
+		den = 1
+	}
+	return t.OutputMultiplier, den
 }
 
 // WhitelistConfig defines configuration for whitelisted users that bypass billing
@@ -1095,11 +1127,11 @@ func normalizeUSDPerUnitPrice(fieldPath, raw string) (string, error) {
 // "tieredPricing.tiers" or "service.modelPricing[0].tiers").
 func validatePricingTiers(prefix string, tiers []PricingTier) error {
 	for i, tier := range tiers {
-		if tier.InputMultiplier < 1 {
-			return fmt.Errorf("invalid config: %s[%d].inputMultiplier must be >= 1, got %d", prefix, i, tier.InputMultiplier)
+		if err := validateTierMultiplier(prefix, i, "input", tier.InputMultiplier, tier.InputMultiplierDenominator); err != nil {
+			return err
 		}
-		if tier.OutputMultiplier < 1 {
-			return fmt.Errorf("invalid config: %s[%d].outputMultiplier must be >= 1, got %d", prefix, i, tier.OutputMultiplier)
+		if err := validateTierMultiplier(prefix, i, "output", tier.OutputMultiplier, tier.OutputMultiplierDenominator); err != nil {
+			return err
 		}
 		if tier.MaxInputTokens < 0 {
 			return fmt.Errorf("invalid config: %s[%d].maxInputTokens must be >= 0, got %d", prefix, i, tier.MaxInputTokens)
@@ -1116,6 +1148,53 @@ func validatePricingTiers(prefix string, tiers []PricingTier) error {
 					prefix, prefix, i, tier.MaxInputTokens, prefix, i-1, prev.MaxInputTokens)
 			}
 		}
+	}
+	return nil
+}
+
+// maxTierMultiplier caps the effective tier price ratio (numerator/denominator).
+// It mirrors the 0g-router's clampTierMultiplier cap so the broker never accepts
+// a config the router will silently clamp — otherwise the broker would settle at
+// the configured ratio while the router charges the user the capped ratio, and
+// the operator eats the difference. Real tiers express small context-length
+// ratios (~2–8x), so 1000x is far above any legitimate value.
+const maxTierMultiplier = 1000
+
+// maxTierMultiplierDenominator bounds the fraction denominator. Real fractions
+// have tiny denominators (3/2, 5/2, 10/3); the bound keeps num (<= den*1000) and
+// den small enough that the int64 cross-multiplication in maxTierMultipliers
+// (n*inDen vs inNum*d) cannot overflow.
+const maxTierMultiplierDenominator = 1_000_000
+
+// validateTierMultiplier enforces the tier multiplier fraction rules for one
+// side (input/output): the denominator, when set, must be >= 1 (0/unset means 1)
+// and within maxTierMultiplierDenominator; and the effective fraction must be
+// >= 1x (numerator >= denominator) and <= maxTierMultiplier. A tier is a
+// surcharge over the base (lowest-tier) price, never a discount below it — the
+// base price is what registers on-chain, so a sub-1x tier would bill below the
+// advertised floor. Rejecting numerator < denominator also catches a transposed
+// fraction (e.g. 2/3 when 3/2 was intended). The upper bound keeps the config in
+// lockstep with the router's billing cap. Mirrors validateWriteMultiplier for
+// the cache-write premium.
+func validateTierMultiplier(prefix string, i int, side string, num, den int64) error {
+	if num < 1 {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplier must be >= 1, got %d", prefix, i, side, num)
+	}
+	if den < 0 {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplierDenominator must be >= 0 (0 = unset = 1), got %d", prefix, i, side, den)
+	}
+	if den > maxTierMultiplierDenominator {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplierDenominator %d exceeds max %d", prefix, i, side, den, maxTierMultiplierDenominator)
+	}
+	effDen := den
+	if effDen == 0 {
+		effDen = 1
+	}
+	if num < effDen {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplier fraction is a surcharge and must be >= 1x (numerator >= denominator), got %d/%d", prefix, i, side, num, den)
+	}
+	if num > effDen*maxTierMultiplier {
+		return fmt.Errorf("invalid config: %s[%d].%sMultiplier effective ratio must be <= %dx, got %d/%d", prefix, i, side, maxTierMultiplier, num, den)
 	}
 	return nil
 }
