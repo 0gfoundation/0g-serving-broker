@@ -368,6 +368,12 @@ func (c *Ctrl) UpstreamForModel(requestedModel, identity string) string {
 }
 
 func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, outputPrice string, charing bool) error {
+	// Assay: hand the verifier this request's settlement hash so it can fold
+	// it into the signed verdict (single-use signature; see recordAssayVerdict).
+	if c.assayVerdictFilter && reqModel.RequestHash != "" {
+		req.Header.Set(constant.HeaderZGRequestHash, reqModel.RequestHash)
+	}
+
 	// Use shared HTTP client for connection reuse
 	// The shared client is initialized with appropriate timeout and connection pool settings
 	// back up body for other usage

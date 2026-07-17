@@ -2,6 +2,9 @@ package ctrl
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
+	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
@@ -114,6 +117,16 @@ type Ctrl struct {
 	// per request and excludes REJECT'd requests from settlement. Set from
 	// cfg.Assay.Enabled; off by default so the path is fully inert until opted in.
 	assayVerdictFilter bool
+	// assayVerifierPubkey, when non-nil, is the Ed25519 key the verifier signs
+	// verdicts with (cfg.Assay.VerifierPubkey). A verdict is then only recorded
+	// if ZG-Verdict-Sig verifies over the verdict + request hash — the verdict
+	// decides settlement, so it must be authenticated. nil = legacy
+	// trust-the-header mode.
+	assayVerifierPubkey ed25519.PublicKey
+	// assayStrictVerdict records INVALID_SIG (settlement-excluded) for
+	// responses whose verdict is missing/unverifiable, so header stripping
+	// can't launder a REJECT. Only meaningful with assayVerifierPubkey set.
+	assayStrictVerdict bool
 
 	// allowTokenBilledSTT gates billSpeechToTextByTokens. Defaults to false
 	// because the requests.input_count column conflates seconds (whisper)
@@ -306,6 +319,22 @@ func New(
 		}
 	}
 
+	// Parse the Assay verifier's verdict-signing key up front: a malformed key
+	// with verification "on" must fail loudly at boot, not silently downgrade
+	// to trusting unauthenticated verdicts on the settlement path.
+	var assayPubkey ed25519.PublicKey
+	if cfg.Assay.VerifierPubkey != "" {
+		raw, err := hex.DecodeString(strings.TrimPrefix(cfg.Assay.VerifierPubkey, "0x"))
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			panic(fmt.Sprintf("assay.verifierPubkey must be %d hex bytes (ed25519 public key), got %q",
+				ed25519.PublicKeySize, cfg.Assay.VerifierPubkey))
+		}
+		assayPubkey = ed25519.PublicKey(raw)
+	}
+	if cfg.Assay.StrictVerdict && assayPubkey == nil {
+		panic("assay.strictVerdict requires assay.verifierPubkey to be set")
+	}
+
 	p := &Ctrl{
 		autoSettleBufferTime: cfg.Interval.AutoSettleBufferTime,
 		minSettlementFee:     minSettlementFee,
@@ -322,6 +351,8 @@ func New(
 		concurrencyLimit:     cfg.ConcurrencyLimit,
 		userUsageStats:       cfg.UserUsageStats,
 		assayVerdictFilter:   cfg.Assay.Enabled,
+		assayVerifierPubkey:  assayPubkey,
+		assayStrictVerdict:   cfg.Assay.StrictVerdict,
 		allowTokenBilledSTT:  cfg.AllowTokenBilledSpeechToText,
 		priceCache:           priceCache,
 		svcCache:             svcCache,
