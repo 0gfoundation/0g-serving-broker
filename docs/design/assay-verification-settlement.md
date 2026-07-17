@@ -58,6 +58,28 @@ flowchart LR
   `(RequestsHash, TotalFee, …)`; because `REJECT`'d requests are removed *before*
   signing, the fee and hash naturally cover only the verified subset.
 
+### Known assumption: the provider audits itself (today)
+
+In the current deployment **one operator runs all three services**: the
+untrusted GPU node, the verifier that audits it, and the broker that settles.
+The auditor and the audited party share an operator, so the integrity of the
+whole scheme rests on the verifier actually running the published code inside
+TDX — that attestation is the *only* thing separating "independent audit" from
+"the provider grading its own homework". Two consequences:
+
+- The verdict-authentication mechanism (§3) pins the verifier's signing key,
+  which proves the verdict came from *that key holder* — it does not yet prove
+  the key holder is an attested TDX verifier. Binding the verdict key to the
+  verifier's TDX attestation (e.g. via the existing `TargetTeeAddress` /
+  attestation path) is the natural next step; until then, the pubkey pin is an
+  operator-managed trust anchor.
+- The target end-state is a **neutral verifier tier**: verifiers operated
+  independently of providers (shared/rotating, or network-operated), so the
+  audit is adversarial by construction rather than by attestation alone.
+
+Until either lands, read every guarantee in this document with that assumption
+attached.
+
 ---
 
 ## 3. Request-time flow (verdict capture)
