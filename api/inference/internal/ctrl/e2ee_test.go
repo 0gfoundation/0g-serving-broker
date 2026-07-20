@@ -401,6 +401,115 @@ func TestStreamFrameSealer_SyntheticFinalOnDone(t *testing.T) {
 	_ = out1
 }
 
+func TestMaybeUnsealRequest_BadClientEphPubLength(t *testing.T) {
+	f := newE2EEFixture(t)
+	// Build a valid sealed envelope, then overwrite client_eph_pub with a short key.
+	body := f.sealRequest(t, f.signerAddr)
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var e wire.E2EE
+	if err := json.Unmarshal(env["_e2ee"], &e); err != nil {
+		t.Fatalf("unmarshal _e2ee: %v", err)
+	}
+	e.ClientEphPub = base64.RawURLEncoding.EncodeToString([]byte("too-short")) // 9 bytes
+	env["_e2ee"] = mustRaw(t, e)
+	tampered, _ := json.Marshal(env)
+	ctx := newGinCtx()
+
+	if _, err := f.c.MaybeUnsealRequest(ctx, tampered); err == nil {
+		t.Fatal("expected rejection on short client_eph_pub (pre-forward, avoids free inference)")
+	} else if !strings.Contains(err.Error(), "client_eph_pub") {
+		t.Errorf("error = %v, want client_eph_pub length error", err)
+	}
+}
+
+func TestUsageMarksFinal(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"absent", "", false},
+		{"null", "null", false},
+		{"empty object", "{}", false},
+		{"all zero", `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`, false},
+		{"real usage", `{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}`, true},
+		{"only completion", `{"completion_tokens":5}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw json.RawMessage
+			if tc.raw != "" {
+				raw = json.RawMessage(tc.raw)
+			}
+			if got := usageMarksFinal(raw); got != tc.want {
+				t.Errorf("usageMarksFinal(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStreamFrameSealer_EmptyUsageNotFinal reproduces the truncation bug: an
+// intermediate frame carrying "usage":{} must NOT be marked final, and the real
+// terminal frame (or the synthetic [DONE] frame) must be.
+func TestStreamFrameSealer_EmptyUsageNotFinal(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	lines := []string{
+		`data: {"choices":[{"delta":{"content":"a"}}],"usage":{}}` + "\n", // empty usage mid-stream
+		`data: {"choices":[{"delta":{"content":"b"}}]}` + "\n",            // real terminal content
+		"data: [DONE]\n",
+	}
+	var frames []wire.Response
+	for _, ln := range lines {
+		out, err := rs.sealSSELine(ln)
+		if err != nil {
+			t.Fatalf("sealSSELine: %v", err)
+		}
+		for _, seg := range strings.Split(out, "\n") {
+			seg = strings.TrimSpace(seg)
+			payload := strings.TrimSpace(strings.TrimPrefix(seg, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			var fr wire.Response
+			if err := json.Unmarshal([]byte(payload), &fr); err != nil {
+				t.Fatalf("unmarshal frame: %v", err)
+			}
+			frames = append(frames, fr)
+		}
+	}
+	// The first (empty-usage) frame must not be final.
+	e0, _ := frames[0].E2EE()
+	if e0.Final {
+		t.Error("empty-usage frame was wrongly marked final (would truncate the stream)")
+	}
+	// Exactly one final frame, and it must be the last one emitted.
+	finalCount := 0
+	for i, fr := range frames {
+		e, _ := fr.E2EE()
+		if e.Final {
+			finalCount++
+			if i != len(frames)-1 {
+				t.Errorf("final frame at index %d, expected last (%d)", i, len(frames)-1)
+			}
+		}
+	}
+	if finalCount != 1 {
+		t.Errorf("final frame count = %d, want 1", finalCount)
+	}
+}
+
 func TestVerifyEncKeyID(t *testing.T) {
 	f := newE2EEFixture(t)
 	good := base64.RawURLEncoding.EncodeToString(f.c.teeService.KeyID)

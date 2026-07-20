@@ -28,6 +28,10 @@ const (
 	// (A header signal may be added later; the field is the source of truth today.)
 	e2eeBodyMarker = "_e2ee"
 
+	// clientEphPubLen is the byte length of the client's response ephemeral X25519
+	// public key (SPEC §3 suite).
+	clientEphPubLen = 32
+
 	// CtxKeyE2EESealed marks (bool) that the current request arrived sealed, so the
 	// response path knows to seal its reply.
 	CtxKeyE2EESealed = "e2eeSealed"
@@ -102,9 +106,16 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 
 	// Extract the client's response ephemeral key before opening, so the response
 	// path can seal even though the field lives in the (now consumed) envelope.
+	// Validate its length here, BEFORE the request is forwarded upstream: an
+	// invalid key only breaks response sealing, which happens after inference has
+	// already run — so a malformed key would otherwise buy free (unbilled) compute
+	// and fail closed only at seal time. Reject it fail-closed pre-inference.
 	clientEphPub, err := base64.RawURLEncoding.DecodeString(e2ee.ClientEphPub)
 	if err != nil {
 		return nil, fmt.Errorf("sealed request has invalid client_eph_pub: %w", err)
+	}
+	if len(clientEphPub) != clientEphPubLen {
+		return nil, fmt.Errorf("sealed request client_eph_pub must be %d bytes (X25519), got %d", clientEphPubLen, len(clientEphPub))
 	}
 
 	// Open (verifies v/kem_id, recomputes AAD, HPKE-Open fail-closed, checks
@@ -256,9 +267,30 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		return "", fmt.Errorf("seal stream frame: %w", err)
 	}
 	ensureChoices(frame)
-	_, hasUsage := frame["usage"]
-	final := hasUsage && !isJSONNull(frame["usage"])
-	return rs.sealFrame(frame, final)
+	return rs.sealFrame(frame, usageMarksFinal(frame["usage"]))
+}
+
+// usageMarksFinal reports whether a frame's usage value marks it the final
+// streaming frame (SPEC §7: usage rides the final frame). It requires a present,
+// non-null usage object with a non-zero token count — mirroring the billing-side
+// guard (extractUsageFromLine) against empty "usage":{} chunks (e.g. attestation
+// data) that some upstreams emit mid-stream. Marking such a chunk final would set
+// the final flag early, truncating the client's stream and leaving the real last
+// frame unmarked. When no frame carries real usage, sealSSELine emits a synthetic
+// final frame on [DONE] instead.
+func usageMarksFinal(raw json.RawMessage) bool {
+	if len(raw) == 0 || isJSONNull(raw) {
+		return false
+	}
+	var u struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return false
+	}
+	return u.PromptTokens != 0 || u.CompletionTokens != 0 || u.TotalTokens != 0
 }
 
 // sealFrame seals one frame object and returns the "data: {json}\n" line.
