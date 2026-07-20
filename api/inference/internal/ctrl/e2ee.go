@@ -188,8 +188,10 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 		return body, false, nil
 	}
 	var resp wire.Response
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, true, fmt.Errorf("seal response: body is not a JSON object: %w", err)
+	// A literal JSON `null` unmarshals into a nil map WITHOUT error; ensureChoices
+	// would then panic writing to it. Reject any non-object body fail-closed.
+	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
+		return nil, true, fmt.Errorf("seal response: body is not a JSON object")
 	}
 	ensureChoices(resp)
 	out, err = sealResponseMarshal(ephPub, resp)
@@ -234,25 +236,24 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 }
 
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
-// (SPEC §7). A "data: {json}" chunk has its choices sealed; the frame carrying
-// usage is marked final (the broker forces stream_options.include_usage, so the
-// last chunk before [DONE] carries usage). A "data: [DONE]" sentinel passes
-// through, preceded by a synthetic final frame if none was emitted yet so the
-// client can always detect completion. Blank/other lines pass through unchanged.
+// (SPEC §7). Every "data: {json}" chunk is sealed as a NON-final frame; exactly
+// one final frame is emitted synthetically at stream end — before a "data: [DONE]"
+// sentinel here, or on EOF by the caller via finalFrameLine. Deriving `final` from
+// per-frame usage is deliberately avoided: some upstreams emit empty "usage":{}
+// mid-stream, and vLLM continuous_usage_stats puts usage on every chunk, either of
+// which would mark a non-terminal frame final and truncate the client's stream.
+// Blank/comment/non-JSON lines pass through unchanged.
 func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return line, nil // preserve SSE event separators
 	}
 	if isStreamDone([]byte(trimmed)) {
-		if rs.emittedFinal {
-			return line, nil
-		}
-		final, err := rs.sealFrame(wire.Response{"choices": json.RawMessage("[]")}, true)
+		final, err := rs.finalFrameLine()
 		if err != nil {
 			return "", err
 		}
-		return final + line, nil
+		return final + line, nil // synthetic final frame (if any) precedes [DONE]
 	}
 	after, ok := strings.CutPrefix(trimmed, "data:")
 	if !ok {
@@ -267,30 +268,17 @@ func (rs *responseFrameSealer) sealSSELine(line string) (string, error) {
 		return "", fmt.Errorf("seal stream frame: %w", err)
 	}
 	ensureChoices(frame)
-	return rs.sealFrame(frame, usageMarksFinal(frame["usage"]))
+	return rs.sealFrame(frame, false)
 }
 
-// usageMarksFinal reports whether a frame's usage value marks it the final
-// streaming frame (SPEC §7: usage rides the final frame). It requires a present,
-// non-null usage object with a non-zero token count — mirroring the billing-side
-// guard (extractUsageFromLine) against empty "usage":{} chunks (e.g. attestation
-// data) that some upstreams emit mid-stream. Marking such a chunk final would set
-// the final flag early, truncating the client's stream and leaving the real last
-// frame unmarked. When no frame carries real usage, sealSSELine emits a synthetic
-// final frame on [DONE] instead.
-func usageMarksFinal(raw json.RawMessage) bool {
-	if len(raw) == 0 || isJSONNull(raw) {
-		return false
+// finalFrameLine returns a synthetic final SSE frame (empty choices) so the client
+// always receives exactly one completion marker (SPEC §7). It returns "" if a
+// final frame was already emitted, making it safe to call on both [DONE] and EOF.
+func (rs *responseFrameSealer) finalFrameLine() (string, error) {
+	if rs.emittedFinal {
+		return "", nil
 	}
-	var u struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	}
-	if err := json.Unmarshal(raw, &u); err != nil {
-		return false
-	}
-	return u.PromptTokens != 0 || u.CompletionTokens != 0 || u.TotalTokens != 0
+	return rs.sealFrame(wire.Response{"choices": json.RawMessage("[]")}, true)
 }
 
 // sealFrame seals one frame object and returns the "data: {json}\n" line.
@@ -317,9 +305,4 @@ func ensureChoices(frame wire.Response) {
 	if _, ok := frame["choices"]; !ok {
 		frame["choices"] = json.RawMessage("[]")
 	}
-}
-
-// isJSONNull reports whether raw is the JSON literal null.
-func isJSONNull(raw json.RawMessage) bool {
-	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }

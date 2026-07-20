@@ -292,6 +292,17 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err == io.EOF {
+					// E2EE (§7): if the upstream closed without a [DONE] sentinel, the
+					// synthetic final frame was never emitted. Emit it now so the client
+					// still receives exactly one completion marker (a missing final frame
+					// is a truncation on the client). Skip if the client already left.
+					if frameSealer != nil && !clientDisconnected {
+						if fin, ferr := frameSealer.finalFrameLine(); ferr == nil && fin != "" {
+							if _, werr := w.Write([]byte(fin)); werr == nil {
+								ctx.Writer.Flush()
+							}
+						}
+					}
 					return false
 				}
 				c.handleBrokerError(ctx, err, "read from body")
@@ -478,7 +489,30 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		c.recordWhitelistedUsage(reqModel, input, output, cached, cacheWrite, rateClass)
 	}
 
-	if c.Service.IsCentralized() {
+	// E2EE (§8): a sealed request is signed over the DECRYPTED content the client
+	// verifies — the JCS-canonical reconstructed request and plaintext response —
+	// regardless of provider type. This takes precedence over the routing-proof
+	// path so a sealed request to a centralized provider still gets a §8 signature
+	// an E2EE client can verify (rather than a routing proof over the modified
+	// upstream body).
+	e2eeActive := false
+	var reqPlaintext []byte
+	if ginCtx, ok := ctx.(*gin.Context); ok {
+		if _, sealed := e2eeSealedRequest(ginCtx); sealed {
+			e2eeActive = true
+			reqPlaintext = reqBody
+			if pt, ok := e2eePlaintextRequest(ginCtx); ok {
+				reqPlaintext = pt
+			}
+		}
+	}
+
+	if e2eeActive {
+		c.logger.Debug("E2EE sealed request, signing decrypted content (§8)")
+		if err := c.signChatE2EE(reqPlaintext, signData, chatKey, isStream); err != nil {
+			return err
+		}
+	} else if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
 		var tlsState *tls.ConnectionState
 		if ginCtx, ok := ctx.(*gin.Context); ok {
@@ -504,25 +538,7 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
-		// E2EE (§8): when the request was sealed, the client verifies the signature
-		// over the DECRYPTED content, so bind the JCS-canonical reconstructed
-		// request and plaintext response rather than the raw/sealed bytes.
-		e2eeActive := false
-		var reqPlaintext []byte
-		if ginCtx, ok := ctx.(*gin.Context); ok {
-			if _, sealed := e2eeSealedRequest(ginCtx); sealed {
-				e2eeActive = true
-				reqPlaintext = reqBody
-				if pt, ok := e2eePlaintextRequest(ginCtx); ok {
-					reqPlaintext = pt
-				}
-			}
-		}
-		if e2eeActive {
-			if err := c.signChatE2EE(reqPlaintext, signData, chatKey, isStream); err != nil {
-				return err
-			}
-		} else if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
+		if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
 			return err
 		}
 	}

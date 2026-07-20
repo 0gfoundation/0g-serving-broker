@@ -425,56 +425,15 @@ func TestMaybeUnsealRequest_BadClientEphPubLength(t *testing.T) {
 	}
 }
 
-func TestUsageMarksFinal(t *testing.T) {
-	cases := []struct {
-		name string
-		raw  string
-		want bool
-	}{
-		{"absent", "", false},
-		{"null", "null", false},
-		{"empty object", "{}", false},
-		{"all zero", `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`, false},
-		{"real usage", `{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}`, true},
-		{"only completion", `{"completion_tokens":5}`, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var raw json.RawMessage
-			if tc.raw != "" {
-				raw = json.RawMessage(tc.raw)
-			}
-			if got := usageMarksFinal(raw); got != tc.want {
-				t.Errorf("usageMarksFinal(%q) = %v, want %v", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestStreamFrameSealer_EmptyUsageNotFinal reproduces the truncation bug: an
-// intermediate frame carrying "usage":{} must NOT be marked final, and the real
-// terminal frame (or the synthetic [DONE] frame) must be.
-func TestStreamFrameSealer_EmptyUsageNotFinal(t *testing.T) {
-	f := newE2EEFixture(t)
-	ctx := newGinCtx()
-	ctx.Set(CtxKeyE2EESealed, true)
-	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
-
-	rs, err := f.c.newResponseFrameSealer(ctx)
-	if err != nil {
-		t.Fatalf("newResponseFrameSealer: %v", err)
-	}
-
-	lines := []string{
-		`data: {"choices":[{"delta":{"content":"a"}}],"usage":{}}` + "\n", // empty usage mid-stream
-		`data: {"choices":[{"delta":{"content":"b"}}]}` + "\n",            // real terminal content
-		"data: [DONE]\n",
-	}
+// collectSealedFrames runs lines through the sealer and returns the sealed frames
+// (skipping [DONE]/blank), asserting no plaintext choices leak.
+func collectSealedFrames(t *testing.T, rs *responseFrameSealer, lines []string) []wire.Response {
+	t.Helper()
 	var frames []wire.Response
 	for _, ln := range lines {
 		out, err := rs.sealSSELine(ln)
 		if err != nil {
-			t.Fatalf("sealSSELine: %v", err)
+			t.Fatalf("sealSSELine(%q): %v", ln, err)
 		}
 		for _, seg := range strings.Split(out, "\n") {
 			seg = strings.TrimSpace(seg)
@@ -482,19 +441,21 @@ func TestStreamFrameSealer_EmptyUsageNotFinal(t *testing.T) {
 			if payload == "" || payload == "[DONE]" {
 				continue
 			}
+			if strings.Contains(payload, "delta") || strings.Contains(payload, "content") {
+				t.Errorf("sealed frame leaked plaintext choices: %s", payload)
+			}
 			var fr wire.Response
 			if err := json.Unmarshal([]byte(payload), &fr); err != nil {
-				t.Fatalf("unmarshal frame: %v", err)
+				t.Fatalf("unmarshal frame %q: %v", payload, err)
 			}
 			frames = append(frames, fr)
 		}
 	}
-	// The first (empty-usage) frame must not be final.
-	e0, _ := frames[0].E2EE()
-	if e0.Final {
-		t.Error("empty-usage frame was wrongly marked final (would truncate the stream)")
-	}
-	// Exactly one final frame, and it must be the last one emitted.
+	return frames
+}
+
+func assertExactlyOneFinalLast(t *testing.T, frames []wire.Response) {
+	t.Helper()
 	finalCount := 0
 	for i, fr := range frames {
 		e, _ := fr.E2EE()
@@ -506,7 +467,96 @@ func TestStreamFrameSealer_EmptyUsageNotFinal(t *testing.T) {
 		}
 	}
 	if finalCount != 1 {
-		t.Errorf("final frame count = %d, want 1", finalCount)
+		t.Errorf("final frame count = %d, want exactly 1", finalCount)
+	}
+}
+
+// Data frames are never marked final; exactly one synthetic final is emitted on
+// [DONE]. Covers the empty-usage and multi-usage truncation vectors: no data
+// frame (empty, real, or repeated usage) is ever final.
+func TestStreamFrameSealer_ExactlyOneFinal(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	cases := map[string][]string{
+		"empty usage mid-stream": {
+			`data: {"choices":[{"delta":{"content":"a"}}],"usage":{}}` + "\n",
+			`data: {"choices":[{"delta":{"content":"b"}}]}` + "\n",
+			"data: [DONE]\n",
+		},
+		"usage on every chunk (continuous_usage_stats)": {
+			`data: {"choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n",
+			`data: {"choices":[{"delta":{"content":"b"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}` + "\n",
+			"data: [DONE]\n",
+		},
+		"trailing usage frame": {
+			`data: {"choices":[{"delta":{"content":"a"}}]}` + "\n",
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n",
+			"data: [DONE]\n",
+		},
+	}
+	for name, lines := range cases {
+		t.Run(name, func(t *testing.T) {
+			rs, err := f.c.newResponseFrameSealer(ctx)
+			if err != nil {
+				t.Fatalf("newResponseFrameSealer: %v", err)
+			}
+			frames := collectSealedFrames(t, rs, lines)
+			// No data frame is final; only the trailing synthetic one is.
+			for i := 0; i < len(frames)-1; i++ {
+				if e, _ := frames[i].E2EE(); e.Final {
+					t.Errorf("data frame %d wrongly marked final", i)
+				}
+			}
+			assertExactlyOneFinalLast(t, frames)
+		})
+	}
+}
+
+// When the upstream closes without [DONE], the caller emits the synthetic final
+// via finalFrameLine; a second call is a no-op (idempotent), so [DONE]+EOF never
+// double-emits.
+func TestStreamFrameSealer_FinalFrameLineIdempotent(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	// EOF path: emit synthetic final directly.
+	first, err := rs.finalFrameLine()
+	if err != nil || first == "" {
+		t.Fatalf("first finalFrameLine = %q, err %v; want a frame", first, err)
+	}
+	// A subsequent call (e.g. a later [DONE]) must not emit a second final.
+	second, err := rs.finalFrameLine()
+	if err != nil {
+		t.Fatalf("second finalFrameLine err: %v", err)
+	}
+	if second != "" {
+		t.Error("finalFrameLine emitted a second final frame (not idempotent)")
+	}
+}
+
+func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	// A literal JSON null unmarshals to a nil map without error — must fail closed,
+	// not panic.
+	_, isSealed, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
+	if !isSealed {
+		t.Fatal("expected isSealed=true for a sealed request")
+	}
+	if err == nil {
+		t.Fatal("expected a fail-closed error for a null body, got nil")
 	}
 }
 
