@@ -117,6 +117,14 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	if len(clientEphPub) != clientEphPubLen {
 		return nil, fmt.Errorf("sealed request client_eph_pub must be %d bytes (X25519), got %d", clientEphPubLen, len(clientEphPub))
 	}
+	// Length alone is not enough: a 32-byte value can still be a low-order/invalid
+	// X25519 point that only fails at response-seal time (post-inference), which
+	// would buy free unbilled compute. Probe HPKE setup now — fail closed here,
+	// before forwarding upstream. The probe sealer is discarded; the response path
+	// creates its own.
+	if _, err := wire.NewResponseSealer(pccrypto.PublicKey(clientEphPub)); err != nil {
+		return nil, fmt.Errorf("sealed request client_eph_pub is not a usable X25519 key: %w", err)
+	}
 
 	// Open (verifies v/kem_id, recomputes AAD, HPKE-Open fail-closed, checks
 	// decrypted keys == sealed_fields with no cleartext collision, and reconstructs

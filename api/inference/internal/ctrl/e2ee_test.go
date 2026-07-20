@@ -560,6 +560,31 @@ func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestMaybeUnsealRequest_LowOrderClientEphPubRejected(t *testing.T) {
+	f := newE2EEFixture(t)
+	// A 32-byte all-zero value passes the length check but is a low-order X25519
+	// point that fails HPKE setup — must be rejected pre-inference, not post.
+	body := f.sealRequest(t, f.signerAddr)
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var e wire.E2EE
+	if err := json.Unmarshal(env["_e2ee"], &e); err != nil {
+		t.Fatalf("unmarshal _e2ee: %v", err)
+	}
+	e.ClientEphPub = base64.RawURLEncoding.EncodeToString(make([]byte, 32)) // 32 zero bytes
+	env["_e2ee"] = mustRaw(t, e)
+	tampered, _ := json.Marshal(env)
+	ctx := newGinCtx()
+
+	if _, err := f.c.MaybeUnsealRequest(ctx, tampered); err == nil {
+		t.Fatal("expected rejection of a low-order client_eph_pub (pre-inference, avoids free compute)")
+	} else if !strings.Contains(err.Error(), "client_eph_pub") {
+		t.Errorf("error = %v, want client_eph_pub usability error", err)
+	}
+}
+
 func TestVerifyEncKeyID(t *testing.T) {
 	f := newE2EEFixture(t)
 	good := base64.RawURLEncoding.EncodeToString(f.c.teeService.KeyID)
