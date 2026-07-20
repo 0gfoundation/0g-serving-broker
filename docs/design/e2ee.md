@@ -31,25 +31,21 @@ ChaCha20-Poly1305. All AAD and content hashes are over JCS-canonical JSON
   path (`/e2ee-enc`) distinct from the secp256k1 signer key. The private key
   never leaves the enclave. See `common/tee/enckey.go` (`deriveEncKey`) and
   `common/tee/tee.go` (`SyncQuote` → `getEncKey`).
-- The quote's `report_data` uses the §4.2 layout (64 bytes):
+- `key_id = SHA-256(enc_pub)[0:8]` (§4.3).
+- `GET /v1/e2ee/pubkey` advertises `{v, kem_id, enc_pub, key_id, signer_address}`.
 
-  | offset | size | field |
-  |--------|------|-------|
-  | 0 | 32 | `enc_pub` (X25519 public key) |
-  | 32 | 20 | `signer_addr` (secp256k1 Ethereum address) |
-  | 52 | 4 | `version` (uint32 big-endian, = 1) |
-  | 56 | 8 | reserved (zero) |
+### report_data binding — deferred (TODO)
 
-  This is a **breaking change** from the legacy layout (signer address hex),
-  gated by the `version` field. The signer binding is preserved (bytes 32:52);
-  the change adds `enc_pub` so a client can extract it directly from a verified
-  quote — the only trustworthy source of the enc key.
-- `key_id = SHA-256(enc_pub)[0:8]` (§4.3). The `TappdClient.TdxQuote` interface
-  now takes `reportData []byte` (was a hex string) so the binary layout is passed
-  through each backend (`phala`, `gcp`, `mock`, `alicloud`).
-- `GET /v1/e2ee/pubkey` advertises `{v, kem_id, enc_pub, key_id, signer_address}`
-  as a convenience fetch. A client MUST still verify `enc_pub` against the quote's
-  `report_data`; this endpoint is not itself a trust source.
+The §4.2 layout binds `enc_pub` into the quote's `report_data`
+(`enc_pub(32) ‖ signer_addr(20) ‖ version(4) ‖ reserved(8)`) so a client can
+extract and verify the enc key straight out of a verified attestation. This is a
+**breaking change** to `report_data` (today it is the legacy signer-address-hex
+layout) and is **deferred** to get the E2EE flow working end-to-end first.
+
+Until it lands, `enc_pub` is published only via `GET /v1/e2ee/pubkey` and is
+**not yet attestation-bound** — a client cannot yet prove the enc key belongs to
+the attested enclave. Tracked as a follow-up (see the TODO in
+`common/tee/enckey.go` / `SyncQuote`).
 
 ## Request unseal (SPEC §5–§6)
 
@@ -57,7 +53,10 @@ ChaCha20-Poly1305. All AAD and content hashes are over JCS-canonical JSON
 (`proxyHTTPRequest`) right after the request body is read, before any
 routing/billing:
 
-1. Detect a sealed request (`_e2ee` body field or `X-0G-E2EE` header).
+1. Detect a sealed request by a genuine top-level `_e2ee` object in the body —
+   matching the router, which routes on the body field, not a header. A body that
+   merely contains the substring `_e2ee` inside its content is passed through
+   unchanged (not rejected). (A header signal may be added later.)
 2. Select the enc key by `key_id`; verify `v` / `kem_id` (done by
    `wire.OpenRequest`, plus an explicit `key_id` check for a clear error).
 3. Recompute AAD = JCS(envelope minus `_e2ee.ciphertext`) and HPKE-`Open`
@@ -108,4 +107,4 @@ signatures are relied upon. Tracked in `#552` and `0g-pc#7`.
 
 Client-side attestation verify (`0g-pc#7`); router acceptance of sealed requests
 (`0g-router#618`); candidate scoring; finalized streaming signature format
-(`#552`).
+(`#552`); §4.2 `report_data` binding of `enc_pub` (deferred follow-up, see above).

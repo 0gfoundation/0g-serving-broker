@@ -160,6 +160,25 @@ func TestMaybeUnsealRequest_Passthrough(t *testing.T) {
 	}
 }
 
+func TestMaybeUnsealRequest_MarkerInContentPassthrough(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	// "_e2ee" appears inside message content but there is no top-level _e2ee key:
+	// must pass through unchanged, NOT be rejected.
+	plain := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"what is _e2ee?"}]}`)
+
+	out, err := f.c.MaybeUnsealRequest(ctx, plain)
+	if err != nil {
+		t.Fatalf("MaybeUnsealRequest should not error on marker-in-content: %v", err)
+	}
+	if string(out) != string(plain) {
+		t.Error("body with _e2ee only in content was modified")
+	}
+	if _, sealed := e2eeSealedRequest(ctx); sealed {
+		t.Error("marker-in-content request wrongly marked sealed")
+	}
+}
+
 func TestMaybeUnsealRequest_ProviderIDMismatch(t *testing.T) {
 	f := newE2EEFixture(t)
 	body := f.sealRequest(t, "0x000000000000000000000000000000000000dEaD")

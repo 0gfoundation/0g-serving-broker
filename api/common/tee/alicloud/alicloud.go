@@ -22,7 +22,7 @@ import (
 
 type AliCloudClient struct{}
 
-func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
+func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
 	// Get TAPP service URL from environment variable
 	tappServiceURL := os.Getenv("TAPP_SERVICE_URL")
 	if tappServiceURL == "" {
@@ -40,14 +40,36 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData []byte, nvQuot
 		return "", errors.New("invalid TAPP_SERVICE_URL: missing host")
 	}
 
-	// report_data carries the §4.2 layout (enc_pub ‖ signer_addr ‖ version ‖
-	// reserved), passed as raw bytes. TDX report_data is 64 bytes; pad to 64 so a
-	// shorter payload still lands in the fixed-width field.
-	if len(reportData) > 64 {
-		return "", errors.New("report data is too large, it should be at most 64 bytes")
+	// According to get_evidence.sh, signer should be 32-byte data
+	// reportData is typically an Ethereum address (0x + 40 hex chars = 20 bytes)
+	// Remove 0x prefix if present
+	cleanReportData := reportData
+	if len(reportData) >= 2 && (reportData[:2] == "0x" || reportData[:2] == "0X") {
+		cleanReportData = reportData[2:]
 	}
-	signerBytes := make([]byte, 64)
-	copy(signerBytes, reportData)
+
+	// Convert hex string to bytes
+	reportDataBytes, err := hex.DecodeString(cleanReportData)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to decode reportData hex string")
+	}
+
+	if len(reportDataBytes) > 32 {
+		return "", errors.New("report data is too large, it should be at most 32 bytes")
+	}
+
+	// Pad to 32 bytes if necessary (Ethereum address is 20 bytes, needs padding to 32)
+	paddedReportData := make([]byte, 32)
+	copy(paddedReportData, reportDataBytes)
+
+	// Convert to hex string (64 characters), similar to SIGNER_HEX in get_evidence.sh
+	signerHex := hex.EncodeToString(paddedReportData)
+
+	// Convert hex back to bytes, then to the format expected by proto (should be bytes)
+	signerBytes, err := hex.DecodeString(signerHex)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to decode signer hex")
+	}
 
 	// Create gRPC connection with insecure credentials for TCP service
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))

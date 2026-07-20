@@ -2,13 +2,10 @@ package tee
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
-	"fmt"
 	"io"
 
 	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
 	"github.com/cloudflare/circl/hpke"
-	"github.com/ethereum/go-ethereum/common"
 	"golang.org/x/crypto/hkdf"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
@@ -35,17 +32,15 @@ const (
 	// with another use of the same material.
 	encKeyHKDFInfo = "0g-pc/v1/enc-key"
 
-	// reportDataVersion is the report_data layout version written at bytes [52:56]
-	// (§4.2). Bumped only on a breaking change to the layout.
-	reportDataVersion uint32 = 1
-
-	// reportDataSize is the fixed TDX report_data length (§4.2).
-	reportDataSize = 64
-	// encPubLen is the X25519 public key length.
-	encPubLen = 32
 	// keyIDLen is the length of key_id = SHA-256(enc_pub)[0:8] (§4.3).
 	keyIDLen = 8
 )
+
+// TODO(#601 §4.2): bind enc_pub into the quote's report_data
+// (enc_pub(32) ‖ signer_addr(20) ‖ version(4) ‖ reserved(8)) so a client can
+// extract and verify the enc key directly from a verified attestation. Deferred
+// to get the E2EE flow working first; enc_pub is currently published only via
+// GET /v1/e2ee/pubkey, so it is not yet attestation-bound.
 
 // encKemScheme is the HPKE KEM used for the enc key: DHKEM(X25519, HKDF-SHA256),
 // matching the 0g-pc protocol suite (SPEC §3). Keys marshaled by this scheme are
@@ -85,26 +80,4 @@ func deriveEncKey(material []byte) (pccrypto.PrivateKey, pccrypto.PublicKey, err
 func keyID(encPub pccrypto.PublicKey) []byte {
 	h := sha256.Sum256(encPub)
 	return h[:keyIDLen]
-}
-
-// buildReportData assembles the 64-byte report_data payload (§4.2):
-//
-//	offset  size  field
-//	0       32    enc_pub      X25519 public key
-//	32      20    signer_addr  secp256k1 Ethereum address
-//	52      4     version      uint32 big-endian (= reportDataVersion)
-//	56      8     reserved     zero
-//
-// This binds both keys into one attestation. It is a breaking change from the
-// legacy layout (signer address hex), gated by the version field.
-func buildReportData(encPub pccrypto.PublicKey, signer common.Address) ([]byte, error) {
-	if len(encPub) != encPubLen {
-		return nil, fmt.Errorf("enc_pub must be %d bytes, got %d", encPubLen, len(encPub))
-	}
-	rd := make([]byte, reportDataSize)
-	copy(rd[0:32], encPub)
-	copy(rd[32:52], signer.Bytes()) // common.Address is exactly 20 bytes
-	binary.BigEndian.PutUint32(rd[52:56], reportDataVersion)
-	// rd[56:64] left zero (reserved).
-	return rd, nil
 }

@@ -3,13 +3,11 @@ package tee
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"testing"
 
 	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
 	"github.com/0gfoundation/0g-pc/protocol/wire"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
@@ -33,8 +31,8 @@ func TestDeriveEncKeyDeterministic(t *testing.T) {
 	if !bytes.Equal(pub1, pub2) || !bytes.Equal(priv1, priv2) {
 		t.Fatal("derivation is not deterministic for identical material")
 	}
-	if len(pub1) != encPubLen {
-		t.Fatalf("enc_pub len = %d, want %d", len(pub1), encPubLen)
+	if len(pub1) != 32 {
+		t.Fatalf("enc_pub len = %d, want 32", len(pub1))
 	}
 	// Different material must yield a different key.
 	_, pub3, err := deriveEncKey([]byte("other-material"))
@@ -43,36 +41,6 @@ func TestDeriveEncKeyDeterministic(t *testing.T) {
 	}
 	if bytes.Equal(pub1, pub3) {
 		t.Fatal("different material produced the same enc_pub")
-	}
-}
-
-func TestBuildReportDataLayout(t *testing.T) {
-	_, pub, err := deriveEncKey([]byte("material"))
-	if err != nil {
-		t.Fatalf("deriveEncKey: %v", err)
-	}
-	addr := common.HexToAddress("0x2A94D671f1A5e080f75A8164087Cdd35c8442e69")
-
-	rd, err := buildReportData(pub, addr)
-	if err != nil {
-		t.Fatalf("buildReportData: %v", err)
-	}
-	if len(rd) != reportDataSize {
-		t.Fatalf("report_data len = %d, want %d", len(rd), reportDataSize)
-	}
-	if !bytes.Equal(rd[0:32], pub) {
-		t.Error("enc_pub not at offset 0")
-	}
-	if !bytes.Equal(rd[32:52], addr.Bytes()) {
-		t.Error("signer_addr not at offset 32")
-	}
-	if v := binary.BigEndian.Uint32(rd[52:56]); v != reportDataVersion {
-		t.Errorf("version = %d, want %d", v, reportDataVersion)
-	}
-	for i := 56; i < 64; i++ {
-		if rd[i] != 0 {
-			t.Errorf("reserved byte %d is non-zero", i)
-		}
 	}
 }
 

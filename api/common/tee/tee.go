@@ -29,10 +29,7 @@ const (
 )
 
 type TappdClient interface {
-	// TdxQuote fetches a TDX quote binding reportData into the quote's 64-byte
-	// report_data field (§4.2). reportData is raw bytes (at most 64), not a hex
-	// string.
-	TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error)
+	TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error)
 	DeriveKey(ctx context.Context, path string) (string, error)
 }
 
@@ -85,7 +82,14 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.logger.Debugf("teeAddress: %s", s.Address)
 
 	// Derive the X25519 enc key (§4.1) inside the TEE from a distinct path, so a
-	// client can seal request fields to this enclave (§5–§6).
+	// client can seal request fields to this enclave (§5–§6). Published via
+	// GET /v1/e2ee/pubkey.
+	//
+	// TODO(#601 §4.2): bind enc_pub into the quote's report_data
+	// (enc_pub ‖ signer_addr ‖ version ‖ reserved) so a client can verify the enc
+	// key straight out of a verified attestation instead of trusting the endpoint.
+	// Deferred to get the E2EE flow working first; report_data stays the legacy
+	// signer-address-hex layout for now (no breaking change to quote consumers).
 	encPriv, encPub, err := s.getEncKey(ctx, client)
 	if err != nil {
 		return errors.Wrap(err, "deriving enc key")
@@ -94,15 +98,7 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.EncPublicKey = encPub
 	s.KeyID = keyID(encPub)
 
-	// report_data now carries the §4.2 layout (enc_pub ‖ signer_addr ‖ version ‖
-	// reserved), binding both keys into the attestation. This is a breaking change
-	// from the legacy signer-address-hex layout, gated by the version field.
-	reportData, err := buildReportData(encPub, s.Address)
-	if err != nil {
-		return errors.Wrap(err, "build report data")
-	}
-
-	quoteStr, err := client.TdxQuote(ctx, reportData, nvQuote)
+	quoteStr, err := client.TdxQuote(ctx, s.Address.Hex(), nvQuote)
 	if err != nil {
 		return errors.Wrap(err, "tdx quote")
 	}

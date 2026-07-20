@@ -22,14 +22,10 @@ import (
 )
 
 const (
-	// e2eeHeader is the request header a client/router sets to flag a sealed
-	// request. Coordinated with the router (0g-router#618). Detection also falls
-	// back to the presence of the "_e2ee" body field, so a client that omits the
-	// header is still handled.
-	e2eeHeader = "X-0G-E2EE"
-
 	// e2eeBodyMarker is the reserved top-level field carrying the sealing metadata
-	// (SPEC §5). Used for a cheap pre-check before a full JSON parse.
+	// (SPEC §5). A request is treated as sealed iff it has this as a top-level JSON
+	// key — matching the router, which routes on the body field, not a header.
+	// (A header signal may be added later; the field is the source of truth today.)
 	e2eeBodyMarker = "_e2ee"
 
 	// CtxKeyE2EESealed marks (bool) that the current request arrived sealed, so the
@@ -46,43 +42,48 @@ const (
 	CtxKeyE2EEPlaintextReq = "e2eePlaintextReq"
 )
 
-// isSealedRequest reports whether reqBody / the request headers indicate a sealed
-// E2EE request. Cheap: a substring pre-check on the body plus the header, before
-// any JSON parse. The definitive check is in UnsealRequest, which fails closed.
-func isSealedRequest(ctx *gin.Context, reqBody []byte) bool {
-	if ctx != nil && ctx.Request != nil && ctx.Request.Header.Get(e2eeHeader) != "" {
-		return true
-	}
+// hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
+// majority of (non-sealed) requests. A match is not proof of a sealed request —
+// the substring could appear inside message content — so MaybeUnsealRequest
+// confirms a genuine top-level "_e2ee" key before committing to fail-closed.
+func hasE2EEMarker(reqBody []byte) bool {
 	return bytes.Contains(reqBody, []byte(e2eeBodyMarker))
 }
 
 // MaybeUnsealRequest unseals a sealed E2EE request in-enclave and returns the
-// reconstructed plaintext body to forward upstream. For a non-sealed request it
-// returns reqBody unchanged.
+// reconstructed plaintext body to forward upstream. A request is sealed iff it
+// carries a top-level "_e2ee" object (SPEC §5); any other request (including one
+// that merely contains the substring "_e2ee" inside its content) is returned
+// unchanged.
 //
 // On success for a sealed request it stashes, on the gin context, that the
 // request was sealed and the client's response ephemeral key, so the response
-// path seals its reply (SPEC §7). Any failure on a request that claims to be
-// sealed is returned as an error and MUST be treated as fail-closed by the caller
-// (no plaintext fallback, SPEC §6) — a sealed request that cannot be opened,
-// whose provider_id is not this enclave, or whose key_id is unknown is rejected.
+// path seals its reply (SPEC §7). Once a request is confirmed sealed, any failure
+// is returned as an error and MUST be treated as fail-closed by the caller (no
+// plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
+// provider_id is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
-	if !isSealedRequest(ctx, reqBody) {
+	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
-	}
-	if len(c.teeService.EncPrivateKey) == 0 {
-		return nil, fmt.Errorf("received a sealed request but the enclave enc key is not available")
 	}
 
 	var env wire.Request
 	if err := json.Unmarshal(reqBody, &env); err != nil {
-		return nil, fmt.Errorf("sealed request body is not a JSON object: %w", err)
+		// Not a JSON object → cannot be a sealed envelope; forward unchanged.
+		return reqBody, nil
 	}
-	// A body carrying the header/marker but no real _e2ee object: treat as an error
-	// rather than silently forwarding cleartext (fail-closed).
+	if _, ok := env[e2eeBodyMarker]; !ok {
+		// The substring matched inside content, not a real envelope; not sealed.
+		return reqBody, nil
+	}
+
+	// Confirmed sealed from here on: fail-closed on any error.
+	if len(c.teeService.EncPrivateKey) == 0 {
+		return nil, fmt.Errorf("received a sealed request but the enclave enc key is not available")
+	}
 	e2ee, err := env.E2EE()
 	if err != nil {
-		return nil, fmt.Errorf("sealed request missing %q envelope: %w", e2eeBodyMarker, err)
+		return nil, fmt.Errorf("sealed request has a malformed %q envelope: %w", e2eeBodyMarker, err)
 	}
 
 	// Select the enc key by key_id (SPEC §6). The broker holds a single current
