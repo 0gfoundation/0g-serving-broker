@@ -205,10 +205,24 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		clientBody = sanitized
 	}
 
+	// E2EE (0g-pc SPEC §7): if the request arrived sealed, seal the sensitive
+	// response fields (choices) to the client's ephemeral key before forwarding.
+	// clientBody stays PLAINTEXT — billing (raw respBody) and the §8 content
+	// binding both operate on cleartext; only the bytes sent to the client change.
+	outBody := clientBody
+	if sealed, isSealed, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody); isSealed {
+		if sealErr != nil {
+			// Fail-closed: never forward plaintext for a sealed request.
+			c.handleBrokerError(ctx, sealErr, "seal response")
+			return sealErr
+		}
+		outBody = sealed
+	}
+
 	// Attempt to write the response to the client. If the client has already
 	// disconnected (broken pipe, connection reset), log a warning but continue
 	// to billing so GPU work is not wasted without payment.
-	if _, writeErr := ctx.Writer.Write(clientBody); writeErr != nil {
+	if _, writeErr := ctx.Writer.Write(outBody); writeErr != nil {
 		if c.isClientDisconnectError(writeErr) {
 			ctx.Set("ignoreError", true)
 			c.logger.Warnf("Client disconnected during non-streaming response, billing for completed response (%d bytes)", len(respBody))
@@ -250,10 +264,20 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	}
 
 	var rawBody bytes.Buffer
-	// clientBody accumulates the sanitized bytes actually delivered to the client
-	// (comment lines dropped, leak fields stripped, model rewritten), so the TEE
-	// signature attests what the client can verify rather than the raw upstream.
+	// clientBody accumulates the sanitized PLAINTEXT SSE lines (comment lines
+	// dropped, leak fields stripped, model rewritten). Under E2EE the bytes sent
+	// to the client are sealed, but clientBody stays plaintext so the §8 content
+	// binding attests the decrypted content the client can verify.
 	var clientBody bytes.Buffer
+
+	// E2EE (0g-pc SPEC §7): per-stream frame sealer, nil when the request is not
+	// sealed. Set up before streaming so a setup failure fails the request rather
+	// than leaking plaintext frames.
+	frameSealer, err := c.newResponseFrameSealer(ctx)
+	if err != nil {
+		c.handleBrokerError(ctx, err, "set up response sealer")
+		return err
+	}
 
 	var streamErr error = nil
 	var responseChunk []byte = nil
@@ -288,9 +312,25 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				clientBody.WriteString(clientLine)
 			}
 
+			// E2EE (§7): seal the forwardable line to the client's ephemeral key.
+			// clientBody above keeps the plaintext (for §8 signing); only the bytes
+			// written to the client are sealed.
+			outLine := clientLine
+			if forward && frameSealer != nil {
+				sealedLine, sErr := frameSealer.sealSSELine(clientLine)
+				if sErr != nil {
+					// Fail-closed: a sealed request whose frame cannot be sealed must
+					// not receive plaintext. Stop the stream.
+					c.handleBrokerError(ctx, sErr, "seal stream frame")
+					streamErr = sErr
+					return false
+				}
+				outLine = sealedLine
+			}
+
 			// Only write to client if still connected
 			if !clientDisconnected && forward {
-				_, streamErr = w.Write([]byte(clientLine))
+				_, streamErr = w.Write([]byte(outLine))
 				if streamErr != nil {
 					// Check if this is a client disconnection error
 					if c.isClientDisconnectError(streamErr) {
@@ -464,7 +504,25 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	} else if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
-		if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
+		// E2EE (§8): when the request was sealed, the client verifies the signature
+		// over the DECRYPTED content, so bind the JCS-canonical reconstructed
+		// request and plaintext response rather than the raw/sealed bytes.
+		e2eeActive := false
+		var reqPlaintext []byte
+		if ginCtx, ok := ctx.(*gin.Context); ok {
+			if _, sealed := e2eeSealedRequest(ginCtx); sealed {
+				e2eeActive = true
+				reqPlaintext = reqBody
+				if pt, ok := e2eePlaintextRequest(ginCtx); ok {
+					reqPlaintext = pt
+				}
+			}
+		}
+		if e2eeActive {
+			if err := c.signChatE2EE(reqPlaintext, signData, chatKey, isStream); err != nil {
+				return err
+			}
+		} else if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
 			return err
 		}
 	}

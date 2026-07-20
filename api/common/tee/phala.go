@@ -28,9 +28,8 @@ type QuoteResponseWithNvidia struct {
 	NvidiaPayload interface{} `json:"nvidia_payload,omitempty"`
 }
 
-func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
-	// Convert report_data to bytes
-	reportDataBytes := []byte(reportData)
+func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
+	reportDataBytes := reportData
 
 	// TODO: Custom implementation to get quote with vm_config field
 	// Remove if https://pkg.go.dev/github.com/Dstack-TEE/dstack/sdk/go#DstackClient.GetQuote updated

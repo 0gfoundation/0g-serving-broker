@@ -16,13 +16,19 @@ import (
 
 type GcpTappdClient struct{}
 
-func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
+func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
 	quoteProvider, err := client.GetQuoteProvider()
 	if err != nil {
 		return "", errors.Wrap(err, "Failed to get quote provider")
 	}
 
-	quote, err := client.GetQuote(quoteProvider, [64]byte{})
+	if len(reportData) > 64 {
+		return "", errors.New("report data is too large, it should be at most 64 bytes")
+	}
+	var reportData64 [64]byte
+	copy(reportData64[:], reportData)
+
+	quote, err := client.GetQuote(quoteProvider, reportData64)
 	if err != nil {
 		return "", errors.Wrap(err, "Failed to get quote")
 	}

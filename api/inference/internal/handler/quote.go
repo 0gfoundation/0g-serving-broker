@@ -25,6 +25,25 @@ func (h *Handler) GetQuote(ctx *gin.Context) {
 	ctx.String(http.StatusOK, quote)
 }
 
+// GetEncKey
+//
+//	@Description  Returns the enclave HPKE encryption key for E2EE request sealing
+//	@ID			getEncKey
+//	@Tags		quote
+//	@Produce	json
+//	@Router		/e2ee/pubkey [get]
+//	@Success	200	{object}	ctrl.EncKeyInfo
+func (h *Handler) GetEncKey(ctx *gin.Context) {
+	info, ok := h.ctrl.GetEncKey(ctx)
+	if !ok {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "enclave encryption key not available yet",
+		})
+		return
+	}
+	ctx.JSON(http.StatusOK, info)
+}
+
 // VerifyGPU proxies attestation report verification to NVIDIA's service
 //
 //	@Description  This endpoint proxies attestation report verification requests to NVIDIA's TEE verification service
@@ -58,7 +77,7 @@ func (h *Handler) VerifyGPU(ctx *gin.Context) {
 		"User-Agent":     true,
 		"Content-Length": true,
 	}
-	
+
 	for name, values := range ctx.Request.Header {
 		if allowedHeaders[name] {
 			for _, value := range values {

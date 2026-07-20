@@ -413,6 +413,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	}
 	p.logger.Debugf("Proxy: ReadAll success, method=%s, url=%s, Content-Length=%s, readLen=%d", ctx.Request.Method, ctx.Request.URL.String(), ctx.Request.Header.Get("Content-Length"), len(reqBody))
 
+	// E2EE (0g-pc SPEC §5–§6): if the request is sealed to this enclave, unseal it
+	// in-enclave and continue with the reconstructed plaintext body, so all
+	// downstream processing (model enforcement, billing, forwarding) operates on
+	// the real request. Fail-closed: a sealed request that cannot be opened is a
+	// client-caused rejection, never forwarded as cleartext.
+	unsealed, err := p.ctrl.MaybeUnsealRequest(ctx, reqBody)
+	if err != nil {
+		ctx.Set("ignoreError", true)
+		p.handleBrokerError(ctx, errors.NewBadRequest("e2ee: %s", err.Error()), "unseal request")
+		return
+	}
+	reqBody = unsealed
+
 	// handle endpoints not need to be charged
 	if _, ok := constant.TargetRoute[targetPath]; !ok {
 		// Check if this is a signature endpoint with special handling (targetSeparated=false)

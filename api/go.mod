@@ -5,9 +5,11 @@ go 1.24.0
 toolchain go1.24.9
 
 require (
+	github.com/0gfoundation/0g-pc/protocol v0.0.0-20260720060422-05f8dcdb16ba
 	github.com/0gfoundation/0g-storage-client v1.2.2
 	github.com/Dstack-TEE/dstack/sdk/go v0.0.0-20251023024755-9304e6d533e7
 	github.com/andybalholm/brotli v1.1.0
+	github.com/cloudflare/circl v1.6.4
 	github.com/docker/docker v28.0.0+incompatible
 	github.com/ecies/go/v2 v2.0.11
 	github.com/ethereum/go-ethereum v1.16.9
@@ -17,6 +19,7 @@ require (
 	github.com/go-gormigrate/gormigrate/v2 v2.1.2
 	github.com/google/go-tdx-guest v0.3.1
 	github.com/google/uuid v1.6.0
+	github.com/gowebpki/jcs v1.0.1
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
 	github.com/openweb3/go-rpc-provider v0.3.6
 	github.com/openweb3/web3go v0.2.9
@@ -29,7 +32,7 @@ require (
 	github.com/swaggo/swag v1.16.3
 	github.com/testcontainers/testcontainers-go v0.34.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.34.0
-	golang.org/x/crypto v0.37.0
+	golang.org/x/crypto v0.45.0
 	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.68.1
 	google.golang.org/protobuf v1.35.2
@@ -210,13 +213,13 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
-	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/oauth2 v0.23.0 // indirect
-	golang.org/x/sync v0.13.0 // indirect
+	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/term v0.31.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
-	golang.org/x/tools v0.29.0 // indirect
+	golang.org/x/term v0.37.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/tools v0.38.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20241209162323-e6fa225c2576 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
