@@ -585,6 +585,88 @@ func TestMaybeUnsealRequest_LowOrderClientEphPubRejected(t *testing.T) {
 	}
 }
 
+// splitSSEEvents mimics the 0g-pc client's SSE reader: events are separated by a
+// blank line, and consecutive "data:" lines within an event are joined with "\n".
+// Returns each event's data payload.
+func splitSSEEvents(raw string) []string {
+	var events []string
+	var cur []string
+	have := false
+	flush := func() {
+		if have {
+			events = append(events, strings.Join(cur, "\n"))
+			cur = nil
+			have = false
+		}
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" {
+			flush()
+			continue
+		}
+		if p, ok := strings.CutPrefix(line, "data:"); ok {
+			cur = append(cur, strings.TrimPrefix(p, " "))
+			have = true
+		}
+	}
+	flush()
+	return events
+}
+
+// TestStreamFrameSealer_EventsBlankLineDelimited is the regression test for the
+// bug where the synthetic final frame ran into "data: [DONE]" without a blank
+// line, so the client merged them into one event ("{json}\n[DONE]") and JSON
+// decoding hit '[' after the object. Every emitted event must be either a single
+// valid JSON object or the bare [DONE] sentinel — never a merge.
+func TestStreamFrameSealer_EventsBlankLineDelimited(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+
+	// Real upstream shape: each data chunk is followed by a blank line, then [DONE].
+	lines := []string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n",
+		"\n",
+		"data: [DONE]\n",
+	}
+	var raw strings.Builder
+	for _, ln := range lines {
+		out, err := rs.sealSSELine(ln)
+		if err != nil {
+			t.Fatalf("sealSSELine(%q): %v", ln, err)
+		}
+		raw.WriteString(out)
+	}
+
+	events := splitSSEEvents(raw.String())
+	sawDone := false
+	for _, ev := range events {
+		if strings.TrimSpace(ev) == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		// Must decode as a single JSON object with no trailing data — the exact
+		// property that failed before the blank-line terminator fix.
+		dec := json.NewDecoder(strings.NewReader(ev))
+		var obj map[string]json.RawMessage
+		if err := dec.Decode(&obj); err != nil {
+			t.Fatalf("event is not a single JSON object (merge bug?): %q: %v", ev, err)
+		}
+		if dec.More() {
+			t.Fatalf("event has trailing data after the JSON object (merge bug): %q", ev)
+		}
+	}
+	if !sawDone {
+		t.Error("[DONE] was not emitted as its own event")
+	}
+}
+
 func TestVerifyEncKeyID(t *testing.T) {
 	f := newE2EEFixture(t)
 	good := base64.RawURLEncoding.EncodeToString(f.c.teeService.KeyID)

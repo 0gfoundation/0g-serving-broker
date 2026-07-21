@@ -289,7 +289,15 @@ func (rs *responseFrameSealer) finalFrameLine() (string, error) {
 	return rs.sealFrame(wire.Response{"choices": json.RawMessage("[]")}, true)
 }
 
-// sealFrame seals one frame object and returns the "data: {json}\n" line.
+// sealFrame seals one frame object and returns a self-contained SSE event:
+// "data: {json}\n\n". The trailing blank line is the SSE event terminator and is
+// REQUIRED — the client's SSE reader concatenates consecutive "data:" lines that
+// are not separated by a blank line into a single event, so without it a sealed
+// frame would merge with the following frame or the "data: [DONE]" sentinel,
+// yielding "{json}\n[DONE]" and a JSON decode error on the client. We terminate
+// every frame ourselves rather than relying on the upstream's blank line (which
+// an abrupt EOF may omit); an extra blank line the upstream also sends is
+// harmless (ignored by SSE parsers).
 func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (string, error) {
 	out, err := rs.sealer.SealFrame(frame, nil, final)
 	if err != nil {
@@ -302,7 +310,7 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	if final {
 		rs.emittedFinal = true
 	}
-	return "data: " + string(b) + "\n", nil
+	return "data: " + string(b) + "\n\n", nil
 }
 
 // ensureChoices guarantees a "choices" field is present so SealFrame (whose v1
