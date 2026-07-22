@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -209,10 +210,17 @@ func TestMaybeUnsealRequest_KeyIDMismatch(t *testing.T) {
 	body, _ := json.Marshal(sealed)
 	ctx := newGinCtx()
 
-	if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
+	_, err = f.c.MaybeUnsealRequest(ctx, body)
+	if err == nil {
 		t.Fatal("expected rejection on key_id mismatch")
-	} else if !strings.Contains(err.Error(), "key_id") {
-		t.Errorf("error = %v, want key_id mismatch", err)
+	}
+	// Must be classified as the retriable self-heal condition (→ 409), and the
+	// message must begin with the machine-recognizable code token.
+	if !errors.Is(err, ErrE2EEKeyMismatch) {
+		t.Errorf("error = %v, want errors.Is(ErrE2EEKeyMismatch)", err)
+	}
+	if !strings.HasPrefix(err.Error(), "e2ee_key_mismatch") {
+		t.Errorf("error message = %q, want prefix %q", err.Error(), "e2ee_key_mismatch")
 	}
 }
 
@@ -229,8 +237,14 @@ func TestMaybeUnsealRequest_TamperedCleartextFailsClosed(t *testing.T) {
 	tampered, _ := json.Marshal(env)
 	ctx := newGinCtx()
 
-	if _, err := f.c.MaybeUnsealRequest(ctx, tampered); err == nil {
+	err := func() error { _, e := f.c.MaybeUnsealRequest(ctx, tampered); return e }()
+	if err == nil {
 		t.Fatal("expected fail-closed on tampered cleartext (AAD mismatch)")
+	}
+	// A tampered request is a hard failure (→ 400), NOT the retriable key-mismatch
+	// self-heal condition — re-fetching a key would not help.
+	if errors.Is(err, ErrE2EEKeyMismatch) {
+		t.Error("tampered cleartext must not be classified as e2ee_key_mismatch")
 	}
 }
 

@@ -19,7 +19,20 @@ import (
 	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
 	"github.com/0gfoundation/0g-pc/protocol/wire"
 	"github.com/gin-gonic/gin"
+
+	"github.com/0glabs/0g-serving-broker/common/errors"
 )
+
+// ErrE2EEKeyMismatch marks a sealed request whose key_id is not the enclave's
+// current enc key — e.g. after a provider upgrade rotated the measurement-tied
+// key while the router/client still hold the old one. It is a RETRIABLE,
+// self-healing condition (the client should re-fetch + re-verify the enc key and
+// re-seal), distinct from a hard fail-closed unseal failure (tampered AAD, bad
+// envelope, unusable ephemeral key). The proxy maps it to HTTP 409 with a
+// machine-recognizable "e2ee_key_mismatch" message prefix so the router
+// (0g-router#618) re-syncs this provider rather than bouncing a 4xx to the user;
+// all other unseal failures stay 400.
+var ErrE2EEKeyMismatch = errors.New("e2ee_key_mismatch")
 
 const (
 	// e2eeBodyMarker is the reserved top-level field carrying the sealing metadata
@@ -147,11 +160,14 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 }
 
 // verifyEncKeyID checks that a request's key_id (base64url) selects this
-// enclave's current enc key (SPEC §4.3/§6).
+// enclave's current enc key (SPEC §4.3/§6). A mismatch returns an error wrapping
+// ErrE2EEKeyMismatch (→ retriable 409). The current key_id is included as a
+// NON-authoritative hint (a public hash, not the key material and not a trust
+// source): the client must re-fetch and verify the enc key, not trust this value.
 func (c *Ctrl) verifyEncKeyID(b64KeyID string) error {
 	want := base64.RawURLEncoding.EncodeToString(c.teeService.KeyID)
 	if b64KeyID != want {
-		return fmt.Errorf("sealed request key_id %q does not match the enclave enc key", b64KeyID)
+		return fmt.Errorf("%w: sealed request key_id %q is not the enclave's current enc key (current %q); re-fetch the enc key and re-seal", ErrE2EEKeyMismatch, b64KeyID, want)
 	}
 	return nil
 }

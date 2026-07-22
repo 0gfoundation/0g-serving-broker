@@ -421,7 +421,19 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	unsealed, err := p.ctrl.MaybeUnsealRequest(ctx, reqBody)
 	if err != nil {
 		ctx.Set("ignoreError", true)
-		p.handleBrokerError(ctx, errors.NewBadRequest("e2ee: %s", err.Error()), "unseal request")
+		if errors.Is(err, ctrl.ErrE2EEKeyMismatch) {
+			// Self-healing signal: the client sealed to a stale enc key (e.g. after
+			// a provider upgrade rotated it). Return 409 with the "e2ee_key_mismatch"
+			// message prefix so the router/gateway (0g-router#618) re-fetches the enc
+			// key and re-seals to this provider, instead of bouncing a generic 400 to
+			// the user. Detected pre-inference, so nothing is billed. The current
+			// key_id in the message is a hint only — the client must re-verify the key.
+			p.handleBrokerError(ctx, errors.NewConflict("%s", err.Error()), "unseal request")
+		} else {
+			// Hard fail-closed: tampered AAD, malformed envelope, unusable ephemeral
+			// key, provider_id mismatch — not retriable by re-fetching a key.
+			p.handleBrokerError(ctx, errors.NewBadRequest("e2ee: %s", err.Error()), "unseal request")
+		}
 		return
 	}
 	reqBody = unsealed

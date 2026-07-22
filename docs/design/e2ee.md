@@ -69,6 +69,22 @@ routing/billing:
 The reconstructed plaintext (pre-upstream-rewrite) is stashed on the context for
 the §8 signature.
 
+### Stale enc key self-heal (409)
+
+The enc key is measurement-tied, so a provider upgrade can rotate it while the
+router/client still hold the old `key_id`. A sealed request that selects a
+`key_id` which is not the enclave's current key is rejected with **HTTP 409** and
+a body whose message begins with the token `e2ee_key_mismatch` (carrying the
+current `key_id` as a non-authoritative hint). This is a retriable, self-healing
+signal: the router/gateway should re-fetch and re-verify the enc key (via the
+quote once §4.2 lands — never trust a forwarded key blindly) and re-seal to this
+provider, rather than treating it as a generic client error. It is detected
+pre-inference in `MaybeUnsealRequest`, so nothing is billed. All *other* unseal
+failures (tampered AAD, malformed envelope, unusable ephemeral key, `provider_id`
+mismatch) stay **400** fail-closed — re-fetching a key would not help. Detection
+uses the `ctrl.ErrE2EEKeyMismatch` sentinel; the router must key off the
+`e2ee_key_mismatch` token (coordinate with `0g-router#618`).
+
 ## Response seal (SPEC §7)
 
 `ctrl/e2ee.go` seals the sensitive response fields (v1 default: `choices`) to the
