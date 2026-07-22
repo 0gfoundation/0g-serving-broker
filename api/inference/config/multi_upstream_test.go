@@ -58,6 +58,42 @@ func TestEffectiveTargetURL(t *testing.T) {
 	}
 }
 
+// TestEffectiveAdditionalSecret_TargetURLDecouple verifies the credential-leak
+// guard: a model routed to its OWN (different) upstream via per-model targetUrl
+// must NOT inherit the service-level API key, but one without a targetUrl (or one
+// pointing at the same host) still falls back to it.
+func TestEffectiveAdditionalSecret_TargetURLDecouple(t *testing.T) {
+	s := &Service{
+		TargetURL:        "https://svc.example.com/v1",
+		AdditionalSecret: map[string]string{"Authorization": "Bearer svc-key"},
+		ModelPricing: []ModelPricingEntry{
+			// Different upstream, no own key → must NOT leak the service key.
+			{Model: "rehomed", InputPrice: "1", OutputPrice: "2", TargetURL: "https://other.example.com/v1"},
+			// Different upstream, own key → uses its own key.
+			{Model: "rehomed-keyed", InputPrice: "1", OutputPrice: "2", TargetURL: "https://other.example.com/v1", AdditionalSecret: map[string]string{"Authorization": "Bearer own-key"}},
+			// No targetUrl override → shares service upstream → keeps service key.
+			{Model: "shared", InputPrice: "1", OutputPrice: "2"},
+			// Same host as service → keeps service key.
+			{Model: "same-host", InputPrice: "1", OutputPrice: "2", TargetURL: "https://svc.example.com/v1"},
+		},
+	}
+	if err := s.BuildModelPricingMap(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.EffectiveAdditionalSecret("rehomed"); got != nil {
+		t.Errorf("rehomed (different upstream, no own key) = %v; want nil (no service-key leak)", got)
+	}
+	if got := s.EffectiveAdditionalSecret("rehomed-keyed"); got["Authorization"] != "Bearer own-key" {
+		t.Errorf("rehomed-keyed = %v; want own key", got)
+	}
+	if got := s.EffectiveAdditionalSecret("shared"); got["Authorization"] != "Bearer svc-key" {
+		t.Errorf("shared = %v; want service key", got)
+	}
+	if got := s.EffectiveAdditionalSecret("same-host"); got["Authorization"] != "Bearer svc-key" {
+		t.Errorf("same-host = %v; want service key", got)
+	}
+}
+
 // TestEffectiveProviderIdentity covers per-model upstream identity resolution
 // used by the routing proof and the reconciliation rollup.
 func TestEffectiveProviderIdentity(t *testing.T) {

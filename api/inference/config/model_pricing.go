@@ -181,9 +181,11 @@ type ModelPricingEntry struct {
 	// It exists so that when TargetURL fans one provider out to several upstreams,
 	// the TEE routing proof and the usage-reconciliation rollup name the upstream a
 	// request truly hit (see Service.EffectiveProviderIdentity), instead of tagging
-	// every upstream with one provider-level identity. Centralized-only, and
-	// normalized to a lowercase machine key at load, exactly like the service-level
-	// field.
+	// every upstream with one provider-level identity. Normalized to a lowercase
+	// machine key at load, exactly like the service-level field. For a centralized
+	// provider it flows into the signed routing proof and GET /v1/models; for a
+	// standard provider it feeds only the internal reconciliation rollup and stays
+	// hidden from every external surface (same gating as the service-level field).
 	ProviderIdentity string `yaml:"providerIdentity"`
 }
 
@@ -1184,6 +1186,25 @@ func validateModelPricing(cfg *Config) error {
 		}
 	}
 
+	// Per-model upstream overrides (targetUrl / providerIdentity) describe the SAME
+	// upstream and are meant to move together; setting one without the other, or a
+	// targetUrl to a different host without that host's own additionalSecret, is a
+	// silent-mislabel / no-credential footgun. Warn loudly at load (mirroring the
+	// additionalSecret warning above) rather than surface it as a runtime proof
+	// mislabel or an upstream 401.
+	for i := range svc.ModelPricing {
+		entry := &svc.ModelPricing[i]
+		if entry.TargetURL == "" && entry.ProviderIdentity == "" {
+			continue
+		}
+		if (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
+			log.Printf("[CONFIG] service.modelPricing model %q sets only one of {targetUrl, providerIdentity}; the TEE routing proof and reconciliation will use the service-level value for the other — set both for a genuine per-model upstream.", entry.Model)
+		}
+		if entry.TargetURL != "" && entry.TargetURL != svc.TargetURL && len(entry.AdditionalSecret) == 0 {
+			log.Printf("[CONFIG] service.modelPricing model %q sets targetUrl %q (a different upstream) but no additionalSecret; the broker will NOT forward the service-level credential to another host — set this model's own additionalSecret or it calls the upstream unauthenticated.", entry.Model, entry.TargetURL)
+		}
+	}
+
 	// Build the derived lookup map (single source of truth; also detects duplicate
 	// model ids). Per-entry validation above establishes the precondition the
 	// MaxModelPrices* helpers rely on.
@@ -1382,6 +1403,11 @@ func validateModelUpstream(i int, entry *ModelPricingEntry, isCentralized bool) 
 		if isCentralized && u.Scheme != "https" {
 			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must use HTTPS for a centralized provider (routing proof requires TLS) (model %q)", i, entry.TargetURL, entry.Model)
 		}
+		// Normalize away a trailing slash: the forward URL is base + route and the
+		// route always starts with "/", so a base ending in "/" would produce a
+		// double slash ("https://host/v1//chat/completions"). Trim it here (this
+		// validator is stricter than the service-level targetUrl check by design).
+		entry.TargetURL = strings.TrimRight(entry.TargetURL, "/")
 	}
 	if entry.ProviderIdentity != "" {
 		if err := normalizeProviderIdentity(&entry.ProviderIdentity); err != nil {

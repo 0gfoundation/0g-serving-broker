@@ -1527,8 +1527,20 @@ func (s *Service) EffectiveInjectBodyFields(model string) map[string]interface{}
 // per-model keys are only possible for explicitly enumerated entries.
 func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 	if model != "" {
-		if e := s.GetModelPricing(model); e != nil && len(e.AdditionalSecret) > 0 {
-			return e.AdditionalSecret
+		if e := s.GetModelPricing(model); e != nil {
+			if len(e.AdditionalSecret) > 0 {
+				return e.AdditionalSecret
+			}
+			// A model routed to its OWN upstream (a per-model targetUrl pointing to a
+			// DIFFERENT host than the service upstream) must NOT inherit the
+			// service-level credential: that key belongs to the service upstream, and
+			// forwarding it to a different vendor's host would leak it. Send no auth
+			// header instead — the operator must set this model's own additionalSecret
+			// (loadConfig warns when this override is set without one). A same-host or
+			// no targetUrl override keeps the service-level key (shared upstream).
+			if e.TargetURL != "" && e.TargetURL != s.TargetURL {
+				return nil
+			}
 		}
 	}
 	return s.AdditionalSecret

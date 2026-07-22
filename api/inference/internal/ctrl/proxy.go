@@ -201,11 +201,14 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 			if rest, ok := strings.CutPrefix(targetURL, c.Service.TargetURL); ok {
 				targetURL = base + rest
 			} else {
-				// targetURL should always begin with service.targetUrl (proxyHTTPRequest
-				// builds it that way). If it somehow doesn't, keep the original target
-				// (a valid upstream + full route) rather than swapping to a bare base
-				// with no path — a bad swap would 404, losing the route is worse than
-				// not applying the per-model override.
+				// Unreachable in practice: proxyHTTPRequest always builds targetURL as
+				// serviceTarget+route and serviceTarget is assigned c.Service.TargetURL
+				// verbatim, so this CutPrefix cannot fail. Warn-and-continue is safe ONLY
+				// because of that invariant — the fallback keeps the original (valid,
+				// full-route) service target. Note: the per-model AdditionalSecret below
+				// is keyed independently on the resolved model, so if this invariant were
+				// ever broken the per-model key would be sent to the service host; keep
+				// the serviceTarget==TargetURL construction invariant intact.
 				c.logger.Warnf("PrepareHTTPRequest: targetURL %q lacks service target prefix %q; per-model upstream override for %q not applied", targetURL, c.Service.TargetURL, resolvedModelStr)
 			}
 		}
