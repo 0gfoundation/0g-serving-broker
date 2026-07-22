@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
-	"github.com/0gfoundation/0g-pc/protocol/wire"
+	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"

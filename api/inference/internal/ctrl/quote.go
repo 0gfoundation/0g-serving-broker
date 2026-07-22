@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 
-	"github.com/0gfoundation/0g-pc/protocol/wire"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/ethereum/go-ethereum/common"
 )
 

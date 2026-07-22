@@ -4,7 +4,7 @@ This documents the broker (provider enclave) side of the 0G Private Computer
 end-to-end encryption protocol. The normative wire spec and the reference
 implementation live in `0gfoundation/0g-pc` (`protocol/SPEC.md`, `protocol/wire`,
 `protocol/crypto`); the broker MUST match it byte-for-byte and does so by
-importing that module directly (`github.com/0gfoundation/0g-pc/protocol`) rather
+importing that module directly (`github.com/0gfoundation/0g-pc-e2ee/protocol`) rather
 than reimplementing the crypto/wire format.
 
 Related issues: broker `#601` (this work), router acceptance `0g-router#618`,

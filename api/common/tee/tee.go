@@ -5,7 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 
-	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
+	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 

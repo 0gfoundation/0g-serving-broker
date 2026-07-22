@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
-	"github.com/0gfoundation/0g-pc/protocol/wire"
+	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 )
 
 func mustJSON(t *testing.T, v any) json.RawMessage {

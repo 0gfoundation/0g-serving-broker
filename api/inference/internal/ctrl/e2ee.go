@@ -4,7 +4,7 @@ package ctrl
 // encryption protocol (SPEC.md §5–§7): unsealing the sensitive request fields a
 // client sealed to this enclave's HPKE key, and sealing the sensitive response
 // fields back to the client's ephemeral key. The wire format and crypto are
-// provided by github.com/0gfoundation/0g-pc/protocol (imported byte-for-byte);
+// provided by github.com/0gfoundation/0g-pc-e2ee/protocol (imported byte-for-byte);
 // this layer wires them into the broker's proxy/billing/signing path and adds
 // the broker-specific policy checks the protocol package deliberately leaves to
 // the caller.
@@ -16,8 +16,8 @@ import (
 	"fmt"
 	"strings"
 
-	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
-	"github.com/0gfoundation/0g-pc/protocol/wire"
+	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"

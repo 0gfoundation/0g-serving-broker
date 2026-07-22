@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"io"
 
-	pccrypto "github.com/0gfoundation/0g-pc/protocol/crypto"
+	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/cloudflare/circl/hpke"
 	"golang.org/x/crypto/hkdf"
 
