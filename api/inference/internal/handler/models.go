@@ -523,23 +523,17 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	if cfg.HasMultiModelPricing() {
 		models := make([]ModelObject, 0, len(cfg.ModelPricing))
 		teeVerifier := parseTeeVerifier(svc.AdditionalInfo)
-		// Serving domain is provider-level (one targetUrl for all models); compute
-		// once. Only meaningful for centralized providers.
-		var servingDomain string
-		if cfg.IsCentralized() {
-			servingDomain = upstreamServingDomain(cfg)
-		}
 		// Provider class is surfaced for every forwarder (centralized and standard),
-		// same gate as the single-model path. A standard provider still hides its
-		// upstream, so providerIdentity stays centralized-only (and servingDomain
-		// above is already IsCentralized()-gated).
-		var providerType, providerIdentity string
+		// same gate as the single-model path.
+		var providerType string
 		if cfg.IsForwarder() {
 			providerType = cfg.ProviderType
 		}
-		if cfg.IsCentralized() {
-			providerIdentity = cfg.ProviderIdentity
-		}
+		// providerIdentity and servingDomain are resolved PER-MODEL in the loop below
+		// (a multi-upstream provider can point each model at its own targetUrl /
+		// identity — see EffectiveTargetURL/EffectiveProviderIdentity). Both stay
+		// centralized-only: a standard provider hides its upstream, so it must not
+		// surface a per-model identity or serving domain either.
 		// A standard provider performs no response attestation; its settlement TEE
 		// signer being acknowledged must not surface as tee_attested (that marker
 		// reflects response verifiability, which standard deliberately omits).
@@ -604,6 +598,21 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 				effCache = *mp.CacheTokenBilling
 			}
 			modelCacheBilling := newModelCacheTokenBilling(effCache)
+			// Per-model upstream: a multi-upstream provider points each model at its
+			// own targetUrl / identity, so the serving domain and identity are resolved
+			// per entry. Centralized-only (a standard provider hides its upstream).
+			var providerIdentity, servingDomain string
+			if cfg.IsCentralized() {
+				providerIdentity = cfg.EffectiveProviderIdentity(mp.Model)
+				// Under targetTLSProxy the per-model targetUrl is an in-CVM container
+				// name; publish the operator-declared UpstreamDomain instead (same
+				// carve-out as upstreamServingDomain for the single-model path).
+				if cfg.TargetTLSProxy {
+					servingDomain = cfg.UpstreamDomain
+				} else {
+					servingDomain = parseServingDomain(cfg.EffectiveTargetURL(mp.Model))
+				}
+			}
 			obj := ModelObject{
 				ID:               mp.Model,
 				CanonicalID:      canonicalID,

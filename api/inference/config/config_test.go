@@ -2723,7 +2723,7 @@ func TestValidateModelPricingEntry_RejectsBadPerModelCacheDivisor(t *testing.T) 
 		Model: "claude", InputPrice: "300", OutputPrice: "1500",
 		CacheTokenBilling: &CacheTokenBillingConfig{Enabled: true, Divisor: 0},
 	}
-	if err := validateModelPricingEntry(0, entry, "chatbot", false); err == nil ||
+	if err := validateModelPricingEntry(0, entry, "chatbot", false, true); err == nil ||
 		!strings.Contains(err.Error(), "divisor must be >= 1") {
 		t.Fatalf("expected per-model cache divisor error, got: %v", err)
 	}

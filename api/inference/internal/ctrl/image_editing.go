@@ -243,7 +243,9 @@ func (c *Ctrl) handleImageEditingResponse(ctx *gin.Context, resp *http.Response,
 	case c.Service.IsCentralized():
 		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
 		c.logger.Debug("Centralized provider, signing image-editing routing proof")
-		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, fingerprint); err != nil {
+		// Image modalities reject modelPricing at config load, so "" falls back to
+		// the service-level providerIdentity inside the signer (unchanged behaviour).
+		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, fingerprint, ""); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	case !c.Service.TargetSeparated:

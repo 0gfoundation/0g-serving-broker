@@ -461,7 +461,10 @@ func (c *Ctrl) warnIfTokenBillingObservedNothing(ctx context.Context, tokens int
 func (c *Ctrl) signVideoResponse(ctx *gin.Context, reqBody, respBody []byte, chatKey string) error {
 	if c.Service.IsCentralized() {
 		c.logger.Debug("Centralized provider, signing video-generation routing proof")
-		return c.signCentralizedRoutingProof(reqBody, respBody, chatKey, ctx.GetString(CtxKeyUpstreamCertFingerprint))
+		// Video-generation rejects per-model targetUrl/providerIdentity at config
+		// load, so there is no per-model upstream override; "" falls back to the
+		// service-level providerIdentity inside signCentralizedRoutingProof.
+		return c.signCentralizedRoutingProof(reqBody, respBody, chatKey, ctx.GetString(CtxKeyUpstreamCertFingerprint), "")
 	}
 	c.logger.Debug("LLM server in the same network, signing video-generation response")
 	return c.signChatWithKey(reqBody, respBody, chatKey)

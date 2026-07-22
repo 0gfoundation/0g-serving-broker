@@ -476,7 +476,9 @@ func (c *Ctrl) dropStaleVideoSignature(job model.VideoPollJob, cause error) {
 // proof over the real content.
 func (c *Ctrl) signVideoPollResult(job model.VideoPollJob, body []byte, upstreamCertFingerprint string) error {
 	if c.Service.IsCentralized() {
-		return c.signCentralizedRoutingProof(job.RequestBody, body, job.ChatKey, upstreamCertFingerprint)
+		// Video-generation rejects per-model providerIdentity at config load, so ""
+		// falls back to the service-level identity inside the signer.
+		return c.signCentralizedRoutingProof(job.RequestBody, body, job.ChatKey, upstreamCertFingerprint, "")
 	}
 	return c.signChatWithKey(job.RequestBody, body, job.ChatKey)
 }

@@ -218,7 +218,10 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	case c.Service.IsCentralized():
 		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
 		c.logger.Debug("Centralized provider, signing text-to-image routing proof")
-		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, fingerprint); err != nil {
+		// Image modalities reject modelPricing at config load, so there is no
+		// per-model upstream override here; "" falls back to the service-level
+		// providerIdentity inside signCentralizedRoutingProof (unchanged behaviour).
+		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, fingerprint, ""); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	case !c.Service.TargetSeparated:

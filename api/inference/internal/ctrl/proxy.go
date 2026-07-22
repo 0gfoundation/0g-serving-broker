@@ -185,6 +185,32 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		ctx.Set(CtxKeyResolvedModel, c.Service.ModelType)
 	}
 
+	// Multi-upstream: forward this model to its own upstream when it configures a
+	// per-model targetUrl, so ONE provider can front several upstream hosts (e.g.
+	// Bailian and Minimax). The passed targetURL is `service.targetUrl + route`;
+	// swap only the base, preserving the route/query the caller appended. Runs after
+	// model resolution so CtxKeyResolvedModel is set. No-op (base == service target)
+	// for single-upstream providers and any model without an override, so existing
+	// deployments are unaffected. Per-model targetUrl is only accepted by config
+	// validation on the multi-model modalities (chatbot/STT/video); on others
+	// EffectiveTargetURL returns the service target regardless.
+	{
+		resolvedModelVal, _ := ctx.Get(CtxKeyResolvedModel)
+		resolvedModelStr, _ := resolvedModelVal.(string)
+		if base := c.Service.EffectiveTargetURL(resolvedModelStr); base != c.Service.TargetURL {
+			if rest, ok := strings.CutPrefix(targetURL, c.Service.TargetURL); ok {
+				targetURL = base + rest
+			} else {
+				// targetURL should always begin with service.targetUrl (proxyHTTPRequest
+				// builds it that way). If it somehow doesn't, keep the original target
+				// (a valid upstream + full route) rather than swapping to a bare base
+				// with no path — a bad swap would 404, losing the route is worse than
+				// not applying the per-model override.
+				c.logger.Warnf("PrepareHTTPRequest: targetURL %q lacks service target prefix %q; per-model upstream override for %q not applied", targetURL, c.Service.TargetURL, resolvedModelStr)
+			}
+		}
+	}
+
 	// Stamp the BOUNDED metric label for TrackMetrics: the monitor package
 	// has no pricing-config access, and CtxKeyResolvedModel holds RAW user
 	// strings on wildcard deployments — they must never become label values
@@ -302,6 +328,20 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	req.Header.Del(teeutil.HeaderUpstreamCertHost)
 
 	return req, nil
+}
+
+// UpstreamForModel resolves the reconciliation "upstream" label for a requested
+// model: the per-model (or service-level) providerIdentity of the upstream that
+// served it, falling back to "self" for a decentralized provider with no
+// identity. Alias/wildcard aware via ResolveRequestedModel, matching how the
+// forward path picks the per-model targetUrl, so accounting and routing agree.
+func (c *Ctrl) UpstreamForModel(requestedModel string) string {
+	_, resolved, _ := c.Service.ResolveRequestedModel(requestedModel)
+	upstream := c.Service.EffectiveProviderIdentity(resolved)
+	if upstream == "" {
+		return constant.UpstreamSelf
+	}
+	return upstream
 }
 
 func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Request, reqModel model.Request, outputPrice string, charing bool) error {

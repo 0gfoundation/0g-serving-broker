@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -163,6 +164,27 @@ type ModelPricingEntry struct {
 	// service-level key can no longer be shared. json:"-" keeps the secret out of
 	// any accidental struct marshal (defense-in-depth; nothing marshals it today).
 	AdditionalSecret map[string]string `yaml:"additionalSecret" json:"-"`
+
+	// TargetURL is the per-model counterpart of service.targetUrl: the upstream
+	// base URL requests resolved to THIS model are forwarded to. Empty means the
+	// service-level service.targetUrl applies. It lets ONE provider (one on-chain
+	// service / one serving domain) front MULTIPLE distinct upstream hosts — e.g.
+	// Alibaba Bailian and Minimax under the same broker — by pointing each model at
+	// its own upstream, while per-model AdditionalSecret supplies that upstream's
+	// API key. Only the base is swapped; the request path/query the broker appends
+	// is preserved. Must be an absolute http(s) URL (see validateModelPricingEntry).
+	TargetURL string `yaml:"targetUrl"`
+
+	// ProviderIdentity is the per-model counterpart of service.providerIdentity: the
+	// machine key of the upstream actually serving THIS model (e.g. "aliyun",
+	// "minimax"). Empty means the service-level service.providerIdentity applies.
+	// It exists so that when TargetURL fans one provider out to several upstreams,
+	// the TEE routing proof and the usage-reconciliation rollup name the upstream a
+	// request truly hit (see Service.EffectiveProviderIdentity), instead of tagging
+	// every upstream with one provider-level identity. Centralized-only, and
+	// normalized to a lowercase machine key at load, exactly like the service-level
+	// field.
+	ProviderIdentity string `yaml:"providerIdentity"`
 }
 
 // BillingMode selects how a model's per-request fee is computed. Empty defaults
@@ -1119,7 +1141,7 @@ func validateModelPricing(cfg *Config) error {
 	hasWildcard := false
 	for i := range svc.ModelPricing {
 		entry := &svc.ModelPricing[i]
-		if err := validateModelPricingEntry(i, entry, svc.Type, isUSD); err != nil {
+		if err := validateModelPricingEntry(i, entry, svc.Type, isUSD, svc.IsCentralized()); err != nil {
 			return err
 		}
 		if entry.Model == ModelWildcard {
@@ -1220,7 +1242,7 @@ func validateModelPricing(cfg *Config) error {
 // validateModelPricingEntry validates one modelPricing entry: identity + the
 // per-modality price rules, then the modality-agnostic tail (canonical id,
 // billing block, modelInfo).
-func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD bool) error {
+func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType string, isUSD, isCentralized bool) error {
 	if entry.Model == "" {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].model is required", i)
 	}
@@ -1328,6 +1350,41 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 	// panic at billing).
 	if entry.CacheTokenBilling != nil {
 		if err := validateCacheTokenBilling(fmt.Sprintf("service.modelPricing[%d].cacheTokenBilling", i), entry.CacheTokenBilling); err != nil {
+			return err
+		}
+	}
+	// Optional per-model upstream override (the multi-upstream feature): forward
+	// this model to its own targetUrl / attribute it to its own providerIdentity.
+	if err := validateModelUpstream(i, entry, isCentralized); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateModelUpstream validates the per-model upstream overrides (TargetURL and
+// ProviderIdentity). TargetURL must be an absolute http(s) URL with a host and no
+// surrounding whitespace (it is prefix-swapped into the forward URL, so a relative
+// or malformed value would forward to a nonsense target); for a centralized
+// provider it must be HTTPS, mirroring the service-level rule, because the routing
+// proof binds resp.TLS which is only populated over TLS. ProviderIdentity is
+// normalized to a lowercase machine key in place, exactly like the service-level
+// field (modelPricing is forwarder-only, so this is never reached for a
+// decentralized provider). Both empty is the common case and a no-op.
+func validateModelUpstream(i int, entry *ModelPricingEntry, isCentralized bool) error {
+	if entry.TargetURL != "" {
+		if strings.TrimSpace(entry.TargetURL) != entry.TargetURL {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must not have leading/trailing whitespace (model %q)", i, entry.TargetURL, entry.Model)
+		}
+		u, err := url.Parse(entry.TargetURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must be an absolute http(s) URL (model %q)", i, entry.TargetURL, entry.Model)
+		}
+		if isCentralized && u.Scheme != "https" {
+			return fmt.Errorf("invalid config: service.modelPricing[%d].targetUrl %q must use HTTPS for a centralized provider (routing proof requires TLS) (model %q)", i, entry.TargetURL, entry.Model)
+		}
+	}
+	if entry.ProviderIdentity != "" {
+		if err := normalizeProviderIdentity(&entry.ProviderIdentity); err != nil {
 			return err
 		}
 	}

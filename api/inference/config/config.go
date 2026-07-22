@@ -1534,6 +1534,38 @@ func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 	return s.AdditionalSecret
 }
 
+// EffectiveTargetURL returns the upstream base URL a request resolved to the given
+// model must be forwarded to: the resolved model's per-entry targetUrl when set,
+// otherwise the service-level service.targetUrl. This is what lets one provider
+// (one serving URL) front several upstream hosts — see ModelPricingEntry.TargetURL.
+// A "" model (single-model providers, or paths with no resolved model) yields the
+// service-level URL, so single-upstream deployments are unaffected. `model` is the
+// resolved model id (GetModelPricing folds unenumerated models onto the wildcard
+// entry, matching EffectiveAdditionalSecret's resolution).
+func (s *Service) EffectiveTargetURL(model string) string {
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil && e.TargetURL != "" {
+			return e.TargetURL
+		}
+	}
+	return s.TargetURL
+}
+
+// EffectiveProviderIdentity returns the upstream machine-key identity to attribute
+// a request resolved to the given model to — used for the TEE routing proof and the
+// usage-reconciliation rollup. It is the resolved model's per-entry providerIdentity
+// when set, otherwise the service-level service.providerIdentity, so single-upstream
+// providers (and any model without an override) keep the provider-level identity
+// unchanged. A "" model yields the service-level identity.
+func (s *Service) EffectiveProviderIdentity(model string) string {
+	if model != "" {
+		if e := s.GetModelPricing(model); e != nil && e.ProviderIdentity != "" {
+			return e.ProviderIdentity
+		}
+	}
+	return s.ProviderIdentity
+}
+
 // deepMergeInjectFields returns a new map equal to base with override applied on
 // top: nested map[string]interface{} values are merged recursively (override's
 // leaf wins), every other value type (scalars, slices) is replaced wholesale by
