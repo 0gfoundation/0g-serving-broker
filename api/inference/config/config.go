@@ -1531,17 +1531,19 @@ func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 			if len(e.AdditionalSecret) > 0 {
 				return e.AdditionalSecret
 			}
-			// A model routed to its OWN upstream (a per-model targetUrl pointing to a
-			// DIFFERENT host than the service upstream) must NOT inherit the
-			// service-level credential: that key belongs to the service upstream, and
-			// forwarding it to a different vendor's host would leak it. Send no auth
-			// header instead — the operator must set this model's own additionalSecret
-			// (loadConfig warns when this override is set without one). A same-target or
-			// no targetUrl override keeps the service-level key (shared upstream). The
-			// comparison is trailing-slash-insensitive: per-model targetUrl is trimmed
-			// at load but the service-level one is not, so a raw compare would treat
-			// "https://h/v1" and "https://h/v1/" as different hosts and wrongly drop the
-			// key for a same-host override.
+			// A model routed to its OWN upstream (a per-model targetUrl that differs
+			// from the service upstream) must NOT inherit the service-level credential:
+			// that key belongs to the service upstream, and forwarding it elsewhere
+			// would leak it. Send no auth header instead — the operator must set this
+			// model's own additionalSecret (loadConfig warns when this override is set
+			// without one). A same-target or no targetUrl override keeps the
+			// service-level key (shared upstream). The comparison is on the full base
+			// URL (trailing-slash-insensitive, since per-model targetUrl is trimmed at
+			// load but the service-level one is not): it drops the key on ANY difference
+			// — a different host OR a different path on the same host. That is
+			// deliberately conservative (it can only over-drop, never leak); a same-host
+			// different-path upstream that legitimately shares the key must set its own
+			// additionalSecret, which the load-time warning prompts.
 			if e.TargetURL != "" && strings.TrimRight(e.TargetURL, "/") != strings.TrimRight(s.TargetURL, "/") {
 				return nil
 			}
