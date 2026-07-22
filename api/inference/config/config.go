@@ -1536,9 +1536,13 @@ func (s *Service) EffectiveAdditionalSecret(model string) map[string]string {
 			// service-level credential: that key belongs to the service upstream, and
 			// forwarding it to a different vendor's host would leak it. Send no auth
 			// header instead — the operator must set this model's own additionalSecret
-			// (loadConfig warns when this override is set without one). A same-host or
-			// no targetUrl override keeps the service-level key (shared upstream).
-			if e.TargetURL != "" && e.TargetURL != s.TargetURL {
+			// (loadConfig warns when this override is set without one). A same-target or
+			// no targetUrl override keeps the service-level key (shared upstream). The
+			// comparison is trailing-slash-insensitive: per-model targetUrl is trimmed
+			// at load but the service-level one is not, so a raw compare would treat
+			// "https://h/v1" and "https://h/v1/" as different hosts and wrongly drop the
+			// key for a same-host override.
+			if e.TargetURL != "" && strings.TrimRight(e.TargetURL, "/") != strings.TrimRight(s.TargetURL, "/") {
 				return nil
 			}
 		}

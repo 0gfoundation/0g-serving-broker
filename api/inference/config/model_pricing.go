@@ -1200,7 +1200,7 @@ func validateModelPricing(cfg *Config) error {
 		if (entry.TargetURL == "") != (entry.ProviderIdentity == "") {
 			log.Printf("[CONFIG] service.modelPricing model %q sets only one of {targetUrl, providerIdentity}; the TEE routing proof and reconciliation will use the service-level value for the other — set both for a genuine per-model upstream.", entry.Model)
 		}
-		if entry.TargetURL != "" && entry.TargetURL != svc.TargetURL && len(entry.AdditionalSecret) == 0 {
+		if entry.TargetURL != "" && strings.TrimRight(entry.TargetURL, "/") != strings.TrimRight(svc.TargetURL, "/") && len(entry.AdditionalSecret) == 0 {
 			log.Printf("[CONFIG] service.modelPricing model %q sets targetUrl %q (a different upstream) but no additionalSecret; the broker will NOT forward the service-level credential to another host — set this model's own additionalSecret or it calls the upstream unauthenticated.", entry.Model, entry.TargetURL)
 		}
 	}
