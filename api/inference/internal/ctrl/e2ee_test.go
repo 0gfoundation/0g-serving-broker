@@ -311,6 +311,107 @@ func TestSealNonStreamResponse_RoundTrip(t *testing.T) {
 	}
 }
 
+func cloneFrame(f wire.Response) wire.Response {
+	out := make(wire.Response, len(f))
+	for k, v := range f {
+		out[k] = v
+	}
+	return out
+}
+
+// The broker declares x_0g_trace unbound on the sealed response, so the router
+// can inject it downstream without breaking the client's Open — while any BOUND
+// cleartext field stays tamper-evident.
+func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	respBody := []byte(`{"id":"x","model":"gpt-4o","usage":{"total_tokens":3},"choices":[{"message":{"content":"hi"}}]}`)
+	sealed, isSealed, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	if err != nil || !isSealed {
+		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
+	}
+
+	var frame wire.Response
+	if err := json.Unmarshal(sealed, &frame); err != nil {
+		t.Fatalf("unmarshal sealed: %v", err)
+	}
+	e2ee, err := frame.E2EE()
+	if err != nil {
+		t.Fatalf("E2EE(): %v", err)
+	}
+	if len(e2ee.UnboundFields) != 1 || e2ee.UnboundFields[0] != "x_0g_trace" {
+		t.Fatalf("unbound_fields = %v, want [x_0g_trace]", e2ee.UnboundFields)
+	}
+
+	// Router injects x_0g_trace into the sealed response → client still opens.
+	injected := cloneFrame(frame)
+	injected["x_0g_trace"] = json.RawMessage(`{"trace_id":"abc","hops":2}`)
+	opened, err := wire.OpenResponse(f.clientEphSk, injected)
+	if err != nil {
+		t.Fatalf("OpenResponse after trace injection: %v", err)
+	}
+	if !strings.Contains(string(opened["choices"]), "hi") {
+		t.Errorf("opened choices missing content: %s", opened["choices"])
+	}
+
+	// Tampering a BOUND cleartext field (model) must fail-close.
+	tampered := cloneFrame(frame)
+	tampered["model"] = json.RawMessage(`"evil"`)
+	if _, err := wire.OpenResponse(f.clientEphSk, tampered); err == nil {
+		t.Error("tampering a bound field (model) must fail Open")
+	}
+}
+
+// Streaming frames carry the same unbound declaration, and an injected x_0g_trace
+// still opens in order.
+func TestStreamFrameSealer_UnboundTrace(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+	ctx.Set(CtxKeyE2EESealed, true)
+	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+
+	rs, err := f.c.newResponseFrameSealer(ctx)
+	if err != nil {
+		t.Fatalf("newResponseFrameSealer: %v", err)
+	}
+	out, err := rs.sealSSELine(`data: {"model":"gpt-4o","choices":[{"delta":{"content":"a"}}]}` + "\n")
+	if err != nil {
+		t.Fatalf("sealSSELine: %v", err)
+	}
+	events := splitSSEEvents(out)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	var fr wire.Response
+	if err := json.Unmarshal([]byte(events[0]), &fr); err != nil {
+		t.Fatalf("unmarshal frame: %v", err)
+	}
+	e2ee, err := fr.E2EE()
+	if err != nil {
+		t.Fatalf("E2EE(): %v", err)
+	}
+	if len(e2ee.UnboundFields) != 1 || e2ee.UnboundFields[0] != "x_0g_trace" {
+		t.Fatalf("unbound_fields = %v, want [x_0g_trace]", e2ee.UnboundFields)
+	}
+
+	ro, err := wire.NewResponseOpener(f.clientEphSk, fr)
+	if err != nil {
+		t.Fatalf("NewResponseOpener: %v", err)
+	}
+	injected := cloneFrame(fr)
+	injected["x_0g_trace"] = json.RawMessage(`"t-1"`)
+	opened, err := ro.OpenFrame(injected)
+	if err != nil {
+		t.Fatalf("OpenFrame after trace injection: %v", err)
+	}
+	if !strings.Contains(string(opened["choices"]), "\"a\"") {
+		t.Errorf("opened choices missing delta: %s", opened["choices"])
+	}
+}
+
 func TestSealNonStreamResponse_NotSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx() // not marked sealed

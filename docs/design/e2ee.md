@@ -95,12 +95,30 @@ request's `client_eph_pub` (`info = "0g-pc/v1/resp"`), leaving `usage`/`model`/
   `maybeSealNonStreamResponse`, sealed after sanitization and before the write.
 - Streaming (`handleChargingStreamResponse`): a per-stream `responseFrameSealer`
   seals each SSE frame under one HPKE context (sequence increments per frame).
-  The frame carrying `usage` is marked `final` (the broker forces
-  `stream_options.include_usage`, so the last chunk before `[DONE]` carries it);
-  if no such frame appears, a synthetic final frame is emitted before `[DONE]` so
-  the client can always detect completion.
+  Every data frame is sealed as NON-final and exactly one synthetic final frame is
+  emitted at stream end — before `[DONE]`, or on EOF-without-`[DONE]` — so the
+  client always gets exactly one completion marker. `final` is deliberately NOT
+  derived from per-frame `usage` (empty `usage:{}` chunks and vLLM
+  `continuous_usage_stats` would otherwise mark a non-terminal frame final and
+  truncate the stream). Each sealed frame is a self-contained SSE event (`\n\n`
+  terminator) so it never merges with the next frame or `[DONE]` in the client's
+  SSE reader.
 
 Billing is unaffected: it reads the raw upstream bytes, not the sealed copy.
+
+### Unbound field: `x_0g_trace` (SPEC §5.2)
+
+Every sealed response declares `unbound_fields: ["x_0g_trace"]` — a cleartext
+field EXCLUDED from the seal AAD. The response travels broker → router → client,
+and the **router** attaches `x_0g_trace` (an observability trace) to the sealed
+response on the way back. Because it is unbound, the router's injection does not
+break the client's `Open`, while every bound field (`choices` sealed, `usage`/
+`model`/`id` cleartext) stays tamper-evident. Per the §8 corollary a
+router-injected value is not cryptographically trusted (trust comes from on-chain
+settlement), so a trace object MUST be unbound, never a bound/signed field.
+`x_0g_trace` is response-only — it is not on the request path and never reaches
+any upstream. Declared via the seal APIs' trailing `unboundFields` variadic
+(`SealResponse` / `NewResponseSealer`).
 
 ## Response signature (SPEC §8)
 
