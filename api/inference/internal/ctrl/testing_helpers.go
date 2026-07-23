@@ -7,9 +7,16 @@ import (
 
 	"github.com/patrickmn/go-cache"
 
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
+
+// SetTeeServiceForTest injects a TeeService so tests in other packages (e.g. the
+// proxy) can exercise the E2EE unseal path, which reads the unexported field.
+func (c *Ctrl) SetTeeServiceForTest(ts *tee.TeeService) {
+	c.teeService = ts
+}
 
 // SeedContractAccountCache pre-seeds the contract account cache for integration testing.
 // This avoids contract calls during session and balance validation.

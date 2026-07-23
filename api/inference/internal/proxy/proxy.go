@@ -428,11 +428,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// key and re-seals to this provider, instead of bouncing a generic 400 to
 			// the user. Detected pre-inference, so nothing is billed. The current
 			// key_id in the message is a hint only — the client must re-verify the key.
-			p.handleBrokerError(ctx, errors.NewConflict("%s", err.Error()), "unseal request")
+			// Empty context so the message stays token-prefixed for the router match.
+			p.handleBrokerError(ctx, errors.NewConflict("%s", err.Error()), "")
 		} else {
 			// Hard fail-closed: tampered AAD, malformed envelope, unusable ephemeral
 			// key, provider_id mismatch — not retriable by re-fetching a key.
-			p.handleBrokerError(ctx, errors.NewBadRequest("e2ee: %s", err.Error()), "unseal request")
+			p.handleBrokerError(ctx, errors.NewBadRequest("e2ee: %s", err.Error()), "")
 		}
 		return
 	}
