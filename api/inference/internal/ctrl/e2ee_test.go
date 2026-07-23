@@ -204,15 +204,15 @@ func TestMaybeUnsealRequest_MarkerInContentPassthrough(t *testing.T) {
 	}
 }
 
-func TestMaybeUnsealRequest_ProviderIDMismatch(t *testing.T) {
+func TestMaybeUnsealRequest_SignerAddrMismatch(t *testing.T) {
 	f := newE2EEFixture(t)
 	body := f.sealRequest(t, "0x000000000000000000000000000000000000dEaD")
 	ctx := newGinCtx()
 
 	if _, err := f.c.MaybeUnsealRequest(ctx, body); err == nil {
-		t.Fatal("expected rejection on provider_id mismatch")
-	} else if !strings.Contains(err.Error(), "provider_id") {
-		t.Errorf("error = %v, want provider_id mismatch", err)
+		t.Fatal("expected rejection on signer_addr mismatch")
+	} else if !strings.Contains(err.Error(), "signer_addr") {
+		t.Errorf("error = %v, want signer_addr mismatch", err)
 	}
 }
 

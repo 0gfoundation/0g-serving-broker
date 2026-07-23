@@ -62,7 +62,8 @@ routing/billing:
 3. Recompute AAD = JCS(envelope minus `_e2ee.ciphertext`) and HPKE-`Open`
    (`info = "0g-pc/v1/seal"`), **fail-closed** on any error.
 4. Verify `keys(plaintext) == sealed_fields`, no collision with cleartext
-   fields, and `provider_id == this enclave's signer address`.
+   fields, and `signer_addr == this enclave's signer address` (the pin; renamed
+   from `provider_id` in 0g-pc-e2ee #17).
 5. Reconstruct the request = cleartext ∪ decrypted, replace the body, and run the
    normal proxy path on the plaintext.
 
@@ -80,7 +81,7 @@ signal: the router/gateway should re-fetch and re-verify the enc key (via the
 quote once §4.2 lands — never trust a forwarded key blindly) and re-seal to this
 provider, rather than treating it as a generic client error. It is detected
 pre-inference in `MaybeUnsealRequest`, so nothing is billed. All *other* unseal
-failures (tampered AAD, malformed envelope, unusable ephemeral key, `provider_id`
+failures (tampered AAD, malformed envelope, unusable ephemeral key, `signer_addr`
 mismatch) stay **400** fail-closed — re-fetching a key would not help. Detection
 uses the `ctrl.ErrE2EEKeyMismatch` sentinel; the router must key off the
 `e2ee_key_mismatch` token (coordinate with `0g-router#618`).

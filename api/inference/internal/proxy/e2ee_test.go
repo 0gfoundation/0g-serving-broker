@@ -114,9 +114,9 @@ func TestProxyE2EE_KeyMismatch_409(t *testing.T) {
 	}
 }
 
-// A sealed request with the correct key but a wrong provider_id is a hard
-// fail-closed condition (not retriable by re-fetching a key) → 400.
-func TestProxyE2EE_ProviderMismatch_400(t *testing.T) {
+// A sealed request with the correct key but a wrong signer_addr (the provider
+// pin) is a hard fail-closed condition (not retriable by re-fetching a key) → 400.
+func TestProxyE2EE_SignerAddrMismatch_400(t *testing.T) {
 	e := newE2EEProxyEnv(t)
 
 	sealed, err := wire.SealRequest(e.encPub, e2eeReq(t), []string{"messages"},
@@ -131,6 +131,6 @@ func TestProxyE2EE_ProviderMismatch_400(t *testing.T) {
 		t.Fatalf("status = %d, want 400; body: %s", w.Code, w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "e2ee_key_mismatch") {
-		t.Error("provider mismatch must not be classified as e2ee_key_mismatch")
+		t.Error("signer_addr mismatch must not be classified as e2ee_key_mismatch")
 	}
 }

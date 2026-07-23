@@ -88,7 +88,7 @@ func hasE2EEMarker(reqBody []byte) bool {
 // path seals its reply (SPEC §7). Once a request is confirmed sealed, any failure
 // is returned as an error and MUST be treated as fail-closed by the caller (no
 // plaintext fallback, SPEC §6) — a sealed request that cannot be opened, whose
-// provider_id is not this enclave, or whose key_id is unknown is rejected.
+// signer_addr is not this enclave, or whose key_id is unknown is rejected.
 func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, error) {
 	if !hasE2EEMarker(reqBody) {
 		return reqBody, nil
@@ -121,10 +121,11 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	}
 
 	// Enforce provider pinning (SPEC §5/§6): the enclave rejects a request pinned
-	// to a different provider. OpenRequest deliberately does not check this — the
-	// broker knows its own identity.
-	if !strings.EqualFold(e2ee.ProviderID, c.teeService.Address.Hex()) {
-		return nil, fmt.Errorf("sealed request provider_id %q does not match this enclave", e2ee.ProviderID)
+	// to a different provider. The pin is the provider's TEE signer address
+	// (renamed provider_id → signer_addr upstream in 0g-pc-e2ee #17; same value).
+	// OpenRequest deliberately does not check this — the broker knows its own identity.
+	if !strings.EqualFold(e2ee.SignerAddr, c.teeService.Address.Hex()) {
+		return nil, fmt.Errorf("sealed request signer_addr %q does not match this enclave", e2ee.SignerAddr)
 	}
 
 	// Extract the client's response ephemeral key before opening, so the response
