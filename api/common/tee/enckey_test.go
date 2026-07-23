@@ -2,6 +2,7 @@ package tee
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"testing"
@@ -9,6 +10,31 @@ import (
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 )
+
+// TestGetEncKeyFromClient covers the TeeService.getEncKey path (material from a
+// TappdClient → deriveEncKey), which SyncQuote uses. The mock client returns
+// fixed key material, so the derived key is deterministic and usable.
+func TestGetEncKeyFromClient(t *testing.T) {
+	s := &TeeService{}
+	priv, pub, err := s.getEncKey(context.Background(), &MockTappdClient{})
+	if err != nil {
+		t.Fatalf("getEncKey: %v", err)
+	}
+	if len(pub) != 32 {
+		t.Fatalf("enc_pub len = %d, want 32", len(pub))
+	}
+	if len(priv) == 0 {
+		t.Fatal("enc_priv is empty")
+	}
+	// Deterministic in the client material.
+	priv2, pub2, err := s.getEncKey(context.Background(), &MockTappdClient{})
+	if err != nil {
+		t.Fatalf("getEncKey (2): %v", err)
+	}
+	if !bytes.Equal(pub, pub2) || !bytes.Equal(priv, priv2) {
+		t.Error("getEncKey not deterministic for identical material")
+	}
+}
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
 	t.Helper()

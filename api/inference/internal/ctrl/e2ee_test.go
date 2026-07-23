@@ -12,12 +12,36 @@ import (
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 )
+
+// recoverEIP191 recovers the signer address from a personal_sign signature over
+// text, exactly as a client verifier would (§8 step 3).
+func recoverEIP191(t *testing.T, text, sigHex string) common.Address {
+	t.Helper()
+	sig, err := hexutil.Decode(sigHex)
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+	if len(sig) != 65 {
+		t.Fatalf("sig length = %d, want 65", len(sig))
+	}
+	if sig[64] >= 27 { // undo Ethereum's 27/28 offset before recovery
+		sig[64] -= 27
+	}
+	pub, err := crypto.SigToPub(accounts.TextHash([]byte(text)), sig)
+	if err != nil {
+		t.Fatalf("SigToPub: %v", err)
+	}
+	return crypto.PubkeyToAddress(*pub)
+}
 
 // e2eeTestFixture builds a Ctrl with a working enc key + signer, plus a matching
 // client keypair, for exercising the E2EE seal/unseal round trip.
@@ -678,6 +702,104 @@ func TestStreamFrameSealer_EventsBlankLineDelimited(t *testing.T) {
 	}
 	if !sawDone {
 		t.Error("[DONE] was not emitted as its own event")
+	}
+}
+
+func TestSignChatE2EE_NonStream(t *testing.T) {
+	f := newE2EEFixture(t)
+	req := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	resp := []byte(`{"id":"x","choices":[{"message":{"content":"yo"}}],"usage":{"total_tokens":3}}`)
+
+	if err := f.c.signChatE2EE(req, resp, "ck-ns", false); err != nil {
+		t.Fatalf("signChatE2EE: %v", err)
+	}
+	sig, err := f.c.GetChatSignature("ck-ns")
+	if err != nil {
+		t.Fatalf("GetChatSignature: %v", err)
+	}
+
+	// Non-stream binds JCS(request):JCS(response).
+	wantReq, _ := jcsSha256Hex(req)
+	wantResp, _ := jcsSha256Hex(resp)
+	if want := wantReq + ":" + wantResp; sig.Text != want {
+		t.Errorf("text = %q, want %q", sig.Text, want)
+	}
+	if sig.SigningAddressEcdsa != f.c.teeService.Address {
+		t.Errorf("signing_address = %s, want %s", sig.SigningAddressEcdsa, f.c.teeService.Address)
+	}
+	if got := recoverEIP191(t, sig.Text, sig.SignatureEcdsa); got != f.c.teeService.Address {
+		t.Errorf("recovered %s, want %s", got, f.c.teeService.Address)
+	}
+}
+
+func TestSignChatE2EE_Stream(t *testing.T) {
+	f := newE2EEFixture(t)
+	req := []byte(`{"model":"gpt-4o","messages":[]}`)
+	// Provisional streaming binding: ordered plaintext-frame concatenation, hashed
+	// as-is (no JCS on the response side).
+	respConcat := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\ndata: {\"choices\":[]}\n")
+
+	if err := f.c.signChatE2EE(req, respConcat, "ck-s", true); err != nil {
+		t.Fatalf("signChatE2EE: %v", err)
+	}
+	sig, err := f.c.GetChatSignature("ck-s")
+	if err != nil {
+		t.Fatalf("GetChatSignature: %v", err)
+	}
+
+	wantReq, _ := jcsSha256Hex(req)
+	if want := wantReq + ":" + sha256Hex(respConcat); sig.Text != want {
+		t.Errorf("stream text = %q, want %q", sig.Text, want)
+	}
+	if got := recoverEIP191(t, sig.Text, sig.SignatureEcdsa); got != f.c.teeService.Address {
+		t.Errorf("recovered %s, want %s", got, f.c.teeService.Address)
+	}
+}
+
+func TestJCSSha256Hex(t *testing.T) {
+	// Key order must not matter (JCS canonicalization).
+	a, err := jcsSha256Hex([]byte(`{"b":1,"a":2}`))
+	if err != nil {
+		t.Fatalf("jcsSha256Hex: %v", err)
+	}
+	b, err := jcsSha256Hex([]byte(`{"a":2,"b":1}`))
+	if err != nil {
+		t.Fatalf("jcsSha256Hex: %v", err)
+	}
+	if a != b {
+		t.Errorf("JCS did not canonicalize key order: %s != %s", a, b)
+	}
+	// Invalid JSON must error, not silently hash garbage.
+	if _, err := jcsSha256Hex([]byte(`{not json`)); err == nil {
+		t.Error("expected error on invalid JSON")
+	}
+}
+
+func TestGetEncKey(t *testing.T) {
+	f := newE2EEFixture(t)
+	ctx := newGinCtx()
+
+	info, ok := f.c.GetEncKey(ctx)
+	if !ok {
+		t.Fatal("GetEncKey: expected ok for a fixture with a derived enc key")
+	}
+	if info.EncPub != base64.RawURLEncoding.EncodeToString(f.encPub) {
+		t.Errorf("enc_pub = %s, want %s", info.EncPub, base64.RawURLEncoding.EncodeToString(f.encPub))
+	}
+	if info.KeyID != base64.RawURLEncoding.EncodeToString(f.c.teeService.KeyID) {
+		t.Errorf("key_id = %s", info.KeyID)
+	}
+	if info.V != wire.Version || info.KEMID != wire.KEMID {
+		t.Errorf("v/kem_id = %d/%s, want %d/%s", info.V, info.KEMID, wire.Version, wire.KEMID)
+	}
+	if info.SignerAddress != f.signerAddr {
+		t.Errorf("signer_address = %s, want %s", info.SignerAddress, f.signerAddr)
+	}
+
+	// No enc key derived yet → ok=false (handler 503s instead of serving empty).
+	empty := &Ctrl{teeService: &teeutil.TeeService{}}
+	if _, ok := empty.GetEncKey(ctx); ok {
+		t.Error("GetEncKey: expected ok=false when enc key is unavailable")
 	}
 }
 
