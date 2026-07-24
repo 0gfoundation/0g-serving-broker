@@ -100,6 +100,10 @@ func (h *Handler) Register(r *gin.Engine) {
 	// group.GET("/request", corsMiddleware(), h.ListRequest)
 
 	group.GET("/quote", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetQuote)
+	// E2EE (0g-pc SPEC §4.3): advertise the enclave HPKE enc key so a client can
+	// fetch enc_pub / key_id without parsing the quote itself (it MUST still verify
+	// enc_pub against the quote's report_data).
+	group.GET("/e2ee/pubkey", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetEncKey)
 	group.GET("/models", corsMiddleware(), middleware.RateLimitMiddleware(h.rateLimiter), h.GetModels)
 
 	// User account query (authenticated: user can only query their own data)

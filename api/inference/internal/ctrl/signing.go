@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/gowebpki/jcs"
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 )
@@ -49,6 +50,71 @@ func (*Ctrl) chatCacheKey(chatID string) string {
 func sha256Hex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// jcsSha256Hex returns sha256(JCS(b)) as hex. Used by the E2EE content binding
+// (§8), where the client verifies the request/response hashes over JCS-canonical
+// JSON so Go/TS/Rust agree byte-for-byte.
+func jcsSha256Hex(b []byte) (string, error) {
+	canon, err := jcs.Transform(b)
+	if err != nil {
+		return "", fmt.Errorf("jcs canonicalize: %w", err)
+	}
+	return sha256Hex(canon), nil
+}
+
+// signChatE2EE is the E2EE (0g-pc SPEC §8) variant of signChatWithKey. The
+// client verifies the signature over the DECRYPTED content, so the signed text
+// binds the JCS-canonical reconstructed request and the JCS-canonical decrypted
+// response — not the sealed bytes the client received over the wire.
+//
+// reqPlaintext is the reconstructed request captured at unseal time (before the
+// proxy's upstream rewrites), matching what the client reconstructs.
+// respPlaintext is the sanitized cleartext response the broker sealed.
+//
+// Streaming note (TODO, tracked in 0g-serving-broker#552 and 0g-pc#7): a
+// streaming response has no single canonical JSON object, so the exact
+// canonicalization the client will recompute is not yet finalized. As a
+// provisional binding we hash the ordered concatenation of the delivered
+// plaintext frames as-is (whole-frame plaintext concatenation). This MUST be
+// reconciled with the client verify implementation before streaming E2EE
+// signatures are relied upon.
+func (c *Ctrl) signChatE2EE(reqPlaintext, respPlaintext []byte, chatKey string, isStream bool) error {
+	requestSha256, err := jcsSha256Hex(reqPlaintext)
+	if err != nil {
+		return fmt.Errorf("e2ee request hash: %w", err)
+	}
+
+	var responseSha256 string
+	if isStream {
+		// Provisional: ordered plaintext-frame concatenation (see doc comment).
+		responseSha256 = sha256Hex(respPlaintext)
+	} else {
+		responseSha256, err = jcsSha256Hex(respPlaintext)
+		if err != nil {
+			return fmt.Errorf("e2ee response hash: %w", err)
+		}
+	}
+
+	text := fmt.Sprintf("%s:%s", requestSha256, responseSha256)
+	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	if err != nil {
+		return err
+	}
+	if sig[64] == 0 || sig[64] == 1 {
+		sig[64] += 27
+	}
+
+	chatSignature := ChatSignature{
+		Text:                text,
+		SignatureEcdsa:      hexutil.Encode(sig),
+		SigningAddressEcdsa: c.teeService.Address,
+		SigningAlgo:         ECDSA.String(),
+	}
+	key := c.chatCacheKey(chatKey)
+	c.logger.Debugf("e2ee chat signature key: %v", key)
+	c.svcCache.Set(key, chatSignature, c.chatCacheExpiration)
+	return nil
 }
 
 // signChatWithKey signs sha256(reqBody):sha256(respData) and caches the result
