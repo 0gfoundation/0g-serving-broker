@@ -2,13 +2,13 @@
 
 This documents the broker (provider enclave) side of the 0G Private Computer
 end-to-end encryption protocol. The normative wire spec and the reference
-implementation live in `0gfoundation/0g-pc` (`protocol/SPEC.md`, `protocol/wire`,
+implementation live in `0gfoundation/0g-pc-e2ee` (`protocol/SPEC.md`, `protocol/wire`,
 `protocol/crypto`); the broker MUST match it byte-for-byte and does so by
 importing that module directly (`github.com/0gfoundation/0g-pc-e2ee/protocol`) rather
 than reimplementing the crypto/wire format.
 
 Related issues: broker `#601` (this work), router acceptance `0g-router#618`,
-client-side attestation verification `0g-pc#7`, response-signature evolution
+client-side attestation verification `0g-pc-e2ee#7`, response-signature evolution
 `#552`.
 
 ## Goal
@@ -22,8 +22,10 @@ inference, and seals the response (`choices`) back to a client ephemeral key.
 ## Crypto suite (SPEC §3)
 
 HPKE (RFC 9180), base mode: DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 /
-ChaCha20-Poly1305. All AAD and content hashes are over JCS-canonical JSON
-(RFC 8785). Response signature stays ECDSA secp256k1 over an EIP-191 digest.
+ChaCha20-Poly1305. The AAD (the cleartext manifest) is over JCS-canonical JSON
+(RFC 8785); the sealed body itself is NOT canonicalized — its exact bytes are
+bound by the AEAD (0g-pc-e2ee#16 dropped the sealed-body JCS pass). Response
+signature is ECDSA secp256k1 over an EIP-191 digest.
 
 ## Enclave enc key + attestation binding (SPEC §4)
 
@@ -59,8 +61,8 @@ routing/billing:
    unchanged (not rejected). (A header signal may be added later.)
 2. Select the enc key by `key_id`; verify `v` / `kem_id` (done by
    `wire.OpenRequest`, plus an explicit `key_id` check for a clear error).
-3. Recompute AAD = JCS(envelope minus `_e2ee.ciphertext`) and HPKE-`Open`
-   (`info = "0g-pc/v1/seal"`), **fail-closed** on any error.
+3. Recompute AAD = JCS(envelope minus `_e2ee.ciphertext` and any `unbound_fields`)
+   and HPKE-`Open` (`info = "0g-pc/v1/seal"`), **fail-closed** on any error.
 4. Verify `keys(plaintext) == sealed_fields`, no collision with cleartext
    fields, and `signer_addr == this enclave's signer address` (the pin; renamed
    from `provider_id` in 0g-pc-e2ee #17).
@@ -123,23 +125,30 @@ any upstream. Declared via the seal APIs' trailing `unboundFields` variadic
 
 ## Response signature (SPEC §8)
 
-For a sealed request the client verifies the TEE signature over the **decrypted**
-content, so the signed `text` binds the JCS-canonical reconstructed request and
-the JCS-canonical decrypted response (`ctrl/signing.go` → `signChatE2EE`), not
-the sealed bytes on the wire. Non-E2EE requests keep the existing `signChatWithKey`
-behaviour.
+Today `ctrl/signing.go` → `signChatE2EE` binds the JCS-canonical reconstructed
+request and the JCS-canonical decrypted response. Non-E2EE requests keep the
+existing `signChatWithKey` behaviour.
+
+> ⚠️ **Divergence from the current SPEC §8.** 0g-pc-e2ee#16 redefined §8 to bind
+> the on-wire bytes — `sha256(request aad ‖ ciphertext) : sha256(response aad ‖
+> ciphertext)` — instead of `JCS(plaintext)`, so that no canonicalization of the
+> sealed content is needed and the signature covers exactly the non-`unbound`
+> content. Our `signChatE2EE` has not been reworked to this yet; it is a known,
+> tracked gap (not urgent — client-side verification `0g-pc-e2ee#7` is not yet
+> implemented, and the rework is blocked on the wire package exporting an
+> `aad ‖ ciphertext` signing-bytes helper). Tracked with `#552`.
 
 ### Streaming signature — TODO (tracked)
 
 A streaming response has no single canonical JSON object, and the client-side
-verify implementation (`0g-pc#7`) is not yet in place. As a **provisional**
+verify implementation (`0g-pc-e2ee#7`) is not yet in place. As a **provisional**
 binding the broker hashes the ordered concatenation of the delivered plaintext
 frames as-is (whole-frame plaintext concatenation). The exact canonicalization
 MUST be reconciled with the client verify implementation before streaming E2EE
-signatures are relied upon. Tracked in `#552` and `0g-pc#7`.
+signatures are relied upon. Tracked in `#552` and `0g-pc-e2ee#7`.
 
 ## Out of scope (tracked elsewhere)
 
-Client-side attestation verify (`0g-pc#7`); router acceptance of sealed requests
+Client-side attestation verify (`0g-pc-e2ee#7`); router acceptance of sealed requests
 (`0g-router#618`); candidate scoring; finalized streaming signature format
 (`#552`); §4.2 `report_data` binding of `enc_pub` (deferred follow-up, see above).
