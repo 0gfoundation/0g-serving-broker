@@ -319,9 +319,28 @@ func cloneFrame(f wire.Response) wire.Response {
 	return out
 }
 
-// The broker declares x_0g_trace unbound on the sealed response, so the router
-// can inject it downstream without breaking the client's Open — while any BOUND
-// cleartext field stays tamper-evident.
+// equalStringSet reports whether got and want contain the same elements,
+// ignoring order (unbound_fields order is not significant).
+func equalStringSet(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := make(map[string]int, len(got))
+	for _, s := range got {
+		seen[s]++
+	}
+	for _, s := range want {
+		if seen[s] == 0 {
+			return false
+		}
+		seen[s]--
+	}
+	return true
+}
+
+// The broker declares model + x_0g_trace unbound on the sealed response, so the
+// router can rewrite/inject them downstream without breaking the client's Open —
+// while any BOUND cleartext field stays tamper-evident.
 func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
@@ -342,31 +361,36 @@ func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("E2EE(): %v", err)
 	}
-	if len(e2ee.UnboundFields) != 1 || e2ee.UnboundFields[0] != "x_0g_trace" {
-		t.Fatalf("unbound_fields = %v, want [x_0g_trace]", e2ee.UnboundFields)
+	if !equalStringSet(e2ee.UnboundFields, []string{"model", "x_0g_trace"}) {
+		t.Fatalf("unbound_fields = %v, want [model x_0g_trace]", e2ee.UnboundFields)
 	}
 
-	// Router injects x_0g_trace into the sealed response → client still opens.
+	// Router rewrites model and injects x_0g_trace into the sealed response →
+	// client still opens, and sees the router-supplied (unbound) values.
 	injected := cloneFrame(frame)
+	injected["model"] = json.RawMessage(`"gpt-4o-alias"`)
 	injected["x_0g_trace"] = json.RawMessage(`{"trace_id":"abc","hops":2}`)
 	opened, err := wire.OpenResponse(f.clientEphSk, injected)
 	if err != nil {
-		t.Fatalf("OpenResponse after trace injection: %v", err)
+		t.Fatalf("OpenResponse after model rewrite + trace injection: %v", err)
 	}
 	if !strings.Contains(string(opened["choices"]), "hi") {
 		t.Errorf("opened choices missing content: %s", opened["choices"])
 	}
+	if string(opened["model"]) != `"gpt-4o-alias"` {
+		t.Errorf("opened model = %s, want router-rewritten value", opened["model"])
+	}
 
-	// Tampering a BOUND cleartext field (model) must fail-close.
+	// Tampering a BOUND cleartext field (id) must fail-close.
 	tampered := cloneFrame(frame)
-	tampered["model"] = json.RawMessage(`"evil"`)
+	tampered["id"] = json.RawMessage(`"evil"`)
 	if _, err := wire.OpenResponse(f.clientEphSk, tampered); err == nil {
-		t.Error("tampering a bound field (model) must fail Open")
+		t.Error("tampering a bound field (id) must fail Open")
 	}
 }
 
-// Streaming frames carry the same unbound declaration, and an injected x_0g_trace
-// still opens in order.
+// Streaming frames carry the same unbound declaration (model + x_0g_trace), and
+// an injected x_0g_trace still opens in order.
 func TestStreamFrameSealer_UnboundTrace(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx()
@@ -393,8 +417,8 @@ func TestStreamFrameSealer_UnboundTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("E2EE(): %v", err)
 	}
-	if len(e2ee.UnboundFields) != 1 || e2ee.UnboundFields[0] != "x_0g_trace" {
-		t.Fatalf("unbound_fields = %v, want [x_0g_trace]", e2ee.UnboundFields)
+	if !equalStringSet(e2ee.UnboundFields, []string{"model", "x_0g_trace"}) {
+		t.Fatalf("unbound_fields = %v, want [model x_0g_trace]", e2ee.UnboundFields)
 	}
 
 	ro, err := wire.NewResponseOpener(f.clientEphSk, fr)

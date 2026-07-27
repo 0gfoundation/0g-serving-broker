@@ -45,16 +45,6 @@ const (
 	// public key (SPEC §3 suite).
 	clientEphPubLen = 32
 
-	// e2eeResponseUnboundField is declared in every sealed response's
-	// `unbound_fields` (SPEC §5.2). It is a cleartext field EXCLUDED from the seal
-	// AAD, so the router may inject it into the sealed response on the way back to
-	// the client (broker → router → client) without breaking the client's Open —
-	// it is not added by the enclave and not covered by the §8 signature. Trace is
-	// observability only; per the §8 corollary a router-injected value is not
-	// cryptographically trusted (trust comes from on-chain settlement), so it MUST
-	// stay unbound rather than being a bound/signed field.
-	e2eeResponseUnboundField = "x_0g_trace"
-
 	// CtxKeyE2EESealed marks (bool) that the current request arrived sealed, so the
 	// response path knows to seal its reply.
 	CtxKeyE2EESealed = "e2eeSealed"
@@ -68,6 +58,18 @@ const (
 	// modified upstream body.
 	CtxKeyE2EEPlaintextReq = "e2eePlaintextReq"
 )
+
+// e2eeResponseUnboundFields are declared in every sealed response's
+// `unbound_fields` (SPEC §5.2). They are cleartext fields EXCLUDED from the seal
+// AAD, so the router may inject or rewrite them on the way back to the client
+// (broker → router → client) without breaking the client's Open — they are not
+// covered by the §8 signature. Per the §8 corollary a router-injected value is
+// not cryptographically trusted (trust comes from on-chain settlement), so these
+// MUST stay unbound rather than being bound/signed fields:
+//   - "model": the router substitutes the served model back to the alias the
+//     client requested, so it must be rewritable without invalidating the seal.
+//   - "x_0g_trace": observability metadata the router injects downstream.
+var e2eeResponseUnboundFields = []string{"model", "x_0g_trace"}
 
 // hasE2EEMarker is a cheap substring pre-check to skip the JSON parse on the vast
 // majority of (non-sealed) requests. A match is not proof of a sealed request —
@@ -237,9 +239,9 @@ func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []
 }
 
 func sealResponseMarshal(ephPub pccrypto.PublicKey, resp wire.Response) ([]byte, error) {
-	// nil sealedFields → v1 default ["choices"]; declare x_0g_trace unbound so the
-	// router may inject it downstream (SPEC §5.2).
-	out, err := wire.SealResponse(ephPub, resp, nil, e2eeResponseUnboundField)
+	// nil sealedFields → v1 default ["choices"]; declare model + x_0g_trace unbound
+	// so the router may rewrite/inject them downstream (SPEC §5.2).
+	out, err := wire.SealResponse(ephPub, resp, nil, e2eeResponseUnboundFields...)
 	if err != nil {
 		return nil, fmt.Errorf("seal response: %w", err)
 	}
@@ -265,10 +267,10 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if !sealed {
 		return nil, nil
 	}
-	// Declare x_0g_trace unbound on every frame so the router may inject it into
-	// the sealed stream downstream (SPEC §5.2). The whole stream shares one context,
-	// so the unbound set is fixed once here.
-	s, err := wire.NewResponseSealer(ephPub, e2eeResponseUnboundField)
+	// Declare model + x_0g_trace unbound on every frame so the router may
+	// rewrite/inject them into the sealed stream downstream (SPEC §5.2). The whole
+	// stream shares one context, so the unbound set is fixed once here.
+	s, err := wire.NewResponseSealer(ephPub, e2eeResponseUnboundFields...)
 	if err != nil {
 		return nil, fmt.Errorf("set up response sealer: %w", err)
 	}
