@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/go-tdx-guest/client"
 	pb "github.com/google/go-tdx-guest/proto/tdx"
@@ -17,18 +18,26 @@ import (
 type GcpTappdClient struct{}
 
 func (c *GcpTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
+	reportDataBytes := []byte(reportData)
+	if len(reportDataBytes) > 64 {
+		return "", errors.New("report data is too large, it should be at most 64 bytes")
+	}
+
+	var reportDataArray [64]byte
+	copy(reportDataArray[:], reportDataBytes)
+
 	quoteProvider, err := client.GetQuoteProvider()
 	if err != nil {
 		return "", errors.Wrap(err, "Failed to get quote provider")
 	}
 
-	quote, err := client.GetQuote(quoteProvider, [64]byte{})
+	quote, err := client.GetQuote(quoteProvider, reportDataArray)
 	if err != nil {
 		return "", errors.Wrap(err, "Failed to get quote")
 	}
 	quoteV4, ok := quote.(*pb.QuoteV4)
 	if !ok {
-		return "", errors.Wrap(err, "Failed to assert quote to *client.QuoteV4")
+		return "", fmt.Errorf("failed to assert quote to *pb.QuoteV4, got %T", quote)
 	}
 
 	// Create GCP response structure
