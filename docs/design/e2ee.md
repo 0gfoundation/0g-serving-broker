@@ -109,19 +109,20 @@ request's `client_eph_pub` (`info = "0g-pc/v1/resp"`), leaving `usage`/`model`/
 
 Billing is unaffected: it reads the raw upstream bytes, not the sealed copy.
 
-### Unbound field: `x_0g_trace` (SPEC §5.2)
+### Unbound fields: `model`, `x_0g_trace` (SPEC §5.2)
 
-Every sealed response declares `unbound_fields: ["x_0g_trace"]` — a cleartext
-field EXCLUDED from the seal AAD. The response travels broker → router → client,
-and the **router** attaches `x_0g_trace` (an observability trace) to the sealed
-response on the way back. Because it is unbound, the router's injection does not
-break the client's `Open`, while every bound field (`choices` sealed, `usage`/
-`model`/`id` cleartext) stays tamper-evident. Per the §8 corollary a
-router-injected value is not cryptographically trusted (trust comes from on-chain
-settlement), so a trace object MUST be unbound, never a bound/signed field.
-`x_0g_trace` is response-only — it is not on the request path and never reaches
-any upstream. Declared via the seal APIs' trailing `unboundFields` variadic
-(`SealResponse` / `NewResponseSealer`).
+Every sealed response declares `unbound_fields: ["model", "x_0g_trace"]` —
+cleartext fields EXCLUDED from the seal AAD. The response travels
+broker → router → client, and the **router** rewrites `model` (substituting the
+served model back to the alias the client requested) and attaches `x_0g_trace`
+(an observability trace) to the sealed response on the way back. Because they are
+unbound, the router's rewrite/injection does not break the client's `Open`, while
+every bound field (`choices` sealed, `usage`/`id` cleartext) stays tamper-evident.
+Per the §8 corollary a router-injected value is not cryptographically trusted
+(trust comes from on-chain settlement), so these MUST be unbound, never
+bound/signed fields. Both are response-only — they are not on the request path and
+never reach any upstream. Declared via the seal APIs' trailing `unboundFields`
+variadic (`SealResponse` / `NewResponseSealer`).
 
 ## Response signature (SPEC §8)
 
