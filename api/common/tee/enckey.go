@@ -44,7 +44,9 @@ const (
 
 	// reportDataVersion is the report_data layout version (§4.2), written as a
 	// big-endian uint32 at reportDataVersionOffset. Bump it on any layout change
-	// so a consumer can reject a layout it does not understand.
+	// so a consumer can reject a layout it does not understand. This is a separate
+	// version from the _e2ee envelope version (§5, wire.Version) advertised by
+	// GET /v1/e2ee/pubkey: they version independent SPEC layers and need not agree.
 	reportDataVersion = 1
 )
 
