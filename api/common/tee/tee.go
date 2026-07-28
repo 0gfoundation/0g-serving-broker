@@ -49,9 +49,9 @@ type TeeService struct {
 	Quote          string
 
 	// E2EE (0g-pc SPEC §4) enclave encryption key. Derived inside the TEE from a
-	// path distinct from the signer, bound into the quote's report_data, and used
-	// as the HPKE recipient to unseal sealed request fields (§6). EncPrivateKey
-	// never leaves the enclave.
+	// path distinct from the signer, optionally bound into the quote's report_data
+	// (§4.2, see reportData), and used as the HPKE recipient to unseal sealed
+	// request fields (§6). EncPrivateKey never leaves the enclave.
 	EncPrivateKey pccrypto.PrivateKey
 	EncPublicKey  pccrypto.PublicKey
 	KeyID         []byte // SHA-256(enc_pub)[0:8] (§4.3)
@@ -89,8 +89,9 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.logger.Debugf("teeAddress: %s", s.Address)
 
 	// Derive the X25519 enc key (§4.1) inside the TEE from a distinct path, so a
-	// client can seal request fields to this enclave (§5–§6). Bound into the
-	// quote's report_data below (§4.2) and also published via GET /v1/e2ee/pubkey.
+	// client can seal request fields to this enclave (§5–§6). Published via
+	// GET /v1/e2ee/pubkey, and optionally bound into the quote's report_data below
+	// (§4.2) when enabled (see reportData).
 	encPriv, encPub, err := s.getEncKey(ctx, client)
 	if err != nil {
 		return errors.Wrap(err, "deriving enc key")
