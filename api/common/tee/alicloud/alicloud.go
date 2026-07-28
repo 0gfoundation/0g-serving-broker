@@ -22,7 +22,7 @@ import (
 
 type AliCloudClient struct{}
 
-func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
+func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
 	// Get TAPP service URL from environment variable
 	tappServiceURL := os.Getenv("TAPP_SERVICE_URL")
 	if tappServiceURL == "" {
@@ -40,35 +40,10 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 		return "", errors.New("invalid TAPP_SERVICE_URL: missing host")
 	}
 
-	// According to get_evidence.sh, signer should be 32-byte data
-	// reportData is typically an Ethereum address (0x + 40 hex chars = 20 bytes)
-	// Remove 0x prefix if present
-	cleanReportData := reportData
-	if len(reportData) >= 2 && (reportData[:2] == "0x" || reportData[:2] == "0X") {
-		cleanReportData = reportData[2:]
-	}
-
-	// Convert hex string to bytes
-	reportDataBytes, err := hex.DecodeString(cleanReportData)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to decode reportData hex string")
-	}
-
-	if len(reportDataBytes) > 32 {
-		return "", errors.New("report data is too large, it should be at most 32 bytes")
-	}
-
-	// Pad to 32 bytes if necessary (Ethereum address is 20 bytes, needs padding to 32)
-	paddedReportData := make([]byte, 32)
-	copy(paddedReportData, reportDataBytes)
-
-	// Convert to hex string (64 characters), similar to SIGNER_HEX in get_evidence.sh
-	signerHex := hex.EncodeToString(paddedReportData)
-
-	// Convert hex back to bytes, then to the format expected by proto (should be bytes)
-	signerBytes, err := hex.DecodeString(signerHex)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to decode signer hex")
+	// report_data is the 64-byte §4.2 payload (enc_pub ‖ signer_addr ‖ version ‖
+	// reserved); carry it raw. The proto ReportData field is bytes.
+	if len(reportData) > 64 {
+		return "", errors.New("report data is too large, it should be at most 64 bytes")
 	}
 
 	// Create gRPC connection with insecure credentials for TCP service
@@ -81,9 +56,9 @@ func (c *AliCloudClient) TdxQuote(ctx context.Context, reportData string, nvQuot
 	// Create gRPC client
 	client := pb.NewTappServiceClient(conn)
 
-	// Prepare the request - signer should be the bytes (proto will handle base64 encoding)
+	// Prepare the request - report_data is carried as raw bytes (proto handles encoding)
 	req := &pb.GetEvidenceRequest{
-		ReportData: signerBytes, // This matches the proto bytes field
+		ReportData: reportData, // This matches the proto bytes field
 	}
 
 	// Call the GetEvidence RPC

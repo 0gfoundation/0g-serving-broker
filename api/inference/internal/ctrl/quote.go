@@ -21,7 +21,11 @@ func (c *Ctrl) GetProviderSignerAddress(ctx context.Context) common.Address {
 // still extract enc_pub from the verified quote's report_data (§4.2) and confirm
 // it equals EncPub here — this endpoint is not itself a trust source.
 type EncKeyInfo struct {
-	V             int    `json:"v"`              // report_data / envelope version (§4.2)
+	// V is the _e2ee envelope version (§5, wire.Version) used for sealing. It is
+	// NOT the report_data §4.2 version (reportDataVersion in common/tee/enckey.go),
+	// which a client reads directly from report_data[52:56] of the verified quote.
+	// The two are independent SPEC versions and need not track together.
+	V             int    `json:"v"`
 	KEMID         string `json:"kem_id"`         // HPKE KEM id (§3), e.g. "0x0020"
 	EncPub        string `json:"enc_pub"`        // base64url(X25519 pub, 32B)
 	KeyID         string `json:"key_id"`         // base64url(SHA-256(enc_pub)[0:8]) (§4.3)

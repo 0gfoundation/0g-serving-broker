@@ -9,8 +9,8 @@ import (
 // MockTappdClient is a mock implementation of TappdClient for testing.
 type MockTappdClient struct{}
 
-func (c *MockTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
-	encodedReportData := base64.StdEncoding.EncodeToString([]byte(reportData))
+func (c *MockTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
+	encodedReportData := base64.StdEncoding.EncodeToString(reportData)
 	mockResp := map[string]interface{}{
 		"report_data": encodedReportData,
 		"intel_quote":     "mock_intel_quote",

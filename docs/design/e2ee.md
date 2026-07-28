@@ -7,9 +7,9 @@ implementation live in `0gfoundation/0g-pc-e2ee` (`protocol/SPEC.md`, `protocol/
 importing that module directly (`github.com/0gfoundation/0g-pc-e2ee/protocol`) rather
 than reimplementing the crypto/wire format.
 
-Related issues: broker `#601` (this work), router acceptance `0g-router#618`,
-client-side attestation verification `0g-pc-e2ee#7`, response-signature evolution
-`#552`.
+Related issues: broker `#601` (E2EE flow) and `#602` (report_data §4.2 binding),
+router acceptance `0g-router#618`, client-side attestation verification
+`0g-pc-e2ee#7`, response-signature evolution `#552`.
 
 ## Goal
 
@@ -36,18 +36,42 @@ signature is ECDSA secp256k1 over an EIP-191 digest.
 - `key_id = SHA-256(enc_pub)[0:8]` (§4.3).
 - `GET /v1/e2ee/pubkey` advertises `{v, kem_id, enc_pub, key_id, signer_address}`.
 
-### report_data binding — deferred (TODO)
+### report_data binding (SPEC §4.2)
 
-The §4.2 layout binds `enc_pub` into the quote's `report_data`
-(`enc_pub(32) ‖ signer_addr(20) ‖ version(4) ‖ reserved(8)`) so a client can
-extract and verify the enc key straight out of a verified attestation. This is a
-**breaking change** to `report_data` (today it is the legacy signer-address-hex
-layout) and is **deferred** to get the E2EE flow working end-to-end first.
+`SyncQuote` binds `enc_pub` and `signer_addr` into the quote's `report_data` so a
+client can extract and verify the enc key straight out of a verified attestation
+rather than trusting `GET /v1/e2ee/pubkey`. See `buildReportData` in
+`common/tee/enckey.go`. The fixed 64-byte layout:
 
-Until it lands, `enc_pub` is published only via `GET /v1/e2ee/pubkey` and is
-**not yet attestation-bound** — a client cannot yet prove the enc key belongs to
-the attested enclave. Tracked as a follow-up (see the TODO in
-`common/tee/enckey.go` / `SyncQuote`).
+```
+offset  size  field
+0       32    enc_pub      X25519 recipient key (RFC 7748 u-coord, little-endian)
+32      20    signer_addr  secp256k1 Ethereum address, raw bytes
+52      4     version      uint32, big-endian; = 1 (reportDataVersion)
+56      8     reserved     MUST be zero
+```
+
+`report_data` is a fixed 64-byte hardware field. `TappdClient.TdxQuote` takes the
+already-built 64 bytes (`[]byte`) and every backend embeds the same payload; only
+the transport encoding differs per SDK (phala hex, gcp `[64]byte`, alicloud proto
+bytes, mock base64).
+
+A client MUST verify the quote's hardware signature, then read `report_data`,
+check `version`, confirm `signer_addr` matches the on-chain `teeSignerAddress`,
+and only then trust `enc_pub`. `GET /v1/e2ee/pubkey` stays as a convenience fetch
+but is **not** a trust source — the client MUST compare its advertised `enc_pub`
+against the one bound in `report_data`.
+
+This was a **breaking change** to `report_data` (previously the legacy
+signer-address-hex layout): consumers that read it as the ASCII signer address
+must switch to `report_data[32:52]` and gate on `version`. Landed in `#602`,
+coordinated in lockstep with client verify `0g-pc-e2ee#7` and router
+`0g-router#618`.
+
+> The `version` in `report_data` (§4.2, `reportDataVersion` in
+> `common/tee/enckey.go`) is a **separate** version from the `_e2ee` envelope `v`
+> (§5, `wire.Version`) advertised by `GET /v1/e2ee/pubkey`. Both are `1` today but
+> version independent SPEC layers and are not required to track together.
 
 ## Request unseal (SPEC §5–§6)
 

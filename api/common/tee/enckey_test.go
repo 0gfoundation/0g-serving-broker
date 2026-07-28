@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"testing"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // TestGetEncKeyFromClient covers the TeeService.getEncKey path (material from a
@@ -67,6 +69,47 @@ func TestDeriveEncKeyDeterministic(t *testing.T) {
 	}
 	if bytes.Equal(pub1, pub3) {
 		t.Fatal("different material produced the same enc_pub")
+	}
+}
+
+// TestBuildReportDataLayout checks the 64-byte §4.2 layout byte-for-byte:
+// enc_pub(32) ‖ signer_addr(20) ‖ version(4, big-endian) ‖ reserved(8, zero).
+func TestBuildReportDataLayout(t *testing.T) {
+	_, pub, err := deriveEncKey([]byte("material"))
+	if err != nil {
+		t.Fatalf("deriveEncKey: %v", err)
+	}
+	signer := common.HexToAddress("0x2A94D671f1A5e080f75A8164087Cdd35c8442e69")
+
+	rd, err := buildReportData(pub, signer)
+	if err != nil {
+		t.Fatalf("buildReportData: %v", err)
+	}
+	if len(rd) != reportDataSize {
+		t.Fatalf("report_data len = %d, want %d", len(rd), reportDataSize)
+	}
+	if got := rd[reportDataEncPubOffset:reportDataSignerOffset]; !bytes.Equal(got, pub) {
+		t.Errorf("enc_pub = %x, want %x", got, pub)
+	}
+	if got := rd[reportDataSignerOffset:reportDataVersionOffset]; !bytes.Equal(got, signer.Bytes()) {
+		t.Errorf("signer_addr = %x, want %x", got, signer.Bytes())
+	}
+	if got := binary.BigEndian.Uint32(rd[reportDataVersionOffset:reportDataReservedOffset]); got != reportDataVersion {
+		t.Errorf("version = %d, want %d", got, reportDataVersion)
+	}
+	for i := reportDataReservedOffset; i < reportDataSize; i++ {
+		if rd[i] != 0 {
+			t.Errorf("reserved byte %d = %d, want 0", i, rd[i])
+		}
+	}
+}
+
+// TestBuildReportDataRejectsBadEncPub ensures a non-32-byte enc_pub is rejected
+// rather than silently truncated or misaligned in the layout.
+func TestBuildReportDataRejectsBadEncPub(t *testing.T) {
+	signer := common.HexToAddress("0x2A94D671f1A5e080f75A8164087Cdd35c8442e69")
+	if _, err := buildReportData(pccrypto.PublicKey(make([]byte, 31)), signer); err == nil {
+		t.Error("expected error for 31-byte enc_pub, got nil")
 	}
 }
 
