@@ -113,6 +113,45 @@ func TestBuildReportDataRejectsBadEncPub(t *testing.T) {
 	}
 }
 
+// TestReportDataSwitch checks the TEE_REPORT_DATA_BIND_ENC_PUB gate: off (the
+// default) yields the legacy ASCII signer-address layout old clients parse; on
+// yields the 64-byte §4.2 layout that binds enc_pub.
+func TestReportDataSwitch(t *testing.T) {
+	_, pub, err := deriveEncKey([]byte("material"))
+	if err != nil {
+		t.Fatalf("deriveEncKey: %v", err)
+	}
+	signer := common.HexToAddress("0x2A94D671f1A5e080f75A8164087Cdd35c8442e69")
+	s := &TeeService{Address: signer, EncPublicKey: pub}
+
+	// Default (unset) → legacy: the raw bytes are the ASCII address string, which
+	// is exactly what a client decoding report_data as the signer address reads.
+	t.Setenv(bindEncPubEnvVar, "")
+	rd, err := s.reportData()
+	if err != nil {
+		t.Fatalf("reportData (legacy): %v", err)
+	}
+	if got := string(rd); got != signer.Hex() {
+		t.Errorf("legacy report_data = %q, want %q", got, signer.Hex())
+	}
+
+	// Enabled → §4.2: 64 bytes with enc_pub bound at the front and version set.
+	t.Setenv(bindEncPubEnvVar, "true")
+	rd, err = s.reportData()
+	if err != nil {
+		t.Fatalf("reportData (§4.2): %v", err)
+	}
+	if len(rd) != reportDataSize {
+		t.Fatalf("report_data len = %d, want %d", len(rd), reportDataSize)
+	}
+	if got := rd[reportDataEncPubOffset:reportDataSignerOffset]; !bytes.Equal(got, pub) {
+		t.Errorf("enc_pub = %x, want %x", got, pub)
+	}
+	if got := binary.BigEndian.Uint32(rd[reportDataVersionOffset:reportDataReservedOffset]); got != reportDataVersion {
+		t.Errorf("version = %d, want %d", got, reportDataVersion)
+	}
+}
+
 func TestKeyIDMatchesSpec(t *testing.T) {
 	_, pub, err := deriveEncKey([]byte("material"))
 	if err != nil {

@@ -38,8 +38,8 @@ signature is ECDSA secp256k1 over an EIP-191 digest.
 
 ### report_data binding (SPEC §4.2)
 
-`SyncQuote` binds `enc_pub` and `signer_addr` into the quote's `report_data` so a
-client can extract and verify the enc key straight out of a verified attestation
+`SyncQuote` can bind `enc_pub` and `signer_addr` into the quote's `report_data` so
+a client can extract and verify the enc key straight out of a verified attestation
 rather than trusting `GET /v1/e2ee/pubkey`. See `buildReportData` in
 `common/tee/enckey.go`. The fixed 64-byte layout:
 
@@ -62,11 +62,20 @@ and only then trust `enc_pub`. `GET /v1/e2ee/pubkey` stays as a convenience fetc
 but is **not** a trust source — the client MUST compare its advertised `enc_pub`
 against the one bound in `report_data`.
 
-This was a **breaking change** to `report_data` (previously the legacy
+This is a **breaking change** to `report_data` (previously the legacy
 signer-address-hex layout): consumers that read it as the ASCII signer address
 must switch to `report_data[32:52]` and gate on `version`. Landed in `#602`,
 coordinated in lockstep with client verify `0g-pc-e2ee#7` and router
 `0g-router#618`.
+
+Because the SDK/CLI attestation verifiers still parse the legacy layout, the §4.2
+binding is **gated behind the `TEE_REPORT_DATA_BIND_ENC_PUB` env var and defaults
+to off** (see `TeeService.reportData` in `common/tee/tee.go`). With it off,
+`SyncQuote` emits the legacy ASCII signer-address `report_data`, so `enc_pub` is
+**not** attestation-bound — it is still published via `GET /v1/e2ee/pubkey` and
+E2EE sealing works, it just cannot be verified straight out of the quote. Flip the
+var to `true` only once the consuming clients understand the §4.2 layout; the
+switch is temporary and should be removed once they have all migrated.
 
 > The `version` in `report_data` (§4.2, `reportDataVersion` in
 > `common/tee/enckey.go`) is a **separate** version from the `_e2ee` envelope `v`
