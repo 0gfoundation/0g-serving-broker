@@ -28,18 +28,15 @@ type QuoteResponseWithNvidia struct {
 	NvidiaPayload interface{} `json:"nvidia_payload,omitempty"`
 }
 
-func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error) {
-	// Convert report_data to bytes
-	reportDataBytes := []byte(reportData)
-
+func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
 	// TODO: Custom implementation to get quote with vm_config field
 	// Remove if https://pkg.go.dev/github.com/Dstack-TEE/dstack/sdk/go#DstackClient.GetQuote updated
-	if len(reportDataBytes) > 64 {
+	if len(reportData) > 64 {
 		return "", errors.New("report data is too large, it should be at most 64 bytes")
 	}
 
 	payload := map[string]interface{}{
-		"report_data": hex.EncodeToString(reportDataBytes),
+		"report_data": hex.EncodeToString(reportData),
 	}
 
 	// Send RPC request directly
@@ -132,7 +129,7 @@ func (c *PhalaTappdClient) TdxQuote(ctx context.Context, reportData string, nvQu
 			panic(err)
 		}
 
-		nvidiaPayload, err := GpuPayload(hex.EncodeToString(crypto.Keccak256(reportDataBytes)), nil)
+		nvidiaPayload, err := GpuPayload(hex.EncodeToString(crypto.Keccak256(reportData)), nil)
 		if err != nil {
 			return "", errors.Wrap(err, "failed to get NVIDIA payload")
 		}

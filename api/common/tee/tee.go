@@ -29,7 +29,7 @@ const (
 )
 
 type TappdClient interface {
-	TdxQuote(ctx context.Context, reportData string, nvQuote bool) (string, error)
+	TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error)
 	DeriveKey(ctx context.Context, path string) (string, error)
 }
 
@@ -82,14 +82,8 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.logger.Debugf("teeAddress: %s", s.Address)
 
 	// Derive the X25519 enc key (§4.1) inside the TEE from a distinct path, so a
-	// client can seal request fields to this enclave (§5–§6). Published via
-	// GET /v1/e2ee/pubkey.
-	//
-	// TODO(#601 §4.2): bind enc_pub into the quote's report_data
-	// (enc_pub ‖ signer_addr ‖ version ‖ reserved) so a client can verify the enc
-	// key straight out of a verified attestation instead of trusting the endpoint.
-	// Deferred to get the E2EE flow working first; report_data stays the legacy
-	// signer-address-hex layout for now (no breaking change to quote consumers).
+	// client can seal request fields to this enclave (§5–§6). Bound into the
+	// quote's report_data below (§4.2) and also published via GET /v1/e2ee/pubkey.
 	encPriv, encPub, err := s.getEncKey(ctx, client)
 	if err != nil {
 		return errors.Wrap(err, "deriving enc key")
@@ -98,7 +92,15 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.EncPublicKey = encPub
 	s.KeyID = keyID(encPub)
 
-	quoteStr, err := client.TdxQuote(ctx, s.Address.Hex(), nvQuote)
+	// Bind enc_pub and signer_addr into the quote's report_data (§4.2) so a client
+	// can extract and verify them straight out of a verified attestation rather
+	// than trusting the /v1/e2ee/pubkey endpoint.
+	reportData, err := buildReportData(s.EncPublicKey, s.Address)
+	if err != nil {
+		return errors.Wrap(err, "building report_data")
+	}
+
+	quoteStr, err := client.TdxQuote(ctx, reportData, nvQuote)
 	if err != nil {
 		return errors.Wrap(err, "tdx quote")
 	}
