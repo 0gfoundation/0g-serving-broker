@@ -22,6 +22,7 @@ func main() {
 		"0g-fine-tuning-server":         fineTuningServer.Main,
 		"0g-controller":                 controllerServer.Main,
 		"0g-dashscope-video-translator": videoTranslatorServer.Main,
+		"0g-minimax-video-translator":   videoTranslatorServer.MiniMaxMain,
 	}
 
 	names := []string{}
