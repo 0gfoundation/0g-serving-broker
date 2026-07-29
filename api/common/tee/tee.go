@@ -16,9 +16,11 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/tee/alicloud"
 )
 
-// bindEncPubEnvVar toggles binding enc_pub into the quote's report_data using
-// the §4.2 layout. It defaults to off, so the broker keeps emitting the legacy
-// ASCII signer-address report_data that existing clients parse.
+// bindEncPubEnvVar toggles generating the §4.2 report_data quote that binds
+// enc_pub. It defaults to on: SyncQuote always builds the legacy quote and, when
+// enabled, additionally builds the §4.2 quote, so clients can fetch whichever
+// layout they understand via GET /quote?legacy=true|false. Set it to a falsey
+// value (0/false/no/off) as a kill switch to stop emitting the §4.2 quote.
 const bindEncPubEnvVar = "TEE_REPORT_DATA_BIND_ENC_PUB"
 
 type ClientType int
@@ -46,7 +48,14 @@ type TeeService struct {
 
 	ProviderSigner *ecdsa.PrivateKey
 	Address        common.Address
-	Quote          string
+
+	// Quote is the legacy-layout quote whose report_data is the ASCII signer
+	// address; existing clients that predate the §4.2 layout parse this.
+	Quote string
+	// QuoteV2 is the §4.2-layout quote whose report_data binds enc_pub and
+	// signer_addr. It is populated only when the §4.2 binding is enabled (the
+	// default, see bindEncPubEnvVar); empty otherwise.
+	QuoteV2 string
 
 	// E2EE (0g-pc SPEC §4) enclave encryption key. Derived inside the TEE from a
 	// path distinct from the signer, optionally bound into the quote's report_data
@@ -100,43 +109,45 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	s.EncPublicKey = encPub
 	s.KeyID = keyID(encPub)
 
-	// Build the quote's report_data. When enabled, bind enc_pub and signer_addr
-	// using the §4.2 layout so a client can extract and verify them straight out
-	// of a verified attestation rather than trusting the /v1/e2ee/pubkey endpoint.
-	// Otherwise fall back to the legacy signer-address layout (see reportData).
-	reportData, err := s.reportData()
+	// Always build the legacy quote (report_data = ASCII signer address) so
+	// clients that have not migrated to the §4.2 layout keep working.
+	s.Quote, err = client.TdxQuote(ctx, legacyReportData(s.Address), nvQuote)
 	if err != nil {
-		return errors.Wrap(err, "building report_data")
+		return errors.Wrap(err, "tdx quote (legacy)")
 	}
 
-	quoteStr, err := client.TdxQuote(ctx, reportData, nvQuote)
-	if err != nil {
-		return errors.Wrap(err, "tdx quote")
+	// When enabled (the default), also build the §4.2 quote that binds enc_pub and
+	// signer_addr, so a client can extract and verify them straight out of a
+	// verified attestation rather than trusting the /v1/e2ee/pubkey endpoint. It is
+	// served alongside the legacy quote (GET /quote?legacy=false), letting clients
+	// migrate independently without a fleet-wide flip. A falsey env var acts as a
+	// kill switch that stops emitting it.
+	if bindEncPubEnabled() {
+		reportData, err := buildReportData(s.EncPublicKey, s.Address)
+		if err != nil {
+			return errors.Wrap(err, "building §4.2 report_data")
+		}
+		s.QuoteV2, err = client.TdxQuote(ctx, reportData, nvQuote)
+		if err != nil {
+			return errors.Wrap(err, "tdx quote (§4.2)")
+		}
 	}
 
-	s.Quote = quoteStr
 	return nil
 }
 
-// reportData returns the payload bound into the quote's report_data.
-//
-// It gates a breaking change: the §4.2 layout (buildReportData) binds enc_pub
-// and moves signer_addr to raw bytes at [32:52], which existing clients that
-// read report_data as the ASCII signer address cannot parse. Until those clients
-// migrate, the layout is opt-in via the TEE_REPORT_DATA_BIND_ENC_PUB env var and
-// defaults to the legacy layout so the enc_pub binding stays hidden.
-//
-// With binding off, enc_pub is not attestation-bound; it is still published via
-// GET /v1/e2ee/pubkey and E2EE sealing works, it just is not verifiable straight
-// out of the quote. Remove this switch (and always bind) once clients understand
-// the §4.2 layout.
-//
-// TODO(#602): drop the switch and always bind after the SDK/CLI roll out §4.2.
-func (s *TeeService) reportData() ([]byte, error) {
-	if bindEncPubEnabled() {
-		return buildReportData(s.EncPublicKey, s.Address)
+// GetQuote returns the cached quote for the requested report_data layout. When
+// legacy is true (the default served by GET /quote, for backward compatibility)
+// it returns the legacy ASCII signer-address quote. When legacy is false it
+// returns the §4.2 quote that binds enc_pub, falling back to the legacy quote if
+// that quote was not generated (binding disabled via bindEncPubEnvVar). A client
+// that requires the enc_pub binding MUST request legacy=false, check
+// report_data[52:56] == version, and reject the legacy fallback, so it is safe.
+func (s *TeeService) GetQuote(legacy bool) string {
+	if legacy || s.QuoteV2 == "" {
+		return s.Quote
 	}
-	return legacyReportData(s.Address), nil
+	return s.QuoteV2
 }
 
 // legacyReportData is the pre-§4.2 report_data: the ASCII hex of the signer
@@ -146,15 +157,15 @@ func legacyReportData(addr common.Address) []byte {
 	return []byte(addr.Hex())
 }
 
-// bindEncPubEnabled reports whether the §4.2 enc_pub binding is turned on via the
-// TEE_REPORT_DATA_BIND_ENC_PUB env var. Anything other than a truthy value keeps
-// the legacy layout (see reportData).
+// bindEncPubEnabled reports whether the §4.2 enc_pub-binding quote is generated.
+// It is gated by the TEE_REPORT_DATA_BIND_ENC_PUB env var and defaults to on;
+// only an explicit falsey value (0/false/no/off) disables it (see bindEncPubEnvVar).
 func bindEncPubEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(bindEncPubEnvVar))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 
