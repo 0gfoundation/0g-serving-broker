@@ -72,7 +72,18 @@ func (h *MiniMaxVideoHandler) GetVideo(c *gin.Context) {
 		h.writeMiniMaxError(c, fmt.Sprintf("minimax get task failed for %s", taskID), "failed to get video generation task", err)
 		return
 	}
-	if mmResp.Task != nil && !translate.IsRecognizedMiniMaxStatus(mmResp.Task.Status) {
+	// A 200 with no task (and no base_resp error, which the client already turns
+	// into an APIError) is a malformed/transient upstream response. Report it as
+	// a 502 so the broker's poll scheduler treats it as a transient hiccup and
+	// reschedules — NOT as a terminal "failed", which would stop polling and
+	// serve a job that might have succeeded for free. Logged loudly so the
+	// operator sees a genuinely broken upstream.
+	if mmResp.Task == nil {
+		h.logger.Errorf("minimax get task %s: response contained no task (malformed upstream response)", taskID)
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "upstream returned no task"}})
+		return
+	}
+	if !translate.IsRecognizedMiniMaxStatus(mmResp.Task.Status) {
 		h.logger.Errorf("minimax get task %s: unrecognized status %q, mapping to failed", taskID, mmResp.Task.Status)
 	}
 

@@ -91,6 +91,14 @@ func (c *Client) CreateTask(ctx context.Context, authHeader string, req CreateRe
 	if apiErr := baseRespError(out.BaseResp); apiErr != nil {
 		return nil, fmt.Errorf("minimax create task: %w", apiErr)
 	}
+	// A 200 with no task_id (and no base_resp error) is a malformed response —
+	// an error page or unexpected shape that unmarshalled cleanly into an empty
+	// struct. Surface it as a failure rather than letting the translator return
+	// a "queued" job the broker can never poll (empty provider job id). Without
+	// this the create silently succeeds into an untrackable, never-billed job.
+	if out.TaskID == "" {
+		return nil, fmt.Errorf("minimax create task: response contained no task_id (unexpected response shape)")
+	}
 	return &out, nil
 }
 

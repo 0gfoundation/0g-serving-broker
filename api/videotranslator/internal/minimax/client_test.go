@@ -52,6 +52,20 @@ func TestCreateTask_Success(t *testing.T) {
 	}
 }
 
+func TestCreateTask_EmptyTaskIDIsError(t *testing.T) {
+	// A 200 whose body isn't the expected shape (e.g. "{}") must NOT become a
+	// trackable job — it has no id to poll, so the broker could never bill it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	if _, err := NewClient(srv.URL, srv.Client()).CreateTask(context.Background(), "Bearer k", CreateRequest{}); err == nil {
+		t.Fatal("want error for a create response with no task_id, got nil")
+	}
+}
+
 func TestCreateTask_HTTPError(t *testing.T) {
 	// The V2 API uses real HTTP codes (a bad key returns 401, confirmed live).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
