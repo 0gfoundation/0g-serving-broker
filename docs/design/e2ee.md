@@ -75,9 +75,10 @@ and, when the §4.2 binding is enabled (the default, see `bindEncPubEnvVar` in
 `common/tee/tee.go`), additionally builds the §4.2 quote. `GET /quote` selects
 between them:
 
-- `GET /quote` or `GET /quote?legacy=false` → the §4.2 quote binding `enc_pub`
-  (falls back to the legacy quote when the §4.2 quote was not generated).
-- `GET /quote?legacy=true` → the legacy quote, for clients that predate §4.2.
+- `GET /quote` or `GET /quote?legacy=true` (the **default**, for backward
+  compatibility) → the legacy quote, for clients that predate §4.2.
+- `GET /quote?legacy=false` → the §4.2 quote binding `enc_pub` (falls back to the
+  legacy quote when the §4.2 quote was not generated).
 
 The §4.2 quote is gated by the `TEE_REPORT_DATA_BIND_ENC_PUB` env var, which
 **defaults to on**; setting it to a falsey value (`0`/`false`/`no`/`off`) is a

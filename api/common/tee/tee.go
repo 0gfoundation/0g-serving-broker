@@ -137,11 +137,12 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 }
 
 // GetQuote returns the cached quote for the requested report_data layout. When
-// legacy is false (the default served by GET /quote) it returns the §4.2 quote
-// that binds enc_pub; if that quote was not generated (binding disabled via
-// bindEncPubEnvVar) it falls back to the legacy quote. A client that requires the
-// enc_pub binding MUST check report_data[52:56] == version and reject the legacy
-// fallback, so this fallback is safe.
+// legacy is true (the default served by GET /quote, for backward compatibility)
+// it returns the legacy ASCII signer-address quote. When legacy is false it
+// returns the §4.2 quote that binds enc_pub, falling back to the legacy quote if
+// that quote was not generated (binding disabled via bindEncPubEnvVar). A client
+// that requires the enc_pub binding MUST request legacy=false, check
+// report_data[52:56] == version, and reject the legacy fallback, so it is safe.
 func (s *TeeService) GetQuote(legacy bool) string {
 	if legacy || s.QuoteV2 == "" {
 		return s.Quote

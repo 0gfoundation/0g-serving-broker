@@ -12,13 +12,15 @@ import (
 //	@Description  This endpoint allows you to get a quote
 //	@ID			getQuote
 //	@Tags		quote
-//	@Param		legacy	query	bool	false	"Return the legacy ASCII signer-address report_data quote instead of the §4.2 enc_pub-binding quote (default false)"
+//	@Param		legacy	query	bool	false	"Return the legacy ASCII signer-address report_data quote (default true). Pass legacy=false for the §4.2 enc_pub-binding quote."
 //	@Router		/quote [get]
 //	@Success	200	{string}	string
 func (h *Handler) GetQuote(ctx *gin.Context) {
-	legacy := false
+	legacy := true
 	if v := ctx.Query("legacy"); v != "" {
-		legacy, _ = strconv.ParseBool(v)
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			legacy = parsed
+		}
 	}
 
 	quote, err := h.ctrl.GetQuote(ctx, legacy)
