@@ -68,14 +68,27 @@ must switch to `report_data[32:52]` and gate on `version`. Landed in `#602`,
 coordinated in lockstep with client verify `0g-pc-e2ee#7` and router
 `0g-router#618`.
 
-Because the SDK/CLI attestation verifiers still parse the legacy layout, the §4.2
-binding is **gated behind the `TEE_REPORT_DATA_BIND_ENC_PUB` env var and defaults
-to off** (see `TeeService.reportData` in `common/tee/tee.go`). With it off,
-`SyncQuote` emits the legacy ASCII signer-address `report_data`, so `enc_pub` is
-**not** attestation-bound — it is still published via `GET /v1/e2ee/pubkey` and
-E2EE sealing works, it just cannot be verified straight out of the quote. Flip the
-var to `true` only once the consuming clients understand the §4.2 layout; the
-switch is temporary and should be removed once they have all migrated.
+Because the SDK/CLI attestation verifiers still parse the legacy layout, the
+broker serves **both** quotes so clients migrate independently without a
+fleet-wide flip. `SyncQuote` always builds the legacy ASCII signer-address quote
+and, when the §4.2 binding is enabled (the default, see `bindEncPubEnvVar` in
+`common/tee/tee.go`), additionally builds the §4.2 quote. `GET /quote` selects
+between them:
+
+- `GET /quote` or `GET /quote?legacy=false` → the §4.2 quote binding `enc_pub`
+  (falls back to the legacy quote when the §4.2 quote was not generated).
+- `GET /quote?legacy=true` → the legacy quote, for clients that predate §4.2.
+
+The §4.2 quote is gated by the `TEE_REPORT_DATA_BIND_ENC_PUB` env var, which
+**defaults to on**; setting it to a falsey value (`0`/`false`/`no`/`off`) is a
+kill switch that stops emitting the §4.2 quote, so every `GET /quote` then falls
+back to the legacy layout. With the §4.2 quote absent, `enc_pub` is **not**
+attestation-bound — it is still published via `GET /v1/e2ee/pubkey` and E2EE
+sealing works, it just cannot be verified straight out of a quote. A client that
+requires the binding MUST request `legacy=false`, check `report_data[52:56] ==
+version`, and reject a legacy fallback, so the fallback is safe against downgrade.
+The dual-serving is a migration aid; drop the legacy quote once all clients
+understand the §4.2 layout.
 
 > The `version` in `report_data` (§4.2, `reportDataVersion` in
 > `common/tee/enckey.go`) is a **separate** version from the `_e2ee` envelope `v`

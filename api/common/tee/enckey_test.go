@@ -113,42 +113,54 @@ func TestBuildReportDataRejectsBadEncPub(t *testing.T) {
 	}
 }
 
-// TestReportDataSwitch checks the TEE_REPORT_DATA_BIND_ENC_PUB gate: off (the
-// default) yields the legacy ASCII signer-address layout old clients parse; on
-// yields the 64-byte §4.2 layout that binds enc_pub.
-func TestReportDataSwitch(t *testing.T) {
-	_, pub, err := deriveEncKey([]byte("material"))
-	if err != nil {
-		t.Fatalf("deriveEncKey: %v", err)
+// TestBindEncPubEnabledDefault checks the TEE_REPORT_DATA_BIND_ENC_PUB gate:
+// unset defaults to on; only an explicit falsey value turns it off.
+func TestBindEncPubEnabledDefault(t *testing.T) {
+	cases := map[string]bool{
+		"":      true,
+		"true":  true,
+		"1":     true,
+		"on":    true,
+		"false": false,
+		"0":     false,
+		"off":   false,
+		"no":    false,
+		"FALSE": false,
 	}
+	for v, want := range cases {
+		t.Setenv(bindEncPubEnvVar, v)
+		if got := bindEncPubEnabled(); got != want {
+			t.Errorf("bindEncPubEnabled(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
+// TestLegacyReportData checks the legacy payload is the ASCII signer address,
+// which is exactly what a client decoding report_data as the signer reads.
+func TestLegacyReportData(t *testing.T) {
 	signer := common.HexToAddress("0x2A94D671f1A5e080f75A8164087Cdd35c8442e69")
-	s := &TeeService{Address: signer, EncPublicKey: pub}
+	if got := string(legacyReportData(signer)); got != signer.Hex() {
+		t.Errorf("legacyReportData = %q, want %q", got, signer.Hex())
+	}
+}
 
-	// Default (unset) → legacy: the raw bytes are the ASCII address string, which
-	// is exactly what a client decoding report_data as the signer address reads.
-	t.Setenv(bindEncPubEnvVar, "")
-	rd, err := s.reportData()
-	if err != nil {
-		t.Fatalf("reportData (legacy): %v", err)
+// TestGetQuoteSelectsLayout checks GetQuote returns the §4.2 quote by default,
+// the legacy quote when asked, and falls back to legacy when no §4.2 quote was
+// generated.
+func TestGetQuoteSelectsLayout(t *testing.T) {
+	s := &TeeService{Quote: "legacy-quote", QuoteV2: "v2-quote"}
+
+	if got := s.GetQuote(false); got != "v2-quote" {
+		t.Errorf("GetQuote(false) = %q, want §4.2 quote", got)
 	}
-	if got := string(rd); got != signer.Hex() {
-		t.Errorf("legacy report_data = %q, want %q", got, signer.Hex())
+	if got := s.GetQuote(true); got != "legacy-quote" {
+		t.Errorf("GetQuote(true) = %q, want legacy quote", got)
 	}
 
-	// Enabled → §4.2: 64 bytes with enc_pub bound at the front and version set.
-	t.Setenv(bindEncPubEnvVar, "true")
-	rd, err = s.reportData()
-	if err != nil {
-		t.Fatalf("reportData (§4.2): %v", err)
-	}
-	if len(rd) != reportDataSize {
-		t.Fatalf("report_data len = %d, want %d", len(rd), reportDataSize)
-	}
-	if got := rd[reportDataEncPubOffset:reportDataSignerOffset]; !bytes.Equal(got, pub) {
-		t.Errorf("enc_pub = %x, want %x", got, pub)
-	}
-	if got := binary.BigEndian.Uint32(rd[reportDataVersionOffset:reportDataReservedOffset]); got != reportDataVersion {
-		t.Errorf("version = %d, want %d", got, reportDataVersion)
+	// Binding disabled → no §4.2 quote → default (legacy=false) falls back.
+	s.QuoteV2 = ""
+	if got := s.GetQuote(false); got != "legacy-quote" {
+		t.Errorf("GetQuote(false) fallback = %q, want legacy quote", got)
 	}
 }
 
