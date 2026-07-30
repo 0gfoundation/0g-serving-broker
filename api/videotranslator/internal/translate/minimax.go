@@ -130,10 +130,27 @@ func normalizeMiniMaxResolution(size string) string {
 // itself a recognized MiniMax resolution token. A non-positive/unparsable/
 // excessive Seconds yields a zero Duration (omitted) — MiniMax then rejects the
 // request with its own 4xx rather than the translator inventing a duration.
+// MiniMax-H3 accepts an integer duration in [5,15]. OpenAI's seconds enum is
+// {4,8,12} (default 4), so a valid OpenAI request can fall below H3's floor — we
+// clamp into range rather than let H3 4xx the most common call shape (seconds=4
+// or omitted). Billing is on the ACTUAL generated seconds from usage, so a
+// clamped 4→5 bills 5s (H3's minimum), which is what the model produces.
+const (
+	minMiniMaxDuration = 5
+	maxMiniMaxDuration = 15
+)
+
 func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) minimax.CreateRequest {
-	var duration int64
-	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) && s <= float64(maxDashScopeSeconds) {
-		duration = int64(math.Ceil(s))
+	duration := int64(minMiniMaxDuration) // default when seconds is absent/unparseable (H3 requires a duration)
+	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
+		d := int64(math.Ceil(s))
+		switch {
+		case d < minMiniMaxDuration:
+			d = minMiniMaxDuration
+		case d > maxMiniMaxDuration:
+			d = maxMiniMaxDuration
+		}
+		duration = d
 	}
 
 	resolution := defaultResolution
@@ -231,6 +248,10 @@ func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
 		Object: "video",
 		Status: status,
 		Size:   t.Resolution,
+		// Echo the clip duration so the polled OpenAI video object carries
+		// `seconds` (the create response echoes the request; the poll response
+		// should report the actual generated length rather than drop the field).
+		Seconds: strings.TrimSpace(t.Duration.String()),
 	}
 
 	// created_at is already Unix epoch seconds; expires_at is derived from

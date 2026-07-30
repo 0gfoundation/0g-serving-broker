@@ -164,11 +164,23 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid seconds yields zero duration (omitted, MiniMax rejects)", func(t *testing.T) {
+	t.Run("invalid/absent seconds defaults to H3 minimum (5)", func(t *testing.T) {
 		for _, s := range []string{"", "0", "-3", "abc"} {
-			if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: s}, "2K"); got.Duration != 0 {
-				t.Errorf("Seconds=%q: Duration = %d, want 0", s, got.Duration)
+			if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: s}, "2K"); got.Duration != minMiniMaxDuration {
+				t.Errorf("Seconds=%q: Duration = %d, want %d", s, got.Duration, minMiniMaxDuration)
 			}
+		}
+	})
+
+	t.Run("clamps into H3's [5,15] range (OpenAI seconds=4 → 5, oversized → 15)", func(t *testing.T) {
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 5 {
+			t.Errorf("seconds=4 → Duration %d, want 5 (H3 floor)", got.Duration)
+		}
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); got.Duration != 15 {
+			t.Errorf("seconds=20 → Duration %d, want 15 (H3 ceil)", got.Duration)
+		}
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "12"}, "2K"); got.Duration != 12 {
+			t.Errorf("seconds=12 → Duration %d, want 12 (in range)", got.Duration)
 		}
 	})
 }
