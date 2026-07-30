@@ -114,12 +114,12 @@ func TestCreateVideo_BodySizeLimit(t *testing.T) {
 		engine := gin.New()
 		engine.POST("/videos", h.CreateVideo)
 
-		// A prompt well over maxCreateVideoBodyBytes (1 MiB) — simulates a
+		// A prompt well over maxCreateVideoBodyBytes (24 MiB) — simulates a
 		// client disguising a field as an oversized part rather than the tiny
 		// text HappyHorse's own prompt limit (~2,500-5,000 characters) allows.
 		body, contentType := newMultipartBody(t, map[string]string{
 			"model":  "happyhorse",
-			"prompt": strings.Repeat("a", 2<<20), // 2 MiB
+			"prompt": strings.Repeat("a", 25<<20), // 25 MiB, over the 24 MiB cap
 		})
 		req := httptest.NewRequest(http.MethodPost, "/videos", body)
 		req.Header.Set("Content-Type", contentType)

@@ -6,6 +6,7 @@
 package handler
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,12 @@ type jsonCreateVideoRequest struct {
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
 	Seed    json.Number `json:"seed"`
+	// InputReference is the OpenAI Video API image-to-video reference (first
+	// frame): exactly one of image_url (public URL or data: URI) or file_id.
+	InputReference *struct {
+		ImageURL string `json:"image_url"`
+		FileID   string `json:"file_id"`
+	} `json:"input_reference"`
 }
 
 // maxCreateVideoBodyBytes bounds the total POST /videos request body.
@@ -63,7 +70,16 @@ type jsonCreateVideoRequest struct {
 // request (e.g. an "input_reference" image, mirroring the real OpenAI Video
 // API's field of the same name) — don't preemptively raise it now, since
 // DashScope's own size limit for a reference image isn't confirmed yet.
-const maxCreateVideoBodyBytes = 1 << 20 // 1 MiB
+// This is OUR cap, not the vendor's: MiniMax H3 allows a 64 MB total body and
+// images up to 30 MB each. We stay well under that deliberately — the cap is
+// sized to match the router's media-tier /videos limit (24 MiB), so the router
+// stays the binding gate and a body it accepted is never rejected here. An
+// inline first-frame reference (data: URI or multipart file part) fits; a large
+// frame should use a public URL or mm_file:// file_id instead, which keeps the
+// body tiny and is what the vendor's own guide recommends (Base64 inflates
+// payloads ~1/3). ParseMultipartForm's 32 MiB in-memory budget is not a size
+// gate — MaxBytesReader below trips first.
+const maxCreateVideoBodyBytes = 24 << 20 // 24 MiB
 
 // CreateVideo handles POST /videos.
 func (h *VideoHandler) CreateVideo(c *gin.Context) {
@@ -176,24 +192,63 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return translate.CreateVideoRequest{}, err
 		}
-		return translate.CreateVideoRequest{
+		req := translate.CreateVideoRequest{
 			Model:   r.FormValue("model"),
 			Prompt:  r.FormValue("prompt"),
 			Seconds: r.FormValue("seconds"),
 			Size:    r.FormValue("size"),
 			Seed:    r.FormValue("seed"),
-		}, nil
+		}
+		// input_reference (image-to-video): a plain form value carries a URL;
+		// a file part carries the image bytes → encode as a data: URI so the
+		// downstream mapping is transport-agnostic. (For large frames a public
+		// URL / file_id is preferable — data: URIs inflate the body ~1/3.)
+		if v := r.FormValue("input_reference"); v != "" {
+			req.InputReferenceImageURL = v
+		} else if dataURI, ok := multipartFileDataURI(r, "input_reference"); ok {
+			req.InputReferenceImageURL = dataURI
+		}
+		return req, nil
 	}
 
 	var jr jsonCreateVideoRequest
 	if err := json.NewDecoder(r.Body).Decode(&jr); err != nil {
 		return translate.CreateVideoRequest{}, err
 	}
-	return translate.CreateVideoRequest{
+	req := translate.CreateVideoRequest{
 		Model:   jr.Model,
 		Prompt:  jr.Prompt,
 		Seconds: jr.Seconds.String(),
 		Size:    jr.Size,
 		Seed:    jr.Seed.String(),
-	}, nil
+	}
+	if jr.InputReference != nil {
+		req.InputReferenceImageURL = jr.InputReference.ImageURL
+		req.InputReferenceFileID = jr.InputReference.FileID
+	}
+	return req, nil
+}
+
+// multipartFileDataURI reads a named multipart file part and returns it as a
+// base64 data: URI (with the part's declared content type, defaulting to
+// image/png). Returns ("", false) when the part is absent or unreadable.
+func multipartFileDataURI(r *http.Request, field string) (string, bool) {
+	if r.MultipartForm == nil || len(r.MultipartForm.File[field]) == 0 {
+		return "", false
+	}
+	fh := r.MultipartForm.File[field][0]
+	f, err := fh.Open()
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return "", false
+	}
+	ct := fh.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/png"
+	}
+	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(data), true
 }
