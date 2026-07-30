@@ -70,7 +70,16 @@ type jsonCreateVideoRequest struct {
 // request (e.g. an "input_reference" image, mirroring the real OpenAI Video
 // API's field of the same name) — don't preemptively raise it now, since
 // DashScope's own size limit for a reference image isn't confirmed yet.
-const maxCreateVideoBodyBytes = 16 << 20 // 16 MiB — room for an image-to-video first-frame reference sent inline (data: URI or a multipart file part). Aligned with the router's /videos body cap; a public URL / file_id reference stays tiny and a large frame should use those (data: URIs inflate the body ~1/3). ParseMultipartForm's 32 MiB in-memory budget already covers the file part.
+// This is OUR cap, not the vendor's: MiniMax H3 allows a 64 MB total body and
+// images up to 30 MB each. We stay well under that deliberately — the cap is
+// sized to match the router's media-tier /videos limit (24 MiB), so the router
+// stays the binding gate and a body it accepted is never rejected here. An
+// inline first-frame reference (data: URI or multipart file part) fits; a large
+// frame should use a public URL or mm_file:// file_id instead, which keeps the
+// body tiny and is what the vendor's own guide recommends (Base64 inflates
+// payloads ~1/3). ParseMultipartForm's 32 MiB in-memory budget is not a size
+// gate — MaxBytesReader below trips first.
+const maxCreateVideoBodyBytes = 24 << 20 // 24 MiB
 
 // CreateVideo handles POST /videos.
 func (h *VideoHandler) CreateVideo(c *gin.Context) {
