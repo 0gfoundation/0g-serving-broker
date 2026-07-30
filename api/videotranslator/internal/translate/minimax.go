@@ -191,9 +191,28 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 // firstFrameReference resolves the OpenAI input_reference into an H3 image URL:
 // image_url wins (public URL or data: URI, used verbatim); otherwise a file_id
 // becomes mm_file://{file_id}. Empty when no reference was supplied (plain T2V).
+// Only these schemes are accepted for a client-supplied input_reference
+// image_url. Notably mm_file:// is REJECTED here: it addresses the vendor
+// account's shared file namespace, and that account is single-tenant upstream
+// but multi-tenant for us — accepting a client-chosen mm_file id in image_url
+// would let one user reference another's uploaded frame. A file handle must come
+// through the dedicated file_id field, which we prefix ourselves.
+func isAllowedReferenceScheme(u string) bool {
+	lower := strings.ToLower(u)
+	return strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "data:image/")
+}
+
 func firstFrameReference(req CreateVideoRequest) string {
 	if u := strings.TrimSpace(req.InputReferenceImageURL); u != "" {
-		return u
+		if isAllowedReferenceScheme(u) {
+			return u
+		}
+		// Unsupported scheme (mm_file://, file://, a bare path, a non-image data
+		// URI): drop the reference rather than forward it. The request degrades to
+		// text-to-video instead of handing the vendor an unvetted handle/URL.
+		return ""
 	}
 	if id := strings.TrimSpace(req.InputReferenceFileID); id != "" {
 		return "mm_file://" + id
@@ -248,10 +267,14 @@ func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
 		Object: "video",
 		Status: status,
 		Size:   t.Resolution,
-		// Echo the clip duration so the polled OpenAI video object carries
-		// `seconds` (the create response echoes the request; the poll response
-		// should report the actual generated length rather than drop the field).
-		Seconds: strings.TrimSpace(t.Duration.String()),
+		// DELIBERATELY no top-level `seconds` here. Both billers (the broker's
+		// resolveVideoBilling and the router's videoOutputSeconds) read top-level
+		// `seconds` BEFORE usage.output_video_duration, so echoing the task's
+		// output-only duration would shadow the usage block and silently bill
+		// output seconds instead of total_seconds — losing the reference-video
+		// input seconds MiniMax charges us for. The create response already
+		// echoes the requested seconds, and real OpenAI SDKs tolerate the field
+		// being absent on the poll object, so billing correctness wins here.
 	}
 
 	// created_at is already Unix epoch seconds; expires_at is derived from

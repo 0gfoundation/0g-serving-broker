@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/minimax"
@@ -41,6 +42,32 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 		ff := firstFrame(got)
 		if ff == nil || ff.ImageURL == nil || ff.ImageURL.URL != "mm_file://abc123" {
 			t.Fatalf("want first_frame mm_file://abc123, got %+v", got.Content)
+		}
+	})
+
+	t.Run("mm_file:// in image_url is rejected (shared vendor file namespace)", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "animate", Seconds: "5", InputReferenceImageURL: "mm_file://someone-elses-file",
+		}, "2K")
+		if ff := firstFrame(got); ff != nil {
+			t.Fatalf("mm_file:// image_url must be dropped, got %+v", ff)
+		}
+	})
+
+	t.Run("non-image scheme rejected, degrades to T2V", func(t *testing.T) {
+		for _, u := range []string{"file:///etc/passwd", "data:text/html;base64,PHNjcmlwdD4=", "/local/path.png"} {
+			if ff := firstFrame(ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5", InputReferenceImageURL: u}, "2K")); ff != nil {
+				t.Errorf("%q must be dropped, got %+v", u, ff)
+			}
+		}
+	})
+
+	t.Run("data:image URI accepted (multipart upload path)", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "p", Seconds: "5", InputReferenceImageURL: "data:image/png;base64,iVBORw0KGgo=",
+		}, "2K")
+		if ff := firstFrame(got); ff == nil || !strings.HasPrefix(ff.ImageURL.URL, "data:image/png") {
+			t.Fatalf("data:image URI should be kept, got %+v", ff)
 		}
 	})
 
