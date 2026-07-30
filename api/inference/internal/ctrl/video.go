@@ -122,9 +122,14 @@ type videoUsage struct {
 // then usage.duration), or 0 when none is present. This is the authoritative
 // billing basis — billing on the actual generated length, not the request.
 func (f videoResponseFields) actualSeconds() int64 {
-	if s, ok := ceilSeconds(f.Seconds); ok {
-		return s
-	}
+	// usage FIRST. usage.output_video_duration is the field a shim in front of an
+	// async vendor fills with the vendor's BILLED duration (which for a vendor
+	// that charges for reference-video input is input + output). Top-level
+	// `seconds` is the OpenAI-shaped clip length and this same struct doubles as
+	// the request parse, so preferring it would shadow the usage block and bill
+	// output-only — silently dropping input seconds the vendor charged us for.
+	// `seconds` remains the fallback so a response with no usage block still
+	// yields a non-zero basis instead of skipping the bill entirely.
 	if f.Usage != nil {
 		if s, ok := ceilSeconds(f.Usage.OutputVideoDuration); ok {
 			return s
@@ -132,6 +137,9 @@ func (f videoResponseFields) actualSeconds() int64 {
 		if s, ok := ceilSeconds(f.Usage.Duration); ok {
 			return s
 		}
+	}
+	if s, ok := ceilSeconds(f.Seconds); ok {
+		return s
 	}
 	return 0
 }

@@ -267,14 +267,14 @@ func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
 		Object: "video",
 		Status: status,
 		Size:   t.Resolution,
-		// DELIBERATELY no top-level `seconds` here. Both billers (the broker's
-		// resolveVideoBilling and the router's videoOutputSeconds) read top-level
-		// `seconds` BEFORE usage.output_video_duration, so echoing the task's
-		// output-only duration would shadow the usage block and silently bill
-		// output seconds instead of total_seconds — losing the reference-video
-		// input seconds MiniMax charges us for. The create response already
-		// echoes the requested seconds, and real OpenAI SDKs tolerate the field
-		// being absent on the poll object, so billing correctness wins here.
+		// Echo the clip duration so the polled object carries OpenAI's `seconds`.
+		// Safe to echo because both billers prefer usage.output_video_duration
+		// (which carries MiniMax's billed total_seconds) and only fall back to this
+		// field — see videoOutputSeconds / actualSeconds. That ordering is what
+		// keeps reference-video input seconds billed while still leaving a
+		// non-zero basis when a vendor response omits the usage block entirely
+		// (refusing to bill there would hand out a paid-for clip free).
+		Seconds: strings.TrimSpace(t.Duration.String()),
 	}
 
 	// created_at is already Unix epoch seconds; expires_at is derived from
