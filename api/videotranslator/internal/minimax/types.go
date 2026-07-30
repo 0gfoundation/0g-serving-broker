@@ -33,6 +33,17 @@ const (
 type ContentItem struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// ImageURL + Role carry an image content item (e.g. a first_frame reference
+	// for image-to-video). URL may be a public URL, a data: URI, or an
+	// mm_file://{file_id} handle. Role is the H3 content role ("first_frame" for
+	// image-to-video). Both omitempty so a plain text item is unchanged on the wire.
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+	Role     string    `json:"role,omitempty"`
+}
+
+// ImageURL is the H3 image content payload.
+type ImageURL struct {
+	URL string `json:"url"`
 }
 
 // CreateRequest is the body for POST /v2/video_generation. Duration is a

@@ -35,6 +35,13 @@ type CreateVideoRequest struct {
 	Seconds string
 	Size    string
 	Seed    string
+	// InputReferenceImageURL / InputReferenceFileID are the OpenAI Video API's
+	// input_reference (image-to-video / first frame): "provide exactly one of
+	// image_url or file_id". image_url is a public URL or a data: URI; file_id
+	// is a provider file handle. Vendor-agnostic here; the per-vendor mapping
+	// (e.g. MiniMax first_frame + mm_file://) lives in the translate.To* funcs.
+	InputReferenceImageURL string
+	InputReferenceFileID   string
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for

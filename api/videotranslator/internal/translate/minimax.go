@@ -148,13 +148,40 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 		ratio = sizeToMiniMaxRatio(req.Size)
 	}
 
+	content := []minimax.ContentItem{{Type: "text", Text: req.Prompt}}
+	// Image-to-video: the OpenAI input_reference maps to an H3 first_frame image
+	// content item. image_url (public URL or data: URI) is used as-is; a file_id
+	// becomes an mm_file://{id} handle (H3's on-platform file reference). Per the
+	// H3 contract, in first_frame mode the aspect ratio follows the supplied
+	// image and any explicit ratio is ignored — so leaving ratio set is harmless.
+	if ref := firstFrameReference(req); ref != "" {
+		content = append(content, minimax.ContentItem{
+			Type:     "image_url",
+			ImageURL: &minimax.ImageURL{URL: ref},
+			Role:     "first_frame",
+		})
+	}
+
 	return minimax.CreateRequest{
 		Model:      req.Model,
-		Content:    []minimax.ContentItem{{Type: "text", Text: req.Prompt}},
+		Content:    content,
 		Resolution: resolution,
 		Duration:   duration,
 		Ratio:      ratio,
 	}
+}
+
+// firstFrameReference resolves the OpenAI input_reference into an H3 image URL:
+// image_url wins (public URL or data: URI, used verbatim); otherwise a file_id
+// becomes mm_file://{file_id}. Empty when no reference was supplied (plain T2V).
+func firstFrameReference(req CreateVideoRequest) string {
+	if u := strings.TrimSpace(req.InputReferenceImageURL); u != "" {
+		return u
+	}
+	if id := strings.TrimSpace(req.InputReferenceFileID); id != "" {
+		return "mm_file://" + id
+	}
+	return ""
 }
 
 // FromMiniMaxCreateResponse translates a MiniMax create response into the

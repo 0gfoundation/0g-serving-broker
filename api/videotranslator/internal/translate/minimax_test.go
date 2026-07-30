@@ -6,6 +6,55 @@ import (
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/minimax"
 )
 
+func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
+	// helper: find the first_frame image content item, if any
+	firstFrame := func(req minimax.CreateRequest) *minimax.ContentItem {
+		for i := range req.Content {
+			if req.Content[i].Role == "first_frame" {
+				return &req.Content[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("no reference → text-only content (plain T2V)", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "a cat", Seconds: "5"}, "2K")
+		if len(got.Content) != 1 || got.Content[0].Type != "text" {
+			t.Fatalf("want single text item, got %+v", got.Content)
+		}
+	})
+
+	t.Run("image_url → first_frame image item (used verbatim)", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "animate", Seconds: "5", InputReferenceImageURL: "https://cdn/x.png",
+		}, "2K")
+		ff := firstFrame(got)
+		if ff == nil || ff.Type != "image_url" || ff.ImageURL == nil || ff.ImageURL.URL != "https://cdn/x.png" {
+			t.Fatalf("want first_frame image_url https://cdn/x.png, got %+v", got.Content)
+		}
+	})
+
+	t.Run("file_id → mm_file:// first_frame handle", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "animate", Seconds: "5", InputReferenceFileID: "abc123",
+		}, "2K")
+		ff := firstFrame(got)
+		if ff == nil || ff.ImageURL == nil || ff.ImageURL.URL != "mm_file://abc123" {
+			t.Fatalf("want first_frame mm_file://abc123, got %+v", got.Content)
+		}
+	})
+
+	t.Run("image_url wins over file_id", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "animate", Seconds: "5", InputReferenceImageURL: "https://cdn/x.png", InputReferenceFileID: "abc123",
+		}, "2K")
+		ff := firstFrame(got)
+		if ff == nil || ff.ImageURL.URL != "https://cdn/x.png" {
+			t.Fatalf("image_url should win, got %+v", ff)
+		}
+	})
+}
+
 func TestStatusFromMiniMax(t *testing.T) {
 	tests := []struct {
 		name   string
