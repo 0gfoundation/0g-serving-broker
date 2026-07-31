@@ -95,6 +95,12 @@ var miniMaxRatios = []struct {
 //
 // 16:9 because it is landscape, MiniMax's own first listed value, and the ratio
 // of OpenAI's documented default video size (1280x720).
+//
+// Scoped to H3, but NOT gated on the model: req.Model is passed through verbatim,
+// so a future MiniMax video model with a different allowed-ratio set — or one that
+// rejects the field outright — would receive this too. Gate it here when a second
+// model is configured; the same caveat already applies to
+// normalizeMiniMaxResolution's 768P/1080P path.
 const defaultMiniMaxRatio = "16:9"
 
 // sizeToMiniMaxRatio derives MiniMax's "ratio" parameter from the client's

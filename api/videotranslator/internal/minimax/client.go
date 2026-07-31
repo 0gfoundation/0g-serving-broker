@@ -236,14 +236,15 @@ type errorBody struct {
 	RequestID  string         `json:"request_id"`
 }
 
-// errorEnvelope is the inner object of MiniMax's V2 `error` shape. HTTPCode is a
-// STRING there ("400"), not a number — it is deliberately not parsed back into
-// APIError.StatusCode, which already carries the real HTTP status from the
-// response line and must not be overridden by a body a vendor controls.
+// errorEnvelope is the inner object of MiniMax's V2 `error` shape.
+//
+// Its "http_code" is deliberately NOT a field here. APIError.StatusCode always
+// comes from the response line, and a status the vendor states in a body it
+// controls must never be able to steer what the client is told. Not declaring it
+// makes that unconditional rather than a discipline someone has to maintain.
 type errorEnvelope struct {
-	Type     string `json:"type"`
-	Message  string `json:"message"`
-	HTTPCode string `json:"http_code"`
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 func (c *Client) do(httpReq *http.Request, out interface{}) error {
@@ -266,19 +267,28 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 	if resp.StatusCode != http.StatusOK {
 		apiErr := &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 		var eb errorBody
-		if json.Unmarshal(respBody, &eb) == nil {
-			switch {
-			case eb.BaseResp != nil && eb.BaseResp.StatusCode != 0:
-				apiErr.Code = fmt.Sprintf("%d", eb.BaseResp.StatusCode)
-				apiErr.Message = eb.BaseResp.StatusMsg
-			case eb.StatusCode != 0:
-				apiErr.Code = fmt.Sprintf("%d", eb.StatusCode)
-				apiErr.Message = eb.StatusMsg
-			case eb.Error != nil && (eb.Error.Message != "" || eb.Error.Type != ""):
-				apiErr.Code = eb.Error.Type
-				apiErr.Message = eb.Error.Message
-				apiErr.RequestID = eb.RequestID
-			}
+		// Error deliberately ignored, not checked: encoding/json fills every field
+		// it CAN before returning a type error, and this is a best-effort parse of
+		// a shape the vendor does not guarantee. Gating on `== nil` would throw
+		// away a base_resp that decoded perfectly just because some sibling key had
+		// an unexpected type — e.g. a gateway's `{"error":"upstream failure"}`
+		// alongside a legacy envelope, or `"request_id":12345` unquoted. That turns
+		// a parseable rejection back into the `code="" message=""` hole this whole
+		// change exists to close.
+		_ = json.Unmarshal(respBody, &eb)
+		// Captured before the switch: request_id sits at the TOP level of any
+		// shape, so which envelope wins says nothing about whether it is present.
+		apiErr.RequestID = eb.RequestID
+		switch {
+		case eb.BaseResp != nil && eb.BaseResp.StatusCode != 0:
+			apiErr.Code = fmt.Sprintf("%d", eb.BaseResp.StatusCode)
+			apiErr.Message = eb.BaseResp.StatusMsg
+		case eb.StatusCode != 0:
+			apiErr.Code = fmt.Sprintf("%d", eb.StatusCode)
+			apiErr.Message = eb.StatusMsg
+		case eb.Error != nil && (eb.Error.Message != "" || eb.Error.Type != ""):
+			apiErr.Code = eb.Error.Type
+			apiErr.Message = eb.Error.Message
 		}
 		return apiErr
 	}

@@ -171,7 +171,7 @@ func (h *MiniMaxVideoHandler) writeMiniMaxError(c *gin.Context, logContext, fall
 		if message == "" {
 			message = fmt.Sprintf("minimax rejected the request (status %d)", apiErr.StatusCode)
 		}
-		h.logger.Errorf("%s: minimax rejected request: status %d %s", logContext, apiErr.StatusCode, vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body))
+		h.logger.Errorf("%s: minimax rejected request: status %d %s", logContext, apiErr.StatusCode, vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, apiErr.RequestID))
 		c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
 		return
 	}

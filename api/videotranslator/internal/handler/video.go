@@ -206,7 +206,7 @@ func (h *VideoHandler) writeDashScopeError(c *gin.Context, logContext, fallbackM
 		if message == "" {
 			message = fmt.Sprintf("dashscope rejected the request (status %d)", apiErr.StatusCode)
 		}
-		h.logger.Errorf("%s: dashscope rejected request: status %d %s", logContext, apiErr.StatusCode, vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body))
+		h.logger.Errorf("%s: dashscope rejected request: status %d %s", logContext, apiErr.StatusCode, vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, ""))
 		c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
 		return
 	}

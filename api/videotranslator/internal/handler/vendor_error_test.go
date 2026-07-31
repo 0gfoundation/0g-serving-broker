@@ -10,10 +10,26 @@ import (
 // the operator had nothing. The raw body must survive into the line.
 func TestVendorErrorDetail(t *testing.T) {
 	for _, tc := range []struct {
-		name, code, message, body string
-		wantContains              []string
-		wantMissing               string
+		name, code, message, body, requestID string
+		wantContains                         []string
+		wantMissing                          string
 	}{
+		{
+			name:         "a credential echoed back by a gateway never reaches the log",
+			body:         `{"error":"bad request","echo":{"headers":{"Authorization":"Bearer sk-api-e53HjFRV49EE_tz04enq"}}}`,
+			wantContains: []string{"Bearer [redacted]"},
+			wantMissing:  "sk-api-",
+		},
+		{
+			name: "request_id is logged — it is what vendor support asks for",
+			code: "1004", message: "invalid api key", requestID: "06bbd146",
+			wantContains: []string{`request_id="06bbd146"`},
+		},
+		{
+			name: "a code with no message still gets the body: nothing else carries prose",
+			code: "1004", body: `{"detail":"quota exhausted for account"}`,
+			wantContains: []string{"quota exhausted for account"},
+		},
 		{
 			name: "parsed envelope: body is redundant, keep the line short",
 			code: "1004", message: "invalid api key", body: `{"base_resp":{"status_code":1004}}`,
@@ -40,7 +56,7 @@ func TestVendorErrorDetail(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := vendorErrorDetail(tc.code, tc.message, tc.body)
+			got := vendorErrorDetail(tc.code, tc.message, tc.body, tc.requestID)
 			for _, want := range tc.wantContains {
 				if !strings.Contains(got, want) {
 					t.Errorf("detail = %q, want it to contain %q", got, want)
@@ -55,11 +71,20 @@ func TestVendorErrorDetail(t *testing.T) {
 
 // A vendor answering a 4xx with an HTML error page must not fill the log.
 func TestVendorErrorDetailTruncatesABigBody(t *testing.T) {
-	got := vendorErrorDetail("", "", strings.Repeat("x", 5000))
-	if len(got) > maxVendorErrorBodyLog+80 {
-		t.Errorf("detail is %d chars, want it bounded near %d", len(got), maxVendorErrorBodyLog)
-	}
-	if !strings.Contains(got, "(truncated)") {
-		t.Errorf("a cut body must say so, got %q", got[:80])
+	// Two inputs: plain bytes, and the worst case for %q — every byte an escape,
+	// which the previous version of this test missed by using only "x".
+	for name, body := range map[string]string{
+		"plain":             strings.Repeat("x", 5000),
+		"all escaped by %q": strings.Repeat(`"`, 5000),
+	} {
+		got := vendorErrorDetail("", "", body, "")
+		// %q can expand one byte to six (\xNN), so the honest ceiling is on the
+		// TRUNCATED byte count, not on the rendered length.
+		if len(got) > maxVendorErrorBodyLog*6+120 {
+			t.Errorf("%s: detail is %d chars, want it bounded by the %d-byte cut", name, len(got), maxVendorErrorBodyLog)
+		}
+		if !strings.Contains(got, "(truncated)") {
+			t.Errorf("%s: a cut body must say so", name)
+		}
 	}
 }
