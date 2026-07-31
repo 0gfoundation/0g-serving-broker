@@ -287,10 +287,6 @@ func scaledUnits(count int64, multiplier float64) (int64, error) {
 	return int64(v), nil
 }
 
-// MaxTableUnits returns the largest units value in a per_unit_table, or 0 when
-// the table is empty. Used as the conservative fee basis when a live
-// (resolution, duration) isn't in the table — bill the most expensive configured
-// bucket rather than undercharge below it.
 // NextBucketUnits returns the units of the NEXT bucket up from an observed
 // (resolution, duration): the row for that resolution with the smallest duration
 // that is still at least the observed one. Reports whether such a row exists.
@@ -335,6 +331,11 @@ func (b *BillingConfig) NextBucketUnits(resolution string, seconds int64) (int64
 	return best, found
 }
 
+// MaxTableUnits returns the largest units value in a per_unit_table, or 0 when the
+// table is empty. It is the last-resort fee basis: NextBucketUnits handles an
+// observation that some bucket still covers, so this is reached only when the
+// observation is LONGER than every bucket configured for its resolution, where no
+// row covers it and undercharging below the table is the only alternative.
 func (b *BillingConfig) MaxTableUnits() int64 {
 	var max int64
 	for _, t := range b.Table {

@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -305,13 +306,23 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 				// clip as a 4K 15-second one whenever the operator simply had not
 				// tabulated that duration.
 				if units, ok := e.Billing.NextBucketUnits(size, seconds); ok {
-					c.logger.Errorf("video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, size, units, err)
+					// Throttled and metered like every other recurring misconfiguration
+					// in this PR: an untabulated duration is a static config gap, and
+					// the commit that lowered H3's floor made it the MOST COMMON request
+					// shape until the operator adds the row — one error line per video
+					// create until then, with no aggregate signal, is the exact failure
+					// this codebase keeps replacing with a counter.
+					monitor.RecordVideoBillingSkipped()
+					c.logProofSkip("per_unit_table_miss", fmt.Sprintf("%d|%s", seconds, size),
+						"video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, size, units, err)
 					return units
 				}
 				// Observed longer than every bucket for this resolution: nothing
 				// covers it, so the table maximum is the only conservative answer.
 				if mx := e.Billing.MaxTableUnits(); mx > 0 {
-					c.logger.Errorf("video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, size, mx, err)
+					monitor.RecordVideoBillingSkipped()
+					c.logProofSkip("per_unit_table_uncovered", fmt.Sprintf("%d|%s", seconds, size),
+						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, size, mx, err)
 					return mx
 				}
 			}
@@ -700,8 +711,7 @@ func (c *Ctrl) dropUnpollableVideoSignature(chatKey, reason string, permanent bo
 	// Count only a PERMANENT loss. The scheduler-disabled case still writes the job
 	// row, so enabling the scheduler later lets that job poll and re-sign under this
 	// same key — counting it would put a baseline under the alert for a state the
-	// operator can reverse, and it is already loudly logged (and metered as an
-	// unbilled request) right above the caller.
+	// operator can reverse, and its caller already logs it loudly.
 	if permanent && c.Service.IsCentralized() {
 		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoPollJob)
 	}

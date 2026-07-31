@@ -168,16 +168,14 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 	// floor is also OpenAI's documented default, so an omitted seconds bills what an
 	// OpenAI client would expect rather than one second more.
 	duration := int64(minMiniMaxDuration)
-	// Bounded before the int64 conversion, mirroring the DashScope sibling: an
-	// out-of-range float converts implementation-defined (MinInt64 on amd64), which
-	// would fall BELOW the floor and get clamped up to the minimum — silently
-	// defeating the ceiling for an absurd request instead of capping it.
 	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
-		// Clamp the FLOAT before converting, mirroring the DashScope sibling: an
-		// out-of-range value converts implementation-defined (MinInt64 on amd64),
-		// which would land below the floor and be clamped UP to the minimum —
-		// silently turning an absurd request into the shortest clip instead of the
-		// longest one it can have.
+		// Clamp the FLOAT before converting: an out-of-range value converts
+		// implementation-defined (MinInt64 on amd64), which would land below the floor
+		// and be clamped UP to the minimum — silently turning an absurd request into
+		// the shortest clip instead of the longest one it can have. The DashScope
+		// sibling guards the same conversion but REJECTS out-of-range instead of
+		// capping (translate.go, maxDashScopeSeconds); both fail safe, they are not
+		// mirrors.
 		if s > float64(maxMiniMaxDuration) {
 			s = float64(maxMiniMaxDuration)
 		}
