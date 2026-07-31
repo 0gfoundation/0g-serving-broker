@@ -229,16 +229,21 @@ func firstFrameReference(req CreateVideoRequest) string {
 // requested duration immediately (see inference/internal/ctrl/video.go).
 // duration/resolution/prompt are echoed from the client's request, matching
 // how the real OpenAI Video API's create response mirrors what was asked for.
-func FromMiniMaxCreateResponse(req CreateVideoRequest, resp minimax.CreateResponse) VideoResponse {
+func FromMiniMaxCreateResponse(req CreateVideoRequest, resp minimax.CreateResponse) (VideoResponse, error) {
+	// The id we publish is a contract, not MiniMax's choice — see EncodeJobID.
+	id, err := EncodeJobID(resp.TaskID)
+	if err != nil {
+		return VideoResponse{}, err
+	}
 	return VideoResponse{
-		ID:      resp.TaskID,
+		ID:      id,
 		Object:  "video",
 		Model:   req.Model,
 		Status:  StatusQueued,
 		Seconds: req.Seconds,
 		Size:    req.Size,
 		Prompt:  req.Prompt,
-	}
+	}, nil
 }
 
 // FromMiniMaxGetTaskResponse translates a MiniMax get-task response into the

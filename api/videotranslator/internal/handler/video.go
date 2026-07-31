@@ -99,12 +99,26 @@ func (h *VideoHandler) CreateVideo(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, translate.FromCreateResponse(req, *dsResp))
+	out, err := translate.FromCreateResponse(req, *dsResp)
+	if err != nil {
+		// The vendor's id cannot be expressed in the contract the broker publishes
+		// (see translate.EncodeJobID). Fail here, loudly, on this vendor's FIRST
+		// request rather than handing downstream a key it cannot persist.
+		h.logger.Errorf("job id contract: %v", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "upstream returned an unusable job id"}})
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // GetVideo handles GET /videos/{id}.
 func (h *VideoHandler) GetVideo(c *gin.Context) {
-	taskID := c.Param("id")
+	publicID := c.Param("id")
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
+		return
+	}
 	authHeader := c.GetHeader("Authorization")
 
 	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
@@ -116,7 +130,11 @@ func (h *VideoHandler) GetVideo(c *gin.Context) {
 		h.logger.Errorf("dashscope get task %s: unrecognized task_status %q, mapping to failed", taskID, dsResp.Output.TaskStatus)
 	}
 
-	c.JSON(http.StatusOK, translate.FromGetTaskResponse(*dsResp))
+	out := translate.FromGetTaskResponse(*dsResp)
+	// Echo the id the CLIENT holds, not the vendor's — the response object must
+	// carry the same id it was fetched by, or a client keying on it sees two.
+	out.ID = publicID
+	c.JSON(http.StatusOK, out)
 }
 
 // GetVideoContent handles GET /videos/{id}/content: it looks up the task's
@@ -125,7 +143,12 @@ func (h *VideoHandler) GetVideo(c *gin.Context) {
 // keeping the vendor's asset host hidden from the client, consistent with
 // this service never exposing DashScope directly.
 func (h *VideoHandler) GetVideoContent(c *gin.Context) {
-	taskID := c.Param("id")
+	publicID := c.Param("id")
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
+		return
+	}
 	authHeader := c.GetHeader("Authorization")
 
 	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)

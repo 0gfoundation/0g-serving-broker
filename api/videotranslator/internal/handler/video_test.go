@@ -94,8 +94,8 @@ func TestCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp["id"] != "task-abc" || resp["status"] != "queued" || resp["object"] != "video" {
-		t.Errorf("response = %+v, want id=task-abc status=queued object=video", resp)
+	if resp["id"] != "v0_task-abc" || resp["status"] != "queued" || resp["object"] != "video" {
+		t.Errorf("response = %+v, want id=v0_task-abc status=queued object=video", resp)
 	}
 }
 
@@ -312,7 +312,7 @@ func TestGetVideo_TranslatesCompletedStatusAndUsage(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/videos/:id", h.GetVideo)
 
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-abc", nil)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
@@ -324,8 +324,8 @@ func TestGetVideo_TranslatesCompletedStatusAndUsage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp["id"] != "task-abc" || resp["status"] != "completed" {
-		t.Errorf("response = %+v, want id=task-abc status=completed", resp)
+	if resp["id"] != "v0_task-abc" || resp["status"] != "completed" {
+		t.Errorf("response = %+v, want id=v0_task-abc status=completed", resp)
 	}
 	usage, ok := resp["usage"].(map[string]interface{})
 	if !ok {
@@ -356,7 +356,7 @@ func TestGetVideo_TranslatesFailedStatus(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/videos/:id", h.GetVideo)
 
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-abc", nil)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
@@ -400,7 +400,7 @@ func TestGetVideoContent_StreamsBytes(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/videos/:id/content", h.GetVideoContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-abc/content", nil)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
@@ -430,7 +430,7 @@ func TestGetVideoContent_NotReadyReturns404(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/videos/:id/content", h.GetVideoContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-abc/content", nil)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
@@ -460,7 +460,7 @@ func TestGetVideoContent_FetchErrorReturnsBadGateway(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/videos/:id/content", h.GetVideoContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-abc/content", nil)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
@@ -557,7 +557,7 @@ func TestGetVideo_DashScope4xxPropagatesVendorError(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/videos/:id", h.GetVideo)
 
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-abc", nil)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 

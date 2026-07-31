@@ -309,6 +309,29 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
 }
 
+// maxContractJobIDLen is the published ceiling on a video job id. It is not a
+// broker-side storage limit — it comes from what consumers do with the id, chiefly
+// the 0G Router folding it into usage_logs.request_id (varchar(64), UNIQUE), the
+// key that makes async billing exactly-once. See the design doc for why widening
+// it downstream is not a cheap escape hatch.
+const maxContractJobIDLen = 36
+
+// isContractJobID reports whether an id satisfies the contract the broker
+// publishes: at most maxContractJobIDLen characters from [A-Za-z0-9_-].
+func isContractJobID(id string) bool {
+	if id == "" || len(id) > maxContractJobIDLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // signVideoResponse signs a video response under chatKey with whichever proof this
 // service's trust model supports: a routing proof binding the upstream TLS
 // certificate for a centralized provider (the broker cannot attest to a black-box
@@ -383,6 +406,20 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// normally below) — log loudly instead, since under AuthorizeVideoJobAccess's fail-closed
 	// default a write failure here silently locks the job's own creator out of checking its
 	// status later, not just an attacker.
+	// The id the broker publishes is a contract, not the vendor's choice: consumers
+	// persist it and key on it (the router folds it into a billing idempotency key
+	// with a hard length ceiling — see the "Job id contract" section of
+	// docs/design/video-generation-async-billing.md). A translator shapes it into
+	// the contract on our behalf (translate.EncodeJobID); this assertion catches the
+	// case that has no translator to do it — a vendor spoken to directly — on its
+	// FIRST request, rather than after a downstream consumer has already rejected a
+	// clip the vendor generated and charged us for.
+	if !isContractJobID(respFields.ID) {
+		c.logger.Errorf("video generation: upstream returned job id %q, which violates the published contract (max %d chars from [A-Za-z0-9_-]); "+
+			"a consumer keying on it will reject this job after the clip was already generated. Onboard this vendor behind a translator, or map its ids",
+			truncateForLog([]byte(respFields.ID), 80), maxContractJobIDLen)
+	}
+
 	if respFields.ID != "" {
 		if err := c.videoJobOwnerDB.CreateVideoJobOwner(respFields.ID, reqModel.UserAddress, reqModel.Upstream); err != nil {
 			if isDuplicateKeyError(err) {

@@ -280,16 +280,21 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 // duration/resolution/prompt at all, so those are echoed back from the
 // client's own request — matching how the real OpenAI Video API's create
 // response mirrors what was asked for.
-func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) VideoResponse {
+func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) (VideoResponse, error) {
+	// The id we publish is a contract, not DashScope's choice — see EncodeJobID.
+	id, err := EncodeJobID(resp.Output.TaskID)
+	if err != nil {
+		return VideoResponse{}, err
+	}
 	return VideoResponse{
-		ID:      resp.Output.TaskID,
+		ID:      id,
 		Object:  "video",
 		Model:   req.Model,
 		Status:  StatusFromDashScope(resp.Output.TaskStatus),
 		Seconds: req.Seconds,
 		Size:    req.Size,
 		Prompt:  req.Prompt,
-	}
+	}, nil
 }
 
 // FromGetTaskResponse translates a DashScope get-task response into the

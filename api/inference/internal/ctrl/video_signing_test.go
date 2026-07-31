@@ -279,3 +279,35 @@ func TestNoJobIDKeepsCreateSignature(t *testing.T) {
 		t.Error("create-time signature was evicted even though the client has no id to fetch a final body with")
 	}
 }
+
+// TestIsContractJobID pins the published id contract on the broker side. This is
+// the assertion that catches a vendor spoken to DIRECTLY (no translator to shape
+// the id) before a downstream consumer rejects a clip the vendor already billed us
+// for. The shapes below are the ones the router review named.
+func TestIsContractJobID(t *testing.T) {
+	valid := []string{
+		"425080991981768",                      // MiniMax numeric
+		"0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // DashScope UUID — exactly 36, at the boundary
+		"v0_task-123",                          // what our translator issues
+		strings.Repeat("a", 36),
+	}
+	for _, id := range valid {
+		if !isContractJobID(id) {
+			t.Errorf("rejected a contract-compliant id %q", id)
+		}
+	}
+
+	invalid := []string{
+		"",
+		strings.Repeat("a", 37), // one over
+		"vid_0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // 40, the shape the router flagged
+		"video_0385dc795ff840739d5a1a7bc7f3e01dab", // 38, OpenAI-native shape
+		"task/with/slashes",                        // charset
+		"job:42",                                   // charset
+	}
+	for _, id := range invalid {
+		if isContractJobID(id) {
+			t.Errorf("accepted an id that breaks the contract: %q", id)
+		}
+	}
+}

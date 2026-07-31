@@ -31,7 +31,7 @@ func TestUpstreamTLSReport_ReportsVendorCert(t *testing.T) {
 	engine.GET("/videos/:id", h.GetVideo)
 
 	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/videos/t1", nil))
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/videos/v0_t1", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -60,7 +60,7 @@ func TestUpstreamTLSReport_NoHeaderWithoutTLS(t *testing.T) {
 	engine.GET("/videos/:id", h.GetVideo)
 
 	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/videos/t1", nil))
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/videos/v0_t1", nil))
 
 	if got := rec.Header().Get(teeutil.HeaderUpstreamCertFingerprint); got != "" {
 		t.Errorf("plaintext upstream reported %q", got)

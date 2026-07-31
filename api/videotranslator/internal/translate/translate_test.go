@@ -250,10 +250,13 @@ func TestFromCreateResponse(t *testing.T) {
 		Output:    dashscope.CreateOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending},
 	}
 
-	got := FromCreateResponse(req, resp)
+	got, err := FromCreateResponse(req, resp)
+	if err != nil {
+		t.Fatalf("encode job id: %v", err)
+	}
 
 	want := VideoResponse{
-		ID:      "task-123",
+		ID:      "v0_task-123",
 		Object:  "video",
 		Model:   "happyhorse",
 		Status:  StatusQueued,

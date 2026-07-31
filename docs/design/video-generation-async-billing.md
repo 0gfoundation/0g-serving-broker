@@ -268,8 +268,26 @@ consumers do not merely echo the id back — they persist it and key on it:
 > `GET /videos/{id}` and `GET /videos/{id}/content`, is at most **36 characters**
 > from `[A-Za-z0-9_-]`.
 >
-> A vendor whose `task_id` does not satisfy this must be rejected at onboarding or
-> mapped by the translator — **never passed through**.
+> A vendor whose `task_id` does not satisfy this is **mapped by the translator** —
+> never passed through.
+
+**This is now enforced, not merely documented.** Shaping the id is protocol
+translation, so it happens where protocol translation happens:
+
+- `translate.EncodeJobID` (api/videotranslator) maps every vendor `task_id` into the
+  contract on create, and `DecodeJobID` maps it back on every `GET /videos/{id}` and
+  `/content`. The mapping is a self-describing tag plus payload, so it is reversible
+  **without state** — the translator holds no cross-request state and must not start.
+  `v0_` passes a compliant id through, `v1_` compacts a canonical UUID by dropping
+  its hyphens (DashScope's ids are exactly 36 characters and would not otherwise
+  survive the tag), `v2_` base64url-encodes anything else.
+- A vendor id that no encoding can carry — a stateless reversible mapping into 33
+  payload characters holds at most 24 arbitrary bytes — fails the create call
+  loudly, naming the id. That is the vendor's FIRST request, not a production
+  surprise.
+- The broker asserts the contract independently (`isContractJobID`,
+  inference/internal/ctrl/video.go). That path has no translator to rely on: it
+  catches a vendor spoken to directly.
 
 ### Why a bound exists at all, and why it is this tight
 

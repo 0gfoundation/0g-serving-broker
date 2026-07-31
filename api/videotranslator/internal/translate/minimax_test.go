@@ -216,12 +216,17 @@ func TestFromMiniMaxCreateResponse_AlwaysQueued(t *testing.T) {
 	// Load-bearing: the create response has no status, but the broker must see
 	// "queued" (defer-to-poll), never absent (which it reads as a synchronous
 	// completion and mis-bills on requested duration).
-	got := FromMiniMaxCreateResponse(
+	got, err := FromMiniMaxCreateResponse(
 		CreateVideoRequest{Model: "MiniMax-H3", Prompt: "p", Seconds: "5", Size: "1280x720"},
 		minimax.CreateResponse{TaskID: "task-123"},
 	)
-	if got.ID != "task-123" || got.Status != StatusQueued {
-		t.Fatalf("id/status = %q/%q, want task-123/%q", got.ID, got.Status, StatusQueued)
+	if err != nil {
+		t.Fatalf("FromMiniMaxCreateResponse: %v", err)
+	}
+	// The published id is the ENCODED form — the vendor's task_id is ours to shape,
+	// because consumers persist and key on what we hand out (see EncodeJobID).
+	if got.ID != "v0_task-123" || got.Status != StatusQueued {
+		t.Fatalf("id/status = %q/%q, want v0_task-123/%q", got.ID, got.Status, StatusQueued)
 	}
 	if got.Seconds != "5" || got.Size != "1280x720" || got.Prompt != "p" {
 		t.Fatalf("echoed fields wrong: %+v", got)
