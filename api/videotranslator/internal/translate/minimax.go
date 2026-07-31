@@ -82,10 +82,32 @@ var miniMaxRatios = []struct {
 	{"9:16", 9.0 / 16.0},
 }
 
+// defaultMiniMaxRatio is what a text-only request gets when the client's "size"
+// says nothing about aspect ratio.
+//
+// H3 REQUIRES a ratio for text-to-video and rejects the request outright when it
+// is absent — confirmed live: "invalid params, ratio is required for t2va
+// (text-only) and cannot be 'adaptive'". So omitting it is not the harmless
+// "let the vendor default" it reads as; it is a hard 400. It bit the shipped
+// configuration, whose published defaultParameters.size is the resolution token
+// "2K" — exactly the shape sizeToMiniMaxRatio cannot derive a ratio from — so
+// the DEFAULT request shape 400'd and the service could not serve at all.
+//
+// 16:9 because it is landscape, MiniMax's own first listed value, and the ratio
+// of OpenAI's documented default video size (1280x720).
+//
+// Scoped to H3, but NOT gated on the model: req.Model is passed through verbatim,
+// so a future MiniMax video model with a different allowed-ratio set — or one that
+// rejects the field outright — would receive this too. Gate it here when a second
+// model is configured; the same caveat already applies to
+// normalizeMiniMaxResolution's 768P/1080P path.
+const defaultMiniMaxRatio = "16:9"
+
 // sizeToMiniMaxRatio derives MiniMax's "ratio" parameter from the client's
 // pixel-dimension "size" field (e.g. "1280x720" -> "16:9"). An empty or
-// unparsable size yields "" (omitted from the request, so MiniMax applies its
-// "adaptive" default). Reuses parseSize (shared with the DashScope mapping).
+// unparsable size yields "", which the caller replaces with defaultMiniMaxRatio
+// for a text-only request — see there for why "" cannot be sent. Reuses
+// parseSize (shared with the DashScope mapping).
 func sizeToMiniMaxRatio(size string) string {
 	width, height, ok := parseSize(size)
 	if !ok {
@@ -138,12 +160,13 @@ func normalizeMiniMaxResolution(size string) string {
 // i.e. the most common call shape — a floor of 5 would have over-billed the
 // default request by 25%.
 //
-// PENDING LIVE CONFIRMATION: 4 is taken from the published description, not from a
-// verified API call — an earlier revision of this file used 5 with no recorded
-// provenance. If H3 turns out to reject 4, the symptom is a hard 4xx on
-// seconds=4-or-omitted, and MiniMax's own message is propagated verbatim
-// (writeMiniMaxError), so it will name itself. Raise this constant, not the clamp
-// logic, if that happens.
+// CONFIRMED LIVE against api.minimax.io/v2/video_generation, not just read off the
+// published description: duration=4 creates a task, while 3 and 16 are rejected
+// with "model MiniMax-H3 does not support duration Ns, supported durations: 4s,
+// 5s, 6s, 7s, 8s, 9s, 10s, 11s, 12s, 13s, 14s, 15s" — the vendor enumerating
+// exactly this range, integers only. The same probe established that H3's only
+// supported resolution is 2K, so a caller reaching normalizeMiniMaxResolution with
+// 768P/1080P will always be rejected by H3 (that path exists for future models).
 //
 // Above the ceiling the request is still clamped down: the caller cannot have what
 // they asked for either way, and 15s is what the model produces (and therefore what
@@ -208,6 +231,12 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 			ImageURL: &minimax.ImageURL{URL: ref},
 			Role:     "first_frame",
 		})
+	} else if ratio == "" {
+		// Text-only and nothing in "size" told us the aspect ratio. H3 rejects a
+		// t2v request with no ratio, so this is not optional — see
+		// defaultMiniMaxRatio. Only in the text-only branch: with a first frame the
+		// ratio follows the supplied image and H3 ignores any explicit value.
+		ratio = defaultMiniMaxRatio
 	}
 
 	return minimax.CreateRequest{

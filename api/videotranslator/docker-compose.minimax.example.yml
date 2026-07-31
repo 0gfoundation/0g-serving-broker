@@ -58,10 +58,18 @@
 # "seconds" costs what an OpenAI client expects. If you set modelInfo
 # defaultParameters on the broker side, use seconds: 4 to match.
 #
-# MINIMAX_RESOLUTION defaults to "2K" (MiniMax-H3's only supported value). A
-# client can still target another model's resolution tier by sending "size" as
-# a resolution token (e.g. "1080P"); a pixel-dimension "size" (e.g. "1280x720")
-# only sets the aspect ratio and leaves resolution at this default.
+# MINIMAX_RESOLUTION defaults to "2K" (MiniMax-H3's only supported value —
+# confirmed live: H3 rejects 768P naming 2K as its whole supported set). A client
+# can still target another model's resolution tier by sending "size" as a
+# resolution token (e.g. "1080P"), which on H3 will simply be rejected upstream;
+# a pixel-dimension "size" (e.g. "1280x720") only sets the aspect ratio and leaves
+# resolution at this default.
+#
+# ⚠️ ASPECT RATIO: H3 REQUIRES one for text-to-video and rejects "adaptive", so a
+# "size" that carries no aspect ratio — which includes the resolution tokens above
+# and the "2K" in defaultParameters — gets 16:9 (landscape). A client that wants
+# portrait must send a pixel-dimension size (e.g. "720x1280"). Image-to-video is
+# unaffected: there the first frame decides.
 services:
   0g-minimax-video-translator:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest

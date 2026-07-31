@@ -179,10 +179,38 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("resolution token in size overrides the default and leaves ratio empty", func(t *testing.T) {
+	t.Run("resolution token in size overrides the default, ratio falls to the t2v default", func(t *testing.T) {
 		got := ToMiniMaxCreateRequest(CreateVideoRequest{Model: "m", Seconds: "6", Size: "1080p"}, "2K")
-		if got.Resolution != "1080P" || got.Ratio != "" {
+		if got.Resolution != "1080P" || got.Ratio != defaultMiniMaxRatio {
 			t.Fatalf("unexpected resolution/ratio: %+v", got)
+		}
+	})
+
+	// The outage this defends against: H3 rejects a text-only request with no
+	// ratio ("ratio is required for t2va ... and cannot be 'adaptive'"), and the
+	// shipped config publishes defaultParameters.size = "2K" — a resolution
+	// token, which carries no aspect ratio. So the DEFAULT request shape sent no
+	// ratio and 400'd, and the service could not serve at all. Every text-only
+	// shape must leave here with one.
+	t.Run("every text-only request carries a ratio", func(t *testing.T) {
+		for _, size := range []string{"", "2K", "1080p", "768P", "not-a-size", "0x720"} {
+			got := ToMiniMaxCreateRequest(CreateVideoRequest{Model: "MiniMax-H3", Prompt: "a cat", Seconds: "4", Size: size}, "2K")
+			if got.Ratio == "" {
+				t.Errorf("size=%q produced no ratio — H3 rejects a t2v request without one", size)
+			}
+		}
+	})
+
+	// ...but NOT when a first frame is supplied: there the ratio follows the
+	// image, and a pixel size the client happened to send is the only reason to
+	// state one.
+	t.Run("image-to-video with no derivable ratio sends none", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Model: "MiniMax-H3", Prompt: "a cat", Seconds: "4", Size: "2K",
+			InputReferenceImageURL: "https://example.com/frame.png",
+		}, "2K")
+		if got.Ratio != "" {
+			t.Errorf("Ratio = %q, want none — the first frame defines it", got.Ratio)
 		}
 	})
 
