@@ -154,12 +154,13 @@ func normalizeMiniMaxResolution(size string) string {
 // i.e. the most common call shape — a floor of 5 would have over-billed the
 // default request by 25%.
 //
-// PENDING LIVE CONFIRMATION: 4 is taken from the published description, not from a
-// verified API call — an earlier revision of this file used 5 with no recorded
-// provenance. If H3 turns out to reject 4, the symptom is a hard 4xx on
-// seconds=4-or-omitted, and MiniMax's own message is propagated verbatim
-// (writeMiniMaxError), so it will name itself. Raise this constant, not the clamp
-// logic, if that happens.
+// CONFIRMED LIVE against api.minimax.io/v2/video_generation, not just read off the
+// published description: duration=4 creates a task, while 3 and 16 are rejected
+// with "model MiniMax-H3 does not support duration Ns, supported durations: 4s,
+// 5s, 6s, 7s, 8s, 9s, 10s, 11s, 12s, 13s, 14s, 15s" — the vendor enumerating
+// exactly this range, integers only. The same probe established that H3's only
+// supported resolution is 2K, so a caller reaching normalizeMiniMaxResolution with
+// 768P/1080P will always be rejected by H3 (that path exists for future models).
 //
 // Above the ceiling the request is still clamped down: the caller cannot have what
 // they asked for either way, and 15s is what the model produces (and therefore what
