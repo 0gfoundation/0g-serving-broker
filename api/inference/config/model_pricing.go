@@ -291,10 +291,16 @@ func scaledUnits(count int64, multiplier float64) (int64, error) {
 // the table is empty. Used as the conservative fee basis when a live
 // (resolution, duration) isn't in the table — bill the most expensive configured
 // bucket rather than undercharge below it.
-// NextBucketUnits returns the units of the cheapest configured bucket that still
-// covers an observed (resolution, duration) — the smallest row for that resolution
-// whose duration is at least the observed one — and reports whether such a row
-// exists.
+// NextBucketUnits returns the units of the NEXT bucket up from an observed
+// (resolution, duration): the row for that resolution with the smallest duration
+// that is still at least the observed one. Reports whether such a row exists.
+//
+// Selection is by DURATION, not by price. Picking the cheapest covering row would
+// assume the table is monotonic — that a longer bucket never costs less — and
+// nothing enforces that. An operator who discounts long clips (2K@5s = 50 units,
+// 2K@10s = 20) would have a 4-second clip billed at the 10-second row, below the
+// bucket that actually neighbours it. "Round up to the next bucket" is the rule a
+// bucketed price list states, and it holds whatever shape the table has.
 //
 // This is what a bucketed price list means: a duration between buckets rounds UP to
 // the next one. It exists because the alternative on a miss is MaxTableUnits, the
@@ -309,15 +315,21 @@ func scaledUnits(count int64, multiplier float64) (int64, error) {
 func (b *BillingConfig) NextBucketUnits(resolution string, seconds int64) (int64, bool) {
 	res := normalizeResolution(resolution)
 	var (
-		best  int64
-		found bool
+		best    int64
+		bestDur int64
+		found   bool
 	)
 	for _, t := range b.Table {
 		if normalizeResolution(t.Resolution) != res || t.Duration < seconds {
 			continue
 		}
-		if !found || t.Units < best {
-			best, found = t.Units, true
+		switch {
+		case !found, t.Duration < bestDur:
+			best, bestDur, found = t.Units, t.Duration, true
+		case t.Duration == bestDur && t.Units > best:
+			// Duplicate duration rows are a misconfiguration; take the dearer one
+			// rather than letting row order decide how much the provider is paid.
+			best = t.Units
 		}
 	}
 	return best, found
