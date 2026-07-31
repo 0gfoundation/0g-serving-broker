@@ -284,10 +284,11 @@ func resolutionRateClass(size string) string {
 // path (single-model — byte-for-byte unchanged).
 //
 // On a per_unit_table miss (a live (resolution, duration) the operator didn't
-// table), it bills the table's MAX units — never the seconds×serviceRatio
-// formula, which uses an unrelated resolution vocabulary and would underbill the
-// bucket (a client could force this by requesting an unlisted combo). The miss
-// is logged loudly so the operator adds the row.
+// table), it rounds UP to the next bucket that covers the observation, and falls
+// to the table's MAX units only when nothing covers it — never the
+// seconds×serviceRatio formula, which uses an unrelated resolution vocabulary and
+// would underbill the bucket (a client could force this by requesting an unlisted
+// combo). Either way the miss is metered and logged so the operator adds the row.
 func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string) int64 {
 	if c.Service.HasMultiModelPricing() {
 		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
@@ -295,9 +296,9 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 			if err == nil {
 				return units
 			}
-			// Bucketed (per_unit_table) miss: bill the most expensive configured
-			// bucket rather than dropping to the seconds-ratio formula (which would
-			// underbill). Conservative + loud, never below the table.
+			// Bucketed (per_unit_table) miss: stay inside the table rather than
+			// dropping to the seconds-ratio formula (which would underbill).
+			// Conservative + loud, never below the table.
 			if e.Billing.Mode == config.BillingModePerUnitTable {
 				// Round UP to the NEXT bucket: the smallest configured duration that
 				// still covers this observation (by duration, not by price — see
@@ -315,23 +316,34 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 					// create until then, with no aggregate signal, is the exact failure
 					// this codebase keeps replacing with a counter.
 					monitor.RecordVideoTableMiss(monitor.VideoTableMissNextBucket)
-					// No detail in the throttle key: both seconds and size are chosen by
-					// the caller (size is free text echoed from the request when the
-					// vendor omits it), so keying on them lets one caller mint a fresh
-					// key per request and emit a full line every time — defeating the
-					// throttle, and churning the shared memo until it flushes and
-					// un-throttles the routing-proof reasons too. The reason alone is
-					// the operator's action; the values are still in the message.
-					c.logProofSkip("per_unit_table_miss", "",
-						"video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, truncateForLog([]byte(size), 80), units, err)
+					// Keyed on the COVERING BUCKET's units, never on (seconds, size):
+					// those are chosen by the caller (size is free text echoed from the
+					// request when the vendor omits it), so keying on them lets one
+					// caller mint a fresh key per request and emit a full line every
+					// time — defeating the throttle, and churning the shared memo until
+					// it flushes and un-throttles the routing-proof reasons too. Units
+					// come from a configured row, so the key space is bounded by the
+					// table, and an operator missing rows under several buckets is told
+					// about each of them instead of only the first.
+					//
+					// err is deliberately NOT in the message: it is
+					// "no per_unit_table billing row for resolution=%q duration=%d",
+					// which re-emits the caller's size UNTRUNCATED and says nothing the
+					// line below doesn't already.
+					c.logProofSkip("per_unit_table_miss", strconv.FormatInt(units, 10),
+						"video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row", seconds, truncateForLog([]byte(size), 80), units)
 					return units
 				}
-				// Observed longer than every bucket for this resolution: nothing
-				// covers it, so the table maximum is the only conservative answer.
+				// Nothing in the table covers this observation — either it is longer
+				// than every bucket for its resolution, or the resolution has no rows
+				// at ALL (a vendor emitting a size the operator never tabulated). The
+				// table maximum is the only conservative answer for both. No detail in
+				// the key here: unlike the branch above there is no configured row to
+				// name, and the only candidates left are caller-chosen.
 				if mx := e.Billing.MaxTableUnits(); mx > 0 {
 					monitor.RecordVideoTableMiss(monitor.VideoTableMissUncovered)
 					c.logProofSkip("per_unit_table_uncovered", "",
-						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, truncateForLog([]byte(size), 80), mx, err)
+						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table to this resolution and duration", seconds, truncateForLog([]byte(size), 80), mx)
 					return mx
 				}
 			}

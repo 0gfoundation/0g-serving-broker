@@ -173,9 +173,9 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 		// implementation-defined (MinInt64 on amd64), which would land below the floor
 		// and be clamped UP to the minimum — silently turning an absurd request into
 		// the shortest clip instead of the longest one it can have. The DashScope
-		// sibling guards the same conversion but REJECTS out-of-range instead of
-		// capping (translate.go, maxDashScopeSeconds); both fail safe, they are not
-		// mirrors.
+		// sibling guards the same conversion but IGNORES an out-of-range value and
+		// omits duration entirely, letting the vendor default (translate.go,
+		// maxDashScopeSeconds); both fail safe, they are not mirrors.
 		if s > float64(maxMiniMaxDuration) {
 			s = float64(maxMiniMaxDuration)
 		}

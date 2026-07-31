@@ -42,12 +42,19 @@
 # configured bucket, which is a price /v1/models actually advertises — but only if
 # such a bucket exists. A value with NOTHING at or above it (e.g. seconds=12 in a
 # table that stops at 5) falls to the table maximum across every resolution, which
-# can charge a short 2K clip at a long 4K rate.
+# can charge a short 2K clip at a long 4K rate. A resolution with NO rows at all
+# lands there too, however short the clip — so tabulate the resolutions a client
+# can reach (see MINIMAX_RESOLUTION below), not only the one you default to.
+#
+# Watch broker_video_table_miss_total{reason} to find out: "next_bucket" means a
+# row is missing but a covering one absorbed it, "uncovered" means the table
+# maximum was charged. The log line names the offending (seconds, size).
 #
 # Duration: H3 accepts 4-15s (its published range) and the translator clamps into
-# it. A request inside the range is never rounded UP — the broker bills the seconds
-# the vendor reports generating, so raising a caller's duration would raise their
-# bill above what they asked for. 4 is also OpenAI's default, so an omitted
+# it. An integer request inside the range is never rounded UP — the broker bills the
+# seconds the vendor reports generating, so raising a caller's duration would raise
+# their bill above what they asked for. (A fractional "seconds" does round up to a
+# whole second — 4.1 becomes 5 — because H3 takes an integer duration.) 4 is also OpenAI's default, so an omitted
 # "seconds" costs what an OpenAI client expects. If you set modelInfo
 # defaultParameters on the broker side, use seconds: 4 to match.
 #

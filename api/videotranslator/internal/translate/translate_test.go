@@ -100,6 +100,13 @@ func TestSizeToDashScopeParams(t *testing.T) {
 		{"1024x1792 (openai portrait 1080-tier)", "1024x1792", "1080P", "9:16"},
 		{"square", "1024x1024", "720P", "1:1"},
 		{"case-insensitive separator", "1280X720", "720P", "16:9"},
+		// DashScope's own resolution token, honoured rather than dropped. This is
+		// the one direction that UNDERBILLS: dropping it renders at the vendor's
+		// default (1080P) while the broker still bills the "720P" table row it
+		// echoed back from the request. Ratio stays empty — the token carries none.
+		{"vendor resolution token", "720P", "720P", ""},
+		{"vendor resolution token, lowercase", "1080p", "1080P", ""},
+		{"unknown token still yields no override", "480P", "", ""},
 		{"empty size yields no override", "", "", ""},
 		{"unparsable size yields no override", "not-a-size", "", ""},
 		{"zero dimension yields no override", "0x720", "", ""},

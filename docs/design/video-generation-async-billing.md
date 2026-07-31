@@ -226,12 +226,24 @@ the most expensive clip the operator ever priced. It is reachable whenever a ven
 minimum shifts: MiniMax H3's floor moved 5 → 4, which is also its default request
 shape, so the most common request became a miss overnight.
 
-**Operator rule:** tabulate every duration the vendor can emit, starting at its
-minimum — not just the minimum. A conforming OpenAI client sends `seconds` from
-{4, 8, 12}, and any value with no bucket at or above it falls to the table maximum
-across every resolution. Otherwise clients are billed a price `GET /v1/models` does not advertise for
-their request — it publishes one variant per configured bucket, so an untabulated
-duration has no visible price at all.
+**Operator rule:** tabulate every duration the vendor can emit **for every resolution
+it can emit**, starting at the vendor's minimum — not just the minimum. A conforming
+OpenAI client sends `seconds` from {4, 8, 12}, and any value with no bucket at or
+above it falls to the table maximum across every resolution. The resolution half
+matters just as much and is easier to miss: a resolution with *no rows at all* has no
+covering bucket however short the clip, so it takes that same table-max path — a
+4-second clip at an untabulated size is billed as the longest 4K one in the table.
+Otherwise clients are billed a price `GET /v1/models` does not advertise for their
+request — it publishes one variant per configured bucket, so an untabulated
+`(resolution, duration)` has no visible price at all.
+
+Misses are metered by **`broker_video_table_miss_total{reason}`**, which is how an
+operator finds out a row is missing without reading logs. `reason="next_bucket"` means
+the observation was rounded up to a covering row; `reason="uncovered"` means nothing
+covered it and the table maximum was charged — the expensive one, and the one to alert
+on. This is deliberately NOT `broker_video_billing_skipped_total`, which means the
+opposite: a video served *without being billed at all*. The log line names the
+offending `(seconds, size)`, throttled to a few lines an hour per bucket.
 
 ## Signature lifecycle (`ZG-Res-Key`)
 
@@ -281,12 +293,11 @@ alert whose instruction is "any sustained rate is a problem".
 
 ## Job id contract (broker → consumers)
 
-The `id` in the `POST /videos` response is currently the vendor's `task_id`, passed
-through verbatim — the translator copies `resp.TaskID` and the broker reads it back
-out of the upstream body (`videoRespFields.ID`). The broker never mints it.
-
-That makes the vendor's id-shaping decision a **published API contract**, because
-consumers do not merely echo the id back — they persist it and key on it:
+The `id` in the `POST /videos` response originates upstream, not in the broker: the
+broker reads it back out of the upstream body (`videoRespFields.ID`) and never mints
+one. Before this change the translator passed the vendor's `task_id` through verbatim,
+which made the vendor's id-shaping decision a **published API contract** — because
+consumers do not merely echo the id back, they persist it and key on it:
 
 > **Guarantee:** the `id` returned by `POST /videos`, and accepted by
 > `GET /videos/{id}` and `GET /videos/{id}/content`, is at most **36 characters**

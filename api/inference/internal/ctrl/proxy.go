@@ -454,15 +454,19 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 const proofSkipLogWindow = 10 * time.Minute
 
 // maxProofSkipKeys bounds the distinct (reason, detail) pairs logProofSkip
-// remembers. Far above any real deployment — there are four reasons and a healthy
-// one has a single upstream host — and low enough that a misbehaving sidecar cannot
-// turn the throttle into a leak.
+// remembers. Far above any real deployment — six routing-proof reasons plus two
+// billing-table ones, and a healthy deployment has a single upstream host — and low
+// enough that a misbehaving sidecar cannot turn the throttle into a leak. All
+// reasons share one memo, which is why no caller may key on a value the client or
+// the sidecar chooses: overflow flushes the map for everyone.
 const maxProofSkipKeys = 64
 
-// logProofSkip reports a response served without a routing proof, at most once per
-// window per (reason, detail). Detail is what distinguishes causes an operator would
-// fix differently — the reported host for drift, empty where the reason alone says
-// everything.
+// logProofSkip reports a recurring misconfiguration at most once per window per
+// (reason, detail) — a response served without a routing proof, or a billing-table
+// row the operator has not added. Detail is what distinguishes causes an operator
+// would fix differently — the reported host for drift, the covering bucket for a
+// table miss, empty where the reason alone says everything. It must always come
+// from config or from the enclave, never from the request; see maxProofSkipKeys.
 func (c *Ctrl) logProofSkip(reason, detail, format string, args ...interface{}) {
 	// The detail is truncated into the key as well as the message: it comes from the
 	// sidecar, and an unbounded key would let a broken one grow this map by the

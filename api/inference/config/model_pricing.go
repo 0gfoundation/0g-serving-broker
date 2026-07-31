@@ -333,9 +333,12 @@ func (b *BillingConfig) NextBucketUnits(resolution string, seconds int64) (int64
 
 // MaxTableUnits returns the largest units value in a per_unit_table, or 0 when the
 // table is empty. It is the last-resort fee basis: NextBucketUnits handles an
-// observation that some bucket still covers, so this is reached only when the
-// observation is LONGER than every bucket configured for its resolution, where no
-// row covers it and undercharging below the table is the only alternative.
+// observation that some bucket still covers, so this is reached only when NO row
+// covers it — either the observation is LONGER than every bucket configured for
+// its resolution, or that resolution has no rows at all (a vendor emitting a size
+// the operator never tabulated). In both cases undercharging below the table is
+// the only alternative, so an untabulated resolution is billed at the dearest row
+// in the WHOLE table until the operator adds it.
 func (b *BillingConfig) MaxTableUnits() int64 {
 	var max int64
 	for _, t := range b.Table {

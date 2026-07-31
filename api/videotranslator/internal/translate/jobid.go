@@ -65,6 +65,12 @@ func EncodeJobID(vendorID string) (string, error) {
 	if vendorID == "" {
 		return "", fmt.Errorf("vendor returned an empty job id")
 	}
+	if vendorID == "." || vendorID == ".." {
+		// Encodes fine (v2_Lg / v2_Li4) but DecodeJobID rejects it, so without this
+		// the create would succeed and every poll 4xx until MaxPollDuration. Fail at
+		// create, like every other id this function cannot carry.
+		return "", fmt.Errorf("vendor job id %q is a path segment, not a task id", vendorID)
+	}
 
 	if len(vendorID) <= maxPayloadLen && isContractCharset(vendorID) {
 		return tagRaw + vendorID, nil
@@ -110,7 +116,11 @@ func DecodeJobID(publicID string) (string, error) {
 		return expandUUID(strings.TrimPrefix(publicID, tagUUID))
 
 	case strings.HasPrefix(publicID, tagBase64):
-		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(publicID, tagBase64))
+		// Strict: without it, non-zero trailing bits are accepted, so v2_Lg and
+		// v2_Lh both decode to ".". Harmless today (the ownership row is keyed on
+		// the exact published id and fails closed on a miss), but "one published id
+		// per vendor id" is cheaper to keep than to re-derive later.
+		raw, err := base64.RawURLEncoding.Strict().DecodeString(strings.TrimPrefix(publicID, tagBase64))
 		if err != nil {
 			return "", fmt.Errorf("job id %q has a malformed payload: %w", publicID, err)
 		}

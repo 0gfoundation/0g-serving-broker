@@ -180,6 +180,17 @@ const dashScopeResolutionThreshold = 1280
 // yields empty strings for both (omitted from the request, so DashScope
 // applies its own defaults: 1080P, 16:9).
 func sizeToDashScopeParams(size string) (resolution, ratio string) {
+	// DashScope's own two-tier token, passed straight through. Without this a
+	// client sending size="720P" fails parseSize, we omit resolution, the vendor
+	// renders at ITS default (1080P) — and the broker still bills the "720p" table
+	// row it echoed back from the request. That is the one direction that
+	// UNDERBILLS the provider, so the token form is honoured rather than dropped.
+	// Ratio stays empty; DashScope defaults it, exactly as before.
+	switch strings.ToUpper(strings.TrimSpace(size)) {
+	case "720P", "1080P":
+		return strings.ToUpper(strings.TrimSpace(size)), ""
+	}
+
 	width, height, ok := parseSize(size)
 	if !ok {
 		return "", ""
