@@ -3,7 +3,6 @@ package ctrl
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -316,16 +315,23 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 					// create until then, with no aggregate signal, is the exact failure
 					// this codebase keeps replacing with a counter.
 					monitor.RecordVideoTableMiss(monitor.VideoTableMissNextBucket)
-					c.logProofSkip("per_unit_table_miss", fmt.Sprintf("%d|%s", seconds, size),
-						"video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, size, units, err)
+					// No detail in the throttle key: both seconds and size are chosen by
+					// the caller (size is free text echoed from the request when the
+					// vendor omits it), so keying on them lets one caller mint a fresh
+					// key per request and emit a full line every time — defeating the
+					// throttle, and churning the shared memo until it flushes and
+					// un-throttles the routing-proof reasons too. The reason alone is
+					// the operator's action; the values are still in the message.
+					c.logProofSkip("per_unit_table_miss", "",
+						"video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, truncateForLog([]byte(size), 80), units, err)
 					return units
 				}
 				// Observed longer than every bucket for this resolution: nothing
 				// covers it, so the table maximum is the only conservative answer.
 				if mx := e.Billing.MaxTableUnits(); mx > 0 {
 					monitor.RecordVideoTableMiss(monitor.VideoTableMissUncovered)
-					c.logProofSkip("per_unit_table_uncovered", fmt.Sprintf("%d|%s", seconds, size),
-						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, size, mx, err)
+					c.logProofSkip("per_unit_table_uncovered", "",
+						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, truncateForLog([]byte(size), 80), mx, err)
 					return mx
 				}
 			}
@@ -676,7 +682,7 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// to DIRECTLY has nothing shaping it — and isContractJobID above only logs, so
 		// a "?" or "../" would otherwise reach this URL. Pre-existing on main; the
 		// check that would have caught it now sits directly above.
-		PollURL:            c.Service.TargetURL + "/videos/" + url.PathEscape(providerJobID),
+		PollURL:            c.Service.TargetURL + "/videos/" + escapeVendorJobID(providerJobID),
 		RequestBody:        reqBody,
 		RequestContentType: contentType,
 		OutputPrice:        outputPrice,
@@ -699,6 +705,22 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		return errors.Wrap(err, "create video poll job")
 	}
 	return nil
+}
+
+// escapeVendorJobID renders an upstream-supplied job id safe to splice into the
+// poll URL. PathEscape handles separators but leaves a bare "." or ".." intact, and
+// those stay LIVE path segments that walk the vendor's URL rather than naming a task
+// under it — the same blind spot translate.checkedVendorID guards on the translator
+// side. Behind a translator EncodeJobID already rules them out; this covers the
+// centralized vendor spoken to DIRECTLY, where isContractJobID only logs.
+func escapeVendorJobID(id string) string {
+	if id == "." || id == ".." {
+		// Cannot be made safe by escaping, and cannot be dropped (the poll needs an
+		// id). Percent-encode the dots so the vendor sees a literal segment and
+		// answers 404 promptly, rather than the broker walking its URL.
+		return url.PathEscape(strings.ReplaceAll(id, ".", "%2E"))
+	}
+	return url.PathEscape(id)
 }
 
 // dropUnpollableVideoSignature is the create-side mirror of evictVideoSignature

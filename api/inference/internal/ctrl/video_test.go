@@ -428,3 +428,40 @@ func TestVideoOutputUnits_PerUnitTableMiss(t *testing.T) {
 		t.Errorf("sub-bucket miss at 1080P = %d, want 12", got)
 	}
 }
+
+// TestEscapeVendorJobID pins what may reach the poll URL. The id is upstream-supplied
+// and the URL carries the broker's injected vendor credentials, so a value that
+// changes the URL's shape must not survive. Behind a translator EncodeJobID already
+// rules those out; this covers the centralized vendor spoken to DIRECTLY, where
+// isContractJobID only logs.
+func TestEscapeVendorJobID(t *testing.T) {
+	// Every id shape actually in use must be byte-identical — escaping must not
+	// change the URL for any job that works today.
+	for _, id := range []string{
+		"v0_task-abc",                          // what our translator publishes
+		"v1_0385dc795ff840739d5a1a7bc7f3e01d",  // ditto, UUID-compacted
+		"0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // DashScope, pre-tagging
+		"425080991981768",                      // MiniMax
+	} {
+		if got := escapeVendorJobID(id); got != id {
+			t.Errorf("escapeVendorJobID(%q) = %q — a working id's URL must not change", id, got)
+		}
+	}
+
+	// PathEscape handles separators but leaves a bare dot segment live, and a live
+	// ".." walks the vendor's URL instead of naming a task under it.
+	for _, tc := range []struct{ id, mustNotBe string }{
+		{"..", ".."},
+		{".", "."},
+	} {
+		if got := escapeVendorJobID(tc.id); got == tc.mustNotBe {
+			t.Errorf("escapeVendorJobID(%q) left a live path segment", tc.id)
+		}
+	}
+	for _, id := range []string{"a?b", "a#b", "a/b", "a b"} {
+		got := escapeVendorJobID(id)
+		if got == id {
+			t.Errorf("escapeVendorJobID(%q) passed a URL metacharacter through unescaped", id)
+		}
+	}
+}
