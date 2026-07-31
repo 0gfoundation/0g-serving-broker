@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 )
 
 // defaultBaseURL is the legacy China (Beijing) domain — still fully
@@ -128,6 +130,11 @@ func (c *Client) GetTask(ctx context.Context, authHeader, taskID string) (*GetTa
 // (DashScope's output.video_url — typically a pre-signed CDN link, not the
 // DashScope API itself, so no Authorization header is attached). The caller
 // must close the returned response's Body.
+//
+// Deliberately does NOT report its TLS certificate to the request's CertCapture,
+// unlike do(): this URL is vendor-supplied (a CDN host), while the broker's routing
+// proof must bind the API endpoint that authenticated our key and produced the
+// response being signed. Do not add an Observe call here for symmetry.
 func (c *Client) FetchContent(ctx context.Context, videoURL string) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, videoURL, nil)
 	if err != nil {
@@ -179,6 +186,10 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// See the mirror of this line in internal/minimax/client.go: this hop is where
+	// the TLS a centralized routing proof attests to actually happens, so report
+	// the vendor certificate back to the inbound request's capture.
+	teeutil.CertCaptureFromContext(httpReq.Context()).Observe(resp.TLS)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

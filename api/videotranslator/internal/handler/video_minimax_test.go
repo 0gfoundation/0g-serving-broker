@@ -30,7 +30,7 @@ func TestMiniMaxGetVideo_NilTaskIsTransient(t *testing.T) {
 	engine.GET("/videos/:id", h.GetVideo)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/videos/task-123", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_task-123", nil)
 	engine.ServeHTTP(rec, req)
 
 	if rec.Code < 500 {
@@ -55,7 +55,7 @@ func TestMiniMaxGetVideo_SucceededBills(t *testing.T) {
 	engine.GET("/videos/:id", h.GetVideo)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/videos/t1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/videos/v0_t1", nil)
 	engine.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

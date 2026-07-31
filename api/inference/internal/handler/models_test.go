@@ -569,6 +569,49 @@ func TestGetModels_ServiceError(t *testing.T) {
 	}
 }
 
+// TestGetModels_ServingDomainUnderTargetTLSProxy: with an in-enclave translator the
+// broker no longer dials the vendor, so targetUrl is a container name and must not
+// be published. The operator-declared vendor FQDN takes its place — without it a
+// verifier would hold the routing proof's certificate fingerprint and have no host
+// to fetch a certificate from to compare it against.
+func TestGetModels_ServingDomainUnderTargetTLSProxy(t *testing.T) {
+	mock := &mockModelsCtrl{
+		service: model.Service{
+			ModelType:   "MiniMax-H3",
+			Type:        "video-generation",
+			InputPrice:  "0",
+			OutputPrice: "200",
+		},
+		serviceConfig: config.Service{
+			ProviderType:     "centralized",
+			ProviderIdentity: "minimax",
+			TargetURL:        "http://0g-minimax-video-translator:8090",
+			TargetTLSProxy:   true,
+			UpstreamDomain:   "api.minimax.io",
+		},
+	}
+
+	h := newModelsTestHandler(mock)
+	w := performRequest(h.GetModels, "GET", "/v1/models", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(resp.Data))
+	}
+	m := resp.Data[0]
+	if m.ServingDomain != "api.minimax.io" {
+		t.Errorf("serving_domain = %q, want the vendor FQDN (never the in-CVM container name)", m.ServingDomain)
+	}
+	if m.ProviderIdentity != "minimax" {
+		t.Errorf("provider_identity = %q, want minimax", m.ProviderIdentity)
+	}
+}
+
 func TestGetModels_CentralizedProviderInfo(t *testing.T) {
 	mock := &mockModelsCtrl{
 		service: model.Service{

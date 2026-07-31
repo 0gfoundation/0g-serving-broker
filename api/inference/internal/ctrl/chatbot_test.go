@@ -100,6 +100,17 @@ func recoverSignerAddress(t *testing.T, cs ChatSignature) common.Address {
 // signCentralizedRoutingProof
 // ==========================================================================
 
+// fingerprintOf mirrors what Ctrl.upstreamCertFingerprint hands the signer for a
+// direct (non-sidecar) centralized connection, so these tests keep exercising the
+// real cert -> fingerprint path rather than a hand-written hex string.
+func fingerprintOf(state *tls.ConnectionState) string {
+	info := teeutil.ExtractTLSInfo(state)
+	if info == nil {
+		return ""
+	}
+	return info.PeerCertFingerprint
+}
+
 func TestSignCentralizedRoutingProof_NilTLSState(t *testing.T) {
 	reqBody := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`)
 	respData := []byte(`{"id":"chatcmpl-123","choices":[{"message":{"content":"hi"}}]}`)
@@ -113,11 +124,11 @@ func TestSignCentralizedRoutingProof_NilTLSState(t *testing.T) {
 
 	// Without TLS state, signing must refuse — a proof with an empty
 	// fingerprint would give verifiers false security.
-	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, nil)
+	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, "")
 	if err == nil {
 		t.Fatal("expected error when TLS state is nil")
 	}
-	if !strings.Contains(err.Error(), "TLS certificate not available") {
+	if !strings.Contains(err.Error(), "no usable upstream TLS certificate fingerprint") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 
@@ -145,7 +156,7 @@ func TestSignCentralizedRoutingProof_WithTLSState(t *testing.T) {
 		ServerName:       "api.openai.com",
 	}
 
-	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, tlsState)
+	err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, fingerprintOf(tlsState))
 	if err != nil {
 		t.Fatalf("signCentralizedRoutingProof returned error: %v", err)
 	}
@@ -221,7 +232,7 @@ func TestSignCentralizedRoutingProof_DifferentProviders(t *testing.T) {
 				ServerName:       tt.certCN,
 			}
 
-			err := ctrl.signCentralizedRoutingProof(reqBody, respData, "key-"+tt.name, tlsState)
+			err := ctrl.signCentralizedRoutingProof(reqBody, respData, "key-"+tt.name, fingerprintOf(tlsState))
 			if err != nil {
 				t.Fatalf("error: %v", err)
 			}
@@ -318,7 +329,7 @@ func TestSignatureVValueAdjustment(t *testing.T) {
 		reqBody := []byte(`{"i":` + hex.EncodeToString([]byte{byte(i)}) + `}`)
 		respData := []byte(`{"r":` + hex.EncodeToString([]byte{byte(i)}) + `}`)
 
-		err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, tlsState)
+		err := ctrl.signCentralizedRoutingProof(reqBody, respData, chatKey, fingerprintOf(tlsState))
 		if err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}

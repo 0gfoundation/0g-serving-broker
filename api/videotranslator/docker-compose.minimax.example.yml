@@ -7,7 +7,7 @@
 # (POST /v2/video_generation, GET /v2/query/video_generation/{task_id}). The
 # broker owns polling-to-completion and billing; this container never does.
 #
-# Broker-side wiring (three things):
+# Broker-side wiring (four things):
 #   1. Register the provider's on-chain Service.Url as this container's address
 #      (e.g. http://0g-minimax-video-translator:8090) instead of api.minimax.io.
 #   2. Set additionalSecret in the broker's config.yaml so it injects the
@@ -22,6 +22,41 @@
 #      see api/inference/config/model_pricing.go. The translator maps MiniMax's
 #      usage.total_seconds onto the broker's usage.output_video_duration field,
 #      which is what resolveVideoBilling meters.
+#   4. Keep TEE verification: this sidecar reports the vendor's TLS certificate
+#      back to the broker (Zg-Upstream-Cert-Fingerprint), so the provider can stay
+#      providerType: centralized instead of falling back to the non-verifiable
+#      "standard" type. Set all four, and run this container in the SAME CVM as the
+#      broker — that co-location is what makes the report trustworthy:
+#        service:
+#          providerType: centralized
+#          providerIdentity: minimax
+#          targetTLSProxy: true
+#          upstreamDomain: api.minimax.io
+#      See docs/design/sidecar-routing-proof.md.
+#
+# ⚠️ per_unit_table operators: tabulate EVERY duration H3 can emit, for every
+# configured resolution — not just its 4s minimum. A conforming OpenAI client sends
+# `seconds` from {4, 8, 12} (default 4), and H3 accepts anything in 4-15.
+#
+# A duration the table does not list is a MISS. A miss rounds UP to the next
+# configured bucket, which is a price /v1/models actually advertises — but only if
+# such a bucket exists. A value with NOTHING at or above it (e.g. seconds=12 in a
+# table that stops at 5) falls to the table maximum across every resolution, which
+# can charge a short 2K clip at a long 4K rate. A resolution with NO rows at all
+# lands there too, however short the clip — so tabulate the resolutions a client
+# can reach (see MINIMAX_RESOLUTION below), not only the one you default to.
+#
+# Watch broker_video_table_miss_total{reason} to find out: "next_bucket" means a
+# row is missing but a covering one absorbed it, "uncovered" means the table
+# maximum was charged. The log line names the offending (seconds, size).
+#
+# Duration: H3 accepts 4-15s (its published range) and the translator clamps into
+# it. An integer request inside the range is never rounded UP — the broker bills the
+# seconds the vendor reports generating, so raising a caller's duration would raise
+# their bill above what they asked for. (A fractional "seconds" does round up to a
+# whole second — 4.1 becomes 5 — because H3 takes an integer duration.) 4 is also OpenAI's default, so an omitted
+# "seconds" costs what an OpenAI client expects. If you set modelInfo
+# defaultParameters on the broker side, use seconds: 4 to match.
 #
 # MINIMAX_RESOLUTION defaults to "2K" (MiniMax-H3's only supported value). A
 # client can still target another model's resolution tier by sending "size" as
@@ -35,7 +70,12 @@ services:
     environment:
       - PORT=8090
       - LOG_LEVEL=info
-      # - MINIMAX_BASE_URL=https://api.minimax.io   # override for a domestic-site account
+      # MUST agree with the broker's service.upstreamDomain — that is the host the
+      # broker tells verifiers to fetch a certificate from, and this is the host
+      # actually dialed. The broker compares the two on every response and refuses
+      # to sign a routing proof when they differ (reason: domain_mismatch), so a
+      # domestic-site account must change BOTH this and upstreamDomain.
+      # - MINIMAX_BASE_URL=https://api.minimaxi.com   # domestic site; then upstreamDomain: api.minimaxi.com
       # - MINIMAX_RESOLUTION=2K
     networks:
       - localhost

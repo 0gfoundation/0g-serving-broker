@@ -100,6 +100,13 @@ func TestSizeToDashScopeParams(t *testing.T) {
 		{"1024x1792 (openai portrait 1080-tier)", "1024x1792", "1080P", "9:16"},
 		{"square", "1024x1024", "720P", "1:1"},
 		{"case-insensitive separator", "1280X720", "720P", "16:9"},
+		// DashScope's own resolution token, honoured rather than dropped. This is
+		// the one direction that UNDERBILLS: dropping it renders at the vendor's
+		// default (1080P) while the broker still bills the "720P" table row it
+		// echoed back from the request. Ratio stays empty — the token carries none.
+		{"vendor resolution token", "720P", "720P", ""},
+		{"vendor resolution token, lowercase", "1080p", "1080P", ""},
+		{"unknown token still yields no override", "480P", "", ""},
 		{"empty size yields no override", "", "", ""},
 		{"unparsable size yields no override", "not-a-size", "", ""},
 		{"zero dimension yields no override", "0x720", "", ""},
@@ -250,10 +257,13 @@ func TestFromCreateResponse(t *testing.T) {
 		Output:    dashscope.CreateOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending},
 	}
 
-	got := FromCreateResponse(req, resp)
+	got, err := FromCreateResponse(req, resp)
+	if err != nil {
+		t.Fatalf("encode job id: %v", err)
+	}
 
 	want := VideoResponse{
-		ID:      "task-123",
+		ID:      "v0_task-123",
 		Object:  "video",
 		Model:   "happyhorse",
 		Status:  StatusQueued,
@@ -285,7 +295,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				},
 			},
 			want: VideoResponse{
-				ID:        "task-123",
+				ID:        "v0_pub",
 				Object:    "video",
 				Status:    StatusInProgress,
 				Prompt:    "a cat playing piano",
@@ -299,7 +309,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusQueued,
 			},
@@ -310,7 +320,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending, SubmitTime: "not-a-timestamp"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusQueued,
 			},
@@ -322,7 +332,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusCompleted,
 				Usage:  &Usage{OutputVideoDuration: "5"},
@@ -335,7 +345,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5.5"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusCompleted,
 				Usage:  &Usage{OutputVideoDuration: "5.5"},
@@ -347,7 +357,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusRunning},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusInProgress,
 			},
@@ -363,7 +373,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "InvalidParameter", Message: "prompt violates content policy"},
@@ -376,7 +386,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Usage:  &dashscope.TaskUsage{},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusCompleted,
 			},
@@ -387,7 +397,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: "SOME_NEW_STATUS"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "unrecognized_dashscope_status", Message: `dashscope reported unrecognized task_status "SOME_NEW_STATUS"`},
@@ -399,7 +409,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusCanceled},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "dashscope_task_canceled", Message: "dashscope reported task_status CANCELED"},
@@ -411,7 +421,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusUnknown},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "dashscope_task_unknown", Message: "dashscope reported task_status UNKNOWN (task expired past its 24h validity, or never existed)"},
@@ -421,7 +431,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FromGetTaskResponse(tt.resp)
+			got := FromGetTaskResponse("v0_pub", tt.resp)
 			if got.ID != tt.want.ID || got.Object != tt.want.Object || got.Status != tt.want.Status {
 				t.Errorf("FromGetTaskResponse() = %+v, want %+v", got, tt.want)
 			}

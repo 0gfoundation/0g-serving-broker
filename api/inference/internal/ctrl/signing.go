@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/gowebpki/jcs"
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 const ChatPrefix = "chat"
@@ -159,7 +159,7 @@ func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 // Parity note: this is the image-flow counterpart of signChatWithKey, NOT of
 // signCentralizedRoutingProof. If image-editing is ever enabled for a
 // centralized provider, a sibling function (signImageResponseRoutingProof)
-// must be added that also takes *tls.ConnectionState and emits the TLS
+// must be added that also takes the upstream cert fingerprint and emits the TLS
 // fingerprint / ProviderType / ProviderIdentity fields — otherwise a verifier
 // would see a TEE-signed envelope with no evidence of which upstream served
 // the image. The guard below fails loud so the gap cannot be reached silently
@@ -198,19 +198,36 @@ func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string
 // signCentralizedRoutingProof creates a TEE-signed routing proof for centralized
 // provider requests. The proof includes request/response hashes, provider identity,
 // and the TLS certificate fingerprint proving the connection target.
-func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey string, tlsState *tls.ConnectionState) error {
+//
+// tlsFingerprint comes from Ctrl.upstreamCertFingerprint (proxy.go), which resolves
+// it from either the broker's own resp.TLS or an in-enclave shim's report — this
+// function is deliberately indifferent to which, so the proof format and every
+// verifier stay unchanged whether or not a protocol translator sits in the path.
+func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tlsFingerprint string) error {
 	requestSha256 := sha256Hex(reqBody)
 	responseSha256 := sha256Hex(respData)
 
-	// Extract TLS certificate fingerprint — refuse to sign without it.
-	// A routing proof with an empty fingerprint carries a TEE signature but
-	// provides no TLS evidence, giving verifiers a false sense of security.
-	certInfo := teeutil.ExtractTLSInfo(tlsState)
-	if certInfo == nil || certInfo.PeerCertFingerprint == "" {
-		return fmt.Errorf("TLS certificate not available for centralized provider routing proof (response and billing are unaffected)")
+	// Refuse to sign without a well-formed fingerprint. An empty one carries a TEE
+	// signature with no TLS evidence at all, giving verifiers false confidence.
+	// Re-validating the format here (rather than trusting the resolver) is what
+	// keeps this true for EVERY source, and it is the last gate before the value is
+	// joined into a ':'-delimited signed text that escapes nothing — a value proven
+	// to be 32 hex bytes cannot smuggle a delimiter, and a caller that passed the
+	// wrong string (chatKey and this are adjacent same-typed parameters) fails
+	// closed instead of signing a proof that attests to a UUID.
+	normalized, ok := teeutil.NormalizeCertFingerprint(tlsFingerprint)
+	if !ok {
+		// No metric here when the value is empty: upstreamCertFingerprint already
+		// counted that skip with the precise reason (no_tls / no_sidecar_report), and
+		// counting again would make the reason label double-count the same lost proof.
+		// A non-empty but malformed value never came from the resolver, so it is a
+		// caller bug and does get counted.
+		if tlsFingerprint != "" {
+			monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
+		}
+		return fmt.Errorf("no usable upstream TLS certificate fingerprint for centralized provider routing proof (response and billing are unaffected)")
 	}
-	tlsFingerprint := certInfo.PeerCertFingerprint
-	c.logger.Debugf("TLS cert fingerprint captured: %s (server: %s)", tlsFingerprint, certInfo.ServerName)
+	tlsFingerprint = normalized
 
 	text := teeutil.FormatRoutingProofText(
 		requestSha256, responseSha256,
@@ -222,6 +239,7 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey str
 
 	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
 	if err != nil {
+		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
 		return fmt.Errorf("failed to sign routing proof: %w", err)
 	}
 

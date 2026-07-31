@@ -424,7 +424,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		// once. Only meaningful for centralized providers.
 		var servingDomain string
 		if cfg.IsCentralized() {
-			servingDomain = parseServingDomain(cfg.TargetURL)
+			servingDomain = upstreamServingDomain(cfg)
 		}
 		// Provider class is surfaced for every forwarder (centralized and standard),
 		// same gate as the single-model path. A standard provider still hides its
@@ -735,7 +735,7 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 	}
 	if cfg.IsCentralized() {
 		obj.ProviderIdentity = cfg.ProviderIdentity
-		obj.ServingDomain = parseServingDomain(cfg.TargetURL)
+		obj.ServingDomain = upstreamServingDomain(cfg)
 	}
 
 	// Provider display metadata is provider-type-agnostic; surface whenever set.
@@ -803,6 +803,25 @@ func (h *Handler) GetModels(ctx *gin.Context) {
 		Data:      []ModelObject{obj},
 		PriceFeed: priceFeedOut,
 	})
+}
+
+// upstreamServingDomain resolves the vendor hostname to publish as serving_domain
+// for a centralized provider.
+//
+// targetUrl is the right source only when the broker dials the vendor itself. Under
+// targetTLSProxy it is an in-CVM container name — publishing that would disclose
+// internal topology AND break this field's contract (it is specified as matching
+// the SNI/SAN of the upstream TLS connection, which the translator now makes).
+// The operator declares the real host instead; see Service.UpstreamDomain for why
+// that is safe to take on their word.
+//
+// One helper rather than the condition inlined at both call sites: they publish the
+// same field and must not drift.
+func upstreamServingDomain(cfg config.Service) string {
+	if cfg.TargetTLSProxy {
+		return cfg.UpstreamDomain
+	}
+	return parseServingDomain(cfg.TargetURL)
 }
 
 // parseServingDomain extracts the bare hostname (FQDN) from a target URL,

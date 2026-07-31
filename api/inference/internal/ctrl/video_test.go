@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -385,9 +386,10 @@ func TestVideoOutputUnits_PerModelAndFallback(t *testing.T) {
 }
 
 // TestVideoOutputUnits_PerUnitTableMiss verifies a bucketed-model request for an
-// unlisted (resolution, duration) bills the table MAX, never the seconds×ratio
-// formula (which would underbill, and which a client could force by requesting
-// an untabled combo).
+// unlisted (resolution, duration) stays inside the table — rounding up to the
+// bucket that covers it, or the table MAX when none does — never the seconds×ratio
+// formula (which would underbill, and which a client could force by requesting an
+// untabled combo).
 func TestVideoOutputUnits_PerUnitTableMiss(t *testing.T) {
 	entry := config.ModelPricingEntry{
 		Model:       "minimax-hailuo",
@@ -406,8 +408,115 @@ func TestVideoOutputUnits_PerUnitTableMiss(t *testing.T) {
 	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 6, "768P"); got != 6 {
 		t.Errorf("table hit (768P,6) = %d, want 6", got)
 	}
-	// Miss (duration 8 not tabled): must bill table-max (12), NOT ceil(8*1.0)=8.
+	// Miss with NO bucket that covers it (duration 8 exceeds every 768P row): the
+	// table max is the only conservative answer, and it must never fall to the
+	// seconds-ratio underbill of ceil(8*1.0)=8.
 	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 8, "768P"); got != 12 {
-		t.Errorf("table miss = %d, want table-max 12 (never the seconds-ratio underbill)", got)
+		t.Errorf("uncovered miss = %d, want table-max 12 (never the seconds-ratio underbill)", got)
+	}
+
+	// Miss BELOW the smallest bucket: bill the cheapest bucket that covers it, not
+	// the table max. This is the reachable one — a vendor whose minimum duration
+	// shifts (MiniMax H3's floor moved 5 -> 4, which is also its default request
+	// shape) drops the MOST COMMON request into a miss, and billing the table max
+	// would charge a 4-second 768P clip at the 1080P rate. Rounding up to the next
+	// bucket is what a bucketed price list means, and it is the price the client can
+	// actually look up in /v1/models.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 4, "768P"); got != 6 {
+		t.Errorf("sub-bucket miss = %d, want the covering 768P bucket 6 — not the cross-resolution table max", got)
+	}
+	// The covering bucket is resolution-scoped: a 4s 1080P clip takes the 1080P row.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 4, "1080P"); got != 12 {
+		t.Errorf("sub-bucket miss at 1080P = %d, want 12", got)
+	}
+	// An untabulated RESOLUTION has no covering bucket either, however short the
+	// clip — so it lands on the same table-max path as an over-long duration, not
+	// on the seconds-ratio underbill. Worth pinning because the branch reads as if
+	// it were about duration only.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 4, "2160P"); got != 12 {
+		t.Errorf("untabulated resolution = %d, want table-max 12", got)
+	}
+}
+
+// TestVideoTableMissThrottleKeyIsNotClientMintable: every reason shares one 64-key
+// memo, and overflow flushes it for ALL of them — so a table-miss key derived from
+// the caller's own size/seconds would both un-throttle itself and take the
+// routing-proof reasons down with it. The key must come from the configured table.
+func TestVideoTableMissThrottleKeyIsNotClientMintable(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "minimax-hailuo",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:  config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{{Resolution: "768P", Duration: 6, Units: 6}},
+		},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo")}
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	// next_bucket: every one of these rounds up to the same configured row, so the
+	// caller's seconds must not turn one missing row into one line per request.
+	for i := 0; i < maxProofSkipKeys*4; i++ {
+		c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), int64(i%5)+1, "768P")
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d times for one missing row, want 1 — seconds is in the key", rec.errors)
+	}
+
+	// uncovered: size is free text echoed from the request, so a fresh one per
+	// request must not mint a key either.
+	for i := 0; i < maxProofSkipKeys*4; i++ {
+		c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 4, fmt.Sprintf("768P-%d", i))
+	}
+	if rec.errors != 2 {
+		t.Errorf("logged %d times total, want 2 — size is in the key", rec.errors)
+	}
+
+	n := 0
+	c.proofSkipLogged.Range(func(_, _ any) bool { n++; return true })
+	if n != 2 {
+		t.Errorf("memo holds %d entries for two missing rows, want 2", n)
+	}
+}
+
+// TestEscapeVendorJobID pins what may reach the poll URL. The id is upstream-supplied
+// and the URL carries the broker's injected vendor credentials, so a value that
+// changes the URL's shape must not survive. Behind a translator EncodeJobID already
+// rules those out; this covers the centralized vendor spoken to DIRECTLY, where
+// isContractJobID only logs.
+func TestEscapeVendorJobID(t *testing.T) {
+	// Every id shape actually in use must be byte-identical — escaping must not
+	// change the URL for any job that works today.
+	for _, id := range []string{
+		"v0_task-abc",                          // what our translator publishes
+		"v1_0385dc795ff840739d5a1a7bc7f3e01d",  // ditto, UUID-compacted
+		"0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // DashScope, pre-tagging
+		"425080991981768",                      // MiniMax
+	} {
+		if got := escapeVendorJobID(id); got != id {
+			t.Errorf("escapeVendorJobID(%q) = %q — a working id's URL must not change", id, got)
+		}
+	}
+
+	// PathEscape handles separators but leaves a bare dot segment live, and a live
+	// ".." walks the vendor's URL instead of naming a task under it. The exact
+	// output is asserted, not just "changed": double-encoding is the subtle part —
+	// a single %2E is the classic bypass on a proxy that decodes before it
+	// normalizes, and "" would be worse than "..", turning the vendor's item
+	// endpoint into its collection endpoint.
+	for _, tc := range []struct{ id, want string }{
+		{"..", "%252E%252E"},
+		{".", "%252E"},
+	} {
+		if got := escapeVendorJobID(tc.id); got != tc.want {
+			t.Errorf("escapeVendorJobID(%q) = %q, want %q", tc.id, got, tc.want)
+		}
+	}
+	for _, id := range []string{"a?b", "a#b", "a/b", "a b"} {
+		got := escapeVendorJobID(id)
+		if got == id {
+			t.Errorf("escapeVendorJobID(%q) passed a URL metacharacter through unescaped", id)
+		}
 	}
 }

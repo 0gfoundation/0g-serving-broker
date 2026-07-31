@@ -1478,6 +1478,287 @@ service:
 	}
 }
 
+// TestLoadConfig_TargetTLSProxyAllowsHTTPTarget: a protocol-translation sidecar
+// inside the broker's own CVM is reached over plaintext HTTP by construction, and
+// it — not the broker — makes the vendor TLS connection. Requiring HTTPS on that
+// hop is what previously forced every translated provider down to providerType
+// 'standard' (no verification at all).
+func TestLoadConfig_TargetTLSProxyAllowsHTTPTarget(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "http://0g-minimax-video-translator:8090"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "video-generation"
+  model: "MiniMax-H3"
+  verifiability: "TeeML"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	if err := loadConfig(cfg); err != nil {
+		t.Fatalf("targetTLSProxy should waive the HTTPS requirement: %v", err)
+	}
+	if !cfg.Service.TargetTLSProxy {
+		t.Error("targetTLSProxy was not loaded")
+	}
+}
+
+// TestLoadConfig_TargetTLSProxyRejectedForNonCentralized: nothing outside the
+// centralized routing proof reads the sidecar's report, so an operator who set
+// this elsewhere is expecting verification they would not be getting.
+func TestLoadConfig_TargetTLSProxyRejectedForNonCentralized(t *testing.T) {
+	for _, providerType := range []string{"standard", "decentralized"} {
+		t.Run(providerType, func(t *testing.T) {
+			configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "http://0g-minimax-video-translator:8090"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "test"
+  providerType: "`+providerType+`"
+  targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
+`)
+			t.Setenv("CONFIG_FILE", configPath)
+
+			cfg := &Config{}
+			err := loadConfig(cfg)
+			if err == nil {
+				t.Fatalf("expected targetTLSProxy to be rejected for providerType %q", providerType)
+			}
+			if !strings.Contains(err.Error(), "targetTLSProxy") {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_TargetTLSProxyRequiresInEnclaveTarget: the flag makes the broker
+// sign a fingerprint some OTHER process reported, so "which process" is the whole
+// security question. An external target is not merely unsupported — it is strictly
+// worse than not setting the flag, since the broker then ignores its own resp.TLS
+// in favour of a header that host writes.
+func TestLoadConfig_TargetTLSProxyRequiresInEnclaveTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		targetURL string
+		wantErr   string
+	}{
+		{name: "compose service name", targetURL: "http://0g-minimax-video-translator:8090"},
+		{name: "loopback", targetURL: "http://127.0.0.1:8090"},
+		{name: "localhost", targetURL: "http://localhost:8090"},
+		{name: "private range", targetURL: "http://10.1.2.3:8090"},
+		{name: "https vendor endpoint", targetURL: "https://api.minimax.io", wantErr: "plaintext 'http://' targetUrl"},
+		{name: "public dns host", targetURL: "http://api.minimax.io", wantErr: "public DNS host"},
+		{name: "routable ip", targetURL: "http://93.184.216.34:8090", wantErr: "routable address"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "`+tt.targetURL+`"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "video-generation"
+  model: "test"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
+`)
+			t.Setenv("CONFIG_FILE", configPath)
+
+			cfg := &Config{}
+			err := loadConfig(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected %s to be accepted as an in-CVM target: %v", tt.targetURL, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected %s to be rejected", tt.targetURL)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not mention %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_TargetTLSProxyRestrictedToVideo: only video-generation gates its
+// ZG-Res-Key advertisement on the proof being producible, and under this flag a
+// 200 with no fingerprint is routine — so any other modality would hand clients a
+// signature handle that can only 404. Fail closed until that path is wired.
+func TestLoadConfig_TargetTLSProxyRestrictedToVideo(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "http://0g-shim:8090"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "test"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected targetTLSProxy to be rejected for a non-video service type")
+	}
+	if !strings.Contains(err.Error(), "video-generation") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestValidateInEnclaveTarget_BypassShapes exercises the URL forms that would let a
+// routable host masquerade as an in-CVM sidecar. This check is what keeps
+// targetTLSProxy's trust story honest — if any of these start passing, the broker
+// would sign a fingerprint reported by a host outside its own enclave.
+// TestLoadConfig_UpstreamDomainRequiredWithTargetTLSProxy: without it the routing
+// proof carries a certificate fingerprint and /v1/models offers no host to check it
+// against — provider_identity alone is not enough, since one vendor can front
+// several endpoints with different certificates (MiniMax serves both api.minimax.io
+// and api.minimaxi.com). A proof nobody can falsify is not verification.
+func TestLoadConfig_UpstreamDomainRequiredWithTargetTLSProxy(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "http://0g-minimax-video-translator:8090"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "video-generation"
+  model: "MiniMax-H3"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  targetTLSProxy: true
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected targetTLSProxy without upstreamDomain to be rejected")
+	}
+	if !strings.Contains(err.Error(), "upstreamDomain is required") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestLoadConfig_UpstreamDomainRejectedWithoutTargetTLSProxy: on a direct
+// connection targetUrl already names the vendor, so this field could only publish a
+// domain the broker does not actually dial.
+func TestLoadConfig_UpstreamDomainRejectedWithoutTargetTLSProxy(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "https://api.minimax.io"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "MiniMax-Text"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  upstreamDomain: "api.minimax.io"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected upstreamDomain without targetTLSProxy to be rejected")
+	}
+	if !strings.Contains(err.Error(), "only supported alongside") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestValidateUpstreamDomain pins the shape: this value is published verbatim as
+// serving_domain and a verifier fetches exactly that host's certificate, so it has
+// to be a hostname and nothing else. An IP is rejected because a certificate's
+// meaning here comes from the hostname check, which an IP cannot carry.
+func TestValidateUpstreamDomain(t *testing.T) {
+	rejected := []string{
+		"",                       // empty
+		"https://api.minimax.io", // scheme
+		"api.minimax.io:443",     // port
+		"api.minimax.io/v2",      // path
+		"user@api.minimax.io",    // userinfo
+		"93.184.216.34",          // IPv4
+		"::1",                    // IPv6
+		"minimax",                // single label, not an FQDN
+		"api..minimax.io",        // empty label
+		"-api.minimax.io",        // leading hyphen
+	}
+	for _, d := range rejected {
+		if err := validateUpstreamDomain(d); err == nil {
+			t.Errorf("accepted %q as an upstream domain", d)
+		}
+	}
+
+	accepted := []string{
+		"api.minimax.io",
+		"api.minimaxi.com",
+		"dashscope-intl.aliyuncs.com",
+		"API.MINIMAX.IO", // case is not the operator's problem
+	}
+	for _, d := range accepted {
+		if err := validateUpstreamDomain(d); err != nil {
+			t.Errorf("rejected legitimate upstream domain %q: %v", d, err)
+		}
+	}
+}
+
+func TestValidateInEnclaveTarget_BypassShapes(t *testing.T) {
+	rejected := []string{
+		"http://user@api.minimax.io/",              // userinfo hiding a public host
+		"http://api.minimax.io./",                  // trailing-dot FQDN
+		"http://API.MINIMAX.IO",                    // uppercase public host
+		"http://[2001:4860:4860::8888]:80",         // routable IPv6
+		"http://8.8.8.8",                           // routable IPv4
+		"http://api.minimax.io:8090",               // public host on a sidecar-shaped port
+		"https://0g-minimax-video-translator:8090", // right host, TLS hop the broker can't witness
+		"//0g-shim:8090",                           // scheme-relative
+		"0g-shim:8090",                             // no scheme (parses as scheme "0g-shim")
+		"",                                         // empty
+	}
+	for _, target := range rejected {
+		if err := validateInEnclaveTarget(target); err == nil {
+			t.Errorf("accepted %q as an in-CVM target", target)
+		}
+	}
+
+	accepted := []string{
+		"http://0g-minimax-video-translator:8090", // the documented shape
+		"http://localhost:8090",
+		"http://127.0.0.1:8090",
+		"http://[::1]:8090",
+		"http://10.0.0.5:8090",
+		"http://172.16.3.4:8090",
+		"http://192.168.1.9:8090",
+		"HTTP://0g-shim:8090", // scheme case is not the operator's problem
+	}
+	for _, target := range accepted {
+		if err := validateInEnclaveTarget(target); err != nil {
+			t.Errorf("rejected legitimate in-CVM target %q: %v", target, err)
+		}
+	}
+}
+
 func TestLoadConfig_InvalidProviderType(t *testing.T) {
 	configPath := writeTestConfig(t, `
 service:

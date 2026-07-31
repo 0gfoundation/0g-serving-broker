@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -28,6 +30,99 @@ func normalizeProviderIdentity(identity *string) error {
 	*identity = strings.ToLower(*identity)
 	if !validProviderIdentity.MatchString(*identity) {
 		return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", *identity)
+	}
+	return nil
+}
+
+// validateInEnclaveTarget enforces that a targetTLSProxy target really is the
+// in-CVM shape the flag claims: plaintext http:// to a host that is not routable
+// off the machine — loopback, a private/link-local address, or a bare hostname
+// (a compose service name, which only resolves on the CVM's own docker network).
+//
+// This is what anchors the flag's trust story rather than leaving it to a comment.
+// Under targetTLSProxy the broker signs a fingerprint some other process reported
+// instead of one it witnessed, so "which process" is the whole security question:
+//
+//   - An https:// target is rejected because it is strictly worse than not setting
+//     the flag at all. That hop has a real resp.TLS the broker could bind itself,
+//     and the flag would make it ignore that first-hand evidence in favour of a
+//     header the remote host writes — handing an external upstream authorship of
+//     its own routing proof. Nothing legitimate needs this: an in-CVM shim hop is
+//     never TLS.
+//   - Link-local (169.254/16) is rejected too: it is not a compose-network shape
+//     and it contains the cloud metadata address. Loopback, the RFC1918 ranges a
+//     docker bridge hands out, and a bare compose service label are the whole set.
+//   - A routable host is rejected because it also sends the vendor API key over
+//     the public network in cleartext (the broker injects additionalSecret on
+//     every forwarded call), and because a shim outside the enclave is not covered
+//     by the CVM's attestation, which is the only reason its report is worth
+//     anything.
+//
+// What remains, deliberately, is that the operator can still declare a fake shim
+// as a service in their own compose. That is not a hole this check can close, and
+// it does not need to: the compose is hashed into the CVM measurement, so cheating
+// that way changes the quote — the same trust boundary every other part of the
+// deployment already rests on. See docs/design/sidecar-routing-proof.md.
+func validateInEnclaveTarget(targetURL string) error {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("invalid config: service.targetUrl '%s' is not a valid URL: %w", targetURL, err)
+	}
+	if strings.ToLower(u.Scheme) != "http" {
+		return fmt.Errorf("invalid config: service.targetTLSProxy requires a plaintext 'http://' targetUrl (an in-CVM sidecar hop is never TLS), got '%s'. If this target is the vendor itself, drop targetTLSProxy so the broker binds the certificate it sees directly", targetURL)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("invalid config: service.targetUrl '%s' has no host", targetURL)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsUnspecified() {
+			return fmt.Errorf("invalid config: service.targetTLSProxy requires an in-CVM target, but targetUrl '%s' is a routable address — a sidecar outside the enclave is not covered by this broker's attestation, and the injected upstream API key would cross the public network in cleartext", targetURL)
+		}
+		return nil
+	}
+	// A dotted name resolves through public DNS; a bare label is a docker-compose
+	// service name on the CVM's own network (e.g. 0g-minimax-video-translator).
+	// "localhost" needs no exemption: it has no dot, so it never reaches here.
+	if strings.Contains(host, ".") {
+		return fmt.Errorf("invalid config: service.targetTLSProxy requires an in-CVM target, but targetUrl '%s' names a public DNS host — use the sidecar's compose service name (e.g. http://0g-minimax-video-translator:8090) so the target cannot resolve off this machine", targetURL)
+	}
+	return nil
+}
+
+// validUpstreamDomain matches a bare lowercase FQDN: dot-separated labels of
+// letters/digits/hyphens, at least two labels. Deliberately rejects anything with a
+// scheme, port, path, or userinfo — this value is published verbatim as
+// serving_domain and a verifier is expected to fetch that exact host's certificate,
+// so it must be a hostname and nothing else.
+var validUpstreamDomain = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// validateUpstreamDomain checks service.upstreamDomain is a bare vendor FQDN.
+//
+// An IP address is rejected on purpose: certificate validation is what gives the
+// routing proof its meaning, and a verifier fetching a bare IP cannot perform the
+// hostname check that makes a certificate mean "this is that vendor".
+func validateUpstreamDomain(domain string) error {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if strings.Contains(d, "://") || strings.ContainsAny(d, "/:@") {
+		return fmt.Errorf("invalid config: service.upstreamDomain must be a bare hostname with no scheme, port, path or userinfo (e.g. 'api.minimax.io'), got '%s'", domain)
+	}
+	if net.ParseIP(d) != nil {
+		return fmt.Errorf("invalid config: service.upstreamDomain must be a hostname, not an IP address — a verifier compares the routing proof's fingerprint against the certificate served for this name, and an IP cannot carry that hostname check; got '%s'", domain)
+	}
+	// DNS limits, so the function actually means "a hostname" rather than "a
+	// dot-separated string": a name past these cannot resolve, which makes the
+	// published serving_domain a dead end for the verifier it exists to serve.
+	if len(d) > 253 {
+		return fmt.Errorf("invalid config: service.upstreamDomain is %d characters, over the 253-character DNS limit", len(d))
+	}
+	for _, label := range strings.Split(d, ".") {
+		if len(label) > 63 {
+			return fmt.Errorf("invalid config: service.upstreamDomain has a %d-character label (%q), over the 63-character DNS limit", len(label), label)
+		}
+	}
+	if !validUpstreamDomain.MatchString(d) {
+		return fmt.Errorf("invalid config: service.upstreamDomain must be a fully-qualified domain name (e.g. 'api.minimax.io'), got '%s'", domain)
 	}
 	return nil
 }
@@ -290,6 +385,46 @@ type Service struct {
 	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
 	// Only used when ProviderType is "centralized".
 	ProviderIdentity string `yaml:"providerIdentity"`
+	// TargetTLSProxy declares that TargetURL is a protocol-translation sidecar
+	// running INSIDE this broker's own TEE (same CVM, same TDX quote) rather than
+	// the vendor endpoint itself — the deployment shape used for a vendor whose
+	// wire protocol the broker doesn't speak natively (see api/videotranslator).
+	//
+	// It exists because a sidecar breaks the centralized routing proof's evidence
+	// chain: the proof binds the leaf certificate of the connection that reached
+	// the vendor, read from resp.TLS, but with a shim in front the broker's own hop
+	// is plaintext HTTP on the compose network and the vendor handshake happens in
+	// the shim. Setting this makes the broker take the fingerprint from the shim's
+	// tee.HeaderUpstreamCertFingerprint response header instead, and waives the
+	// HTTPS requirement on TargetURL.
+	//
+	// SECURITY: only set this when the target really is in-enclave. The header is a
+	// plain string an upstream can put whatever it likes in; what makes it evidence
+	// is that the shim is covered by the same attestation as the broker. Pointing
+	// this at an external host would let that host dictate its own routing proof.
+	// The broker never reads the header when this is false, so a rogue upstream on
+	// an ordinary centralized deployment cannot forge a fingerprint.
+	TargetTLSProxy bool `yaml:"targetTLSProxy"`
+	// UpstreamDomain is the vendor FQDN the in-enclave translator actually connects
+	// to (e.g. "api.minimax.io"). Required with targetTLSProxy, meaningless without
+	// it, and published as serving_domain in GET /v1/models.
+	//
+	// It exists because targetTLSProxy makes TargetURL an in-CVM container name,
+	// which is both the wrong thing to publish (internal topology) and a violation
+	// of serving_domain's contract — that field is specified as matching the SNI /
+	// certificate SAN of the upstream connection, which the broker no longer makes
+	// itself. Suppressing it instead would leave a verifier holding a certificate
+	// fingerprint with no host to check it against: provider_identity alone is not
+	// enough, since a vendor can front several endpoints (MiniMax serves
+	// api.minimax.io and api.minimaxi.com with different certificates).
+	//
+	// Unlike targetTLSProxy this is NOT a value the operator has to be trusted on,
+	// and that asymmetry is the whole reason it can be operator-declared: a wrong
+	// domain is self-defeating. A verifier fetches this host's real certificate and
+	// compares it against the fingerprint in the signed routing proof, so declaring
+	// a host the translator does not talk to makes verification FAIL rather than
+	// succeed falsely. It buys verifiability without buying trust.
+	UpstreamDomain string `yaml:"upstreamDomain"`
 	// ProviderName is an optional human-readable display name for the provider
 	// (e.g., "OpenAI", "Aliyun (CN)"). Surfaced as provider_name in /v1/models for
 	// presentation only. Unlike ProviderIdentity (a lowercase machine key), this is
@@ -1747,8 +1882,11 @@ func loadConfig(cfg *Config) error {
 		cfg.Service.TargetSeparated = true
 		// Require HTTPS for centralized providers — routing proof relies on
 		// resp.TLS which is only populated for HTTPS connections.
-		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
-			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
+		// Waived under targetTLSProxy: the target is then an in-enclave shim that made
+		// the vendor TLS connection itself and reports its fingerprint back on a
+		// header, so the proof has TLS evidence even though this hop doesn't.
+		if !cfg.Service.TargetTLSProxy && cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
+			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s' — set service.targetTLSProxy: true if this target is a protocol-translation sidecar inside this broker's own TEE", cfg.Service.TargetURL)
 		}
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
@@ -1805,6 +1943,48 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
 			log.Printf("[CONFIG] providerType 'standard' with type 'video-generation': the upstream is fully hidden only when it returns the asset via GET /videos/{id}/content (broker-proxied). An upstream that returns a direct asset URL in the response body will expose that URL's host to clients — the broker does not proxy video bytes or rewrite URL values.")
 		}
+	}
+
+	// targetTLSProxy only means anything to the centralized routing proof. On any
+	// other provider type nothing reads the header, so an operator who set it is
+	// working from a wrong mental model (most likely expecting verification they
+	// are not getting) — say so at load instead of booting a service that silently
+	// ignores it.
+	if cfg.Service.TargetTLSProxy && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
+		return fmt.Errorf("invalid config: service.targetTLSProxy is only supported when providerType is '%s' (it feeds the centralized routing proof), got '%s'", constant.ProviderTypeCentralized, cfg.Service.ProviderType)
+	}
+	if cfg.Service.TargetTLSProxy {
+		if err := validateInEnclaveTarget(cfg.Service.TargetURL); err != nil {
+			return err
+		}
+		// Restricted to the one modality whose response path is actually wired for
+		// it. targetTLSProxy makes "a 200 with no usable fingerprint" a routine
+		// outcome, and only video-generation decides whether to advertise ZG-Res-Key
+		// from whether the proof can actually be produced (the `signs` predicate in
+		// ctrl/video.go). Chatbot / image / speech still advertise it whenever the
+		// provider is centralized — harmless while a direct HTTPS hop guarantees
+		// resp.TLS, but under this flag it would hand clients a lookup handle that
+		// only 404s. Fail closed here rather than ship that; when a non-video shim
+		// lands, wire its modality's advertise predicate first, then widen this.
+		if cfg.Service.Type != constant.ServiceTypeVideoGeneration {
+			return fmt.Errorf("invalid config: service.targetTLSProxy is currently supported only for service type '%s' (the only modality whose signature advertisement is gated on the proof actually being producible), got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
+		}
+		// Required, not optional: without it the routing proof carries a certificate
+		// fingerprint and GET /v1/models offers no host to check it against, which
+		// makes the proof unfalsifiable in practice — the opposite of the point.
+		if cfg.Service.UpstreamDomain == "" {
+			return fmt.Errorf("invalid config: service.upstreamDomain is required when service.targetTLSProxy is set — targetUrl is then an in-CVM container name, so clients need the vendor FQDN (e.g. 'api.minimax.io') to fetch the certificate the routing proof's fingerprint is compared against")
+		}
+		if err := validateUpstreamDomain(cfg.Service.UpstreamDomain); err != nil {
+			return err
+		}
+		cfg.Service.UpstreamDomain = strings.ToLower(strings.TrimSpace(cfg.Service.UpstreamDomain))
+	}
+	// Meaningless without the flag: serving_domain is derived from targetUrl on every
+	// other deployment, and that IS the vendor host there. Setting this alongside a
+	// direct connection would publish a domain the broker does not actually dial.
+	if cfg.Service.UpstreamDomain != "" && !cfg.Service.TargetTLSProxy {
+		return fmt.Errorf("invalid config: service.upstreamDomain is only supported alongside service.targetTLSProxy (without it, serving_domain is derived from targetUrl, which already names the upstream)")
 	}
 
 	// Body-field injection is only applied for the chatbot service type (see

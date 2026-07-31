@@ -187,10 +187,26 @@ type Ctrl struct {
 	// tests construct a *Ctrl directly) — callers must fall back to context.Background() via
 	// videoPollBaseCtx rather than assume it is always set.
 	videoPollEnabled atomic.Bool
-	videoPollCfg     config.VideoPollConfig
-	videoPollCtx     context.Context
-	videoPollCancel  context.CancelFunc
-	videoPollWg      sync.WaitGroup
+
+	// proofSkipLogged throttles the "no routing proof for this response" errors,
+	// keyed by reason and by whatever detail distinguishes one cause from another
+	// (the reported host, for drift). Every one of these conditions is static — a
+	// stale sidecar image, a plaintext base URL, two config files disagreeing — so
+	// none self-heals between requests, and logging per response would recreate the
+	// log-volume failure broker_routing_proof_skipped_total exists to replace. The
+	// counter carries the rate; the log only has to carry the diagnosis.
+	//
+	// Time-windowed rather than log-once so a condition that is fixed and later
+	// recurs is still reported, and keyed by detail so drifting to a SECOND wrong
+	// host is not swallowed by the first.
+	proofSkipLogged sync.Map // string -> time.Time
+	// proofSkipKeys approximates proofSkipLogged's size so it can be bounded; exact
+	// agreement with the map under concurrency is not needed for a throttle.
+	proofSkipKeys   atomic.Int64
+	videoPollCfg    config.VideoPollConfig
+	videoPollCtx    context.Context
+	videoPollCancel context.CancelFunc
+	videoPollWg     sync.WaitGroup
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager

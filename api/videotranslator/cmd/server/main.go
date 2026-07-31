@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/videotranslator/config"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/dashscope"
@@ -58,8 +56,7 @@ func Main() {
 	client := dashscope.NewClient(cfg.DashScopeBaseURL, &http.Client{Timeout: cfg.RequestTimeout, Transport: transport})
 	videoHandler := handler.NewVideoHandler(client, logger)
 
-	engine := gin.New()
-	engine.Use(gin.Recovery())
+	engine := handler.NewEngine()
 	engine.POST("/videos", videoHandler.CreateVideo)
 	engine.GET("/videos/:id", videoHandler.GetVideo)
 	engine.GET("/videos/:id/content", videoHandler.GetVideoContent)

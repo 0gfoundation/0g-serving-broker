@@ -59,12 +59,32 @@ func (h *MiniMaxVideoHandler) CreateVideo(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, translate.FromMiniMaxCreateResponse(req, *mmResp))
+	out, err := translate.FromMiniMaxCreateResponse(req, *mmResp)
+	if err != nil {
+		// The vendor's id cannot be expressed in the contract the broker publishes
+		// (see translate.EncodeJobID). Fail here, loudly, on this vendor's FIRST
+		// request rather than handing downstream a key it cannot persist.
+		h.logger.Errorf("job id contract: %v", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "upstream returned an unusable job id"}})
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // GetVideo handles GET /videos/{id}.
 func (h *MiniMaxVideoHandler) GetVideo(c *gin.Context) {
-	taskID := c.Param("id")
+	publicID := c.Param("id")
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		// The only failure in these handlers that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's three
+		// distinct causes (unknown shape / malformed payload / not a task id) are
+		// discarded. Log it — this is also the path most likely to reject something
+		// legitimate.
+		h.logger.Warnf("video id %q rejected: %v", publicID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
+		return
+	}
 	authHeader := c.GetHeader("Authorization")
 
 	mmResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
@@ -87,7 +107,7 @@ func (h *MiniMaxVideoHandler) GetVideo(c *gin.Context) {
 		h.logger.Errorf("minimax get task %s: unrecognized status %q, mapping to failed", taskID, mmResp.Task.Status)
 	}
 
-	c.JSON(http.StatusOK, translate.FromMiniMaxGetTaskResponse(*mmResp))
+	c.JSON(http.StatusOK, translate.FromMiniMaxGetTaskResponse(publicID, *mmResp))
 }
 
 // GetVideoContent handles GET /videos/{id}/content: it looks up the task's
@@ -95,7 +115,18 @@ func (h *MiniMaxVideoHandler) GetVideo(c *gin.Context) {
 // through the translator rather than redirecting, keeping the vendor's asset
 // host hidden from the client.
 func (h *MiniMaxVideoHandler) GetVideoContent(c *gin.Context) {
-	taskID := c.Param("id")
+	publicID := c.Param("id")
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		// The only failure in these handlers that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's three
+		// distinct causes (unknown shape / malformed payload / not a task id) are
+		// discarded. Log it — this is also the path most likely to reject something
+		// legitimate.
+		h.logger.Warnf("video id %q rejected: %v", publicID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
+		return
+	}
 	authHeader := c.GetHeader("Authorization")
 
 	mmResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)

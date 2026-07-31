@@ -392,6 +392,24 @@ func (d *DB) Migrate() error {
 				return tx.AutoMigrate(&VideoJobOwner{})
 			},
 		},
+		{
+			ID: "video-job-owner-binary-collation",
+			Migrate: func(tx *gorm.DB) error {
+				// The published video job id's payload became case-SIGNIFICANT once the
+				// translator started encoding vendor ids (translate.EncodeJobID emits
+				// hex for a UUID and base64url otherwise). Under this column's inherited
+				// utf8mb4_0900_ai_ci, two ids differing only in payload case are one row
+				// for BOTH the unique index and the authorization lookup in
+				// GetVideoJobOwner — so a user authorized for their own job could reach
+				// a task id they never created by flipping case, and a legitimate
+				// creator could be denied by a pre-existing near-collision.
+				//
+				// Harmless for the ids in flight today (numeric and lowercase-hex
+				// payloads have no case to flip); this closes it before the first vendor
+				// that needs the base64 tag.
+				return tx.Exec("ALTER TABLE `video_job_owner` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

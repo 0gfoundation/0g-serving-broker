@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -514,26 +513,20 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		}
 	} else if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
-		var tlsState *tls.ConnectionState
+		var fingerprint string
 		if ginCtx, ok := ctx.(*gin.Context); ok {
-			if val, exists := ginCtx.Get("tlsState"); exists {
-				if ts, ok := val.(*tls.ConnectionState); ok {
-					tlsState = ts
-				} else {
-					c.logger.Warn("tlsState context value has unexpected type")
-				}
-			} else {
-				c.logger.Warn("tlsState not found in context")
+			if fingerprint = ginCtx.GetString(CtxKeyUpstreamCertFingerprint); fingerprint == "" {
+				c.logger.Warn("upstream cert fingerprint not found in context")
 			}
 		} else {
-			c.logger.Warn("context is not *gin.Context, cannot retrieve TLS state")
+			c.logger.Warn("context is not *gin.Context, cannot retrieve upstream cert fingerprint")
 		}
 		c.logger.Debug("Centralized provider, signing routing proof")
 		// Signing failure is non-fatal: the response and billing are already
 		// complete at this point.  Without a cached signature the SDK will get
 		// a 404 on /v1/proxy/signature/{chatID}, which is more honest than a
 		// TEE-signed proof that lacks TLS evidence.
-		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, tlsState); err != nil {
+		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, fingerprint); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	} else if !c.Service.TargetSeparated {

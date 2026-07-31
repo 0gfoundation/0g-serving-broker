@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
@@ -183,15 +185,22 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			} else {
 				c.logger.Errorf("video poll job %d: mark timed_out: %v", job.ID, err)
 			}
-		} else if job.IsWhitelisted {
+		} else {
+			// Terminal without ever signing a final body (see the completed-but-
+			// unresolvable path below): the provider may still deliver, so the
+			// create-time proof over the queued placeholder must not be what a client
+			// verifies the video against.
+			c.evictVideoSignature(job, errors.New("timed out before any terminal response could be signed"))
 			// Only the worker that actually won the guarded write (err == nil, not a lost
 			// race) records usage — otherwise two racing workers could both record it.
-			c.recordWhitelistedVideoPollUsage(job, 0, "")
+			if job.IsWhitelisted {
+				c.recordWhitelistedVideoPollUsage(job, 0, "")
+			}
 		}
 		return
 	}
 
-	body, ok := c.doVideoPollRequest(job)
+	body, respHeader, respTLS, ok := c.doVideoPollRequest(job)
 	if !ok {
 		c.rescheduleVideoPollJob(job)
 		return
@@ -209,8 +218,18 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			} else {
 				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
 			}
-		} else if job.IsWhitelisted {
-			c.recordWhitelistedVideoPollUsage(job, 0, "")
+		} else {
+			// Evict even though no video was generated. "Nothing delivered" is not the
+			// same as "no final body": the failed job resource is itself a body the
+			// client can GET /videos/{id}, and this service's contract is that
+			// ZG-Res-Key covers the FINAL body, not the create envelope. Leaving the
+			// queued-envelope proof would have a client following that contract compare
+			// it against {"status":"failed"} and see a valid TEE signature over the
+			// wrong hash — the false-tampering signal every other eviction prevents.
+			c.evictVideoSignature(job, errors.New("provider reported failed; final body never signed"))
+			if job.IsWhitelisted {
+				c.recordWhitelistedVideoPollUsage(job, 0, "")
+			}
 		}
 		return
 	}
@@ -235,6 +254,16 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		return
 	}
 
+	// Terminal and completed: this is the one poll that owes a routing proof, so it
+	// is the one that resolves (and, on a miss, logs and meters) the evidence. An
+	// empty ChatKey means the create response never advertised one, so no proof was
+	// ever promised — resolving anyway would meter a second loss for a request the
+	// create path already counted.
+	var upstreamCertFingerprint string
+	if job.ChatKey != "" {
+		upstreamCertFingerprint = c.upstreamCertFingerprint(respHeader, respTLS)
+	}
+
 	seconds, size, source := resolveVideoBilling(body, job.RequestBody, job.RequestContentType)
 
 	if source == "" {
@@ -250,8 +279,17 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			} else {
 				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, err)
 			}
-		} else if job.IsWhitelisted {
-			c.recordWhitelistedVideoPollUsage(job, 0, "")
+		} else {
+			// Terminal WITHOUT a re-sign: the provider says completed (so the client
+			// can fetch the finished video) but we could not resolve a duration, so
+			// nothing above signed the final body. Leaving the create-time signature
+			// in place would have the client verify the delivered video against a
+			// proof over the queued placeholder — a hash mismatch that reads as
+			// tampering. Drop it so the lookup 404s instead.
+			c.evictVideoSignature(job, errors.New("completed with no resolvable duration; final body never signed"))
+			if job.IsWhitelisted {
+				c.recordWhitelistedVideoPollUsage(job, 0, "")
+			}
 		}
 		return
 	}
@@ -284,8 +322,8 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			return
 		}
 		if job.ChatKey != "" {
-			if err := c.signChatWithKey(job.RequestBody, body, job.ChatKey); err != nil {
-				c.logger.Warnf("video poll job %d: failed to sign completed response (TEE verification will be unavailable): %v", job.ID, err)
+			if err := c.signVideoPollResult(job, body, upstreamCertFingerprint); err != nil {
+				c.dropStaleVideoSignature(job, err)
 			}
 		}
 		c.recordWhitelistedVideoPollUsage(job, seconds, rateClass)
@@ -337,6 +375,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			monitor.RecordVideoBillingSkipped()
 			if failErr := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "linked request row no longer exists"); failErr != nil && !errors.Is(failErr, db.ErrVideoPollJobAlreadyResolved) {
 				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, failErr)
+			} else if failErr == nil {
+				// The worst instance of the never-re-signed class: the provider DID
+				// report completed and the video is fetchable, but the job is now
+				// terminal so no later poll will sign the final body.
+				c.evictVideoSignature(job, errors.New("linked request row no longer exists; final body never signed"))
 			}
 			return
 		}
@@ -348,10 +391,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		// Re-sign under the SAME chatKey already returned to the client via the create
 		// response's ZG-Res-Key header, overwriting the placeholder signature made over
 		// the queued-status body (signChatWithKey just overwrites the cache entry keyed
-		// by chatKey — see signing.go) so a client that fetches /videos/{id}/content and
-		// verifies against ZG-Res-Key gets a signature over the real, final content.
-		if err := c.signChatWithKey(job.RequestBody, body, job.ChatKey); err != nil {
-			c.logger.Warnf("video poll job %d: failed to sign completed response (TEE verification will be unavailable): %v", job.ID, err)
+		// by chatKey — see signing.go) so a client verifying against ZG-Res-Key gets a
+		// signature over the job's real, final state. Note it binds the terminal poll
+		// JSON body, not the mp4 bytes served by /videos/{id}/content.
+		if err := c.signVideoPollResult(job, body, upstreamCertFingerprint); err != nil {
+			c.dropStaleVideoSignature(job, err)
 		}
 	}
 
@@ -362,18 +406,77 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 }
 
+// evictVideoSignature drops the create-time signature cached under job.ChatKey.
+//
+// Call it on any outcome where a final body EXISTS (or may still be delivered) that
+// the client can obtain, but nothing re-signed it. The create response was signed
+// over the queued placeholder on the assumption that a poll would overwrite it;
+// when that never happens, the client fetches a VALID broker signature whose
+// response hash does not match the video it downloaded — indistinguishable from
+// tampering. A 404 is the honest answer.
+//
+// The test is whether a body the client can OBTAIN exists, not whether a video was
+// produced: a provider-reported failure is still a job resource the client can GET,
+// so that path evicts too. The one case that does not is a create response with no
+// job id — with no id the client cannot fetch anything, so the cached signature
+// still describes exactly the response it holds (see dropUnpollableVideoSignature).
+//
+// Deliberately not gated on IsCentralized(): a decentralized in-network provider's
+// content signature goes just as stale as a routing proof.
+func (c *Ctrl) evictVideoSignature(job model.VideoPollJob, cause error) {
+	if job.ChatKey == "" {
+		return
+	}
+	c.svcCache.Delete(c.chatCacheKey(job.ChatKey))
+	c.logger.Errorf("video poll job %d: no final body was ever signed; dropped the create-time signature so ZG-Res-Key 404s instead of returning a proof over the queued placeholder: %v", job.ID, cause)
+}
+
+// dropStaleVideoSignature is evictVideoSignature for the case where a re-sign was
+// actually ATTEMPTED and failed — the only case that represents a lost routing
+// proof, and so the only one that feeds the skipped-proof counter.
+func (c *Ctrl) dropStaleVideoSignature(job model.VideoPollJob, cause error) {
+	// No metric here: whichever step failed already counted it with the reason it
+	// knows — upstreamCertFingerprint for missing evidence, signCentralizedRoutingProof
+	// for a signing failure. Counting again would double-report one lost proof, and a
+	// failure on the DECENTRALIZED branch (signChatWithKey) is not a routing-proof
+	// skip at all.
+	c.evictVideoSignature(job, cause)
+}
+
+// signVideoPollResult is the background scheduler's counterpart to signVideoResponse
+// (video.go): same dispatch on the trust model, but reading the poll's own upstream
+// certificate instead of a *gin.Context — there is no live HTTP request here.
+//
+// It re-signs under the SAME chatKey the create response already returned to the
+// client via ZG-Res-Key, overwriting the earlier signature over the queued-status
+// body (both signers just overwrite the cache entry keyed by chatKey — see
+// signing.go), so a client that verifies after fetching the finished video gets a
+// proof over the real content.
+func (c *Ctrl) signVideoPollResult(job model.VideoPollJob, body []byte, upstreamCertFingerprint string) error {
+	if c.Service.IsCentralized() {
+		return c.signCentralizedRoutingProof(job.RequestBody, body, job.ChatKey, upstreamCertFingerprint)
+	}
+	return c.signChatWithKey(job.RequestBody, body, job.ChatKey)
+}
+
 // doVideoPollRequest issues one GET to job.PollURL and returns the response body. ok is false
 // on any transport/status/read error, all of which the caller treats as "try again next
 // interval" (bounded by ExpiresAt), not an immediate failure — a single blip should not lose a
 // job that would otherwise have billed correctly on the next attempt.
-func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool) {
+//
+// respHeader/respTLS are this poll's own evidence for Ctrl.upstreamCertFingerprint:
+// a centralized provider's routing proof over the completed body must bind the
+// connection that actually delivered that body, not the one the create request used
+// possibly hours earlier. They are returned unresolved so the caller can resolve
+// once, at the terminal poll, rather than on every attempt.
+func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, respHeader http.Header, respTLS *tls.ConnectionState, ok bool) {
 	pollCtx, cancel := context.WithTimeout(c.videoPollBaseCtx(), c.videoPollCfg.PollRequestTimeout)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(pollCtx, http.MethodGet, job.PollURL, nil)
 	if err != nil {
 		c.logger.Errorf("video poll job %d: build poll request: %v", job.ID, err)
-		return nil, false
+		return nil, nil, nil, false
 	}
 	httpReq.Header.Set("Accept-Encoding", "identity")
 	// Per-model secret keyed on the job's resolved model, so a poll to an upstream
@@ -381,18 +484,25 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool)
 	for k, v := range c.Service.EffectiveAdditionalSecret(job.ResolvedModel) {
 		httpReq.Header.Set(k, v)
 	}
+	// Last, matching the other two request builders. This is the one that actually
+	// talks to the targetTLSProxy sidecar and whose RESPONSE header is trusted as
+	// evidence, so it is the builder where an outbound copy of that header would
+	// matter most — an operator naming it in additionalSecret is the only way it
+	// could get here, and that must not be able to prime an echo.
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertHost)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		c.logger.Warnf("video poll job %d: poll request failed (will retry): %v", job.ID, err)
-		return nil, false
+		return nil, nil, nil, false
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.logger.Warnf("video poll job %d: read poll response (will retry): %v", job.ID, err)
-		return nil, false
+		return nil, nil, nil, false
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -400,7 +510,7 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool)
 		// intermediary, echo back request content), and this logs on every retry until the
 		// job resolves — truncate rather than writing the full body to broker logs each time.
 		c.logger.Warnf("video poll job %d: poll returned status %d (will retry): %s", job.ID, resp.StatusCode, truncateForLog(respBody, 500))
-		return nil, false
+		return nil, nil, nil, false
 	}
 
 	// For forwarder providers, strip #184 upstream identity/cost leak fields before this body
@@ -415,7 +525,12 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, ok bool)
 		respBody = c.sanitizeForwarderPollResponseBody(respBody, resp.Header.Get("Content-Encoding"))
 	}
 
-	return respBody, true
+	// Deliberately NOT resolving the routing-proof fingerprint here: this runs on
+	// every poll while a proof is owed only on the terminal one. Hand the two
+	// response fields the resolver reads back to the caller instead — neither is
+	// affected by the deferred Body close — so resolution (which logs and meters a
+	// miss) happens exactly once, where the proof is actually due.
+	return respBody, resp.Header, resp.TLS, true
 }
 
 // sanitizeForwarderPollResponseBody mirrors sanitizeForwarderResponseBody (sanitize.go) for the

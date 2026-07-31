@@ -45,6 +45,16 @@ var (
 	// WhitelistAudioSecondsTotal mirrors AudioSecondsTotal for whitelisted users.
 	WhitelistAudioSecondsTotal *prometheus.CounterVec
 
+	// RoutingProofSkippedTotal counts responses from a centralized provider that
+	// were served WITHOUT a TEE routing proof, by reason. A centralized service
+	// advertises its verifiability statically in config, so nothing else notices
+	// when proof production stops: the individual per-response log lines are the
+	// same volume as ordinary traffic. This counter is the aggregate signal —
+	// "sidecar rolled back to an image that doesn't report the upstream
+	// certificate" and "every proof has silently vanished for an hour" look
+	// identical in logs and obvious here.
+	RoutingProofSkippedTotal *prometheus.CounterVec
+
 	// VideoBillingSkippedTotal counts video-generation requests that returned
 	// 200 but for which no positive duration could be resolved from either the
 	// upstream response or the client request — i.e. the video was served
@@ -52,6 +62,18 @@ var (
 	// isn't being parsed (e.g. an async provider that doesn't echo seconds), so
 	// it must be alertable rather than a silent skip.
 	VideoBillingSkippedTotal prometheus.Counter
+
+	// VideoTableMissTotal counts video-generation requests whose observed
+	// (resolution, duration) had no exact per_unit_table row, labeled by whether a
+	// bucket still covered it (reason=next_bucket) or nothing did and the table
+	// maximum was charged (reason=uncovered).
+	//
+	// Deliberately NOT folded into VideoBillingSkippedTotal: that one means the video
+	// was served WITHOUT being billed, and an operator alerting on it is asking "am I
+	// giving away output?". A table miss is billed — just at a fallback price rather
+	// than the one /v1/models advertises for the request. Different question,
+	// different urgency, different fix (add the row), so it gets its own series.
+	VideoTableMissTotal *prometheus.CounterVec
 
 	// VideoPollTimedOutTotal counts video-generation poll jobs (see
 	// docs/design/video-generation-async-billing.md) that hit their
@@ -373,12 +395,30 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	VideoTableMissTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_video_table_miss_total",
+			Help:        "Video-generation requests whose (resolution, duration) had no exact per_unit_table row, labeled by reason (next_bucket = a longer bucket covered it; uncovered = nothing did, table maximum charged). Non-zero means clients are billed a price GET /v1/models does not advertise for their request — add the missing rows.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
 			Help:        "Video-generation requests where the provider reported a terminal status=failed (create time or mid-poll).",
 			ConstLabels: constLabels,
 		},
+	)
+
+	RoutingProofSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_routing_proof_skipped_total",
+			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, no_sidecar_host, domain_mismatch, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
 	)
 
 	RequestRejectedTotal = prometheus.NewCounterVec(
@@ -406,6 +446,8 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoBillingSkippedTotal)
 	prometheus.MustRegister(VideoPollTimedOutTotal)
 	prometheus.MustRegister(VideoGenerationFailedTotal)
+	prometheus.MustRegister(VideoTableMissTotal)
+	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
 }
@@ -702,6 +744,66 @@ func RecordVideoBillingSkipped() {
 		return
 	}
 	VideoBillingSkippedTotal.Inc()
+}
+
+// Reasons for RecordRoutingProofSkipped.
+const (
+	// RoutingProofSkipNoTLS: a direct centralized response arrived with no TLS
+	// connection state to bind.
+	RoutingProofSkipNoTLS = "no_tls"
+	// RoutingProofSkipNoSidecarReport: targetTLSProxy is set but the in-enclave
+	// shim reported no usable certificate fingerprint.
+	RoutingProofSkipNoSidecarReport = "no_sidecar_report"
+	// RoutingProofSkipSignError: evidence was present but signing itself failed.
+	RoutingProofSkipSignError = "sign_error"
+	// RoutingProofSkipDomainMismatch: the in-enclave shim reported dialing a host
+	// other than service.upstreamDomain. The proof would be signed over one host's
+	// certificate while serving_domain points verifiers at another, so every
+	// verification would fail — with no other signal, since the fingerprint itself
+	// was well-formed. Almost always broker config and shim env having drifted
+	// apart (e.g. MINIMAX_BASE_URL changed for a domestic-site account).
+	RoutingProofSkipDomainMismatch = "domain_mismatch"
+	// RoutingProofSkipNoSidecarHost: the shim reported a certificate but no SNI, so
+	// the broker cannot confirm it dialed the host it publishes as serving_domain.
+	// Separate from domain_mismatch because the fix is different: this one is a shim
+	// image predating the header, or a *_BASE_URL that is an IP literal or plaintext
+	// URL — not two config files disagreeing.
+	RoutingProofSkipNoSidecarHost = "no_sidecar_host"
+	// RoutingProofSkipNoPollJob: an async video job never reached the poll
+	// scheduler (no provider job id, scheduler disabled, or the job row could not
+	// be written), so nothing will sign the final body the client was promised a
+	// proof over. Distinct from sign_error because the fix is the scheduler
+	// config or the shim's create response, not the TEE signer.
+	RoutingProofSkipNoPollJob = "no_poll_job"
+)
+
+// RecordRoutingProofSkipped increments the counter of centralized-provider
+// responses served without a TEE routing proof. Every call site is a place where
+// the service continues to advertise verifiability it did not deliver for that
+// response, so this must be alertable rather than log-only.
+func RecordRoutingProofSkipped(reason string) {
+	if RoutingProofSkippedTotal == nil {
+		return
+	}
+	RoutingProofSkippedTotal.WithLabelValues(reason).Inc()
+}
+
+// Reasons for RecordVideoTableMiss.
+const (
+	// VideoTableMissNextBucket: no exact row, but a longer bucket covered the
+	// observation and was charged.
+	VideoTableMissNextBucket = "next_bucket"
+	// VideoTableMissUncovered: nothing at or above the observation exists for that
+	// resolution, so the table maximum across every resolution was charged.
+	VideoTableMissUncovered = "uncovered"
+)
+
+// RecordVideoTableMiss increments the per_unit_table miss counter.
+func RecordVideoTableMiss(reason string) {
+	if VideoTableMissTotal == nil {
+		return
+	}
+	VideoTableMissTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordVideoPollTimedOut increments the counter of video poll jobs that hit

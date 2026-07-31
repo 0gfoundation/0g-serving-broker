@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -199,9 +200,12 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("clamps into H3's [5,15] range (OpenAI seconds=4 → 5, oversized → 15)", func(t *testing.T) {
-		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 5 {
-			t.Errorf("seconds=4 → Duration %d, want 5 (H3 floor)", got.Duration)
+	t.Run("clamps into H3's [4,15] range (OpenAI default 4 passes through, oversized → 15)", func(t *testing.T) {
+		// 4 is OpenAI's default and inside H3's range, so it must NOT be rounded up:
+		// billing is on generated seconds, so clamping up would over-bill the most
+		// common request shape.
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 4 {
+			t.Errorf("seconds=4 → Duration %d, want 4 (H3 floor)", got.Duration)
 		}
 		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); got.Duration != 15 {
 			t.Errorf("seconds=20 → Duration %d, want 15 (H3 ceil)", got.Duration)
@@ -216,12 +220,17 @@ func TestFromMiniMaxCreateResponse_AlwaysQueued(t *testing.T) {
 	// Load-bearing: the create response has no status, but the broker must see
 	// "queued" (defer-to-poll), never absent (which it reads as a synchronous
 	// completion and mis-bills on requested duration).
-	got := FromMiniMaxCreateResponse(
+	got, err := FromMiniMaxCreateResponse(
 		CreateVideoRequest{Model: "MiniMax-H3", Prompt: "p", Seconds: "5", Size: "1280x720"},
 		minimax.CreateResponse{TaskID: "task-123"},
 	)
-	if got.ID != "task-123" || got.Status != StatusQueued {
-		t.Fatalf("id/status = %q/%q, want task-123/%q", got.ID, got.Status, StatusQueued)
+	if err != nil {
+		t.Fatalf("FromMiniMaxCreateResponse: %v", err)
+	}
+	// The published id is the ENCODED form — the vendor's task_id is ours to shape,
+	// because consumers persist and key on what we hand out (see EncodeJobID).
+	if got.ID != "v0_task-123" || got.Status != StatusQueued {
+		t.Fatalf("id/status = %q/%q, want v0_task-123/%q", got.ID, got.Status, StatusQueued)
 	}
 	if got.Seconds != "5" || got.Size != "1280x720" || got.Prompt != "p" {
 		t.Fatalf("echoed fields wrong: %+v", got)
@@ -230,7 +239,7 @@ func TestFromMiniMaxCreateResponse_AlwaysQueued(t *testing.T) {
 
 func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	t.Run("succeeded maps total_seconds to output_video_duration and resolution to size", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			ID:         "424010985738629",
 			Status:     minimax.TaskStatusSucceeded,
 			CreatedAt:  1785125529,
@@ -253,7 +262,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	})
 
 	t.Run("prefers total_seconds over output_seconds for reference-video billing", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			Status: minimax.TaskStatusSucceeded,
 			Usage:  &minimax.TaskUsage{TotalSeconds: "12", InputSeconds: "7", OutputSeconds: "5"},
 		}})
@@ -263,7 +272,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	})
 
 	t.Run("failed carries the vendor error", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			Status: minimax.TaskStatusFailed,
 			Error:  &minimax.TaskError{Code: "1027", Message: "content risk"},
 		}})
@@ -274,7 +283,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 
 	t.Run("cancelled/expired synthesize an error when the vendor gave none", func(t *testing.T) {
 		for _, s := range []string{minimax.TaskStatusCancelled, minimax.TaskStatusExpired} {
-			got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{Status: s}})
+			got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{Status: s}})
 			if got.Status != StatusFailed || got.Error == nil || got.Error.Message == "" {
 				t.Fatalf("status %q: want failed with synthesized error, got %+v", s, got.Error)
 			}
@@ -282,14 +291,14 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	})
 
 	t.Run("nil task is a terminal failure, not a hang", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{})
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{})
 		if got.Status != StatusFailed || got.Error == nil {
 			t.Fatalf("want failed with error, got %+v", got)
 		}
 	})
 
 	t.Run("no positive usage omits the usage block", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			Status: minimax.TaskStatusRunning,
 			Usage:  &minimax.TaskUsage{TotalSeconds: "0", OutputSeconds: "0"},
 		}})
@@ -297,4 +306,42 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 			t.Fatalf("want nil usage, got %+v", got.Usage)
 		}
 	})
+}
+
+// TestDurationIsNeverClampedUpwards pins the billing-relevant half of the clamp.
+// The broker bills the seconds the vendor reports GENERATING, so raising a
+// caller's requested duration raises their bill above what they asked for. Only
+// clamping DOWN is safe in that respect, and it is bounded by what they requested.
+func TestDurationIsNeverClampedUpwards(t *testing.T) {
+	for _, seconds := range []string{"4", "5", "8", "12", "15"} {
+		req := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: seconds}, "2K")
+		want, _ := strconv.ParseInt(seconds, 10, 64)
+		if req.Duration != want {
+			t.Errorf("Seconds=%q sent Duration=%d — a value inside H3's range must go through untouched, or the caller is billed for seconds they did not ask for", seconds, req.Duration)
+		}
+	}
+
+	// Above the ceiling is the one case that changes the value, and it can only
+	// lower it.
+	if req := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); req.Duration != maxMiniMaxDuration {
+		t.Errorf("Seconds=20 sent Duration=%d, want %d", req.Duration, maxMiniMaxDuration)
+	}
+
+	// The two residuals that DO bill above the request, pinned so they stay a stated
+	// trade-off rather than being rediscovered as a bug. Neither is reachable from a
+	// conforming OpenAI client, whose seconds enum is {4,8,12}.
+	for _, tc := range []struct {
+		seconds string
+		want    int64
+		why     string
+	}{
+		{"3", 4, "below H3's floor: unsatisfiable, so the caller gets and pays for the 4s minimum"},
+		{"0.5", 4, "ditto"},
+		{"4.1", 5, "H3 takes an integer, so ceil is forced"},
+		{"1e30", 15, "clamped to the ceiling before the int64 conversion, not wrapped below the floor"},
+	} {
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: tc.seconds}, "2K").Duration; got != tc.want {
+			t.Errorf("Seconds=%q sent Duration=%d, want %d (%s)", tc.seconds, got, tc.want, tc.why)
+		}
+	}
 }

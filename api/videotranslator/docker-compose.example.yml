@@ -6,7 +6,7 @@
 # into your own provider compose only when serving a DashScope-family video model
 # (HappyHorse, Wan2.7, ...).
 #
-# After starting this container, two things on the broker side make it take
+# After starting this container, three things on the broker side make it take
 # effect:
 #   1. Register the provider's on-chain Service.Url as this container's address
 #      (e.g. http://0g-dashscope-video-translator:8090) instead of DashScope's.
@@ -16,6 +16,15 @@
 #          Authorization: "Bearer <your-dashscope-api-key>"
 #      The translator never stores or reads the key itself — it only forwards
 #      whatever Authorization header the broker sends (see internal/dashscope/client.go).
+#   3. Keep TEE verification: this sidecar reports DashScope's TLS certificate back
+#      to the broker (Zg-Upstream-Cert-Fingerprint), so the provider can stay
+#      providerType: centralized instead of falling back to the non-verifiable
+#      "standard" type. Set providerType: centralized, providerIdentity,
+#      targetTLSProxy: true, and upstreamDomain (the vendor FQDN a verifier checks
+#      the reported certificate against, e.g. dashscope.aliyuncs.com), and run this
+#      container in the SAME CVM as the broker — that co-location is what makes the
+#      report trustworthy. See
+#      docs/design/sidecar-routing-proof.md.
 services:
   0g-dashscope-video-translator:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest
@@ -24,6 +33,13 @@ services:
     environment:
       - PORT=8090
       - LOG_LEVEL=info
+      # MUST agree with the broker's service.upstreamDomain — that is the host the
+      # broker tells verifiers to fetch a certificate from, and this is the host
+      # actually dialed. The broker compares the two on every response and refuses
+      # to sign a routing proof when they differ (reason: domain_mismatch). The
+      # DashScope client's own docs say operators outside China MUST override this,
+      # so changing it means changing BOTH.
+      # - DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com   # then upstreamDomain: dashscope-intl.aliyuncs.com
     networks:
       - localhost
 

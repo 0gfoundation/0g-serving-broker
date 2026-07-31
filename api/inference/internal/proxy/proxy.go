@@ -910,6 +910,20 @@ func extractVideoJobID(targetPath string) string {
 	if len(targetPath) <= len(videoStatusPathPrefix) || !strings.EqualFold(targetPath[:len(videoStatusPathPrefix)], videoStatusPathPrefix) {
 		return ""
 	}
+	// The id is the FIRST segment, but the WHOLE path is forwarded upstream
+	// unchanged. So a dot segment ANYWHERE means the resource the vendor resolves
+	// is not the one this check authorized: "/videos/<id-you-own>/../<victim-id>"
+	// extracts an id you own, passes the ownership check, and then walks to a job
+	// you do not. Refusing the request is right rather than normalizing it — no
+	// legitimate caller of this API sends one, and normalizing here would leave the
+	// forwarded path and the checked path free to diverge again. The
+	// percent-encoded form stays a single segment and already fails closed on the
+	// ownership lookup.
+	for _, seg := range strings.Split(targetPath, "/") {
+		if seg == "." || seg == ".." {
+			return ""
+		}
+	}
 	rest := targetPath[len(videoStatusPathPrefix):]
 	if idx := strings.Index(rest, "/"); idx != -1 {
 		rest = rest[:idx]

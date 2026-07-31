@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -374,6 +375,14 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		}
 	}
 
+	// Last, matching PrepareHTTPRequest: the response-side header is TEE evidence,
+	// so it never leaves on a request. Unreachable today (handler/async.go stores
+	// only Content-Type, and targetTLSProxy is video-only while this path serves
+	// images), but the invariant should hold in BOTH request builders rather than
+	// rest on two restrictions that are each marked "widen later".
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertHost)
+
 	// Execute the request
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -470,7 +479,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	switch {
 	case c.Service.IsCentralized():
 		chatKey = uuid.NewString()
-		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, resp.TLS); err != nil {
+		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, c.upstreamCertFingerprint(resp.Header, resp.TLS)); err != nil {
 			c.logger.Warnf("Async job %s: routing proof not created (TEE verification unavailable): %v", jobID, err)
 			chatKey = ""
 		}
@@ -491,6 +500,13 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// Serialize response headers, including ZG-Res-Key for TEE verification
 	headerMap := make(map[string][]string)
 	for k, v := range resp.Header {
+		// Same #184 filter the sync path applies before forwarding. Only ZG-Res-Key is
+		// replayed to clients today, but storing upstream identity headers (including
+		// the broker-internal upstream cert fingerprint) keeps them one code change
+		// away from being served.
+		if isUpstreamLeakHeader(k) {
+			continue
+		}
 		headerMap[k] = v
 	}
 	if chatKey != "" {

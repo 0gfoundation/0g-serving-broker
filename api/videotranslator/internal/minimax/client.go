@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 )
 
 // defaultBaseURL is MiniMax's overseas endpoint, the one the H3 integration
@@ -131,6 +133,11 @@ func (c *Client) GetTask(ctx context.Context, authHeader, taskID string) (*GetTa
 // (task.content.url — a time-limited public CDN link, not the MiniMax API
 // itself, so no Authorization header is attached). The caller must close the
 // returned response's Body.
+//
+// Deliberately does NOT report its TLS certificate to the request's CertCapture,
+// unlike do(): this URL is vendor-supplied (a CDN host), while the broker's routing
+// proof must bind the API endpoint that authenticated our key and produced the
+// response being signed. Do not add an Observe call here for symmetry.
 func (c *Client) FetchContent(ctx context.Context, videoURL string) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, videoURL, nil)
 	if err != nil {
@@ -215,6 +222,12 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// Report the vendor's TLS certificate to whoever is handling this inbound
+	// request, so the broker can bind it into a centralized routing proof: this
+	// hop is where the TLS the proof attests to actually happens (the broker's own
+	// hop to this sidecar is plaintext HTTP inside the CVM). No-op when no capture
+	// is installed on the context.
+	teeutil.CertCaptureFromContext(httpReq.Context()).Observe(resp.TLS)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

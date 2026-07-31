@@ -57,7 +57,10 @@ requires, and only charges once the actual result is known.
 - **Provider job IDs and TTLs are foreign, opaque strings.** DashScope-style `task_id`s are
   valid for roughly 24 hours; some vendors may use different TTLs or ID shapes. The poll
   scheduler must not assume anything about the ID format and must give up (fail, not hang
-  forever) once a job has been unresolved for too long.
+  forever) once a job has been unresolved for too long. **This applies to the broker's
+  INTERNAL handling only** — the id the broker hands to a client is a published contract with a
+  format guarantee, because downstream consumers persist and key on it. See
+  [Job id contract](#job-id-contract-broker--consumers).
 - **Must survive broker restarts without either double-billing or silently dropping revenue.**
   A crash mid-poll must resume polling, not discard the job — unlike a single `POST` create
   call (which cannot be safely retried without risking duplicate generation), a status `GET` is
@@ -205,6 +208,182 @@ reason it is already fine that chatbot/image billing finalizes after the respons
 the client (`video.go:266` writes before `video.go:295` bills) — content delivery has never been
 gated on billing completion in this codebase, and gating it here would reintroduce the latency
 this design exists to avoid.
+
+## `per_unit_table` and durations a vendor can actually emit
+
+A `per_unit_table` prices exact `(resolution, duration)` buckets. A duration the
+table does not list is a **miss**, and a miss does not fall back to the per-second
+formula — that would underbill. It rounds up to the **next bucket**: the row for that
+resolution with the smallest duration that is still ≥ the observed one. Selection is
+by duration, never by price — choosing the cheapest covering row would assume the
+table is monotonic, and an operator who discounts long clips would have a short clip
+billed below the bucket that neighbours it. Only when NOTHING covers the observation
+does it fall to the table maximum.
+
+That rounding-up rule exists because the previous behaviour — always the table
+maximum, across every resolution — turns an untabulated duration into a charge for
+the most expensive clip the operator ever priced. It is reachable whenever a vendor's
+minimum shifts: MiniMax H3's floor moved 5 → 4, which is also its default request
+shape, so the most common request became a miss overnight.
+
+**Operator rule:** tabulate every duration the vendor can emit **for every resolution
+it can emit**, starting at the vendor's minimum — not just the minimum. A conforming
+OpenAI client sends `seconds` from {4, 8, 12}, and any value with no bucket at or
+above it falls to the table maximum across every resolution. The resolution half
+matters just as much and is easier to miss: a resolution with *no rows at all* has no
+covering bucket however short the clip, so it takes that same table-max path — a
+4-second clip at an untabulated size is billed as the longest 4K one in the table.
+Otherwise clients are billed a price `GET /v1/models` does not advertise for their
+request — it publishes one variant per configured bucket, so an untabulated
+`(resolution, duration)` has no visible price at all.
+
+Misses are metered by **`broker_video_table_miss_total{reason}`**, which is how an
+operator finds out a row is missing without reading logs. `reason="next_bucket"` means
+the observation was rounded up to a covering row; `reason="uncovered"` means nothing
+covered it and the table maximum was charged — the expensive one, and the one to alert
+on. This is deliberately NOT `broker_video_billing_skipped_total`, which means the
+opposite: a video served *without being billed at all*. The log line names the
+offending `(seconds, size)`, throttled to a few lines an hour per bucket.
+
+## Signature lifecycle (`ZG-Res-Key`)
+
+Billing is not the only thing an async job defers — so is the TEE signature, and the
+two have the same shape: the create response is not the final answer.
+
+`ZG-Res-Key` is issued with the create response and signed over the
+`{"status":"queued"}` envelope, then **re-signed by the poller over the FINAL body**
+under the same key. So the contract is:
+
+> the key covers the job's final state, not the envelope the client first received.
+
+That contract only holds if every path keeps it. Two rules follow:
+
+1. **A response is only advertised as signed if it will actually be signed.** One
+   predicate (`signs` in `handleVideoGenerationResponse`) drives the `ZG-Res-Key`
+   header, the create-time signing call, and whether a `chatKey` is handed to the
+   poll job — they cannot disagree. A centralized provider previously advertised the
+   header while only the decentralized signer existed, so the key could only 404.
+
+2. **The create-time signature is evicted whenever a final body the client can
+   obtain exists but was never signed.** Timeout, provider-reported `failed`,
+   completed-with-no-resolvable-duration, a linked request row that vanished, a
+   failed re-sign, and two of the three no-poll-job exits (scheduler disabled,
+   insert failed) — in all of these the vendor job id exists, and `GET /videos/{id}`
+   proxies straight to the upstream regardless of any poll job, so the client can
+   fetch a body the cached signature does not describe. Leaving it would hand the
+   client a *valid* TEE signature whose response hash does not match what it
+   fetched — indistinguishable from tampering, and worse than the 404 it gets
+   instead.
+
+   The exception is a create response with **no job id**: the client cannot build
+   `GET /videos/{id}`, so no final body is obtainable and the cached signature still
+   describes exactly the response it holds. Evicting there would break a lookup that
+   was never in doubt. The rule is "an obtainable final body exists", not "the
+   poller did not run".
+
+   Note this is a client-visible change for providers that predate it: such a job's
+   `ZG-Res-Key` used to stay resolvable (pointing at the queued envelope) and now
+   404s.
+
+Lost signatures are metered by `broker_routing_proof_skipped_total{reason}` for
+centralized providers, except where a sibling counter already covers the outcome
+(`VideoPollTimedOutTotal`, `VideoGenerationFailedTotal`, `VideoBillingSkippedTotal`)
+— double-metering a routine vendor failure would put a permanent baseline under an
+alert whose instruction is "any sustained rate is a problem".
+
+## Job id contract (broker → consumers)
+
+The `id` in the `POST /videos` response originates upstream, not in the broker: the
+broker reads it back out of the upstream body (`videoRespFields.ID`) and never mints
+one. Before this change the translator passed the vendor's `task_id` through verbatim,
+which made the vendor's id-shaping decision a **published API contract** — because
+consumers do not merely echo the id back, they persist it and key on it:
+
+> **Guarantee:** the `id` returned by `POST /videos`, and accepted by
+> `GET /videos/{id}` and `GET /videos/{id}/content`, is at most **36 characters**
+> from `[A-Za-z0-9_-]`.
+>
+> A vendor whose `task_id` does not satisfy this is **mapped by the translator**.
+
+**This is now enforced, not merely documented.** Shaping the id is protocol
+translation, so it happens where protocol translation happens:
+
+- `translate.EncodeJobID` (api/videotranslator) maps every vendor `task_id` into the
+  contract on create, and `DecodeJobID` maps it back on every `GET /videos/{id}` and
+  `/content`. The mapping is a self-describing tag plus payload, so it is reversible
+  **without state** — the translator holds no cross-request state and must not start.
+  `v0_` passes a compliant id through, `v1_` compacts a canonical UUID by dropping
+  its hyphens (DashScope's ids are exactly 36 characters and would not otherwise
+  survive the tag), `v2_` base64url-encodes anything else.
+- A vendor id that no encoding can carry — a stateless reversible mapping into 33
+  payload characters holds at most 24 arbitrary bytes — fails the create call
+  loudly, naming the id. Note what that does NOT buy: encoding runs after the
+  vendor's create call returned, so the vendor has already accepted the job and will
+  bill for it, and the id survives only in the log. The win is a local, immediate,
+  named failure — not a saved clip. Nor is it guaranteed to surface in staging: a
+  vendor whose id shape varies by model, region, or API version can fail first in
+  production.
+- **An id with no tag is passed through** as a pre-tagging vendor id. The translator
+  shipped before tagging existed, so ids already in flight carry none, and rejecting
+  them would strand every such job (the poller treats the 4xx as retryable, so the
+  job spins to `MaxPollDuration`, never bills, and drops the signature its client
+  holds a key for). An id carrying a `vN_` tag this build does not know is a
+  different thing and IS rejected — it came from a newer replica, and forwarding it
+  would hand the vendor an id it never issued.
+- Adding a tag is a **two-phase deploy**: ship the decode case everywhere first,
+  enable it in the encoder only once every replica can decode it, and never remove
+  or reuse a tag. A rollback otherwise strands every id the new tag issued.
+- The broker asserts the contract independently (`isContractJobID`,
+  inference/internal/ctrl/video.go). That path has no translator to rely on: it
+  catches a vendor spoken to directly.
+
+### Why a bound exists at all, and why it is this tight
+
+The 0G Router (the main consumer today) stores the id as part of the primary key of
+its `async_jobs` table (`varchar(36)`) and validates it at submit. But the binding
+constraint is one step further downstream: the id is folded into the router's
+billing idempotency key,
+
+```
+"async-" + <last 8 of provider address> + "-" + <job id>   →   usage_logs.request_id
+```
+
+and `usage_logs.request_id` is `varchar(64)` with a UNIQUE index — **the key that
+makes async billing exactly-once, shared by video and image alike**. That leaves a
+hard ceiling of 49 characters for the id, and raising it means rebuilding a unique
+index on the largest, hottest table in that system. So "just widen the column" is
+not available as a cheap escape hatch; 36 is the value in force today and 49 is the
+absolute ceiling under the current key format.
+
+### What happens if the guarantee is broken
+
+Not a clean rejection. The router validates the id **after** the create call has
+already succeeded, so an over-long id means:
+
+- the vendor has generated (and charged us for) a clip,
+- the router returns an error to the client and marks the provider failed —
+  degrading routing for a provider that is actually healthy,
+- and no `async_jobs` row is written, so nothing can ever bill or deliver that clip.
+
+The failure is silent from the vendor's side and looks like a provider fault from
+the router's. That asymmetry — cheap to guarantee here, expensive and misattributed
+there — is why the bound belongs at this boundary.
+
+### Enforcement options
+
+1. **Validate at onboarding (cheap, recommended first).** Reject a provider config
+   whose vendor issues non-conforming ids, turning a runtime, per-request failure
+   into an explicit deployment-time one. Zero runtime cost.
+2. **Mint and map (the full fix).** Have the broker issue its own short id and store
+   the vendor `task_id` beside it — `video_job_owner` is already keyed by this id, so
+   it is one extra column. This removes the ceiling entirely and makes the id shape
+   the broker's own decision rather than each vendor's, which is what the "opaque
+   internally, guaranteed externally" split above actually requires.
+
+Note the current margin is thin, not comfortable: a DashScope UUID is exactly 36
+characters, and an OpenAI-shaped `vid_`/`video_` prefix on a UUID or 32-byte hex
+(40 and 38 characters) is already over. This is worth settling before the first
+non-MiniMax video vendor is onboarded.
 
 ## Whitelisted (unbilled) traffic
 

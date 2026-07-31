@@ -127,30 +127,61 @@ func normalizeMiniMaxResolution(size string) string {
 // ToMiniMaxCreateRequest builds the MiniMax create body from an OpenAI-shaped
 // create request. defaultResolution is the deployment-configured resolution
 // (e.g. "2K", H3's only supported value) used unless the client's "size" is
-// itself a recognized MiniMax resolution token. A non-positive/unparsable/
-// excessive Seconds yields a zero Duration (omitted) — MiniMax then rejects the
-// request with its own 4xx rather than the translator inventing a duration.
-// MiniMax-H3 accepts an integer duration in [5,15]. OpenAI's seconds enum is
-// {4,8,12} (default 4), so a valid OpenAI request can fall below H3's floor — we
-// clamp into range rather than let H3 4xx the most common call shape (seconds=4
-// or omitted). Billing is on the ACTUAL generated seconds from usage, so a
-// clamped 4→5 bills 5s (H3's minimum), which is what the model produces.
+// itself a recognized MiniMax resolution token. A non-positive, unparsable, or
+// absent Seconds falls to the floor below — H3 requires a duration, so there is no
+// "omit it and let the vendor decide" option.
+// MiniMax-H3 accepts an integer duration in [4,15], per the model's public
+// description ("4-15s, 24 fps"). The floor matters for billing, not just for
+// acceptance: billing is on the ACTUAL generated seconds the vendor reports, so
+// clamping a request UP silently raises the bill above what the caller asked for.
+// At 4 that is exactly OpenAI's default (its seconds enum is {4,8,12}, default 4),
+// i.e. the most common call shape — a floor of 5 would have over-billed the
+// default request by 25%.
+//
+// PENDING LIVE CONFIRMATION: 4 is taken from the published description, not from a
+// verified API call — an earlier revision of this file used 5 with no recorded
+// provenance. If H3 turns out to reject 4, the symptom is a hard 4xx on
+// seconds=4-or-omitted, and MiniMax's own message is propagated verbatim
+// (writeMiniMaxError), so it will name itself. Raise this constant, not the clamp
+// logic, if that happens.
+//
+// Above the ceiling the request is still clamped down: the caller cannot have what
+// they asked for either way, and 15s is what the model produces (and therefore what
+// they are billed). Clamping DOWN cannot exceed what was requested, so it does not
+// have the over-billing property that made the floor worth getting right.
+//
+// Two residual cases DO still bill above the request, both unreachable from a
+// conforming OpenAI client (its seconds enum is {4,8,12}):
+//   - Below the floor (seconds=1, 3, 0.5): unsatisfiable, so the caller gets and
+//     pays for H3's 4s minimum. Rejecting instead would be defensible; it is a
+//     behaviour change with no conforming caller behind it, so it is left alone
+//     and named here rather than silently assumed away.
+//   - Fractional values (seconds=4.1): H3 takes an integer, so ceil is forced. The
+//     caller pays 5 for a 4.1 request. Unavoidable without rejecting fractions.
 const (
-	minMiniMaxDuration = 5
+	minMiniMaxDuration = 4
 	maxMiniMaxDuration = 15
 )
 
 func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) minimax.CreateRequest {
-	duration := int64(minMiniMaxDuration) // default when seconds is absent/unparseable (H3 requires a duration)
+	// Default when seconds is absent or unparseable: H3 requires a duration, and the
+	// floor is also OpenAI's documented default, so an omitted seconds bills what an
+	// OpenAI client would expect rather than one second more.
+	duration := int64(minMiniMaxDuration)
 	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
-		d := int64(math.Ceil(s))
-		switch {
-		case d < minMiniMaxDuration:
-			d = minMiniMaxDuration
-		case d > maxMiniMaxDuration:
-			d = maxMiniMaxDuration
+		// Clamp the FLOAT before converting: an out-of-range value converts
+		// implementation-defined (MinInt64 on amd64), which would land below the floor
+		// and be clamped UP to the minimum — silently turning an absurd request into
+		// the shortest clip instead of the longest one it can have. The DashScope
+		// sibling guards the same conversion but IGNORES an out-of-range value and
+		// omits duration entirely, letting the vendor default (translate.go,
+		// maxDashScopeSeconds); both fail safe, they are not mirrors.
+		if s > float64(maxMiniMaxDuration) {
+			s = float64(maxMiniMaxDuration)
 		}
-		duration = d
+		if d := int64(math.Ceil(s)); d > minMiniMaxDuration {
+			duration = d
+		}
 	}
 
 	resolution := defaultResolution
@@ -229,16 +260,21 @@ func firstFrameReference(req CreateVideoRequest) string {
 // requested duration immediately (see inference/internal/ctrl/video.go).
 // duration/resolution/prompt are echoed from the client's request, matching
 // how the real OpenAI Video API's create response mirrors what was asked for.
-func FromMiniMaxCreateResponse(req CreateVideoRequest, resp minimax.CreateResponse) VideoResponse {
+func FromMiniMaxCreateResponse(req CreateVideoRequest, resp minimax.CreateResponse) (VideoResponse, error) {
+	// The id we publish is a contract, not MiniMax's choice — see EncodeJobID.
+	id, err := EncodeJobID(resp.TaskID)
+	if err != nil {
+		return VideoResponse{}, err
+	}
 	return VideoResponse{
-		ID:      resp.TaskID,
+		ID:      id,
 		Object:  "video",
 		Model:   req.Model,
 		Status:  StatusQueued,
 		Seconds: req.Seconds,
 		Size:    req.Size,
 		Prompt:  req.Prompt,
-	}
+	}, nil
 }
 
 // FromMiniMaxGetTaskResponse translates a MiniMax get-task response into the
@@ -247,13 +283,14 @@ func FromMiniMaxCreateResponse(req CreateVideoRequest, resp minimax.CreateRespon
 // broker's recognized usage.output_video_duration field. total_seconds — not
 // output_seconds — is used because MiniMax bills the account on total_seconds;
 // for text-to-video (input_seconds == 0) the two are equal anyway.
-func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
+func FromMiniMaxGetTaskResponse(publicID string, resp minimax.GetTaskResponse) VideoResponse {
 	if resp.Task == nil {
 		// A well-formed MiniMax response always carries a task; its absence
 		// (with no base_resp error, which the client already turns into an
 		// APIError) is unrecoverable and reported as a terminal failure so the
 		// broker's poller stops rather than waiting forever.
 		return VideoResponse{
+			ID:     publicID,
 			Object: "video",
 			Status: StatusFailed,
 			Error:  &Error{Code: "minimax_no_task", Message: "minimax get-task response contained no task"},
@@ -263,7 +300,7 @@ func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
 	t := resp.Task
 	status := StatusFromMiniMax(t.Status)
 	out := VideoResponse{
-		ID:     t.ID,
+		ID:     publicID,
 		Object: "video",
 		Status: status,
 		Size:   t.Resolution,
