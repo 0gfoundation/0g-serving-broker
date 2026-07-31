@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -28,6 +30,61 @@ func normalizeProviderIdentity(identity *string) error {
 	*identity = strings.ToLower(*identity)
 	if !validProviderIdentity.MatchString(*identity) {
 		return fmt.Errorf("invalid config: service.providerIdentity must be lowercase alphanumeric with optional hyphens (e.g., 'openai', 'anthropic'), got '%s'", *identity)
+	}
+	return nil
+}
+
+// validateInEnclaveTarget enforces that a targetTLSProxy target really is the
+// in-CVM shape the flag claims: plaintext http:// to a host that is not routable
+// off the machine — loopback, a private/link-local address, or a bare hostname
+// (a compose service name, which only resolves on the CVM's own docker network).
+//
+// This is what anchors the flag's trust story rather than leaving it to a comment.
+// Under targetTLSProxy the broker signs a fingerprint some other process reported
+// instead of one it witnessed, so "which process" is the whole security question:
+//
+//   - An https:// target is rejected because it is strictly worse than not setting
+//     the flag at all. That hop has a real resp.TLS the broker could bind itself,
+//     and the flag would make it ignore that first-hand evidence in favour of a
+//     header the remote host writes — handing an external upstream authorship of
+//     its own routing proof. Nothing legitimate needs this: an in-CVM shim hop is
+//     never TLS.
+//   - Link-local (169.254/16) is rejected too: it is not a compose-network shape
+//     and it contains the cloud metadata address. Loopback, the RFC1918 ranges a
+//     docker bridge hands out, and a bare compose service label are the whole set.
+//   - A routable host is rejected because it also sends the vendor API key over
+//     the public network in cleartext (the broker injects additionalSecret on
+//     every forwarded call), and because a shim outside the enclave is not covered
+//     by the CVM's attestation, which is the only reason its report is worth
+//     anything.
+//
+// What remains, deliberately, is that the operator can still declare a fake shim
+// as a service in their own compose. That is not a hole this check can close, and
+// it does not need to: the compose is hashed into the CVM measurement, so cheating
+// that way changes the quote — the same trust boundary every other part of the
+// deployment already rests on. See docs/design/sidecar-routing-proof.md.
+func validateInEnclaveTarget(targetURL string) error {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("invalid config: service.targetUrl '%s' is not a valid URL: %w", targetURL, err)
+	}
+	if strings.ToLower(u.Scheme) != "http" {
+		return fmt.Errorf("invalid config: service.targetTLSProxy requires a plaintext 'http://' targetUrl (an in-CVM sidecar hop is never TLS), got '%s'. If this target is the vendor itself, drop targetTLSProxy so the broker binds the certificate it sees directly", targetURL)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("invalid config: service.targetUrl '%s' has no host", targetURL)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsUnspecified() {
+			return fmt.Errorf("invalid config: service.targetTLSProxy requires an in-CVM target, but targetUrl '%s' is a routable address — a sidecar outside the enclave is not covered by this broker's attestation, and the injected upstream API key would cross the public network in cleartext", targetURL)
+		}
+		return nil
+	}
+	// A dotted name resolves through public DNS; a bare label is a docker-compose
+	// service name on the CVM's own network (e.g. 0g-minimax-video-translator).
+	if strings.Contains(host, ".") && !strings.EqualFold(host, "localhost") {
+		return fmt.Errorf("invalid config: service.targetTLSProxy requires an in-CVM target, but targetUrl '%s' names a public DNS host — use the sidecar's compose service name (e.g. http://0g-minimax-video-translator:8090) so the target cannot resolve off this machine", targetURL)
 	}
 	return nil
 }
@@ -1772,6 +1829,87 @@ func loadConfig(cfg *Config) error {
 		// header, so the proof has TLS evidence even though this hop doesn't.
 		if !cfg.Service.TargetTLSProxy && cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
 			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s' — set service.targetTLSProxy: true if this target is a protocol-translation sidecar inside this broker's own TEE", cfg.Service.TargetURL)
+		}
+	}
+	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
+		// Unlike centralized, providerIdentity is OPTIONAL here, not required —
+		// and setting it does NOT publish it. A standard provider still hides its
+		// upstream from every EXTERNAL surface (GET /v1/models, on-chain
+		// additionalInfo, the TEE-signed routing proof) — those are gated on
+		// IsCentralized(), not on providerIdentity being empty, so they stay hidden
+		// regardless. What setting it DOES do is flow into internal-only
+		// bookkeeping that has no external gate: reconciliation's per-upstream
+		// usage rollup (Ctrl.recordWhitelistedUsage) and the per-request Upstream
+		// tag used for cost reconciliation (proxy.go), both of which fall back to
+		// "self" when this is empty — indistinguishable from every OTHER standard
+		// deployment. An operator running several standard providers behind
+		// different real upstreams can set this to tell their own reconciliation
+		// data apart, without it ever reaching a client or the chain.
+		if cfg.Service.ProviderIdentity != "" {
+			if err := normalizeProviderIdentity(&cfg.Service.ProviderIdentity); err != nil {
+				return err
+			}
+		}
+		// A standard provider forwards to an external upstream and never signs, so it
+		// always behaves as TargetSeparated (no broker signature, no ZG-Res-Key).
+		cfg.Service.TargetSeparated = true
+		// TargetSeparated is forced on, which would otherwise publish a
+		// TargetTeeAddress on-chain (see buildAdditionalInfo). A standard provider has
+		// no upstream TEE, so force it empty rather than leak a stale/misleading TEE
+		// address for a non-verifiable service.
+		cfg.Service.TargetTeeAddress = ""
+		// The upstream must be configured explicitly — a standard provider has no
+		// co-located model and no known default base URL.
+		if cfg.Service.TargetURL == "" {
+			return fmt.Errorf("invalid config: service.targetUrl is required when providerType is 'standard'")
+		}
+		// Standard is non-verifiable by construction. Force the "standard" marker so
+		// the on-chain verifiability can never claim a TEE mode (which would make
+		// clients attempt a verification the broker never backs). Reject any
+		// operator-supplied value other than the standard marker rather than
+		// silently overwriting it.
+		if cfg.Service.Verifiability != "" && cfg.Service.Verifiability != constant.VerifiabilityStandard {
+			return fmt.Errorf("invalid config: service.verifiability must be empty or '%s' when providerType is 'standard', got '%s'", constant.VerifiabilityStandard, cfg.Service.Verifiability)
+		}
+		cfg.Service.Verifiability = constant.VerifiabilityStandard
+
+		// Upstream-hiding is complete for chatbot / speech-to-text / image responses
+		// (leak headers + leak-key body fields are stripped, and image assets are
+		// broker-served). Video is the exception: the broker does not proxy video
+		// bytes, so if the upstream returns the finished asset as a DIRECT URL in the
+		// response body (e.g. {"output":{"video_url":"https://<upstream-host>/..."}}),
+		// that host reaches the client — leak-key stripping does not rewrite URL
+		// values. Upstreams that expose the asset via the OpenAI GET /videos/{id}/content
+		// pattern (which the broker proxies) do not leak. Warn so the operator makes a
+		// conscious choice. (stdlib log: the structured logger isn't up at config load.)
+		if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
+			log.Printf("[CONFIG] providerType 'standard' with type 'video-generation': the upstream is fully hidden only when it returns the asset via GET /videos/{id}/content (broker-proxied). An upstream that returns a direct asset URL in the response body will expose that URL's host to clients — the broker does not proxy video bytes or rewrite URL values.")
+		}
+	}
+
+	// targetTLSProxy only means anything to the centralized routing proof. On any
+	// other provider type nothing reads the header, so an operator who set it is
+	// working from a wrong mental model (most likely expecting verification they
+	// are not getting) — say so at load instead of booting a service that silently
+	// ignores it.
+	if cfg.Service.TargetTLSProxy && cfg.Service.ProviderType != constant.ProviderTypeCentralized {
+		return fmt.Errorf("invalid config: service.targetTLSProxy is only supported when providerType is '%s' (it feeds the centralized routing proof), got '%s'", constant.ProviderTypeCentralized, cfg.Service.ProviderType)
+	}
+	if cfg.Service.TargetTLSProxy {
+		if err := validateInEnclaveTarget(cfg.Service.TargetURL); err != nil {
+			return err
+		}
+		// Restricted to the one modality whose response path is actually wired for
+		// it. targetTLSProxy makes "a 200 with no usable fingerprint" a routine
+		// outcome, and only video-generation decides whether to advertise ZG-Res-Key
+		// from whether the proof can actually be produced (the `signs` predicate in
+		// ctrl/video.go). Chatbot / image / speech still advertise it whenever the
+		// provider is centralized — harmless while a direct HTTPS hop guarantees
+		// resp.TLS, but under this flag it would hand clients a lookup handle that
+		// only 404s. Fail closed here rather than ship that; when a non-video shim
+		// lands, wire its modality's advertise predicate first, then widen this.
+		if cfg.Service.Type != constant.ServiceTypeVideoGeneration {
+			return fmt.Errorf("invalid config: service.targetTLSProxy is currently supported only for service type '%s' (the only modality whose signature advertisement is gated on the proof actually being producible), got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
 		}
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
