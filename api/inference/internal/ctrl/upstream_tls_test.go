@@ -3,6 +3,7 @@ package ctrl
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -233,6 +234,30 @@ func TestProofSkipLogIsThrottledPerCause(t *testing.T) {
 	ctrl.upstreamCertFingerprint(hdrFor(""), nil)
 	if rec.errors != 3 {
 		t.Errorf("a different reason must log: total %d, want 3", rec.errors)
+	}
+}
+
+// TestProofSkipMemoIsBounded: the throttle key carries a value the sidecar chooses,
+// so a broken one reporting a different host every response must not be able to grow
+// the memo without limit.
+func TestProofSkipMemoIsBounded(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{
+		ProviderType: "centralized", ProviderIdentity: "minimax",
+		TargetTLSProxy: true, UpstreamDomain: "api.minimax.io",
+	})
+	ctrl.logger = &countingLogger{Logger: ctrl.logger}
+
+	for i := 0; i < maxProofSkipKeys*4; i++ {
+		h := http.Header{}
+		h.Set(teeutil.HeaderUpstreamCertFingerprint, strings.Repeat("ab", 32))
+		h.Set(teeutil.HeaderUpstreamCertHost, fmt.Sprintf("host-%d.example.com", i))
+		ctrl.upstreamCertFingerprint(h, nil)
+	}
+
+	n := 0
+	ctrl.proofSkipLogged.Range(func(_, _ any) bool { n++; return true })
+	if n > maxProofSkipKeys {
+		t.Errorf("memo holds %d entries, want at most %d", n, maxProofSkipKeys)
 	}
 }
 

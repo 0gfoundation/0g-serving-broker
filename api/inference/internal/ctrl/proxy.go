@@ -453,19 +453,44 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 // logs after a change sees the result.
 const proofSkipLogWindow = 10 * time.Minute
 
+// maxProofSkipKeys bounds the distinct (reason, detail) pairs logProofSkip
+// remembers. Far above any real deployment — there are four reasons and a healthy
+// one has a single upstream host — and low enough that a misbehaving sidecar cannot
+// turn the throttle into a leak.
+const maxProofSkipKeys = 64
+
 // logProofSkip reports a response served without a routing proof, at most once per
 // window per (reason, detail). Detail is what distinguishes causes an operator would
 // fix differently — the reported host for drift, empty where the reason alone says
 // everything.
 func (c *Ctrl) logProofSkip(reason, detail, format string, args ...interface{}) {
-	key := reason + "|" + detail
+	// The detail is truncated into the key as well as the message: it comes from the
+	// sidecar, and an unbounded key would let a broken one grow this map by the
+	// length of whatever it reports.
+	key := reason + "|" + string(truncateForLog([]byte(detail), 80))
 	now := time.Now()
-	if last, ok := c.proofSkipLogged.Load(key); ok {
-		if t, _ := last.(time.Time); now.Sub(t) < proofSkipLogWindow {
+
+	if v, ok := c.proofSkipLogged.Load(key); ok {
+		if t, _ := v.(time.Time); now.Sub(t) < proofSkipLogWindow {
 			return
 		}
+		c.proofSkipLogged.Store(key, now)
+	} else {
+		// Bound the number of distinct causes remembered. A healthy deployment has
+		// one or two; a sidecar reporting a different host on every response would
+		// otherwise grow this without limit. Dropping the whole memo on overflow
+		// costs at most a burst of repeated lines — the counter still carries the
+		// rate, and a deployment in that state has a louder problem than log volume.
+		if c.proofSkipKeys.Add(1) > maxProofSkipKeys {
+			c.proofSkipLogged.Range(func(k, _ any) bool {
+				c.proofSkipLogged.Delete(k)
+				return true
+			})
+			c.proofSkipKeys.Store(0)
+		}
+		c.proofSkipLogged.Store(key, now)
 	}
-	c.proofSkipLogged.Store(key, now)
+
 	c.logger.Errorf(format, args...)
 }
 

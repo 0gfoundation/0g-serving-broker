@@ -200,6 +200,9 @@ type Ctrl struct {
 	// recurs is still reported, and keyed by detail so drifting to a SECOND wrong
 	// host is not swallowed by the first.
 	proofSkipLogged sync.Map // string -> time.Time
+	// proofSkipKeys approximates proofSkipLogged's size so it can be bounded; exact
+	// agreement with the map under concurrency is not needed for a throttle.
+	proofSkipKeys   atomic.Int64
 	videoPollCfg    config.VideoPollConfig
 	videoPollCtx    context.Context
 	videoPollCancel context.CancelFunc
