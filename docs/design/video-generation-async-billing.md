@@ -57,7 +57,10 @@ requires, and only charges once the actual result is known.
 - **Provider job IDs and TTLs are foreign, opaque strings.** DashScope-style `task_id`s are
   valid for roughly 24 hours; some vendors may use different TTLs or ID shapes. The poll
   scheduler must not assume anything about the ID format and must give up (fail, not hang
-  forever) once a job has been unresolved for too long.
+  forever) once a job has been unresolved for too long. **This applies to the broker's
+  INTERNAL handling only** — the id the broker hands to a client is a published contract with a
+  format guarantee, because downstream consumers persist and key on it. See
+  [Job id contract](#job-id-contract-broker--consumers).
 - **Must survive broker restarts without either double-billing or silently dropping revenue.**
   A crash mid-poll must resume polling, not discard the job — unlike a single `POST` create
   call (which cannot be safely retried without risking duplicate generation), a status `GET` is
@@ -251,6 +254,70 @@ centralized providers, except where a sibling counter already covers the outcome
 (`VideoPollTimedOutTotal`, `VideoGenerationFailedTotal`, `VideoBillingSkippedTotal`)
 — double-metering a routine vendor failure would put a permanent baseline under an
 alert whose instruction is "any sustained rate is a problem".
+
+## Job id contract (broker → consumers)
+
+The `id` in the `POST /videos` response is currently the vendor's `task_id`, passed
+through verbatim — the translator copies `resp.TaskID` and the broker reads it back
+out of the upstream body (`videoRespFields.ID`). The broker never mints it.
+
+That makes the vendor's id-shaping decision a **published API contract**, because
+consumers do not merely echo the id back — they persist it and key on it:
+
+> **Guarantee:** the `id` returned by `POST /videos`, and accepted by
+> `GET /videos/{id}` and `GET /videos/{id}/content`, is at most **36 characters**
+> from `[A-Za-z0-9_-]`.
+>
+> A vendor whose `task_id` does not satisfy this must be rejected at onboarding or
+> mapped by the translator — **never passed through**.
+
+### Why a bound exists at all, and why it is this tight
+
+The 0G Router (the main consumer today) stores the id as part of the primary key of
+its `async_jobs` table (`varchar(36)`) and validates it at submit. But the binding
+constraint is one step further downstream: the id is folded into the router's
+billing idempotency key,
+
+```
+"async-" + <last 8 of provider address> + "-" + <job id>   →   usage_logs.request_id
+```
+
+and `usage_logs.request_id` is `varchar(64)` with a UNIQUE index — **the key that
+makes async billing exactly-once, shared by video and image alike**. That leaves a
+hard ceiling of 49 characters for the id, and raising it means rebuilding a unique
+index on the largest, hottest table in that system. So "just widen the column" is
+not available as a cheap escape hatch; 36 is the value in force today and 49 is the
+absolute ceiling under the current key format.
+
+### What happens if the guarantee is broken
+
+Not a clean rejection. The router validates the id **after** the create call has
+already succeeded, so an over-long id means:
+
+- the vendor has generated (and charged us for) a clip,
+- the router returns an error to the client and marks the provider failed —
+  degrading routing for a provider that is actually healthy,
+- and no `async_jobs` row is written, so nothing can ever bill or deliver that clip.
+
+The failure is silent from the vendor's side and looks like a provider fault from
+the router's. That asymmetry — cheap to guarantee here, expensive and misattributed
+there — is why the bound belongs at this boundary.
+
+### Enforcement options
+
+1. **Validate at onboarding (cheap, recommended first).** Reject a provider config
+   whose vendor issues non-conforming ids, turning a runtime, per-request failure
+   into an explicit deployment-time one. Zero runtime cost.
+2. **Mint and map (the full fix).** Have the broker issue its own short id and store
+   the vendor `task_id` beside it — `video_job_owner` is already keyed by this id, so
+   it is one extra column. This removes the ceiling entirely and makes the id shape
+   the broker's own decision rather than each vendor's, which is what the "opaque
+   internally, guaranteed externally" split above actually requires.
+
+Note the current margin is thin, not comfortable: a DashScope UUID is exactly 36
+characters, and an OpenAI-shaped `vid_`/`video_` prefix on a UUID or 32-byte hex
+(40 and 38 characters) is already over. This is worth settling before the first
+non-MiniMax video vendor is onboarded.
 
 ## Whitelisted (unbilled) traffic
 
