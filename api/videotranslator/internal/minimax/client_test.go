@@ -84,6 +84,44 @@ func TestCreateTask_HTTPError(t *testing.T) {
 	}
 }
 
+// TestCreateTask_V2ErrorEnvelope pins the shape /v2/video_generation ACTUALLY
+// returns — captured verbatim from api.minimax.io. It was unparsed here, so every
+// rejection from this endpoint reached the operator as `code="" message=""`, and
+// a live outage (a missing required "ratio") took a packet capture to diagnose
+// instead of one log line.
+func TestCreateTask_V2ErrorEnvelope(t *testing.T) {
+	const body = `{"type":"error","error":{"type":"bad_request_error","message":"invalid params, ratio is required for t2va (text-only) and cannot be 'adaptive'; allowed: 16:9/4:3/1:1/3:4/9:16/21:9 (2013)","http_code":"400"},"request_id":"06bbd1460c7f0626b11a6df66cc4135c"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	_, err := NewClient(srv.URL, srv.Client()).CreateTask(context.Background(), "Bearer k", CreateRequest{})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("StatusCode = %d, want 400", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Message, "ratio is required") {
+		t.Errorf("Message = %q, want the vendor's explanation", apiErr.Message)
+	}
+	if apiErr.Code != "bad_request_error" {
+		t.Errorf("Code = %q, want the envelope's error type", apiErr.Code)
+	}
+	// What MiniMax support asks for.
+	if apiErr.RequestID != "06bbd1460c7f0626b11a6df66cc4135c" {
+		t.Errorf("RequestID = %q, want it captured", apiErr.RequestID)
+	}
+	// The body's own "http_code" is a vendor-controlled string and must NOT
+	// override the real status from the response line.
+	if apiErr.Body != body {
+		t.Errorf("raw body must be kept for the unparseable case")
+	}
+}
+
 func TestCreateTask_BaseRespIn200(t *testing.T) {
 	// Defensive fallback: a legacy-shaped non-zero base_resp inside an HTTP 200.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -82,10 +82,26 @@ var miniMaxRatios = []struct {
 	{"9:16", 9.0 / 16.0},
 }
 
+// defaultMiniMaxRatio is what a text-only request gets when the client's "size"
+// says nothing about aspect ratio.
+//
+// H3 REQUIRES a ratio for text-to-video and rejects the request outright when it
+// is absent — confirmed live: "invalid params, ratio is required for t2va
+// (text-only) and cannot be 'adaptive'". So omitting it is not the harmless
+// "let the vendor default" it reads as; it is a hard 400. It bit the shipped
+// configuration, whose published defaultParameters.size is the resolution token
+// "2K" — exactly the shape sizeToMiniMaxRatio cannot derive a ratio from — so
+// the DEFAULT request shape 400'd and the service could not serve at all.
+//
+// 16:9 because it is landscape, MiniMax's own first listed value, and the ratio
+// of OpenAI's documented default video size (1280x720).
+const defaultMiniMaxRatio = "16:9"
+
 // sizeToMiniMaxRatio derives MiniMax's "ratio" parameter from the client's
 // pixel-dimension "size" field (e.g. "1280x720" -> "16:9"). An empty or
-// unparsable size yields "" (omitted from the request, so MiniMax applies its
-// "adaptive" default). Reuses parseSize (shared with the DashScope mapping).
+// unparsable size yields "", which the caller replaces with defaultMiniMaxRatio
+// for a text-only request — see there for why "" cannot be sent. Reuses
+// parseSize (shared with the DashScope mapping).
 func sizeToMiniMaxRatio(size string) string {
 	width, height, ok := parseSize(size)
 	if !ok {
@@ -208,6 +224,12 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 			ImageURL: &minimax.ImageURL{URL: ref},
 			Role:     "first_frame",
 		})
+	} else if ratio == "" {
+		// Text-only and nothing in "size" told us the aspect ratio. H3 rejects a
+		// t2v request with no ratio, so this is not optional — see
+		// defaultMiniMaxRatio. Only in the text-only branch: with a first frame the
+		// ratio follows the supplied image and H3 ignores any explicit value.
+		ratio = defaultMiniMaxRatio
 	}
 
 	return minimax.CreateRequest{

@@ -167,9 +167,16 @@ type APIError struct {
 	// Body is the raw response body, kept for logging when Code/Message
 	// couldn't be parsed out of it.
 	Body string
+	// RequestID is MiniMax's own correlation id, present on the V2 `error`
+	// envelope. It is the identifier their support asks for, and it is the only
+	// way to tie a rejection we logged to a request they can look up.
+	RequestID string
 }
 
 func (e *APIError) Error() string {
+	if e.RequestID != "" {
+		return fmt.Sprintf("minimax status %d: code=%q message=%q request_id=%q", e.StatusCode, e.Code, e.Message, e.RequestID)
+	}
 	return fmt.Sprintf("minimax status %d: code=%q message=%q", e.StatusCode, e.Code, e.Message)
 }
 
@@ -207,13 +214,36 @@ func baseRespError(br *BaseResp) *APIError {
 	}
 }
 
-// errorBody is a best-effort parse of a non-200 MiniMax body. The V2 error
-// shape isn't fully documented, so both a base_resp envelope and a top-level
-// {status_code,status_msg} are attempted; whichever is present wins.
+// errorBody is a best-effort parse of a non-200 MiniMax body. Three shapes are
+// attempted because MiniMax uses more than one; whichever is present wins.
+//
+// The `error` envelope is what /v2/video_generation ACTUALLY returns, confirmed
+// live against api.minimax.io:
+//
+//	{"type":"error","error":{"type":"bad_request_error",
+//	 "message":"invalid params, ratio is required for t2va ... (2013)",
+//	 "http_code":"400"},"request_id":"06bbd1..."}
+//
+// It was missing here, so every rejection this endpoint produced parsed to an
+// empty code AND an empty message — the operator saw `code="" message=""` and
+// could not tell a bad model name from a bad parameter from an exhausted quota.
+// request_id is captured because it is what MiniMax support asks for.
 type errorBody struct {
-	BaseResp   *BaseResp `json:"base_resp"`
-	StatusCode int64     `json:"status_code"`
-	StatusMsg  string    `json:"status_msg"`
+	BaseResp   *BaseResp      `json:"base_resp"`
+	StatusCode int64          `json:"status_code"`
+	StatusMsg  string         `json:"status_msg"`
+	Error      *errorEnvelope `json:"error"`
+	RequestID  string         `json:"request_id"`
+}
+
+// errorEnvelope is the inner object of MiniMax's V2 `error` shape. HTTPCode is a
+// STRING there ("400"), not a number — it is deliberately not parsed back into
+// APIError.StatusCode, which already carries the real HTTP status from the
+// response line and must not be overridden by a body a vendor controls.
+type errorEnvelope struct {
+	Type     string `json:"type"`
+	Message  string `json:"message"`
+	HTTPCode string `json:"http_code"`
 }
 
 func (c *Client) do(httpReq *http.Request, out interface{}) error {
@@ -244,6 +274,10 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 			case eb.StatusCode != 0:
 				apiErr.Code = fmt.Sprintf("%d", eb.StatusCode)
 				apiErr.Message = eb.StatusMsg
+			case eb.Error != nil && (eb.Error.Message != "" || eb.Error.Type != ""):
+				apiErr.Code = eb.Error.Type
+				apiErr.Message = eb.Error.Message
+				apiErr.RequestID = eb.RequestID
 			}
 		}
 		return apiErr
