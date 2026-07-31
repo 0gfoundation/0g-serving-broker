@@ -1,189 +1,125 @@
 package handler
 
-// MiniMaxVideoHandler mirrors VideoHandler (the DashScope surface) for MiniMax's
-// async video API (Hailuo / MiniMax-H3). It reuses this package's shared create
-// request parsing (parseCreateVideoRequest, maxCreateVideoBodyBytes) and the
-// translate package's OpenAI-shaped types; only the vendor client, the vendor
-// mapping functions, and the vendor error type differ.
-//
-// ponytail: a second near-identical handler rather than a shared Provider
-// interface — with exactly two vendors the duplication is smaller and lower
-// risk than restructuring the working DashScope path. Extract a
-// handler.Provider interface (CreateTask/GetTask/FetchContent + error mapping)
-// when a third vendor lands.
+// miniMaxProvider adapts *minimax.Client + the translate package's MiniMax
+// mapping functions to the Provider interface (see provider.go). It reuses
+// this package's shared create-request parsing (parseCreateVideoRequest,
+// maxCreateVideoBodyBytes) via GenericVideoHandler; only the vendor client
+// and vendor mapping functions differ from dashScopeProvider.
 
 import (
+	"context"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/minimax"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/translate"
 )
 
-// MiniMaxVideoHandler serves the OpenAI Video API surface the broker expects,
-// translating each call 1:1 to/from MiniMax. It holds no cross-request state:
-// polling to completion is the broker's job, not this sidecar's.
-type MiniMaxVideoHandler struct {
+// miniMaxProvider serves MiniMax (Hailuo / MiniMax-H3) through the shared
+// Provider interface.
+type miniMaxProvider struct {
 	client            *minimax.Client
 	defaultResolution string
 	logger            log.Logger
 }
 
-// NewMiniMaxVideoHandler builds a MiniMaxVideoHandler. defaultResolution is the
-// resolution sent when the client's "size" isn't itself a MiniMax resolution
-// token (e.g. "2K" for an H3 deployment).
-func NewMiniMaxVideoHandler(client *minimax.Client, defaultResolution string, logger log.Logger) *MiniMaxVideoHandler {
-	return &MiniMaxVideoHandler{client: client, defaultResolution: defaultResolution, logger: logger}
+// NewMiniMaxVideoHandler builds the MiniMax video handler. defaultResolution
+// is the resolution sent when the client's "size" isn't itself a MiniMax
+// resolution token (e.g. "2K" for an H3 deployment).
+func NewMiniMaxVideoHandler(client *minimax.Client, defaultResolution string, logger log.Logger) *GenericVideoHandler {
+	return NewGenericVideoHandler(&miniMaxProvider{client: client, defaultResolution: defaultResolution, logger: logger}, logger)
 }
 
-// CreateVideo handles POST /videos.
-func (h *MiniMaxVideoHandler) CreateVideo(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCreateVideoBodyBytes)
-
-	req, err := parseCreateVideoRequest(c.Request)
+func (p *miniMaxProvider) CreateVideo(ctx context.Context, authHeader string, req translate.CreateVideoRequest) (translate.VideoResponse, error) {
+	mmReq := translate.ToMiniMaxCreateRequest(req, p.defaultResolution)
+	mmResp, err := p.client.CreateTask(ctx, authHeader, mmReq)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
-		return
-	}
-
-	authHeader := c.GetHeader("Authorization")
-	mmReq := translate.ToMiniMaxCreateRequest(req, h.defaultResolution)
-	mmResp, err := h.client.CreateTask(c.Request.Context(), authHeader, mmReq)
-	if err != nil {
-		h.writeMiniMaxError(c, "minimax create task failed", "failed to create video generation task", err)
-		return
+		return translate.VideoResponse{}, err
 	}
 
 	out, err := translate.FromMiniMaxCreateResponse(req, *mmResp)
 	if err != nil {
 		// The vendor's id cannot be expressed in the contract the broker publishes
 		// (see translate.EncodeJobID). Fail here, loudly, on this vendor's FIRST
-		// request rather than handing downstream a key it cannot persist.
-		h.logger.Errorf("job id contract: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "upstream returned an unusable job id"}})
-		return
+		// request rather than handing downstream a key it cannot persist. A plain
+		// error (not newValidationError) — this is an upstream/vendor-shape
+		// problem, not a bad client request, so it falls through
+		// writeProviderError's generic 502 path.
+		p.logger.Errorf("job id contract: %v", err)
+		return translate.VideoResponse{}, err
 	}
-	c.JSON(http.StatusOK, out)
+	return out, nil
 }
 
-// GetVideo handles GET /videos/{id}.
-func (h *MiniMaxVideoHandler) GetVideo(c *gin.Context) {
-	publicID := c.Param("id")
+// errMiniMaxNoTask is returned by GetVideo when a 200 response carries no
+// task (and no base_resp error, which the client already turns into an
+// *minimax.APIError). It is a plain error, not a *minimax.APIError, so
+// GenericVideoHandler.writeProviderError falls through to its generic 502
+// path — the broker's poll scheduler then treats this as a transient hiccup
+// and reschedules, rather than a terminal "failed" that would stop polling
+// and potentially serve a job that later succeeded for free.
+var errMiniMaxNoTask = errors.New("minimax get-task response contained no task (malformed upstream response)")
+
+// GetVideo handles GET /videos/{id}. taskID here is actually the PUBLIC,
+// encoded job id (GenericVideoHandler passes c.Param("id") straight through
+// — it has no vendor-specific encode/decode knowledge), so this decodes it
+// back to MiniMax's real task id before calling the vendor.
+func (p *miniMaxProvider) GetVideo(ctx context.Context, authHeader, publicID string) (translate.VideoResponse, error) {
 	taskID, err := translate.DecodeJobID(publicID)
 	if err != nil {
-		// The only failure in these handlers that would otherwise leave no trace at
-		// all: the client gets a message without the id, and DecodeJobID's three
-		// distinct causes (unknown shape / malformed payload / not a task id) are
-		// discarded. Log it — this is also the path most likely to reject something
-		// legitimate.
-		h.logger.Warnf("video id %q rejected: %v", publicID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
-		return
+		// The only failure in this path that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's
+		// distinct causes (unknown shape / malformed payload / not a task id)
+		// are discarded. Log it — this is also the path most likely to reject
+		// something legitimate. Wrapped with newValidationError so
+		// writeProviderError reports 400 "unknown video id", not the generic
+		// 502 every other non-vendor-4xx error gets — a bad/unknown id is the
+		// client's request being wrong, not a vendor or transport problem.
+		p.logger.Warnf("video id %q rejected: %v", publicID, err)
+		return translate.VideoResponse{}, newValidationError(errors.New("unknown video id"))
 	}
-	authHeader := c.GetHeader("Authorization")
 
-	mmResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
+	mmResp, err := p.client.GetTask(ctx, authHeader, taskID)
 	if err != nil {
-		h.writeMiniMaxError(c, fmt.Sprintf("minimax get task failed for %s", taskID), "failed to get video generation task", err)
-		return
+		return translate.VideoResponse{}, err
 	}
-	// A 200 with no task (and no base_resp error, which the client already turns
-	// into an APIError) is a malformed/transient upstream response. Report it as
-	// a 502 so the broker's poll scheduler treats it as a transient hiccup and
-	// reschedules — NOT as a terminal "failed", which would stop polling and
-	// serve a job that might have succeeded for free. Logged loudly so the
-	// operator sees a genuinely broken upstream.
 	if mmResp.Task == nil {
-		h.logger.Errorf("minimax get task %s: response contained no task (malformed upstream response)", taskID)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "upstream returned no task"}})
-		return
+		return translate.VideoResponse{}, errMiniMaxNoTask
 	}
 	if !translate.IsRecognizedMiniMaxStatus(mmResp.Task.Status) {
-		h.logger.Errorf("minimax get task %s: unrecognized status %q, mapping to failed", taskID, mmResp.Task.Status)
+		p.logger.Errorf("minimax get task %s: unrecognized status %q, mapping to failed", taskID, mmResp.Task.Status)
 	}
-
-	c.JSON(http.StatusOK, translate.FromMiniMaxGetTaskResponse(publicID, *mmResp))
+	return translate.FromMiniMaxGetTaskResponse(publicID, *mmResp), nil
 }
 
-// GetVideoContent handles GET /videos/{id}/content: it looks up the task's
-// current state to find MiniMax's asset URL, then streams the video bytes back
-// through the translator rather than redirecting, keeping the vendor's asset
-// host hidden from the client.
-func (h *MiniMaxVideoHandler) GetVideoContent(c *gin.Context) {
-	publicID := c.Param("id")
+// GetVideoContentURL returns MiniMax's task.content.url once populated. A
+// nil task, nil content, or empty URL (task not yet completed, or upstream
+// reported no asset) is reported as ok=false, not an error — the caller
+// returns 404 for this case. This is deliberately NOT the same treatment
+// GetVideo gives a nil task (a 502): here, the far more common cause is
+// simply that generation hasn't finished yet, which is an ordinary "not
+// ready" state, not a malformed response.
+//
+// publicID (like GetVideo's) is the client-facing encoded id, decoded to
+// MiniMax's real task id here for the same reason.
+func (p *miniMaxProvider) GetVideoContentURL(ctx context.Context, authHeader, publicID string) (string, bool, error) {
 	taskID, err := translate.DecodeJobID(publicID)
 	if err != nil {
-		// The only failure in these handlers that would otherwise leave no trace at
-		// all: the client gets a message without the id, and DecodeJobID's three
-		// distinct causes (unknown shape / malformed payload / not a task id) are
-		// discarded. Log it — this is also the path most likely to reject something
-		// legitimate.
-		h.logger.Warnf("video id %q rejected: %v", publicID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
-		return
+		p.logger.Warnf("video id %q rejected: %v", publicID, err)
+		return "", false, newValidationError(errors.New("unknown video id"))
 	}
-	authHeader := c.GetHeader("Authorization")
 
-	mmResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
+	mmResp, err := p.client.GetTask(ctx, authHeader, taskID)
 	if err != nil {
-		h.writeMiniMaxError(c, fmt.Sprintf("minimax get task failed for %s", taskID), "failed to get video generation task", err)
-		return
+		return "", false, err
 	}
 	if mmResp.Task == nil || mmResp.Task.Content == nil || mmResp.Task.Content.URL == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "video content not available (task not completed, or upstream reported no asset)"}})
-		return
+		return "", false, nil
 	}
-
-	contentResp, err := h.client.FetchContent(c.Request.Context(), mmResp.Task.Content.URL)
-	if err != nil {
-		h.logger.Errorf("fetch video content failed for %s: %v", taskID, err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to fetch video content"}})
-		return
-	}
-	defer contentResp.Body.Close()
-
-	contentType := contentResp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "video/mp4"
-	}
-	c.Header("Content-Type", contentType)
-	c.Status(http.StatusOK)
-	if _, err := io.Copy(c.Writer, contentResp.Body); err != nil {
-		h.logger.Warnf("stream video content failed for %s: %v", taskID, err)
-	}
+	return mmResp.Task.Content.URL, true, nil
 }
 
-// writeMiniMaxError maps a minimax client error to the HTTP response the caller
-// sees. A MiniMax 4xx (*minimax.APIError with a 4xx status — the vendor
-// rejected the request: bad auth, bad parameter, quota) surfaces the vendor's
-// status/code/message so an OpenAI-SDK client classifies it correctly
-// (401 -> AuthenticationError, 429 -> RateLimitError). Anything else (5xx, or a
-// plain transport error) is reported as 502 without vendor detail.
-func (h *MiniMaxVideoHandler) writeMiniMaxError(c *gin.Context, logContext, fallbackMessage string, err error) {
-	var apiErr *minimax.APIError
-	if errors.As(err, &apiErr) {
-		// Logged for EVERY status, not just 4xx: a 5xx is the more common outage
-		// shape and the one where the body is most likely to be the only
-		// explanation (a load balancer's HTML page). Routing it through the same
-		// helper was the last place that still emitted a bare `code="" message=""`.
-		h.logger.Errorf("%s: minimax rejected request: status %d %s", logContext, apiErr.StatusCode,
-			vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, apiErr.RequestID))
-		if apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
-			message := redactCredentials(apiErr.Message)
-			if message == "" {
-				message = fmt.Sprintf("minimax rejected the request (status %d)", apiErr.StatusCode)
-			}
-			c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
-			return
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
-		return
-	}
-	h.logger.Errorf("%s: %v", logContext, err)
-	c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
+func (p *miniMaxProvider) FetchContent(ctx context.Context, contentURL string) (*http.Response, error) {
+	return p.client.FetchContent(ctx, contentURL)
 }

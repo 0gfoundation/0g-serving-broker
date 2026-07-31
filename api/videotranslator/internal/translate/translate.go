@@ -25,16 +25,28 @@ const (
 )
 
 // CreateVideoRequest is the OpenAI-shaped POST /videos request as parsed
-// from the broker's forwarded body (multipart/form-data or JSON). Seed has
-// no official OpenAI Video API field — a client can only set it via the
-// SDK's documented "undocumented request params" escape hatch, which sends
-// it through as a plain extra field the broker relays unmodified.
+// from the broker's forwarded body (multipart/form-data or JSON). Seed,
+// Watermark, and Audio have no official OpenAI Video API field — a client
+// can only set them via the SDK's documented "undocumented request params"
+// escape hatch, which sends them through as plain extra fields the broker
+// relays unmodified. Kept as raw strings (like Seed already was) rather than
+// typed bool/int here, matching the existing convention of doing all
+// vendor-specific parsing/validation in each translate.ToXCreateRequest
+// function rather than at this shared, vendor-agnostic layer.
 type CreateVideoRequest struct {
 	Model   string
 	Prompt  string
 	Seconds string
 	Size    string
 	Seed    string
+	// Watermark/Audio are new, additive fields (existing DashScope/MiniMax
+	// mappings ignore them, unchanged from before): DashScope's own
+	// ToDashScopeCreateRequest still hardcodes Watermark=false regardless
+	// (it has no client-facing watermark control), and MiniMax's
+	// CreateRequest has no watermark/audio field at all. Vidu is the first
+	// vendor to actually read these.
+	Watermark string
+	Audio     string
 	// InputReferenceImageURL / InputReferenceFileID are the OpenAI Video API's
 	// input_reference (image-to-video / first frame): "provide exactly one of
 	// image_url or file_id". image_url is a public URL or a data: URI; file_id
@@ -42,6 +54,15 @@ type CreateVideoRequest struct {
 	// (e.g. MiniMax first_frame + mm_file://) lives in the translate.To* funcs.
 	InputReferenceImageURL string
 	InputReferenceFileID   string
+	// LastFrameReferenceImageURL is a new, additive field for Vidu's
+	// start/end-frame model family, which requires EXACTLY two reference
+	// images (first frame = InputReferenceImageURL, last frame = this
+	// field) — unlike MiniMax/DashScope's single first-frame-only
+	// image-to-video. No file_id counterpart: Vidu documents only public
+	// http(s) URLs for media[].url, no vendor-native file-handle scheme
+	// analogous to MiniMax's mm_file://, so there is nothing to prefix
+	// server-side the way firstFrameReference does for MiniMax.
+	LastFrameReferenceImageURL string
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for

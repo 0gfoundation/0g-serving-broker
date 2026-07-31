@@ -1,36 +1,113 @@
-// Package handler wires the OpenAI-shaped HTTP surface to the DashScope
-// client and the translate package. It holds no state across requests: the
-// translator is a stateless, per-call protocol shim (see
+// Package handler wires the OpenAI-shaped HTTP surface to each vendor's
+// native client and the translate package, via the shared Provider interface
+// (provider.go). It holds no state across requests: the translator is a
+// stateless, per-call protocol shim (see
 // 0gfoundation/0g-serving-broker#582) — polling to completion is the
 // broker's job, not this service's.
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/dashscope"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/translate"
 )
 
-// VideoHandler serves the OpenAI Video API surface the broker expects,
-// translating each call 1:1 to/from DashScope.
-type VideoHandler struct {
+// dashScopeProvider adapts *dashscope.Client + the translate package's
+// DashScope mapping functions to the Provider interface.
+type dashScopeProvider struct {
 	client *dashscope.Client
 	logger log.Logger
 }
 
-// NewVideoHandler builds a VideoHandler.
-func NewVideoHandler(client *dashscope.Client, logger log.Logger) *VideoHandler {
-	return &VideoHandler{client: client, logger: logger}
+// NewVideoHandler builds the DashScope video handler.
+func NewVideoHandler(client *dashscope.Client, logger log.Logger) *GenericVideoHandler {
+	return NewGenericVideoHandler(&dashScopeProvider{client: client, logger: logger}, logger)
+}
+
+func (p *dashScopeProvider) CreateVideo(ctx context.Context, authHeader string, req translate.CreateVideoRequest) (translate.VideoResponse, error) {
+	dsReq := translate.ToDashScopeCreateRequest(req)
+	dsResp, err := p.client.CreateTask(ctx, authHeader, dsReq)
+	if err != nil {
+		return translate.VideoResponse{}, err
+	}
+
+	out, err := translate.FromCreateResponse(req, *dsResp)
+	if err != nil {
+		// The vendor's id cannot be expressed in the contract the broker publishes
+		// (see translate.EncodeJobID). Fail here, loudly, on this vendor's FIRST
+		// request rather than handing downstream a key it cannot persist. A plain
+		// error (not newValidationError) — this is an upstream/vendor-shape
+		// problem, not a bad client request, so it falls through
+		// writeProviderError's generic 502 path.
+		p.logger.Errorf("job id contract: %v", err)
+		return translate.VideoResponse{}, err
+	}
+	return out, nil
+}
+
+// GetVideo handles GET /videos/{id}. taskID here is actually the PUBLIC,
+// encoded job id (GenericVideoHandler passes c.Param("id") straight through
+// — it has no vendor-specific encode/decode knowledge), so this decodes it
+// back to DashScope's real task id before calling the vendor.
+func (p *dashScopeProvider) GetVideo(ctx context.Context, authHeader, publicID string) (translate.VideoResponse, error) {
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		// The only failure in this path that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's
+		// distinct causes (unknown shape / malformed payload / not a task id)
+		// are discarded. Log it — this is also the path most likely to reject
+		// something legitimate. Wrapped with newValidationError so
+		// writeProviderError reports 400 "unknown video id", not the generic
+		// 502 every other non-vendor-4xx error gets — a bad/unknown id is the
+		// client's request being wrong, not a vendor or transport problem.
+		p.logger.Warnf("video id %q rejected: %v", publicID, err)
+		return translate.VideoResponse{}, newValidationError(errors.New("unknown video id"))
+	}
+
+	dsResp, err := p.client.GetTask(ctx, authHeader, taskID)
+	if err != nil {
+		return translate.VideoResponse{}, err
+	}
+	if !translate.IsRecognizedDashScopeStatus(dsResp.Output.TaskStatus) {
+		p.logger.Errorf("dashscope get task %s: unrecognized task_status %q, mapping to failed", taskID, dsResp.Output.TaskStatus)
+	}
+	return translate.FromGetTaskResponse(publicID, *dsResp), nil
+}
+
+// GetVideoContentURL returns DashScope's video_url once populated. An empty
+// video_url (task not yet completed, or upstream reported no asset) is
+// reported as ok=false, not an error — the caller returns 404 for this case.
+//
+// publicID (like GetVideo's) is the client-facing encoded id, decoded to
+// DashScope's real task id here for the same reason.
+func (p *dashScopeProvider) GetVideoContentURL(ctx context.Context, authHeader, publicID string) (string, bool, error) {
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		p.logger.Warnf("video id %q rejected: %v", publicID, err)
+		return "", false, newValidationError(errors.New("unknown video id"))
+	}
+
+	dsResp, err := p.client.GetTask(ctx, authHeader, taskID)
+	if err != nil {
+		return "", false, err
+	}
+	if dsResp.Output.VideoURL == "" {
+		return "", false, nil
+	}
+	return dsResp.Output.VideoURL, true, nil
+}
+
+func (p *dashScopeProvider) FetchContent(ctx context.Context, contentURL string) (*http.Response, error) {
+	return p.client.FetchContent(ctx, contentURL)
 }
 
 // jsonCreateVideoRequest is the JSON-shaped variant of a create request
@@ -45,12 +122,28 @@ type jsonCreateVideoRequest struct {
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
 	Seed    json.Number `json:"seed"`
+	// Watermark/Audio are genuine JSON booleans (not numbers, unlike
+	// Seed/Seconds) — *bool so "absent" (nil) is distinguishable from an
+	// explicit "false", converted to a plain "true"/"false" string (or ""
+	// when absent) before reaching the shared, vendor-agnostic
+	// CreateVideoRequest, matching how every other field here is a raw
+	// string for the translate layer to parse per-vendor.
+	Watermark *bool `json:"watermark"`
+	Audio     *bool `json:"audio"`
 	// InputReference is the OpenAI Video API image-to-video reference (first
 	// frame): exactly one of image_url (public URL or data: URI) or file_id.
 	InputReference *struct {
 		ImageURL string `json:"image_url"`
 		FileID   string `json:"file_id"`
 	} `json:"input_reference"`
+	// LastFrameReference is Vidu-specific (start/end-frame models): the
+	// last-frame counterpart to InputReference's first frame. Only
+	// image_url is supported (Vidu documents no file_id/vendor-native
+	// handle scheme for media[].url, so there is nothing to prefix
+	// server-side the way MiniMax's file_id is).
+	LastFrameReference *struct {
+		ImageURL string `json:"image_url"`
+	} `json:"last_frame_reference"`
 }
 
 // maxCreateVideoBodyBytes bounds the total POST /videos request body.
@@ -81,146 +174,6 @@ type jsonCreateVideoRequest struct {
 // gate — MaxBytesReader below trips first.
 const maxCreateVideoBodyBytes = 24 << 20 // 24 MiB
 
-// CreateVideo handles POST /videos.
-func (h *VideoHandler) CreateVideo(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCreateVideoBodyBytes)
-
-	req, err := parseCreateVideoRequest(c.Request)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
-		return
-	}
-
-	authHeader := c.GetHeader("Authorization")
-	dsReq := translate.ToDashScopeCreateRequest(req)
-	dsResp, err := h.client.CreateTask(c.Request.Context(), authHeader, dsReq)
-	if err != nil {
-		h.writeDashScopeError(c, "dashscope create task failed", "failed to create video generation task", err)
-		return
-	}
-
-	out, err := translate.FromCreateResponse(req, *dsResp)
-	if err != nil {
-		// The vendor's id cannot be expressed in the contract the broker publishes
-		// (see translate.EncodeJobID). Fail here, loudly, on this vendor's FIRST
-		// request rather than handing downstream a key it cannot persist.
-		h.logger.Errorf("job id contract: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "upstream returned an unusable job id"}})
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// GetVideo handles GET /videos/{id}.
-func (h *VideoHandler) GetVideo(c *gin.Context) {
-	publicID := c.Param("id")
-	taskID, err := translate.DecodeJobID(publicID)
-	if err != nil {
-		// The only failure in these handlers that would otherwise leave no trace at
-		// all: the client gets a message without the id, and DecodeJobID's three
-		// distinct causes (unknown shape / malformed payload / not a task id) are
-		// discarded. Log it — this is also the path most likely to reject something
-		// legitimate.
-		h.logger.Warnf("video id %q rejected: %v", publicID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
-		return
-	}
-	authHeader := c.GetHeader("Authorization")
-
-	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
-	if err != nil {
-		h.writeDashScopeError(c, fmt.Sprintf("dashscope get task failed for %s", taskID), "failed to get video generation task", err)
-		return
-	}
-	if !translate.IsRecognizedDashScopeStatus(dsResp.Output.TaskStatus) {
-		h.logger.Errorf("dashscope get task %s: unrecognized task_status %q, mapping to failed", taskID, dsResp.Output.TaskStatus)
-	}
-
-	c.JSON(http.StatusOK, translate.FromGetTaskResponse(publicID, *dsResp))
-}
-
-// GetVideoContent handles GET /videos/{id}/content: it looks up the task's
-// current state to find DashScope's asset URL, then streams the video bytes
-// back through the translator rather than redirecting the client to it —
-// keeping the vendor's asset host hidden from the client, consistent with
-// this service never exposing DashScope directly.
-func (h *VideoHandler) GetVideoContent(c *gin.Context) {
-	publicID := c.Param("id")
-	taskID, err := translate.DecodeJobID(publicID)
-	if err != nil {
-		// The only failure in these handlers that would otherwise leave no trace at
-		// all: the client gets a message without the id, and DecodeJobID's three
-		// distinct causes (unknown shape / malformed payload / not a task id) are
-		// discarded. Log it — this is also the path most likely to reject something
-		// legitimate.
-		h.logger.Warnf("video id %q rejected: %v", publicID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
-		return
-	}
-	authHeader := c.GetHeader("Authorization")
-
-	dsResp, err := h.client.GetTask(c.Request.Context(), authHeader, taskID)
-	if err != nil {
-		h.writeDashScopeError(c, fmt.Sprintf("dashscope get task failed for %s", taskID), "failed to get video generation task", err)
-		return
-	}
-	if dsResp.Output.VideoURL == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "video content not available (task not completed, or upstream reported no asset)"}})
-		return
-	}
-
-	contentResp, err := h.client.FetchContent(c.Request.Context(), dsResp.Output.VideoURL)
-	if err != nil {
-		h.logger.Errorf("fetch video content failed for %s: %v", taskID, err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "failed to fetch video content"}})
-		return
-	}
-	defer contentResp.Body.Close()
-
-	contentType := contentResp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "video/mp4"
-	}
-	c.Header("Content-Type", contentType)
-	c.Status(http.StatusOK)
-	if _, err := io.Copy(c.Writer, contentResp.Body); err != nil {
-		h.logger.Warnf("stream video content failed for %s: %v", taskID, err)
-	}
-}
-
-// writeDashScopeError maps a dashscope client error to the HTTP response
-// the caller sees. A DashScope 4xx (*dashscope.APIError with a 4xx status —
-// the vendor rejected the request outright: bad auth, bad model/parameter,
-// quota) surfaces the vendor's own status/code/message, since that's the
-// caller's own request being rejected, not a translator or connectivity
-// problem — this also lets an OpenAI-SDK client classify it correctly
-// (e.g. 401 -> AuthenticationError, 429 -> RateLimitError), matching how
-// FromGetTaskResponse already propagates Code/Message for a task that fails
-// asynchronously. Anything else (5xx, or a plain transport/connectivity
-// error with no structured vendor response at all) is reported as 502
-// without vendor detail — there isn't any reliable detail to give.
-func (h *VideoHandler) writeDashScopeError(c *gin.Context, logContext, fallbackMessage string, err error) {
-	var apiErr *dashscope.APIError
-	if errors.As(err, &apiErr) {
-		// Every status, same reasoning as the MiniMax sibling: a 5xx is where the
-		// body is most often the only explanation.
-		h.logger.Errorf("%s: dashscope rejected request: status %d %s", logContext, apiErr.StatusCode,
-			vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, apiErr.RequestID))
-		if apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
-			message := redactCredentials(apiErr.Message)
-			if message == "" {
-				message = fmt.Sprintf("dashscope rejected the request (status %d)", apiErr.StatusCode)
-			}
-			c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
-			return
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
-		return
-	}
-	h.logger.Errorf("%s: %v", logContext, err)
-	c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
-}
-
 // parseCreateVideoRequest reads a create request from either a
 // multipart/form-data body (the broker's live /v1/videos transport) or a
 // plain JSON body.
@@ -231,11 +184,13 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 			return translate.CreateVideoRequest{}, err
 		}
 		req := translate.CreateVideoRequest{
-			Model:   r.FormValue("model"),
-			Prompt:  r.FormValue("prompt"),
-			Seconds: r.FormValue("seconds"),
-			Size:    r.FormValue("size"),
-			Seed:    r.FormValue("seed"),
+			Model:     r.FormValue("model"),
+			Prompt:    r.FormValue("prompt"),
+			Seconds:   r.FormValue("seconds"),
+			Size:      r.FormValue("size"),
+			Seed:      r.FormValue("seed"),
+			Watermark: r.FormValue("watermark"),
+			Audio:     r.FormValue("audio"),
 		}
 		// input_reference (image-to-video): a plain form value carries a URL;
 		// a file part carries the image bytes → encode as a data: URI so the
@@ -245,6 +200,14 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 			req.InputReferenceImageURL = v
 		} else if dataURI, ok := multipartFileDataURI(r, "input_reference"); ok {
 			req.InputReferenceImageURL = dataURI
+		}
+		// last_frame_reference (Vidu start/end-frame models): same
+		// plain-value-or-file-part handling as input_reference, no file_id
+		// counterpart (see CreateVideoRequest.LastFrameReferenceImageURL doc).
+		if v := r.FormValue("last_frame_reference"); v != "" {
+			req.LastFrameReferenceImageURL = v
+		} else if dataURI, ok := multipartFileDataURI(r, "last_frame_reference"); ok {
+			req.LastFrameReferenceImageURL = dataURI
 		}
 		return req, nil
 	}
@@ -260,9 +223,18 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		Size:    jr.Size,
 		Seed:    jr.Seed.String(),
 	}
+	if jr.Watermark != nil {
+		req.Watermark = strconv.FormatBool(*jr.Watermark)
+	}
+	if jr.Audio != nil {
+		req.Audio = strconv.FormatBool(*jr.Audio)
+	}
 	if jr.InputReference != nil {
 		req.InputReferenceImageURL = jr.InputReference.ImageURL
 		req.InputReferenceFileID = jr.InputReference.FileID
+	}
+	if jr.LastFrameReference != nil {
+		req.LastFrameReferenceImageURL = jr.LastFrameReference.ImageURL
 	}
 	return req, nil
 }
