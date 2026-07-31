@@ -290,6 +290,26 @@ type Service struct {
 	// ProviderIdentity identifies the centralized provider (e.g., "openai", "anthropic").
 	// Only used when ProviderType is "centralized".
 	ProviderIdentity string `yaml:"providerIdentity"`
+	// TargetTLSProxy declares that TargetURL is a protocol-translation sidecar
+	// running INSIDE this broker's own TEE (same CVM, same TDX quote) rather than
+	// the vendor endpoint itself — the deployment shape used for a vendor whose
+	// wire protocol the broker doesn't speak natively (see api/videotranslator).
+	//
+	// It exists because a sidecar breaks the centralized routing proof's evidence
+	// chain: the proof binds the leaf certificate of the connection that reached
+	// the vendor, read from resp.TLS, but with a shim in front the broker's own hop
+	// is plaintext HTTP on the compose network and the vendor handshake happens in
+	// the shim. Setting this makes the broker take the fingerprint from the shim's
+	// tee.HeaderUpstreamCertFingerprint response header instead, and waives the
+	// HTTPS requirement on TargetURL.
+	//
+	// SECURITY: only set this when the target really is in-enclave. The header is a
+	// plain string an upstream can put whatever it likes in; what makes it evidence
+	// is that the shim is covered by the same attestation as the broker. Pointing
+	// this at an external host would let that host dictate its own routing proof.
+	// The broker never reads the header when this is false, so a rogue upstream on
+	// an ordinary centralized deployment cannot forge a fingerprint.
+	TargetTLSProxy bool `yaml:"targetTLSProxy"`
 	// ProviderName is an optional human-readable display name for the provider
 	// (e.g., "OpenAI", "Aliyun (CN)"). Surfaced as provider_name in /v1/models for
 	// presentation only. Unlike ProviderIdentity (a lowercase machine key), this is
@@ -1747,8 +1767,11 @@ func loadConfig(cfg *Config) error {
 		cfg.Service.TargetSeparated = true
 		// Require HTTPS for centralized providers — routing proof relies on
 		// resp.TLS which is only populated for HTTPS connections.
-		if cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
-			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s'", cfg.Service.TargetURL)
+		// Waived under targetTLSProxy: the target is then an in-enclave shim that made
+		// the vendor TLS connection itself and reports its fingerprint back on a
+		// header, so the proof has TLS evidence even though this hop doesn't.
+		if !cfg.Service.TargetTLSProxy && cfg.Service.TargetURL != "" && !strings.HasPrefix(strings.ToLower(cfg.Service.TargetURL), "https://") {
+			return fmt.Errorf("invalid config: service.targetUrl must use HTTPS for centralized providers (routing proof requires TLS), got '%s' — set service.targetTLSProxy: true if this target is a protocol-translation sidecar inside this broker's own TEE", cfg.Service.TargetURL)
 		}
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeStandard {

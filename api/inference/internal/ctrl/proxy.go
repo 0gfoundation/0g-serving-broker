@@ -446,7 +446,24 @@ const CtxKeyUpstreamCertFingerprint = "upstreamCertFingerprint"
 // upstreamCertFingerprint returns the fingerprint the centralized routing proof
 // should bind, or "" when there is no TLS evidence (in which case
 // signCentralizedRoutingProof refuses to sign rather than emit a proof with none).
+// The two sources are mutually exclusive by design, not a fallback chain:
+//   - Normal centralized: the broker's own hop IS the vendor connection, so trust
+//     resp.TLS and nothing else. Reading the header here too would let any
+//     upstream forge its own routing proof by setting it.
+//   - targetTLSProxy: the vendor connection was made by an in-enclave shim, so the
+//     header is the only witness. resp.TLS here would be the shim's own
+//     certificate (or nil for the plaintext in-CVM hop) — attesting to it would
+//     prove nothing about which vendor served the request.
 func (c *Ctrl) upstreamCertFingerprint(resp *http.Response) string {
+	if c.Service.TargetTLSProxy {
+		fp, ok := teeutil.NormalizeCertFingerprint(resp.Header.Get(teeutil.HeaderUpstreamCertFingerprint))
+		if !ok {
+			c.logger.Errorf("targetTLSProxy: the sidecar at %s reported no usable %s header; no routing proof for this response",
+				c.Service.TargetURL, teeutil.HeaderUpstreamCertFingerprint)
+			return ""
+		}
+		return fp
+	}
 	if info := teeutil.ExtractTLSInfo(resp.TLS); info != nil {
 		return info.PeerCertFingerprint
 	}
