@@ -80,15 +80,41 @@ func TestEncodeJobIDRefusesWhatItCannotCarry(t *testing.T) {
 	}
 }
 
-// TestDecodeJobIDRejectsForeignIDs: an id we did not issue must not be silently
-// treated as a vendor id — that would send a poll to a path the vendor never knew.
-func TestDecodeJobIDRejectsForeignIDs(t *testing.T) {
+// TestDecodeJobIDPassesThroughLegacyIDs: this translator shipped before tagging
+// existed, so ids already in flight carry no tag. Rejecting them would strand every
+// such job — the broker's poller treats the 4xx as retryable, so the job spins until
+// MaxPollDuration, never bills, and loses the signature its client holds a key for.
+func TestDecodeJobIDPassesThroughLegacyIDs(t *testing.T) {
+	for _, legacy := range []string{
+		"425080991981768",                      // MiniMax, as issued before this change
+		"0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // DashScope, likewise
+		"v9_something",                         // no tag we know: still just a vendor id
+	} {
+		got, err := DecodeJobID(legacy)
+		if err != nil {
+			t.Errorf("DecodeJobID(%q) rejected a pre-tagging id: %v", legacy, err)
+		}
+		if got != legacy {
+			t.Errorf("DecodeJobID(%q) = %q, want it passed through unchanged", legacy, got)
+		}
+	}
+}
+
+// TestDecodeJobIDRejectsWhatMustNotReachAVendorURL: the recovered id is spliced into
+// a URL carrying our account's credentials. PathEscape handles separators, but not a
+// bare ".." (still a live path segment) and not an empty id (which turns a vendor's
+// item endpoint into its collection endpoint).
+func TestDecodeJobIDRejectsWhatMustNotReachAVendorURL(t *testing.T) {
 	for _, id := range []string{
-		"425080991981768",                    // a raw vendor id, untagged
-		"v9_something",                       // unknown tag
-		"v1_not-32-hex-characters-at-all-xx", // uuid tag, bad payload
-		"v2_!!!",                             // base64 tag, bad payload
-		"",                                   // empty
+		"",          // empty
+		"v0_",       // bare tag, empty payload
+		"v2_",       // ditto
+		"v0_..",     // path segment through the passthrough tag
+		"v2_Li4",    // base64("..")
+		"..",        // untagged
+		"v0_a/b",    // off the contract charset for a tag that only ever emits it
+		"v1_nothex", // uuid tag, bad payload
+		"v2_!!!",    // base64 tag, bad payload
 	} {
 		if got, err := DecodeJobID(id); err == nil {
 			t.Errorf("DecodeJobID(%q) returned %q, want an error", id, got)

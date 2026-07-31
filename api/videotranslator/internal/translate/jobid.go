@@ -69,13 +69,28 @@ func EncodeJobID(vendorID string) (string, error) {
 		vendorID, len(vendorID), MaxJobIDLen)
 }
 
-// DecodeJobID recovers the vendor task id from an id this package issued. Every
-// request after create arrives with the encoded form (the broker stores and replays
-// exactly what it was given), so this runs on every poll and every content fetch.
+// DecodeJobID recovers the vendor task id from a published id. Every request after
+// create arrives in the published form (the broker stores and replays exactly what
+// it was given), so this runs on every poll and every content fetch.
+//
+// An UNTAGGED id is treated as a pre-EncodeJobID vendor id and passed through. That
+// is deliberate, not lax: this translator shipped before tagging existed, so ids it
+// already handed out carry no tag, and rejecting them would strand every in-flight
+// job — the broker's poller treats the resulting 4xx as retryable, so such a job
+// would spin until MaxPollDuration, never bill, and lose the signature its client
+// holds a key for. Passing them through is exactly what this code did before, and
+// the vendor rejects the id if it is junk.
+//
+// Every path validates what it recovers, because the decoded value is spliced into
+// a vendor URL carrying our account's credentials. The clients PathEscape it, which
+// handles separators — but not a bare "..", which stays a live path segment, nor an
+// empty id, which turns a vendor's item endpoint into its collection endpoint.
 func DecodeJobID(publicID string) (string, error) {
 	switch {
 	case strings.HasPrefix(publicID, tagRaw):
-		return strings.TrimPrefix(publicID, tagRaw), nil
+		// EncodeJobID only ever emits a contract-charset payload here, so requiring
+		// one costs nothing and rejects a hand-crafted "v0_..".
+		return checkedVendorID(publicID, strings.TrimPrefix(publicID, tagRaw), true)
 
 	case strings.HasPrefix(publicID, tagUUID):
 		return expandUUID(strings.TrimPrefix(publicID, tagUUID))
@@ -85,10 +100,31 @@ func DecodeJobID(publicID string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("job id %q has a malformed payload: %w", publicID, err)
 		}
-		return string(raw), nil
+		// NOT charset-checked: the base64 tag exists precisely because the vendor id
+		// is not contract-clean. Only the shapes that would change the vendor URL's
+		// meaning are rejected.
+		return checkedVendorID(publicID, string(raw), false)
 	}
 
-	return "", fmt.Errorf("job id %q was not issued by this translator (no known tag)", publicID)
+	return checkedVendorID(publicID, publicID, true)
+}
+
+// checkedVendorID rejects a recovered id that must never reach a vendor URL. It is
+// the one gate between a client-shaped path segment and a request carrying our
+// account's credentials, so it runs on every decode path.
+func checkedVendorID(publicID, vendorID string, requireContractCharset bool) (string, error) {
+	if vendorID == "" {
+		return "", fmt.Errorf("job id %q recovers an empty vendor id", publicID)
+	}
+	if vendorID == "." || vendorID == ".." {
+		// url.PathEscape leaves these intact and they remain live path segments, so
+		// they would walk the vendor's URL rather than name a task under it.
+		return "", fmt.Errorf("job id %q recovers a path segment (%q), not a task id", publicID, vendorID)
+	}
+	if requireContractCharset && (len(vendorID) > MaxJobIDLen || !isContractCharset(vendorID)) {
+		return "", fmt.Errorf("job id %q is not a well-formed job id", publicID)
+	}
+	return vendorID, nil
 }
 
 // isContractCharset reports whether s is drawn from the contract's [A-Za-z0-9_-].

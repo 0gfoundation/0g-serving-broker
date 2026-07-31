@@ -116,6 +116,12 @@ func (h *VideoHandler) GetVideo(c *gin.Context) {
 	publicID := c.Param("id")
 	taskID, err := translate.DecodeJobID(publicID)
 	if err != nil {
+		// The only failure in these handlers that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's three
+		// distinct causes (unknown shape / malformed payload / not a task id) are
+		// discarded. Log it — this is also the path most likely to reject something
+		// legitimate.
+		h.logger.Warnf("video id %q rejected: %v", publicID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
 		return
 	}
@@ -146,6 +152,12 @@ func (h *VideoHandler) GetVideoContent(c *gin.Context) {
 	publicID := c.Param("id")
 	taskID, err := translate.DecodeJobID(publicID)
 	if err != nil {
+		// The only failure in these handlers that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's three
+		// distinct causes (unknown shape / malformed payload / not a task id) are
+		// discarded. Log it — this is also the path most likely to reject something
+		// legitimate.
+		h.logger.Warnf("video id %q rejected: %v", publicID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "unknown video id"}})
 		return
 	}
