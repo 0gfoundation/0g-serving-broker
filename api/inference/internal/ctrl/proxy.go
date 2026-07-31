@@ -576,10 +576,12 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 		// is the enclave's evidence chain broken while the service still advertises
 		// itself as verifiable.
 		if raw == "" {
-			c.logger.Errorf("targetTLSProxy: sidecar at %s sent no %s header — it is not reporting the upstream certificate (check its image and that UpstreamTLSReport is installed); no routing proof for this response",
+			c.logProofSkip(monitor.RoutingProofSkipNoSidecarReport, "absent",
+				"targetTLSProxy: sidecar at %s sent no %s header — it is not reporting the upstream certificate (check its image and that UpstreamTLSReport is installed); no routing proof for this response",
 				c.Service.TargetURL, teeutil.HeaderUpstreamCertFingerprint)
 		} else {
-			c.logger.Errorf("targetTLSProxy: sidecar at %s reported a malformed %s (%q; want 64 hex chars); no routing proof for this response",
+			c.logProofSkip(monitor.RoutingProofSkipNoSidecarReport, "malformed",
+				"targetTLSProxy: sidecar at %s reported a malformed %s (%q; want 64 hex chars); no routing proof for this response",
 				c.Service.TargetURL, teeutil.HeaderUpstreamCertFingerprint, truncateForLog([]byte(raw), 80))
 		}
 		return ""
