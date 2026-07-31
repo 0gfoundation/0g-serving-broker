@@ -21,6 +21,22 @@ func TestVendorErrorDetail(t *testing.T) {
 			wantMissing:  "sk-api-",
 		},
 		{
+			// The broker's own session token is "<base64>|<signature>". Without "|"
+			// in the pattern the signature half survived the redaction.
+			name:         "a piped session token is redacted whole",
+			body:         `{"echo":{"Authorization":"Bearer app-sk-eyJhZGRyZXNzIjoiMHgifQ==|0xa886f31ecc4a20fc"}}`,
+			wantContains: []string{"Bearer [redacted]"},
+			wantMissing:  "0xa886",
+		},
+		{
+			// A gateway reflecting the header VALUE, or a JSON field — no scheme to
+			// anchor on.
+			name:         "a bare key with no Bearer prefix is still redacted",
+			body:         `{"echo":{"X-Api-Key":"sk-api-e53HjFRV49EE","api_key":"app-sk-eyJhIjoxfQ"}}`,
+			wantContains: []string{"[redacted]"},
+			wantMissing:  "e53HjFRV49EE",
+		},
+		{
 			name: "request_id is logged — it is what vendor support asks for",
 			code: "1004", message: "invalid api key", requestID: "06bbd146",
 			wantContains: []string{`request_id="06bbd146"`},

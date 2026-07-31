@@ -10,14 +10,26 @@ import (
 // vendor that answers a 4xx with an HTML error page from filling the log.
 const maxVendorErrorBodyLog = 500
 
-// bearerToken matches an Authorization bearer value so it can be stripped before
-// the body reaches a log. A vendor is not the only thing that writes these bodies:
-// a WAF, CDN, or reverse proxy answering a 4xx on the vendor's behalf commonly
-// echoes the offending REQUEST back, headers included — and the header this
-// sidecar relays is the deployment's MiniMax/DashScope API key. CLAUDE.md's rule
-// on credentials in logs is unconditional, and a log is exactly the place a leaked
-// key outlives the request that leaked it.
-var bearerToken = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*`)
+// A vendor is not the only thing that writes these error bodies: a WAF, CDN, or
+// reverse proxy answering a 4xx on the vendor's behalf commonly echoes the
+// offending REQUEST back, headers included — and the header this sidecar relays is
+// the deployment's MiniMax/DashScope API key. CLAUDE.md's rule on credentials in
+// logs is unconditional, and a log is exactly the place a leaked key outlives the
+// request that leaked it.
+var (
+	// bearerToken covers the form this sidecar actually transmits:
+	// "Authorization: Bearer <key>". "|" is in the class because the broker's own
+	// session tokens are "<base64>|<signature>" — without it the signature half
+	// would survive. "=" is in the CLASS rather than a trailing "=*" for the same
+	// reason: base64 padding sits mid-token there ("...fQ==|0xa886"), so a trailing
+	// quantifier stops at the padding and leaves the rest in the log.
+	bearerToken = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-._~+/|=]+`)
+	// bareAPIKey covers a key echoed WITHOUT its scheme — a gateway reflecting a
+	// header value, or a JSON field. Keyed on the prefix both 0G ("app-sk-") and
+	// the vendors ("sk-") use. Over-redacting a diagnostic that merely mentions
+	// such a prefix is the cheap direction of this trade.
+	bareAPIKey = regexp.MustCompile(`(?i)\b(?:app-)?sk-[A-Za-z0-9\-._~+/|=]+`)
+)
 
 // vendorErrorDetail renders the vendor's own explanation of a rejection for a log
 // line, falling back to the RAW BODY when the parsed fields do not carry one.
@@ -63,10 +75,17 @@ func vendorErrorDetail(code, message, body, requestID string) string {
 	return detail
 }
 
-// redactCredentials removes anything credential-shaped from a body about to be
-// logged. See bearerToken for why a vendor error body can contain one at all.
+// redactCredentials strips the credential forms this deployment can actually emit
+// — a Bearer header value, and a bare sk-/app-sk- key — from a body about to be
+// logged. See the patterns for why a vendor error body can contain one at all.
+//
+// Not a general secret scanner, and not claimed as one: a credential shaped like
+// neither (a vendor that mints opaque keys with no prefix, one split across JSON
+// fields) passes through. The 500-byte cap is the backstop that bounds what any
+// such miss costs.
 func redactCredentials(body string) string {
-	return bearerToken.ReplaceAllString(body, "Bearer [redacted]")
+	body = bearerToken.ReplaceAllString(body, "Bearer [redacted]")
+	return bareAPIKey.ReplaceAllString(body, "[redacted]")
 }
 
 // truncateForLog caps s at limit BYTES, marking that it was cut so a truncated
