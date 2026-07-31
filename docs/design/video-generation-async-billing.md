@@ -206,6 +206,52 @@ the client (`video.go:266` writes before `video.go:295` bills) — content deliv
 gated on billing completion in this codebase, and gating it here would reintroduce the latency
 this design exists to avoid.
 
+## Signature lifecycle (`ZG-Res-Key`)
+
+Billing is not the only thing an async job defers — so is the TEE signature, and the
+two have the same shape: the create response is not the final answer.
+
+`ZG-Res-Key` is issued with the create response and signed over the
+`{"status":"queued"}` envelope, then **re-signed by the poller over the FINAL body**
+under the same key. So the contract is:
+
+> the key covers the job's final state, not the envelope the client first received.
+
+That contract only holds if every path keeps it. Two rules follow:
+
+1. **A response is only advertised as signed if it will actually be signed.** One
+   predicate (`signs` in `handleVideoGenerationResponse`) drives the `ZG-Res-Key`
+   header, the create-time signing call, and whether a `chatKey` is handed to the
+   poll job — they cannot disagree. A centralized provider previously advertised the
+   header while only the decentralized signer existed, so the key could only 404.
+
+2. **The create-time signature is evicted whenever a final body the client can
+   obtain exists but was never signed.** Timeout, provider-reported `failed`,
+   completed-with-no-resolvable-duration, a linked request row that vanished, a
+   failed re-sign, and two of the three no-poll-job exits (scheduler disabled,
+   insert failed) — in all of these the vendor job id exists, and `GET /videos/{id}`
+   proxies straight to the upstream regardless of any poll job, so the client can
+   fetch a body the cached signature does not describe. Leaving it would hand the
+   client a *valid* TEE signature whose response hash does not match what it
+   fetched — indistinguishable from tampering, and worse than the 404 it gets
+   instead.
+
+   The exception is a create response with **no job id**: the client cannot build
+   `GET /videos/{id}`, so no final body is obtainable and the cached signature still
+   describes exactly the response it holds. Evicting there would break a lookup that
+   was never in doubt. The rule is "an obtainable final body exists", not "the
+   poller did not run".
+
+   Note this is a client-visible change for providers that predate it: such a job's
+   `ZG-Res-Key` used to stay resolvable (pointing at the queued envelope) and now
+   404s.
+
+Lost signatures are metered by `broker_routing_proof_skipped_total{reason}` for
+centralized providers, except where a sibling counter already covers the outcome
+(`VideoPollTimedOutTotal`, `VideoGenerationFailedTotal`, `VideoBillingSkippedTotal`)
+— double-metering a routine vendor failure would put a permanent baseline under an
+alert whose instruction is "any sustained rate is a problem".
+
 ## Whitelisted (unbilled) traffic
 
 Whitelisted requests bypass billing entirely and create no `Request` row (see `proxy.go`), but

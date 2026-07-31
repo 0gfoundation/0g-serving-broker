@@ -45,6 +45,16 @@ var (
 	// WhitelistAudioSecondsTotal mirrors AudioSecondsTotal for whitelisted users.
 	WhitelistAudioSecondsTotal *prometheus.CounterVec
 
+	// RoutingProofSkippedTotal counts responses from a centralized provider that
+	// were served WITHOUT a TEE routing proof, by reason. A centralized service
+	// advertises its verifiability statically in config, so nothing else notices
+	// when proof production stops: the individual per-response log lines are the
+	// same volume as ordinary traffic. This counter is the aggregate signal —
+	// "sidecar rolled back to an image that doesn't report the upstream
+	// certificate" and "every proof has silently vanished for an hour" look
+	// identical in logs and obvious here.
+	RoutingProofSkippedTotal *prometheus.CounterVec
+
 	// VideoBillingSkippedTotal counts video-generation requests that returned
 	// 200 but for which no positive duration could be resolved from either the
 	// upstream response or the client request — i.e. the video was served
@@ -381,6 +391,15 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	RoutingProofSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_routing_proof_skipped_total",
+			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
@@ -406,6 +425,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoBillingSkippedTotal)
 	prometheus.MustRegister(VideoPollTimedOutTotal)
 	prometheus.MustRegister(VideoGenerationFailedTotal)
+	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
 }
@@ -702,6 +722,32 @@ func RecordVideoBillingSkipped() {
 		return
 	}
 	VideoBillingSkippedTotal.Inc()
+}
+
+// Reasons for RecordRoutingProofSkipped.
+const (
+	// RoutingProofSkipNoTLS: a direct centralized response arrived with no TLS
+	// connection state to bind.
+	RoutingProofSkipNoTLS = "no_tls"
+	// RoutingProofSkipSignError: evidence was present but signing itself failed.
+	RoutingProofSkipSignError = "sign_error"
+	// RoutingProofSkipNoPollJob: an async video job never reached the poll
+	// scheduler (no provider job id, scheduler disabled, or the job row could not
+	// be written), so nothing will sign the final body the client was promised a
+	// proof over. Distinct from sign_error because the fix is the scheduler
+	// config or the shim's create response, not the TEE signer.
+	RoutingProofSkipNoPollJob = "no_poll_job"
+)
+
+// RecordRoutingProofSkipped increments the counter of centralized-provider
+// responses served without a TEE routing proof. Every call site is a place where
+// the service continues to advertise verifiability it did not deliver for that
+// response, so this must be alertable rather than log-only.
+func RecordRoutingProofSkipped(reason string) {
+	if RoutingProofSkippedTotal == nil {
+		return
+	}
+	RoutingProofSkippedTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordVideoPollTimedOut increments the counter of video poll jobs that hit

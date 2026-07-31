@@ -309,6 +309,26 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
 }
 
+// signVideoResponse signs a video response under chatKey with whichever proof this
+// service's trust model supports: a routing proof binding the upstream TLS
+// certificate for a centralized provider (the broker cannot attest to a black-box
+// vendor's content, only to the path it took), or a content signature when the
+// model runs inside the broker's own network.
+//
+// Both the create response and each poll result go through here so the signature a
+// client eventually fetches is produced the same way in both places. fingerprint is
+// resolved per-response by upstreamCertFingerprint, so it is the certificate of the
+// connection that served THIS body — a poll re-signs with its own poll's evidence,
+// not the create's.
+func (c *Ctrl) signVideoResponse(ctx *gin.Context, reqBody, respBody []byte, chatKey string) error {
+	if c.Service.IsCentralized() {
+		c.logger.Debug("Centralized provider, signing video-generation routing proof")
+		return c.signCentralizedRoutingProof(reqBody, respBody, chatKey, ctx.GetString(CtxKeyUpstreamCertFingerprint))
+	}
+	c.logger.Debug("LLM server in the same network, signing video-generation response")
+	return c.signChatWithKey(reqBody, respBody, chatKey)
+}
+
 // handleVideoGenerationResponse handles the POST /videos response from the provider.
 // Billing prefers the provider's response (actual seconds/size) and falls back to
 // the client request when the upstream doesn't echo them (see resolveVideoBilling).
@@ -320,8 +340,15 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// response is actually signed (broker-in-network). A standard/TargetSeparated
 	// provider produces no signature, so advertising it would point clients at a
 	// signature endpoint that only 404s.
+	// Advertise the signature-lookup handle only when this response will actually
+	// be signed. For a centralized provider that means the upstream certificate was
+	// captured: without it signVideoResponse refuses (correctly), and advertising
+	// anyway would hand the client a key that can only 404. The fingerprint is
+	// resolved before dispatch (ProcessHTTPRequest), so the answer is known here.
 	chatKey := uuid.NewString()
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+	signs := !c.Service.TargetSeparated ||
+		(c.Service.IsCentralized() && ctx.GetString(CtxKeyUpstreamCertFingerprint) != "")
+	if signs {
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
 
@@ -378,10 +405,13 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		return err
 	}
 
-	if !c.Service.TargetSeparated {
-		c.logger.Debug("LLM server in the same network, signing video-generation response")
-		if err := c.signChatWithKey(reqBody, body, chatKey); err != nil {
-			c.logger.Warnf("Failed to sign video-generation response (TEE verification will be unavailable): %v", err)
+	// Sign under exactly the condition that advertised ZG-Res-Key above — one
+	// variable, so the two cannot drift. They used to: a centralized video provider
+	// advertised the header while only the !TargetSeparated branch ever signed, and
+	// centralized forces TargetSeparated, so the key could only 404.
+	if signs {
+		if err := c.signVideoResponse(ctx, reqBody, body, chatKey); err != nil {
+			c.logger.Errorf("Failed to sign video-generation response (TEE verification unavailable for it): %v", err)
 		}
 	}
 
@@ -408,8 +438,10 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			// (RateClass is part of its primary key), since the correct destination row is
 			// only known once the real rate_class is. Waiting until resolution avoids that —
 			// see docs/design/video-generation-async-billing.md.
+			// Same signing condition as the paying path below — a whitelisted
+			// request is unbilled, not unsigned.
 			pollChatKey := ""
-			if !c.Service.TargetSeparated {
+			if signs {
 				pollChatKey = chatKey
 			}
 			return c.deferVideoBillingToPoll(ctx, respFields.ID, pollChatKey, outputPrice, contentType, reqBody, reqModel)
@@ -450,13 +482,16 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// guessing from the requested duration — see
 		// docs/design/video-generation-async-billing.md.
 		//
-		// Only pass chatKey through when this service actually signs (mirrors the
-		// signChatWithKey condition above, NOT the broader ZG-Res-Key-advertise condition,
-		// which also covers IsCentralized()): a TargetSeparated service never runs
-		// signChatWithKey — the remote TEE signs instead — so the scheduler must not attempt
-		// to re-sign under a key the client was never given a matching signature for.
+		// Only pass chatKey through when this service actually signs — the same
+		// condition that advertised ZG-Res-Key and signed the create response above.
+		// A decentralized TargetSeparated service never signs (the remote TEE signs
+		// instead), so the scheduler must not re-sign under a key the client was
+		// never given a matching signature for. A centralized service DOES sign (a
+		// routing proof), and its poll must re-sign over the final body under the
+		// same key, or the client's ZG-Res-Key would resolve to a proof over the
+		// queued placeholder rather than the delivered video.
 		pollChatKey := ""
-		if !c.Service.TargetSeparated {
+		if signs {
 			pollChatKey = chatKey
 		}
 		return c.deferVideoBillingToPoll(ctx, respFields.ID, pollChatKey, outputPrice, contentType, reqBody, reqModel)
@@ -526,6 +561,12 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// serve free + log loudly rather than bill blind.
 		c.logger.Errorf("video generation is non-terminal but the response has no id to poll; cannot track this job, NOT billing request %s (free output)", reqModel.RequestHash)
 		monitor.RecordVideoBillingSkipped()
+		// Deliberately NO signature eviction: with no id the client cannot construct
+		// GET /videos/{id}, so there is no final body for it to obtain and nothing to
+		// mismatch against. The cached signature describes exactly the (malformed)
+		// create response it holds, and destroying it would break a lookup that was
+		// never in doubt. The sibling exits below DO evict because the vendor job
+		// exists there and is fetchable straight from the upstream.
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
 		}
@@ -535,6 +576,12 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// Still register the job (best-effort, in case the scheduler is enabled later) but
 		// make the operator misconfiguration loud rather than silently never billing.
 		c.logger.Errorf("video generation for request %s is non-terminal but the VideoPoll scheduler is disabled (videoPoll.enabled=false); this request will never be billed until it is enabled", reqModel.RequestHash)
+		// Verification breaks with it: no scanner goroutine is running, so nothing will
+		// re-sign the final body under the ZG-Res-Key already handed to the client. The
+		// job row IS still written below, so this is recoverable rather than permanent —
+		// enabling the scheduler later lets that job poll and re-sign under the same
+		// key, restoring the lookup. Until then a 404 is the truthful answer.
+		c.dropUnpollableVideoSignature(chatKey, "the VideoPoll scheduler is disabled", false)
 	}
 	// c.videoPollCfg is always populated with real values (the operator's config, or
 	// config.GetConfig()'s sane defaults) regardless of whether the scheduler is actually
@@ -573,12 +620,40 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		// Same "loud + metered, not silent" precedent as the empty-ID case above: a
 		// transient DB error here means this request is unbilled with no other capture.
 		monitor.RecordVideoBillingSkipped()
+		c.dropUnpollableVideoSignature(chatKey, "the poll job could not be persisted", true)
 		if reqModel.IsWhitelisted {
 			c.recordWhitelistedUsage(reqModel, 0, 0, 0, 0, "")
 		}
 		return errors.Wrap(err, "create video poll job")
 	}
 	return nil
+}
+
+// dropUnpollableVideoSignature is the create-side mirror of evictVideoSignature
+// (video_poll.go): the response was signed and ZG-Res-Key advertised, but this job
+// will never reach the poll scheduler, so nothing will ever re-sign the final body.
+//
+// The vendor job may still exist and be fetchable by the client, and this service's
+// contract is that the key covers the FINAL body (see
+// docs/design/sidecar-routing-proof.md) — so a surviving proof over the
+// {"status":"queued"} envelope is the false-tampering case, not a consolation
+// prize. Drop it, and count it: the client was promised verifiability that is not
+// coming, and no other signal says so (the sibling logs here all talk about
+// billing).
+func (c *Ctrl) dropUnpollableVideoSignature(chatKey, reason string, permanent bool) {
+	if chatKey == "" {
+		return
+	}
+	// Count only a PERMANENT loss. The scheduler-disabled case still writes the job
+	// row, so enabling the scheduler later lets that job poll and re-sign under this
+	// same key — counting it would put a baseline under the alert for a state the
+	// operator can reverse, and it is already loudly logged (and metered as an
+	// unbilled request) right above the caller.
+	if permanent && c.Service.IsCentralized() {
+		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoPollJob)
+	}
+	c.svcCache.Delete(c.chatCacheKey(chatKey))
+	c.logger.Errorf("video generation: no poll job will run (%s), so the final body will never be signed; dropped the create-time signature to keep ZG-Res-Key from resolving to a proof over the queued placeholder", reason)
 }
 
 // ensureMultipartWaitField ensures the "wait" field is present in a multipart/form-data body.
