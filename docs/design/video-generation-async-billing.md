@@ -213,9 +213,12 @@ this design exists to avoid.
 
 A `per_unit_table` prices exact `(resolution, duration)` buckets. A duration the
 table does not list is a **miss**, and a miss does not fall back to the per-second
-formula — that would underbill. It bills the cheapest bucket that still *covers* the
-observation (the smallest row for that resolution whose duration is ≥ the observed
-one), and only when nothing covers it does it fall to the table maximum.
+formula — that would underbill. It rounds up to the **next bucket**: the row for that
+resolution with the smallest duration that is still ≥ the observed one. Selection is
+by duration, never by price — choosing the cheapest covering row would assume the
+table is monotonic, and an operator who discounts long clips would have a short clip
+billed below the bucket that neighbours it. Only when NOTHING covers the observation
+does it fall to the table maximum.
 
 That rounding-up rule exists because the previous behaviour — always the table
 maximum, across every resolution — turns an untabulated duration into a charge for
@@ -224,7 +227,9 @@ minimum shifts: MiniMax H3's floor moved 5 → 4, which is also its default requ
 shape, so the most common request became a miss overnight.
 
 **Operator rule:** tabulate every duration the vendor can emit, starting at its
-minimum. Otherwise clients are billed a price `GET /v1/models` does not advertise for
+minimum — not just the minimum. A conforming OpenAI client sends `seconds` from
+{4, 8, 12}, and any value with no bucket at or above it falls to the table maximum
+across every resolution. Otherwise clients are billed a price `GET /v1/models` does not advertise for
 their request — it publishes one variant per configured bucket, so an untabulated
 duration has no visible price at all.
 

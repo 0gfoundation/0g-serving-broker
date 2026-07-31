@@ -83,7 +83,8 @@ func validateInEnclaveTarget(targetURL string) error {
 	}
 	// A dotted name resolves through public DNS; a bare label is a docker-compose
 	// service name on the CVM's own network (e.g. 0g-minimax-video-translator).
-	if strings.Contains(host, ".") && !strings.EqualFold(host, "localhost") {
+	// "localhost" needs no exemption: it has no dot, so it never reaches here.
+	if strings.Contains(host, ".") {
 		return fmt.Errorf("invalid config: service.targetTLSProxy requires an in-CVM target, but targetUrl '%s' names a public DNS host — use the sidecar's compose service name (e.g. http://0g-minimax-video-translator:8090) so the target cannot resolve off this machine", targetURL)
 	}
 	return nil

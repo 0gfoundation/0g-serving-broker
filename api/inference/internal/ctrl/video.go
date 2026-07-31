@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -299,7 +300,9 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 			// bucket rather than dropping to the seconds-ratio formula (which would
 			// underbill). Conservative + loud, never below the table.
 			if e.Billing.Mode == config.BillingModePerUnitTable {
-				// Round UP to the cheapest bucket that still covers this observation,
+				// Round UP to the NEXT bucket: the smallest configured duration that
+				// still covers this observation (by duration, not by price — see
+				// NextBucketUnits),
 				// which is what a bucketed price list means and what the client can
 				// look up in /v1/models. Falling straight to the table maximum — the
 				// most expensive row across EVERY resolution — would charge a 4-second
@@ -666,9 +669,14 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 
 	now := time.Now()
 	job := model.VideoPollJob{
-		ProviderJobID:      providerJobID,
-		RequestHash:        reqModel.RequestHash,
-		PollURL:            c.Service.TargetURL + "/videos/" + providerJobID,
+		ProviderJobID: providerJobID,
+		RequestHash:   reqModel.RequestHash,
+		// PathEscape: providerJobID is upstream-supplied. Behind a translator
+		// EncodeJobID already guarantees the charset, but a centralized vendor spoken
+		// to DIRECTLY has nothing shaping it — and isContractJobID above only logs, so
+		// a "?" or "../" would otherwise reach this URL. Pre-existing on main; the
+		// check that would have caught it now sits directly above.
+		PollURL:            c.Service.TargetURL + "/videos/" + url.PathEscape(providerJobID),
 		RequestBody:        reqBody,
 		RequestContentType: contentType,
 		OutputPrice:        outputPrice,
