@@ -107,11 +107,7 @@ func (h *MiniMaxVideoHandler) GetVideo(c *gin.Context) {
 		h.logger.Errorf("minimax get task %s: unrecognized status %q, mapping to failed", taskID, mmResp.Task.Status)
 	}
 
-	out := translate.FromMiniMaxGetTaskResponse(*mmResp)
-	// Echo the id the CLIENT holds, not the vendor's — the response object must
-	// carry the same id it was fetched by, or a client keying on it sees two.
-	out.ID = publicID
-	c.JSON(http.StatusOK, out)
+	c.JSON(http.StatusOK, translate.FromMiniMaxGetTaskResponse(publicID, *mmResp))
 }
 
 // GetVideoContent handles GET /videos/{id}/content: it looks up the task's

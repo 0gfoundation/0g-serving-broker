@@ -187,10 +187,18 @@ type Ctrl struct {
 	// tests construct a *Ctrl directly) — callers must fall back to context.Background() via
 	// videoPollBaseCtx rather than assume it is always set.
 	videoPollEnabled atomic.Bool
-	videoPollCfg     config.VideoPollConfig
-	videoPollCtx     context.Context
-	videoPollCancel  context.CancelFunc
-	videoPollWg      sync.WaitGroup
+
+	// lastCertHostMismatch remembers the last host a targetTLSProxy sidecar reported
+	// that disagreed with service.upstreamDomain, so the resulting error is logged
+	// once per distinct host rather than once per response. The mismatch is drift
+	// between two config files: it does not self-heal, and logging it at request
+	// rate would recreate the log-volume failure the skipped-proof counter exists to
+	// replace.
+	lastCertHostMismatch atomic.Pointer[string]
+	videoPollCfg         config.VideoPollConfig
+	videoPollCtx         context.Context
+	videoPollCancel      context.CancelFunc
+	videoPollWg          sync.WaitGroup
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager

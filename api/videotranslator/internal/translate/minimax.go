@@ -252,7 +252,7 @@ func FromMiniMaxCreateResponse(req CreateVideoRequest, resp minimax.CreateRespon
 // broker's recognized usage.output_video_duration field. total_seconds — not
 // output_seconds — is used because MiniMax bills the account on total_seconds;
 // for text-to-video (input_seconds == 0) the two are equal anyway.
-func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
+func FromMiniMaxGetTaskResponse(publicID string, resp minimax.GetTaskResponse) VideoResponse {
 	if resp.Task == nil {
 		// A well-formed MiniMax response always carries a task; its absence
 		// (with no base_resp error, which the client already turns into an
@@ -268,7 +268,7 @@ func FromMiniMaxGetTaskResponse(resp minimax.GetTaskResponse) VideoResponse {
 	t := resp.Task
 	status := StatusFromMiniMax(t.Status)
 	out := VideoResponse{
-		ID:     t.ID,
+		ID:     publicID,
 		Object: "video",
 		Status: status,
 		Size:   t.Resolution,

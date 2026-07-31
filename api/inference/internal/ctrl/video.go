@@ -414,7 +414,11 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// case that has no translator to do it — a vendor spoken to directly — on its
 	// FIRST request, rather than after a downstream consumer has already rejected a
 	// clip the vendor generated and charged us for.
-	if !isContractJobID(respFields.ID) {
+	// Scoped to "an id exists but breaks the contract". An ABSENT id is a different
+	// condition with its own handling and its own accurate log below (and in
+	// deferVideoBillingToPoll) — it is also what a 200 whose body isn't the expected
+	// envelope produces, since the unmarshal error above is deliberately swallowed.
+	if respFields.ID != "" && !isContractJobID(respFields.ID) {
 		c.logger.Errorf("video generation: upstream returned job id %q, which violates the published contract (max %d chars from [A-Za-z0-9_-]); "+
 			"a consumer keying on it will reject this job after the clip was already generated. Onboard this vendor behind a translator, or map its ids",
 			truncateForLog([]byte(respFields.ID), 80), maxContractJobIDLen)

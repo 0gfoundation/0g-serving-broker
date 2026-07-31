@@ -394,7 +394,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RoutingProofSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_routing_proof_skipped_total",
-			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, domain_mismatch, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
+			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, no_sidecar_host, domain_mismatch, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -741,6 +741,12 @@ const (
 	// was well-formed. Almost always broker config and shim env having drifted
 	// apart (e.g. MINIMAX_BASE_URL changed for a domestic-site account).
 	RoutingProofSkipDomainMismatch = "domain_mismatch"
+	// RoutingProofSkipNoSidecarHost: the shim reported a certificate but no SNI, so
+	// the broker cannot confirm it dialed the host it publishes as serving_domain.
+	// Separate from domain_mismatch because the fix is different: this one is a shim
+	// image predating the header, or a *_BASE_URL that is an IP literal or plaintext
+	// URL — not two config files disagreeing.
+	RoutingProofSkipNoSidecarHost = "no_sidecar_host"
 	// RoutingProofSkipNoPollJob: an async video job never reached the poll
 	// scheduler (no provider job id, scheduler disabled, or the job row could not
 	// be written), so nothing will sign the final body the client was promised a

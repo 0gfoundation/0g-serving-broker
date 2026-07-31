@@ -33,6 +33,13 @@ services:
     environment:
       - PORT=8090
       - LOG_LEVEL=info
+      # MUST agree with the broker's service.upstreamDomain — that is the host the
+      # broker tells verifiers to fetch a certificate from, and this is the host
+      # actually dialed. The broker compares the two on every response and refuses
+      # to sign a routing proof when they differ (reason: domain_mismatch). The
+      # DashScope client's own docs say operators outside China MUST override this,
+      # so changing it means changing BOTH.
+      # - DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com   # then upstreamDomain: dashscope-intl.aliyuncs.com
     networks:
       - localhost
 

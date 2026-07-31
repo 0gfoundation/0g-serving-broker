@@ -21,9 +21,13 @@ func TestUpstreamCertFingerprintSourceIsExclusive(t *testing.T) {
 	directCert := &x509.Certificate{Raw: []byte("direct-upstream-cert")}
 	directFingerprint := teeutil.CertFingerprintFromDER(directCert.Raw)
 
+	// The host always matches the configured upstreamDomain here: this table is
+	// about which EVIDENCE SOURCE is admissible, and the drift check has its own
+	// test (TestUpstreamCertFingerprintRefusesDomainDrift).
 	withHeader := func(resp *http.Response, v string) *http.Response {
 		resp.Header = http.Header{}
 		resp.Header.Set(teeutil.HeaderUpstreamCertFingerprint, v)
+		resp.Header.Set(teeutil.HeaderUpstreamCertHost, "api.vendor.test")
 		return resp
 	}
 	directTLS := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{directCert}}
@@ -81,6 +85,7 @@ func TestUpstreamCertFingerprintSourceIsExclusive(t *testing.T) {
 				ProviderType:     "centralized",
 				ProviderIdentity: "vendor",
 				TargetTLSProxy:   tt.targetTLSProxy,
+				UpstreamDomain:   "api.vendor.test",
 			})
 			if got := ctrl.upstreamCertFingerprint(tt.resp.Header, tt.resp.TLS); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
@@ -146,6 +151,8 @@ func TestUpstreamCertFingerprintRefusesDomainDrift(t *testing.T) {
 		{name: "case and trailing dot are not drift", reported: "API.MiniMax.IO.", want: fp},
 		{name: "shim drifted to the domestic site", reported: "api.minimaxi.com", want: ""},
 		{name: "shim reported no host at all", reported: "", want: ""},
+		{name: "shim reported a subdomain of the declared host", reported: "eu.api.minimax.io", want: ""},
+		{name: "shim reported the declared host with a port-looking suffix", reported: "api.minimax.io:443", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

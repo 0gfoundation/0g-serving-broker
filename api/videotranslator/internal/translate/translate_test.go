@@ -288,7 +288,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				},
 			},
 			want: VideoResponse{
-				ID:        "task-123",
+				ID:        "v0_pub",
 				Object:    "video",
 				Status:    StatusInProgress,
 				Prompt:    "a cat playing piano",
@@ -302,7 +302,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusQueued,
 			},
@@ -313,7 +313,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusPending, SubmitTime: "not-a-timestamp"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusQueued,
 			},
@@ -325,7 +325,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusCompleted,
 				Usage:  &Usage{OutputVideoDuration: "5"},
@@ -338,7 +338,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Usage:  &dashscope.TaskUsage{OutputVideoDuration: "5.5"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusCompleted,
 				Usage:  &Usage{OutputVideoDuration: "5.5"},
@@ -350,7 +350,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusRunning},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusInProgress,
 			},
@@ -366,7 +366,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "InvalidParameter", Message: "prompt violates content policy"},
@@ -379,7 +379,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Usage:  &dashscope.TaskUsage{},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusCompleted,
 			},
@@ -390,7 +390,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: "SOME_NEW_STATUS"},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "unrecognized_dashscope_status", Message: `dashscope reported unrecognized task_status "SOME_NEW_STATUS"`},
@@ -402,7 +402,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusCanceled},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "dashscope_task_canceled", Message: "dashscope reported task_status CANCELED"},
@@ -414,7 +414,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 				Output: dashscope.TaskOutput{TaskID: "task-123", TaskStatus: dashscope.TaskStatusUnknown},
 			},
 			want: VideoResponse{
-				ID:     "task-123",
+				ID:     "v0_pub",
 				Object: "video",
 				Status: StatusFailed,
 				Error:  &Error{Code: "dashscope_task_unknown", Message: "dashscope reported task_status UNKNOWN (task expired past its 24h validity, or never existed)"},
@@ -424,7 +424,7 @@ func TestFromGetTaskResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FromGetTaskResponse(tt.resp)
+			got := FromGetTaskResponse("v0_pub", tt.resp)
 			if got.ID != tt.want.ID || got.Object != tt.want.Object || got.Status != tt.want.Status {
 				t.Errorf("FromGetTaskResponse() = %+v, want %+v", got, tt.want)
 			}

@@ -495,10 +495,29 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 			// B — every verification fails, invisibly, because nothing here is
 			// malformed. Refuse instead: an absent proof is checkable, a mismatched
 			// one is indistinguishable from tampering.
-			if host := strings.ToLower(strings.TrimSuffix(header.Get(teeutil.HeaderUpstreamCertHost), ".")); host != c.Service.UpstreamDomain {
+			host := strings.ToLower(strings.TrimSuffix(header.Get(teeutil.HeaderUpstreamCertHost), "."))
+			switch {
+			case host == "":
+				// Distinct from drift, and with a distinct fix: the sidecar reported no
+				// SNI. Either its image predates this header — certain during a rolling
+				// upgrade, since broker and translator are separate containers with
+				// nothing pinning them to the same build — or it is dialing an IP
+				// literal or a plaintext URL, for which TLS sends no SNI at all.
+				// Telling this operator to compare *_BASE_URL against upstreamDomain
+				// would send them to edit config that was never wrong.
+				monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarHost)
+				c.logger.Errorf("targetTLSProxy: sidecar at %s reported a certificate but no %s — its image predates that header, or its *_BASE_URL is an IP literal or plaintext URL (TLS sends no SNI for either); no routing proof for this response",
+					c.Service.TargetURL, teeutil.HeaderUpstreamCertHost)
+				return ""
+			case host != c.Service.UpstreamDomain:
 				monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipDomainMismatch)
-				c.logger.Errorf("targetTLSProxy: sidecar dialed %q but service.upstreamDomain is %q — a proof over the first would send verifiers to the second; no routing proof for this response (check the sidecar's *_BASE_URL against the broker's upstreamDomain)",
-					host, c.Service.UpstreamDomain)
+				// Logged once per distinct host: this is drift between two config files,
+				// so it does not self-heal and would otherwise emit at full request rate
+				// — the log-volume failure mode this counter exists to replace.
+				if c.lastCertHostMismatch.Swap(&host) == nil || *c.lastCertHostMismatch.Load() != host {
+					c.logger.Errorf("targetTLSProxy: sidecar dialed %q but service.upstreamDomain is %q — a proof over the first would send verifiers to the second; no routing proof until they agree (check the sidecar's *_BASE_URL against the broker's upstreamDomain)",
+						truncateForLog([]byte(host), 80), c.Service.UpstreamDomain)
+				}
 				return ""
 			}
 			return fp

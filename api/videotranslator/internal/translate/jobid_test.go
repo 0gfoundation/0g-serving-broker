@@ -47,17 +47,13 @@ func TestJobIDRoundTripsAndHonoursContract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecodeJobID(%q): %v", public, err)
 			}
-			want := tc.vendorID
-			if tc.wantTag == tagUUID {
-				// The UUID path is the one lossy-looking case: hyphens are positional,
-				// so they come back, but hex case does not. Vendors treat UUIDs
-				// case-insensitively; assert the normalized form explicitly rather
-				// than pretending it round-trips byte-for-byte.
-				want = strings.ToLower(tc.vendorID)
-				back = strings.ToLower(back)
-			}
-			if back != want {
-				t.Errorf("round trip: got %q, want %q", back, want)
+			// Byte-for-byte, including hex case on the UUID path: compactUUID slices
+			// the original and expandUUID reinserts hyphens positionally, so nothing
+			// normalizes. Asserting the exact string is what would catch someone
+			// later adding a ToLower — which would silently break every poll and
+			// content fetch against a vendor with case-sensitive ids.
+			if back != tc.vendorID {
+				t.Errorf("round trip: got %q, want %q", back, tc.vendorID)
 			}
 		})
 	}

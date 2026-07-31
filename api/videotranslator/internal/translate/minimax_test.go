@@ -235,7 +235,7 @@ func TestFromMiniMaxCreateResponse_AlwaysQueued(t *testing.T) {
 
 func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	t.Run("succeeded maps total_seconds to output_video_duration and resolution to size", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			ID:         "424010985738629",
 			Status:     minimax.TaskStatusSucceeded,
 			CreatedAt:  1785125529,
@@ -258,7 +258,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	})
 
 	t.Run("prefers total_seconds over output_seconds for reference-video billing", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			Status: minimax.TaskStatusSucceeded,
 			Usage:  &minimax.TaskUsage{TotalSeconds: "12", InputSeconds: "7", OutputSeconds: "5"},
 		}})
@@ -268,7 +268,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	})
 
 	t.Run("failed carries the vendor error", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			Status: minimax.TaskStatusFailed,
 			Error:  &minimax.TaskError{Code: "1027", Message: "content risk"},
 		}})
@@ -279,7 +279,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 
 	t.Run("cancelled/expired synthesize an error when the vendor gave none", func(t *testing.T) {
 		for _, s := range []string{minimax.TaskStatusCancelled, minimax.TaskStatusExpired} {
-			got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{Status: s}})
+			got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{Status: s}})
 			if got.Status != StatusFailed || got.Error == nil || got.Error.Message == "" {
 				t.Fatalf("status %q: want failed with synthesized error, got %+v", s, got.Error)
 			}
@@ -287,14 +287,14 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 	})
 
 	t.Run("nil task is a terminal failure, not a hang", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{})
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{})
 		if got.Status != StatusFailed || got.Error == nil {
 			t.Fatalf("want failed with error, got %+v", got)
 		}
 	})
 
 	t.Run("no positive usage omits the usage block", func(t *testing.T) {
-		got := FromMiniMaxGetTaskResponse(minimax.GetTaskResponse{Task: &minimax.Task{
+		got := FromMiniMaxGetTaskResponse("v0_pub", minimax.GetTaskResponse{Task: &minimax.Task{
 			Status: minimax.TaskStatusRunning,
 			Usage:  &minimax.TaskUsage{TotalSeconds: "0", OutputSeconds: "0"},
 		}})

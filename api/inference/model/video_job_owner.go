@@ -17,7 +17,7 @@ package model
 // covers all four combinations on its own.
 type VideoJobOwner struct {
 	Model
-	ID            uint64 `gorm:"primaryKey;autoIncrement" json:"-"`
+	ID uint64 `gorm:"primaryKey;autoIncrement" json:"-"`
 	// ProviderJobID's global uniqueIndex assumes different upstreams' job id namespaces don't
 	// collide with each other. That assumption is NOT enforced anywhere — it holds today only
 	// because there is exactly one upstream. A colliding id from a second upstream would have
@@ -26,7 +26,15 @@ type VideoJobOwner struct {
 	// needs an API-boundary decision (e.g. a client-facing job id namespaced by upstream), not a
 	// schema change here — see the Upstream field below for why it can't just become part of a
 	// composite key.
-	ProviderJobID string `gorm:"type:varchar(255);not null;uniqueIndex" json:"-"`
+	// COLLATE ...bin, not the utf8mb4_0900_ai_ci this column would inherit: the
+	// published id's payload is case-SIGNIFICANT (translate.EncodeJobID emits hex
+	// for a UUID and base64url otherwise), so a case-insensitive collation would
+	// make two different jobs collide on the unique index below AND on the
+	// authorization lookup — letting a user authorized for their own job reach a
+	// task id they never created by flipping payload case. Latent while every
+	// deployed vendor lands in the numeric/hex tags; it bites the first one that
+	// needs base64.
+	ProviderJobID string `gorm:"type:varchar(255) COLLATE utf8mb4_0900_bin;not null;uniqueIndex" json:"-"`
 	// UserAddress is deliberately NOT indexed: every current query (GetVideoJobOwner,
 	// DeleteExpiredVideoJobOwners) filters on ProviderJobID or CreatedAt, never on this column
 	// alone — add an index here only once a real query needs it (e.g. an admin "list jobs by

@@ -18,12 +18,20 @@ import (
 // Vendors do not honour that, and passing their task_id through verbatim makes
 // their id-shaping decision our published API. Shaping the id is protocol
 // translation, so it belongs here rather than being enforced by rejection further
-// down: a vendor whose ids are too long would otherwise be undeployable, and the
-// failure would land after the vendor had already generated (and charged us for) a
-// clip.
+// down, where a vendor whose ids are too long would simply be undeployable.
+//
+// What this does NOT buy: encoding runs after the vendor's create call has already
+// returned, so when EncodeJobID cannot map an id, the vendor has already accepted
+// the job and will bill for it. The id survives only in the error log. The win is
+// that the failure is immediate, local, and names the id — not that the clip is
+// saved. Nor is "it fails on the vendor's first request" a guarantee: a vendor
+// whose id shape varies by model, region, or API version can pass staging and fail
+// in production.
 const (
-	// MaxJobIDLen is the contract's ceiling. Keep in sync with the design doc and
-	// with the broker's own assertion (inference/internal/ctrl/video.go).
+	// MaxJobIDLen is the contract's ceiling on a PUBLISHED id. It is not the budget
+	// for a vendor id: a tag costs three of the 36, so a passthrough carries 33 and
+	// an arbitrary-byte id only 24 once base64'd. Ask EncodeJobID rather than
+	// comparing a vendor id against this.
 	MaxJobIDLen = 36
 
 	// Tags are self-describing so DecodeJobID needs no state and no guessing. Three
@@ -33,6 +41,11 @@ const (
 	tagRaw    = "v0_" // payload is the vendor id verbatim
 	tagUUID   = "v1_" // payload is a canonical UUID with its hyphens removed
 	tagBase64 = "v2_" // payload is base64url(vendor id), unpadded
+	// Adding a tag is a TWO-PHASE deploy: ship the DecodeJobID case to every replica
+	// first, and only enable it in EncodeJobID once all of them can decode it.
+	// Otherwise a job created by an upgraded replica is unpollable on one that is
+	// not, and a rollback strands every id in flight — after the vendor has billed
+	// for the clip. Never remove or reuse a tag for the same reason.
 
 	maxPayloadLen = MaxJobIDLen - 3
 )

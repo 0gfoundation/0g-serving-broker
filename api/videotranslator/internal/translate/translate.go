@@ -303,10 +303,10 @@ func FromCreateResponse(req CreateVideoRequest, resp dashscope.CreateResponse) (
 // resolveVideoBilling already recognizes — confirmed against HappyHorse's
 // docs, so no renaming is actually needed here (an earlier, pre-confirmation
 // guess had assumed a "video_duration" field name that doesn't exist).
-func FromGetTaskResponse(resp dashscope.GetTaskResponse) VideoResponse {
+func FromGetTaskResponse(publicID string, resp dashscope.GetTaskResponse) VideoResponse {
 	status := StatusFromDashScope(resp.Output.TaskStatus)
 	out := VideoResponse{
-		ID:     resp.Output.TaskID,
+		ID:     publicID,
 		Object: "video",
 		Status: status,
 		Prompt: resp.Output.OrigPrompt,
