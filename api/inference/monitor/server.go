@@ -394,7 +394,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RoutingProofSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_routing_proof_skipped_total",
-			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
+			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, domain_mismatch, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -734,6 +734,13 @@ const (
 	RoutingProofSkipNoSidecarReport = "no_sidecar_report"
 	// RoutingProofSkipSignError: evidence was present but signing itself failed.
 	RoutingProofSkipSignError = "sign_error"
+	// RoutingProofSkipDomainMismatch: the in-enclave shim reported dialing a host
+	// other than service.upstreamDomain. The proof would be signed over one host's
+	// certificate while serving_domain points verifiers at another, so every
+	// verification would fail — with no other signal, since the fingerprint itself
+	// was well-formed. Almost always broker config and shim env having drifted
+	// apart (e.g. MINIMAX_BASE_URL changed for a domestic-site account).
+	RoutingProofSkipDomainMismatch = "domain_mismatch"
 	// RoutingProofSkipNoPollJob: an async video job never reached the poll
 	// scheduler (no provider job id, scheduler disabled, or the job row could not
 	// be written), so nothing will sign the final body the client was promised a

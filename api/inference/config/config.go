@@ -109,6 +109,17 @@ func validateUpstreamDomain(domain string) error {
 	if net.ParseIP(d) != nil {
 		return fmt.Errorf("invalid config: service.upstreamDomain must be a hostname, not an IP address — a verifier compares the routing proof's fingerprint against the certificate served for this name, and an IP cannot carry that hostname check; got '%s'", domain)
 	}
+	// DNS limits, so the function actually means "a hostname" rather than "a
+	// dot-separated string": a name past these cannot resolve, which makes the
+	// published serving_domain a dead end for the verifier it exists to serve.
+	if len(d) > 253 {
+		return fmt.Errorf("invalid config: service.upstreamDomain is %d characters, over the 253-character DNS limit", len(d))
+	}
+	for _, label := range strings.Split(d, ".") {
+		if len(label) > 63 {
+			return fmt.Errorf("invalid config: service.upstreamDomain has a %d-character label (%q), over the 63-character DNS limit", len(label), label)
+		}
+	}
 	if !validUpstreamDomain.MatchString(d) {
 		return fmt.Errorf("invalid config: service.upstreamDomain must be a fully-qualified domain name (e.g. 'api.minimax.io'), got '%s'", domain)
 	}
@@ -1973,61 +1984,6 @@ func loadConfig(cfg *Config) error {
 	// direct connection would publish a domain the broker does not actually dial.
 	if cfg.Service.UpstreamDomain != "" && !cfg.Service.TargetTLSProxy {
 		return fmt.Errorf("invalid config: service.upstreamDomain is only supported alongside service.targetTLSProxy (without it, serving_domain is derived from targetUrl, which already names the upstream)")
-	}
-	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
-		// Unlike centralized, providerIdentity is OPTIONAL here, not required —
-		// and setting it does NOT publish it. A standard provider still hides its
-		// upstream from every EXTERNAL surface (GET /v1/models, on-chain
-		// additionalInfo, the TEE-signed routing proof) — those are gated on
-		// IsCentralized(), not on providerIdentity being empty, so they stay hidden
-		// regardless. What setting it DOES do is flow into internal-only
-		// bookkeeping that has no external gate: reconciliation's per-upstream
-		// usage rollup (Ctrl.recordWhitelistedUsage) and the per-request Upstream
-		// tag used for cost reconciliation (proxy.go), both of which fall back to
-		// "self" when this is empty — indistinguishable from every OTHER standard
-		// deployment. An operator running several standard providers behind
-		// different real upstreams can set this to tell their own reconciliation
-		// data apart, without it ever reaching a client or the chain.
-		if cfg.Service.ProviderIdentity != "" {
-			if err := normalizeProviderIdentity(&cfg.Service.ProviderIdentity); err != nil {
-				return err
-			}
-		}
-		// A standard provider forwards to an external upstream and never signs, so it
-		// always behaves as TargetSeparated (no broker signature, no ZG-Res-Key).
-		cfg.Service.TargetSeparated = true
-		// TargetSeparated is forced on, which would otherwise publish a
-		// TargetTeeAddress on-chain (see buildAdditionalInfo). A standard provider has
-		// no upstream TEE, so force it empty rather than leak a stale/misleading TEE
-		// address for a non-verifiable service.
-		cfg.Service.TargetTeeAddress = ""
-		// The upstream must be configured explicitly — a standard provider has no
-		// co-located model and no known default base URL.
-		if cfg.Service.TargetURL == "" {
-			return fmt.Errorf("invalid config: service.targetUrl is required when providerType is 'standard'")
-		}
-		// Standard is non-verifiable by construction. Force the "standard" marker so
-		// the on-chain verifiability can never claim a TEE mode (which would make
-		// clients attempt a verification the broker never backs). Reject any
-		// operator-supplied value other than the standard marker rather than
-		// silently overwriting it.
-		if cfg.Service.Verifiability != "" && cfg.Service.Verifiability != constant.VerifiabilityStandard {
-			return fmt.Errorf("invalid config: service.verifiability must be empty or '%s' when providerType is 'standard', got '%s'", constant.VerifiabilityStandard, cfg.Service.Verifiability)
-		}
-		cfg.Service.Verifiability = constant.VerifiabilityStandard
-
-		// Upstream-hiding is complete for chatbot / speech-to-text / image responses
-		// (leak headers + leak-key body fields are stripped, and image assets are
-		// broker-served). Video is the exception: the broker does not proxy video
-		// bytes, so if the upstream returns the finished asset as a DIRECT URL in the
-		// response body (e.g. {"output":{"video_url":"https://<upstream-host>/..."}}),
-		// that host reaches the client — leak-key stripping does not rewrite URL
-		// values. Upstreams that expose the asset via the OpenAI GET /videos/{id}/content
-		// pattern (which the broker proxies) do not leak. Warn so the operator makes a
-		// conscious choice. (stdlib log: the structured logger isn't up at config load.)
-		if cfg.Service.Type == constant.ServiceTypeVideoGeneration {
-			log.Printf("[CONFIG] providerType 'standard' with type 'video-generation': the upstream is fully hidden only when it returns the asset via GET /videos/{id}/content (broker-proxied). An upstream that returns a direct asset URL in the response body will expose that URL's host to clients — the broker does not proxy video bytes or rewrite URL values.")
-		}
 	}
 
 	// Body-field injection is only applied for the chatbot service type (see

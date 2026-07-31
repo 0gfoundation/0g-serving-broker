@@ -46,7 +46,12 @@ services:
     environment:
       - PORT=8090
       - LOG_LEVEL=info
-      # - MINIMAX_BASE_URL=https://api.minimax.io   # override for a domestic-site account
+      # MUST agree with the broker's service.upstreamDomain — that is the host the
+      # broker tells verifiers to fetch a certificate from, and this is the host
+      # actually dialed. The broker compares the two on every response and refuses
+      # to sign a routing proof when they differ (reason: domain_mismatch), so a
+      # domestic-site account must change BOTH this and upstreamDomain.
+      # - MINIMAX_BASE_URL=https://api.minimaxi.com   # domestic site; then upstreamDomain: api.minimaxi.com
       # - MINIMAX_RESOLUTION=2K
     networks:
       - localhost

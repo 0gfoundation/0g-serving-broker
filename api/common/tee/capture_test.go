@@ -57,6 +57,12 @@ func TestCertCaptureFirstObservationWins(t *testing.T) {
 	if got := capture.Fingerprint(); got != want {
 		t.Errorf("got %q, want the first observed cert %q", got, want)
 	}
+	// The SNI travels with the fingerprint — it is what lets the broker catch its
+	// own upstreamDomain having drifted from the shim's configured base URL — and
+	// must come from the SAME observation, not the last one seen.
+	if got := capture.ServerName(); got != "api.vendor.test" {
+		t.Errorf("server name = %q, want the API endpoint's, not the CDN's", got)
+	}
 }
 
 func TestCertCaptureIgnoresPlaintextAndIsNilSafe(t *testing.T) {

@@ -32,6 +32,20 @@ type CapturedCert struct {
 // service.targetTLSProxy (see inference/config).
 const HeaderUpstreamCertFingerprint = "Zg-Upstream-Cert-Fingerprint"
 
+// HeaderUpstreamCertHost carries the SNI the shim actually dialed, alongside the
+// fingerprint.
+//
+// It exists because the broker publishes service.upstreamDomain as serving_domain
+// — the host a verifier fetches a certificate from to check the proof against —
+// while the host the shim really reaches is chosen by the shim's OWN config
+// (MINIMAX_BASE_URL / DASHSCOPE_BASE_URL, a different file in a different
+// container). Nothing else couples those two knobs, so drift between them signs a
+// proof over host A's certificate while telling verifiers to check host B: every
+// verification fails, and the broker cannot tell, because the fingerprint it
+// received was perfectly well-formed. Reporting the SNI lets the broker refuse
+// instead of producing a proof nobody can check.
+const HeaderUpstreamCertHost = "Zg-Upstream-Cert-Host"
+
 // CertFingerprintFromDER computes a SHA256 fingerprint from a DER-encoded certificate.
 func CertFingerprintFromDER(der []byte) string {
 	hash := sha256.Sum256(der)

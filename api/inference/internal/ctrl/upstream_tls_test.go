@@ -117,3 +117,57 @@ func TestUpstreamCertFingerprintOnlyForCentralized(t *testing.T) {
 		})
 	}
 }
+
+// TestUpstreamCertFingerprintRefusesDomainDrift is the check that closes the one
+// failure the routing-proof metrics could not see. service.upstreamDomain (broker
+// config) and the shim's own *_BASE_URL (a different file, a different container)
+// are the same fact stored twice with nothing coupling them — and the shipped
+// compose example hardcodes the former while telling a domestic-site operator to
+// change the latter. Drift signs host A's certificate while serving_domain points
+// verifiers at host B: every verification fails, and nothing is malformed, so
+// without this the broker never learns.
+func TestUpstreamCertFingerprintRefusesDomainDrift(t *testing.T) {
+	fp := strings.Repeat("ab", 32)
+	newResp := func(host string) *http.Response {
+		resp := &http.Response{Header: http.Header{}}
+		resp.Header.Set(teeutil.HeaderUpstreamCertFingerprint, fp)
+		if host != "" {
+			resp.Header.Set(teeutil.HeaderUpstreamCertHost, host)
+		}
+		return resp
+	}
+
+	tests := []struct {
+		name     string
+		reported string
+		want     string
+	}{
+		{name: "shim dialed the declared host", reported: "api.minimax.io", want: fp},
+		{name: "case and trailing dot are not drift", reported: "API.MiniMax.IO.", want: fp},
+		{name: "shim drifted to the domestic site", reported: "api.minimaxi.com", want: ""},
+		{name: "shim reported no host at all", reported: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := newChatbotTestCtrl(t, config.Service{
+				ProviderType:     "centralized",
+				ProviderIdentity: "minimax",
+				TargetTLSProxy:   true,
+				UpstreamDomain:   "api.minimax.io",
+			})
+			resp := newResp(tt.reported)
+			if got := ctrl.upstreamCertFingerprint(resp.Header, resp.TLS); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUpstreamCertHostIsStrippedFromClientResponse: the host header is the same
+// class of evidence as the fingerprint — internal, and on a standard provider it
+// names the upstream that deployment exists to hide.
+func TestUpstreamCertHostIsStrippedFromClientResponse(t *testing.T) {
+	if !isUpstreamLeakHeader(teeutil.HeaderUpstreamCertHost) {
+		t.Errorf("%s must be stripped from forwarded responses", teeutil.HeaderUpstreamCertHost)
+	}
+}

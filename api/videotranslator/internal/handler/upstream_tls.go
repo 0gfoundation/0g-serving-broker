@@ -54,8 +54,19 @@ func (w *upstreamTLSWriter) report() {
 		return
 	}
 	w.reported = true
-	if fp := w.capture.Fingerprint(); fp != "" {
-		w.Header().Set(teeutil.HeaderUpstreamCertFingerprint, fp)
+	// Del first, unconditionally: these headers are the broker's evidence, so a
+	// value we did not put there must never survive. No handler copies vendor
+	// response headers today, but the whole point of doing this in middleware is
+	// that a future one cannot get it wrong.
+	w.Header().Del(teeutil.HeaderUpstreamCertFingerprint)
+	w.Header().Del(teeutil.HeaderUpstreamCertHost)
+	fp := w.capture.Fingerprint()
+	if fp == "" {
+		return
+	}
+	w.Header().Set(teeutil.HeaderUpstreamCertFingerprint, fp)
+	if host := w.capture.ServerName(); host != "" {
+		w.Header().Set(teeutil.HeaderUpstreamCertHost, host)
 	}
 }
 

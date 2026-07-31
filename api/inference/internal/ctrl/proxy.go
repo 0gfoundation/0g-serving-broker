@@ -299,6 +299,7 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 	// client-supplied (or operator-mistyped) string into a routing-proof fingerprint.
 	// Nothing legitimate sends it outbound.
 	req.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
+	req.Header.Del(teeutil.HeaderUpstreamCertHost)
 
 	return req, nil
 }
@@ -485,6 +486,21 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 	if c.Service.TargetTLSProxy {
 		raw := header.Get(teeutil.HeaderUpstreamCertFingerprint)
 		if fp, ok := teeutil.NormalizeCertFingerprint(raw); ok {
+			// The fingerprint is well-formed, but a proof is only checkable if it
+			// binds the certificate of the host we TELL verifiers to check. The shim
+			// picks its own upstream (MINIMAX_BASE_URL / DASHSCOPE_BASE_URL, a
+			// different file in a different container) while the broker publishes
+			// service.upstreamDomain as serving_domain, and nothing else couples the
+			// two. Drift would sign host A's certificate and point verifiers at host
+			// B — every verification fails, invisibly, because nothing here is
+			// malformed. Refuse instead: an absent proof is checkable, a mismatched
+			// one is indistinguishable from tampering.
+			if host := strings.ToLower(strings.TrimSuffix(header.Get(teeutil.HeaderUpstreamCertHost), ".")); host != c.Service.UpstreamDomain {
+				monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipDomainMismatch)
+				c.logger.Errorf("targetTLSProxy: sidecar dialed %q but service.upstreamDomain is %q — a proof over the first would send verifiers to the second; no routing proof for this response (check the sidecar's *_BASE_URL against the broker's upstreamDomain)",
+					host, c.Service.UpstreamDomain)
+				return ""
+			}
 			return fp
 		}
 		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarReport)
@@ -516,7 +532,8 @@ func isUpstreamLeakHeader(key string) bool {
 	switch k {
 	case "provider", "server", "via", "x-powered-by":
 		return true
-	case strings.ToLower(teeutil.HeaderUpstreamCertFingerprint):
+	case strings.ToLower(teeutil.HeaderUpstreamCertFingerprint),
+		strings.ToLower(teeutil.HeaderUpstreamCertHost):
 		// Broker-internal evidence, consumed by upstreamCertFingerprint above and
 		// never meant for the client: on a "standard" provider the vendor's
 		// certificate fingerprint identifies the upstream this deployment is

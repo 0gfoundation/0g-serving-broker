@@ -145,6 +145,20 @@ Scope notes, both deliberate:
   FAIL rather than falsely succeed. It buys verifiability without buying trust —
   where the flag itself, unconstrained, would buy the operator a forged proof.
 
+  **But failing at the verifier is not good enough**, because the broker would not
+  know. `upstreamDomain` and the host the translator actually dials are the same
+  fact stored twice, in two files in two containers — the translator picks its own
+  via `MINIMAX_BASE_URL` / `DASHSCOPE_BASE_URL`. Nothing couples them, and the
+  shipped compose example hardcodes one while telling a domestic-site operator to
+  change the other. So the translator reports the SNI it dialed alongside the
+  fingerprint (`Zg-Upstream-Cert-Host`) and the broker **refuses to sign on a
+  mismatch**, with reason `domain_mismatch`. A missing proof is checkable; one
+  bound to a host nobody was told to check is indistinguishable from tampering.
+
+  A translator dialing a bare IP reports no SNI (TLS sends none for an IP literal)
+  and therefore produces no proof — correct, since `upstreamDomain` must be a
+  hostname and could never have matched.
+
 ## Video generation also had no proof path at all
 
 Independent of the sidecar, `video-generation` advertised `ZG-Res-Key` for a

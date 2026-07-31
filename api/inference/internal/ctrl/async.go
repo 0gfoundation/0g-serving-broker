@@ -381,6 +381,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	// images), but the invariant should hold in BOTH request builders rather than
 	// rest on two restrictions that are each marked "widen later".
 	httpReq.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertHost)
 
 	// Execute the request
 	resp, err := c.httpClient.Do(httpReq)

@@ -255,8 +255,14 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	}
 
 	// Terminal and completed: this is the one poll that owes a routing proof, so it
-	// is the one that resolves (and, on a miss, logs and meters) the evidence.
-	upstreamCertFingerprint := c.upstreamCertFingerprint(respHeader, respTLS)
+	// is the one that resolves (and, on a miss, logs and meters) the evidence. An
+	// empty ChatKey means the create response never advertised one, so no proof was
+	// ever promised — resolving anyway would meter a second loss for a request the
+	// create path already counted.
+	var upstreamCertFingerprint string
+	if job.ChatKey != "" {
+		upstreamCertFingerprint = c.upstreamCertFingerprint(respHeader, respTLS)
+	}
 
 	seconds, size, source := resolveVideoBilling(body, job.RequestBody, job.RequestContentType)
 
@@ -409,9 +415,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 // response hash does not match the video it downloaded — indistinguishable from
 // tampering. A 404 is the honest answer.
 //
-// Do NOT call it when nothing was delivered (e.g. the vendor reported failed): the
-// cached signature still describes exactly the create response the client holds,
-// and destroying it breaks a lookup that was never in doubt.
+// The test is whether a body the client can OBTAIN exists, not whether a video was
+// produced: a provider-reported failure is still a job resource the client can GET,
+// so that path evicts too. The one case that does not is a create response with no
+// job id — with no id the client cannot fetch anything, so the cached signature
+// still describes exactly the response it holds (see dropUnpollableVideoSignature).
 //
 // Deliberately not gated on IsCentralized(): a decentralized in-network provider's
 // content signature goes just as stale as a routing proof.
@@ -456,7 +464,6 @@ func (c *Ctrl) signVideoPollResult(job model.VideoPollJob, body []byte, upstream
 // interval" (bounded by ExpiresAt), not an immediate failure — a single blip should not lose a
 // job that would otherwise have billed correctly on the next attempt.
 //
-// The returned fingerprint is the upstream TLS certificate observed on THIS poll
 // respHeader/respTLS are this poll's own evidence for Ctrl.upstreamCertFingerprint:
 // a centralized provider's routing proof over the completed body must bind the
 // connection that actually delivered that body, not the one the create request used
@@ -483,6 +490,7 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, respHead
 	// matter most — an operator naming it in additionalSecret is the only way it
 	// could get here, and that must not be able to prime an echo.
 	httpReq.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertHost)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

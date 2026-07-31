@@ -18,6 +18,7 @@ import (
 type CertCapture struct {
 	mu          sync.Mutex
 	fingerprint string
+	serverName  string
 }
 
 type certCaptureKey struct{}
@@ -59,7 +60,21 @@ func (c *CertCapture) Observe(state *tls.ConnectionState) {
 	defer c.mu.Unlock()
 	if c.fingerprint == "" {
 		c.fingerprint = info.PeerCertFingerprint
+		c.serverName = info.ServerName
 	}
+}
+
+// ServerName returns the SNI of the observed connection, or "" if none was
+// observed. Reported alongside the fingerprint so the broker can check the host the
+// shim actually dialed against the one it publishes to verifiers — see
+// HeaderUpstreamCertHost.
+func (c *CertCapture) ServerName() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.serverName
 }
 
 // Fingerprint returns the observed leaf-certificate fingerprint, or "" if no TLS

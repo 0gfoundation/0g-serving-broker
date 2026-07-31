@@ -40,6 +40,14 @@ func TestUpstreamTLSReport_ReportsVendorCert(t *testing.T) {
 	if got := rec.Header().Get(teeutil.HeaderUpstreamCertFingerprint); got != want {
 		t.Errorf("reported fingerprint %q, want the vendor's leaf cert %q", got, want)
 	}
+	// No host is reported here, and that is correct rather than a gap: httptest
+	// serves on 127.0.0.1 and TLS sends no SNI for an IP literal. The broker refuses
+	// to sign without a host (upstreamCertFingerprint), which is the right outcome —
+	// service.upstreamDomain must be a hostname, so an IP-dialed upstream could
+	// never have matched it anyway.
+	if got := rec.Header().Get(teeutil.HeaderUpstreamCertHost); got != "" {
+		t.Errorf("reported host %q for an IP-dialed upstream, want none", got)
+	}
 }
 
 // TestUpstreamTLSReport_NoHeaderWithoutTLS: a plaintext upstream produces no
@@ -64,5 +72,8 @@ func TestUpstreamTLSReport_NoHeaderWithoutTLS(t *testing.T) {
 
 	if got := rec.Header().Get(teeutil.HeaderUpstreamCertFingerprint); got != "" {
 		t.Errorf("plaintext upstream reported %q", got)
+	}
+	if got := rec.Header().Get(teeutil.HeaderUpstreamCertHost); got != "" {
+		t.Errorf("plaintext upstream reported host %q", got)
 	}
 }
