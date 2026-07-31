@@ -331,16 +331,26 @@ func ToViduCreateRequest(req CreateVideoRequest) vidu.CreateRequest {
 // duration/resolution/prompt are echoed from the client's own request,
 // matching how the real OpenAI Video API's create response mirrors what was
 // asked for.
-func FromViduCreateResponse(req CreateVideoRequest, resp vidu.CreateResponse) VideoResponse {
+func FromViduCreateResponse(req CreateVideoRequest, resp vidu.CreateResponse) (VideoResponse, error) {
+	// The id we publish is a contract, not Vidu's choice — see EncodeJobID.
+	// Vidu shares the same DashScope-family transport/task-tracking as
+	// DashScope itself (see viduTimeLayout/viduTaskIDValidity above), so its
+	// task_id is expected to need the same treatment (DashScope's is a
+	// canonical UUID, over budget once the published contract's tag is
+	// added — see jobid.go's compactUUID).
+	id, err := EncodeJobID(resp.Output.TaskID)
+	if err != nil {
+		return VideoResponse{}, err
+	}
 	return VideoResponse{
-		ID:      resp.Output.TaskID,
+		ID:      id,
 		Object:  "video",
 		Model:   req.Model,
 		Status:  StatusQueued,
 		Seconds: strconv.FormatInt(validateViduDuration(req.Model, req.Seconds), 10),
 		Size:    normalizeViduResolution(req.Size),
 		Prompt:  req.Prompt,
-	}
+	}, nil
 }
 
 // viduTimeLayout matches the vendor's documented timestamp format for
@@ -408,15 +418,18 @@ func parseViduTime(raw string) (int64, bool) {
 // used.) An absent/malformed usage.SR yields an empty Size, which the
 // broker's own table-max-on-miss fallback then handles the same way an
 // unmatched variant already does for every other vendor.
-func FromViduGetTaskResponse(resp vidu.GetTaskResponse) VideoResponse {
+func FromViduGetTaskResponse(publicID string, resp vidu.GetTaskResponse) VideoResponse {
 	// Flat, no-output-wrapper failure shape (structurally identical to a
 	// create-time failure, but returned from GET .../tasks/{id}): Output has
 	// no TaskStatus, but a top-level Code is present. Confirmed live for
 	// Kling's sibling integration against the same DashScope-family
 	// transport; handled defensively here too, even though Vidu's own
 	// documented FAILED example uses the nested-in-output shape below.
+	// publicID is echoed even on this path — the client already has it (it's
+	// what they polled with), matching DashScope's FromGetTaskResponse.
 	if resp.Output.TaskStatus == "" && resp.Code != "" {
 		return VideoResponse{
+			ID:     publicID,
 			Object: "video",
 			Status: StatusFailed,
 			Error:  &Error{Code: resp.Code, Message: resp.Message},
@@ -425,7 +438,7 @@ func FromViduGetTaskResponse(resp vidu.GetTaskResponse) VideoResponse {
 
 	status := StatusFromVidu(resp.Output.TaskStatus)
 	out := VideoResponse{
-		ID:     resp.Output.TaskID,
+		ID:     publicID,
 		Object: "video",
 		Status: status,
 		Prompt: resp.Output.OrigPrompt,

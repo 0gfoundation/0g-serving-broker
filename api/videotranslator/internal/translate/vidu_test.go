@@ -181,6 +181,45 @@ func TestNormalizeViduResolution(t *testing.T) {
 	}
 }
 
+// TestFromViduCreateResponse_EncodesID pins the fix for a real gap found
+// during a main-branch merge: Vidu shares the same DashScope-family
+// transport/task-tracking as DashScope itself, whose task_id needed
+// EncodeJobID (a canonical UUID, over budget once the published contract's
+// tag is added) — Vidu's own create response must go through the same
+// encoding, not publish its vendor task_id verbatim the way it did before
+// this fix.
+func TestFromViduCreateResponse_EncodesID(t *testing.T) {
+	got, err := FromViduCreateResponse(
+		CreateVideoRequest{Model: ModelViduQ3Turbo, Prompt: "a cat", Seconds: "5", Size: "1280x720"},
+		vidu.CreateResponse{Output: vidu.CreateOutput{TaskID: "task-123", TaskStatus: vidu.TaskStatusPending}},
+	)
+	if err != nil {
+		t.Fatalf("FromViduCreateResponse: %v", err)
+	}
+	// The published id is the ENCODED form — the vendor's task_id is ours to
+	// shape, because consumers persist and key on what we hand out (see
+	// EncodeJobID).
+	if got.ID != "v0_task-123" || got.Status != StatusQueued {
+		t.Fatalf("id/status = %q/%q, want v0_task-123/%q", got.ID, got.Status, StatusQueued)
+	}
+}
+
+// TestFromViduCreateResponse_UUIDTaskIDCompacted covers the shape DashScope's
+// own task_id actually takes (a canonical UUID) — Vidu, on the same
+// DashScope-family platform, is expected to mint ids the same way.
+func TestFromViduCreateResponse_UUIDTaskIDCompacted(t *testing.T) {
+	got, err := FromViduCreateResponse(
+		CreateVideoRequest{Model: ModelViduQ3Turbo, Prompt: "a cat", Seconds: "5"},
+		vidu.CreateResponse{Output: vidu.CreateOutput{TaskID: "0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d"}},
+	)
+	if err != nil {
+		t.Fatalf("FromViduCreateResponse: %v", err)
+	}
+	if got.ID != "v1_0385dc795ff840739d5a1a7bc7f3e01d" {
+		t.Errorf("id = %q, want the compacted-UUID (v1_) encoding", got.ID)
+	}
+}
+
 func TestFromViduGetTaskResponse_DurationPrecedence(t *testing.T) {
 	// usage.duration (billed) must win over usage.output_video_duration
 	// (clip length) — simulating audio-overhead rounding where they diverge.
@@ -188,7 +227,7 @@ func TestFromViduGetTaskResponse_DurationPrecedence(t *testing.T) {
 		Output: vidu.TaskOutput{TaskID: "t1", TaskStatus: vidu.TaskStatusSucceeded},
 		Usage:  &vidu.TaskUsage{Duration: "6", OutputVideoDuration: "5", SR: "540"},
 	}
-	got := FromViduGetTaskResponse(resp)
+	got := FromViduGetTaskResponse("v0_t1", resp)
 	if got.Usage == nil {
 		t.Fatal("usage missing from response")
 	}
@@ -204,7 +243,7 @@ func TestFromViduGetTaskResponse_DurationFallback(t *testing.T) {
 		Output: vidu.TaskOutput{TaskID: "t1", TaskStatus: vidu.TaskStatusSucceeded},
 		Usage:  &vidu.TaskUsage{OutputVideoDuration: "5"},
 	}
-	got := FromViduGetTaskResponse(resp)
+	got := FromViduGetTaskResponse("v0_t1", resp)
 	if got.Usage == nil || got.Usage.OutputVideoDuration.String() != "5" {
 		t.Errorf("expected fallback to output_video_duration=5, got %+v", got.Usage)
 	}
@@ -215,7 +254,7 @@ func TestFromViduGetTaskResponse_ResolutionFromSR(t *testing.T) {
 		Output: vidu.TaskOutput{TaskID: "t1", TaskStatus: vidu.TaskStatusSucceeded},
 		Usage:  &vidu.TaskUsage{Duration: "5", SR: "540"},
 	}
-	got := FromViduGetTaskResponse(resp)
+	got := FromViduGetTaskResponse("v0_t1", resp)
 	if got.Size != "540P" {
 		t.Errorf("Size = %q, want 540P (derived from usage.SR + \"P\")", got.Size)
 	}
@@ -223,7 +262,7 @@ func TestFromViduGetTaskResponse_ResolutionFromSR(t *testing.T) {
 
 func TestFromViduGetTaskResponse_UnknownIsTerminalFailed(t *testing.T) {
 	resp := vidu.GetTaskResponse{Output: vidu.TaskOutput{TaskID: "t1", TaskStatus: vidu.TaskStatusUnknown}}
-	got := FromViduGetTaskResponse(resp)
+	got := FromViduGetTaskResponse("v0_t1", resp)
 	if got.Status != StatusFailed {
 		t.Errorf("status = %q, want failed (UNKNOWN must be terminal, never retried)", got.Status)
 	}
@@ -236,7 +275,7 @@ func TestFromViduGetTaskResponse_FlatFailureShape(t *testing.T) {
 	// Structurally identical to Kling's confirmed flat query-time failure
 	// shape — no output.task_status, top-level code/message instead.
 	resp := vidu.GetTaskResponse{Code: "InvalidParameter", Message: "bad request"}
-	got := FromViduGetTaskResponse(resp)
+	got := FromViduGetTaskResponse("v0_t1", resp)
 	if got.Status != StatusFailed {
 		t.Errorf("status = %q, want failed", got.Status)
 	}

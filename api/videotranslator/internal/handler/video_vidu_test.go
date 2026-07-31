@@ -87,4 +87,16 @@ func TestViduCreateVideo_BothFramesSucceeds(t *testing.T) {
 	if gotReq.Input.Media[0].URL != "https://example.com/first.png" || gotReq.Input.Media[1].URL != "https://example.com/last.png" {
 		t.Errorf("media = %+v, want first then last frame", gotReq.Input.Media)
 	}
+
+	// The response id must be the ENCODED form (translate.EncodeJobID), not
+	// the vendor's raw task_id verbatim — Vidu shares DashScope's task-id
+	// contract (see FromViduCreateResponse), and this is the client-visible
+	// proof that the create path actually goes through it.
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["id"] != "v0_t1" {
+		t.Errorf("id = %v, want v0_t1 (encoded)", resp["id"])
+	}
 }

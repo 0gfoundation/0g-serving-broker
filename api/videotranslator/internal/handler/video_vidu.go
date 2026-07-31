@@ -10,6 +10,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -48,10 +49,40 @@ func (p *viduProvider) CreateVideo(ctx context.Context, authHeader string, req t
 	if err != nil {
 		return translate.VideoResponse{}, err
 	}
-	return translate.FromViduCreateResponse(req, *vdResp), nil
+
+	out, err := translate.FromViduCreateResponse(req, *vdResp)
+	if err != nil {
+		// The vendor's id cannot be expressed in the contract the broker publishes
+		// (see translate.EncodeJobID). Fail here, loudly, on this vendor's FIRST
+		// request rather than handing downstream a key it cannot persist. A plain
+		// error (not newValidationError) — this is an upstream/vendor-shape
+		// problem, not a bad client request, so it falls through
+		// writeProviderError's generic 502 path.
+		p.logger.Errorf("job id contract: %v", err)
+		return translate.VideoResponse{}, err
+	}
+	return out, nil
 }
 
-func (p *viduProvider) GetVideo(ctx context.Context, authHeader, taskID string) (translate.VideoResponse, error) {
+// GetVideo handles GET /videos/{id}. taskID here is actually the PUBLIC,
+// encoded job id (GenericVideoHandler passes c.Param("id") straight through
+// — it has no vendor-specific encode/decode knowledge), so this decodes it
+// back to Vidu's real task id before calling the vendor.
+func (p *viduProvider) GetVideo(ctx context.Context, authHeader, publicID string) (translate.VideoResponse, error) {
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		// The only failure in this path that would otherwise leave no trace at
+		// all: the client gets a message without the id, and DecodeJobID's
+		// distinct causes (unknown shape / malformed payload / not a task id)
+		// are discarded. Log it — this is also the path most likely to reject
+		// something legitimate. Wrapped with newValidationError so
+		// writeProviderError reports 400 "unknown video id", not the generic
+		// 502 every other non-vendor-4xx error gets — a bad/unknown id is the
+		// client's request being wrong, not a vendor or transport problem.
+		p.logger.Warnf("video id %q rejected: %v", publicID, err)
+		return translate.VideoResponse{}, newValidationError(errors.New("unknown video id"))
+	}
+
 	vdResp, err := p.client.GetTask(ctx, authHeader, taskID)
 	if err != nil {
 		return translate.VideoResponse{}, err
@@ -59,13 +90,22 @@ func (p *viduProvider) GetVideo(ctx context.Context, authHeader, taskID string) 
 	if !translate.IsRecognizedViduStatus(vdResp.Output.TaskStatus) {
 		p.logger.Errorf("vidu get task %s: unrecognized task_status %q, mapping to failed", taskID, vdResp.Output.TaskStatus)
 	}
-	return translate.FromViduGetTaskResponse(*vdResp), nil
+	return translate.FromViduGetTaskResponse(publicID, *vdResp), nil
 }
 
 // GetVideoContentURL returns Vidu's video_url once populated. An empty
 // video_url (task not yet completed, or upstream reported no asset) is
 // reported as ok=false, not an error — the caller returns 404 for this case.
-func (p *viduProvider) GetVideoContentURL(ctx context.Context, authHeader, taskID string) (string, bool, error) {
+//
+// publicID (like GetVideo's) is the client-facing encoded id, decoded to
+// Vidu's real task id here for the same reason.
+func (p *viduProvider) GetVideoContentURL(ctx context.Context, authHeader, publicID string) (string, bool, error) {
+	taskID, err := translate.DecodeJobID(publicID)
+	if err != nil {
+		p.logger.Warnf("video id %q rejected: %v", publicID, err)
+		return "", false, newValidationError(errors.New("unknown video id"))
+	}
+
 	vdResp, err := p.client.GetTask(ctx, authHeader, taskID)
 	if err != nil {
 		return "", false, err
