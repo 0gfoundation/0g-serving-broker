@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -199,7 +200,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		return
 	}
 
-	body, upstreamCertFingerprint, ok := c.doVideoPollRequest(job)
+	body, respHeader, respTLS, ok := c.doVideoPollRequest(job)
 	if !ok {
 		c.rescheduleVideoPollJob(job)
 		return
@@ -252,6 +253,10 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		c.rescheduleVideoPollJob(job)
 		return
 	}
+
+	// Terminal and completed: this is the one poll that owes a routing proof, so it
+	// is the one that resolves (and, on a miss, logs and meters) the evidence.
+	upstreamCertFingerprint := c.upstreamCertFingerprint(respHeader, respTLS)
 
 	seconds, size, source := resolveVideoBilling(body, job.RequestBody, job.RequestContentType)
 
@@ -422,12 +427,11 @@ func (c *Ctrl) evictVideoSignature(job model.VideoPollJob, cause error) {
 // actually ATTEMPTED and failed — the only case that represents a lost routing
 // proof, and so the only one that feeds the skipped-proof counter.
 func (c *Ctrl) dropStaleVideoSignature(job model.VideoPollJob, cause error) {
-	// Centralized only: a failure on the decentralized branch (signChatWithKey) is
-	// not a routing-proof skip, and counting it would pollute a centralized-only
-	// signal with unrelated events.
-	if c.Service.IsCentralized() {
-		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
-	}
+	// No metric here: whichever step failed already counted it with the reason it
+	// knows — upstreamCertFingerprint for missing evidence, signCentralizedRoutingProof
+	// for a signing failure. Counting again would double-report one lost proof, and a
+	// failure on the DECENTRALIZED branch (signChatWithKey) is not a routing-proof
+	// skip at all.
 	c.evictVideoSignature(job, cause)
 }
 
@@ -453,17 +457,19 @@ func (c *Ctrl) signVideoPollResult(job model.VideoPollJob, body []byte, upstream
 // job that would otherwise have billed correctly on the next attempt.
 //
 // The returned fingerprint is the upstream TLS certificate observed on THIS poll
-// (see Ctrl.upstreamCertFingerprint): a centralized provider's routing proof over
-// the completed body must bind the connection that actually delivered that body,
-// not the one the create request used possibly hours earlier.
-func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, fingerprint string, ok bool) {
+// respHeader/respTLS are this poll's own evidence for Ctrl.upstreamCertFingerprint:
+// a centralized provider's routing proof over the completed body must bind the
+// connection that actually delivered that body, not the one the create request used
+// possibly hours earlier. They are returned unresolved so the caller can resolve
+// once, at the terminal poll, rather than on every attempt.
+func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, respHeader http.Header, respTLS *tls.ConnectionState, ok bool) {
 	pollCtx, cancel := context.WithTimeout(c.videoPollBaseCtx(), c.videoPollCfg.PollRequestTimeout)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(pollCtx, http.MethodGet, job.PollURL, nil)
 	if err != nil {
 		c.logger.Errorf("video poll job %d: build poll request: %v", job.ID, err)
-		return nil, "", false
+		return nil, nil, nil, false
 	}
 	httpReq.Header.Set("Accept-Encoding", "identity")
 	// Per-model secret keyed on the job's resolved model, so a poll to an upstream
@@ -471,7 +477,6 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, fingerpr
 	for k, v := range c.Service.EffectiveAdditionalSecret(job.ResolvedModel) {
 		httpReq.Header.Set(k, v)
 	}
-
 	// Last, matching the other two request builders. This is the one that actually
 	// talks to the targetTLSProxy sidecar and whose RESPONSE header is trusted as
 	// evidence, so it is the builder where an outbound copy of that header would
@@ -482,14 +487,14 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, fingerpr
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		c.logger.Warnf("video poll job %d: poll request failed (will retry): %v", job.ID, err)
-		return nil, "", false
+		return nil, nil, nil, false
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.logger.Warnf("video poll job %d: read poll response (will retry): %v", job.ID, err)
-		return nil, "", false
+		return nil, nil, nil, false
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -497,7 +502,7 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, fingerpr
 		// intermediary, echo back request content), and this logs on every retry until the
 		// job resolves — truncate rather than writing the full body to broker logs each time.
 		c.logger.Warnf("video poll job %d: poll returned status %d (will retry): %s", job.ID, resp.StatusCode, truncateForLog(respBody, 500))
-		return nil, "", false
+		return nil, nil, nil, false
 	}
 
 	// For forwarder providers, strip #184 upstream identity/cost leak fields before this body
@@ -512,7 +517,12 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, fingerpr
 		respBody = c.sanitizeForwarderPollResponseBody(respBody, resp.Header.Get("Content-Encoding"))
 	}
 
-	return respBody, c.upstreamCertFingerprint(resp), true
+	// Deliberately NOT resolving the routing-proof fingerprint here: this runs on
+	// every poll while a proof is owed only on the terminal one. Hand the two
+	// response fields the resolver reads back to the caller instead — neither is
+	// affected by the deferred Body close — so resolution (which logs and meters a
+	// miss) happens exactly once, where the proof is actually due.
+	return respBody, resp.Header, resp.TLS, true
 }
 
 // sanitizeForwarderPollResponseBody mirrors sanitizeForwarderResponseBody (sanitize.go) for the

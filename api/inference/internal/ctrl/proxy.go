@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -355,9 +356,14 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 	defer resp.Body.Close()
 
-	// Capture the upstream TLS certificate for the centralized routing proof.
-	if c.Service.IsCentralized() {
-		if fp := c.upstreamCertFingerprint(resp); fp != "" {
+	// Capture the upstream TLS certificate for the centralized routing proof. Only
+	// for a 200: a sidecar that rejected the request itself (a 4xx it produced
+	// without ever calling the vendor) legitimately has no certificate to report,
+	// and warning about it would bury the signal that actually matters — a
+	// SUCCESSFUL response whose evidence chain is broken — under ordinary client
+	// errors. Nothing is lost: a non-200 returns below without signing anyway.
+	if c.Service.IsCentralized() && resp.StatusCode == http.StatusOK {
+		if fp := c.upstreamCertFingerprint(resp.Header, resp.TLS); fp != "" {
 			ctx.Set(CtxKeyUpstreamCertFingerprint, fp)
 		}
 	}
@@ -440,41 +446,68 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	return &chatSignature, nil
 }
 
-// isUpstreamLeakHeader reports whether a response header from the upstream
-// reveals the aggregator/provider identity and must not be forwarded (#184).
 // CtxKeyUpstreamCertFingerprint holds the SHA256 leaf-certificate fingerprint of
 // the TLS connection that reached the real upstream.
 //
 // upstreamCertFingerprint below is the ONLY legitimate writer — it is where the
-// question "may this value be trusted as evidence?" is answered. Readers (the
-// routing-proof signers) deliberately do not re-derive it, so that decision lives
-// in exactly one place.
+// question "may this value be trusted as evidence?" is answered. Readers
+// (the routing-proof signers) deliberately do not re-derive it, so that decision
+// lives in exactly one place.
 const CtxKeyUpstreamCertFingerprint = "upstreamCertFingerprint"
 
 // upstreamCertFingerprint returns the fingerprint the centralized routing proof
-// should bind, or "" when there is no TLS evidence (in which case
+// should bind, or "" when there is no usable TLS evidence (in which case
 // signCentralizedRoutingProof refuses to sign rather than emit a proof with none).
-// The two sources are mutually exclusive by design, not a fallback chain:
+//
+// It takes the two response fields it actually reads rather than the *http.Response,
+// so a caller can resolve at the moment a proof is OWED rather than the moment a
+// response arrives. That distinction matters for the video poll scheduler, which
+// polls one job many times but owes a proof only on the terminal poll: resolving per
+// response would multiply a single lost proof into one error log and one counter
+// increment per poll, pinning the very alert this feeds.
+//
+// The two evidence sources are mutually exclusive by design, not a fallback chain:
 //   - Normal centralized: the broker's own hop IS the vendor connection, so trust
-//     resp.TLS and nothing else. Reading the header here too would let any
-//     upstream forge its own routing proof by setting it.
+//     resp.TLS and nothing else. Reading the header here too would let any upstream
+//     forge its own routing proof by setting it.
 //   - targetTLSProxy: the vendor connection was made by an in-enclave shim, so the
-//     header is the only witness. resp.TLS here would be the shim's own
-//     certificate (or nil for the plaintext in-CVM hop) — attesting to it would
-//     prove nothing about which vendor served the request.
-func (c *Ctrl) upstreamCertFingerprint(resp *http.Response) string {
-	if c.Service.TargetTLSProxy {
-		fp, ok := teeutil.NormalizeCertFingerprint(resp.Header.Get(teeutil.HeaderUpstreamCertFingerprint))
-		if !ok {
-			c.logger.Errorf("targetTLSProxy: the sidecar at %s reported no usable %s header; no routing proof for this response",
-				c.Service.TargetURL, teeutil.HeaderUpstreamCertFingerprint)
-			return ""
-		}
-		return fp
+//     header is the only witness. resp.TLS here would be the shim's own certificate
+//     (or nil for the plaintext in-CVM hop) — attesting to it would prove nothing
+//     about which vendor served the request.
+func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.ConnectionState) string {
+	// Only a centralized provider has a routing proof to bind evidence into. The
+	// poll scheduler runs for every video job regardless of provider type, so
+	// without this a perfectly healthy decentralized in-network provider — plaintext
+	// target, nil resp.TLS — would report a lost proof on every job.
+	if !c.Service.IsCentralized() {
+		return ""
 	}
-	if info := teeutil.ExtractTLSInfo(resp.TLS); info != nil {
+	if c.Service.TargetTLSProxy {
+		raw := header.Get(teeutil.HeaderUpstreamCertFingerprint)
+		if fp, ok := teeutil.NormalizeCertFingerprint(raw); ok {
+			return fp
+		}
+		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarReport)
+		// Absent and malformed have different fixes, so they get different messages:
+		// absent means the shim is not reporting at all (wrong image, middleware not
+		// installed, or it never reached the vendor over TLS); malformed means
+		// something between broker and shim mangled the value. Error, not warn — this
+		// is the enclave's evidence chain broken while the service still advertises
+		// itself as verifiable.
+		if raw == "" {
+			c.logger.Errorf("targetTLSProxy: sidecar at %s sent no %s header — it is not reporting the upstream certificate (check its image and that UpstreamTLSReport is installed); no routing proof for this response",
+				c.Service.TargetURL, teeutil.HeaderUpstreamCertFingerprint)
+		} else {
+			c.logger.Errorf("targetTLSProxy: sidecar at %s reported a malformed %s (%q; want 64 hex chars); no routing proof for this response",
+				c.Service.TargetURL, teeutil.HeaderUpstreamCertFingerprint, truncateForLog([]byte(raw), 80))
+		}
+		return ""
+	}
+	if info := teeutil.ExtractTLSInfo(state); info != nil {
 		return info.PeerCertFingerprint
 	}
+	monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoTLS)
+	c.logger.Errorf("centralized provider response arrived without TLS state; no routing proof for this response")
 	return ""
 }
 

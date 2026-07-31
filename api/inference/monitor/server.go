@@ -394,7 +394,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RoutingProofSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_routing_proof_skipped_total",
-			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
+			Help:        "Responses from a centralized provider served WITHOUT a TEE routing proof, labeled by reason (no_tls, no_sidecar_report, sign_error, no_poll_job). Non-zero means the service is advertising verifiability it is not delivering — alert on any sustained rate.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -729,6 +729,9 @@ const (
 	// RoutingProofSkipNoTLS: a direct centralized response arrived with no TLS
 	// connection state to bind.
 	RoutingProofSkipNoTLS = "no_tls"
+	// RoutingProofSkipNoSidecarReport: targetTLSProxy is set but the in-enclave
+	// shim reported no usable certificate fingerprint.
+	RoutingProofSkipNoSidecarReport = "no_sidecar_report"
 	// RoutingProofSkipSignError: evidence was present but signing itself failed.
 	RoutingProofSkipSignError = "sign_error"
 	// RoutingProofSkipNoPollJob: an async video job never reached the poll

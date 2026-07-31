@@ -7,7 +7,7 @@
 # (POST /v2/video_generation, GET /v2/query/video_generation/{task_id}). The
 # broker owns polling-to-completion and billing; this container never does.
 #
-# Broker-side wiring (three things):
+# Broker-side wiring (four things):
 #   1. Register the provider's on-chain Service.Url as this container's address
 #      (e.g. http://0g-minimax-video-translator:8090) instead of api.minimax.io.
 #   2. Set additionalSecret in the broker's config.yaml so it injects the
@@ -22,6 +22,17 @@
 #      see api/inference/config/model_pricing.go. The translator maps MiniMax's
 #      usage.total_seconds onto the broker's usage.output_video_duration field,
 #      which is what resolveVideoBilling meters.
+#   4. Keep TEE verification: this sidecar reports the vendor's TLS certificate
+#      back to the broker (Zg-Upstream-Cert-Fingerprint), so the provider can stay
+#      providerType: centralized instead of falling back to the non-verifiable
+#      "standard" type. Set all four, and run this container in the SAME CVM as the
+#      broker — that co-location is what makes the report trustworthy:
+#        service:
+#          providerType: centralized
+#          providerIdentity: minimax
+#          targetTLSProxy: true
+#          upstreamDomain: api.minimax.io
+#      See docs/design/sidecar-routing-proof.md.
 #
 # MINIMAX_RESOLUTION defaults to "2K" (MiniMax-H3's only supported value). A
 # client can still target another model's resolution tier by sending "size" as

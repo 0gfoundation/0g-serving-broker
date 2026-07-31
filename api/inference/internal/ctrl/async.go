@@ -478,7 +478,7 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 	switch {
 	case c.Service.IsCentralized():
 		chatKey = uuid.NewString()
-		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, c.upstreamCertFingerprint(resp)); err != nil {
+		if err := c.signCentralizedRoutingProof(params.RequestBody, providerRespBody, chatKey, c.upstreamCertFingerprint(resp.Header, resp.TLS)); err != nil {
 			c.logger.Warnf("Async job %s: routing proof not created (TEE verification unavailable): %v", jobID, err)
 			chatKey = ""
 		}
@@ -508,7 +508,6 @@ func (c *Ctrl) processAsyncJob(params asyncJobParams) {
 		}
 		headerMap[k] = v
 	}
-
 	if chatKey != "" {
 		headerMap["ZG-Res-Key"] = []string{chatKey}
 	}

@@ -25,6 +25,7 @@ func TestSignVideoResponseCentralizedProducesRoutingProof(t *testing.T) {
 		ProviderType:     "centralized",
 		ProviderIdentity: "minimax",
 		TargetSeparated:  true,
+		TargetTLSProxy:   true,
 	})
 
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -99,6 +100,7 @@ func TestSignVideoPollResultRebindsFinalBody(t *testing.T) {
 		ProviderType:     "centralized",
 		ProviderIdentity: "minimax",
 		TargetSeparated:  true,
+		TargetTLSProxy:   true,
 	})
 
 	reqBody := []byte(`{"model":"MiniMax-H3","prompt":"a cat"}`)
@@ -124,13 +126,30 @@ func TestSignVideoPollResultRebindsFinalBody(t *testing.T) {
 	}
 }
 
+// TestSignCentralizedRoutingProofRejectsNonFingerprint: the signer takes two
+// adjacent same-typed strings (chatKey, fingerprint). Re-validating the format at
+// the signer means a caller that swaps them, or hands over any other string, fails
+// closed instead of signing a proof that attests to a UUID — and a value proven to
+// be 32 hex bytes cannot smuggle the ':' the proof text delimits on.
+func TestSignCentralizedRoutingProofRejectsNonFingerprint(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "centralized", ProviderIdentity: "minimax"})
+	for _, bad := range []string{"", "not-hex", "a-uuid-shaped-value-4f2c9d1e8b7a6350f1e2d3c4b5a69788", strings.Repeat("ab", 32) + ":extra"} {
+		if err := ctrl.signCentralizedRoutingProof([]byte(`{}`), []byte(`{}`), "key", bad); err == nil {
+			t.Errorf("signed a routing proof with fingerprint %q", bad)
+		}
+	}
+	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("key")); found {
+		t.Error("nothing may be cached when the fingerprint was rejected")
+	}
+}
+
 // TestDropStaleVideoSignatureEvicts: when a poll cannot re-sign, the create-time
 // signature over the queued placeholder must NOT survive. Left in place, the client
 // fetches a valid broker signature whose response hash doesn't match the video it
 // downloaded — indistinguishable from tampering. A 404 is the honest answer.
 func TestDropStaleVideoSignatureEvicts(t *testing.T) {
 	ctrl := newChatbotTestCtrl(t, config.Service{
-		ProviderType: "centralized", ProviderIdentity: "minimax", TargetSeparated: true,
+		ProviderType: "centralized", ProviderIdentity: "minimax", TargetSeparated: true, TargetTLSProxy: true,
 	})
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Set(CtxKeyUpstreamCertFingerprint, strings.Repeat("11", 32))
@@ -148,6 +167,27 @@ func TestDropStaleVideoSignatureEvicts(t *testing.T) {
 	}
 	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("video-key")); found {
 		t.Error("stale create-time signature survived a failed re-sign")
+	}
+}
+
+// TestUpstreamCertFingerprintHeaderNotForwardedUpstream: the broker treats this
+// header on a RESPONSE as evidence, so a client-supplied one must never reach the
+// target — any upstream that echoes request headers would otherwise let a client
+// author the fingerprint.
+func TestUpstreamCertFingerprintHeaderNotForwardedUpstream(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "centralized", ProviderIdentity: "minimax"})
+	ctrl.Service.Type = "chatbot"
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	ctx.Request.Header.Set(teeutil.HeaderUpstreamCertFingerprint, strings.Repeat("ff", 32))
+
+	req, err := ctrl.PrepareHTTPRequest(ctx, "http://upstream.invalid/v1/chat/completions", []byte(`{"model":"m"}`), "chatbot")
+	if err != nil {
+		t.Fatalf("PrepareHTTPRequest: %v", err)
+	}
+	if got := req.Header.Get(teeutil.HeaderUpstreamCertFingerprint); got != "" {
+		t.Errorf("client-supplied %s was forwarded upstream as %q", teeutil.HeaderUpstreamCertFingerprint, got)
 	}
 }
 
@@ -199,7 +239,7 @@ func TestEvictVideoSignatureOnEveryUnsignedTerminalOutcome(t *testing.T) {
 // error), so nothing will re-sign the final body.
 func TestDropUnpollableVideoSignature(t *testing.T) {
 	ctrl := newChatbotTestCtrl(t, config.Service{
-		ProviderType: "centralized", ProviderIdentity: "minimax", TargetSeparated: true,
+		ProviderType: "centralized", ProviderIdentity: "minimax", TargetSeparated: true, TargetTLSProxy: true,
 	})
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Set(CtxKeyUpstreamCertFingerprint, strings.Repeat("11", 32))
@@ -237,43 +277,5 @@ func TestNoJobIDKeepsCreateSignature(t *testing.T) {
 
 	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("video-key")); !found {
 		t.Error("create-time signature was evicted even though the client has no id to fetch a final body with")
-	}
-}
-
-// TestSignCentralizedRoutingProofRejectsNonFingerprint: the signer takes two
-// adjacent same-typed strings (chatKey, fingerprint). Re-validating the format at
-// the signer means a caller that swaps them, or hands over any other string, fails
-// closed instead of signing a proof that attests to a UUID — and a value proven to
-// be 32 hex bytes cannot smuggle the ':' the proof text delimits on.
-func TestSignCentralizedRoutingProofRejectsNonFingerprint(t *testing.T) {
-	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "centralized", ProviderIdentity: "minimax"})
-	for _, bad := range []string{"", "not-hex", "a-uuid-shaped-value-4f2c9d1e8b7a6350f1e2d3c4b5a69788", strings.Repeat("ab", 32) + ":extra"} {
-		if err := ctrl.signCentralizedRoutingProof([]byte(`{}`), []byte(`{}`), "key", bad); err == nil {
-			t.Errorf("signed a routing proof with fingerprint %q", bad)
-		}
-	}
-	if _, found := ctrl.svcCache.Get(ctrl.chatCacheKey("key")); found {
-		t.Error("nothing may be cached when the fingerprint was rejected")
-	}
-}
-
-// TestUpstreamCertFingerprintHeaderNotForwardedUpstream: the broker treats this
-// header on a RESPONSE as evidence, so a client-supplied one must never reach the
-// target — any upstream that echoes request headers would otherwise let a client
-// author the fingerprint.
-func TestUpstreamCertFingerprintHeaderNotForwardedUpstream(t *testing.T) {
-	ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: "centralized", ProviderIdentity: "minimax"})
-	ctrl.Service.Type = "chatbot"
-
-	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	ctx.Request.Header.Set(teeutil.HeaderUpstreamCertFingerprint, strings.Repeat("ff", 32))
-
-	req, err := ctrl.PrepareHTTPRequest(ctx, "http://upstream.invalid/v1/chat/completions", []byte(`{"model":"m"}`), "chatbot")
-	if err != nil {
-		t.Fatalf("PrepareHTTPRequest: %v", err)
-	}
-	if got := req.Header.Get(teeutil.HeaderUpstreamCertFingerprint); got != "" {
-		t.Errorf("client-supplied %s was forwarded upstream as %q", teeutil.HeaderUpstreamCertFingerprint, got)
 	}
 }

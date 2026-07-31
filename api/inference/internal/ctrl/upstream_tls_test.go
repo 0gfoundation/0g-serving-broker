@@ -82,7 +82,7 @@ func TestUpstreamCertFingerprintSourceIsExclusive(t *testing.T) {
 				ProviderIdentity: "vendor",
 				TargetTLSProxy:   tt.targetTLSProxy,
 			})
-			if got := ctrl.upstreamCertFingerprint(tt.resp); got != tt.want {
+			if got := ctrl.upstreamCertFingerprint(tt.resp.Header, tt.resp.TLS); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
@@ -98,5 +98,22 @@ func TestUpstreamCertFingerprintHeaderIsStrippedFromClientResponse(t *testing.T)
 	}
 	if !isUpstreamLeakHeader(strings.ToLower(teeutil.HeaderUpstreamCertFingerprint)) {
 		t.Error("header matching must be case-insensitive")
+	}
+}
+
+// TestUpstreamCertFingerprintOnlyForCentralized: the video poll scheduler resolves
+// this for every job regardless of provider type, so a decentralized in-network
+// provider (plaintext target, nil resp.TLS) must not be reported as a lost routing
+// proof — that would pin the very alert the counter exists to raise.
+func TestUpstreamCertFingerprintOnlyForCentralized(t *testing.T) {
+	for _, providerType := range []string{"decentralized", "standard"} {
+		t.Run(providerType, func(t *testing.T) {
+			ctrl := newChatbotTestCtrl(t, config.Service{ProviderType: providerType})
+			resp := &http.Response{Header: http.Header{}}
+			resp.Header.Set(teeutil.HeaderUpstreamCertFingerprint, strings.Repeat("11", 32))
+			if got := ctrl.upstreamCertFingerprint(resp.Header, resp.TLS); got != "" {
+				t.Errorf("resolved %q for a %s provider, which has no routing proof", got, providerType)
+			}
+		})
 	}
 }
