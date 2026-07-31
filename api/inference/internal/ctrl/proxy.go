@@ -514,7 +514,11 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 				// Logged once per distinct host: this is drift between two config files,
 				// so it does not self-heal and would otherwise emit at full request rate
 				// — the log-volume failure mode this counter exists to replace.
-				if c.lastCertHostMismatch.Swap(&host) == nil || *c.lastCertHostMismatch.Load() != host {
+				// Compare against the PREVIOUS value: Swap has already stored this one,
+				// so re-reading it would always match and the log would fire only on
+				// the very first mismatch — going silent if the operator then drifts to
+				// a different wrong host.
+				if prev := c.lastCertHostMismatch.Swap(&host); prev == nil || *prev != host {
 					c.logger.Errorf("targetTLSProxy: sidecar dialed %q but service.upstreamDomain is %q — a proof over the first would send verifiers to the second; no routing proof until they agree (check the sidecar's *_BASE_URL against the broker's upstreamDomain)",
 						truncateForLog([]byte(host), 80), c.Service.UpstreamDomain)
 				}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0glabs/0g-serving-broker/common/log"
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -178,3 +179,47 @@ func TestUpstreamCertHostIsStrippedFromClientResponse(t *testing.T) {
 		t.Errorf("%s must be stripped from forwarded responses", teeutil.HeaderUpstreamCertHost)
 	}
 }
+
+// TestDomainMismatchLogsOncePerDistinctHost pins the rate-limit's actual contract.
+// The naive shape (Swap, then re-read what you just stored) compares a value with
+// itself and therefore fires only on the FIRST mismatch ever — going silent exactly
+// when an operator drifts to a second wrong host, which is when they most need to
+// hear about it.
+func TestDomainMismatchLogsOncePerDistinctHost(t *testing.T) {
+	ctrl := newChatbotTestCtrl(t, config.Service{
+		ProviderType:     "centralized",
+		ProviderIdentity: "minimax",
+		TargetTLSProxy:   true,
+		UpstreamDomain:   "api.minimax.io",
+	})
+	rec := &countingLogger{Logger: ctrl.logger}
+	ctrl.logger = rec
+
+	resp := func(host string) (http.Header, *tls.ConnectionState) {
+		h := http.Header{}
+		h.Set(teeutil.HeaderUpstreamCertFingerprint, strings.Repeat("ab", 32))
+		h.Set(teeutil.HeaderUpstreamCertHost, host)
+		return h, nil
+	}
+
+	for i := 0; i < 5; i++ {
+		hdr, st := resp("api.minimaxi.com")
+		ctrl.upstreamCertFingerprint(hdr, st)
+	}
+	if rec.errors != 1 {
+		t.Errorf("same host repeated: logged %d times, want 1", rec.errors)
+	}
+
+	hdr, st := resp("api.example.com")
+	ctrl.upstreamCertFingerprint(hdr, st)
+	if rec.errors != 2 {
+		t.Errorf("a DIFFERENT wrong host must log: total %d, want 2", rec.errors)
+	}
+}
+
+type countingLogger struct {
+	log.Logger
+	errors int
+}
+
+func (l *countingLogger) Errorf(format string, args ...interface{}) { l.errors++ }
