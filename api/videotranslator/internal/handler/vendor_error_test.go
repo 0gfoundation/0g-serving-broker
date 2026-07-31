@@ -37,6 +37,41 @@ func TestVendorErrorDetail(t *testing.T) {
 			wantMissing:  "e53HjFRV49EE",
 		},
 		{
+			// MiniMax also mints prefix-less JWTs. Only the scheme-anchored pattern
+			// sees this one — every other fixture here would also be caught by
+			// bareAPIKey, so without this case bearerToken is untested.
+			name:         "a scheme-prefixed JWT with no sk- prefix is redacted",
+			body:         `{"echo":{"Authorization":"Bearer eyJhbGciOiJSUzI1NiJ9.eyJHcm91cE5hbWUiOiJ4In0.sIg"}}`,
+			wantContains: []string{"Bearer [redacted]"},
+			wantMissing:  "eyJHcm91cE5hbWUi",
+		},
+		{
+			// Opaque token: neither sk- prefixed nor JWT-shaped, so ONLY the
+			// scheme-anchored pattern can see it. Without this case bearerToken can
+			// be deleted outright and the suite stays green — the JWT fixtures
+			// below happen to reconstruct "Bearer [redacted]" without it.
+			name:         "an opaque bearer token is redacted by the scheme anchor alone",
+			body:         `{"echo":{"Authorization":"Bearer a1b2c3d4e5f6g7h8i9j0"}}`,
+			wantContains: []string{"Bearer [redacted]"},
+			wantMissing:  "a1b2c3d4e5f6",
+		},
+		{
+			// The intersection of both blind spots: a JWT echoed with NO scheme.
+			name:         "a schemeless JWT is redacted",
+			body:         `{"echo":{"X-Api-Key":"eyJhbGciOiJSUzI1NiJ9.eyJHcm91cE5hbWUiOiJ4In0.sIg"}}`,
+			wantContains: []string{"[redacted]"},
+			wantMissing:  "eyJHcm91cE5hbWUi",
+		},
+		{
+			// A vendor auth error that echoes the presented key lands in a field
+			// that PARSES, so it takes the short path — the one place a credential
+			// still reached the log verbatim, AND the value returned to the client.
+			name:         "a credential inside the parsed message is redacted too",
+			message:      "invalid api key: Bearer sk-api-e53HjFRV49EE",
+			wantContains: []string{"Bearer [redacted]"},
+			wantMissing:  "e53HjFRV49EE",
+		},
+		{
 			name: "request_id is logged — it is what vendor support asks for",
 			code: "1004", message: "invalid api key", requestID: "06bbd146",
 			wantContains: []string{`request_id="06bbd146"`},

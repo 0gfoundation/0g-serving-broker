@@ -25,10 +25,15 @@ var (
 	// quantifier stops at the padding and leaves the rest in the log.
 	bearerToken = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-._~+/|=]+`)
 	// bareAPIKey covers a key echoed WITHOUT its scheme — a gateway reflecting a
-	// header value, or a JSON field. Keyed on the prefix both 0G ("app-sk-") and
-	// the vendors ("sk-") use. Over-redacting a diagnostic that merely mentions
+	// header value, or a JSON field. Keyed on the prefix 0G ("app-sk-") and
+	// DashScope ("sk-") use. Over-redacting a diagnostic that merely mentions
 	// such a prefix is the cheap direction of this trade.
 	bareAPIKey = regexp.MustCompile(`(?i)\b(?:app-)?sk-[A-Za-z0-9\-._~+/|=]+`)
+	// jwtToken covers the OTHER shape MiniMax mints: a prefix-less JWT. It is the
+	// intersection of the two patterns above's blind spots — no scheme to anchor
+	// on AND no "sk-" prefix — and it is this deployment's own vendor credential,
+	// so leaving it to the size cap was not good enough.
+	jwtToken = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 )
 
 // vendorErrorDetail renders the vendor's own explanation of a rejection for a log
@@ -61,7 +66,12 @@ var (
 // the only one that populates it — logs through this helper and never through
 // APIError.Error().
 func vendorErrorDetail(code, message, body, requestID string) string {
-	detail := fmt.Sprintf("code=%q message=%q", code, message)
+	// message is redacted too, not just body: an auth failure that echoes the
+	// presented credential ("invalid api key: Bearer eyJ...") lands in a field
+	// that PARSES, which takes the short path below and would otherwise be the
+	// one place a key still reached the log verbatim. The handlers apply the same
+	// call before returning message to the client.
+	detail := fmt.Sprintf("code=%q message=%q", code, redactCredentials(message))
 	if message == "" {
 		if body == "" {
 			detail += " (and an empty body — the vendor explained nothing)"
@@ -79,13 +89,15 @@ func vendorErrorDetail(code, message, body, requestID string) string {
 // — a Bearer header value, and a bare sk-/app-sk- key — from a body about to be
 // logged. See the patterns for why a vendor error body can contain one at all.
 //
-// Not a general secret scanner, and not claimed as one: a credential shaped like
-// neither (a vendor that mints opaque keys with no prefix, one split across JSON
-// fields) passes through. The 500-byte cap is the backstop that bounds what any
-// such miss costs.
-func redactCredentials(body string) string {
-	body = bearerToken.ReplaceAllString(body, "Bearer [redacted]")
-	return bareAPIKey.ReplaceAllString(body, "[redacted]")
+// Not a general secret scanner, and not claimed as one: a vendor that mints
+// opaque keys with no prefix and no scheme, or one split across JSON fields,
+// passes through. There is NO backstop for that — the size cap bounds log volume,
+// not exposure, and a credential in an echoed header sits well inside the first
+// 500 bytes. The miss is accepted, not mitigated.
+func redactCredentials(s string) string {
+	s = bearerToken.ReplaceAllString(s, "Bearer [redacted]")
+	s = bareAPIKey.ReplaceAllString(s, "[redacted]")
+	return jwtToken.ReplaceAllString(s, "[redacted]")
 }
 
 // truncateForLog caps s at limit BYTES, marking that it was cut so a truncated

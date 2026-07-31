@@ -201,13 +201,20 @@ func (h *VideoHandler) GetVideoContent(c *gin.Context) {
 // without vendor detail — there isn't any reliable detail to give.
 func (h *VideoHandler) writeDashScopeError(c *gin.Context, logContext, fallbackMessage string, err error) {
 	var apiErr *dashscope.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
-		message := apiErr.Message
-		if message == "" {
-			message = fmt.Sprintf("dashscope rejected the request (status %d)", apiErr.StatusCode)
+	if errors.As(err, &apiErr) {
+		// Every status, same reasoning as the MiniMax sibling: a 5xx is where the
+		// body is most often the only explanation.
+		h.logger.Errorf("%s: dashscope rejected request: status %d %s", logContext, apiErr.StatusCode,
+			vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, apiErr.RequestID))
+		if apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
+			message := redactCredentials(apiErr.Message)
+			if message == "" {
+				message = fmt.Sprintf("dashscope rejected the request (status %d)", apiErr.StatusCode)
+			}
+			c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
+			return
 		}
-		h.logger.Errorf("%s: dashscope rejected request: status %d %s", logContext, apiErr.StatusCode, vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, ""))
-		c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
 		return
 	}
 	h.logger.Errorf("%s: %v", logContext, err)

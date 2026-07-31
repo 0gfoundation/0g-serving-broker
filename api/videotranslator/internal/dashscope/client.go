@@ -165,6 +165,8 @@ type APIError struct {
 	// couldn't be parsed out of it (a non-JSON or differently-shaped error
 	// page, e.g. from a proxy/load balancer in front of DashScope).
 	Body string
+	// RequestID is DashScope's own correlation id — what their support asks for.
+	RequestID string
 }
 
 func (e *APIError) Error() string {
@@ -176,8 +178,9 @@ func (e *APIError) Error() string {
 // as output.code/output.message inside an otherwise-200 get-task response
 // once task_status reaches FAILED.
 type errorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id"`
 }
 
 func (c *Client) do(httpReq *http.Request, out interface{}) error {
@@ -198,10 +201,14 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 	if resp.StatusCode != http.StatusOK {
 		apiErr := &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 		var eb errorBody
-		if json.Unmarshal(respBody, &eb) == nil {
-			apiErr.Code = eb.Code
-			apiErr.Message = eb.Message
-		}
+		// Error deliberately ignored, matching the MiniMax sibling: encoding/json
+		// fills every field it CAN before returning a type error, so gating on
+		// `== nil` throws away a code/message that decoded fine just because some
+		// sibling key had an unexpected type. Best-effort parse, best-effort read.
+		_ = json.Unmarshal(respBody, &eb)
+		apiErr.Code = eb.Code
+		apiErr.Message = eb.Message
+		apiErr.RequestID = eb.RequestID
 		return apiErr
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
