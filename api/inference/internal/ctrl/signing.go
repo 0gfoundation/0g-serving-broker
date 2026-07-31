@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -159,7 +158,7 @@ func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 // Parity note: this is the image-flow counterpart of signChatWithKey, NOT of
 // signCentralizedRoutingProof. If image-editing is ever enabled for a
 // centralized provider, a sibling function (signImageResponseRoutingProof)
-// must be added that also takes *tls.ConnectionState and emits the TLS
+// must be added that also takes the upstream cert fingerprint and emits the TLS
 // fingerprint / ProviderType / ProviderIdentity fields — otherwise a verifier
 // would see a TEE-signed envelope with no evidence of which upstream served
 // the image. The guard below fails loud so the gap cannot be reached silently
@@ -198,19 +197,20 @@ func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string
 // signCentralizedRoutingProof creates a TEE-signed routing proof for centralized
 // provider requests. The proof includes request/response hashes, provider identity,
 // and the TLS certificate fingerprint proving the connection target.
-func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey string, tlsState *tls.ConnectionState) error {
+//
+// tlsFingerprint is resolved by Ctrl.upstreamCertFingerprint (proxy.go) rather than
+// extracted here, so every modality asks the same question in the same place and
+// this function stays indifferent to HOW the certificate was observed.
+func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tlsFingerprint string) error {
 	requestSha256 := sha256Hex(reqBody)
 	responseSha256 := sha256Hex(respData)
 
-	// Extract TLS certificate fingerprint — refuse to sign without it.
-	// A routing proof with an empty fingerprint carries a TEE signature but
-	// provides no TLS evidence, giving verifiers a false sense of security.
-	certInfo := teeutil.ExtractTLSInfo(tlsState)
-	if certInfo == nil || certInfo.PeerCertFingerprint == "" {
+	// Refuse to sign without a fingerprint. A routing proof with an empty one
+	// carries a TEE signature but provides no TLS evidence, giving verifiers a
+	// false sense of security.
+	if tlsFingerprint == "" {
 		return fmt.Errorf("TLS certificate not available for centralized provider routing proof (response and billing are unaffected)")
 	}
-	tlsFingerprint := certInfo.PeerCertFingerprint
-	c.logger.Debugf("TLS cert fingerprint captured: %s (server: %s)", tlsFingerprint, certInfo.ServerName)
 
 	text := teeutil.FormatRoutingProofText(
 		requestSha256, responseSha256,

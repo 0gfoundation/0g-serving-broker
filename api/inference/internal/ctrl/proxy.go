@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/model"
@@ -346,10 +347,11 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 	defer resp.Body.Close()
 
-	// Capture TLS connection state for centralized provider routing proof.
-	// resp.TLS is populated by net/http when the connection uses HTTPS.
-	if c.Service.IsCentralized() && resp.TLS != nil {
-		ctx.Set("tlsState", resp.TLS)
+	// Capture the upstream TLS certificate for the centralized routing proof.
+	if c.Service.IsCentralized() {
+		if fp := c.upstreamCertFingerprint(resp); fp != "" {
+			ctx.Set(CtxKeyUpstreamCertFingerprint, fp)
+		}
 	}
 
 	for k, v := range resp.Header {
@@ -432,6 +434,25 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 
 // isUpstreamLeakHeader reports whether a response header from the upstream
 // reveals the aggregator/provider identity and must not be forwarded (#184).
+// CtxKeyUpstreamCertFingerprint holds the SHA256 leaf-certificate fingerprint of
+// the TLS connection that reached the real upstream.
+//
+// upstreamCertFingerprint below is the ONLY legitimate writer — it is where the
+// question "may this value be trusted as evidence?" is answered. Readers (the
+// routing-proof signers) deliberately do not re-derive it, so that decision lives
+// in exactly one place.
+const CtxKeyUpstreamCertFingerprint = "upstreamCertFingerprint"
+
+// upstreamCertFingerprint returns the fingerprint the centralized routing proof
+// should bind, or "" when there is no TLS evidence (in which case
+// signCentralizedRoutingProof refuses to sign rather than emit a proof with none).
+func (c *Ctrl) upstreamCertFingerprint(resp *http.Response) string {
+	if info := teeutil.ExtractTLSInfo(resp.TLS); info != nil {
+		return info.PeerCertFingerprint
+	}
+	return ""
+}
+
 func isUpstreamLeakHeader(key string) bool {
 	k := strings.ToLower(key)
 	switch k {

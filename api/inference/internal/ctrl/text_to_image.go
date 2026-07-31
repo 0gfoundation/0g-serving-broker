@@ -1,7 +1,6 @@
 package ctrl
 
 import (
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -217,12 +216,9 @@ func (c *Ctrl) handleTextToImageResponse(ctx *gin.Context, resp *http.Response, 
 	//     the broker does not duplicate.
 	switch {
 	case c.Service.IsCentralized():
-		var tlsState *tls.ConnectionState
-		if v, exists := ctx.Get("tlsState"); exists {
-			tlsState, _ = v.(*tls.ConnectionState)
-		}
+		fingerprint := ctx.GetString(CtxKeyUpstreamCertFingerprint)
 		c.logger.Debug("Centralized provider, signing text-to-image routing proof")
-		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, tlsState); err != nil {
+		if err := c.signCentralizedRoutingProof(sigReqBody, body, chatKey, fingerprint); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
 	case !c.Service.TargetSeparated:
