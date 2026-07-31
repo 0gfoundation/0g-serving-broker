@@ -63,6 +63,18 @@ var (
 	// it must be alertable rather than a silent skip.
 	VideoBillingSkippedTotal prometheus.Counter
 
+	// VideoTableMissTotal counts video-generation requests whose observed
+	// (resolution, duration) had no exact per_unit_table row, labeled by whether a
+	// bucket still covered it (reason=next_bucket) or nothing did and the table
+	// maximum was charged (reason=uncovered).
+	//
+	// Deliberately NOT folded into VideoBillingSkippedTotal: that one means the video
+	// was served WITHOUT being billed, and an operator alerting on it is asking "am I
+	// giving away output?". A table miss is billed — just at a fallback price rather
+	// than the one /v1/models advertises for the request. Different question,
+	// different urgency, different fix (add the row), so it gets its own series.
+	VideoTableMissTotal *prometheus.CounterVec
+
 	// VideoPollTimedOutTotal counts video-generation poll jobs (see
 	// docs/design/video-generation-async-billing.md) that hit their
 	// MaxPollDuration ceiling without the provider ever reaching a terminal
@@ -383,6 +395,15 @@ func PrometheusInit(serverName, providerAddress string) {
 		},
 	)
 
+	VideoTableMissTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_video_table_miss_total",
+			Help:        "Video-generation requests whose (resolution, duration) had no exact per_unit_table row, labeled by reason (next_bucket = a longer bucket covered it; uncovered = nothing did, table maximum charged). Non-zero means clients are billed a price GET /v1/models does not advertise for their request — add the missing rows.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
@@ -425,6 +446,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoBillingSkippedTotal)
 	prometheus.MustRegister(VideoPollTimedOutTotal)
 	prometheus.MustRegister(VideoGenerationFailedTotal)
+	prometheus.MustRegister(VideoTableMissTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -764,6 +786,24 @@ func RecordRoutingProofSkipped(reason string) {
 		return
 	}
 	RoutingProofSkippedTotal.WithLabelValues(reason).Inc()
+}
+
+// Reasons for RecordVideoTableMiss.
+const (
+	// VideoTableMissNextBucket: no exact row, but a longer bucket covered the
+	// observation and was charged.
+	VideoTableMissNextBucket = "next_bucket"
+	// VideoTableMissUncovered: nothing at or above the observation exists for that
+	// resolution, so the table maximum across every resolution was charged.
+	VideoTableMissUncovered = "uncovered"
+)
+
+// RecordVideoTableMiss increments the per_unit_table miss counter.
+func RecordVideoTableMiss(reason string) {
+	if VideoTableMissTotal == nil {
+		return
+	}
+	VideoTableMissTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordVideoPollTimedOut increments the counter of video poll jobs that hit

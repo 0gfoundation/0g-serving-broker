@@ -315,7 +315,7 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 					// shape until the operator adds the row — one error line per video
 					// create until then, with no aggregate signal, is the exact failure
 					// this codebase keeps replacing with a counter.
-					monitor.RecordVideoBillingSkipped()
+					monitor.RecordVideoTableMiss(monitor.VideoTableMissNextBucket)
 					c.logProofSkip("per_unit_table_miss", fmt.Sprintf("%d|%s", seconds, size),
 						"video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, size, units, err)
 					return units
@@ -323,7 +323,7 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 				// Observed longer than every bucket for this resolution: nothing
 				// covers it, so the table maximum is the only conservative answer.
 				if mx := e.Billing.MaxTableUnits(); mx > 0 {
-					monitor.RecordVideoBillingSkipped()
+					monitor.RecordVideoTableMiss(monitor.VideoTableMissUncovered)
 					c.logProofSkip("per_unit_table_uncovered", fmt.Sprintf("%d|%s", seconds, size),
 						"video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, size, mx, err)
 					return mx
