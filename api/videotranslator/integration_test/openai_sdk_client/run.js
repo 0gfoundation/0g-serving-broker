@@ -90,6 +90,19 @@ async function main() {
       );
     },
 
+    async createThenRetrieve() {
+      // The round trip a real client actually performs: create, then hand the id
+      // the SDK gave you straight back to retrieve. The translator reshapes the
+      // vendor's task id into the published contract, so this is what proves the
+      // published id is usable — asserting the create id alone would not.
+      const created = await client.videos.create(
+        { model: "happyhorse", prompt: "a cat", seconds: "4" },
+        authedOpts,
+      );
+      const fetched = await client.videos.retrieve(created.id, authedOpts);
+      return { createdID: created.id, fetchedID: fetched.id, status: fetched.status };
+    },
+
     async retrieve() {
       if (!videoID) throw new Error("VIDEO_ID env var is required for the retrieve scenario");
       const video = await client.videos.retrieve(videoID, authedOpts);

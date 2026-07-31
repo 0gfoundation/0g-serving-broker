@@ -71,6 +71,26 @@ func newMockDashScopeCreate(t *testing.T, taskID string, capture *mockDashScopeC
 	}))
 }
 
+// newMockDashScopeCreateThenGet answers a create with taskID and then answers
+// get-task, recording the path it was asked for — so a test can assert the
+// translator handed the vendor its OWN id back, not the reshaped one it published.
+func newMockDashScopeCreateThenGet(t *testing.T, taskID string, gotGetPath *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			_ = json.NewEncoder(w).Encode(dashscope.CreateResponse{
+				Output: dashscope.CreateOutput{TaskID: taskID, TaskStatus: dashscope.TaskStatusPending},
+			})
+			return
+		}
+		*gotGetPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(dashscope.GetTaskResponse{
+			Output: dashscope.TaskOutput{TaskID: taskID, TaskStatus: dashscope.TaskStatusRunning},
+		})
+	}))
+}
+
 // newMockDashScope4xx returns a mock that rejects every request (create or
 // get-task alike) with the given status and DashScope-shaped error body.
 func newMockDashScope4xx(t *testing.T, status int, code, message string) *httptest.Server {
@@ -219,8 +239,10 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("create scenario failed: %s (%s)", res.Error, res.ErrType)
 	}
-	if res.Result["id"] != "task-abc123" {
-		t.Errorf("id = %v, want task-abc123", res.Result["id"])
+	// The published id is the ENCODED form: the vendor's task id is ours to shape,
+	// because consumers persist it and key on it (see translate.EncodeJobID).
+	if res.Result["id"] != "v0_task-abc123" {
+		t.Errorf("id = %v, want v0_task-abc123", res.Result["id"])
 	}
 	if res.Result["status"] != "queued" {
 		t.Errorf("status = %v, want queued (DashScope PENDING mapped)", res.Result["status"])
@@ -258,6 +280,37 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 // "seed" field in VideoCreateParams — the OpenAI Video API doesn't have
 // one) actually reaches the translator and gets validated/forwarded to
 // DashScope, not silently dropped somewhere in the SDK's own encoding.
+// TestOpenAISDK_CreateThenRetrieveRoundTrip is the property that matters most once
+// the translator started reshaping vendor ids: the id a real SDK receives from
+// create must work when handed straight back to retrieve, and the vendor must see
+// its OWN id on that second call. Asserting the create id alone would pass even if
+// the published id were undecodable — which is exactly the bug shape this guards.
+func TestOpenAISDK_CreateThenRetrieveRoundTrip(t *testing.T) {
+	var gotGetPath string
+	mockDashScope := newMockDashScopeCreateThenGet(t, "task-abc123", &gotGetPath)
+	t.Cleanup(mockDashScope.Close)
+
+	baseURL := startTranslator(t, mockDashScope.URL)
+
+	res := runNodeSDKScenario(t, baseURL, "Bearer dashscope-secret-key", "createThenRetrieve", "")
+	if !res.OK {
+		t.Fatalf("round-trip scenario failed: %s (%s)", res.Error, res.ErrType)
+	}
+
+	if res.Result["createdID"] != "v0_task-abc123" {
+		t.Errorf("created id = %v, want the encoded v0_task-abc123", res.Result["createdID"])
+	}
+	if res.Result["fetchedID"] != res.Result["createdID"] {
+		t.Errorf("retrieve returned id %v but create gave %v — a client keying on the id sees two",
+			res.Result["fetchedID"], res.Result["createdID"])
+	}
+	// The vendor must never see the shaped id: the translator decodes before
+	// forwarding, so DashScope is asked for the task it actually issued.
+	if !strings.HasSuffix(gotGetPath, "/task-abc123") {
+		t.Errorf("vendor was asked for %q, want a path ending in the vendor's own /task-abc123", gotGetPath)
+	}
+}
+
 func TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam(t *testing.T) {
 	capture := &mockDashScopeCapture{}
 	mockDashScope := newMockDashScopeCreate(t, "task-abc123", capture)
