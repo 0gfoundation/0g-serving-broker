@@ -136,6 +136,20 @@ func TestExtractVideoJobID(t *testing.T) {
 		{"/videos", ""},                    // no trailing slash at all
 		{"/images/video-123", ""},          // wrong prefix entirely
 		{"/videos/weird-id-with/multiple/slashes", "weird-id-with"},
+
+		// A dot segment anywhere refuses the request: the id checked is the first
+		// segment but the WHOLE path is forwarded, so ".." after an id the caller
+		// owns resolves, at a vendor gateway that normalizes, to one they do not.
+		{"/videos/mine/../victim", ""},
+		{"/videos/mine/../victim/content", ""},
+		{"/videos/..", ""},
+		{"/videos/./mine", ""},
+		{"/videos/mine/./content", ""},
+		// Percent-encoded stays one segment — it is a legal (if absurd) id, and the
+		// ownership lookup is what rejects it, not this function.
+		{"/videos/%2e%2e", "%2e%2e"},
+		// Dots INSIDE a segment are not path traversal and must still extract.
+		{"/videos/v0_id..with.dots", "v0_id..with.dots"},
 	}
 
 	for _, tt := range tests {

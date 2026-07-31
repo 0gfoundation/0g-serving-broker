@@ -598,6 +598,8 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 	return ""
 }
 
+// isUpstreamLeakHeader reports whether a response header from the upstream reveals
+// the aggregator/provider identity and must not be forwarded (#184).
 func isUpstreamLeakHeader(key string) bool {
 	k := strings.ToLower(key)
 	switch k {

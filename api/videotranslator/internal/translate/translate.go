@@ -176,9 +176,11 @@ const dashScopeResolutionThreshold = 1280
 // and "ratio" (e.g. "16:9") parameters from the client's pixel-dimension
 // "size" field (e.g. "1280x720") — there is no direct equivalent on the
 // OpenAI-facing side, since HappyHorse's own resolution vocabulary is a
-// coarse enum, not exact pixel dimensions. An empty or unparsable size
-// yields empty strings for both (omitted from the request, so DashScope
-// applies its own defaults: 1080P, 16:9).
+// coarse enum, not exact pixel dimensions. DashScope's own resolution token
+// ("720P"/"1080P") is accepted directly and passed through, since a client
+// that sends one means it. An empty or otherwise unparsable size yields empty
+// strings for both (omitted from the request, so DashScope applies its own
+// defaults: 1080P, 16:9).
 func sizeToDashScopeParams(size string) (resolution, ratio string) {
 	// DashScope's own two-tier token, passed straight through. Without this a
 	// client sending size="720P" fails parseSize, we omit resolution, the vendor

@@ -69,6 +69,12 @@ func TestEncodeJobIDRefusesWhatItCannotCarry(t *testing.T) {
 		"vid_0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // 40 bytes, no exploitable structure
 		strings.Repeat("x", 34),                    // 34 bytes: too long raw, and 46 chars once base64'd
 		strings.Repeat("x", 24) + ":",              // 25 bytes off-charset: one past what base64 can carry
+
+		// Encodable (v2_Lg / v2_Li4) but NOT decodable — checkedVendorID rejects a
+		// bare path segment. Without the create-time guard the vendor accepts and
+		// bills the job, then every poll 4xx's until MaxPollDuration.
+		".",
+		"..",
 	} {
 		if got, err := EncodeJobID(id); err == nil {
 			t.Errorf("EncodeJobID(%q) returned %q, want an error", id, got)
@@ -111,6 +117,11 @@ func TestDecodeJobIDRejectsWhatMustNotReachAVendorURL(t *testing.T) {
 		"v0_a/b",    // off the contract charset for a tag that only ever emits it
 		"v1_nothex", // uuid tag, bad payload
 		"v2_!!!",    // base64 tag, bad payload
+		// Non-canonical base64: RawURLEncoding without Strict() accepts non-zero
+		// trailing bits, so this decoded to "." exactly like v2_Lg — two published
+		// ids for one vendor id. Our own encoder never emits this shape, so
+		// rejecting it strands nothing already in flight.
+		"v2_Lh",
 	} {
 		if got, err := DecodeJobID(id); err == nil {
 			t.Errorf("DecodeJobID(%q) returned %q, want an error", id, got)
