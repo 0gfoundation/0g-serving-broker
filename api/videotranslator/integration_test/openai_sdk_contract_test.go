@@ -275,11 +275,6 @@ func TestOpenAISDK_CreateVideo(t *testing.T) {
 	}
 }
 
-// TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam proves the real SDK's
-// own documented escape hatch for undocumented request params (there is no
-// "seed" field in VideoCreateParams — the OpenAI Video API doesn't have
-// one) actually reaches the translator and gets validated/forwarded to
-// DashScope, not silently dropped somewhere in the SDK's own encoding.
 // TestOpenAISDK_CreateThenRetrieveRoundTrip is the property that matters most once
 // the translator started reshaping vendor ids: the id a real SDK receives from
 // create must work when handed straight back to retrieve, and the vendor must see
@@ -311,6 +306,11 @@ func TestOpenAISDK_CreateThenRetrieveRoundTrip(t *testing.T) {
 	}
 }
 
+// TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam proves the real SDK's
+// own documented escape hatch for undocumented request params (there is no
+// "seed" field in VideoCreateParams — the OpenAI Video API doesn't have
+// one) actually reaches the translator and gets validated/forwarded to
+// DashScope, not silently dropped somewhere in the SDK's own encoding.
 func TestOpenAISDK_CreateVideo_SeedViaUndocumentedParam(t *testing.T) {
 	capture := &mockDashScopeCapture{}
 	mockDashScope := newMockDashScopeCreate(t, "task-abc123", capture)

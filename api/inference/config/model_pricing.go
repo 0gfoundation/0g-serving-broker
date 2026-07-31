@@ -291,6 +291,38 @@ func scaledUnits(count int64, multiplier float64) (int64, error) {
 // the table is empty. Used as the conservative fee basis when a live
 // (resolution, duration) isn't in the table — bill the most expensive configured
 // bucket rather than undercharge below it.
+// NextBucketUnits returns the units of the cheapest configured bucket that still
+// covers an observed (resolution, duration) — the smallest row for that resolution
+// whose duration is at least the observed one — and reports whether such a row
+// exists.
+//
+// This is what a bucketed price list means: a duration between buckets rounds UP to
+// the next one. It exists because the alternative on a miss is MaxTableUnits, the
+// most expensive row in the entire table across every resolution — which turns a
+// duration the operator simply did not tabulate into a charge for a 4K 15-second
+// clip. That cliff is reachable by any untabulated duration, and a vendor whose
+// minimum shifts (MiniMax H3's floor moved 5 -> 4, its default request shape) drops
+// the MOST COMMON request straight into it.
+//
+// Still never below the table: a row that covers the observation is by definition
+// priced for at least as much output, so the provider cannot be underbilled.
+func (b *BillingConfig) NextBucketUnits(resolution string, seconds int64) (int64, bool) {
+	res := normalizeResolution(resolution)
+	var (
+		best  int64
+		found bool
+	)
+	for _, t := range b.Table {
+		if normalizeResolution(t.Resolution) != res || t.Duration < seconds {
+			continue
+		}
+		if !found || t.Units < best {
+			best, found = t.Units, true
+		}
+	}
+	return best, found
+}
+
 func (b *BillingConfig) MaxTableUnits() int64 {
 	var max int64
 	for _, t := range b.Table {

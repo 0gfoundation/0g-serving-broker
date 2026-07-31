@@ -406,8 +406,25 @@ func TestVideoOutputUnits_PerUnitTableMiss(t *testing.T) {
 	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 6, "768P"); got != 6 {
 		t.Errorf("table hit (768P,6) = %d, want 6", got)
 	}
-	// Miss (duration 8 not tabled): must bill table-max (12), NOT ceil(8*1.0)=8.
+	// Miss with NO bucket that covers it (duration 8 exceeds every 768P row): the
+	// table max is the only conservative answer, and it must never fall to the
+	// seconds-ratio underbill of ceil(8*1.0)=8.
 	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 8, "768P"); got != 12 {
-		t.Errorf("table miss = %d, want table-max 12 (never the seconds-ratio underbill)", got)
+		t.Errorf("uncovered miss = %d, want table-max 12 (never the seconds-ratio underbill)", got)
+	}
+
+	// Miss BELOW the smallest bucket: bill the cheapest bucket that covers it, not
+	// the table max. This is the reachable one — a vendor whose minimum duration
+	// shifts (MiniMax H3's floor moved 5 -> 4, which is also its default request
+	// shape) drops the MOST COMMON request into a miss, and billing the table max
+	// would charge a 4-second 768P clip at the 1080P rate. Rounding up to the next
+	// bucket is what a bucketed price list means, and it is the price the client can
+	// actually look up in /v1/models.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 4, "768P"); got != 6 {
+		t.Errorf("sub-bucket miss = %d, want the covering 768P bucket 6 — not the cross-resolution table max", got)
+	}
+	// The covering bucket is resolution-scoped: a 4s 1080P clip takes the 1080P row.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), 4, "1080P"); got != 12 {
+		t.Errorf("sub-bucket miss at 1080P = %d, want 12", got)
 	}
 }

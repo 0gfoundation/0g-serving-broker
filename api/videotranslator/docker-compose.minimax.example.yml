@@ -34,6 +34,13 @@
 #          upstreamDomain: api.minimax.io
 #      See docs/design/sidecar-routing-proof.md.
 #
+# ⚠️ per_unit_table operators: your table MUST have a `duration: 4` row for every
+# configured resolution. H3's floor is 4s and that is also OpenAI's default, so the
+# most common request generates a 4-second clip; a duration the table does not list
+# is a MISS, and a miss bills the cheapest bucket that still covers it — a 5s row if
+# you have one, otherwise the table maximum across every resolution. Tabulate 4 and
+# the client is charged the price /v1/models actually advertises for its request.
+#
 # Duration: H3 accepts 4-15s (its published range) and the translator clamps into
 # it. A request inside the range is never rounded UP — the broker bills the seconds
 # the vendor reports generating, so raising a caller's duration would raise their

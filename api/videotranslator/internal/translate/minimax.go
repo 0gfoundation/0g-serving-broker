@@ -127,9 +127,9 @@ func normalizeMiniMaxResolution(size string) string {
 // ToMiniMaxCreateRequest builds the MiniMax create body from an OpenAI-shaped
 // create request. defaultResolution is the deployment-configured resolution
 // (e.g. "2K", H3's only supported value) used unless the client's "size" is
-// itself a recognized MiniMax resolution token. A non-positive/unparsable/
-// excessive Seconds yields a zero Duration (omitted) — MiniMax then rejects the
-// request with its own 4xx rather than the translator inventing a duration.
+// itself a recognized MiniMax resolution token. A non-positive, unparsable, or
+// absent Seconds falls to the floor below — H3 requires a duration, so there is no
+// "omit it and let the vendor decide" option.
 // MiniMax-H3 accepts an integer duration in [4,15], per the model's public
 // description ("4-15s, 24 fps"). The floor matters for billing, not just for
 // acceptance: billing is on the ACTUAL generated seconds the vendor reports, so
@@ -168,15 +168,22 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 	// floor is also OpenAI's documented default, so an omitted seconds bills what an
 	// OpenAI client would expect rather than one second more.
 	duration := int64(minMiniMaxDuration)
+	// Bounded before the int64 conversion, mirroring the DashScope sibling: an
+	// out-of-range float converts implementation-defined (MinInt64 on amd64), which
+	// would fall BELOW the floor and get clamped up to the minimum — silently
+	// defeating the ceiling for an absurd request instead of capping it.
 	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
-		d := int64(math.Ceil(s))
-		switch {
-		case d < minMiniMaxDuration:
-			d = minMiniMaxDuration
-		case d > maxMiniMaxDuration:
-			d = maxMiniMaxDuration
+		// Clamp the FLOAT before converting, mirroring the DashScope sibling: an
+		// out-of-range value converts implementation-defined (MinInt64 on amd64),
+		// which would land below the floor and be clamped UP to the minimum —
+		// silently turning an absurd request into the shortest clip instead of the
+		// longest one it can have.
+		if s > float64(maxMiniMaxDuration) {
+			s = float64(maxMiniMaxDuration)
 		}
-		duration = d
+		if d := int64(math.Ceil(s)); d > minMiniMaxDuration {
+			duration = d
+		}
 	}
 
 	resolution := defaultResolution

@@ -298,8 +298,20 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 			// bucket rather than dropping to the seconds-ratio formula (which would
 			// underbill). Conservative + loud, never below the table.
 			if e.Billing.Mode == config.BillingModePerUnitTable {
+				// Round UP to the cheapest bucket that still covers this observation,
+				// which is what a bucketed price list means and what the client can
+				// look up in /v1/models. Falling straight to the table maximum — the
+				// most expensive row across EVERY resolution — would charge a 4-second
+				// clip as a 4K 15-second one whenever the operator simply had not
+				// tabulated that duration.
+				if units, ok := e.Billing.NextBucketUnits(size, seconds); ok {
+					c.logger.Errorf("video per_unit_table miss (seconds=%d, size=%q): billing the next bucket up, %d units; operator should add this row: %v", seconds, size, units, err)
+					return units
+				}
+				// Observed longer than every bucket for this resolution: nothing
+				// covers it, so the table maximum is the only conservative answer.
 				if mx := e.Billing.MaxTableUnits(); mx > 0 {
-					c.logger.Errorf("video per_unit_table miss (seconds=%d, size=%q): billing table-max %d units; operator should add this row: %v", seconds, size, mx, err)
+					c.logger.Errorf("video per_unit_table miss (seconds=%d, size=%q) with no bucket that covers it: billing table-max %d units; operator should extend the table: %v", seconds, size, mx, err)
 					return mx
 				}
 			}
@@ -694,7 +706,11 @@ func (c *Ctrl) dropUnpollableVideoSignature(chatKey, reason string, permanent bo
 		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoPollJob)
 	}
 	c.svcCache.Delete(c.chatCacheKey(chatKey))
-	c.logger.Errorf("video generation: no poll job will run (%s), so the final body will never be signed; dropped the create-time signature to keep ZG-Res-Key from resolving to a proof over the queued placeholder", reason)
+	// Throttled like every other skip reason: the causes here are static
+	// (videoPoll.enabled off, a shim whose create response carries no job id), so
+	// this would otherwise be one error line per video create, forever.
+	c.logProofSkip(monitor.RoutingProofSkipNoPollJob, reason,
+		"video generation: no poll job will run (%s), so the final body will never be signed; dropped the create-time signature to keep ZG-Res-Key from resolving to a proof over the queued placeholder", reason)
 }
 
 // ensureMultipartWaitField ensures the "wait" field is present in a multipart/form-data body.

@@ -205,7 +205,7 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		// billing is on generated seconds, so clamping up would over-bill the most
 		// common request shape.
 		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 4 {
-			t.Errorf("seconds=4 → Duration %d, want 5 (H3 floor)", got.Duration)
+			t.Errorf("seconds=4 → Duration %d, want 4 (H3 floor)", got.Duration)
 		}
 		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); got.Duration != 15 {
 			t.Errorf("seconds=20 → Duration %d, want 15 (H3 ceil)", got.Duration)
@@ -338,6 +338,7 @@ func TestDurationIsNeverClampedUpwards(t *testing.T) {
 		{"3", 4, "below H3's floor: unsatisfiable, so the caller gets and pays for the 4s minimum"},
 		{"0.5", 4, "ditto"},
 		{"4.1", 5, "H3 takes an integer, so ceil is forced"},
+		{"1e30", 15, "clamped to the ceiling before the int64 conversion, not wrapped below the floor"},
 	} {
 		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: tc.seconds}, "2K").Duration; got != tc.want {
 			t.Errorf("Seconds=%q sent Duration=%d, want %d (%s)", tc.seconds, got, tc.want, tc.why)

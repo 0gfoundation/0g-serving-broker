@@ -209,6 +209,25 @@ the client (`video.go:266` writes before `video.go:295` bills) — content deliv
 gated on billing completion in this codebase, and gating it here would reintroduce the latency
 this design exists to avoid.
 
+## `per_unit_table` and durations a vendor can actually emit
+
+A `per_unit_table` prices exact `(resolution, duration)` buckets. A duration the
+table does not list is a **miss**, and a miss does not fall back to the per-second
+formula — that would underbill. It bills the cheapest bucket that still *covers* the
+observation (the smallest row for that resolution whose duration is ≥ the observed
+one), and only when nothing covers it does it fall to the table maximum.
+
+That rounding-up rule exists because the previous behaviour — always the table
+maximum, across every resolution — turns an untabulated duration into a charge for
+the most expensive clip the operator ever priced. It is reachable whenever a vendor's
+minimum shifts: MiniMax H3's floor moved 5 → 4, which is also its default request
+shape, so the most common request became a miss overnight.
+
+**Operator rule:** tabulate every duration the vendor can emit, starting at its
+minimum. Otherwise clients are billed a price `GET /v1/models` does not advertise for
+their request — it publishes one variant per configured bucket, so an untabulated
+duration has no visible price at all.
+
 ## Signature lifecycle (`ZG-Res-Key`)
 
 Billing is not the only thing an async job defers — so is the TEE signature, and the
