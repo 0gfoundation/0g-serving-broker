@@ -407,7 +407,7 @@ func (d *DB) Migrate() error {
 				// Harmless for the ids in flight today (numeric and lowercase-hex
 				// payloads have no case to flip); this closes it before the first vendor
 				// that needs the base64 tag.
-				return tx.Exec("ALTER TABLE `video_job_owner` MODIFY `provider_job_id` varchar(255) COLLATE utf8mb4_0900_bin NOT NULL;").Error
+				return tx.Exec("ALTER TABLE `video_job_owner` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
 			},
 		},
 	})

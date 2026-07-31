@@ -188,17 +188,22 @@ type Ctrl struct {
 	// videoPollBaseCtx rather than assume it is always set.
 	videoPollEnabled atomic.Bool
 
-	// lastCertHostMismatch remembers the last host a targetTLSProxy sidecar reported
-	// that disagreed with service.upstreamDomain, so the resulting error is logged
-	// once per distinct host rather than once per response. The mismatch is drift
-	// between two config files: it does not self-heal, and logging it at request
-	// rate would recreate the log-volume failure the skipped-proof counter exists to
-	// replace.
-	lastCertHostMismatch atomic.Pointer[string]
-	videoPollCfg         config.VideoPollConfig
-	videoPollCtx         context.Context
-	videoPollCancel      context.CancelFunc
-	videoPollWg          sync.WaitGroup
+	// proofSkipLogged throttles the "no routing proof for this response" errors,
+	// keyed by reason and by whatever detail distinguishes one cause from another
+	// (the reported host, for drift). Every one of these conditions is static — a
+	// stale sidecar image, a plaintext base URL, two config files disagreeing — so
+	// none self-heals between requests, and logging per response would recreate the
+	// log-volume failure broker_routing_proof_skipped_total exists to replace. The
+	// counter carries the rate; the log only has to carry the diagnosis.
+	//
+	// Time-windowed rather than log-once so a condition that is fixed and later
+	// recurs is still reported, and keyed by detail so drifting to a SECOND wrong
+	// host is not swallowed by the first.
+	proofSkipLogged sync.Map // string -> time.Time
+	videoPollCfg    config.VideoPollConfig
+	videoPollCtx    context.Context
+	videoPollCancel context.CancelFunc
+	videoPollWg     sync.WaitGroup
 
 	// LoRA manager for fine-tuned model serving (nil if LoRA not enabled)
 	loraManager *lora.Manager

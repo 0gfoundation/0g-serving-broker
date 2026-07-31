@@ -259,6 +259,7 @@ func FromMiniMaxGetTaskResponse(publicID string, resp minimax.GetTaskResponse) V
 		// APIError) is unrecoverable and reported as a terminal failure so the
 		// broker's poller stops rather than waiting forever.
 		return VideoResponse{
+			ID:     publicID,
 			Object: "video",
 			Status: StatusFailed,
 			Error:  &Error{Code: "minimax_no_task", Message: "minimax get-task response contained no task"},

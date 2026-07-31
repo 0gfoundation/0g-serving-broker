@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -119,8 +120,24 @@ func DecodeJobID(publicID string) (string, error) {
 		return checkedVendorID(publicID, string(raw), false)
 	}
 
+	// A vN_ shape we do not know is NOT a legacy id — it is one this build cannot
+	// decode, from a replica that is ahead of us (or from a tag we rolled back).
+	// Passing it through would hand the vendor a task id it never issued: a 404 that
+	// the broker's poller treats as retryable, so the job spins to MaxPollDuration,
+	// never bills, and drops the signature its client holds a key for — exactly the
+	// failure the legacy passthrough exists to prevent, relocated to the rollback
+	// direction. Fail here instead, where the message names the cause. No vendor
+	// mints ids of this shape (numeric, canonical UUID).
+	if unknownTag.MatchString(publicID) {
+		return "", fmt.Errorf("job id %q carries a tag this build cannot decode — it was issued by a newer translator; see the two-phase deploy rule above", publicID)
+	}
+
 	return checkedVendorID(publicID, publicID, true)
 }
+
+// unknownTag matches the tag shape this package mints, so a tag from a future build
+// is distinguishable from a pre-tagging vendor id rather than silently forwarded.
+var unknownTag = regexp.MustCompile(`^v[0-9]+_`)
 
 // checkedVendorID rejects a recovered id that must never reach a vendor URL. It is
 // the one gate between a client-shaped path segment and a request carrying our
@@ -134,7 +151,12 @@ func checkedVendorID(publicID, vendorID string, requireContractCharset bool) (st
 		// they would walk the vendor's URL rather than name a task under it.
 		return "", fmt.Errorf("job id %q recovers a path segment (%q), not a task id", publicID, vendorID)
 	}
-	if requireContractCharset && (len(vendorID) > MaxJobIDLen || !isContractCharset(vendorID)) {
+	if len(vendorID) > MaxJobIDLen {
+		// Bounded here rather than trusting the caller's schema: this is a decoder for
+		// client-shaped input, and it should be self-contained.
+		return "", fmt.Errorf("job id %q recovers a %d-character vendor id, over the contract's %d", publicID, len(vendorID), MaxJobIDLen)
+	}
+	if requireContractCharset && !isContractCharset(vendorID) {
 		return "", fmt.Errorf("job id %q is not a well-formed job id", publicID)
 	}
 	return vendorID, nil

@@ -268,8 +268,7 @@ consumers do not merely echo the id back — they persist it and key on it:
 > `GET /videos/{id}` and `GET /videos/{id}/content`, is at most **36 characters**
 > from `[A-Za-z0-9_-]`.
 >
-> A vendor whose `task_id` does not satisfy this is **mapped by the translator** —
-> never passed through.
+> A vendor whose `task_id` does not satisfy this is **mapped by the translator**.
 
 **This is now enforced, not merely documented.** Shaping the id is protocol
 translation, so it happens where protocol translation happens:
@@ -283,8 +282,22 @@ translation, so it happens where protocol translation happens:
   survive the tag), `v2_` base64url-encodes anything else.
 - A vendor id that no encoding can carry — a stateless reversible mapping into 33
   payload characters holds at most 24 arbitrary bytes — fails the create call
-  loudly, naming the id. That is the vendor's FIRST request, not a production
-  surprise.
+  loudly, naming the id. Note what that does NOT buy: encoding runs after the
+  vendor's create call returned, so the vendor has already accepted the job and will
+  bill for it, and the id survives only in the log. The win is a local, immediate,
+  named failure — not a saved clip. Nor is it guaranteed to surface in staging: a
+  vendor whose id shape varies by model, region, or API version can fail first in
+  production.
+- **An id with no tag is passed through** as a pre-tagging vendor id. The translator
+  shipped before tagging existed, so ids already in flight carry none, and rejecting
+  them would strand every such job (the poller treats the 4xx as retryable, so the
+  job spins to `MaxPollDuration`, never bills, and drops the signature its client
+  holds a key for). An id carrying a `vN_` tag this build does not know is a
+  different thing and IS rejected — it came from a newer replica, and forwarding it
+  would hand the vendor an id it never issued.
+- Adding a tag is a **two-phase deploy**: ship the decode case everywhere first,
+  enable it in the encoder only once every replica can decode it, and never remove
+  or reuse a tag. A rollback otherwise strands every id the new tag issued.
 - The broker asserts the contract independently (`isContractJobID`,
   inference/internal/ctrl/video.go). That path has no translator to rely on: it
   catches a vendor spoken to directly.

@@ -180,12 +180,13 @@ func TestUpstreamCertHostIsStrippedFromClientResponse(t *testing.T) {
 	}
 }
 
-// TestDomainMismatchLogsOncePerDistinctHost pins the rate-limit's actual contract.
-// The naive shape (Swap, then re-read what you just stored) compares a value with
-// itself and therefore fires only on the FIRST mismatch ever — going silent exactly
-// when an operator drifts to a second wrong host, which is when they most need to
-// hear about it.
-func TestDomainMismatchLogsOncePerDistinctHost(t *testing.T) {
+// TestProofSkipLogIsThrottledPerCause pins what the throttle must and must not
+// swallow. Every skip reason is a static condition — a stale sidecar image, a
+// plaintext base URL, two config files disagreeing — so none self-heals between
+// requests and logging per response would recreate the log-volume failure the
+// counter exists to replace. But a SECOND distinct cause must still be reported:
+// an operator who drifts to another wrong host needs that line.
+func TestProofSkipLogIsThrottledPerCause(t *testing.T) {
 	ctrl := newChatbotTestCtrl(t, config.Service{
 		ProviderType:     "centralized",
 		ProviderIdentity: "minimax",
@@ -195,25 +196,43 @@ func TestDomainMismatchLogsOncePerDistinctHost(t *testing.T) {
 	rec := &countingLogger{Logger: ctrl.logger}
 	ctrl.logger = rec
 
-	resp := func(host string) (http.Header, *tls.ConnectionState) {
+	hdrFor := func(host string) http.Header {
 		h := http.Header{}
 		h.Set(teeutil.HeaderUpstreamCertFingerprint, strings.Repeat("ab", 32))
-		h.Set(teeutil.HeaderUpstreamCertHost, host)
-		return h, nil
+		if host != "" {
+			h.Set(teeutil.HeaderUpstreamCertHost, host)
+		}
+		return h
 	}
 
 	for i := 0; i < 5; i++ {
-		hdr, st := resp("api.minimaxi.com")
-		ctrl.upstreamCertFingerprint(hdr, st)
+		ctrl.upstreamCertFingerprint(hdrFor("api.minimaxi.com"), nil)
 	}
 	if rec.errors != 1 {
-		t.Errorf("same host repeated: logged %d times, want 1", rec.errors)
+		t.Errorf("same cause repeated: logged %d times, want 1", rec.errors)
 	}
 
-	hdr, st := resp("api.example.com")
-	ctrl.upstreamCertFingerprint(hdr, st)
+	// A different wrong host is a different thing to fix.
+	ctrl.upstreamCertFingerprint(hdrFor("api.example.com"), nil)
 	if rec.errors != 2 {
-		t.Errorf("a DIFFERENT wrong host must log: total %d, want 2", rec.errors)
+		t.Errorf("a second wrong host must log: total %d, want 2", rec.errors)
+	}
+
+	// Alternating between two hosts must not defeat the throttle — that is the
+	// two-replica rolling-upgrade shape, and it used to restore full-rate logging.
+	for i := 0; i < 10; i++ {
+		ctrl.upstreamCertFingerprint(hdrFor("api.minimaxi.com"), nil)
+		ctrl.upstreamCertFingerprint(hdrFor("api.example.com"), nil)
+	}
+	if rec.errors != 2 {
+		t.Errorf("alternating hosts re-logged: total %d, want 2", rec.errors)
+	}
+
+	// A different REASON is also its own line: no host reported at all is a stale
+	// sidecar image or an IP-literal base URL, not config drift.
+	ctrl.upstreamCertFingerprint(hdrFor(""), nil)
+	if rec.errors != 3 {
+		t.Errorf("a different reason must log: total %d, want 3", rec.errors)
 	}
 }
 

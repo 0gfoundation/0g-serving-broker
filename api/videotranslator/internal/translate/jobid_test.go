@@ -84,7 +84,7 @@ func TestDecodeJobIDPassesThroughLegacyIDs(t *testing.T) {
 	for _, legacy := range []string{
 		"425080991981768",                      // MiniMax, as issued before this change
 		"0385dc79-5ff8-4073-9d5a-1a7bc7f3e01d", // DashScope, likewise
-		"v9_something",                         // no tag we know: still just a vendor id
+
 	} {
 		got, err := DecodeJobID(legacy)
 		if err != nil {

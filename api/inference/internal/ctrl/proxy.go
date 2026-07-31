@@ -447,6 +447,28 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	return &chatSignature, nil
 }
 
+// proofSkipLogWindow is how long the same (reason, detail) skip stays quiet after
+// being reported. Long enough that a persistent misconfiguration costs a handful of
+// lines an hour instead of one per request; short enough that an operator watching
+// logs after a change sees the result.
+const proofSkipLogWindow = 10 * time.Minute
+
+// logProofSkip reports a response served without a routing proof, at most once per
+// window per (reason, detail). Detail is what distinguishes causes an operator would
+// fix differently — the reported host for drift, empty where the reason alone says
+// everything.
+func (c *Ctrl) logProofSkip(reason, detail, format string, args ...interface{}) {
+	key := reason + "|" + detail
+	now := time.Now()
+	if last, ok := c.proofSkipLogged.Load(key); ok {
+		if t, _ := last.(time.Time); now.Sub(t) < proofSkipLogWindow {
+			return
+		}
+	}
+	c.proofSkipLogged.Store(key, now)
+	c.logger.Errorf(format, args...)
+}
+
 // CtxKeyUpstreamCertFingerprint holds the SHA256 leaf-certificate fingerprint of
 // the TLS connection that reached the real upstream.
 //
@@ -506,7 +528,7 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 				// Telling this operator to compare *_BASE_URL against upstreamDomain
 				// would send them to edit config that was never wrong.
 				monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoSidecarHost)
-				c.logger.Errorf("targetTLSProxy: sidecar at %s reported a certificate but no %s — its image predates that header, or its *_BASE_URL is an IP literal or plaintext URL (TLS sends no SNI for either); no routing proof for this response",
+				c.logProofSkip(monitor.RoutingProofSkipNoSidecarHost, "", "targetTLSProxy: sidecar at %s reported a certificate but no %s — its image predates that header, or its *_BASE_URL is an IP literal or plaintext URL (TLS sends no SNI for either); no routing proof for this response",
 					c.Service.TargetURL, teeutil.HeaderUpstreamCertHost)
 				return ""
 			case host != c.Service.UpstreamDomain:
@@ -514,14 +536,9 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 				// Logged once per distinct host: this is drift between two config files,
 				// so it does not self-heal and would otherwise emit at full request rate
 				// — the log-volume failure mode this counter exists to replace.
-				// Compare against the PREVIOUS value: Swap has already stored this one,
-				// so re-reading it would always match and the log would fire only on
-				// the very first mismatch — going silent if the operator then drifts to
-				// a different wrong host.
-				if prev := c.lastCertHostMismatch.Swap(&host); prev == nil || *prev != host {
-					c.logger.Errorf("targetTLSProxy: sidecar dialed %q but service.upstreamDomain is %q — a proof over the first would send verifiers to the second; no routing proof until they agree (check the sidecar's *_BASE_URL against the broker's upstreamDomain)",
-						truncateForLog([]byte(host), 80), c.Service.UpstreamDomain)
-				}
+				c.logProofSkip(monitor.RoutingProofSkipDomainMismatch, host,
+					"targetTLSProxy: sidecar dialed %q but service.upstreamDomain is %q — a proof over the first would send verifiers to the second; no routing proof until they agree (check the sidecar's *_BASE_URL against the broker's upstreamDomain)",
+					truncateForLog([]byte(host), 80), c.Service.UpstreamDomain)
 				return ""
 			}
 			return fp
@@ -546,7 +563,7 @@ func (c *Ctrl) upstreamCertFingerprint(header http.Header, state *tls.Connection
 		return info.PeerCertFingerprint
 	}
 	monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipNoTLS)
-	c.logger.Errorf("centralized provider response arrived without TLS state; no routing proof for this response")
+	c.logProofSkip(monitor.RoutingProofSkipNoTLS, "", "centralized provider response arrived without TLS state; no routing proof for this response")
 	return ""
 }
 
