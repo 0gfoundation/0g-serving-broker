@@ -130,18 +130,35 @@ func normalizeMiniMaxResolution(size string) string {
 // itself a recognized MiniMax resolution token. A non-positive/unparsable/
 // excessive Seconds yields a zero Duration (omitted) — MiniMax then rejects the
 // request with its own 4xx rather than the translator inventing a duration.
-// MiniMax-H3 accepts an integer duration in [5,15]. OpenAI's seconds enum is
-// {4,8,12} (default 4), so a valid OpenAI request can fall below H3's floor — we
-// clamp into range rather than let H3 4xx the most common call shape (seconds=4
-// or omitted). Billing is on the ACTUAL generated seconds from usage, so a
-// clamped 4→5 bills 5s (H3's minimum), which is what the model produces.
+// MiniMax-H3 accepts an integer duration in [4,15], per the model's public
+// description ("4-15s, 24 fps"). The floor matters for billing, not just for
+// acceptance: billing is on the ACTUAL generated seconds the vendor reports, so
+// clamping a request UP silently raises the bill above what the caller asked for.
+// At 4 that is exactly OpenAI's default (its seconds enum is {4,8,12}, default 4),
+// i.e. the most common call shape — a floor of 5 would have over-billed the
+// default request by 25%.
+//
+// PENDING LIVE CONFIRMATION: 4 is taken from the published description, not from a
+// verified API call — an earlier revision of this file used 5 with no recorded
+// provenance. If H3 turns out to reject 4, the symptom is a hard 4xx on
+// seconds=4-or-omitted, and MiniMax's own message is propagated verbatim
+// (writeMiniMaxError), so it will name itself. Raise this constant, not the clamp
+// logic, if that happens.
+//
+// Above the ceiling the request is still clamped down: the caller cannot have what
+// they asked for either way, and 15s is what the model produces (and therefore what
+// they are billed). Clamping DOWN cannot exceed what was requested, so it does not
+// have the over-billing property that made the floor worth getting right.
 const (
-	minMiniMaxDuration = 5
+	minMiniMaxDuration = 4
 	maxMiniMaxDuration = 15
 )
 
 func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) minimax.CreateRequest {
-	duration := int64(minMiniMaxDuration) // default when seconds is absent/unparseable (H3 requires a duration)
+	// Default when seconds is absent or unparseable: H3 requires a duration, and the
+	// floor is also OpenAI's documented default, so an omitted seconds bills what an
+	// OpenAI client would expect rather than one second more.
+	duration := int64(minMiniMaxDuration)
 	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
 		d := int64(math.Ceil(s))
 		switch {

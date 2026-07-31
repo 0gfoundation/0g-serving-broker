@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -199,8 +200,11 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("clamps into H3's [5,15] range (OpenAI seconds=4 → 5, oversized → 15)", func(t *testing.T) {
-		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 5 {
+	t.Run("clamps into H3's [4,15] range (OpenAI default 4 passes through, oversized → 15)", func(t *testing.T) {
+		// 4 is OpenAI's default and inside H3's range, so it must NOT be rounded up:
+		// billing is on generated seconds, so clamping up would over-bill the most
+		// common request shape.
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 4 {
 			t.Errorf("seconds=4 → Duration %d, want 5 (H3 floor)", got.Duration)
 		}
 		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); got.Duration != 15 {
@@ -302,4 +306,24 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 			t.Fatalf("want nil usage, got %+v", got.Usage)
 		}
 	})
+}
+
+// TestDurationIsNeverClampedUpwards pins the billing-relevant half of the clamp.
+// The broker bills the seconds the vendor reports GENERATING, so raising a
+// caller's requested duration raises their bill above what they asked for. Only
+// clamping DOWN is safe in that respect, and it is bounded by what they requested.
+func TestDurationIsNeverClampedUpwards(t *testing.T) {
+	for _, seconds := range []string{"4", "5", "8", "12", "15"} {
+		req := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: seconds}, "2K")
+		want, _ := strconv.ParseInt(seconds, 10, 64)
+		if req.Duration != want {
+			t.Errorf("Seconds=%q sent Duration=%d — a value inside H3's range must go through untouched, or the caller is billed for seconds they did not ask for", seconds, req.Duration)
+		}
+	}
+
+	// Above the ceiling is the one case that changes the value, and it can only
+	// lower it.
+	if req := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); req.Duration != maxMiniMaxDuration {
+		t.Errorf("Seconds=20 sent Duration=%d, want %d", req.Duration, maxMiniMaxDuration)
+	}
 }

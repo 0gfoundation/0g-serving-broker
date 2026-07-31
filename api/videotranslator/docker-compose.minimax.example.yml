@@ -34,6 +34,13 @@
 #          upstreamDomain: api.minimax.io
 #      See docs/design/sidecar-routing-proof.md.
 #
+# Duration: H3 accepts 4-15s (its published range) and the translator clamps into
+# it. A request inside the range is never rounded UP — the broker bills the seconds
+# the vendor reports generating, so raising a caller's duration would raise their
+# bill above what they asked for. 4 is also OpenAI's default, so an omitted
+# "seconds" costs what an OpenAI client expects. If you set modelInfo
+# defaultParameters on the broker side, use seconds: 4 to match.
+#
 # MINIMAX_RESOLUTION defaults to "2K" (MiniMax-H3's only supported value). A
 # client can still target another model's resolution tier by sending "size" as
 # a resolution token (e.g. "1080P"); a pixel-dimension "size" (e.g. "1280x720")
