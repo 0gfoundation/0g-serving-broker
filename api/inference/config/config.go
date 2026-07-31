@@ -89,6 +89,32 @@ func validateInEnclaveTarget(targetURL string) error {
 	return nil
 }
 
+// validUpstreamDomain matches a bare lowercase FQDN: dot-separated labels of
+// letters/digits/hyphens, at least two labels. Deliberately rejects anything with a
+// scheme, port, path, or userinfo — this value is published verbatim as
+// serving_domain and a verifier is expected to fetch that exact host's certificate,
+// so it must be a hostname and nothing else.
+var validUpstreamDomain = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// validateUpstreamDomain checks service.upstreamDomain is a bare vendor FQDN.
+//
+// An IP address is rejected on purpose: certificate validation is what gives the
+// routing proof its meaning, and a verifier fetching a bare IP cannot perform the
+// hostname check that makes a certificate mean "this is that vendor".
+func validateUpstreamDomain(domain string) error {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if strings.Contains(d, "://") || strings.ContainsAny(d, "/:@") {
+		return fmt.Errorf("invalid config: service.upstreamDomain must be a bare hostname with no scheme, port, path or userinfo (e.g. 'api.minimax.io'), got '%s'", domain)
+	}
+	if net.ParseIP(d) != nil {
+		return fmt.Errorf("invalid config: service.upstreamDomain must be a hostname, not an IP address — a verifier compares the routing proof's fingerprint against the certificate served for this name, and an IP cannot carry that hostname check; got '%s'", domain)
+	}
+	if !validUpstreamDomain.MatchString(d) {
+		return fmt.Errorf("invalid config: service.upstreamDomain must be a fully-qualified domain name (e.g. 'api.minimax.io'), got '%s'", domain)
+	}
+	return nil
+}
+
 // validProviderCountry matches a two-letter ISO 3166-1 alpha-2 country code.
 // Format-only check (not validated against the full code list) — the value is a
 // display hint, so enforcing two ASCII letters is enough to keep it well-formed.
@@ -367,6 +393,26 @@ type Service struct {
 	// The broker never reads the header when this is false, so a rogue upstream on
 	// an ordinary centralized deployment cannot forge a fingerprint.
 	TargetTLSProxy bool `yaml:"targetTLSProxy"`
+	// UpstreamDomain is the vendor FQDN the in-enclave translator actually connects
+	// to (e.g. "api.minimax.io"). Required with targetTLSProxy, meaningless without
+	// it, and published as serving_domain in GET /v1/models.
+	//
+	// It exists because targetTLSProxy makes TargetURL an in-CVM container name,
+	// which is both the wrong thing to publish (internal topology) and a violation
+	// of serving_domain's contract — that field is specified as matching the SNI /
+	// certificate SAN of the upstream connection, which the broker no longer makes
+	// itself. Suppressing it instead would leave a verifier holding a certificate
+	// fingerprint with no host to check it against: provider_identity alone is not
+	// enough, since a vendor can front several endpoints (MiniMax serves
+	// api.minimax.io and api.minimaxi.com with different certificates).
+	//
+	// Unlike targetTLSProxy this is NOT a value the operator has to be trusted on,
+	// and that asymmetry is the whole reason it can be operator-declared: a wrong
+	// domain is self-defeating. A verifier fetches this host's real certificate and
+	// compares it against the fingerprint in the signed routing proof, so declaring
+	// a host the translator does not talk to makes verification FAIL rather than
+	// succeed falsely. It buys verifiability without buying trust.
+	UpstreamDomain string `yaml:"upstreamDomain"`
 	// ProviderName is an optional human-readable display name for the provider
 	// (e.g., "OpenAI", "Aliyun (CN)"). Surfaced as provider_name in /v1/models for
 	// presentation only. Unlike ProviderIdentity (a lowercase machine key), this is
@@ -1911,6 +1957,22 @@ func loadConfig(cfg *Config) error {
 		if cfg.Service.Type != constant.ServiceTypeVideoGeneration {
 			return fmt.Errorf("invalid config: service.targetTLSProxy is currently supported only for service type '%s' (the only modality whose signature advertisement is gated on the proof actually being producible), got '%s'", constant.ServiceTypeVideoGeneration, cfg.Service.Type)
 		}
+		// Required, not optional: without it the routing proof carries a certificate
+		// fingerprint and GET /v1/models offers no host to check it against, which
+		// makes the proof unfalsifiable in practice — the opposite of the point.
+		if cfg.Service.UpstreamDomain == "" {
+			return fmt.Errorf("invalid config: service.upstreamDomain is required when service.targetTLSProxy is set — targetUrl is then an in-CVM container name, so clients need the vendor FQDN (e.g. 'api.minimax.io') to fetch the certificate the routing proof's fingerprint is compared against")
+		}
+		if err := validateUpstreamDomain(cfg.Service.UpstreamDomain); err != nil {
+			return err
+		}
+		cfg.Service.UpstreamDomain = strings.ToLower(strings.TrimSpace(cfg.Service.UpstreamDomain))
+	}
+	// Meaningless without the flag: serving_domain is derived from targetUrl on every
+	// other deployment, and that IS the vendor host there. Setting this alongside a
+	// direct connection would publish a domain the broker does not actually dial.
+	if cfg.Service.UpstreamDomain != "" && !cfg.Service.TargetTLSProxy {
+		return fmt.Errorf("invalid config: service.upstreamDomain is only supported alongside service.targetTLSProxy (without it, serving_domain is derived from targetUrl, which already names the upstream)")
 	}
 	if cfg.Service.ProviderType == constant.ProviderTypeStandard {
 		// Unlike centralized, providerIdentity is OPTIONAL here, not required —

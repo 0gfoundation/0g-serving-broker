@@ -291,6 +291,14 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		}
 	}
 
+	// LAST, after every other header source (client copy above, additionalSecret
+	// just now): the broker reads this header on the RESPONSE as TEE evidence, so it
+	// must never leave on a request. Any upstream that echoes request headers back —
+	// a debug route, an nginx add_header passthrough — would otherwise turn a
+	// client-supplied (or operator-mistyped) string into a routing-proof fingerprint.
+	// Nothing legitimate sends it outbound.
+	req.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
+
 	return req, nil
 }
 
@@ -474,6 +482,13 @@ func isUpstreamLeakHeader(key string) bool {
 	k := strings.ToLower(key)
 	switch k {
 	case "provider", "server", "via", "x-powered-by":
+		return true
+	case strings.ToLower(teeutil.HeaderUpstreamCertFingerprint):
+		// Broker-internal evidence, consumed by upstreamCertFingerprint above and
+		// never meant for the client: on a "standard" provider the vendor's
+		// certificate fingerprint identifies the upstream this deployment is
+		// required to hide. Where a client legitimately gets it, it is inside the
+		// TEE-signed routing proof.
 		return true
 	case "location":
 		// An upstream redirect Location would name the upstream host. Go's http

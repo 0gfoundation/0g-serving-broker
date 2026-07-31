@@ -1496,6 +1496,7 @@ service:
   providerType: "centralized"
   providerIdentity: "minimax"
   targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
@@ -1524,6 +1525,7 @@ service:
   model: "test"
   providerType: "`+providerType+`"
   targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
 `)
 			t.Setenv("CONFIG_FILE", configPath)
 
@@ -1571,6 +1573,7 @@ service:
   providerType: "centralized"
   providerIdentity: "minimax"
   targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
 `)
 			t.Setenv("CONFIG_FILE", configPath)
 
@@ -1608,6 +1611,7 @@ service:
   providerType: "centralized"
   providerIdentity: "minimax"
   targetTLSProxy: true
+  upstreamDomain: "api.minimax.io"
 `)
 	t.Setenv("CONFIG_FILE", configPath)
 
@@ -1625,6 +1629,100 @@ service:
 // routable host masquerade as an in-CVM sidecar. This check is what keeps
 // targetTLSProxy's trust story honest — if any of these start passing, the broker
 // would sign a fingerprint reported by a host outside its own enclave.
+// TestLoadConfig_UpstreamDomainRequiredWithTargetTLSProxy: without it the routing
+// proof carries a certificate fingerprint and /v1/models offers no host to check it
+// against — provider_identity alone is not enough, since one vendor can front
+// several endpoints with different certificates (MiniMax serves both api.minimax.io
+// and api.minimaxi.com). A proof nobody can falsify is not verification.
+func TestLoadConfig_UpstreamDomainRequiredWithTargetTLSProxy(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "http://0g-minimax-video-translator:8090"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "video-generation"
+  model: "MiniMax-H3"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  targetTLSProxy: true
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected targetTLSProxy without upstreamDomain to be rejected")
+	}
+	if !strings.Contains(err.Error(), "upstreamDomain is required") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestLoadConfig_UpstreamDomainRejectedWithoutTargetTLSProxy: on a direct
+// connection targetUrl already names the vendor, so this field could only publish a
+// domain the broker does not actually dial.
+func TestLoadConfig_UpstreamDomainRejectedWithoutTargetTLSProxy(t *testing.T) {
+	configPath := writeTestConfig(t, `
+service:
+  servingUrl: "https://example.com"
+  targetUrl: "https://api.minimax.io"
+  inputPrice: "1000"
+  outputPrice: "2000"
+  type: "chatbot"
+  model: "MiniMax-Text"
+  providerType: "centralized"
+  providerIdentity: "minimax"
+  upstreamDomain: "api.minimax.io"
+`)
+	t.Setenv("CONFIG_FILE", configPath)
+
+	cfg := &Config{}
+	err := loadConfig(cfg)
+	if err == nil {
+		t.Fatal("expected upstreamDomain without targetTLSProxy to be rejected")
+	}
+	if !strings.Contains(err.Error(), "only supported alongside") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestValidateUpstreamDomain pins the shape: this value is published verbatim as
+// serving_domain and a verifier fetches exactly that host's certificate, so it has
+// to be a hostname and nothing else. An IP is rejected because a certificate's
+// meaning here comes from the hostname check, which an IP cannot carry.
+func TestValidateUpstreamDomain(t *testing.T) {
+	rejected := []string{
+		"",                       // empty
+		"https://api.minimax.io", // scheme
+		"api.minimax.io:443",     // port
+		"api.minimax.io/v2",      // path
+		"user@api.minimax.io",    // userinfo
+		"93.184.216.34",          // IPv4
+		"::1",                    // IPv6
+		"minimax",                // single label, not an FQDN
+		"api..minimax.io",        // empty label
+		"-api.minimax.io",        // leading hyphen
+	}
+	for _, d := range rejected {
+		if err := validateUpstreamDomain(d); err == nil {
+			t.Errorf("accepted %q as an upstream domain", d)
+		}
+	}
+
+	accepted := []string{
+		"api.minimax.io",
+		"api.minimaxi.com",
+		"dashscope-intl.aliyuncs.com",
+		"API.MINIMAX.IO", // case is not the operator's problem
+	}
+	for _, d := range accepted {
+		if err := validateUpstreamDomain(d); err != nil {
+			t.Errorf("rejected legitimate upstream domain %q: %v", d, err)
+		}
+	}
+}
+
 func TestValidateInEnclaveTarget_BypassShapes(t *testing.T) {
 	rejected := []string{
 		"http://user@api.minimax.io/",              // userinfo hiding a public host

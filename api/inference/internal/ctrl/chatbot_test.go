@@ -128,7 +128,7 @@ func TestSignCentralizedRoutingProof_NilTLSState(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when TLS state is nil")
 	}
-	if !strings.Contains(err.Error(), "TLS certificate not available") {
+	if !strings.Contains(err.Error(), "no usable upstream TLS certificate fingerprint") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 

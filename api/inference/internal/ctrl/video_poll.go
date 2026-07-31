@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/common/util"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
@@ -470,6 +471,13 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, fingerpr
 	for k, v := range c.Service.EffectiveAdditionalSecret(job.ResolvedModel) {
 		httpReq.Header.Set(k, v)
 	}
+
+	// Last, matching the other two request builders. This is the one that actually
+	// talks to the targetTLSProxy sidecar and whose RESPONSE header is trusted as
+	// evidence, so it is the builder where an outbound copy of that header would
+	// matter most — an operator naming it in additionalSecret is the only way it
+	// could get here, and that must not be able to prime an echo.
+	httpReq.Header.Del(teeutil.HeaderUpstreamCertFingerprint)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

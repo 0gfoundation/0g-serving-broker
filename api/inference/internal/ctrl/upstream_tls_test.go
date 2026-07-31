@@ -88,3 +88,15 @@ func TestUpstreamCertFingerprintSourceIsExclusive(t *testing.T) {
 		})
 	}
 }
+
+// TestUpstreamCertFingerprintHeaderIsStrippedFromClientResponse guards the other
+// half: the header is broker-internal evidence, and on a standard provider it
+// names the very upstream that deployment must hide.
+func TestUpstreamCertFingerprintHeaderIsStrippedFromClientResponse(t *testing.T) {
+	if !isUpstreamLeakHeader(teeutil.HeaderUpstreamCertFingerprint) {
+		t.Errorf("%s must be stripped from forwarded responses", teeutil.HeaderUpstreamCertFingerprint)
+	}
+	if !isUpstreamLeakHeader(strings.ToLower(teeutil.HeaderUpstreamCertFingerprint)) {
+		t.Error("header matching must be case-insensitive")
+	}
+}
