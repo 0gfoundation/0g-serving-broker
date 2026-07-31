@@ -326,4 +326,21 @@ func TestDurationIsNeverClampedUpwards(t *testing.T) {
 	if req := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); req.Duration != maxMiniMaxDuration {
 		t.Errorf("Seconds=20 sent Duration=%d, want %d", req.Duration, maxMiniMaxDuration)
 	}
+
+	// The two residuals that DO bill above the request, pinned so they stay a stated
+	// trade-off rather than being rediscovered as a bug. Neither is reachable from a
+	// conforming OpenAI client, whose seconds enum is {4,8,12}.
+	for _, tc := range []struct {
+		seconds string
+		want    int64
+		why     string
+	}{
+		{"3", 4, "below H3's floor: unsatisfiable, so the caller gets and pays for the 4s minimum"},
+		{"0.5", 4, "ditto"},
+		{"4.1", 5, "H3 takes an integer, so ceil is forced"},
+	} {
+		if got := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: tc.seconds}, "2K").Duration; got != tc.want {
+			t.Errorf("Seconds=%q sent Duration=%d, want %d (%s)", tc.seconds, got, tc.want, tc.why)
+		}
+	}
 }

@@ -149,6 +149,15 @@ func normalizeMiniMaxResolution(size string) string {
 // they asked for either way, and 15s is what the model produces (and therefore what
 // they are billed). Clamping DOWN cannot exceed what was requested, so it does not
 // have the over-billing property that made the floor worth getting right.
+//
+// Two residual cases DO still bill above the request, both unreachable from a
+// conforming OpenAI client (its seconds enum is {4,8,12}):
+//   - Below the floor (seconds=1, 3, 0.5): unsatisfiable, so the caller gets and
+//     pays for H3's 4s minimum. Rejecting instead would be defensible; it is a
+//     behaviour change with no conforming caller behind it, so it is left alone
+//     and named here rather than silently assumed away.
+//   - Fractional values (seconds=4.1): H3 takes an integer, so ceil is forced. The
+//     caller pays 5 for a 4.1 request. Unavoidable without rejecting fractions.
 const (
 	minMiniMaxDuration = 4
 	maxMiniMaxDuration = 15
