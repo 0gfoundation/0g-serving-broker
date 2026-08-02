@@ -432,7 +432,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
-			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error).",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error, model_expired, invalid_request).",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},

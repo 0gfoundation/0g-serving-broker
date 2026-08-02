@@ -182,6 +182,37 @@ func multipartFormField(body []byte, contentType, name string) string {
 	}
 }
 
+// multipartHasFormField reports whether a non-file part with this name EXISTS,
+// independent of whether multipartFormField can return its value. The two answers
+// differ: that reader caps a part at 1024 bytes and trims, so a value padded past the
+// cap comes back "" — indistinguishable from a missing field unless presence is asked
+// separately. The video pre-flight reserve needs the distinction, because "the client
+// named no duration" and "the client named a duration we could not read" have opposite
+// safe answers (price the model's default vs refuse). Callers that only need a value
+// should keep using multipartFormField.
+func multipartHasFormField(body []byte, contentType, name string) bool {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	boundary, ok := params["boundary"]
+	if !ok {
+		return false
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return false
+		}
+		if part.FormName() == name && part.FileName() == "" {
+			part.Close()
+			return true
+		}
+		part.Close()
+	}
+}
+
 // rewriteResponseModel patches the "model" field in a non-streaming JSON response
 // to return the original ft-* model name instead of the base model name that vLLM returns.
 // Uses JSON unmarshal/marshal to handle any JSON whitespace formatting.

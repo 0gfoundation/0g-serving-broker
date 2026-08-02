@@ -105,58 +105,104 @@ both the client-facing passthrough and the broker's own poller.
 
 Create-time validates the user has sufficient balance for the **requested** duration
 (reusing the existing `ValidateRequestWithEstimatedFee` balance check, the same mechanism
-`async.go:188` already uses for the text-to-image async queue) and persists a `Request` row with
-that estimated fee. Completion — whether immediate or via the poller — recomputes the fee from
-the actual delivered duration and overwrites it, exactly as `UpdateRequestFeesAndCount` does
-today. If actual and requested diverge, the corrected fee is what settles; nothing settles before
-the actual duration is known.
+`async.go:188` already uses for the text-to-image async queue). The reserve is used for that
+comparison and then **thrown away**: `proxyHTTPRequest` zeroes `InputFee`/`Fee` before
+`CreateRequest`, so the row is a zero-fee placeholder, not a persisted estimate. Completion —
+whether immediate or via the poller — computes the fee from the actual delivered duration and
+writes it, exactly as `UpdateRequestFeesAndCount` does today. Nothing settles before the actual
+duration is known.
 
-The reserve is `VideoCreateReserveFee` (`video.go`): `videoCreateReserveUnits × outputPrice`,
-where the units are the requested `seconds` weighted by the **service-level** size ratio
-(`GetVideoSizeRatio`, baseline 1.0 for an unrecognized size) and floored at 1.
+The reserve is `VideoCreateReserveFee` (`video.go`): `videoReserveUnitsFromRequest × outputPrice`.
 
-Both inputs are client-controlled while the bill is computed from the **response**, so the unit
-basis is guarded in two directions:
+Both of its inputs are client-controlled while the bill is computed from the **response**, so the
+unit basis is guarded rather than trusted:
 
+- **A duration that was named but cannot be priced is refused**, never floored:
+  non-numeric, non-positive, above `ceilSeconds`' range, or a multipart value padded past
+  `multipartFormField`'s 1024-byte read all raise `ErrVideoSecondsUnpriceable` (400, recorded as
+  `RejectionInvalidRequest`). Each was a measured giveaway when it floored at 1 unit instead:
+  `{"seconds": 1e20}` reserved 1 and billed 15, because the translator clamps *down* to the model
+  maximum and bills in full; a multipart value padded past the read cap did the same invisibly,
+  since the upstream's own form parser reads the whole value. The broker does not know the
+  upstream's clamp, so it refuses rather than guesses.
+- **An OMITTED duration is priced at the model's published default**, not refused and not floored.
+  Omitting `seconds` is legal — OpenAI's Video API defaults it — and the upstream applies its own
+  default and bills that, so flooring at 1 unit handed over the difference (H3 defaults to 4s).
+  The reserve reads `defaultParameters.seconds` from the same `ModelInfo` that `GET /v1/models`
+  publishes (`Service.DefaultVideoSecondsFor`, resolved per-model exactly as `EffectiveModelInfo`
+  does), so the gate prices the number a caller reading the model card would expect to be charged.
+  A model that publishes no default leaves nothing to price, and only then is the create refused.
+  An explicit `null` counts as omitted; presence is asked separately from readability
+  (`videoJSONNamesSeconds` / `multipartHasFormField`) precisely so a value we could not read is
+  never mistaken for one that was never sent.
 - **The size ratio is clamped to a 1.0 floor.** `DefaultVideoSizeRatios` prices small frames
-  *below* baseline (`"832x480"` = 0.5), so an unclamped reserve let a caller name a cheap size,
-  reserve half, and be billed for what the upstream actually rendered — H3 only ever renders 2K,
-  whose ratio is the 1.0 baseline, so `seconds:15, size:"832x480"` reserved 8 units against a
-  15-unit bill. Scaling *up* is kept: a caller naming an expensive tier is asking for the
-  expensive thing, and if the upstream honours it the bill follows.
-- **A present-but-unpriceable `seconds` is rejected** (`ErrVideoSecondsUnpriceable` → 400,
-  recorded as `RejectionInvalidRequest`), not floored. `ceilSeconds` refuses anything above
-  `maxVideoOutputUnits`, which made an out-of-range duration indistinguishable from "no duration
-  given" — while the translator clamps the same value *down* to the model maximum and bills it in
-  full. `{"seconds": 1e20}` therefore reserved 1 unit and billed 15. The broker cannot know the
-  upstream's clamp, so a duration it cannot price is refused rather than guessed at. An explicit
-  `null` still counts as "unset" and takes the floor.
+  *below* baseline (`"832x480"` = 0.5), so unclamped a caller names a cheap size, reserves half,
+  and is billed for what the upstream actually rendered — H3 only ever renders 2K, whose ratio is
+  the 1.0 baseline, so `seconds:15, size:"832x480"` reserved 8 units against a 15-unit bill. The
+  clamp is coherent with what these ratios mean (multipliers "relative to the baseline 720x1280"),
+  so a map with no entry at or above 1.0 is a misconfiguration rather than a cheaper service.
+  Scaling *up* is kept: a caller naming an expensive tier is asking for the expensive thing.
+- **A tier the model prices by NAME is honoured.** `GetVideoSizeRatio` knows only pixel-dimension
+  keys, so on a tiered model a caller could name `"1080P"` and reserve the 1.0 baseline against a
+  2× bucket. The reserve therefore also prices `(seconds, size)` through the resolved model's own
+  billing block and takes whichever answer is larger — but only on an EXACT hit (a
+  `resolutionMultipliers` entry, or a `per_unit_table` row for this duration). A miss falls through
+  silently to the service-ratio basis: no next-bucket rounding, no table maximum, no metering.
 
 Two further properties are deliberate and worth not "fixing" by accident:
 
-- **It does not reuse `videoOutputUnits`**, which is what settlement bills on. The two read `size`
-  from different vocabularies: settlement sees the response's rendered resolution tier (`"2K"`),
-  which is what a `per_unit_table` list is keyed on, while a create request carries the client's
-  free-text size — pixel dimensions (`"1280x720"`) for an OpenAI-conforming caller. Routing the
-  request value through the bucket lookup misses every row, and `videoOutputUnits` answers a miss
-  with the table **maximum**; as a reserve that rejects callers who can afford the real bill, and
-  it would double the `per_unit_table_miss` operator signal that settlement already emits for the
-  same request.
+- **It does not call `videoOutputUnits`**, which is what settlement bills on, and the two are not
+  interchangeable in either direction. They read `size` from different vocabularies: settlement
+  sees the response's rendered tier (`"2K"`), which is what a `per_unit_table` list is keyed on,
+  while a create carries the client's free-text size. A resolution the table carries no rows for at
+  all finds no covering bucket, so `videoOutputUnits` falls to the table **maximum** — as a reserve
+  that rejects callers who can afford the real bill, and it double-counts the
+  `per_unit_table_miss` operator signal settlement already emits for the same request. (A
+  duration-only miss rounds up to the next bucket instead; it is the absent-resolution case that
+  reaches the maximum.) Swapping the other way — settling on the reserve's basis — would bill the
+  requested duration instead of the delivered one and silently under-bill; the names carry the
+  basis for that reason.
 - **It prices off `GetCachedService`, not `GetBillingPrices`.** `CtxKeyResolvedModel` is set by
   `PrepareHTTPRequest`, which runs *after* the balance check, so per-model pricing is not
   available at gate time and asking for it would log a spurious "resolvedModel missing" ERROR on
   every video create. The service price is the configured ceiling over all models (USD-denominated
   services get the live max wei price overlaid), so the reserve stays at or above the per-model fee
-  for these units.
+  for these units. Note the ceiling is over per-*unit* prices, so it does not compensate for a unit
+  count the reserve under-counts — see the residuals.
 
-Known residuals, both bounded, both strictly smaller than the "reserve nothing" they replace, and
-both now requiring the **upstream** to diverge from the request rather than the client to shape it:
-if the rendered tier prices above the requested one (a `per_video_second` multiplier > 1, or a
-`per_unit_table` bucket) the reserve sits below the bill by that tier factor; and a create that
-names *no* `seconds` reserves the 1-unit floor while the upstream applies its own default duration
-(H3's is 4s) and bills that. Closing either needs the rendered tier / applied duration at request
-time, which only the upstream knows — the fix is the create response echoing them, not the broker
-guessing.
+### Known residuals
+
+Named because they are the difference between "the gap is closed" and "the gap is smaller", and
+none of them is currently measured — see the last entry.
+
+1. **The reserve bounds the size of one request, not the number of them.** An async create writes
+   its `Request` row with `Fee = "0"` and it stays there until the poller resolves it minutes
+   later, so `CalculateUnsettledFee` sees nothing for jobs in flight and the gate re-admits at the
+   same balance: N concurrent creates all pass on a balance sized for one. There is no broker-side
+   in-flight cap on video creates. Closing this needs in-flight jobs to carry their reserve into
+   `unsettled`, which in turn needs `FailVideoPollJob` / `TimeOutVideoPollJob` to clear it —
+   otherwise a job that never delivers settles as real revenue and the caller pays for a video
+   they never received. That is a change to the poll lifecycle, not to the reserve, and is
+   deliberately not attempted alongside it.
+2. **A rendered tier above the requested one.** The reserve prices the tier the caller asked for;
+   if the upstream renders a dearer one, the bill exceeds the reserve by that factor (config-bound:
+   `resolutionMultipliers` reach 8 in this repo's own example). Now requires the *upstream* to
+   diverge from the request — a client naming a dearer tier is priced for it — but it is not
+   closed. Closing it needs the rendered tier at request time, which only the upstream knows: the
+   fix is the create response echoing it, not the broker guessing.
+3. **A `seconds` the upstream clamps, in either direction.** `{"seconds":1}` prices at 1 unit
+   while the translator raises it to the model floor (H3: 4s) and bills that — an under-reserve.
+   Above the ceiling it is the mirror image and costs the *caller*: `{"seconds":60}` is priced at
+   60 units though the translator clamps to 15 and bills 15, so a solvent caller can be refused
+   for a request the upstream would have served (the 0G Router accepts up to 3600). Both come from
+   the same gap: the model's priceable duration range is not published anywhere the gate can read
+   it. `defaultParameters.seconds` closed the omitted case; a published min/max would close these
+   two the same way, and would also let the broker reject an out-of-range duration outright
+   instead of silently clamping it upstream — which is the better contract anyway.
+4. **None of the above is observed.** The reserve is never persisted, so no signal compares it to
+   what settled — every bound above is an argument, not a measurement. The cheap fix is a counter
+   or histogram of `settledFee / reservedFee` at settlement, which needs the reserve carried on the
+   poll job or the `Request` row. Until then, a regression in any of these is invisible.
 
 ## Data model
 

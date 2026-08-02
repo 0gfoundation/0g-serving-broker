@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
@@ -1070,3 +1071,50 @@ func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string
 	}
 	return nil
 }
+
+// DefaultVideoSecondsFor resolves the duration a video create that OMITS `seconds`
+// will be served at, from the model's published defaultParameters.seconds — the same
+// metadata GET /v1/models advertises, resolved with the same per-model precedence as
+// EffectiveModelInfo. Reports false when the model publishes no usable default.
+//
+// It exists so the pre-flight reserve can price an omitted duration exactly instead of
+// having to choose between refusing a legal request and reserving a 1-unit floor while
+// the upstream applies its own default and bills that. YAML decodes a scalar as int or
+// float64 depending on how it was written, and an operator may quote it, so all three
+// are accepted; anything non-positive or unrepresentable is treated as unpublished.
+func (s *Service) DefaultVideoSecondsFor(model string) (int64, bool) {
+	mi := s.EffectiveModelInfo(model)
+	if mi == nil || len(mi.DefaultParameters) == 0 {
+		return 0, false
+	}
+	raw, ok := mi.DefaultParameters["seconds"]
+	if !ok {
+		return 0, false
+	}
+	var seconds float64
+	switch v := raw.(type) {
+	case int:
+		seconds = float64(v)
+	case int64:
+		seconds = float64(v)
+	case float64:
+		seconds = v
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, false
+		}
+		seconds = parsed
+	default:
+		return 0, false
+	}
+	if !(seconds > 0) || math.IsInf(seconds, 0) || seconds > maxDefaultVideoSeconds {
+		return 0, false
+	}
+	return int64(math.Ceil(seconds)), true
+}
+
+// maxDefaultVideoSeconds bounds a published default duration. It is an operator-set
+// value, not client input, so this only catches a typo'd config (a stray "3600000")
+// turning every omitted-duration create into an unaffordable reserve.
+const maxDefaultVideoSeconds = 3600

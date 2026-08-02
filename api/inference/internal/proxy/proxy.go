@@ -828,11 +828,20 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// between a caller and a clip that bills many times that. Measured live: a
 		// wallet with exactly 1.0 0G locked passed the gate and was billed 6.698 0G
 		// for one 5s 2K clip; at the 15s ceiling that is ~20 0G against a 1 0G lock.
-		// The overrun is bounded to one request per settlement window (the unsettled
-		// fee blocks the next one), but it is free video every window, per wallet.
 		//
-		// Reserving the projected fee closes it. Not a charge — nothing here is
-		// billed; settlement still bills the delivered duration.
+		// Reserving the projected fee closes the PER-REQUEST gap. Not a charge —
+		// nothing here is billed; settlement still bills the delivered duration.
+		//
+		// It does NOT bound the number of such requests, and it would be wrong to
+		// read it that way: an async create writes its Request row with Fee "0" and
+		// keeps it there until the poller resolves it minutes later, so
+		// CalculateUnsettledFee sees nothing for jobs still in flight and the gate
+		// re-admits at the same balance. N concurrent creates therefore all pass on a
+		// balance sized for one. Closing that needs in-flight jobs to carry their
+		// reserve into `unsettled` — and the poll failure/timeout paths to clear it,
+		// or a job that never delivers would settle as real revenue. Tracked as a
+		// residual in docs/design/video-generation-async-billing.md, deliberately not
+		// done here: getting it half right bills callers for videos they never got.
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
 			if errors.Is(err, ctrl.ErrVideoSecondsUnpriceable) {
@@ -845,7 +854,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// is attacker-reachable. record() stamps CtxKeyRejectionReason itself.
 				ctx.Set("ignoreError", true)
 				p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
-				p.handleBrokerError(ctx, err, "price video pre-flight reserve")
+				// No wrap context: handleBrokerError prefixes it onto the body the CLIENT
+				// receives, and "price video pre-flight reserve: `seconds` is required…"
+				// hands an internal breadcrumb to someone who only needs the field name.
+				// The log line carries its own context independently.
+				p.handleBrokerError(ctx, err, "")
 				return
 			}
 			// Broker-side: GetCachedService fails closed on a stale/unpopulated USD
@@ -1097,6 +1110,16 @@ func (p *Proxy) handleBrokerError(ctx *gin.Context, err error, context string) {
 	}
 	if context != "" {
 		err = errors.Wrap(err, context)
+	}
+	// USD pricing outage: surface as 503 with PRICING_UNAVAILABLE so SDKs and the 0G
+	// Router can distinguish a transient rate-feed failure (retryable, broker-side)
+	// from a bad request. Matches ctrl.handleBrokerError and the /v1/service handler,
+	// which have had this mapping; this one did not, so every billing-gate price
+	// failure that lands here — the video pre-flight reserve, and the pre-existing
+	// GetBillingPrices call in proxyHTTPRequest — was returned as a deterministic 400
+	// that no client retries.
+	if errors.Is(err, ctrl.ErrPricingUnavailable) {
+		err = errors.ServiceUnavailable(err)
 	}
 	errors.Response(ctx, err)
 }
