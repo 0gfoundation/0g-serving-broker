@@ -373,7 +373,9 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 		return errors.New("nil lockBalance in account")
 	}
 
-	// Use fixed minimum locked balance for all service types (3 0G)
+	// Use fixed minimum locked balance for all service types. constant.MinimumLockedBalance
+	// is 1 0G, not the 3 0G this comment claimed — a video create can bill ~20x that, which
+	// is why the video pre-flight reserve exists (see proxyHTTPRequest's video-generation arm).
 	responseFeeReservation, ok := new(big.Int).SetString(constant.MinimumLockedBalance, 10)
 	if !ok {
 		return errors.New("invalid MinimumLockedBalance constant")

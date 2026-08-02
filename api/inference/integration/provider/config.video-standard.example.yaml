@@ -89,6 +89,16 @@ service:
           - prompt
           - size
           - seconds
+        # REQUIRED for video-generation, and billing-relevant rather than merely
+        # documentation: the pre-flight balance reserve prices a create that OMITS
+        # `seconds` / `size` at these values, because the upstream applies its own
+        # defaults and bills them. Publish what the upstream actually applies —
+        # `seconds` is boot-validated (a video model without it fails to start,
+        # since the alternative is refusing every conforming create that omits the
+        # field), and a wrong `size` silently moves the reserve away from the bill.
+        defaultParameters:
+          seconds: 5
+          size: "720p"
 
     - model: "happyhorse-1.0"
       # TODO: same as above — set to DashScope's exact model identifier.
@@ -110,6 +120,16 @@ service:
           - prompt
           - size
           - seconds
+        # REQUIRED for video-generation, and billing-relevant rather than merely
+        # documentation: the pre-flight balance reserve prices a create that OMITS
+        # `seconds` / `size` at these values, because the upstream applies its own
+        # defaults and bills them. Publish what the upstream actually applies —
+        # `seconds` is boot-validated (a video model without it fails to start,
+        # since the alternative is refusing every conforming create that omits the
+        # field), and a wrong `size` silently moves the reserve away from the bill.
+        defaultParameters:
+          seconds: 5
+          size: "720p"
 
 # Optional: rate limiting and concurrency configuration (RPM applies to every
 # service type; video-generation has no dedicated per-minute dimension of its

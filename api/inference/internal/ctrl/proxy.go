@@ -1481,3 +1481,15 @@ func (c *Ctrl) recordModelMismatch(userAddr, requestModel string) {
 		}
 	}
 }
+
+// RecordModelMismatch is the exported entry point to the model-allowlist abuse accounting, for
+// callers that refuse an unserved model BEFORE PrepareHTTPRequest gets to run its own check.
+//
+// The video pre-flight reserve is one: it resolves the model to find the published defaults
+// that price the request, so it detects an unserved model at the balance gate — earlier than
+// ResolveModelForBilling, which used to be the only path that recorded the mismatch. Without
+// this the metric would still move while the per-user limiter that actually blocks name
+// enumeration never saw the request.
+func (c *Ctrl) RecordModelMismatch(userAddr, requestModel string) {
+	c.recordModelMismatch(userAddr, requestModel)
+}

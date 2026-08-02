@@ -136,8 +136,15 @@ func ExtractModelName(body []byte, contentType string) string {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
 		return extractModelFromMultipart(body, contentType)
 	}
+	// json.Decoder, not json.Unmarshal: the upstream translator decodes the same body with a
+	// Decoder (which ignores trailing data), so Unmarshal's whole-input validation meant one
+	// byte appended after the object made this return "" while the upstream read the real
+	// model. Everything keyed on that answer then described a different request than the one
+	// served — the reserve priced the configured default model, the allowlist in
+	// ResolveModelForBilling passed a model the caller never named, and settlement billed the
+	// default's per-model price for whatever the vendor rendered.
 	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&bodyMap); err != nil {
 		return ""
 	}
 	modelName, _ := bodyMap["model"].(string)
@@ -158,11 +165,43 @@ func extractModelFromMultipart(body []byte, contentType string) string {
 // content type isn't multipart, the boundary is missing, or the field is absent.
 // The read is capped so a mislabeled file part can't pull unbounded memory; used
 // for short scalar fields (model, seconds, size).
+// Deliberately NOT delegating to multipartFormFields: that reader answers a money-grade
+// question (was this field repeated, was its value truncated, did the body walk cleanly) and to
+// do so it must always advance to io.EOF — and multipart.Reader.NextPart streams every part it
+// skips. This wrapper's callers want one short scalar from bodies that can be tens of
+// megabytes of audio or image, and they want it before the upload. Delegating cost 34ms of CPU
+// per speech-to-text request at 25MB (measured ~2,600x) for an answer none of them read.
 func multipartFormField(body []byte, contentType, name string) string {
-	if f := multipartFormFields(body, contentType, name)[name]; len(f.Values) > 0 {
-		return f.Values[0]
+	reader, ok := multipartReader(body, contentType)
+	if !ok {
+		return ""
 	}
-	return ""
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return "" // io.EOF (field absent) or a malformed body
+		}
+		if part.FormName() == name && part.FileName() == "" {
+			val, _ := io.ReadAll(io.LimitReader(part, maxMultipartFieldBytes))
+			part.Close()
+			return strings.TrimSpace(string(val))
+		}
+		part.Close()
+	}
+}
+
+// multipartReader builds a MIME reader for a multipart body, reporting false when the content
+// type is not multipart or carries no boundary.
+func multipartReader(body []byte, contentType string) (*multipart.Reader, bool) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, false
+	}
+	boundary, ok := params["boundary"]
+	if !ok {
+		return nil, false
+	}
+	return multipart.NewReader(bytes.NewReader(body), boundary), true
 }
 
 // maxMultipartFieldBytes caps how much of a scalar part is read, so a mislabeled file
@@ -170,64 +209,54 @@ func multipartFormField(body []byte, contentType, name string) string {
 // rather than silently shortened — see multipartField.Truncated.
 const maxMultipartFieldBytes = 1024
 
-// multipartField is what one walk learned about a single field name. The three flags
-// beyond the value exist because a money path has to tell "the client did not send
-// this" apart from "the client sent something we could not read the same way the
-// upstream will":
+// multipartField is what one walk learned about a single field name. The flags beyond the
+// value exist because a money path has to tell "the client did not send this" apart from "the
+// client sent something we could not read the same way the upstream will":
 //
-//   - Values holds EVERY non-file part with this name, in order, so a caller can refuse
-//     a repeated field instead of guessing. The broker reads the first; Starlette /
-//     FastAPI form parsers return the LAST — so silently taking one of them lets a
-//     caller price `seconds=1` and be rendered `seconds=15`.
-//   - Truncated says a value hit maxMultipartFieldBytes. Padding a value past the cap
-//     makes it read as empty here while the upstream's own parser (no per-field cap,
-//     and it trims) reads the real value.
-//   - WalkOK says the reader reached the end of the body cleanly. Without it a
-//     malformed part BEFORE the field is indistinguishable from the field being absent,
-//     which is fail-open on a gate.
+//   - Values holds EVERY non-file part with this name, in order, so a caller can refuse a
+//     repeated field instead of guessing. The broker reads the first; Starlette / FastAPI form
+//     parsers return the LAST — so silently taking one of them lets a caller price
+//     `seconds=1` and be rendered `seconds=15`.
+//   - Truncated says a value hit maxMultipartFieldBytes. Padding a value past the cap makes it
+//     read as empty here while the upstream's own parser (no per-field cap, and it trims)
+//     reads the real value.
 type multipartField struct {
 	Values    []string
 	Truncated bool
-	WalkOK    bool
 }
 
-// multipartFormFields walks a multipart/form-data body ONCE and reports what it found
-// for each requested field name, using a real MIME reader (NOT a substring scan) so
-// adversarial content in another field — a prompt containing the literal
-// name="seconds" — cannot be mistaken for the field. Every returned entry has WalkOK
-// false when the content type is not multipart, carries no boundary, or the body could
-// not be walked to the end.
+// multipartFormFields walks a multipart/form-data body ONCE and reports what it found for each
+// requested field name, using a real MIME reader (NOT a substring scan) so adversarial content
+// in another field — a prompt containing the literal name="seconds" — cannot be mistaken for
+// the field.
 //
-// One walk for all names on purpose: an image-to-video create can carry megabytes of
-// reference image, and advancing a multipart reader streams every part it skips, so a
-// walk per field multiplied that cost by the number of fields.
-func multipartFormFields(body []byte, contentType string, names ...string) map[string]multipartField {
+// walkedOK is a property of the BODY, not of any field: false when the content type is not
+// multipart, carries no boundary, or the body could not be walked to the end. It is returned
+// separately rather than stamped onto every entry so a caller cannot check it on one field and
+// miss it on another — and so a lookup of a name that was never requested (a zero
+// multipartField) cannot be mistaken for "the body is unwalkable".
+//
+// One walk for all names on purpose: an image-to-video create can carry megabytes of reference
+// image, and advancing a multipart reader streams every part it skips, so a walk per field
+// multiplied that cost by the number of fields.
+func multipartFormFields(body []byte, contentType string, names ...string) (fields map[string]multipartField, walkedOK bool) {
 	found := make(map[string]multipartField, len(names))
 	wanted := make(map[string]bool, len(names))
 	for _, n := range names {
 		found[n] = multipartField{}
 		wanted[n] = true
 	}
-	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return found
-	}
-	boundary, ok := params["boundary"]
+	reader, ok := multipartReader(body, contentType)
 	if !ok {
-		return found
+		return found, false
 	}
-	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	for {
 		part, err := reader.NextPart()
 		if err != nil {
-			if err == io.EOF {
-				// Walked the whole body: absent now means absent.
-				for n, f := range found {
-					f.WalkOK = true
-					found[n] = f
-				}
-			}
-			return found
+			// errors.Is rather than ==: NextPart returns the bare sentinel today, and if that
+			// ever becomes wrapped, an == check would report every body unwalkable and turn
+			// every multipart video create into a 400.
+			return found, errors.Is(err, io.EOF)
 		}
 		if name := part.FormName(); wanted[name] && part.FileName() == "" {
 			val, _ := io.ReadAll(io.LimitReader(part, maxMultipartFieldBytes+1))

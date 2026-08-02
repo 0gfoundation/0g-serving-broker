@@ -136,12 +136,23 @@ is a fixed discount, so these are all `unpriceable`:
 | one byte appended after the JSON object | absent (`json.Unmarshal` validates the whole input and populates nothing) | 15s — the translator decodes with `json.Decoder`, which ignores trailing data |
 | `{"seconds":"abc"}`, `" 6 "`, `"+6"`, `true`, `[15]`, `{...}` | absent (a wrong JSON type is a hard decode failure for `json.Number`) | whatever a laxer upstream coerces |
 | a multipart value padded past the field reader's 1024-byte cap | absent | read in full by the upstream's form parser |
-| a multipart field sent twice | first value | Starlette/FastAPI return the **last** |
+| a multipart field sent twice (`seconds`, `size` or `model`) | first value | Starlette/FastAPI return the **last** |
 | a multipart body that cannot be walked to the end | absent | repaired or sniffed downstream |
 | a body that is not a JSON object at all | absent | — |
+| `{"seconds":1,"Seconds":15}` | 1 | 15 — Go matches keys onto struct fields case-insensitively and resolves competing variants by document order, so an unordered map cannot know which the upstream took |
+
+Keys are matched case-**insensitively**, which is the price of decoding key-wise: the upstream
+decodes into a struct, and `encoding/json` matches object keys onto struct fields regardless of
+case. Folding the lookup makes a `{"Seconds":15}` read the same on both sides; more than one
+variant of a billing field is refused, because Go resolves competing variants by document order
+and a map has none.
 
 Transport is chosen by **Content-Type**, the way `ExtractModelName` chooses it — not by "did this
-parse as JSON". Falling back from a failed JSON parse into the multipart reader was the mechanism
+parse as JSON". `ExtractModelName` itself decodes with a `json.Decoder` for the same reason the
+duration does: it used to use `json.Unmarshal`, so one appended byte made it read no model at all
+and fall back to the configured default — the reserve priced the default model, the allowlist in
+`ResolveModelForBilling` passed a model the caller never named, settlement billed the default's
+price, and the upstream rendered the one that was asked for. Falling back from a failed JSON parse into the multipart reader was the mechanism
 behind the trailing-byte bypass: on a JSON content type that reader finds no boundary and reports
 the field absent. `multipartFormFields` answers value, repetition, truncation and walk-completion
 in **one** walk, because an image-to-video create can carry megabytes of reference image and
@@ -162,11 +173,19 @@ a caller reading the model card would expect to be charged, and it is what the u
   sides simply never spoke the same vocabulary.
 
 This makes a field that used to be pure `/v1/models` documentation load-bearing for billing, so
-`ModelInfo.Validate` rejects a published-but-unusable `seconds` at **config load** — at runtime it
-is indistinguishable from "unpublished", which refuses every conforming create that omits the
-field, i.e. an operator typo presenting as a client error. A *missing* key stays legal (a service
-whose callers always send `seconds` needs nothing) and is refused at request time as
-`ErrVideoDefaultDurationUnpublished` — a **broker**-attributed 503, not a client fault.
+`ModelInfo.Validate` now **requires** `defaultParameters.seconds` for a video-generation service
+and rejects a published-but-unusable value — both at **config load**. Requiring it is the point:
+at runtime "unpublished" refuses every conforming create that omits the field, which is an
+operator config gap presenting as 503s on normal traffic, so the operator has to meet it at
+deploy time instead. A present-but-unusable `size` fails the boot for the mirror reason — it
+degrades *silently* (a YAML `size: 1080` decodes as an int, reports unpublished, and the reserve
+drops to the baseline ratio with no error, log or metric). `config.video-standard.example.yaml`
+publishes both.
+
+One non-obvious consequence: `constant.TargetRoute` is keyed on path only, so a bodyless
+`GET /videos` (the OpenAI Video API's list operation) reaches the same billing arm. It reserves
+nothing — pricing the published default duration for it would demand balance for a video nobody
+asked for, and refusing would 503 a read.
 
 ### The size ratio, and the tier a model prices by name
 
@@ -179,12 +198,24 @@ The basis is the requested duration weighted by the larger of two answers:
   what these ratios mean — multipliers "relative to the baseline 720x1280" — so a map with no entry
   at or above 1.0 is a misconfiguration, not a cheaper service. The comparison is `!(ratio >= 1)`
   so a `NaN` ratio cannot slip through into `videoOutputCount`'s NaN floor.
-- **the resolved model's own billing block**, when it prices that resolution **exactly**
-  (`BillingConfig.HasResolution`). `GetVideoSizeRatio` knows only pixel keys, so on a tiered model a
+- **the resolved model's own billing block**, when it prices that resolution
+  (`BillingConfig.HasResolution`). A **duration** the block does not tabulate at a resolution it
+  does carry rounds UP to the covering bucket, because that is what settlement's `NextBucketUnits`
+  bills — falling through to the seconds basis there was a 5.7× under-reserve on one legal integer
+  (`seconds:7` against rows at 6 and 10 reserved 7 units against a 40-unit bill). `GetVideoSizeRatio` knows only pixel keys, so on a tiered model a
   caller could name `"1080P"` and reserve the baseline against a 2× bucket. Exactness is checked
   separately rather than trusted from `OutputUnits`, because `resolutionMultiplier` answers a
   `per_video_second` miss with the 1.0 baseline *and a nil error* — indistinguishable from a tier
   that genuinely costs 1.0.
+
+A **resolution-keyed** model (`BillingConfig.IsResolutionKeyed`) prices in table units that bear
+no relation to seconds — a 6s clip at 2K can be 60 units — so the service-ratio basis is not a
+conservative fallback for one, it is a different scale. When neither the request nor the model's
+published `defaultParameters.size` names a tier such a model prices, the reserve is refused
+(`ErrVideoDefaultSizeUnpublished`, broker-attributed) rather than expressed on the wrong scale.
+The per-model `videoSizeRatios` map is also consulted, taking the larger of it and the
+service-level map: it is a per-model-capable field that `GET /v1/models` advertises per model, and
+the reserve read only the service scope, so a published per-model ratio was used by nothing.
 
 Two further properties are deliberate and worth not "fixing" by accident:
 
@@ -217,17 +248,24 @@ and broker faults:
 | `ErrVideoSecondsUnpriceable` | 400 | client | `invalid_request` |
 | `ErrVideoModelNotServed` | 400 | client | `model_mismatch` |
 | `ErrVideoDefaultDurationUnpublished` | 503 | broker | — |
+| `ErrVideoDefaultSizeUnpublished` | 503 | broker | — |
 | `ErrPricingUnavailable` (stale USD snapshot) | 503 | broker | — |
 | anything else (contract RPC failure, unparseable configured price) | 503 | broker | — |
 
 `ErrVideoModelNotServed` exists because the allowlist's own check runs in `PrepareHTTPRequest`,
 *after* this gate: without it, a caller enumerating model names on the video path was told their
-`seconds` was invalid and never reached `recordModelMismatch` or the `model_mismatch` reason. The
-final row is explicit because `errors.Response` defaults an unclassified error to 400 — which told
-the client a broker outage was their fault and, since it only redacts at ≥ 500, handed them the RPC
-endpoint and dial error in the response body. It is also a **new dependency**: `GetBillingPrices`
-took the per-model branch and never read the contract at gate time, so an RPC blip has to be
-retryable rather than terminal.
+`seconds` was invalid. Refusing here also short-circuits the only other caller of
+`recordModelMismatch`, which is what feeds the per-user limiter that BLOCKS such a caller — the
+rejection counter alone would have left the video path with no enumeration throttle at all — so
+this arm calls `Ctrl.RecordModelMismatch` itself. 
+
+The final row is explicit for two separate reasons. Retryability: `errors.Response` defaults an
+unclassified error to 400, which told the client a broker outage was their fault — and this path is
+a **new dependency**, since `GetBillingPrices` took the per-model branch and never read the contract
+at gate time, so an RPC blip has to be retryable rather than terminal. Disclosure:
+`errors.Response` replaces the message only at EXACTLY 500, so a 503 body ships whatever it was
+handed — a contract-read failure put `dial tcp …: connection refused` in front of the caller. The
+cause is logged at the call site and the client gets a generic message.
 
 The same `ErrPricingUnavailable` → 503 mapping was added to `proxy.handleBrokerError` itself, which
 its two siblings (`ctrl.handleBrokerError`, the `/v1/service` handler) already had. That also fixes

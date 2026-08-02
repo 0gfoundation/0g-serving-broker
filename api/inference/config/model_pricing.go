@@ -251,6 +251,18 @@ func (b *BillingConfig) HasResolution(resolution string) bool {
 	return false
 }
 
+// IsResolutionKeyed reports whether this block prices by resolution at all — i.e. whether
+// HasResolution can ever be true for it. A block that is resolution-keyed prices in units
+// that are NOT seconds (a per_unit_table row is an arbitrary integer), so a caller that
+// cannot resolve a resolution for it has no scale to fall back to; one that is not
+// resolution-keyed prices per second and the service-ratio basis is directly comparable.
+func (b *BillingConfig) IsResolutionKeyed() bool {
+	if b == nil {
+		return false
+	}
+	return len(b.ResolutionMultipliers) > 0 || len(b.Table) > 0
+}
+
 func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
 	res := normalizeResolution(resolution)
 	for k, m := range b.ResolutionMultipliers {
@@ -1127,11 +1139,27 @@ func (s *Service) DefaultVideoSecondsFor(model string) (int64, bool) {
 // bills THAT, so an omitted size must not reserve the baseline ratio.
 func (s *Service) DefaultVideoSizeFor(model string) (string, bool) {
 	mi := s.EffectiveModelInfo(model)
+	if mi == nil {
+		return "", false
+	}
+	return mi.defaultVideoSize()
+}
+
+// defaultVideoSize is the published-size read shared by DefaultVideoSizeFor and the config-load
+// validator, so the value the gate uses and the value the boot check accepts cannot drift.
+func (mi *ModelInfo) defaultVideoSize() (string, bool) {
 	if mi == nil || len(mi.DefaultParameters) == 0 {
 		return "", false
 	}
-	size, ok := mi.DefaultParameters["size"].(string)
-	if size = strings.TrimSpace(size); !ok || size == "" {
+	raw, ok := mi.DefaultParameters["size"]
+	if !ok {
+		return "", false
+	}
+	size, isString := raw.(string)
+	if !isString {
+		return "", false
+	}
+	if size = strings.TrimSpace(size); size == "" {
 		return "", false
 	}
 	return size, true
@@ -1157,6 +1185,10 @@ func videoDefaultSeconds(params map[string]interface{}) (int64, bool) {
 	}
 	var seconds float64
 	switch v := raw.(type) {
+	case nil:
+		// `seconds:` written with no value. That is "published nothing", the same state as
+		// omitting the key — not a typo to fail the boot on.
+		return 0, false
 	case int:
 		seconds = float64(v)
 	case int64:
@@ -1172,7 +1204,10 @@ func videoDefaultSeconds(params map[string]interface{}) (int64, bool) {
 	default:
 		return 0, false
 	}
-	if seconds < 1 || math.IsInf(seconds, 0) || seconds > maxDefaultVideoSeconds {
+	// !(seconds >= 1) rather than seconds < 1: NaN is false for every ordered comparison, so
+	// `<` let a YAML `.nan` through the bounds check AND past the config-load validator, and
+	// int64(math.Ceil(NaN)) is math.MinInt64 — reported as a usable published default.
+	if !(seconds >= 1) || math.IsInf(seconds, 0) || seconds > maxDefaultVideoSeconds {
 		return 0, false
 	}
 	return int64(math.Ceil(seconds)), true
@@ -1191,12 +1226,26 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 	if mi == nil {
 		return nil
 	}
+	// REQUIRED, not merely validated: the reserve prices a create that omits `seconds` at this
+	// value, and with nothing published it refuses the create instead (a 503, since it is an
+	// operator gap and not a bad request). Omitting `seconds` is the OpenAI Video API's default
+	// request shape, so a video service that publishes no default answers conforming traffic
+	// with 503s. Failing the boot puts that in front of the operator at deploy time.
 	raw, ok := mi.DefaultParameters["seconds"]
-	if !ok {
-		return nil
-	}
 	if _, usable := videoDefaultSeconds(mi.DefaultParameters); !usable {
+		if !ok || raw == nil {
+			return fmt.Errorf("modelInfo.defaultParameters.seconds is required for video-generation: the pre-flight balance reserve prices a create that omits `seconds` at this value, and refuses the create when nothing is published")
+		}
 		return fmt.Errorf("invalid modelInfo.defaultParameters.seconds %v: must be a number between 1 and %d", raw, maxDefaultVideoSeconds)
+	}
+	// `size` is load-bearing the same way and fails SILENTLY rather than loudly: a YAML `size:
+	// 1080` decodes as an int, DefaultVideoSizeFor reports unpublished, and the reserve drops to
+	// the baseline ratio with no error, no log and no metric. Not required — a model whose
+	// billing is not resolution-keyed does not need it — but a present one must be usable.
+	if raw, ok := mi.DefaultParameters["size"]; ok && raw != nil {
+		if _, usable := mi.defaultVideoSize(); !usable {
+			return fmt.Errorf("invalid modelInfo.defaultParameters.size %v: must be a non-empty string naming a resolution this model prices", raw)
+		}
 	}
 	return nil
 }

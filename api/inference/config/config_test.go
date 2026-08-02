@@ -96,8 +96,27 @@ func TestModelInfo_Validate_VideoGeneration_NullContextLength(t *testing.T) {
 	m := validModelInfo()
 	m.ContextLength = 0
 	m.MaxCompletionTokens = 0
+	// A video model must also publish the default duration the pre-flight balance reserve
+	// prices a create that omits `seconds` at — see validateVideoDefaultParameters.
+	m.DefaultParameters = map[string]interface{}{"seconds": 5}
 	if err := m.Validate("video-generation"); err != nil {
 		t.Errorf("expected no error for video-generation with zero contextLength, got %v", err)
+	}
+}
+
+// TestModelInfo_Validate_VideoGeneration_RequiresDefaultSeconds pins the boot requirement. With
+// nothing published the reserve refuses every create that omits `seconds` — the OpenAI Video
+// API's default request shape — so the operator has to learn about it at deploy time rather than
+// from 503s on conforming traffic.
+func TestModelInfo_Validate_VideoGeneration_RequiresDefaultSeconds(t *testing.T) {
+	m := validModelInfo()
+	m.ContextLength = 0
+	if err := m.Validate("video-generation"); err == nil {
+		t.Error("expected video-generation to require modelInfo.defaultParameters.seconds")
+	}
+	// Non-video service types are unaffected: there the field is pure /v1/models metadata.
+	if err := validModelInfo().Validate("chatbot"); err != nil {
+		t.Errorf("chatbot must not be gated on video defaults: %v", err)
 	}
 }
 

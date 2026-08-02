@@ -710,6 +710,43 @@ func TestVideoReserveSecondsSizeFromRequest(t *testing.T) {
 			wantState: videoDurationUnpriceable,
 		},
 		{
+			// BYPASS: encoding/json matches object keys onto struct fields case-INSENSITIVELY,
+			// so the upstream reads this as a 15s duration while an exact-key lookup here read
+			// it as absent — and absent is a funded state. Folding the lookup makes the two
+			// agree, which is better than refusing: the request is priced at what will be
+			// rendered.
+			name:        "bypass: case-variant duration key is priced, not absent",
+			reqBody:     []byte(`{"model":"m","Seconds":15}`),
+			wantSeconds: 15,
+			wantState:   videoDurationPriced,
+		},
+		{
+			name:        "upper-case duration key is priced",
+			reqBody:     []byte(`{"model":"m","SECONDS":15}`),
+			wantSeconds: 15,
+			wantState:   videoDurationPriced,
+		},
+		{
+			// BYPASS: Go resolves competing variants by document order — the LAST wins, even
+			// over an exact match — so there is no safe single reading from an unordered map.
+			// Measured: this gate read 1, the upstream read 15.
+			name:      "bypass: competing duration key variants are unpriceable",
+			reqBody:   []byte(`{"seconds":1,"Seconds":15}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			name:        "case-variant size key is read, not dropped",
+			reqBody:     []byte(`{"seconds":15,"Size":"1024x1792"}`),
+			wantSeconds: 15,
+			wantSize:    "1024x1792",
+			wantState:   videoDurationPriced,
+		},
+		{
+			name:      "bypass: competing size key variants are unpriceable",
+			reqBody:   []byte(`{"seconds":15,"size":"832x480","SIZE":"1024x1792"}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
 			name:      "non-object json body is unpriceable",
 			reqBody:   []byte(`[1,2]`),
 			wantState: videoDurationUnpriceable,
@@ -787,6 +824,27 @@ func TestVideoReserveSecondsSizeFromRequest(t *testing.T) {
 			// as "field absent".
 			name:        "bypass: unwalkable multipart body is unpriceable",
 			reqBody:     []byte("--boundary\r\nbroken-header-line\r\n\r\nx\r\n--boundary\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n15\r\n--boundary--"),
+			contentType: reserveMultipartCT,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			// `model` selects the price, so it is in the same refuse-on-ambiguity set as the
+			// duration and the size.
+			name: "bypass: repeated multipart model is unpriceable",
+			reqBody: rawMultipartBody(
+				[2]string{"seconds", "6"},
+				[2]string{"model", "cheap"},
+				[2]string{"model", "expensive"},
+			),
+			contentType: reserveMultipartCT,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			name: "bypass: padded multipart model is unpriceable",
+			reqBody: rawMultipartBody(
+				[2]string{"seconds", "6"},
+				[2]string{"model", strings.Repeat(" ", 2000) + "expensive"},
+			),
 			contentType: reserveMultipartCT,
 			wantState:   videoDurationUnpriceable,
 		},
@@ -905,21 +963,43 @@ func TestVideoReserveUnits_PerModelTier(t *testing.T) {
 			Mode: config.BillingModePerUnitTable,
 			Table: []config.BillingUnitTier{
 				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "768P", Duration: 10, Units: 20},
 				{Resolution: "1080P", Duration: 6, Units: 12},
+				{Resolution: "1080P", Duration: 10, Units: 40},
 			},
 		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "1080P"}},
 	}
 	c := &Ctrl{
 		logger:  testLogger(),
 		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo"),
 	}
 
+	// An exact row: the tier the client named by name is honoured (the service ratio alone
+	// would have produced 6).
 	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":6,"size":"1080P"}`, 12)
-	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`, 6)
+
+	// A DURATION the table does not carry, at a resolution it does. Settlement rounds UP to
+	// the covering bucket (NextBucketUnits), so the reserve must too — falling through to the
+	// seconds x service-ratio basis reserved 7 units against a 40-unit bill.
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":7,"size":"1080P"}`, 40)
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":9,"size":"768P"}`, 20)
+
+	// An omitted size takes the published tier, so it lands on a table row rather than the
+	// baseline: 9s at 1080P rounds up to the 10s bucket.
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":9}`, 40)
+
+	// A size the table prices nowhere. Table units are not seconds — a 6s clip at 2K can be 60
+	// units — so the seconds x ratio basis is not a conservative fallback for a
+	// resolution-keyed model, it is a different scale. Refused, broker-attributed, because
+	// publishing a usable default resolution is the operator's job.
+	if _, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`), "application/json"); !errors.Is(err, ErrVideoDefaultSizeUnpublished) {
+		t.Errorf("err = %v, want ErrVideoDefaultSizeUnpublished for a tier this model prices nowhere", err)
+	}
 
 	// A model this service does not serve must be reported as such, not as an invalid
-	// `seconds`: the allowlist's own check runs after this gate, so folding the two lost
-	// the model_mismatch accounting that throttles name enumeration.
+	// `seconds`: the allowlist's own check runs after this gate, so folding the two lost the
+	// model_mismatch accounting that throttles name enumeration.
 	if _, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"not-a-model","prompt":"x"}`), "application/json"); !errors.Is(err, ErrVideoModelNotServed) {
 		t.Errorf("err = %v, want ErrVideoModelNotServed", err)
 	}
@@ -932,28 +1012,51 @@ func TestVideoReserveUnits_PerModelTier(t *testing.T) {
 // It pins the KNOWN-GOOD pairs. The documented residuals are deliberately absent: they are
 // the pairs where this invariant does not hold yet.
 func TestVideoReserveNeverBelowSettlement(t *testing.T) {
-	entry := config.ModelPricingEntry{
+	perSecond := config.ModelPricingEntry{
 		Model:       "minimax-hailuo",
 		OutputPrice: "100",
 		Billing: &config.BillingConfig{
 			Mode:                  config.BillingModePerVideoSecond,
 			ResolutionMultipliers: map[string]float64{"768P": 1.0, "1080P": 2.0},
 		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 4, "size": "768P"}},
+	}
+	perTable := config.ModelPricingEntry{
+		Model:       "bucketed",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "768P", Duration: 10, Units: 20},
+				{Resolution: "1080P", Duration: 6, Units: 12},
+				{Resolution: "1080P", Duration: 10, Units: 40},
+			},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "1080P"}},
 	}
 	c := &Ctrl{
 		logger:  testLogger(),
-		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo"),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{perSecond, perTable}, "minimax-hailuo"),
 	}
 
 	cases := []struct {
 		name           string
+		model          string
 		body           string
 		renderedSize   string
 		renderedSecond int64
 	}{
-		{name: "rendered tier equals the requested tier", body: `{"model":"minimax-hailuo","seconds":6,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 6},
-		{name: "rendered duration shorter than requested", body: `{"model":"minimax-hailuo","seconds":15,"size":"768P"}`, renderedSize: "768P", renderedSecond: 10},
-		{name: "cheap size requested, baseline rendered", body: `{"model":"minimax-hailuo","seconds":15,"size":"832x480"}`, renderedSize: "768P", renderedSecond: 15},
+		{name: "per_video_second: rendered tier equals the requested tier", model: "minimax-hailuo", body: `{"model":"minimax-hailuo","seconds":6,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 6},
+		{name: "per_video_second: rendered duration shorter than requested", model: "minimax-hailuo", body: `{"model":"minimax-hailuo","seconds":15,"size":"768P"}`, renderedSize: "768P", renderedSecond: 10},
+		{name: "per_video_second: size omitted, published tier rendered", model: "minimax-hailuo", body: `{"model":"minimax-hailuo","seconds":15}`, renderedSize: "768P", renderedSecond: 15},
+		{name: "per_video_second: duration omitted, published default rendered", model: "minimax-hailuo", body: `{"model":"minimax-hailuo","size":"1080P"}`, renderedSize: "1080P", renderedSecond: 4},
+		// The bucketed rows are what a duration-miss regression shows up on: settlement rounds
+		// up to the covering bucket, so a reserve on the seconds x ratio basis is 5.7x low.
+		{name: "per_unit_table: exact row", model: "bucketed", body: `{"model":"bucketed","seconds":6,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 6},
+		{name: "per_unit_table: duration between buckets", model: "bucketed", body: `{"model":"bucketed","seconds":7,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 7},
+		{name: "per_unit_table: duration between buckets at the cheap tier", model: "bucketed", body: `{"model":"bucketed","seconds":9,"size":"768P"}`, renderedSize: "768P", renderedSecond: 9},
+		{name: "per_unit_table: size omitted, published tier rendered", model: "bucketed", body: `{"model":"bucketed","seconds":9}`, renderedSize: "1080P", renderedSecond: 9},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -961,7 +1064,7 @@ func TestVideoReserveNeverBelowSettlement(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			settled := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), tc.renderedSecond, tc.renderedSize)
+			settled := c.videoOutputUnits(ginCtxWithResolvedModel(tc.model), tc.renderedSecond, tc.renderedSize)
 			if reserve < settled {
 				t.Errorf("reserve %d < settled %d — the gate admitted a request it cannot cover", reserve, settled)
 			}
@@ -1008,55 +1111,80 @@ func TestVideoCreateReserveFee(t *testing.T) {
 
 // TestMultipartFormFields covers the one-walk reader the reserve depends on. Each row is a
 // shape where "the value this reader returns" and "the value the upstream's form parser
-// returns" can differ, which is why the reserve needs presence, truncation and
+// returns" can differ, which is why the reserve needs repetition, truncation and
 // walk-completion rather than just a string.
 func TestMultipartFormFields(t *testing.T) {
 	t.Run("value, presence and clean walk", func(t *testing.T) {
-		f := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), reserveMultipartCT, "seconds", "size")["seconds"]
-		if !f.WalkOK || f.Truncated || len(f.Values) != 1 || f.Values[0] != "15" {
-			t.Errorf("got %+v, want one value \"15\", walked, untruncated", f)
+		fields, walkedOK := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), reserveMultipartCT, "seconds", "size")
+		if !walkedOK {
+			t.Fatal("walkedOK = false for a well-formed body")
+		}
+		f := fields["seconds"]
+		if f.Truncated || len(f.Values) != 1 || f.Values[0] != "15" {
+			t.Errorf("got %+v, want one value \"15\", untruncated", f)
 		}
 	})
 	t.Run("absent field on a clean walk", func(t *testing.T) {
-		f := multipartFormFields(multipartBody(map[string]string{"model": "m"}), reserveMultipartCT, "seconds")["seconds"]
-		if !f.WalkOK || len(f.Values) != 0 {
-			t.Errorf("got %+v, want no values on a completed walk", f)
+		fields, walkedOK := multipartFormFields(multipartBody(map[string]string{"model": "m"}), reserveMultipartCT, "seconds")
+		if !walkedOK || len(fields["seconds"].Values) != 0 {
+			t.Errorf("got %+v walkedOK=%v, want no values on a completed walk", fields["seconds"], walkedOK)
 		}
 	})
 	t.Run("repeated field keeps every value in order", func(t *testing.T) {
-		// This reader takes the first; Starlette/FastAPI take the last. Callers must see
-		// both to be able to refuse.
-		f := multipartFormFields(rawMultipartBody([2]string{"seconds", "1"}, [2]string{"seconds", "15"}), reserveMultipartCT, "seconds")["seconds"]
-		if len(f.Values) != 2 || f.Values[0] != "1" || f.Values[1] != "15" {
-			t.Errorf("values = %q, want [1 15]", f.Values)
+		// This reader takes the first; Starlette/FastAPI take the last. Callers must see both
+		// to be able to refuse.
+		fields, _ := multipartFormFields(rawMultipartBody([2]string{"seconds", "1"}, [2]string{"seconds", "15"}), reserveMultipartCT, "seconds")
+		if v := fields["seconds"].Values; len(v) != 2 || v[0] != "1" || v[1] != "15" {
+			t.Errorf("values = %q, want [1 15]", v)
 		}
 	})
 	t.Run("value past the cap is reported truncated", func(t *testing.T) {
-		f := multipartFormFields(rawMultipartBody([2]string{"seconds", strings.Repeat("0", maxMultipartFieldBytes+10) + "15"}), reserveMultipartCT, "seconds")["seconds"]
-		if !f.Truncated {
-			t.Errorf("got %+v, want Truncated for a value past the cap", f)
+		fields, _ := multipartFormFields(rawMultipartBody([2]string{"seconds", strings.Repeat("0", maxMultipartFieldBytes+10) + "15"}), reserveMultipartCT, "seconds")
+		if !fields["seconds"].Truncated {
+			t.Errorf("got %+v, want Truncated for a value past the cap", fields["seconds"])
 		}
 	})
-	t.Run("unwalkable body reports WalkOK false", func(t *testing.T) {
+	t.Run("unwalkable body reports walkedOK false", func(t *testing.T) {
 		body := []byte("--boundary\r\nbroken-header-line\r\n\r\nx\r\n--boundary--")
-		if f := multipartFormFields(body, reserveMultipartCT, "seconds")["seconds"]; f.WalkOK {
-			t.Errorf("got %+v, want WalkOK false for a malformed body", f)
+		if _, walkedOK := multipartFormFields(body, reserveMultipartCT, "seconds"); walkedOK {
+			t.Error("walkedOK = true for a malformed body")
 		}
 	})
-	t.Run("missing boundary reports WalkOK false", func(t *testing.T) {
-		if f := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), "multipart/form-data", "seconds")["seconds"]; f.WalkOK {
-			t.Errorf("got %+v, want WalkOK false without a boundary", f)
+	t.Run("missing boundary reports walkedOK false", func(t *testing.T) {
+		if _, walkedOK := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), "multipart/form-data", "seconds"); walkedOK {
+			t.Error("walkedOK = true without a boundary")
 		}
 	})
 	t.Run("file parts are not values", func(t *testing.T) {
 		body := []byte("--boundary\r\nContent-Disposition: form-data; name=\"seconds\"; filename=\"s.txt\"\r\n\r\n15\r\n--boundary--")
-		if f := multipartFormFields(body, reserveMultipartCT, "seconds")["seconds"]; len(f.Values) != 0 {
-			t.Errorf("values = %q, want none for a file part", f.Values)
+		fields, _ := multipartFormFields(body, reserveMultipartCT, "seconds")
+		if len(fields["seconds"].Values) != 0 {
+			t.Errorf("values = %q, want none for a file part", fields["seconds"].Values)
 		}
 	})
-	t.Run("multipartFormField still returns the first value", func(t *testing.T) {
+	t.Run("an unrequested name cannot be mistaken for an unwalkable body", func(t *testing.T) {
+		// walkedOK is a property of the BODY and returned separately for this reason: a zero
+		// multipartField for a name nobody asked for used to carry WalkOK=false, so reading it
+		// looked exactly like "this body could not be parsed".
+		fields, walkedOK := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), reserveMultipartCT, "seconds")
+		if !walkedOK {
+			t.Fatal("walkedOK = false for a well-formed body")
+		}
+		if f, asked := fields["size"]; asked || len(f.Values) != 0 {
+			t.Errorf("unrequested name present in the result: %+v", f)
+		}
+	})
+	t.Run("multipartFormField still returns the first value and stops early", func(t *testing.T) {
 		if got := multipartFormField(rawMultipartBody([2]string{"model", "a"}, [2]string{"model", "b"}), reserveMultipartCT, "model"); got != "a" {
 			t.Errorf("multipartFormField = %q, want %q", got, "a")
+		}
+		// It must not need a walkable remainder: the shared modalities (speech-to-text,
+		// image-editing) read `model` from the head of a body whose tail is megabytes of
+		// upload, and delegating to the full-walk reader cost ~34ms of CPU per request.
+		head := rawMultipartBody([2]string{"model", "whisper-1"})
+		truncated := append([]byte(nil), head[:len(head)-len("--boundary--")]...)
+		if got := multipartFormField(truncated, reserveMultipartCT, "model"); got != "whisper-1" {
+			t.Errorf("multipartFormField on an unterminated body = %q, want %q", got, "whisper-1")
 		}
 	})
 }
@@ -1156,21 +1284,82 @@ func TestVideoDefaultParametersValidatedAtLoad(t *testing.T) {
 		}
 		return mi
 	}
-	if err := newInfo(nil).Validate("video-generation"); err != nil {
-		t.Errorf("a video model publishing no default must still load: %v", err)
+	// Required, not merely validated: with nothing published the reserve refuses every create
+	// that omits `seconds` — the OpenAI Video API's default request shape — so the operator has
+	// to learn about it at deploy time rather than from 503s on conforming traffic.
+	if err := newInfo(nil).Validate("video-generation"); err == nil {
+		t.Error("a video model publishing no default duration must fail config load")
+	}
+	// A blank `seconds:` in YAML decodes to nil: that is "published nothing", the same state as
+	// omitting the key, and must produce the required-field error rather than a typo error.
+	if err := newInfo(nil).Validate("video-generation"); err == nil || !strings.Contains(err.Error(), "is required") {
+		t.Errorf("err = %v, want the required-field error", err)
 	}
 	if err := newInfo(4).Validate("video-generation"); err != nil {
 		t.Errorf("a usable published default must load: %v", err)
 	}
-	for _, bad := range []interface{}{0, 3601, "auto", true, 0.4} {
+	for _, bad := range []interface{}{0, 3601, "auto", true, 0.4, math.NaN()} {
 		if err := newInfo(bad).Validate("video-generation"); err == nil {
 			t.Errorf("defaultParameters.seconds = %v must fail config load", bad)
 		}
 	}
+	// A present-but-unusable `size` must fail too: it degrades SILENTLY at runtime (a YAML
+	// `size: 1080` decodes as an int, reports unpublished, and the reserve drops to the
+	// baseline ratio with no error, log or metric).
+	for _, badSize := range []interface{}{1080, "", "   ", true} {
+		mi := newInfo(4)
+		mi.DefaultParameters["size"] = badSize
+		if err := mi.Validate("video-generation"); err == nil {
+			t.Errorf("defaultParameters.size = %v must fail config load", badSize)
+		}
+	}
+
 	// Non-video services are unaffected: the field is pure /v1/models metadata there.
 	mi := newInfo("auto")
 	mi.ContextLength = 4096
 	if err := mi.Validate("chatbot"); err != nil {
 		t.Errorf("a chatbot model must not be gated on video defaults: %v", err)
 	}
+}
+
+// TestVideoReserveRequestModel pins that the model the reserve prices against is the model the
+// upstream will actually be asked for.
+//
+// The gate and the translator must read it with the same parser. ExtractModelName used
+// json.Unmarshal (whole-input validation) while the translator uses a json.Decoder (which
+// ignores trailing data), so one appended byte made the gate read no model at all and fall back
+// to the configured default: the reserve priced the default model, ResolveModelForBilling's
+// allowlist passed a model the caller never named, settlement billed the default's price, and
+// the upstream rendered the expensive one.
+func TestVideoReserveRequestModel(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		contentType string
+		want        string
+	}{
+		{name: "named in json", body: `{"model":"expensive","seconds":6}`, want: "expensive"},
+		{name: "named in json with trailing data", body: `{"model":"expensive","seconds":6}x`, want: "expensive"},
+		{name: "named in json with a trailing object", body: `{"model":"expensive"}` + "\n{}", want: "expensive"},
+		{name: "absent falls back to the configured model", body: `{"seconds":6}`, want: "configured"},
+		{name: "unparseable falls back to the configured model", body: `not json`, want: "configured"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ct := tt.contentType
+			if ct == "" {
+				ct = "application/json"
+			}
+			if got := videoReserveRequestModel([]byte(tt.body), ct, "configured"); got != tt.want {
+				t.Errorf("videoReserveRequestModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("multipart", func(t *testing.T) {
+		body := multipartBody(map[string]string{"model": "expensive", "seconds": "6"})
+		if got := videoReserveRequestModel(body, reserveMultipartCT, "configured"); got != "expensive" {
+			t.Errorf("videoReserveRequestModel() = %q, want %q", got, "expensive")
+		}
+	})
 }

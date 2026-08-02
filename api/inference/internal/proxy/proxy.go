@@ -842,6 +842,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// or a job that never delivers would settle as real revenue. Tracked as a
 		// residual in docs/design/video-generation-async-billing.md, deliberately not
 		// done here: getting it half right bills callers for videos they never got.
+		if ctx.Request.Method != http.MethodPost {
+			// TargetRoute is keyed on path only, so a bodyless GET /videos (the OpenAI Video
+			// API's list operation) lands in this arm too. There is no clip to generate and
+			// nothing to price; reserving the published default duration for it would demand
+			// balance for a video nobody asked for, and refusing would 503 a read.
+			expectedInputFee = "0"
+			break
+		}
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
 			switch {
@@ -861,6 +869,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				reason := monitor.RejectionInvalidRequest
 				if errors.Is(err, ctrl.ErrVideoModelNotServed) {
 					reason = monitor.RejectionModelMismatch
+					// rejections.record is a Prometheus counter; RecordModelMismatch is what
+					// feeds the per-user limiter that BLOCKS a wallet spamming model names.
+					// Refusing here short-circuits ResolveModelForBilling, the only other
+					// caller, so without this the video path lost its enumeration throttle
+					// entirely — a regression, not a pre-existing gap.
+					p.ctrl.RecordModelMismatch(userAddress, ctrl.ExtractModelName(reqBody, ctx.Request.Header.Get("Content-Type")))
 				}
 				ctx.Set("ignoreError", true)
 				p.rejections.record(ctx, reason, userAddress)
@@ -870,23 +884,36 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// entirely, so the context string would have had no reader.
 				p.handleBrokerError(ctx, err, "")
 				return
-			case errors.Is(err, ctrl.ErrPricingUnavailable), errors.Is(err, ctrl.ErrVideoDefaultDurationUnpublished):
-				// Broker-side, and each already carries its own 5xx: a stale/unpopulated USD
-				// rate snapshot (GetCachedService fails closed), or a model publishing no
-				// default duration for the gate to price. NOT flagged ignoreError — both
-				// must reach the broker-fault alert rather than be attributed to the client.
-				p.handleBrokerError(ctx, err, "estimate video pre-flight reserve")
+			case errors.Is(err, ctrl.ErrPricingUnavailable),
+				errors.Is(err, ctrl.ErrVideoDefaultDurationUnpublished),
+				errors.Is(err, ctrl.ErrVideoDefaultSizeUnpublished):
+				// Broker-side, with a message the operator (and the caller) can act on: a
+				// stale/unpopulated USD rate snapshot (GetCachedService fails closed), or a
+				// model that publishes no default duration/resolution for the gate to price.
+				// NOT flagged ignoreError — all three must reach the broker-fault alert rather
+				// than be attributed to the client. Wrapped rather than passed through so the
+				// 503 does not depend on each listed sentinel already carrying one: a future
+				// addition built with errors.New would otherwise fall to errors.Response's
+				// 400 default and be attributed to the caller.
+				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "estimate video pre-flight reserve")
 				return
 			default:
-				// Anything else here is broker infrastructure: a contract read that could
-				// not reach the RPC endpoint, or an unparseable configured price. Mapped to
-				// 503 explicitly, because errors.Response defaults an unclassified error to
-				// 400 — which told the client a broker outage was their fault and, since it
-				// only redacts at >= 500, handed them the RPC endpoint and dial error in the
-				// response body. This path is also a NEW dependency for multi-model video
-				// providers (GetBillingPrices took the per-model branch and never read the
-				// contract at gate time), so an RPC blip has to be retryable, not terminal.
-				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "estimate video pre-flight reserve")
+				// Anything else here is broker infrastructure: a contract read that could not
+				// reach the RPC endpoint, or an unparseable configured price. Two separate
+				// problems with the naive handling, both fixed here:
+				//
+				// Retryability — errors.Response defaults an unclassified error to 400, which
+				// told the client a broker outage was their fault. This path is a NEW
+				// dependency for multi-model video providers (GetBillingPrices took the
+				// per-model branch and never read the contract at gate time), so an RPC blip
+				// has to be retryable rather than terminal.
+				//
+				// Disclosure — errors.Response replaces the message only at EXACTLY 500, so a
+				// 503 body ships whatever it was handed: "dial tcp 10.x.x.x:8545: connect:
+				// connection refused" went straight to the caller. The cause is logged here
+				// and the client gets a generic 503.
+				p.logger.Errorf("video pre-flight reserve failed (broker infrastructure): %v", err)
+				p.handleBrokerError(ctx, errors.ServiceUnavailable(errors.New("video pricing temporarily unavailable")), "")
 				return
 			}
 		}
