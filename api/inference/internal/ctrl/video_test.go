@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -534,176 +535,267 @@ func TestEscapeVendorJobID(t *testing.T) {
 
 const reserveMultipartCT = "multipart/form-data; boundary=boundary"
 
-// newReserveCtrl builds a Ctrl whose service price is served from the cache, so
-// VideoCreateReserveFee needs no contract. OutputPrice 1000 keeps the arithmetic
-// readable: fee == units * 1000.
-func newReserveCtrl(t *testing.T, svc config.Service) *Ctrl {
-	t.Helper()
-	c := &Ctrl{
-		logger:       testLogger(),
-		Service:      svc,
-		serviceCache: cache.New(time.Minute, time.Minute),
+// rawMultipartBody builds a body from ordered (name, value) pairs so a test can emit a
+// REPEATED field — which map-keyed multipartBody cannot express, and which is the shape
+// where this reader and a Starlette-style form parser disagree.
+func rawMultipartBody(pairs ...[2]string) []byte {
+	var body string
+	for _, p := range pairs {
+		body += "--boundary\r\nContent-Disposition: form-data; name=\"" + p[0] + "\"\r\n\r\n" + p[1] + "\r\n"
 	}
-	c.serviceCache.Set("current_service", model.Service{OutputPrice: "1000"}, cache.DefaultExpiration)
-	return c
+	return []byte(body + "--boundary--")
 }
 
-// TestVideoReserveUnitsFromRequest covers the unit basis the pre-flight balance gate
-// reserves on — the number that used to be effectively zero (expectedInputFee = "0"),
-// leaving MinimumLockedBalance as the only thing between a caller and a clip billing
-// many times their locked balance.
-//
-// Every wantErr case below was a measured under-reserve before it was made a refusal:
-// the gate cannot price the duration, and flooring instead of refusing is what let a
-// caller pay for 1 unit and receive up to 15.
-func TestVideoReserveUnitsFromRequest(t *testing.T) {
-	// ModelInfo nil → config.DefaultVideoSizeRatios (1280x720 = 1.0, 1024x1792 = 2.0,
-	// 832x480 = 0.5, anything unlisted = 1.0).
-	c := &Ctrl{logger: testLogger(), Service: config.Service{}}
+func (s videoReserveDuration) String() string {
+	switch s {
+	case videoDurationPriced:
+		return "priced"
+	case videoDurationAbsent:
+		return "absent"
+	default:
+		return "unpriceable"
+	}
+}
 
+// TestVideoReserveSecondsSizeFromRequest asserts the CLASSIFICATION directly, not just
+// "some error came back".
+//
+// That distinction is the whole point of the three states, and asserting only the outer
+// error is how two bypasses hid through a full review round: on a service that publishes
+// no default duration, `absent` and `unpriceable` both surface as an error, so a row that
+// should have been `unpriceable` passed while actually being classified `absent` — a
+// FUNDED state that prices the published default. Every `unpriceable` row below is a
+// measured under-reserve, not a hypothetical.
+func TestVideoReserveSecondsSizeFromRequest(t *testing.T) {
 	tests := []struct {
 		name        string
 		reqBody     []byte
 		contentType string
-		want        int64
-		wantErr     bool
+		wantSeconds int64
+		wantSize    string
+		wantState   videoReserveDuration
 	}{
 		{
-			// The shape published in the model page's examples.
-			name:    "json seconds with baseline pixel size",
-			reqBody: []byte(`{"model":"MiniMax-H3","prompt":"a cat","seconds":6,"size":"1280x720"}`),
-			want:    6,
+			name:        "json duration and pixel size",
+			reqBody:     []byte(`{"model":"MiniMax-H3","prompt":"a cat","seconds":6,"size":"1280x720"}`),
+			wantSeconds: 6,
+			wantSize:    "1280x720",
+			wantState:   videoDurationPriced,
 		},
 		{
-			// Measured live: 5s at "2K" billed 5 units × outputPrice (6.698 0G against a
-			// 1.0 0G lock). "2K" is not in DefaultVideoSizeRatios, so it takes the 1.0
-			// baseline — which is exactly what settlement billed.
-			name:    "json seconds with unlisted resolution token takes baseline",
-			reqBody: []byte(`{"model":"MiniMax-H3","prompt":"a cat","seconds":5,"size":"2K"}`),
-			want:    5,
+			// BYPASS: json.Unmarshal validates the whole input first, so one appended byte
+			// populated NOTHING and the old guard fell through to the multipart reader,
+			// which on a JSON content type reports the field absent. The translator decodes
+			// with json.Decoder, which ignores trailing data and renders the full 15s.
+			name:        "bypass: trailing byte must not hide the duration",
+			reqBody:     []byte(`{"seconds":15,"size":"1280x720"}x`),
+			wantSeconds: 15,
+			wantSize:    "1280x720",
+			wantState:   videoDurationPriced,
 		},
 		{
-			name:    "size ratio above baseline scales the reserve up",
-			reqBody: []byte(`{"seconds":5,"size":"1024x1792"}`),
-			want:    10,
+			name:        "trailing comma is tolerated like the upstream decoder",
+			reqBody:     []byte(`{"seconds":15,"size":"1280x720"},`),
+			wantSeconds: 15,
+			wantSize:    "1280x720",
+			wantState:   videoDurationPriced,
 		},
 		{
-			// BYPASS: size is client-controlled, the bill uses the RESPONSE's size. H3
-			// only renders 2K (ratio 1.0), so an honoured 0.5 reserved 8 against a
-			// 15-unit bill. Deleting the clamp reopens it.
-			name:    "bypass: cheap size must not halve the reserve",
-			reqBody: []byte(`{"seconds":15,"size":"832x480"}`),
-			want:    15,
+			name:        "trailing second object is tolerated",
+			reqBody:     []byte("{\"seconds\":15,\"size\":\"1280x720\"}\n{\"seconds\":1}"),
+			wantSeconds: 15,
+			wantSize:    "1280x720",
+			wantState:   videoDurationPriced,
 		},
 		{
-			// BYPASS: the request used to be parsed with videoResponseFields, which
-			// carries `usage`/`id`/`status`. encoding/json returns a type error for one
-			// wrong-typed sibling while still decoding the rest, so honouring that error
-			// threw away a valid seconds=15 and reserved 1. A lenient upstream ignores
-			// the extra key and renders the full 15s.
-			name:    "bypass: wrong-typed sibling field must not discard seconds",
-			reqBody: []byte(`{"seconds":15,"size":"1280x720","usage":0,"status":0,"id":123}`),
-			want:    15,
+			// Unknown siblings are ignored outright now that the reserve decodes key-wise
+			// rather than through the response struct.
+			name:        "response-shaped siblings do not disturb the duration",
+			reqBody:     []byte(`{"seconds":15,"size":"1280x720","usage":0,"status":0,"id":123}`),
+			wantSeconds: 15,
+			wantSize:    "1280x720",
+			wantState:   videoDurationPriced,
 		},
 		{
-			// A wrong-typed `size` degrades only `size` (to the baseline), and must not
-			// be misreported as an invalid `seconds`.
-			name:    "wrong-typed size degrades to baseline without erroring",
-			reqBody: []byte(`{"seconds":15,"size":1080}`),
-			want:    15,
+			name:        "string-encoded duration is priced",
+			reqBody:     []byte(`{"seconds":"15"}`),
+			wantSeconds: 15,
+			wantState:   videoDurationPriced,
 		},
 		{
-			// encoding/json unquotes into json.Number, so a string-encoded duration is
-			// priced the same.
-			name:    "string-encoded seconds is priced",
-			reqBody: []byte(`{"seconds":"15","size":"1280x720"}`),
-			want:    15,
+			name:        "fractional duration rounds up",
+			reqBody:     []byte(`{"seconds":4.1}`),
+			wantSeconds: 5,
+			wantState:   videoDurationPriced,
 		},
 		{
-			name:    "fractional seconds round up",
-			reqBody: []byte(`{"seconds":4.1,"size":"1280x720"}`),
-			want:    5,
+			name:        "wrong-typed size degrades only the size",
+			reqBody:     []byte(`{"seconds":15,"size":1080}`),
+			wantSeconds: 15,
+			wantState:   videoDurationPriced,
 		},
 		{
-			// BYPASS: ceilSeconds refuses anything above maxVideoOutputUnits, which made
-			// this indistinguishable from "no duration given" — while the translator
-			// clamps it DOWN to the model maximum and bills in full.
-			name:    "bypass: out-of-range seconds is refused, not floored",
-			reqBody: []byte(`{"seconds":1e20,"size":"1280x720"}`),
-			wantErr: true,
+			name:      "omitted duration keeps the size",
+			reqBody:   []byte(`{"prompt":"a cat","size":"1024x1792"}`),
+			wantSize:  "1024x1792",
+			wantState: videoDurationAbsent,
 		},
 		{
-			name:    "seconds beyond float64 range is refused",
-			reqBody: []byte(`{"seconds":1e400,"size":"1280x720"}`),
-			wantErr: true,
+			// An explicit null is a client saying "unset" — the upstream treats it the same
+			// as omitting the key, so it must not be refused.
+			name:      "explicit null duration keeps the size",
+			reqBody:   []byte(`{"seconds":null,"size":"1024x1792"}`),
+			wantSize:  "1024x1792",
+			wantState: videoDurationAbsent,
 		},
 		{
-			name:    "non-numeric seconds is refused",
-			reqBody: []byte(`{"seconds":"abc","size":"1280x720"}`),
-			wantErr: true,
+			// BYPASS: ceilSeconds refuses anything above maxVideoOutputUnits, and the
+			// translator clamps the same value DOWN to the model maximum and bills it.
+			name:      "bypass: out-of-range duration is unpriceable",
+			reqBody:   []byte(`{"seconds":1e20}`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			// BYPASS: the upstream applies its own default duration (H3: 4s) and bills it,
-			// so an omitted `seconds` used to buy a 4x under-reserve for free. This
-			// service publishes no default, so there is nothing to price and the only
-			// answer that is not a giveaway is a refusal. See
-			// TestVideoReserveUnits_AbsentSecondsUsesPublishedDefault for the case where
-			// the model does publish one.
-			name:    "bypass: absent seconds with no published default is refused",
-			reqBody: []byte(`{"model":"MiniMax-H3","prompt":"a cat","size":"1280x720"}`),
-			wantErr: true,
+			name:      "bypass: out-of-range duration plus trailing byte is still unpriceable",
+			reqBody:   []byte(`{"seconds":1e20}x`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			// An explicit null is a client saying "unset" — same state as absent, not an
-			// unpriceable value.
-			name:    "explicit null seconds is treated as absent",
-			reqBody: []byte(`{"seconds":null,"size":"1280x720"}`),
-			wantErr: true,
+			name:      "duration beyond float64 range is unpriceable",
+			reqBody:   []byte(`{"seconds":1e400}`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			name:    "zero seconds is refused",
-			reqBody: []byte(`{"seconds":0,"size":"1280x720"}`),
-			wantErr: true,
+			// BYPASS: a wrong JSON TYPE is a hard decode failure for json.Number, so these
+			// left the field empty and were classified absent — priced at the default while
+			// a laxer upstream (pydantic, float("+6")) reads the real value.
+			name:      "bypass: non-numeric string duration is unpriceable",
+			reqBody:   []byte(`{"seconds":"abc"}`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			name:    "negative seconds is refused",
-			reqBody: []byte(`{"seconds":-15,"size":"1280x720"}`),
-			wantErr: true,
+			name:      "bypass: space-padded string duration is unpriceable",
+			reqBody:   []byte(`{"seconds":" 6 "}`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			name:    "empty body is refused",
-			reqBody: nil,
-			wantErr: true,
+			name:      "bypass: signed string duration is unpriceable",
+			reqBody:   []byte(`{"seconds":"+6"}`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			name:    "unparseable body is refused",
-			reqBody: []byte(`not json at all`),
-			wantErr: true,
+			name:      "bypass: boolean duration is unpriceable",
+			reqBody:   []byte(`{"seconds":true}`),
+			wantState: videoDurationUnpriceable,
 		},
 		{
-			name:        "multipart seconds and size",
+			name:      "bypass: array duration is unpriceable",
+			reqBody:   []byte(`{"seconds":[15]}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			// And it must not take the size with it into a funded state.
+			name:      "bypass: object duration with a dear size is unpriceable",
+			reqBody:   []byte(`{"seconds":{"v":15},"size":"1024x1792"}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			name:      "zero duration is unpriceable",
+			reqBody:   []byte(`{"seconds":0}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			name:      "negative duration is unpriceable",
+			reqBody:   []byte(`{"seconds":-15}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			name:      "non-object json body is unpriceable",
+			reqBody:   []byte(`[1,2]`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			name:      "unparseable body is unpriceable",
+			reqBody:   []byte(`not json at all`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
+			name:      "empty body is absent",
+			reqBody:   nil,
+			wantState: videoDurationAbsent,
+		},
+		{
+			name:        "multipart duration and size",
 			reqBody:     multipartBody(map[string]string{"model": "MiniMax-H3", "seconds": "6", "size": "1024x1792"}),
 			contentType: reserveMultipartCT,
-			want:        12,
+			wantSeconds: 6,
+			wantSize:    "1024x1792",
+			wantState:   videoDurationPriced,
 		},
 		{
-			name:        "multipart without seconds is refused",
-			reqBody:     multipartBody(map[string]string{"model": "MiniMax-H3", "prompt": "a cat"}),
+			name:        "multipart without a duration is absent, size preserved",
+			reqBody:     rawMultipartBody([2]string{"model", "MiniMax-H3"}, [2]string{"size", "1024x1792"}),
 			contentType: reserveMultipartCT,
-			wantErr:     true,
+			wantSize:    "1024x1792",
+			wantState:   videoDurationAbsent,
 		},
 		{
-			// BYPASS: multipartFormField reads at most 1024 bytes of a part and trims,
-			// so a value padded past that ceiling comes back "". Treating that as an
-			// absent field floored the reserve at 1 while the upstream's own form parser
-			// read the whole value and rendered the full duration.
-			name: "bypass: multipart seconds padded past the read limit is refused",
-			reqBody: multipartBody(map[string]string{
-				"model":   "MiniMax-H3",
-				"seconds": strings.Repeat(" ", 2000) + "15",
-			}),
+			// BYPASS: the field reader caps a part at 1024 bytes, so a padded value read as
+			// empty while the upstream's form parser (no cap, and it trims) read the real
+			// one.
+			name: "bypass: padded multipart duration is unpriceable",
+			reqBody: rawMultipartBody(
+				[2]string{"model", "MiniMax-H3"},
+				[2]string{"seconds", strings.Repeat(" ", 2000) + "15"},
+			),
 			contentType: reserveMultipartCT,
-			wantErr:     true,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			// Same cap, same giveaway, one field over.
+			name: "bypass: padded multipart size is unpriceable",
+			reqBody: rawMultipartBody(
+				[2]string{"seconds", "15"},
+				[2]string{"size", strings.Repeat(" ", 2000) + "1024x1792"},
+			),
+			contentType: reserveMultipartCT,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			// BYPASS: this reader takes the FIRST repeated part; Starlette/FastAPI take the
+			// LAST. Pricing either one lets a caller reserve 1 and be rendered 15.
+			name: "bypass: repeated multipart duration is unpriceable",
+			reqBody: rawMultipartBody(
+				[2]string{"seconds", "1"},
+				[2]string{"seconds", "15"},
+			),
+			contentType: reserveMultipartCT,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			name: "bypass: repeated multipart size is unpriceable",
+			reqBody: rawMultipartBody(
+				[2]string{"seconds", "15"},
+				[2]string{"size", "832x480"},
+				[2]string{"size", "1024x1792"},
+			),
+			contentType: reserveMultipartCT,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			// BYPASS: a malformed part BEFORE the field aborted the walk, which used to read
+			// as "field absent".
+			name:        "bypass: unwalkable multipart body is unpriceable",
+			reqBody:     []byte("--boundary\r\nbroken-header-line\r\n\r\nx\r\n--boundary\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n15\r\n--boundary--"),
+			contentType: reserveMultipartCT,
+			wantState:   videoDurationUnpriceable,
+		},
+		{
+			// A multipart content type with no boundary cannot be walked either.
+			name:        "multipart content type without a boundary is unpriceable",
+			reqBody:     multipartBody(map[string]string{"seconds": "15"}),
+			contentType: "multipart/form-data",
+			wantState:   videoDurationUnpriceable,
 		},
 	}
 
@@ -713,34 +805,98 @@ func TestVideoReserveUnitsFromRequest(t *testing.T) {
 			if ct == "" {
 				ct = "application/json"
 			}
-			got, err := c.videoReserveUnitsFromRequest(tt.reqBody, ct)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("videoReserveUnitsFromRequest() error = %v, wantErr %v", err, tt.wantErr)
+			seconds, size, state := videoReserveSecondsSizeFromRequest(tt.reqBody, ct)
+			if state != tt.wantState {
+				t.Fatalf("state = %s, want %s", state, tt.wantState)
 			}
-			if tt.wantErr {
-				if !errors.Is(err, ErrVideoSecondsUnpriceable) {
-					t.Errorf("error = %v, want ErrVideoSecondsUnpriceable", err)
-				}
-				return
+			if seconds != tt.wantSeconds {
+				t.Errorf("seconds = %d, want %d", seconds, tt.wantSeconds)
 			}
-			if got != tt.want {
-				t.Errorf("videoReserveUnitsFromRequest() = %d, want %d", got, tt.want)
+			if size != tt.wantSize {
+				t.Errorf("size = %q, want %q", size, tt.wantSize)
 			}
 		})
 	}
 }
 
-// TestVideoReserveUnits_PerModelTier covers the two halves of the per-model rule: a
-// tier the model prices BY NAME is honoured (GetVideoSizeRatio knows only pixel keys,
-// so without this a caller names "1080P" and reserves the 1.0 baseline against a 2x
-// bucket), while a size the model cannot price EXACTLY falls through to the
-// service-ratio basis instead of videoOutputUnits' next-bucket / table-maximum miss
-// handling — which as a reserve would refuse callers who can afford the real bill.
+// TestVideoReserveUnitsFromRequest covers the unit arithmetic on top of the classifier,
+// and the two failure classes the proxy attributes differently.
+func TestVideoReserveUnitsFromRequest(t *testing.T) {
+	// ModelInfo nil → config.DefaultVideoSizeRatios (1280x720 = 1.0, 1024x1792 = 2.0,
+	// 832x480 = 0.5, anything unlisted = 1.0), and no published defaults.
+	bare := &Ctrl{logger: testLogger(), Service: config.Service{}}
+	// Publishes both defaults, the way a video service is expected to.
+	published := &Ctrl{logger: testLogger(), Service: config.Service{
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 4, "size": "1024x1792"}},
+	}}
+
+	t.Run("measured live case: 5s at an unlisted tier takes the baseline", func(t *testing.T) {
+		// 5s at "2K" billed 5 units × outputPrice (6.698 0G against a 1.0 0G lock).
+		assertUnits(t, bare, `{"seconds":5,"size":"2K"}`, 5)
+	})
+	t.Run("above-baseline ratio scales up", func(t *testing.T) {
+		assertUnits(t, bare, `{"seconds":5,"size":"1024x1792"}`, 10)
+	})
+	t.Run("bypass: below-baseline ratio is clamped, not honoured", func(t *testing.T) {
+		// H3 renders only 2K (ratio 1.0), so honouring 0.5 reserved 8 against a 15 bill.
+		assertUnits(t, bare, `{"seconds":15,"size":"832x480"}`, 15)
+	})
+	t.Run("omitted duration is priced at the published default", func(t *testing.T) {
+		// 4 × ratio("1024x1792") = 8: the published size applies too.
+		assertUnits(t, published, `{"prompt":"a cat"}`, 8)
+	})
+	t.Run("bypass: omitted size is priced at the published tier, not the baseline", func(t *testing.T) {
+		// The upstream renders its configured tier and settlement bills THAT, so an
+		// omitted size must not reserve the 1.0 baseline: 6 × 2.0.
+		assertUnits(t, published, `{"seconds":6}`, 12)
+	})
+	t.Run("an explicit size still wins over the published default", func(t *testing.T) {
+		assertUnits(t, published, `{"seconds":6,"size":"1280x720"}`, 6)
+	})
+	t.Run("a published default cannot rescue an unpriceable duration", func(t *testing.T) {
+		if _, err := published.videoReserveUnitsFromRequest([]byte(`{"seconds":1e20}`), "application/json"); !errors.Is(err, ErrVideoSecondsUnpriceable) {
+			t.Errorf("err = %v, want ErrVideoSecondsUnpriceable", err)
+		}
+	})
+	t.Run("no published default is a broker-attributed refusal", func(t *testing.T) {
+		// Client-fault sentinels would blame the caller for an operator config gap.
+		_, err := bare.videoReserveUnitsFromRequest([]byte(`{"prompt":"a cat"}`), "application/json")
+		if !errors.Is(err, ErrVideoDefaultDurationUnpublished) {
+			t.Fatalf("err = %v, want ErrVideoDefaultDurationUnpublished", err)
+		}
+		if errors.Is(err, ErrVideoSecondsUnpriceable) {
+			t.Error("an unpublished default must not be reported as an invalid `seconds`")
+		}
+	})
+	t.Run("NaN ratio cannot slip past the 1.0 clamp", func(t *testing.T) {
+		nan := &Ctrl{logger: testLogger(), Service: config.Service{
+			ModelInfo: &config.ModelInfo{VideoSizeRatios: map[string]float64{"weird": math.NaN()}},
+		}}
+		// videoOutputCount floors NaN at 1 unit, so an unclamped NaN would reserve 1 for a
+		// 15s clip.
+		assertUnits(t, nan, `{"seconds":15,"size":"weird"}`, 15)
+	})
+}
+
+func assertUnits(t *testing.T, c *Ctrl, body string, want int64) {
+	t.Helper()
+	got, err := c.videoReserveUnitsFromRequest([]byte(body), "application/json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Errorf("reserve units = %d, want %d", got, want)
+	}
+}
+
+// TestVideoReserveUnits_PerModelTier covers the per-model half: a tier the model prices by
+// name is honoured (GetVideoSizeRatio knows only pixel keys, so without this a caller names
+// "1080P" and reserves the 1.0 baseline against a 2x bucket), while a size the table cannot
+// price EXACTLY falls through to the service-ratio basis rather than videoOutputUnits'
+// next-bucket / table-maximum handling — which as a reserve would refuse solvent callers.
 //
-// Note the direction of the surviving gap this pins: the untabled-size case reserves 6
-// where a response rendering 1080P would bill 12. That is deliberate (over-reserving
-// refuses solvent callers, and the rendered tier is unknowable at request time), not an
-// oversight.
+// Note the direction of the gap this pins: the untabled-size row reserves 6 where a
+// response rendering 1080P bills 12. Deliberate, and the reason residual #2 exists.
 func TestVideoReserveUnits_PerModelTier(t *testing.T) {
 	entry := config.ModelPricingEntry{
 		Model:       "minimax-hailuo",
@@ -758,34 +914,72 @@ func TestVideoReserveUnits_PerModelTier(t *testing.T) {
 		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo"),
 	}
 
-	// Exact table hit on a tier named by the client: 12 units, not the 6 the service
-	// ratio alone would have produced.
-	got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"minimax-hailuo","seconds":6,"size":"1080P"}`), "application/json")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != 12 {
-		t.Errorf("reserve units for a client-named dear tier = %d, want 12", got)
-	}
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":6,"size":"1080P"}`, 12)
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`, 6)
 
-	// "1280x720" matches no table row. The reserve stays on the seconds × service ratio
-	// basis (6 × 1.0), NOT the table maximum (12).
-	got, err = c.videoReserveUnitsFromRequest([]byte(`{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`), "application/json")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != 6 {
-		t.Errorf("reserve units for an untabled size = %d, want 6 (service-ratio basis, not table max)", got)
+	// A model this service does not serve must be reported as such, not as an invalid
+	// `seconds`: the allowlist's own check runs after this gate, so folding the two lost
+	// the model_mismatch accounting that throttles name enumeration.
+	if _, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"not-a-model","prompt":"x"}`), "application/json"); !errors.Is(err, ErrVideoModelNotServed) {
+		t.Errorf("err = %v, want ErrVideoModelNotServed", err)
 	}
 }
 
-// TestVideoCreateReserveFee covers the money function itself: the fee handed to the
-// balance gate is units × the service output price, and the client-caused refusal is
-// returned before any price lookup.
-func TestVideoCreateReserveFee(t *testing.T) {
-	c := newReserveCtrl(t, config.Service{})
+// TestVideoReserveNeverBelowSettlement is the invariant anyone actually cares about:
+// nothing measures reserve-vs-settled in production (see the design doc's residual 4), so
+// this is the only signal that the two sides of the money path agree.
+//
+// It pins the KNOWN-GOOD pairs. The documented residuals are deliberately absent: they are
+// the pairs where this invariant does not hold yet.
+func TestVideoReserveNeverBelowSettlement(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "minimax-hailuo",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"768P": 1.0, "1080P": 2.0},
+		},
+	}
+	c := &Ctrl{
+		logger:  testLogger(),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo"),
+	}
 
-	// 6 units × 1000.
+	cases := []struct {
+		name           string
+		body           string
+		renderedSize   string
+		renderedSecond int64
+	}{
+		{name: "rendered tier equals the requested tier", body: `{"model":"minimax-hailuo","seconds":6,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 6},
+		{name: "rendered duration shorter than requested", body: `{"model":"minimax-hailuo","seconds":15,"size":"768P"}`, renderedSize: "768P", renderedSecond: 10},
+		{name: "cheap size requested, baseline rendered", body: `{"model":"minimax-hailuo","seconds":15,"size":"832x480"}`, renderedSize: "768P", renderedSecond: 15},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reserve, err := c.videoReserveUnitsFromRequest([]byte(tc.body), "application/json")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			settled := c.videoOutputUnits(ginCtxWithResolvedModel("minimax-hailuo"), tc.renderedSecond, tc.renderedSize)
+			if reserve < settled {
+				t.Errorf("reserve %d < settled %d — the gate admitted a request it cannot cover", reserve, settled)
+			}
+		})
+	}
+}
+
+// TestVideoCreateReserveFee covers the money function itself: the fee handed to the balance
+// gate is units × the service output price, and a client-caused refusal is returned before
+// any price lookup.
+func TestVideoCreateReserveFee(t *testing.T) {
+	c := &Ctrl{
+		logger:       testLogger(),
+		Service:      config.Service{},
+		serviceCache: cache.New(time.Minute, time.Minute),
+	}
+	c.serviceCache.Set("current_service", model.Service{OutputPrice: "1000"}, cache.DefaultExpiration)
+
 	fee, err := c.VideoCreateReserveFee(context.Background(), []byte(`{"seconds":6,"size":"1280x720"}`), "application/json")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -803,54 +997,75 @@ func TestVideoCreateReserveFee(t *testing.T) {
 		t.Errorf("clamped fee = %q, want %q", fee, "15000")
 	}
 
-	// An unpriceable duration is refused BEFORE the price is fetched. Asserted on a
-	// Ctrl with no service cache and no contract: if the order ever flips, this panics
-	// or errors with something other than the client-caused error.
+	// A refusal must come back BEFORE the price is fetched. Asserted on a Ctrl with an
+	// empty cache and no contract: if the order ever flips this panics or returns a
+	// different class, which is what the proxy's 400-vs-503 split depends on.
 	bare := &Ctrl{logger: testLogger(), Service: config.Service{}, serviceCache: cache.New(time.Minute, time.Minute)}
-	if _, err := bare.VideoCreateReserveFee(context.Background(), []byte(`{"prompt":"a cat"}`), "application/json"); !errors.Is(err, ErrVideoSecondsUnpriceable) {
-		t.Errorf("error = %v, want ErrVideoSecondsUnpriceable before any price lookup", err)
+	if _, err := bare.VideoCreateReserveFee(context.Background(), []byte(`{"seconds":1e20}`), "application/json"); !errors.Is(err, ErrVideoSecondsUnpriceable) {
+		t.Errorf("err = %v, want ErrVideoSecondsUnpriceable before any price lookup", err)
 	}
 }
 
-// TestVideoReserveUnits_AbsentSecondsUsesPublishedDefault covers the omitted-duration
-// path. Omitting `seconds` is legal (OpenAI's Video API defaults it) and the upstream
-// applies its own default and bills that, so the reserve prices the default the model
-// PUBLISHES in GET /v1/models — refusing would break a valid request, and flooring at 1
-// unit would hand over the difference.
-func TestVideoReserveUnits_AbsentSecondsUsesPublishedDefault(t *testing.T) {
-	c := &Ctrl{logger: testLogger(), Service: config.Service{
-		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5}},
-	}}
-
-	got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"MiniMax-H3","prompt":"a cat"}`), "application/json")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != 5 {
-		t.Errorf("reserve units for an omitted duration = %d, want 5 (the published default)", got)
-	}
-
-	// The absent path must still read `size`: it used to be discarded whenever seconds
-	// could not be parsed, so a 2.0-ratio request reserved the baseline.
-	got, err = c.videoReserveUnitsFromRequest([]byte(`{"prompt":"a cat","size":"1024x1792"}`), "application/json")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != 10 {
-		t.Errorf("reserve units for an omitted duration at ratio 2.0 = %d, want 10 (size must survive the absent path)", got)
-	}
-
-	// An unpriceable duration is still refused even when a default exists — the client
-	// named something, and the upstream's parser is more permissive than ours.
-	if _, err := c.videoReserveUnitsFromRequest([]byte(`{"seconds":1e20}`), "application/json"); !errors.Is(err, ErrVideoSecondsUnpriceable) {
-		t.Errorf("error = %v, want ErrVideoSecondsUnpriceable (a published default must not rescue an unpriceable value)", err)
-	}
+// TestMultipartFormFields covers the one-walk reader the reserve depends on. Each row is a
+// shape where "the value this reader returns" and "the value the upstream's form parser
+// returns" can differ, which is why the reserve needs presence, truncation and
+// walk-completion rather than just a string.
+func TestMultipartFormFields(t *testing.T) {
+	t.Run("value, presence and clean walk", func(t *testing.T) {
+		f := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), reserveMultipartCT, "seconds", "size")["seconds"]
+		if !f.WalkOK || f.Truncated || len(f.Values) != 1 || f.Values[0] != "15" {
+			t.Errorf("got %+v, want one value \"15\", walked, untruncated", f)
+		}
+	})
+	t.Run("absent field on a clean walk", func(t *testing.T) {
+		f := multipartFormFields(multipartBody(map[string]string{"model": "m"}), reserveMultipartCT, "seconds")["seconds"]
+		if !f.WalkOK || len(f.Values) != 0 {
+			t.Errorf("got %+v, want no values on a completed walk", f)
+		}
+	})
+	t.Run("repeated field keeps every value in order", func(t *testing.T) {
+		// This reader takes the first; Starlette/FastAPI take the last. Callers must see
+		// both to be able to refuse.
+		f := multipartFormFields(rawMultipartBody([2]string{"seconds", "1"}, [2]string{"seconds", "15"}), reserveMultipartCT, "seconds")["seconds"]
+		if len(f.Values) != 2 || f.Values[0] != "1" || f.Values[1] != "15" {
+			t.Errorf("values = %q, want [1 15]", f.Values)
+		}
+	})
+	t.Run("value past the cap is reported truncated", func(t *testing.T) {
+		f := multipartFormFields(rawMultipartBody([2]string{"seconds", strings.Repeat("0", maxMultipartFieldBytes+10) + "15"}), reserveMultipartCT, "seconds")["seconds"]
+		if !f.Truncated {
+			t.Errorf("got %+v, want Truncated for a value past the cap", f)
+		}
+	})
+	t.Run("unwalkable body reports WalkOK false", func(t *testing.T) {
+		body := []byte("--boundary\r\nbroken-header-line\r\n\r\nx\r\n--boundary--")
+		if f := multipartFormFields(body, reserveMultipartCT, "seconds")["seconds"]; f.WalkOK {
+			t.Errorf("got %+v, want WalkOK false for a malformed body", f)
+		}
+	})
+	t.Run("missing boundary reports WalkOK false", func(t *testing.T) {
+		if f := multipartFormFields(multipartBody(map[string]string{"seconds": "15"}), "multipart/form-data", "seconds")["seconds"]; f.WalkOK {
+			t.Errorf("got %+v, want WalkOK false without a boundary", f)
+		}
+	})
+	t.Run("file parts are not values", func(t *testing.T) {
+		body := []byte("--boundary\r\nContent-Disposition: form-data; name=\"seconds\"; filename=\"s.txt\"\r\n\r\n15\r\n--boundary--")
+		if f := multipartFormFields(body, reserveMultipartCT, "seconds")["seconds"]; len(f.Values) != 0 {
+			t.Errorf("values = %q, want none for a file part", f.Values)
+		}
+	})
+	t.Run("multipartFormField still returns the first value", func(t *testing.T) {
+		if got := multipartFormField(rawMultipartBody([2]string{"model", "a"}, [2]string{"model", "b"}), reserveMultipartCT, "model"); got != "a" {
+			t.Errorf("multipartFormField = %q, want %q", got, "a")
+		}
+	})
 }
 
-// TestDefaultVideoSecondsFor covers the published-default lookup, including the scalar
-// shapes YAML can produce for the same config line.
-func TestDefaultVideoSecondsFor(t *testing.T) {
-	tests := []struct {
+// TestDefaultVideoParametersFor covers the published-metadata lookups that price an omitted
+// duration and size. These make a field that used to be pure GET /v1/models documentation
+// load-bearing for billing, so the coercions and both bounds are pinned.
+func TestDefaultVideoParametersFor(t *testing.T) {
+	seconds := []struct {
 		name  string
 		value interface{}
 		want  int64
@@ -858,17 +1073,22 @@ func TestDefaultVideoSecondsFor(t *testing.T) {
 	}{
 		{name: "int", value: 5, want: 5, ok: true},
 		{name: "int64", value: int64(8), want: 8, ok: true},
-		{name: "float", value: 4.2, want: 5, ok: true},
+		{name: "float rounds up", value: 4.2, want: 5, ok: true},
 		{name: "quoted", value: "6", want: 6, ok: true},
-		{name: "quoted with space", value: " 6 ", want: 6, ok: true},
+		{name: "quoted with spaces", value: " 6 ", want: 6, ok: true},
+		{name: "at the ceiling", value: 3600, want: 3600, ok: true},
+		// Below one second would reserve a single unit while the upstream applied its real
+		// default (H3's floor is 4s) and billed that — the giveaway the default closes.
+		{name: "below one second", value: 0.4, ok: false},
 		{name: "zero", value: 0, ok: false},
 		{name: "negative", value: -4, ok: false},
+		{name: "above the ceiling", value: 3601, ok: false},
+		{name: "config typo", value: 3600000, ok: false},
 		{name: "non-numeric", value: "auto", ok: false},
-		{name: "wrong type", value: true, ok: false},
-		{name: "absurd config typo", value: 3600000, ok: false},
+		{name: "yaml bool", value: true, ok: false},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tt := range seconds {
+		t.Run("seconds/"+tt.name, func(t *testing.T) {
 			svc := config.Service{ModelInfo: &config.ModelInfo{
 				DefaultParameters: map[string]interface{}{"seconds": tt.value},
 			}}
@@ -882,7 +1102,6 @@ func TestDefaultVideoSecondsFor(t *testing.T) {
 		})
 	}
 
-	// No ModelInfo / no defaultParameters / no seconds key.
 	for _, svc := range []config.Service{
 		{},
 		{ModelInfo: &config.ModelInfo{}},
@@ -891,5 +1110,67 @@ func TestDefaultVideoSecondsFor(t *testing.T) {
 		if _, ok := svc.DefaultVideoSecondsFor("any"); ok {
 			t.Errorf("DefaultVideoSecondsFor() = ok for a service publishing no default duration")
 		}
+	}
+
+	sizes := []struct {
+		name  string
+		value interface{}
+		want  string
+		ok    bool
+	}{
+		{name: "tier token", value: "2K", want: "2K", ok: true},
+		{name: "trimmed", value: " 1080P ", want: "1080P", ok: true},
+		{name: "empty", value: "   ", ok: false},
+		{name: "not a string", value: 1080, ok: false},
+	}
+	for _, tt := range sizes {
+		t.Run("size/"+tt.name, func(t *testing.T) {
+			svc := config.Service{ModelInfo: &config.ModelInfo{
+				DefaultParameters: map[string]interface{}{"size": tt.value},
+			}}
+			got, ok := svc.DefaultVideoSizeFor("any")
+			if ok != tt.ok {
+				t.Fatalf("ok = %v, want %v", ok, tt.ok)
+			}
+			if ok && got != tt.want {
+				t.Errorf("size = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVideoDefaultParametersValidatedAtLoad pins that a published-but-unusable duration
+// fails STARTUP rather than traffic. At runtime it is indistinguishable from "unpublished",
+// which refuses every create that omits `seconds` — an operator typo presenting as a client
+// error on conforming requests.
+func TestVideoDefaultParametersValidatedAtLoad(t *testing.T) {
+	newInfo := func(seconds interface{}) *config.ModelInfo {
+		mi := &config.ModelInfo{
+			Name:                "v",
+			Description:         "v",
+			Architecture:        &config.ModelArchitecture{Modality: "text->video", InputModalities: []string{"text"}, OutputModalities: []string{"video"}},
+			SupportedParameters: []string{"seconds"},
+		}
+		if seconds != nil {
+			mi.DefaultParameters = map[string]interface{}{"seconds": seconds}
+		}
+		return mi
+	}
+	if err := newInfo(nil).Validate("video-generation"); err != nil {
+		t.Errorf("a video model publishing no default must still load: %v", err)
+	}
+	if err := newInfo(4).Validate("video-generation"); err != nil {
+		t.Errorf("a usable published default must load: %v", err)
+	}
+	for _, bad := range []interface{}{0, 3601, "auto", true, 0.4} {
+		if err := newInfo(bad).Validate("video-generation"); err == nil {
+			t.Errorf("defaultParameters.seconds = %v must fail config load", bad)
+		}
+	}
+	// Non-video services are unaffected: the field is pure /v1/models metadata there.
+	mi := newInfo("auto")
+	mi.ContextLength = 4096
+	if err := mi.Validate("chatbot"); err != nil {
+		t.Errorf("a chatbot model must not be gated on video defaults: %v", err)
 	}
 }

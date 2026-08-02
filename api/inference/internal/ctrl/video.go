@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -353,21 +354,6 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
 }
 
-// videoCreateRequestFields is the REQUEST-side parse for the two fields that drive
-// the pre-flight reserve. Deliberately its own struct rather than reusing
-// videoResponseFields (which the settlement path parses requests with as a
-// last-resort fallback): that struct carries response-only typed fields — `id`,
-// `status`, `usage` — and encoding/json returns an UnmarshalTypeError for a single
-// wrong-typed sibling while still populating everything it did decode. Sharing it
-// meant a create carrying `"usage": 0` or `"status": 0` — keys a lenient upstream
-// simply ignores — made a perfectly good `seconds` unreadable. With two fields there
-// is nothing for a create body to collide with, and a wrong-typed `size` degrades
-// only `size`.
-type videoCreateRequestFields struct {
-	Seconds json.Number `json:"seconds"`
-	Size    string      `json:"size"`
-}
-
 // videoReserveDuration is what the request said about the clip's length, as far as the
 // pre-flight reserve can tell. The three states have three different safe answers, which
 // is the whole reason this is not a bare (int64, bool):
@@ -376,11 +362,16 @@ type videoCreateRequestFields struct {
 //   - absent: the create named no duration. The upstream will apply its own default and
 //     bill that, so the reserve prices the default the model PUBLISHES rather than
 //     refusing a legal request (see Ctrl.videoReserveUnitsFromRequest).
-//   - unpriceable: a duration was named but cannot be turned into a number — malformed,
-//     non-positive, out of ceilSeconds' range, or a multipart value the field reader
-//     could not return in full. Never treat this as absent: the upstream's own parser is
-//     more permissive than ours and will happily render (and bill) what we could not
-//     read.
+//   - unpriceable: the request named a duration, or carried a body, that this gate cannot
+//     read the way the upstream will. Refused, never treated as absent — absent is a
+//     FUNDED state (it reserves the published default), so routing a read failure into it
+//     hands the caller a fixed discount.
+//
+// The distinction is load-bearing and every past bypass in this path was a read failure
+// landing in absent: a byte appended after the JSON object (json.Unmarshal validates the
+// whole input and populates nothing, while the translator's json.Decoder ignores trailing
+// data), a `seconds` whose value is the wrong JSON type, a multipart value padded past the
+// field reader's cap, a repeated multipart field, a body that could not be walked.
 type videoReserveDuration int
 
 const (
@@ -390,44 +381,89 @@ const (
 )
 
 // videoReserveSecondsSizeFromRequest reads the duration and size the pre-flight reserve
-// prices, from a create body in either transport, and classifies the duration — see
-// videoReserveDuration for why the absent/unpriceable split matters.
+// prices, and classifies the duration — see videoReserveDuration.
 //
-// The JSON decode deliberately ignores its error, the way resolveVideoBilling already
-// does for responses: encoding/json populates the fields it decoded even when a sibling
-// fails to convert, so honouring the error would discard a valid `seconds`.
+// Transport is chosen by Content-Type, the same way ExtractModelName chooses it, NOT by
+// "did this parse as JSON". Falling back from a failed JSON parse into the multipart
+// reader was the mechanism behind the trailing-byte bypass: on a JSON content type that
+// reader finds no boundary, reports the field absent, and the reserve prices the default.
 func videoReserveSecondsSizeFromRequest(reqBody []byte, contentType string) (seconds int64, size string, state videoReserveDuration) {
 	if len(reqBody) == 0 {
 		return 0, "", videoDurationAbsent
 	}
-	var jsonFields videoCreateRequestFields
-	jsonErr := json.Unmarshal(reqBody, &jsonFields)
-	if s, valid := ceilSeconds(jsonFields.Seconds); valid {
-		return s, jsonFields.Size, videoDurationPriced
+	if isMultipartContentType(contentType) {
+		return videoReserveFromMultipart(reqBody, contentType)
 	}
-	// A body that decoded as a JSON object had its `seconds` read above, so reaching
-	// here means it carried none we could use. Distinguish the two: a field that is
-	// present but unreadable (null, "abc", 0, 1e20, or a wrong-typed value that survived
-	// the tolerant decode) must not be mistaken for one that was never sent.
-	if jsonErr == nil || jsonFields.Seconds != "" {
-		if videoJSONNamesSeconds(reqBody) {
-			return 0, "", videoDurationUnpriceable
-		}
-		return 0, jsonFields.Size, videoDurationAbsent
+	return videoReserveFromJSON(reqBody)
+}
+
+// isMultipartContentType mirrors ExtractModelName's transport test so the reserve reads
+// `seconds`/`size` from the same wire format the rest of the request path reads `model`
+// from. Two different transport oracles for one request is how the two halves of a reserve
+// end up describing different bodies.
+func isMultipartContentType(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/")
+}
+
+// videoReserveFromJSON classifies a JSON create body.
+//
+// The body is decoded key-wise into json.RawMessage, not into a typed struct, because the
+// question "did the client name a duration" must not be answerable by the VALUE's shape:
+// a typed decode of `{"seconds": true}` leaves the field empty and looks identical to a
+// create that never sent it. json.Decoder (not json.Unmarshal) because the upstream
+// translator decodes the same body with a Decoder, which ignores trailing data — matching
+// it means a trailing byte can no longer make the two read different requests.
+func videoReserveFromJSON(reqBody []byte) (int64, string, videoReserveDuration) {
+	var fields map[string]json.RawMessage
+	if json.NewDecoder(bytes.NewReader(reqBody)).Decode(&fields) != nil {
+		// Not a JSON object at all (a bare array/number, or unparseable). The gate cannot
+		// read this request; something downstream still might.
+		return 0, "", videoDurationUnpriceable
 	}
-	// multipart/form-data — the live transport for image-to-video creates. Presence is
-	// asked separately from the value because multipartFormField caps a part at 1024
-	// bytes and trims, so a value padded past that ceiling reads as "": that must land
-	// as unpriceable, not absent, or the padding buys the cheapest possible reserve
-	// while the upstream's own form parser reads the whole value and bills it.
-	size = multipartFormField(reqBody, contentType, "size")
-	secStr := multipartFormField(reqBody, contentType, "seconds")
-	f, err := strconv.ParseFloat(strings.TrimSpace(secStr), 64)
-	if err != nil || !(f > 0) || math.IsInf(f, 0) || f > float64(maxVideoOutputUnits) {
-		if multipartHasFormField(reqBody, contentType, "seconds") {
-			return 0, "", videoDurationUnpriceable
-		}
+	// size is independent: a wrong-typed size degrades size alone and never the duration.
+	var size string
+	_ = json.Unmarshal(fields["size"], &size)
+
+	raw, named := fields["seconds"]
+	if !named || string(raw) == "null" {
+		// An explicit null is a client saying "unset", which the upstream treats the same
+		// way as omitting the key.
 		return 0, size, videoDurationAbsent
+	}
+	var n json.Number
+	if json.Unmarshal(raw, &n) == nil {
+		if sec, valid := ceilSeconds(n); valid {
+			return sec, size, videoDurationPriced
+		}
+	}
+	return 0, "", videoDurationUnpriceable
+}
+
+// videoReserveFromMultipart classifies a multipart/form-data create body — the live
+// transport for image-to-video. One walk answers both fields; see multipartField for why
+// the reserve needs presence, truncation and walk-completion, not just a value.
+func videoReserveFromMultipart(reqBody []byte, contentType string) (int64, string, videoReserveDuration) {
+	fields := multipartFormFields(reqBody, contentType, "seconds", "size")
+	sec, sz := fields["seconds"], fields["size"]
+
+	// A body the reader could not walk to the end, a value it could not read in full, or a
+	// field the client sent twice: in each case what the upstream's own form parser will
+	// read is not what this gate read. Refuse rather than price one of the readings —
+	// Starlette/FastAPI take the LAST value of a repeated field where this reader takes the
+	// first, so a caller could otherwise price `seconds=1` and be rendered `seconds=15`.
+	if !sec.WalkOK || sec.Truncated || sz.Truncated || len(sec.Values) > 1 || len(sz.Values) > 1 {
+		return 0, "", videoDurationUnpriceable
+	}
+	size := ""
+	if len(sz.Values) == 1 {
+		size = sz.Values[0]
+	}
+	if len(sec.Values) == 0 {
+		return 0, size, videoDurationAbsent
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(sec.Values[0]), 64)
+	if err != nil || !(f > 0) || math.IsInf(f, 0) || f > float64(maxVideoOutputUnits) {
+		return 0, "", videoDurationUnpriceable
 	}
 	return int64(math.Ceil(f)), size, videoDurationPriced
 }
@@ -443,19 +479,6 @@ func videoReserveRequestModel(reqBody []byte, contentType, configured string) st
 		return requested
 	}
 	return configured
-}
-
-// videoJSONNamesSeconds reports whether a JSON create body carries a `seconds` key at
-// all. Decoded into json.RawMessage so no value shape can make the key itself
-// unreadable — the question is presence, not type. An explicit null counts as absent: it
-// is a client saying "unset", which the upstream treats as "apply your default".
-func videoJSONNamesSeconds(reqBody []byte) bool {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(reqBody, &fields) != nil {
-		return false
-	}
-	raw, ok := fields["seconds"]
-	return ok && string(raw) != "null"
 }
 
 // videoReserveUnitsFromRequest derives the billable-unit count to RESERVE for a video
@@ -485,65 +508,95 @@ func videoJSONNamesSeconds(reqBody []byte) bool {
 //     bill. The clamp is coherent with what these ratios mean — they are multipliers
 //     "relative to the baseline 720x1280", so a map with no entry at or above 1.0 is a
 //     misconfiguration, not a cheaper service.
-//   - the resolved model's own billing block, when it can price the REQUESTED size
-//     exactly (a resolutionMultipliers entry, or a per_unit_table row for this
-//     duration). Without this, a caller on a tiered model names an expensive tier by
-//     name — "1080P", which GetVideoSizeRatio does not know — and reserves the 1.0
-//     baseline against a bill of 2× or more. A miss falls through silently: no
-//     next-bucket rounding, no table maximum, no metering.
+//   - the resolved model's own billing block, when it can price that size exactly (a
+//     per_unit_table row for this duration). Without this, a caller on a tiered model
+//     names an expensive tier by name — "1080P", which GetVideoSizeRatio does not know —
+//     and reserves the 1.0 baseline against a bill of 2× or more.
 //
-// Known residual, now requiring the UPSTREAM to diverge from the request rather than
-// the client to shape it: if the rendered tier prices above the requested one, the
-// reserve sits below the bill by that factor. Closing it needs the rendered tier at
-// request time, which only the upstream knows — the fix is the create response echoing
-// it, not the broker guessing.
+// Both `seconds` and `size` fall back to what the model PUBLISHES in GET /v1/models
+// (defaultParameters) when the create omits them, rather than to a floor. The upstream
+// applies its own defaults and bills them, so a floor is a discount for omitting a
+// field: an omitted `seconds` reserved 1 unit against H3's 4s default, and an omitted
+// `size` reserved the 1.0 baseline while the vendor rendered — and settlement billed —
+// its configured tier. Neither is upstream misbehaviour; both are shapes a conforming
+// OpenAI client sends.
+//
+// Known residual: if the tier the upstream actually renders prices above the tier the
+// request named AND the model publishes, the reserve sits below the bill by that factor.
+// That one does need the upstream to diverge from both the request and its own published
+// metadata — the fix is the create response echoing the rendered tier, not the broker
+// guessing.
 func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) (int64, error) {
 	seconds, size, state := videoReserveSecondsSizeFromRequest(reqBody, contentType)
-	switch state {
-	case videoDurationUnpriceable:
+	if state == videoDurationUnpriceable {
 		return 0, ErrVideoSecondsUnpriceable
-	case videoDurationAbsent:
-		// Omitting `seconds` is legal (OpenAI's Video API defaults it), and the upstream
-		// will apply its own default and bill that — so refusing would break a valid
-		// request, and flooring at 1 unit would hand over the difference (H3 defaults to
-		// 4s). Price the default the model PUBLISHES in GET /v1/models instead, which is
-		// the same number a caller reading the model card would expect to be charged for.
-		// A model that publishes none leaves the gate nothing to price, and refusing is
-		// the only answer that is not a giveaway.
-		def, published := c.Service.DefaultVideoSecondsFor(videoReserveRequestModel(reqBody, contentType, c.Service.ModelType))
+	}
+	// Resolve the model once: it decides the published defaults AND the tier lookup, and
+	// walking a multipart body to re-read `model` is not free on an image-to-video create.
+	requestedModel := videoReserveRequestModel(reqBody, contentType, c.Service.ModelType)
+	if c.Service.HasMultiModelPricing() {
+		if _, _, ok := c.Service.ResolveRequestedModel(requestedModel); !ok {
+			// Not a model this service serves. Saying "invalid seconds" here would blame the
+			// wrong field, and classifying it as a bad request would let a caller enumerate
+			// model names without ever tripping the allowlist's own mismatch accounting.
+			return 0, ErrVideoModelNotServed
+		}
+	}
+	if state == videoDurationAbsent {
+		def, published := c.Service.DefaultVideoSecondsFor(requestedModel)
 		if !published {
-			return 0, ErrVideoSecondsUnpriceable
+			// The gate has nothing to price and the upstream will still apply a default and
+			// bill it. Broker-attributed on purpose: this is an operator config gap, not a
+			// malformed request — see ErrVideoDefaultDurationUnpublished.
+			return 0, ErrVideoDefaultDurationUnpublished
 		}
 		seconds = def
 	}
+	if size == "" {
+		// Same reasoning as the duration: the upstream applies its configured tier and
+		// settlement bills THAT, so an omitted size must not reserve the baseline.
+		if def, published := c.Service.DefaultVideoSizeFor(requestedModel); published {
+			size = def
+		}
+	}
 	ratio := c.Service.GetVideoSizeRatio(size)
-	if ratio < 1 {
+	// !(ratio >= 1) rather than ratio < 1: a NaN ratio (an operator can write one into
+	// videoSizeRatios) is false for `<` and would slip past the clamp into
+	// videoOutputCount, whose NaN guard floors at 1 unit.
+	if !(ratio >= 1) {
 		ratio = 1
 	}
 	units := videoOutputCount(seconds, ratio)
-	if modelUnits, priced := c.videoModelUnitsForRequestedSize(reqBody, contentType, seconds, size); priced && modelUnits > units {
+	if modelUnits, priced := c.videoModelUnitsForRequestedSize(requestedModel, seconds, size); priced && modelUnits > units {
 		units = modelUnits
 	}
 	return units, nil
 }
 
-// videoModelUnitsForRequestedSize prices (seconds, size) through the billing block of
-// the model this create names, reporting priced=false whenever that cannot be done
-// EXACTLY — no per-model pricing configured, model not resolvable, no billing block,
-// or the block does not carry the requested size (a per_unit_table row for this
-// duration, or a resolutionMultipliers entry).
+// videoModelUnitsForRequestedSize prices (seconds, size) through the billing block of the
+// named model, reporting priced=false when that cannot be done EXACTLY: no per-model
+// pricing, an unresolvable model, no billing block, a mode with no resolution vocabulary,
+// or a resolution the block carries no entry for.
 //
-// Only exact hits count, which is the whole point: OutputUnits' own miss handling is
-// what makes videoOutputUnits unusable as a reserve, so a miss here must fall through
-// to the service-ratio basis rather than round up to a bucket or the table maximum.
-// It reads the model from the body rather than CtxKeyResolvedModel because that key is
-// set by PrepareHTTPRequest, which runs after the balance gate.
-func (c *Ctrl) videoModelUnitsForRequestedSize(reqBody []byte, contentType string, seconds int64, size string) (int64, bool) {
-	if !c.Service.HasMultiModelPricing() || len(reqBody) == 0 {
+// The exactness requirement is the whole point, and it needs HasResolution rather than
+// trusting OutputUnits' return: resolutionMultiplier answers a per_video_second MISS with
+// the 1.0 baseline and a nil error, so without the check a tier the model has never heard
+// of would be "priced" at baseline — which is what the service-ratio basis already covers,
+// and would mask a tier the model prices higher. On per_unit_table a miss is a real error,
+// but OutputUnits' own miss handling (next bucket up, else the table MAXIMUM) is exactly
+// what makes videoOutputUnits unusable as a reserve, so a miss must fall through here
+// instead of rounding.
+func (c *Ctrl) videoModelUnitsForRequestedSize(requestedModel string, seconds int64, size string) (int64, bool) {
+	if !c.Service.HasMultiModelPricing() {
 		return 0, false
 	}
-	entry, _, resolved := c.Service.ResolveRequestedModel(videoReserveRequestModel(reqBody, contentType, c.Service.ModelType))
-	if !resolved || entry == nil || entry.Billing == nil {
+	entry, _, resolved := c.Service.ResolveRequestedModel(requestedModel)
+	if !resolved || entry == nil || entry.Billing == nil || !entry.Billing.HasResolution(size) {
+		return 0, false
+	}
+	switch entry.Billing.Mode {
+	case config.BillingModePerVideoSecond, config.BillingModePerUnitTable:
+	default:
 		return 0, false
 	}
 	units, err := entry.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size})
@@ -553,31 +606,51 @@ func (c *Ctrl) videoModelUnitsForRequestedSize(reqBody []byte, contentType strin
 	return units, true
 }
 
-// ErrVideoSecondsUnpriceable is returned when a video create does not carry a `seconds`
-// the gate can price: absent, non-numeric, non-positive, out of ceilSeconds' range, or
-// a multipart value the field reader could not return in full.
+// ErrVideoSecondsUnpriceable is returned when a video create names a duration, or carries
+// a body, that the gate cannot read the way the upstream will: a non-numeric or
+// non-positive value, one out of ceilSeconds' range, a body that is not a JSON object, a
+// multipart value the field reader could not return in full, or a field the client sent
+// twice.
 //
-// So `seconds` is effectively REQUIRED for a video create, and that is the deliberate
-// part. Every alternative to refusing was a giveaway measured in this PR's own review:
+// Omitting `seconds` is NOT in this set — that is priced at the model's published default
+// (see videoReserveUnitsFromRequest). What is refused is a request this gate read
+// differently from the upstream, because every past bypass in this path was such a
+// difference resolving to the cheapest legal reserve:
 //
-//   - Flooring at 1 unit for an out-of-range value: ceilSeconds rejects anything above
-//     maxVideoOutputUnits, so `{"seconds": 1e20}` reserved 1 unit — while the
-//     translator clamps the same value DOWN to the model maximum and bills it in full
-//     (H3: 15s).
-//   - Flooring at 1 unit for an ABSENT value: the upstream then applies its own default
-//     and bills that (H3's is 4s), so omitting the field bought a 4× under-reserve with
-//     no error and no signal — the original bug with two characters deleted.
-//   - Flooring at 1 unit for a multipart value padded past multipartFormField's 1024
-//     byte read: same giveaway, and invisible.
+//   - `{"seconds": 1e20}`: ceilSeconds refuses anything above maxVideoOutputUnits, so it
+//     reserved 1 unit while the translator clamped the same value DOWN to the model
+//     maximum and billed it in full (H3: 15s).
+//   - `{"seconds": 15}` plus one appended byte: json.Unmarshal validates the whole input
+//     and populates nothing, so a valid 15 vanished — while the translator's json.Decoder
+//     ignores trailing data and rendered 15.
+//   - a multipart value padded past the field reader's cap: read as empty here, read in
+//     full by the upstream's own form parser.
 //
-// The broker cannot know the upstream's clamp or its default duration; those live in the
-// translator and the vendor. So a duration it cannot price is refused rather than
-// guessed at, and the caller gets a 400 naming the field instead of a clip they did not
-// ask for. The cost is a contract tightening: a create that omits `seconds` used to be
-// served at the model's default and is now rejected. The 0G Router already requires the
-// field, and the model's advertised range is published in GET /v1/models.
+// The broker cannot resolve these by guessing. It does not read the translator's clamp
+// constants — that is a separate component, and a NATIVE upstream has its own — so a
+// request it cannot price is refused, and the caller gets a 400 naming the field rather
+// than a clip they did not ask for.
 var ErrVideoSecondsUnpriceable = errors.NewBadRequest(
 	"invalid `seconds`: must be a positive number this service can price, or omitted to accept the model's published default duration")
+
+// ErrVideoModelNotServed is returned when a video create names a model this service does
+// not serve. It exists so the reserve does not report an unserved model as an invalid
+// `seconds` — which blamed the wrong field, and (because the allowlist check lives in
+// PrepareHTTPRequest, AFTER this gate) let a caller enumerate model names without the
+// mismatch ever reaching recordModelMismatch or the model_mismatch rejection reason.
+var ErrVideoModelNotServed = errors.NewBadRequest("model not supported: not available for this service")
+
+// ErrVideoDefaultDurationUnpublished is returned when a create omits `seconds` and the
+// resolved model publishes no defaultParameters.seconds for the gate to price.
+//
+// Broker-attributed, unlike the two above, because it is an operator config gap and not
+// something the caller can fix: omitting `seconds` is legal, the upstream will apply its
+// own default and bill it, and the only reason the gate cannot price that is that the
+// model's own GET /v1/models metadata does not say what the default is. Folding it into
+// ErrVideoSecondsUnpriceable told the caller their `seconds` was invalid and recorded a
+// client-fault rejection for every conforming request, with no broker-side signal at all.
+var ErrVideoDefaultDurationUnpublished = errors.NewServiceUnavailable(
+	"video pricing unavailable: this model publishes no default duration; send an explicit `seconds`")
 
 // VideoCreateReserveFee is the pre-flight reserve for a video create: the fee this
 // request bills if the upstream renders the duration it asked for, priced at the

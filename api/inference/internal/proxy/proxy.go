@@ -844,29 +844,51 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// done here: getting it half right bills callers for videos they never got.
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
-			if errors.Is(err, ctrl.ErrVideoSecondsUnpriceable) {
-				// A `seconds` the service cannot price is a bad request, same class as
-				// the image-editing parse failure above: flag it so the broker-fault
-				// alert does not fire on a malformed client body. Unlike that sibling it
-				// is also RECORDED, for the reason the validate-request path below
-				// states — a request refused at the billing gate is exactly the "high
-				// RPS, zero revenue" shape that must not die unclassified, and this one
-				// is attacker-reachable. record() stamps CtxKeyRejectionReason itself.
+			switch {
+			case errors.Is(err, ctrl.ErrVideoSecondsUnpriceable), errors.Is(err, ctrl.ErrVideoModelNotServed):
+				// Client-caused: a duration this gate cannot price the way the upstream
+				// will, or a model this service does not serve. Flagged so the broker-fault
+				// alert does not fire on a malformed client body, and RECORDED for the
+				// reason the validate-request path below states — a request refused at the
+				// billing gate is exactly the "high RPS, zero revenue" shape that must not
+				// die unclassified, and both of these are attacker-reachable. record()
+				// stamps CtxKeyRejectionReason itself.
+				//
+				// An unserved model is classified as model_mismatch, not invalid_request:
+				// the allowlist's own check runs in PrepareHTTPRequest, i.e. AFTER this
+				// gate, so without this a caller could enumerate model names on the video
+				// path and never appear in the mismatch accounting.
+				reason := monitor.RejectionInvalidRequest
+				if errors.Is(err, ctrl.ErrVideoModelNotServed) {
+					reason = monitor.RejectionModelMismatch
+				}
 				ctx.Set("ignoreError", true)
-				p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+				p.rejections.record(ctx, reason, userAddress)
 				// No wrap context: handleBrokerError prefixes it onto the body the CLIENT
-				// receives, and "price video pre-flight reserve: `seconds` is required…"
-				// hands an internal breadcrumb to someone who only needs the field name.
-				// The log line carries its own context independently.
+				// receives, and an internal breadcrumb helps nobody who only needs the
+				// field name. Nothing is lost — ignoreError suppresses the log line
+				// entirely, so the context string would have had no reader.
 				p.handleBrokerError(ctx, err, "")
 				return
+			case errors.Is(err, ctrl.ErrPricingUnavailable), errors.Is(err, ctrl.ErrVideoDefaultDurationUnpublished):
+				// Broker-side, and each already carries its own 5xx: a stale/unpopulated USD
+				// rate snapshot (GetCachedService fails closed), or a model publishing no
+				// default duration for the gate to price. NOT flagged ignoreError — both
+				// must reach the broker-fault alert rather than be attributed to the client.
+				p.handleBrokerError(ctx, err, "estimate video pre-flight reserve")
+				return
+			default:
+				// Anything else here is broker infrastructure: a contract read that could
+				// not reach the RPC endpoint, or an unparseable configured price. Mapped to
+				// 503 explicitly, because errors.Response defaults an unclassified error to
+				// 400 — which told the client a broker outage was their fault and, since it
+				// only redacts at >= 500, handed them the RPC endpoint and dial error in the
+				// response body. This path is also a NEW dependency for multi-model video
+				// providers (GetBillingPrices took the per-model branch and never read the
+				// contract at gate time), so an RPC blip has to be retryable, not terminal.
+				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "estimate video pre-flight reserve")
+				return
 			}
-			// Broker-side: GetCachedService fails closed on a stale/unpopulated USD
-			// rate snapshot, the same class as the GetBillingPrices failure below. NOT
-			// flagged ignoreError — it must reach the broker-fault alert rather than be
-			// attributed to the client.
-			p.handleBrokerError(ctx, err, "estimate video pre-flight reserve")
-			return
 		}
 		expectedInputFee = fee
 	default:

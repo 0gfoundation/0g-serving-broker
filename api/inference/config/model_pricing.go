@@ -221,6 +221,36 @@ func normalizeResolution(s string) string {
 // or the baseline 1.0 when unset/unknown. Matching is case/whitespace
 // insensitive (see normalizeResolution); validateBillingConfig rejects keys
 // that collide under that normalization, so the first match is unambiguous.
+// HasResolution reports whether this billing block carries an explicit entry for the
+// given resolution — a resolutionMultipliers key, or a per_unit_table row at any duration.
+// Case- and space-insensitive, matching how billing normalizes the keys.
+//
+// It exists because resolutionMultiplier answers a MISS with the 1.0 baseline and no error,
+// so OutputUnits alone cannot distinguish "this tier costs 1.0" from "I have never heard of
+// this tier". The pre-flight reserve needs that distinction: an exact hit is a price it can
+// rely on, a miss must fall through to the service-level basis rather than silently reserve
+// the baseline for a tier the model actually prices higher.
+func (b *BillingConfig) HasResolution(resolution string) bool {
+	if b == nil {
+		return false
+	}
+	res := normalizeResolution(resolution)
+	if res == "" {
+		return false
+	}
+	for k := range b.ResolutionMultipliers {
+		if normalizeResolution(k) == res {
+			return true
+		}
+	}
+	for _, t := range b.Table {
+		if normalizeResolution(t.Resolution) == res {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
 	res := normalizeResolution(resolution)
 	for k, m := range b.ResolutionMultipliers {
@@ -1072,22 +1102,56 @@ func validateTokenModelEntry(i int, entry *ModelPricingEntry, serviceType string
 	return nil
 }
 
-// DefaultVideoSecondsFor resolves the duration a video create that OMITS `seconds`
-// will be served at, from the model's published defaultParameters.seconds — the same
-// metadata GET /v1/models advertises, resolved with the same per-model precedence as
-// EffectiveModelInfo. Reports false when the model publishes no usable default.
+// DefaultVideoSecondsFor resolves the duration a video create that OMITS `seconds` will be
+// served at, from the model's published defaultParameters.seconds — the same metadata GET
+// /v1/models advertises, resolved with the same per-model precedence as EffectiveModelInfo.
+// Reports false when the model publishes no usable default.
 //
 // It exists so the pre-flight reserve can price an omitted duration exactly instead of
-// having to choose between refusing a legal request and reserving a 1-unit floor while
-// the upstream applies its own default and bills that. YAML decodes a scalar as int or
-// float64 depending on how it was written, and an operator may quote it, so all three
-// are accepted; anything non-positive or unrepresentable is treated as unpublished.
+// having to choose between refusing a legal request and reserving a floor while the
+// upstream applies its own default and bills that. Note this makes a field that was pure
+// /v1/models documentation load-bearing for billing; validateVideoDefaultParameters
+// hard-errors at config load on a published-but-unusable value so a typo cannot reach the
+// request path.
 func (s *Service) DefaultVideoSecondsFor(model string) (int64, bool) {
 	mi := s.EffectiveModelInfo(model)
-	if mi == nil || len(mi.DefaultParameters) == 0 {
+	if mi == nil {
 		return 0, false
 	}
-	raw, ok := mi.DefaultParameters["seconds"]
+	return videoDefaultSeconds(mi.DefaultParameters)
+}
+
+// DefaultVideoSizeFor resolves the resolution a video create that omits `size` will be
+// rendered at, from the model's published defaultParameters.size. Same precedence and same
+// reason as DefaultVideoSecondsFor: the upstream applies its configured tier and settlement
+// bills THAT, so an omitted size must not reserve the baseline ratio.
+func (s *Service) DefaultVideoSizeFor(model string) (string, bool) {
+	mi := s.EffectiveModelInfo(model)
+	if mi == nil || len(mi.DefaultParameters) == 0 {
+		return "", false
+	}
+	size, ok := mi.DefaultParameters["size"].(string)
+	if size = strings.TrimSpace(size); !ok || size == "" {
+		return "", false
+	}
+	return size, true
+}
+
+// videoDefaultSeconds coerces a published defaultParameters.seconds into whole seconds.
+// YAML decodes a scalar as int or float64 depending on how it was written, and an operator
+// may quote it, so all three are accepted. Reports false for anything that cannot be a
+// duration this gate would price — which validateVideoDefaultParameters turns into a
+// config-load error rather than letting it silently gate traffic.
+//
+// Bounded on BOTH sides. Above: a typo'd "3600000" would make every omitted-duration
+// create unaffordable. Below: a value under one second would reserve a single unit while
+// the upstream applied its real default (H3's floor is 4s) and billed that — the exact
+// giveaway the published default exists to close.
+func videoDefaultSeconds(params map[string]interface{}) (int64, bool) {
+	if len(params) == 0 {
+		return 0, false
+	}
+	raw, ok := params["seconds"]
 	if !ok {
 		return 0, false
 	}
@@ -1108,13 +1172,31 @@ func (s *Service) DefaultVideoSecondsFor(model string) (int64, bool) {
 	default:
 		return 0, false
 	}
-	if !(seconds > 0) || math.IsInf(seconds, 0) || seconds > maxDefaultVideoSeconds {
+	if seconds < 1 || math.IsInf(seconds, 0) || seconds > maxDefaultVideoSeconds {
 		return 0, false
 	}
 	return int64(math.Ceil(seconds)), true
 }
 
-// maxDefaultVideoSeconds bounds a published default duration. It is an operator-set
-// value, not client input, so this only catches a typo'd config (a stray "3600000")
-// turning every omitted-duration create into an unaffordable reserve.
+// maxDefaultVideoSeconds bounds a published default duration. It is an operator-set value,
+// not client input, so this only catches a typo'd config (a stray "3600000").
 const maxDefaultVideoSeconds = 3600
+
+// validateVideoDefaultParameters rejects a published-but-unusable defaultParameters.seconds
+// at config load. A MISSING key is allowed (a service whose callers always send `seconds`
+// needs nothing), but a present one that videoDefaultSeconds cannot use must fail startup:
+// at runtime it is indistinguishable from "unpublished", which refuses every create that
+// omits the field — an operator typo presenting as a client error on conforming traffic.
+func validateVideoDefaultParameters(mi *ModelInfo) error {
+	if mi == nil {
+		return nil
+	}
+	raw, ok := mi.DefaultParameters["seconds"]
+	if !ok {
+		return nil
+	}
+	if _, usable := videoDefaultSeconds(mi.DefaultParameters); !usable {
+		return fmt.Errorf("invalid modelInfo.defaultParameters.seconds %v: must be a number between 1 and %d", raw, maxDefaultVideoSeconds)
+	}
+	return nil
+}

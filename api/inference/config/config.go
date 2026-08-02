@@ -209,16 +209,22 @@ const (
 // These fields enrich the on-chain service data with static model details.
 // When provided, name, description, contextLength, architecture, and supportedParameters are required.
 type ModelInfo struct {
-	Name                string                 `yaml:"name"`                // Required. Human-readable display name
-	Description         string                 `yaml:"description"`         // Required. Model description
-	ContextLength       int                    `yaml:"contextLength"`       // Required. Max context window size in tokens
-	MaxCompletionTokens int                    `yaml:"maxCompletionTokens"` // Optional. Max output tokens
-	Architecture        *ModelArchitecture     `yaml:"architecture"`        // Required. Model architecture details
-	SupportedParameters []string               `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
-	SupportedFormats    []string               `yaml:"supportedFormats"`    // Optional. API surfaces this model accepts: "openai" (/chat/completions) and/or "anthropic" (/v1/messages). When omitted the model is unconstrained and accepts every surface (backward compatible); when set, requests on an undeclared surface are rejected (see ctrl.enforceRequestFormat).
-	DefaultParameters   map[string]interface{} `yaml:"defaultParameters"`   // Optional. Default values for parameters, e.g., {"temperature": 0.7, "top_p": 0.9}
-	TeeType             string                 `yaml:"teeType"`             // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
-	ExpirationDate      string                 `yaml:"expirationDate"`      // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z". After this instant the broker rejects requests for the model with HTTP 410.
+	Name                string             `yaml:"name"`                // Required. Human-readable display name
+	Description         string             `yaml:"description"`         // Required. Model description
+	ContextLength       int                `yaml:"contextLength"`       // Required. Max context window size in tokens
+	MaxCompletionTokens int                `yaml:"maxCompletionTokens"` // Optional. Max output tokens
+	Architecture        *ModelArchitecture `yaml:"architecture"`        // Required. Model architecture details
+	SupportedParameters []string           `yaml:"supportedParameters"` // Required. e.g., ["temperature", "top_p", "max_tokens"]
+	SupportedFormats    []string           `yaml:"supportedFormats"`    // Optional. API surfaces this model accepts: "openai" (/chat/completions) and/or "anthropic" (/v1/messages). When omitted the model is unconstrained and accepts every surface (backward compatible); when set, requests on an undeclared surface are rejected (see ctrl.enforceRequestFormat).
+	// DefaultParameters is optional metadata for GET /v1/models, e.g. {"temperature": 0.7,
+	// "top_p": 0.9}. For video-generation it is also BILLING-RELEVANT: `seconds` and `size`
+	// are what the pre-flight balance reserve prices a create that omits them at (see
+	// Service.DefaultVideoSecondsFor / DefaultVideoSizeFor). Publish the values the upstream
+	// actually applies — publishing none means every create omitting `seconds` is refused,
+	// and publishing a wrong one moves the reserve away from what will be billed.
+	DefaultParameters map[string]interface{} `yaml:"defaultParameters"`
+	TeeType           string                 `yaml:"teeType"`        // Optional. TEE hardware type, e.g., "TDX", "SEV", "SGX", "H100"
+	ExpirationDate    string                 `yaml:"expirationDate"` // Optional. Model availability expiration in RFC3339 format, e.g., "2026-12-31T00:00:00Z". After this instant the broker rejects requests for the model with HTTP 410.
 
 	// VideoSizeRatios maps output resolution (e.g., "1280x720") to a cost multiplier.
 	// Used for video generation billing: fee = seconds × sizeRatio × outputPrice.
@@ -262,6 +268,15 @@ func (m *ModelInfo) Validate(serviceType string) error {
 		case APIFormatOpenAI, APIFormatAnthropic:
 		default:
 			return fmt.Errorf("service.modelInfo.supportedFormats contains unknown format %q (allowed: %q, %q)", f, APIFormatOpenAI, APIFormatAnthropic)
+		}
+	}
+	// defaultParameters.seconds is billing-relevant for video (it is what the
+	// pre-flight reserve prices an omitted duration at), so a published-but-unusable
+	// value must fail startup: at runtime it is indistinguishable from "unpublished",
+	// which refuses every create that omits the field.
+	if serviceType == "video-generation" {
+		if err := validateVideoDefaultParameters(m); err != nil {
+			return fmt.Errorf("service.modelInfo: %w", err)
 		}
 	}
 	// Parse the optional expiration once at load time so the request path never

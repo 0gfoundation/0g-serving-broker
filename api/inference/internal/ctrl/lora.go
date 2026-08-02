@@ -159,55 +159,85 @@ func extractModelFromMultipart(body []byte, contentType string) string {
 // The read is capped so a mislabeled file part can't pull unbounded memory; used
 // for short scalar fields (model, seconds, size).
 func multipartFormField(body []byte, contentType, name string) string {
-	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return ""
+	if f := multipartFormFields(body, contentType, name)[name]; len(f.Values) > 0 {
+		return f.Values[0]
 	}
-	boundary, ok := params["boundary"]
-	if !ok {
-		return ""
-	}
-	reader := multipart.NewReader(bytes.NewReader(body), boundary)
-	for {
-		part, err := reader.NextPart()
-		if err != nil {
-			return "" // io.EOF (field absent) or a malformed body
-		}
-		if part.FormName() == name && part.FileName() == "" {
-			val, _ := io.ReadAll(io.LimitReader(part, 1024))
-			part.Close()
-			return strings.TrimSpace(string(val))
-		}
-		part.Close()
-	}
+	return ""
 }
 
-// multipartHasFormField reports whether a non-file part with this name EXISTS,
-// independent of whether multipartFormField can return its value. The two answers
-// differ: that reader caps a part at 1024 bytes and trims, so a value padded past the
-// cap comes back "" — indistinguishable from a missing field unless presence is asked
-// separately. The video pre-flight reserve needs the distinction, because "the client
-// named no duration" and "the client named a duration we could not read" have opposite
-// safe answers (price the model's default vs refuse). Callers that only need a value
-// should keep using multipartFormField.
-func multipartHasFormField(body []byte, contentType, name string) bool {
+// maxMultipartFieldBytes caps how much of a scalar part is read, so a mislabeled file
+// part cannot pull unbounded memory. A value longer than this is reported truncated
+// rather than silently shortened — see multipartField.Truncated.
+const maxMultipartFieldBytes = 1024
+
+// multipartField is what one walk learned about a single field name. The three flags
+// beyond the value exist because a money path has to tell "the client did not send
+// this" apart from "the client sent something we could not read the same way the
+// upstream will":
+//
+//   - Values holds EVERY non-file part with this name, in order, so a caller can refuse
+//     a repeated field instead of guessing. The broker reads the first; Starlette /
+//     FastAPI form parsers return the LAST — so silently taking one of them lets a
+//     caller price `seconds=1` and be rendered `seconds=15`.
+//   - Truncated says a value hit maxMultipartFieldBytes. Padding a value past the cap
+//     makes it read as empty here while the upstream's own parser (no per-field cap,
+//     and it trims) reads the real value.
+//   - WalkOK says the reader reached the end of the body cleanly. Without it a
+//     malformed part BEFORE the field is indistinguishable from the field being absent,
+//     which is fail-open on a gate.
+type multipartField struct {
+	Values    []string
+	Truncated bool
+	WalkOK    bool
+}
+
+// multipartFormFields walks a multipart/form-data body ONCE and reports what it found
+// for each requested field name, using a real MIME reader (NOT a substring scan) so
+// adversarial content in another field — a prompt containing the literal
+// name="seconds" — cannot be mistaken for the field. Every returned entry has WalkOK
+// false when the content type is not multipart, carries no boundary, or the body could
+// not be walked to the end.
+//
+// One walk for all names on purpose: an image-to-video create can carry megabytes of
+// reference image, and advancing a multipart reader streams every part it skips, so a
+// walk per field multiplied that cost by the number of fields.
+func multipartFormFields(body []byte, contentType string, names ...string) map[string]multipartField {
+	found := make(map[string]multipartField, len(names))
+	wanted := make(map[string]bool, len(names))
+	for _, n := range names {
+		found[n] = multipartField{}
+		wanted[n] = true
+	}
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return false
+		return found
 	}
 	boundary, ok := params["boundary"]
 	if !ok {
-		return false
+		return found
 	}
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	for {
 		part, err := reader.NextPart()
 		if err != nil {
-			return false
+			if err == io.EOF {
+				// Walked the whole body: absent now means absent.
+				for n, f := range found {
+					f.WalkOK = true
+					found[n] = f
+				}
+			}
+			return found
 		}
-		if part.FormName() == name && part.FileName() == "" {
-			part.Close()
-			return true
+		if name := part.FormName(); wanted[name] && part.FileName() == "" {
+			val, _ := io.ReadAll(io.LimitReader(part, maxMultipartFieldBytes+1))
+			f := found[name]
+			if len(val) > maxMultipartFieldBytes {
+				f.Truncated = true
+				val = val[:maxMultipartFieldBytes]
+			}
+			f.Values = append(f.Values, strings.TrimSpace(string(val)))
+			found[name] = f
 		}
 		part.Close()
 	}

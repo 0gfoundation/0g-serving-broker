@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	logrus "github.com/sirupsen/logrus"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -653,5 +654,58 @@ func TestHandleImageServeRoute_HEADReturnsNoBody(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
 		t.Errorf("Content-Type = %q, want image/*", ct)
+	}
+}
+
+// TestHandleBrokerError_PricingUnavailableMapsTo503 locks in the retry contract for a
+// USD-pricing-feed outage on the PROXY's handleBrokerError.
+//
+// Its two siblings (ctrl.handleBrokerError and the /v1/service handler) have had this
+// mapping; this copy did not, so every billing-gate price failure routed through it — the
+// video pre-flight reserve and the two pre-existing GetBillingPrices calls — answered a
+// transient broker-side feed outage with a deterministic 400 that no SDK and no router
+// retries. errors.Response defaults an unclassified error to 400, which is why the mapping
+// has to be explicit.
+func TestHandleBrokerError_PricingUnavailableMapsTo503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		err        error
+		context    string
+		wantStatus int
+	}{
+		{
+			name:       "bare sentinel",
+			err:        ctrl.ErrPricingUnavailable,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			// The realistic shape: ctrl wraps the sentinel with %w, then handleBrokerError
+			// adds a route context. errors.Is must traverse both layers.
+			name:       "wrapped by ctrl and by the route context",
+			err:        errors.Wrap(ctrl.ErrPricingUnavailable, "get service price for video pre-flight reserve"),
+			context:    "estimate video pre-flight reserve",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			// A client-caused refusal must keep its own 4xx — the mapping must not swallow
+			// the video reserve's bad-request class into a retryable 503.
+			name:       "unrelated bad request keeps its status",
+			err:        ctrl.ErrVideoSecondsUnpriceable,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/proxy/videos", nil)
+			newTestProxy(t, nil).handleBrokerError(ctx, tt.err, tt.context)
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
 	}
 }
