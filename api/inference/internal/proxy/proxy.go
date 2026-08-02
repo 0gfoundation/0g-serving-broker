@@ -833,11 +833,24 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		//
 		// Reserving the projected fee closes it. Not a charge — nothing here is
 		// billed; settlement still bills the delivered duration.
-		fee, err := p.ctrl.EstimateVideoCreateFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
-			// Same class as the GetBillingPrices failure below (a stale/unpopulated
-			// USD rate snapshot fails closed): broker-side, so it is NOT flagged
-			// ignoreError — it must reach the broker-fault alert rather than be
+			if errors.Is(err, ctrl.ErrVideoSecondsUnpriceable) {
+				// A `seconds` the service cannot price is a bad request, same class as
+				// the image-editing parse failure above: flag it so the broker-fault
+				// alert does not fire on a malformed client body. Unlike that sibling it
+				// is also RECORDED, for the reason the validate-request path below
+				// states — a request refused at the billing gate is exactly the "high
+				// RPS, zero revenue" shape that must not die unclassified, and this one
+				// is attacker-reachable. record() stamps CtxKeyRejectionReason itself.
+				ctx.Set("ignoreError", true)
+				p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+				p.handleBrokerError(ctx, err, "price video pre-flight reserve")
+				return
+			}
+			// Broker-side: GetCachedService fails closed on a stale/unpopulated USD
+			// rate snapshot, the same class as the GetBillingPrices failure below. NOT
+			// flagged ignoreError — it must reach the broker-fault alert rather than be
 			// attributed to the client.
 			p.handleBrokerError(ctx, err, "estimate video pre-flight reserve")
 			return

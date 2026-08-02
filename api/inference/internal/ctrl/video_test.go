@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
@@ -544,6 +545,7 @@ func TestVideoCreateReserveUnits(t *testing.T) {
 		reqBody     []byte
 		contentType string
 		want        int64
+		wantErr     bool
 	}{
 		{
 			// The shape published in the model page's examples.
@@ -565,9 +567,45 @@ func TestVideoCreateReserveUnits(t *testing.T) {
 			want:    10,
 		},
 		{
-			name:    "size ratio below baseline scales the reserve down",
-			reqBody: []byte(`{"seconds":4,"size":"832x480"}`),
-			want:    2,
+			// A below-baseline ratio must NOT scale the reserve down: `size` is
+			// client-controlled and the bill is computed from the RESPONSE's size, so
+			// asking for a cheap frame used to reserve half of what H3 (which only ever
+			// renders 2K, ratio 1.0) went on to bill. Clamped at the 1.0 floor.
+			name:    "below-baseline size ratio is clamped, not honoured",
+			reqBody: []byte(`{"seconds":15,"size":"832x480"}`),
+			want:    15,
+		},
+		{
+			// Out of the range ceilSeconds accepts (> maxVideoOutputUnits). Used to be
+			// indistinguishable from "no duration given" and reserved the 1-unit floor,
+			// while the translator clamps the same value DOWN to the model max and bills
+			// it in full — the bypass this whole change exists to close.
+			name:    "out-of-range seconds is rejected, not floored",
+			reqBody: []byte(`{"seconds":1e20,"size":"1280x720"}`),
+			wantErr: true,
+		},
+		{
+			name:    "seconds beyond float64 range is rejected",
+			reqBody: []byte(`{"seconds":1e400,"size":"1280x720"}`),
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric seconds is rejected",
+			reqBody: []byte(`{"seconds":"abc","size":"1280x720"}`),
+			wantErr: true,
+		},
+		{
+			name:        "out-of-range multipart seconds is rejected",
+			reqBody:     multipartBody(map[string]string{"model": "MiniMax-H3", "seconds": "1e20"}),
+			contentType: multipartCT,
+			wantErr:     true,
+		},
+		{
+			// An explicit null is a client saying "unset", not an unpriceable value:
+			// floor, do not reject.
+			name:    "explicit null seconds floors at one unit",
+			reqBody: []byte(`{"seconds":null,"size":"1280x720"}`),
+			want:    1,
 		},
 		{
 			// encoding/json unquotes into json.Number, so a client that string-encodes
@@ -587,14 +625,14 @@ func TestVideoCreateReserveUnits(t *testing.T) {
 			want:    1,
 		},
 		{
-			name:    "zero seconds floors at one unit",
+			name:    "zero seconds is rejected, not floored",
 			reqBody: []byte(`{"seconds":0,"size":"1280x720"}`),
-			want:    1,
+			wantErr: true,
 		},
 		{
-			name:    "negative seconds floors at one unit",
+			name:    "negative seconds is rejected, not floored",
 			reqBody: []byte(`{"seconds":-15,"size":"1280x720"}`),
-			want:    1,
+			wantErr: true,
 		},
 		{
 			name:    "empty body floors at one unit",
@@ -626,7 +664,17 @@ func TestVideoCreateReserveUnits(t *testing.T) {
 			if ct == "" {
 				ct = "application/json"
 			}
-			if got := c.videoCreateReserveUnits(tt.reqBody, ct); got != tt.want {
+			got, err := c.videoCreateReserveUnits(tt.reqBody, ct)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("videoCreateReserveUnits() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !errors.Is(err, ErrVideoSecondsUnpriceable) {
+					t.Errorf("error = %v, want ErrVideoSecondsUnpriceable", err)
+				}
+				return
+			}
+			if got != tt.want {
 				t.Errorf("videoCreateReserveUnits() = %d, want %d", got, tt.want)
 			}
 		})
@@ -660,7 +708,11 @@ func TestVideoCreateReserveUnits_IgnoresPerUnitTable(t *testing.T) {
 
 	// "1280x720" matches no table row. The reserve stays on the seconds × service
 	// ratio basis (6 × 1.0), NOT the table maximum (12).
-	if got := c.videoCreateReserveUnits([]byte(`{"seconds":6,"size":"1280x720"}`), "application/json"); got != 6 {
+	got, err := c.videoCreateReserveUnits([]byte(`{"seconds":6,"size":"1280x720"}`), "application/json")
+	if err != nil {
+		t.Fatalf("videoCreateReserveUnits() unexpected error: %v", err)
+	}
+	if got != 6 {
 		t.Errorf("reserve units for an untabled size = %d, want 6 (service-ratio basis, not table max)", got)
 	}
 }

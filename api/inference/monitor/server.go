@@ -200,6 +200,14 @@ const (
 	RejectionAccountNotExist = "account_not_exist"
 	RejectionUpstreamError   = "upstream_error"
 	RejectionModelExpired    = "model_expired"
+	// RejectionInvalidRequest: the body carries a field the billing gate cannot
+	// price, so the request is refused before it reaches the upstream. Emitted by
+	// the video-generation pre-flight reserve for an unpriceable `seconds`. Its own
+	// reason rather than the upstream_error catch-all because it is attacker-
+	// reachable — an out-of-range duration used to reserve the 1-unit floor while
+	// the translator clamped it down and billed in full, so a spike here is
+	// something an operator wants to see, not a request that dies unclassified.
+	RejectionInvalidRequest = "invalid_request"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler

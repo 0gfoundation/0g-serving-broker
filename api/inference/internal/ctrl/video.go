@@ -367,45 +367,104 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 // also double the operator's per_unit_table_miss signal, since the same request
 // meters a miss again at settlement.
 //
-// So the reserve uses the service-level size ratio (baseline 1.0 for an
-// unrecognized size — GetVideoSizeRatio), i.e. the formula the single-model
-// settlement path bills on. Known ceiling: for a model whose per-model billing
-// block prices a tier ABOVE that baseline (a per_video_second multiplier > 1, or a
-// per_unit_table bucket), the reserve sits below the eventual bill by that tier
-// factor. That is a bounded gap where the previous value was "0", and erring low
-// here costs at most one request per settlement window. Closing it needs the
-// rendered tier at request time, which only the upstream/translator knows — the
-// fix for that is the create response echoing it, not the broker guessing.
-func (c *Ctrl) videoCreateReserveUnits(reqBody []byte, contentType string) int64 {
+// So the reserve uses the service-level size ratio (GetVideoSizeRatio) — the formula
+// the single-model settlement path bills on — with two guards that exist because the
+// request's `size` is CLIENT-CONTROLLED while the bill is computed from the
+// RESPONSE's size:
+//
+//   - The ratio is clamped to a 1.0 floor. DefaultVideoSizeRatios prices small frames
+//     BELOW baseline ("832x480" = 0.5), so without the clamp a caller asks for a cheap
+//     size, reserves half, and is billed for whatever the upstream actually renders:
+//     H3 only ever renders 2K, whose ratio is the 1.0 baseline, so `seconds:15,
+//     size:"832x480"` reserved 8 units against a 15-unit bill. Scaling UP is kept — a
+//     caller naming an expensive tier is telling us they want the expensive thing, and
+//     if the upstream honours it the bill follows.
+//   - An unusable-but-present `seconds` is an error, not the floor. See
+//     ErrVideoSecondsUnpriceable.
+//
+// Known ceiling, now requiring the UPSTREAM to upsize rather than the client to lie:
+// if the rendered tier prices above the requested one (a per_video_second multiplier
+// > 1, or a per_unit_table bucket), the reserve sits below the bill by that factor.
+// Closing it needs the rendered tier at request time, which only the upstream knows —
+// the fix is the create response echoing it, not the broker guessing.
+func (c *Ctrl) videoCreateReserveUnits(reqBody []byte, contentType string) (int64, error) {
 	seconds, size := videoSecondsSizeFromRequest(reqBody, contentType)
-	// seconds == 0 (absent, unparseable, or absurd enough to fail the parse guards)
-	// floors at 1 unit inside videoOutputCount rather than reserving nothing: the
-	// upstream applies its own default duration and bills it, so a create that
-	// names no duration still has to put something up. Residual: a vendor default
-	// above 1s (H3's is 4) under-reserves by that difference.
-	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
+	if seconds <= 0 && videoRequestNamesSeconds(reqBody, contentType) {
+		return 0, ErrVideoSecondsUnpriceable
+	}
+	// seconds == 0 here means the create named no duration at all. It floors at 1 unit
+	// inside videoOutputCount rather than reserving nothing: the upstream applies its
+	// own default duration and bills it, so such a create still has to put something
+	// up. Residual: a vendor default above 1s (H3's is 4) under-reserves by that
+	// difference.
+	ratio := c.Service.GetVideoSizeRatio(size)
+	if ratio < 1 {
+		ratio = 1
+	}
+	return videoOutputCount(seconds, ratio), nil
 }
 
-// EstimateVideoCreateFee is the pre-flight reserve for a video create: the fee this
+// ErrVideoSecondsUnpriceable is returned when a create request carries a `seconds`
+// field that cannot be turned into a price: unparseable, non-positive, or beyond the
+// range ceilSeconds accepts.
+//
+// Failing closed here is the point. ceilSeconds rejects anything above
+// maxVideoOutputUnits, which made an out-of-range duration indistinguishable from
+// "no duration given" and floored the reserve at 1 unit — while the translator clamps
+// the same value DOWN to the model's maximum and bills it in full (H3: 15s). So
+// `{"seconds": 1e20}` reserved 1 unit and billed 15, which is the bypass this whole
+// change exists to close. The broker cannot know the upstream's clamp, so a duration
+// it cannot price is rejected rather than guessed at — and the caller gets a 400
+// naming the field instead of a clip they did not ask for.
+var ErrVideoSecondsUnpriceable = errors.NewBadRequest(
+	"invalid `seconds`: must be a positive number the service can price; omit it to accept the model's default duration")
+
+// videoRequestNamesSeconds reports whether a create body carries a `seconds` field at
+// all, independent of whether it can be priced — the distinction between "no duration
+// requested" (reserve the floor, the upstream will apply its default) and "a duration
+// we cannot price" (reject; see ErrVideoSecondsUnpriceable). An explicit JSON null
+// counts as absent: it is a client saying "unset", not an unpriceable value.
+func videoRequestNamesSeconds(reqBody []byte, contentType string) bool {
+	if len(reqBody) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(reqBody, &fields) == nil {
+		raw, ok := fields["seconds"]
+		return ok && string(raw) != "null"
+	}
+	return multipartFormField(reqBody, contentType, "seconds") != ""
+}
+
+// VideoCreateReserveFee is the pre-flight reserve for a video create: the fee this
 // request bills if the upstream renders the duration it asked for, priced at the
 // service's output price. Mirrors settlement's `units × outputPrice`
 // (handleVideoGenerationResponse) with the reserve's own unit basis — see
-// videoCreateReserveUnits. Reserving is not charging: nothing is billed here, and
-// settlement still bills the delivered duration.
+// videoCreateReserveUnits, and note that settlement, NOT this, is what bills.
+// Reserving is not charging: nothing is billed here.
 //
-// Prices off GetCachedService rather than GetBillingPrices because the resolved
-// model is not on the context yet at gate time (PrepareHTTPRequest sets
+// Two failure classes, deliberately kept separable so the proxy can attribute them:
+// ErrVideoSecondsUnpriceable is client-caused (a 400), anything else is broker-caused
+// (a stale/unpopulated USD rate snapshot failing closed inside GetCachedService).
+// Callers must classify — see the video-generation case in proxyHTTPRequest.
+//
+// Prices off GetCachedService rather than GetBillingPrices because the resolved model
+// is not on the context yet at gate time (PrepareHTTPRequest sets
 // CtxKeyResolvedModel, and it runs after the balance check): asking for per-model
 // prices here would log a spurious "resolvedModel missing" ERROR on every video
 // request. The service price is the configured ceiling over all models — and for a
 // USD-denominated service GetCachedService overlays the live max wei price — so the
 // reserve stays at or above the per-model fee for these units.
-func (c *Ctrl) EstimateVideoCreateFee(ctx context.Context, reqBody []byte, contentType string) (string, error) {
+func (c *Ctrl) VideoCreateReserveFee(ctx context.Context, reqBody []byte, contentType string) (string, error) {
+	units, err := c.videoCreateReserveUnits(reqBody, contentType)
+	if err != nil {
+		return "", err
+	}
 	svc, err := c.GetCachedService(ctx)
 	if err != nil {
 		return "", errors.Wrap(err, "get service price for video pre-flight reserve")
 	}
-	fee, err := util.Multiply(svc.OutputPrice, c.videoCreateReserveUnits(reqBody, contentType))
+	fee, err := util.Multiply(svc.OutputPrice, units)
 	if err != nil {
 		return "", errors.Wrap(err, "compute video pre-flight reserve")
 	}
