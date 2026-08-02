@@ -820,9 +820,29 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
 	case "video-generation":
-		// Video billing is deferred to response time — the provider returns
-		// actual seconds/size in the JSON response, so we don't guess here.
-		expectedInputFee = "0"
+		// Video SETTLEMENT is deferred to response time (the provider reports the
+		// actual seconds/size), but the pre-flight gate still has to reserve
+		// something: validateBalanceAdequacy checks
+		// `thisRequestFee + unsettled + MinimumLockedBalance <= lockBalance`, so a
+		// fee of "0" left MinimumLockedBalance (1 0G) as the ONLY thing standing
+		// between a caller and a clip that bills many times that. Measured live: a
+		// wallet with exactly 1.0 0G locked passed the gate and was billed 6.698 0G
+		// for one 5s 2K clip; at the 15s ceiling that is ~20 0G against a 1 0G lock.
+		// The overrun is bounded to one request per settlement window (the unsettled
+		// fee blocks the next one), but it is free video every window, per wallet.
+		//
+		// Reserving the projected fee closes it. Not a charge — nothing here is
+		// billed; settlement still bills the delivered duration.
+		fee, err := p.ctrl.EstimateVideoCreateFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
+		if err != nil {
+			// Same class as the GetBillingPrices failure below (a stale/unpopulated
+			// USD rate snapshot fails closed): broker-side, so it is NOT flagged
+			// ignoreError — it must reach the broker-fault alert rather than be
+			// attributed to the client.
+			p.handleBrokerError(ctx, err, "estimate video pre-flight reserve")
+			return
+		}
+		expectedInputFee = fee
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

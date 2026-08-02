@@ -520,3 +520,147 @@ func TestEscapeVendorJobID(t *testing.T) {
 		}
 	}
 }
+
+// ==========================================================================
+// Pre-flight reserve for a video create (videoCreateReserveUnits)
+// ==========================================================================
+
+// TestVideoCreateReserveUnits covers the unit basis the pre-flight balance gate
+// reserves on. This is the number that used to be effectively zero
+// (expectedInputFee = "0" in proxy.go), which left MinimumLockedBalance as the only
+// thing between a caller and a clip billing many times their locked balance.
+//
+// The floor cases matter as much as the arithmetic: a create that names no usable
+// duration must still reserve something, because the upstream will apply its own
+// default duration and bill it.
+func TestVideoCreateReserveUnits(t *testing.T) {
+	const multipartCT = "multipart/form-data; boundary=boundary"
+	// ModelInfo nil → config.DefaultVideoSizeRatios (1280x720 = 1.0,
+	// 1024x1792 = 2.0, 832x480 = 0.5, anything unlisted = 1.0).
+	c := &Ctrl{logger: testLogger(), Service: config.Service{}}
+
+	tests := []struct {
+		name        string
+		reqBody     []byte
+		contentType string
+		want        int64
+	}{
+		{
+			// The shape published in the model page's examples.
+			name:    "json seconds with baseline pixel size",
+			reqBody: []byte(`{"model":"MiniMax-H3","prompt":"a cat","seconds":6,"size":"1280x720"}`),
+			want:    6,
+		},
+		{
+			// Measured live: 5s at "2K" billed 5 units × outputPrice (6.698 0G on a
+			// wallet with 1.0 0G locked). "2K" is not in DefaultVideoSizeRatios, so it
+			// takes the 1.0 baseline — which is exactly what settlement billed.
+			name:    "json seconds with unlisted resolution token takes baseline",
+			reqBody: []byte(`{"model":"MiniMax-H3","prompt":"a cat","seconds":5,"size":"2K"}`),
+			want:    5,
+		},
+		{
+			name:    "size ratio above baseline scales the reserve up",
+			reqBody: []byte(`{"seconds":5,"size":"1024x1792"}`),
+			want:    10,
+		},
+		{
+			name:    "size ratio below baseline scales the reserve down",
+			reqBody: []byte(`{"seconds":4,"size":"832x480"}`),
+			want:    2,
+		},
+		{
+			// encoding/json unquotes into json.Number, so a client that string-encodes
+			// the duration is priced the same — not floored to 1.
+			name:    "string-encoded seconds is priced, not floored",
+			reqBody: []byte(`{"seconds":"15","size":"1280x720"}`),
+			want:    15,
+		},
+		{
+			name:    "fractional seconds round up",
+			reqBody: []byte(`{"seconds":4.1,"size":"1280x720"}`),
+			want:    5,
+		},
+		{
+			name:    "absent seconds floors at one unit, never zero",
+			reqBody: []byte(`{"model":"MiniMax-H3","prompt":"a cat","size":"1280x720"}`),
+			want:    1,
+		},
+		{
+			name:    "zero seconds floors at one unit",
+			reqBody: []byte(`{"seconds":0,"size":"1280x720"}`),
+			want:    1,
+		},
+		{
+			name:    "negative seconds floors at one unit",
+			reqBody: []byte(`{"seconds":-15,"size":"1280x720"}`),
+			want:    1,
+		},
+		{
+			name:    "empty body floors at one unit",
+			reqBody: nil,
+			want:    1,
+		},
+		{
+			name:    "unparseable body floors at one unit",
+			reqBody: []byte(`not json at all`),
+			want:    1,
+		},
+		{
+			name:        "multipart seconds and size",
+			reqBody:     multipartBody(map[string]string{"model": "MiniMax-H3", "seconds": "6", "size": "1024x1792"}),
+			contentType: multipartCT,
+			want:        12,
+		},
+		{
+			name:        "multipart without seconds floors at one unit",
+			reqBody:     multipartBody(map[string]string{"model": "MiniMax-H3", "prompt": "a cat"}),
+			contentType: multipartCT,
+			want:        1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ct := tt.contentType
+			if ct == "" {
+				ct = "application/json"
+			}
+			if got := c.videoCreateReserveUnits(tt.reqBody, ct); got != tt.want {
+				t.Errorf("videoCreateReserveUnits() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVideoCreateReserveUnits_IgnoresPerUnitTable pins the deliberate choice NOT to
+// price the reserve through videoOutputUnits: a create request's `size` is the
+// client's free-text value (pixel dimensions for an OpenAI-conforming caller), and a
+// per_unit_table price list is keyed on the RESPONSE's rendered tier. Routing the
+// request value through the bucket lookup would miss every row and fall to the table
+// MAXIMUM, over-reserving against callers who can afford the real bill (and
+// double-counting the operator's per_unit_table_miss signal, which settlement emits
+// for the same request).
+func TestVideoCreateReserveUnits_IgnoresPerUnitTable(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "minimax-hailuo",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 12},
+			},
+		},
+	}
+	c := &Ctrl{
+		logger:  testLogger(),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "minimax-hailuo"),
+	}
+
+	// "1280x720" matches no table row. The reserve stays on the seconds × service
+	// ratio basis (6 × 1.0), NOT the table maximum (12).
+	if got := c.videoCreateReserveUnits([]byte(`{"seconds":6,"size":"1280x720"}`), "application/json"); got != 6 {
+		t.Errorf("reserve units for an untabled size = %d, want 6 (service-ratio basis, not table max)", got)
+	}
+}

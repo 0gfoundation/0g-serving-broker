@@ -353,6 +353,65 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string)
 	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
 }
 
+// videoCreateReserveUnits derives the billable-unit count to RESERVE for a video
+// create, from the request alone. Pure and side-effect free.
+//
+// Deliberately NOT videoOutputUnits, even though that is what settlement bills on:
+// the two read `size` from different vocabularies. Settlement sees the RESPONSE's
+// rendered resolution tier (e.g. "2K"), which is what a per_unit_table price list
+// is keyed on; a create request carries the CLIENT's free-text size, which for an
+// OpenAI-conforming caller is pixel dimensions ("1280x720"). Feeding that to the
+// bucket lookup misses every row, and videoOutputUnits answers a miss with the
+// table MAXIMUM — the most expensive row across every resolution — which as a
+// reserve would reject callers who can comfortably afford the real bill. It would
+// also double the operator's per_unit_table_miss signal, since the same request
+// meters a miss again at settlement.
+//
+// So the reserve uses the service-level size ratio (baseline 1.0 for an
+// unrecognized size — GetVideoSizeRatio), i.e. the formula the single-model
+// settlement path bills on. Known ceiling: for a model whose per-model billing
+// block prices a tier ABOVE that baseline (a per_video_second multiplier > 1, or a
+// per_unit_table bucket), the reserve sits below the eventual bill by that tier
+// factor. That is a bounded gap where the previous value was "0", and erring low
+// here costs at most one request per settlement window. Closing it needs the
+// rendered tier at request time, which only the upstream/translator knows — the
+// fix for that is the create response echoing it, not the broker guessing.
+func (c *Ctrl) videoCreateReserveUnits(reqBody []byte, contentType string) int64 {
+	seconds, size := videoSecondsSizeFromRequest(reqBody, contentType)
+	// seconds == 0 (absent, unparseable, or absurd enough to fail the parse guards)
+	// floors at 1 unit inside videoOutputCount rather than reserving nothing: the
+	// upstream applies its own default duration and bills it, so a create that
+	// names no duration still has to put something up. Residual: a vendor default
+	// above 1s (H3's is 4) under-reserves by that difference.
+	return videoOutputCount(seconds, c.Service.GetVideoSizeRatio(size))
+}
+
+// EstimateVideoCreateFee is the pre-flight reserve for a video create: the fee this
+// request bills if the upstream renders the duration it asked for, priced at the
+// service's output price. Mirrors settlement's `units × outputPrice`
+// (handleVideoGenerationResponse) with the reserve's own unit basis — see
+// videoCreateReserveUnits. Reserving is not charging: nothing is billed here, and
+// settlement still bills the delivered duration.
+//
+// Prices off GetCachedService rather than GetBillingPrices because the resolved
+// model is not on the context yet at gate time (PrepareHTTPRequest sets
+// CtxKeyResolvedModel, and it runs after the balance check): asking for per-model
+// prices here would log a spurious "resolvedModel missing" ERROR on every video
+// request. The service price is the configured ceiling over all models — and for a
+// USD-denominated service GetCachedService overlays the live max wei price — so the
+// reserve stays at or above the per-model fee for these units.
+func (c *Ctrl) EstimateVideoCreateFee(ctx context.Context, reqBody []byte, contentType string) (string, error) {
+	svc, err := c.GetCachedService(ctx)
+	if err != nil {
+		return "", errors.Wrap(err, "get service price for video pre-flight reserve")
+	}
+	fee, err := util.Multiply(svc.OutputPrice, c.videoCreateReserveUnits(reqBody, contentType))
+	if err != nil {
+		return "", errors.Wrap(err, "compute video pre-flight reserve")
+	}
+	return fee.String(), nil
+}
+
 // maxContractJobIDLen is the published ceiling on a video job id. It is not a
 // broker-side storage limit — it comes from what consumers do with the id, chiefly
 // the 0G Router folding it into usage_logs.request_id (varchar(64), UNIQUE), the

@@ -103,13 +103,41 @@ both the client-facing passthrough and the broker's own poller.
 
 ### 4. Fee reservation at create time, true-up at completion
 
-Create-time now validates the user has sufficient balance for the **requested** duration
+Create-time validates the user has sufficient balance for the **requested** duration
 (reusing the existing `ValidateRequestWithEstimatedFee` balance check, the same mechanism
 `async.go:188` already uses for the text-to-image async queue) and persists a `Request` row with
 that estimated fee. Completion — whether immediate or via the poller — recomputes the fee from
 the actual delivered duration and overwrites it, exactly as `UpdateRequestFeesAndCount` does
 today. If actual and requested diverge, the corrected fee is what settles; nothing settles before
 the actual duration is known.
+
+The reserve is `EstimateVideoCreateFee` (`video.go`): `videoCreateReserveUnits × outputPrice`,
+where the units are the requested `seconds` weighted by the **service-level** size ratio
+(`GetVideoSizeRatio`, baseline 1.0 for an unrecognized size) and floored at 1. Two properties are
+deliberate and worth not "fixing" by accident:
+
+- **It does not reuse `videoOutputUnits`**, which is what settlement bills on. The two read `size`
+  from different vocabularies: settlement sees the response's rendered resolution tier (`"2K"`),
+  which is what a `per_unit_table` list is keyed on, while a create request carries the client's
+  free-text size — pixel dimensions (`"1280x720"`) for an OpenAI-conforming caller. Routing the
+  request value through the bucket lookup misses every row, and `videoOutputUnits` answers a miss
+  with the table **maximum**; as a reserve that rejects callers who can afford the real bill, and
+  it would double the `per_unit_table_miss` operator signal that settlement already emits for the
+  same request.
+- **It prices off `GetCachedService`, not `GetBillingPrices`.** `CtxKeyResolvedModel` is set by
+  `PrepareHTTPRequest`, which runs *after* the balance check, so per-model pricing is not
+  available at gate time and asking for it would log a spurious "resolvedModel missing" ERROR on
+  every video create. The service price is the configured ceiling over all models (USD-denominated
+  services get the live max wei price overlaid), so the reserve stays at or above the per-model fee
+  for these units.
+
+Known residuals, both bounded and both strictly smaller than the "reserve nothing" they replace:
+a model whose per-model block prices a tier above the service baseline (a `per_video_second`
+multiplier > 1, or a `per_unit_table` bucket) reserves below its eventual bill by that tier factor;
+and a create that names no usable `seconds` reserves the 1-unit floor while the upstream applies
+its own default duration (H3's is 4s) and bills that. Closing either needs the rendered tier /
+applied duration at request time, which only the upstream knows — the fix is the create response
+echoing them, not the broker guessing.
 
 ## Data model
 
