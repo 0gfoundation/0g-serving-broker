@@ -387,34 +387,48 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 // maximum is above whichever one the deployed combination picks, for every transport and provenance.
 func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	bodySeconds, _ := videoSecondsSizeFromRequest(reqBody, contentType)
-	querySeconds, queryShadowsBody := videoReserveQuerySeconds(rawQuery, contentType)
+	querySeconds, queryNamedUnusable := videoReserveQuerySeconds(rawQuery)
+	queryIsRead := isMultipartRequest(contentType)
 
+	// Two separate questions, and conflating them is how this went wrong twice.
+	//
+	// (1) How large a duration did ANY source name? That sets the reserve, so it takes the maximum —
+	//     the three consumers of `seconds` disagree on where they look (see below), and the largest
+	//     reading is above whichever one the deployed combination picks.
 	best := bodySeconds
 	if querySeconds > best {
 		best = querySeconds
 	}
-	// The fallback is an UNKNOWN sentinel, not a candidate value: it only applies when no source named
-	// a duration, or when the one the upstream will read named nothing usable. Treating it as a value
-	// and max()ing it in meant a readable duration lost to it — `{}` plus `?seconds=4` reserved 15s
-	// after the caller had said 4, and `{"seconds":4}` plus a bare `?seconds=` did the same on a JSON
-	// create where the query never reaches the vendor at all. 3.75x the required lock, for a request
-	// that named what it wanted.
-	if best <= 0 || queryShadowsBody {
-		if int64(videoReserveFallbackSeconds) > best {
-			best = videoReserveFallbackSeconds
+
+	// (2) Did the source the UPSTREAM will read name a usable duration? Only that decides whether the
+	//     fallback applies, because the fallback stands in for "the vendor will pick a duration we
+	//     cannot see". Asking (1) instead let a value the upstream provably discards cancel the
+	//     sentinel: on a JSON create the query reaches no reader, yet `?seconds=1` over a body naming
+	//     none reserved 4 units where the same create with no query reserved 23 — 74% deleted by a
+	//     string nothing upstream reads.
+	//
+	//     multipart: ParseMultipartForm seeds r.Form from the query, so FormValue returns the query's
+	//     value whenever the key is present — usable or not — and never consults the body.
+	//     anything else: the translator decodes the body and ignores the query entirely.
+	upstreamNamedDuration := bodySeconds > 0
+	if queryIsRead {
+		switch {
+		case queryNamedUnusable:
+			upstreamNamedDuration = false
+		case querySeconds > 0:
+			upstreamNamedDuration = true
 		}
+	}
+	if !upstreamNamedDuration && int64(videoReserveFallbackSeconds) > best {
+		best = videoReserveFallbackSeconds
 	}
 	return videoReserveClampSeconds(best)
 }
 
-// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does.
-//
-// shadowsBody reports that the query named `seconds` unusably ON A TRANSPORT WHERE THE QUERY WINS —
-// i.e. multipart, where ParseMultipartForm seeds r.Form from the query and FormValue therefore returns
-// the query's empty value and never consults the body. There the vendor applies its own default and the
-// body's value is irrelevant, so the caller must fall back. On a JSON create the query reaches no
-// reader at all, so an unusable one is simply ignored rather than allowed to quadruple the reserve.
-func videoReserveQuerySeconds(rawQuery, contentType string) (seconds int64, shadowsBody bool) {
+// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does. namedUnusable
+// reports that the key was present but held nothing a duration could be read from — which matters only
+// on the transport where the query is what the upstream reads; the caller decides that.
+func videoReserveQuerySeconds(rawQuery string) (seconds int64, namedUnusable bool) {
 	if rawQuery != "" {
 		// ParseQuery's error is IGNORED, matching r.FormValue: r.ParseForm returns the same error and
 		// FormValue ignores it, so `?seconds=15&junk=%zz` still resolves to 15 upstream. Guarding on
@@ -431,11 +445,21 @@ func videoReserveQuerySeconds(rawQuery, contentType string) (seconds int64, shad
 					return int64(math.Ceil(f)), false
 				}
 			}
-			// Present but unreadable or empty. Only shadowing where the query is the reader's source.
-			return 0, strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/")
+			// Present but unreadable or empty.
+			return 0, true
 		}
 	}
 	return 0, false
+}
+
+// isMultipartRequest reports whether the upstream will read this create with r.FormValue's form
+// machinery, which is what makes the URL query a reader of `seconds` at all.
+//
+// Deliberately laxer than the translator's own dispatch (a case-sensitive `multipart/form-data` prefix):
+// every content type where this says yes and the translator says no ends in an upstream 400, so the
+// divergence can only over-reserve a request that is never billed. The reverse would be an under-reserve.
+func isMultipartRequest(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/")
 }
 
 // videoReserveClampSeconds raises a requested duration to the vendor floor. Below it the vendor renders

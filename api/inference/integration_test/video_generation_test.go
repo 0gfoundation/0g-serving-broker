@@ -64,6 +64,13 @@ func newMockVideoProvider(t *testing.T) (*httptest.Server, string) {
 				"model":  "sora-2",
 			})
 
+		case r.Method == "GET" && path == "/videos":
+			// The OpenAI list endpoint. Present so TestVideoGenerationListIsNotGated can tell "the
+			// reserve let this through" apart from "the mock refused the shape".
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"object": "list", "data": []interface{}{}})
+
 		case r.Method == "GET" && path == "/videos/"+jobID+"/content":
 			w.Header().Set("Content-Type", "video/mp4")
 			w.WriteHeader(http.StatusOK)
@@ -1112,3 +1119,59 @@ func TestVideoGeneration_WaitParam(t *testing.T) {
 		})
 	}
 }
+
+// TestVideoGenerationListIsNotGated drives a GET through the real router to pin the reserve's POST-only
+// gate. `/videos` is an exact-match TargetRoute with no method gate behind `serviceGroup.Any("*any")`, so
+// before the gate the OpenAI list endpoint reached the billing switch and was charged a create-sized
+// reserve — a bodyless request prices the full fallback duration at the dearest tier, which on a
+// 4K-tiered config is a ~160 0G lock to list videos. Nothing but a create renders a clip.
+//
+// This lives at the integration level because that is the only one that can exercise the gate: the gate
+// is in the proxy arm, and a unit test of VideoCreateReserveFee is method-agnostic by construction.
+func TestVideoGenerationListIsNotGated(t *testing.T) {
+	mockProvider, _ := newMockVideoProvider(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+	})
+
+	// A wallet funded for MinimumLockedBalance plus 1000 wei. A bodyless create would reserve the
+	// fallback duration at the dearest service ratio — 15s x 2.0 x 100 wei = 3000 wei — so the gate's
+	// absence is observable here as a 402, and its presence as a clean pass. Without this the harness's
+	// 1000 0G covers even a create-sized reserve and the assertion below cannot fail.
+	userAddr := crypto.PubkeyToAddress(env.privateKey.PublicKey)
+	env.ctrl.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
+		User:          userAddr,
+		Balance:       new(big.Int).Add(big.NewInt(1e18), big.NewInt(1000)),
+		PendingRefund: big.NewInt(0),
+		Generation:    big.NewInt(0),
+		RevokedBitmap: big.NewInt(0),
+		Acknowledged:  true,
+	})
+
+	req := httptest.NewRequest("GET", "/v1/proxy/videos", nil)
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+
+	// The one thing this must never be is a balance rejection: the caller is not asking for a clip.
+	if w.Code == http.StatusPaymentRequired {
+		t.Errorf("GET /v1/proxy/videos was charged a create-sized reserve and got 402: %s", w.Body.String())
+	}
+	// And it must actually reach the provider, so the assertion above is not passing merely because
+	// the request died earlier for some unrelated reason.
+	if w.Code != http.StatusOK {
+		t.Errorf("expected the list to reach the provider and return 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The refusal side of the reserve — an underfunded wallet getting a 402 — is asserted at the unit level
+// (TestVideoReserveMeasuredMainnetCase pins the fee for the exact mainnet incident shape) and NOT here,
+// because this harness cannot express it: validateBalanceAdequacy only falls through to its re-check when
+// the fast comparison fails, and that re-check calls SyncUserAccount -> GetUserAccount, which derefs a
+// nil ProviderContract.Contract and SIGSEGVs the test binary. Wiring a real contract binding is the
+// prerequisite for testing a refusal end to end; guarding the nil in production would only hide a
+// genuinely broken deployment. Recorded so the next attempt does not rediscover the crash.

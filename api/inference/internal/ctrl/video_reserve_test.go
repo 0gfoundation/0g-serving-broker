@@ -386,11 +386,22 @@ func TestVideoReserveTakesTheMaxOfQueryAndBody(t *testing.T) {
 			t.Errorf("reserve = %d, want 15 (the query's value)", got)
 		}
 	})
-	t.Run("a readable query is used when the body names nothing", func(t *testing.T) {
-		// The caller DID name a duration. Treating the fallback as a candidate value rather than an
-		// unknown sentinel reserved 15 here and ignored them.
-		if got := videoReserve(t, c, `{"prompt":"a cat"}`, "application/json", "seconds=6"); got != 6 {
-			t.Errorf("reserve = %d, want 6 (the query's value)", got)
+	t.Run("a query-only duration counts only where the upstream reads the query", func(t *testing.T) {
+		// multipart: FormValue returns the query's value and never consults the body, so the caller
+		// named a duration and the sentinel must not apply.
+		mp, ct := multipartSeconds(t, "")
+		if got := videoReserve(t, c, mp, ct, "seconds=6"); got != 6 {
+			t.Errorf("multipart: reserve = %d, want 6 (the query is what the upstream reads)", got)
+		}
+		// JSON: the translator decodes the body and ignores the query entirely, so a query-only
+		// duration reaches NO reader. It must not cancel the unknown-vendor-duration sentinel — an
+		// earlier revision let `?seconds=1` cut this reserve by 74% on a create whose forwarded body is
+		// byte-identical to one carrying no query at all.
+		for _, q := range []string{"seconds=6", "seconds=1"} {
+			if got := videoReserve(t, c, `{"prompt":"a cat"}`, "application/json", q); got != videoReserveFallbackSeconds {
+				t.Errorf("json %q: reserve = %d, want %d (the query reaches no reader, so the duration is still unknown)",
+					q, got, videoReserveFallbackSeconds)
+			}
 		}
 	})
 	t.Run("an unreadable query does not undercut a dearer body", func(t *testing.T) {
@@ -401,10 +412,13 @@ func TestVideoReserveTakesTheMaxOfQueryAndBody(t *testing.T) {
 }
 
 // TestVideoReserveModeMustBeAVideoMode covers a billing block whose mode is per_token or omitted.
-// validBillingModeForType accepts both for ANY service type, so a video model carrying one loads — and
-// settlement cannot price video from it either (OutputUnits errors, videoOutputUnits falls back to the
-// service size-ratio). Treating them as per_video_second reserved the ratio-less duration against a
-// ratio-scaled bill.
+//
+// validBillingModeForType admits both for any service type, but validateVideoModelEntry then rejects
+// them for a video model — so this is defence-in-depth for a caller reaching the pricing helpers without
+// config load, NOT a shape a running broker holds. An earlier revision of this comment claimed such a
+// model "loads", which was measured false. The assertion is still worth keeping: settlement cannot price
+// video from such a block either (OutputUnits errors, videoOutputUnits falls back to the service
+// size-ratio), so reserving off the multipliers would sit under a ratio-scaled bill.
 func TestVideoReserveModeMustBeAVideoMode(t *testing.T) {
 	for _, mode := range []config.BillingMode{"", config.BillingModePerToken} {
 		t.Run(string("mode="+mode), func(t *testing.T) {
@@ -480,14 +494,15 @@ func TestVideoReserveServiceRatioClampIsLoadBearing(t *testing.T) {
 	}
 }
 
-// TestVideoReserveOnlyGatesCreates guards the POST-only check. `/videos` is an exact-match route with no
-// method gate, so the OpenAI list endpoint reached the billing switch and demanded a create-sized lock
-// to list videos — measured at 160.75 0G on a 4K-tiered config. Mutation testing found no test covered
-// it.
-func TestVideoReserveOnlyGatesCreates(t *testing.T) {
-	// The reserve function itself is method-agnostic; the gate lives in the proxy arm. Assert the
-	// property that makes the gate necessary: a bodyless request reserves a full fallback clip, so it
-	// must not be reached by a GET.
+// TestVideoReserveBodylessRequestIsExpensive pins the PRECONDITION that makes the proxy arm's POST-only
+// gate necessary — not the gate itself. Deleting the gate leaves this test green, and an earlier version
+// of this comment claimed the opposite; mutation testing caught the lie. The gate is covered end to end
+// in the integration suite (TestVideoGenerationListIsNotGated), the only level that can drive a GET
+// through the real router.
+func TestVideoReserveBodylessRequestIsExpensive(t *testing.T) {
+	// A bodyless request reserves a full fallback clip at the dearest tier, so any route reaching the
+	// reserve without being a create demands a create-sized lock — 160.75 0G on this 4K-tiered config at
+	// the mainnet unit price.
 	c := videoReserveCtrl(t, &config.BillingConfig{
 		Mode:                  config.BillingModePerVideoSecond,
 		ResolutionMultipliers: map[string]float64{"4K": 8.0},
