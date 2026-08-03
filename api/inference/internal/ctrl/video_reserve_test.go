@@ -2,9 +2,11 @@ package ctrl
 
 import (
 	"bytes"
+	"math"
 	"mime/multipart"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -328,4 +330,98 @@ func TestVideoReserveNeverBelowSettlementBaseline(t *testing.T) {
 			t.Errorf("reserve %d < settled %d — the vendor rendered a tier with no covering row", reserve, settled)
 		}
 	})
+}
+
+// TestVideoReserveTakesTheMaxOfQueryAndBody pins the fix for a hole an earlier revision of THIS reserve
+// opened. `seconds` has three consumers and they disagree on where to look: the multipart create reads
+// r.FormValue (query wins), the JSON create decodes the body (query never read), and settlement's
+// degraded path re-parses the body only (query never read). Reading query-first on the strength of the
+// multipart rule alone handed a caller a discount on the other two.
+func TestVideoReserveTakesTheMaxOfQueryAndBody(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
+
+	t.Run("a cheaper query does not undercut a dearer body", func(t *testing.T) {
+		// `?seconds=4` with a JSON body of 15: the translator decodes the body and renders 15, and even
+		// on multipart, settlement bills the body's value whenever the response omits its duration.
+		if got := videoReserve(t, c, `{"seconds":15}`, "application/json", "seconds=4"); got != 15 {
+			t.Errorf("reserve = %d, want 15 (the body's value; the query is cheaper and must not win)", got)
+		}
+	})
+	t.Run("a dearer query still wins over the body", func(t *testing.T) {
+		// The multipart transport's own rule: r.FormValue resolves the query before the body.
+		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=15"); got != 15 {
+			t.Errorf("reserve = %d, want 15 (the query's value)", got)
+		}
+	})
+	t.Run("an unreadable query does not undercut a dearer body", func(t *testing.T) {
+		if got := videoReserve(t, c, `{"seconds":30}`, "application/json", "seconds="); got != 30 {
+			t.Errorf("reserve = %d, want 30", got)
+		}
+	})
+}
+
+// TestVideoReserveModeMustBeAVideoMode covers a billing block whose mode is per_token or omitted.
+// validBillingModeForType accepts both for ANY service type, so a video model carrying one loads — and
+// settlement cannot price video from it either (OutputUnits errors, videoOutputUnits falls back to the
+// service size-ratio). Treating them as per_video_second reserved the ratio-less duration against a
+// ratio-scaled bill.
+func TestVideoReserveModeMustBeAVideoMode(t *testing.T) {
+	for _, mode := range []config.BillingMode{"", config.BillingModePerToken} {
+		t.Run(string("mode="+mode), func(t *testing.T) {
+			billing := &config.BillingConfig{Mode: mode, ResolutionMultipliers: map[string]float64{"2K": 1.2}}
+			if _, ok, mayFallBack := billing.MaxVideoOutputUnitsFor(10); ok || !mayFallBack {
+				t.Errorf("MaxVideoOutputUnitsFor = (ok %v, mayFallBack %v), want (false, true)", ok, mayFallBack)
+			}
+			c := videoReserveCtrl(t, billing)
+			reserve := videoReserve(t, c, `{"model":"vid","seconds":10,"size":"2K"}`, "application/json", "")
+			settled := c.videoOutputUnits(ginCtxWithResolvedModel("vid"), 10, "1024x1792")
+			if reserve < settled {
+				t.Errorf("reserve %d < settled %d — a non-video mode must not be priced off its multipliers", reserve, settled)
+			}
+		})
+	}
+}
+
+// TestVideoReserveSkipsUnusableMultipliers covers a block holding one entry settlement would refuse.
+// Taking the raw maximum let that single entry make the whole block answer "cannot price", dropping the
+// reserve to a service ratio that knows nothing about the usable multipliers next to it.
+func TestVideoReserveSkipsUnusableMultipliers(t *testing.T) {
+	for _, poison := range []float64{1e30, math.Inf(1), math.NaN()} {
+		billing := &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"cursed": poison, "1080p": 5.0},
+		}
+		c := videoReserveCtrl(t, billing)
+		reserve := videoReserve(t, c, `{"model":"vid","seconds":4,"size":"1080p"}`, "application/json", "")
+		settled := c.videoOutputUnits(ginCtxWithResolvedModel("vid"), 4, "1080p")
+		if reserve < settled {
+			t.Errorf("poison %v: reserve %d < settled %d — the usable 5.0 next to it must still be reserved",
+				poison, reserve, settled)
+		}
+		// And the service-ratio floor must apply, because settlement CAN land there for this block.
+		if _, _, mayFallBack := billing.MaxVideoOutputUnitsFor(4); !mayFallBack {
+			t.Errorf("poison %v: mayFallBack = false; settlement can reach the service ratio here", poison)
+		}
+	}
+}
+
+// TestVideoReserveDoesNotStampRawClientInputOnSingleModel is the regression test for a free-clip path
+// this reserve opened. On a single-model service ResolveRequestedModel returns ok=true with the RAW
+// requested string, and the stamped value reaches VideoPollJob.ResolvedModel — a varchar(255). A
+// 300-character `model` made that insert fail with MySQL 1406 after the create had already returned a
+// job id and registered the caller as its owner: clip retrievable, never billed.
+func TestVideoReserveDoesNotStampRawClientInputOnSingleModel(t *testing.T) {
+	c := singleModelVideoCtrl(t, nil)
+	ctx := gateCtx()
+	body := `{"model":"` + strings.Repeat("A", 300) + `","seconds":6}`
+	if _, err := c.VideoCreateReserveFee(ctx, []byte(body), "application/json", ""); err != nil {
+		t.Fatalf("VideoCreateReserveFee: %v", err)
+	}
+	if v, exists := ctx.Get(CtxKeyResolvedModel); exists {
+		t.Errorf("stamped %q (len %d) on a single-model service; PrepareHTTPRequest's ModelType default must stay in charge",
+			v, len(v.(string)))
+	}
 }

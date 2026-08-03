@@ -828,6 +828,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		//
 		// VideoCreateReserveFee is an upper bound, not an estimate — see its doc. Not a charge: the
 		// real fee is computed from the response and this number is never persisted.
+		// POST only. `/videos` is an exact-match TargetRoute with no method gate, so GET /v1/proxy/videos
+		// — the OpenAI list endpoint — reaches this switch too, and reserving there demanded ~20 0G to
+		// LIST videos where main demanded 1 0G, turning an upstream 400/404 into a 402. Nothing but a
+		// create renders a clip, so nothing but a create needs a reserve.
+		if ctx.Request.Method != http.MethodPost {
+			expectedInputFee = "0"
+			break
+		}
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), ctx.Request.URL.RawQuery)
 		if err != nil {
 			// Broker-side: an unreadable configured price, a contract read that could not reach the

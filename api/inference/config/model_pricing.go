@@ -351,8 +351,18 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 
 // MaxVideoOutputUnitsFor returns an upper bound on the output units this block can bill for a video of
 // the given duration, over every resolution — including the ones it does not list, which settle at the
-// 1.0 baseline (per_video_second) or the table maximum (per_unit_table). ok is false when the block
-// cannot answer at all: no rows, or a multiplier settlement itself would refuse.
+// 1.0 baseline (per_video_second) or the table maximum (per_unit_table).
+//
+// ok is false only when the block cannot price video AT ALL: an empty table, or a mode that is not one
+// of the two video modes. It is NOT false for an unusable individual multiplier — those are skipped and
+// the dearest usable one wins, because the caller's fallback is a different scale and can sit below
+// them.
+//
+// mayFallBack reports whether SETTLEMENT could end up on the service size-ratio for this block: it
+// cannot price at all, or it holds an entry settlement would refuse for a request naming that
+// resolution. The caller floors against that scale only then — flooring unconditionally over-reserved
+// every ordinary multi-model create by the shipped default ratio (2.0), for a fallback that a sane
+// config never reaches.
 //
 // "for the given duration" bounds the SIZE axis only. The duration axis is not bounded by the request:
 // vendors clamp it (MiniMax to [4,15] — up as well as down), and settlement reads
@@ -365,9 +375,9 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 // derives it from max(width, height)), and settlement bills the tier that comes back. Reserving the
 // dearest tier is deliberately more than most requests cost — a reserve is not a charge, and the
 // alternative is a gate that admits a create it cannot cover.
-func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (int64, bool) {
+func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (units int64, ok bool, mayFallBack bool) {
 	if b == nil {
-		return 0, false
+		return 0, false, true
 	}
 	switch b.Mode {
 	case BillingModePerUnitTable:
@@ -378,22 +388,42 @@ func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (int64, bool) {
 		// reserved 100 and settled 900 once the vendor rendered its own 4K tier. Nothing enforces
 		// monotonicity across the table, so filtering by duration is a false economy.
 		mx := b.MaxTableUnits()
-		return mx, mx > 0
-	default:
-		mult := 1.0 // settlement's baseline for a resolution the map does not list
+		return mx, mx > 0, mx <= 0
+	case BillingModePerVideoSecond:
+		// Max over the multipliers settlement would ACCEPT, not over all of them. Taking the raw
+		// maximum let one poison entry destroy the answer: `{"cursed": 1e30, "1080p": 5.0}` (which
+		// validateBillingConfig admits — it bounds only `mult <= 0`) made scaledUnits refuse, this
+		// function report "cannot price", and the caller fall to a service ratio that knows nothing
+		// about the 5.0 — measured reserve 8 against a 20-unit bill. Settlement prices the REQUESTED
+		// resolution, so a multiplier it would refuse is one it can never bill at; skipping those and
+		// keeping the dearest usable one is the true ceiling.
+		//
+		// Seeded at the 1.0 baseline because that is what settlement charges for a resolution the map
+		// does not list. That also covers a NaN entry, which no comparison can select.
+		best, _ := scaledUnits(seconds, 1.0)
+		skipped := false
 		for _, m := range b.ResolutionMultipliers {
-			if m > mult {
-				mult = m
+			u, err := scaledUnits(seconds, m)
+			if err != nil {
+				// Settlement would refuse this multiplier for a request naming its resolution, and
+				// then fall back to the service size-ratio — a different scale this block cannot see.
+				// Report it so the caller floors against that scale.
+				skipped = true
+				continue
+			}
+			if u > best {
+				best = u
 			}
 		}
-		// scaledUnits rather than a local ceil: it is the same helper settlement uses, so a
-		// multiplier it refuses (NaN, ±Inf, or a product past maxBillableUnits) makes this block
-		// answer "cannot price" instead of returning 2^40 and refusing every solvent caller.
-		units, err := scaledUnits(seconds, mult)
-		if err != nil || units < 1 {
-			return 0, false
-		}
-		return units, true
+		return best, best > 0, skipped || best <= 0
+	default:
+		// per_token, or `mode:` omitted entirely — both of which validBillingModeForType accepts for
+		// ANY service type, so a video model carrying one loads fine. Settlement cannot price video
+		// from such a block either (OutputUnits errors and videoOutputUnits falls back to the service
+		// size-ratio), so answering "cannot price" here is what makes the two agree. Claiming the
+		// multiplier path for them reserved the ratio-less duration against a ratio-scaled bill —
+		// measured reserve 10, settlement 20, from nothing worse than a forgotten `mode:`.
+		return 0, false, true
 	}
 }
 

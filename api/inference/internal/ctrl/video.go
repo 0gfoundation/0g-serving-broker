@@ -234,9 +234,18 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 }
 
 // videoReserveFallbackSeconds is the duration the pre-flight reserve prices when the request names no
-// readable `seconds`. The vendor then applies its OWN default, which the broker cannot see, so this has
-// to be at or above the longest clip either live vendor will produce for such a create: MiniMax clamps
-// every duration to 15s, and the DashScope models this broker fronts top out below that.
+// readable `seconds`.
+//
+// It is 15 because of the vendor the broker CANNOT see into, not because of the one it can. The MiniMax
+// path is broker-side and its default for an absent duration is minMiniMaxDuration = 4 (the same
+// constant videoReserveFloorSeconds is taken from, and deliberately OpenAI's documented default). The
+// DashScope path omits `duration` entirely and lets the vendor decide, and nothing in this repo pins
+// that default or any model ceiling — so the constant has to cover an unknown, and 15 is MiniMax's
+// ceiling, i.e. the largest duration any model here is known to render.
+//
+// The cost is real and is the accepted direction: an OpenAI-conforming client that omits `seconds` gets
+// a 4s clip and a 15s reserve. Tightening it needs the per-model published default the reserve does not
+// read today.
 const videoReserveFallbackSeconds = 15
 
 // videoReserveFloorSeconds is the shortest clip the reserve will price, whatever the request asks for.
@@ -283,25 +292,54 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 	//
 	// Stamped once resolved, mirroring ResolveModelForBilling exactly (same extraction, same default,
 	// same resolved id), so GetBillingPrices below prices the requested model instead of falling back.
-	// A model this service does NOT serve is left alone: PrepareHTTPRequest rejects it further down, and
-	// duplicating that rejection here would move which of two 400s a caller sees first.
+	//
+	// Gated on HasMultiModelPricing, and that gate is load-bearing rather than an optimisation: for a
+	// single-model service ResolveRequestedModel returns ok=true with the RAW REQUESTED STRING, so an
+	// ungated stamp wrote unbounded client input into the key. That value reaches
+	// VideoPollJob.ResolvedModel, a varchar(255) — a 300-character `model` field made the poll-job
+	// insert fail with MySQL 1406 AFTER the create had returned a job id and registered the caller as
+	// its owner, so the clip stayed retrievable and was never billed. Repeatable, one field. Before
+	// this change PrepareHTTPRequest defaulted the key to ModelType; the stamp's mere existence skipped
+	// that default. Single-model GetBillingPrices and videoOutputUnits ignore the key anyway.
+	//
+	// On a MULTI-model service a model this provider does not serve leaves the key unset and is
+	// rejected by PrepareHTTPRequest further down; duplicating that rejection here would move which of
+	// two 400s a caller sees first. (On a single-model service nothing rejects it — every id is served
+	// by definition — which is the other half of why the gate above is needed.)
 	var entry *config.ModelPricingEntry
-	requested := ExtractModelName(reqBody, contentType)
-	if requested == "" {
-		requested = c.Service.ModelType
-	}
-	if e, resolved, ok := c.Service.ResolveRequestedModel(requested); ok {
-		entry = e
-		ctx.Set(CtxKeyResolvedModel, resolved)
+	if c.Service.HasMultiModelPricing() {
+		requested := ExtractModelName(reqBody, contentType)
+		if requested == "" {
+			requested = c.Service.ModelType
+		}
+		if e, resolved, ok := c.Service.ResolveRequestedModel(requested); ok {
+			entry = e
+			ctx.Set(CtxKeyResolvedModel, resolved)
+		}
 	}
 
 	units := int64(0)
+	needsServiceRatioFloor := true
 	if entry != nil && entry.Billing != nil {
-		if u, ok := entry.Billing.MaxVideoOutputUnitsFor(seconds); ok {
+		u, ok, mayFallBack := entry.Billing.MaxVideoOutputUnitsFor(seconds)
+		needsServiceRatioFloor = mayFallBack
+		if ok {
 			units = u
+		} else {
+			// A block that exists and cannot price video is a misconfiguration, and this is the only
+			// place that learns it before the clip is rendered. Settlement's counterpart logs the same
+			// condition (videoOutputUnits, "model billing misconfigured"); staying silent here meant
+			// the reserve quietly changed scale with no signal until the bill arrived.
+			c.logger.Errorf("video pre-flight reserve: model %q has a billing block that cannot price video (mode %q); reserving from the service size-ratio instead",
+				entry.Model, entry.Billing.Mode)
 		}
 	}
-	if units == 0 {
+	// The service-ratio basis is a FLOOR under the per-model answer, not a substitute for it — but only
+	// where settlement could actually land on it (see MaxVideoOutputUnitsFor's mayFallBack). Applying it
+	// unconditionally raised every ordinary multi-model create to the shipped default ratio of 2.0, for
+	// a fallback a sane config never reaches. Always applied on the single-model path, which has no
+	// per-model block and where this basis IS what settlement uses.
+	if needsServiceRatioFloor {
 		// Single-model, or a model whose billing block cannot answer: settlement reads the
 		// service-level videoSizeRatios map with the resolution the RESPONSE names, so mirror it at
 		// its dearest entry. The `>= 1` clamp is load-bearing, not defensive: GetVideoSizeRatio returns
@@ -311,7 +349,9 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 		if !(ratio >= 1) {
 			ratio = 1
 		}
-		units = videoOutputCount(seconds, ratio)
+		if floor := videoOutputCount(seconds, ratio); floor > units {
+			units = floor
+		}
 	}
 
 	prices, err := c.GetBillingPrices(ctx)
@@ -328,11 +368,35 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 // videoReserveSeconds resolves the duration the reserve prices. Every branch that cannot read a value
 // resolves it UPWARD — to the vendor floor or to the fallback — never to the cheaper of two readings.
 //
-// The URL query is read BEFORE the body because that is the precedence the upstream applies: it reads
-// the create with r.FormValue, whose ParseMultipartForm seeds r.Form from the query and appends body
-// values after — so `?seconds=15` over a body of `seconds=1` renders 15. Reading the body only would
-// have priced 1.
+// It takes the MAXIMUM of the query and the body, because `seconds` has three consumers and they do not
+// agree on where to look:
+//
+//   - multipart create: the translator reads r.FormValue, whose ParseMultipartForm seeds r.Form from the
+//     query and appends body values after — the QUERY wins.
+//   - JSON create: the translator decodes the body and never looks at the query — the BODY wins.
+//   - settlement's degraded path: when the response reports no duration, resolveVideoBilling re-parses
+//     the request BODY only, never the query — the BODY wins.
+//
+// An earlier revision read query-first on the strength of the multipart rule alone, which handed a
+// caller a discount on the other two: `?seconds=4` with a JSON body of `{"seconds":15}` priced 4 units
+// against a 15-unit bill (measured 5.36 0G reserved against 20.09 0G at the mainnet unit price), and on
+// multipart the same pair settled at the body's 12 whenever the response omitted its duration. The
+// maximum is above whichever one the deployed combination picks, for every transport and provenance.
 func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
+	body := int64(videoReserveFallbackSeconds)
+	if seconds, _ := videoSecondsSizeFromRequest(reqBody, contentType); seconds > 0 {
+		body = videoReserveClampSeconds(seconds)
+	}
+	query := videoReserveQuerySeconds(rawQuery)
+	if query > body {
+		return query
+	}
+	return body
+}
+
+// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does, or reports 0
+// when the query names it nowhere.
+func videoReserveQuerySeconds(rawQuery string) int64 {
 	if rawQuery != "" {
 		// ParseQuery's error is IGNORED, matching r.FormValue: r.ParseForm returns the same error and
 		// FormValue ignores it, so `?seconds=15&junk=%zz` still resolves to 15 upstream. Guarding on
@@ -349,15 +413,13 @@ func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 					return videoReserveClampSeconds(int64(math.Ceil(f)))
 				}
 			}
-			// Present but unreadable or empty: the upstream reads it and the vendor defaults, so do
-			// not fall through to the body's cheaper value.
+			// Present but unreadable or empty: on the transport where the query wins, the upstream
+			// reads it and the vendor applies its own default, so this is the no-readable-duration
+			// case rather than a reason to trust the body alone.
 			return videoReserveFallbackSeconds
 		}
 	}
-	if seconds, _ := videoSecondsSizeFromRequest(reqBody, contentType); seconds > 0 {
-		return videoReserveClampSeconds(seconds)
-	}
-	return videoReserveFallbackSeconds
+	return 0
 }
 
 // videoReserveClampSeconds raises a requested duration to the vendor floor. Below it the vendor renders
