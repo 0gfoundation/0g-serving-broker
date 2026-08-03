@@ -1302,13 +1302,23 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 // API's own default shape — so one junk value moves from "one odd request" to "every request":
 // measured, a `1e300` entry drove the reserve to the maxVideoOutputUnits clamp and 402'd every
 // size-less create. Fail-closed and operator-caused, but it should fail at boot, not per request.
+//
+// That argument is SERVICE-scope only. A per-model modelInfo.videoSizeRatios is read by neither
+// pricing side (GetVideoSizeRatio and ReserveVideoSizeRatio both consult s.ModelInfo alone), so
+// validating it there catches nothing that could move a fee — it is kept for consistency, and because
+// the real trap it hints at is the opposite one: an operator writing ratios per-model and expecting
+// them to price. Per-model resolution pricing belongs in entry.Billing.resolutionMultipliers.
 func validateVideoSizeRatios(info *ModelInfo, prefix string) error {
 	if info == nil {
 		return nil
 	}
 	for size, ratio := range info.VideoSizeRatios {
 		if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio > float64(maxBillableUnits) {
-			return fmt.Errorf("invalid config: %s.videoSizeRatios[%q] must be a finite number > 0 and <= %d, got %v",
+			// No "invalid config:" prefix — the per-model call site already wraps with one, plus the
+			// modelPricing[i] location, and doubling it produced
+			// "invalid config: service.modelPricing[0].modelInfo (model 'm1'): invalid config:
+			// service.modelInfo.videoSizeRatios[...]" — two prefixes and the wrong block named.
+			return fmt.Errorf("%s.videoSizeRatios[%q] must be a finite number > 0 and <= %d, got %v",
 				prefix, size, maxBillableUnits, ratio)
 		}
 	}

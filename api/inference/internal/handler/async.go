@@ -67,18 +67,22 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
 	if err != nil {
 		if errors.Is(err, ctrl.ErrImageNumAmbiguous) {
-			// Labelled AND unwrapped, matching the sync arm: a billing-gate refusal that lands on
-			// broker_request_failures_total with an empty reason code is the "high RPS, zero revenue"
-			// shape this path argues must not die unclassified, and the wrap context ships to the
-			// client on a 400.
-			ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionInvalidRequest)
-			// A malformed body is the caller's, not ours. Without this the async route answered its
-			// own new refusal with ZG-Failure-Source: broker (resolveFailureSource only reads the flag
-			// for a 4xx, and an unflagged 400 falls to broker) and incremented the legacy broker error
-			// counter — so a two-field multipart body could drive the broker-fault alert at the
-			// caller's full rate-limit budget, on a path that was unreachable before this refusal
-			// existed. The sync route at proxy.go already flags it; the async twin did not.
-			ctx.Set("ignoreError", true)
+			// Logged, not labelled — and that asymmetry with the sync arm is the route's, not a
+			// choice. monitor.TrackMetrics is the only reader of CtxKeyRejectionReason and of
+			// ignoreError, and the only installer of the ZG-Failure-Source writer; it is registered on
+			// engine.Group("/v1/proxy") while these routes live under the handler's own /v1 group, and
+			// gin copies a group's middleware at registration time. So on /v1/async/* there is no
+			// FailureCount, no RequestCount, no source header and no rejection counter for ANY outcome.
+			// Two earlier revisions set both context keys here with comments claiming they classified
+			// the refusal; measured, both were no-ops and the refusal emitted nothing at all.
+			//
+			// A log line is what this route can actually carry, so it carries one: a billing-gate
+			// refusal reachable with a two-field multipart body should not be completely invisible.
+			// Wiring TrackMetrics onto the /v1 group is the real fix and belongs in its own change —
+			// it would newly meter every /v1 route, which is a metrics-cardinality decision, not a
+			// video-reserve one. Tracked as a residual in docs/design/video-generation-async-billing.md.
+			h.logger.Warnf("async %s refused at the billing gate for user %s: %v (this route has no failure metric — see the async observability residual)",
+				svcType, userAddress, err)
 			handleBrokerError(ctx, err, "")
 			return
 		}

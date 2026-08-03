@@ -656,8 +656,8 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	// up the same unpriced string and bills the same baseline. Lifting there instead over-reserved the
 	// measured live shape — `{"seconds":5,"size":"2K"}` billed exactly 5 units, and the dearest-ratio
 	// lift demanded 10. A dearer RENDERED size for a named one is residual 2(b), same as everywhere
-	// else in this function. By this point line ~608 has already substituted a published
-	// defaultParameters.size, so "" here means the operator published none either — the case the boot
+	// else in this function. By this point the published-default substitution above has
+	// already run, so "" here means the operator published none either — the case the boot
 	// warning is for.
 	if size == "" && !c.Service.HasMultiModelPricing() {
 		if mx := c.Service.MaxVideoSizeRatio(); mx > ratio {

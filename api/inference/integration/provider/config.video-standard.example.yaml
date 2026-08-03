@@ -101,9 +101,14 @@ service:
         # reserve away from the bill, with no error, log or metric).
         defaultParameters:
           # 1080p, NOT the cheaper 720p row: with no resolution in the request DashScope applies
-          # its OWN default of 1080P (see videotranslator sizeToDashScopeParams). Publishing 720p
-          # here reserved and billed the 1.0 baseline against a 1.5x render — the provider
-          # under-billing itself, silently, on the config an operator copies.
+          # its OWN default of 1080P (see videotranslator sizeToDashScopeParams), so 1080p is the
+          # tier the RESERVE must cover. This is a reserve statement only — an earlier version of
+          # this comment claimed it also fixed the provider under-billing itself, and that is wrong:
+          # settlement's published-size substitution is per_unit_table only, and this block is
+          # per_video_second, so a size-less create still BILLS the 1.0 baseline whatever is
+          # published here. Measured: reserve 8, bill 5. The under-billing is a separate gap; what
+          # this value buys is that a settlement which DOES see the rendered tier (a sync shim, or
+          # any provenance that echoes `size`) is covered instead of billing 8 against a 5 reserve.
           #
           # Publishing a value REPLACES the reserve's fallback ceiling (the dearest row this model can
           # bill) rather than bounding it. So a wrong-and-cheap value is worse for solvency than
@@ -144,9 +149,14 @@ service:
         # reserve away from the bill, with no error, log or metric).
         defaultParameters:
           # 1080p, NOT the cheaper 720p row: with no resolution in the request DashScope applies
-          # its OWN default of 1080P (see videotranslator sizeToDashScopeParams). Publishing 720p
-          # here reserved and billed the 1.0 baseline against a 1.5x render — the provider
-          # under-billing itself, silently, on the config an operator copies.
+          # its OWN default of 1080P (see videotranslator sizeToDashScopeParams), so 1080p is the
+          # tier the RESERVE must cover. This is a reserve statement only — an earlier version of
+          # this comment claimed it also fixed the provider under-billing itself, and that is wrong:
+          # settlement's published-size substitution is per_unit_table only, and this block is
+          # per_video_second, so a size-less create still BILLS the 1.0 baseline whatever is
+          # published here. Measured: reserve 8, bill 5. The under-billing is a separate gap; what
+          # this value buys is that a settlement which DOES see the rendered tier (a sync shim, or
+          # any provenance that echoes `size`) is covered instead of billing 8 against a 5 reserve.
           #
           # Publishing a value REPLACES the reserve's fallback ceiling (the dearest row this model can
           # bill) rather than bounding it. So a wrong-and-cheap value is worse for solvency than

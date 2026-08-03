@@ -1138,7 +1138,9 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		// on one. inference/cmd/server/main.go builds the engine with gin.New() and NO
 		// gin.Recovery(), so that is a dropped connection plus a stack trace, uncounted by
 		// FailureCount (monitor/server.go documents it as known gap #1), loopable by any
-		// authenticated caller. Every sibling body rewriter in this file already carries this guard.
+		// authenticated caller. Most sibling body rewriters in this file carry the same guard —
+		// forceB64ResponseFormat did NOT, and an earlier version of this comment claimed they all did,
+		// which is precisely what stopped anyone checking.
 		bodyMap = map[string]interface{}{}
 	}
 
@@ -1360,6 +1362,18 @@ func forceB64ResponseFormat(body []byte) (originalFormat string, modified []byte
 	dec.UseNumber()
 	if err = dec.Decode(&m); err != nil {
 		return "", body, err
+	}
+	if m == nil {
+		// A literal `null` body decodes without error into a NIL map, and the write below panics on
+		// one. Reachable end to end: GetTextToImageInputFeeAndImageNum reads `null` as one image and
+		// returns no error, so the balance gate passes and PrepareHTTPRequest calls this. With
+		// gin.New() and no Recovery (inference/cmd/server/main.go), that is a dropped connection plus
+		// a stack trace, uncounted by FailureCount, from any authenticated caller with a 4-byte body.
+		//
+		// This is the third occurrence of the class in this file, and the comments on the other two
+		// asserted that "every sibling body rewriter in this file already carries this guard" — it did
+		// not, and the assertion is what would have stopped someone checking.
+		m = map[string]interface{}{}
 	}
 	if v, ok := m["response_format"].(string); ok {
 		originalFormat = v

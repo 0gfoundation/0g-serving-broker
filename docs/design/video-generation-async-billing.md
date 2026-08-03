@@ -407,7 +407,17 @@ delta is expected to be non-zero, and why.
    clamp, not this route. The fix is an input term in the reserve (the gate can see
    `input_reference`), or having the translator report output seconds separately from the billed
    total.
-5. **It is now observed.** `broker_video_reserve_shortfall_total` counts settlements that billed more
+5. **`/v1/async/*` has no failure metric, so a billing-gate refusal there is invisible.**
+   `monitor.TrackMetrics` is the only reader of `CtxKeyRejectionReason` and `ignoreError`, and the only
+   installer of the `ZG-Failure-Source` writer. It is registered on `engine.Group("/v1/proxy")`, while
+   the async routes live under the handler's own `/v1` group — and gin copies a group's middleware at
+   registration time. So on `/v1/async/*` there is no `FailureCount`, no `RequestCount`, no source
+   header and no rejection counter, for **any** outcome, not just the new ones. Measured: the same
+   refusal emits `FailureCount +1 {client, invalid_request}` on `/v1/proxy/images/edits` and nothing at
+   all on `/v1/async/images/edits`. The handler logs a line so the refusal is not completely silent;
+   the real fix is wiring `TrackMetrics` onto the `/v1` group, which newly meters every `/v1` route and
+   is therefore a metrics-cardinality decision of its own rather than part of a video-reserve change.
+6. **It is now observed.** `broker_video_reserve_shortfall_total` counts settlements that billed more
    units than the reserve had gated. The reserve is not persisted, so `checkVideoReserveCoverage`
    RECOMPUTES it from the request body settlement already holds — one pure parse, no new column, no
    carrying it on the poll job.

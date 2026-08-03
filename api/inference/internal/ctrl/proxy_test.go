@@ -924,3 +924,31 @@ func TestAmbiguityRefusalsShipCuratedMessages(t *testing.T) {
 		t.Errorf("refusal does not match its sentinel, so the proxy cannot classify it: %q", err)
 	}
 }
+
+// TestNullBodyDoesNotPanicAnyRewriter sweeps every JSON body rewriter in this file with a `null` body.
+// `null` decodes without error into a NIL map, and a write to one panics; inference/cmd/server/main.go
+// builds the engine with gin.New() and NO gin.Recovery(), so each occurrence is a dropped connection
+// plus a stack trace, uncounted by FailureCount, from any authenticated caller with a 4-byte body.
+//
+// A sweep rather than a case per function on purpose: the class was fixed twice under a comment
+// asserting "every sibling body rewriter in this file already carries this guard", while a third
+// (forceB64ResponseFormat) still panicked. An assertion about siblings needs a test over siblings.
+func TestNullBodyDoesNotPanicAnyRewriter(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "served", "upstream-served")
+	null := []byte("null")
+
+	for name, call := range map[string]func(){
+		"EnforceConfiguredModel": func() { _, _ = c.EnforceConfiguredModel(null, "0xabc") },
+		"EnsureStreamOptions":    func() { _, _ = c.EnsureStreamOptions(null) },
+		"forceB64ResponseFormat": func() { _, _, _ = forceB64ResponseFormat(null) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panicked on a `null` body: %v", r)
+				}
+			}()
+			call()
+		})
+	}
+}
