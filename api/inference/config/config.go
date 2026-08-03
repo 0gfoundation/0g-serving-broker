@@ -1785,6 +1785,25 @@ func loadConfig(cfg *Config) error {
 		}
 	}
 
+	// A video model that publishes no default duration is WARNED about, not rejected: the reserve
+	// prices a create that omits `seconds` at that value and refuses the create without it (a
+	// broker-attributed 503 — see ErrVideoDefaultDurationUnpublished), so the operator needs to
+	// hear about it at deploy time. Not a hard error because it would refuse to boot every
+	// existing video deployment that has not added the field yet; a PRESENT-but-unusable value
+	// still fails the boot, since that one is a typo the operator cannot otherwise see. Checked
+	// per model, through DefaultVideoSecondsFor, so a per-model modelInfo satisfies it for its
+	// own model and inheritance from the service block still works.
+	if cfg.Service.Type == "video-generation" {
+		for _, m := range cfg.Service.videoPricedModels() {
+			if _, published := cfg.Service.DefaultVideoSecondsFor(m); !published {
+				log.Printf("WARNING: video model %q publishes no modelInfo.defaultParameters.seconds. "+
+					"The pre-flight balance reserve prices a create that OMITS `seconds` at that value and "+
+					"refuses the create (503) without it — which is the OpenAI Video API's default request "+
+					"shape. Publish the duration the upstream actually applies.", m)
+			}
+		}
+	}
+
 	if cfg.Service.CanonicalID != "" && !validCanonicalID.MatchString(cfg.Service.CanonicalID) {
 		return fmt.Errorf("invalid config: service.canonicalId %q must be bare lowercase (letters, digits, '-', '.'); namespaced names like 'org/model' belong in service.model instead", cfg.Service.CanonicalID)
 	}

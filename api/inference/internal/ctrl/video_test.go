@@ -989,12 +989,32 @@ func TestVideoReserveUnits_PerModelTier(t *testing.T) {
 	// baseline: 9s at 1080P rounds up to the 10s bucket.
 	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":9}`, 40)
 
-	// A size the table prices nowhere. Table units are not seconds — a 6s clip at 2K can be 60
-	// units — so the seconds x ratio basis is not a conservative fallback for a
-	// resolution-keyed model, it is a different scale. Refused, broker-attributed, because
-	// publishing a usable default resolution is the operator's job.
-	if _, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`), "application/json"); !errors.Is(err, ErrVideoDefaultSizeUnpublished) {
-		t.Errorf("err = %v, want ErrVideoDefaultSizeUnpublished for a tier this model prices nowhere", err)
+	// A duration ABOVE every bucket for its resolution. Settlement bills the table MAXIMUM for
+	// that case (nothing covers the observation), so the reserve must too — falling through to
+	// the seconds x ratio basis reserved 12 units against a 40-unit bill.
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":12,"size":"768P"}`, 40)
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":15,"size":"1080P"}`, 40)
+
+	// A size this model prices NOWHERE — including "1280x720", the OpenAI Video API's documented
+	// shape. The published tier is what the upstream will render and what settlement will bill
+	// from, so it is the reserve's basis: refusing here 503'd a conforming, solvent client with a
+	// message claiming it had sent no size.
+	assertUnits(t, c, `{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`, 12)
+
+	// Only a model that publishes no usable tier either is refused, and then broker-attributed —
+	// table units are not seconds (a 6s clip at 2K can be 60), so there is no scale to fall back
+	// to, and publishing a usable default resolution is the operator's job.
+	noDefault := &Ctrl{
+		logger: testLogger(),
+		Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
+			Model:       "minimax-hailuo",
+			OutputPrice: "100",
+			Billing:     entry.Billing,
+			ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6}},
+		}}, "minimax-hailuo"),
+	}
+	if _, err := noDefault.videoReserveUnitsFromRequest([]byte(`{"model":"minimax-hailuo","seconds":6,"size":"1280x720"}`), "application/json"); !errors.Is(err, ErrVideoDefaultSizeUnpublished) {
+		t.Errorf("err = %v, want ErrVideoDefaultSizeUnpublished when neither the request nor the model names a priced tier", err)
 	}
 
 	// A model this service does not serve must be reported as such, not as an invalid
@@ -1057,6 +1077,9 @@ func TestVideoReserveNeverBelowSettlement(t *testing.T) {
 		{name: "per_unit_table: duration between buckets", model: "bucketed", body: `{"model":"bucketed","seconds":7,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 7},
 		{name: "per_unit_table: duration between buckets at the cheap tier", model: "bucketed", body: `{"model":"bucketed","seconds":9,"size":"768P"}`, renderedSize: "768P", renderedSecond: 9},
 		{name: "per_unit_table: size omitted, published tier rendered", model: "bucketed", body: `{"model":"bucketed","seconds":9}`, renderedSize: "1080P", renderedSecond: 9},
+		{name: "per_unit_table: duration above every bucket", model: "bucketed", body: `{"model":"bucketed","seconds":12,"size":"768P"}`, renderedSize: "768P", renderedSecond: 12},
+		{name: "per_unit_table: duration above every bucket at the dear tier", model: "bucketed", body: `{"model":"bucketed","seconds":15,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 15},
+		{name: "per_unit_table: pixel size the table prices nowhere", model: "bucketed", body: `{"model":"bucketed","seconds":6,"size":"1280x720"}`, renderedSize: "1080P", renderedSecond: 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1362,4 +1385,42 @@ func TestVideoReserveRequestModel(t *testing.T) {
 			t.Errorf("videoReserveRequestModel() = %q, want %q", got, "expensive")
 		}
 	})
+}
+
+// TestExtractModelNameMatchesUpstreamReading pins that the model the broker reads is the model
+// the upstream reads. Everything downstream keys on this answer — the video reserve's price, the
+// allowlist in ResolveModelForBilling, settlement's per-model price, the metric label — so a
+// disagreement means the broker describes a different request than the one served.
+//
+// The upstream (api/videotranslator/internal/handler/video.go) decodes into a struct with a
+// json.Decoder: trailing data is ignored, and encoding/json matches keys onto struct fields
+// case-insensitively.
+func TestExtractModelNameMatchesUpstreamReading(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "exact key", body: `{"model":"expensive","seconds":6}`, want: "expensive"},
+		// json.Unmarshal validates the whole input, so this returned "" and callers substituted
+		// the configured default while the upstream rendered "expensive".
+		{name: "trailing byte", body: `{"model":"expensive","seconds":6}x`, want: "expensive"},
+		{name: "trailing object", body: `{"model":"expensive"}` + "\n{}", want: "expensive"},
+		// Read by exact key this was invisible; the upstream reads it as the model.
+		{name: "case-variant key", body: `{"Model":"expensive","seconds":6}`, want: "expensive"},
+		{name: "upper-case key", body: `{"MODEL":"expensive"}`, want: "expensive"},
+		// Go resolves competing variants by document order, which an unordered map cannot see, so
+		// neither reading can be trusted: reported absent, and the video reserve refuses the body.
+		{name: "competing key variants", body: `{"model":"cheap","Model":"expensive"}`, want: ""},
+		{name: "absent", body: `{"seconds":6}`, want: ""},
+		{name: "wrong-typed model degrades to absent", body: `{"model":123}`, want: ""},
+		{name: "unparseable", body: `not json`, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExtractModelName([]byte(tt.body), "application/json"); got != tt.want {
+				t.Errorf("ExtractModelName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }

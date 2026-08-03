@@ -148,9 +148,10 @@ variant of a billing field is refused, because Go resolves competing variants by
 and a map has none.
 
 Transport is chosen by **Content-Type**, the way `ExtractModelName` chooses it — not by "did this
-parse as JSON". `ExtractModelName` itself decodes with a `json.Decoder` for the same reason the
-duration does: it used to use `json.Unmarshal`, so one appended byte made it read no model at all
-and fall back to the configured default — the reserve priced the default model, the allowlist in
+parse as JSON". `ExtractModelName` itself decodes with a `json.Decoder`, key-wise and case-folded, for the same
+reasons the duration does: it used to use `json.Unmarshal` with an exact-key lookup, so one
+appended byte — or spelling the key `"Model"` — made it read no model at all and fall back to the
+configured default — the reserve priced the default model, the allowlist in
 `ResolveModelForBilling` passed a model the caller never named, settlement billed the default's
 price, and the upstream rendered the one that was asked for. Falling back from a failed JSON parse into the multipart reader was the mechanism
 behind the trailing-byte bypass: on a JSON content type that reader finds no boundary and reports
@@ -172,15 +173,20 @@ a caller reading the model card would expect to be charged, and it is what the u
   reports `Size` as the *rendered* tier, so on a provider that renders exactly one tier the two
   sides simply never spoke the same vocabulary.
 
-This makes a field that used to be pure `/v1/models` documentation load-bearing for billing, so
-`ModelInfo.Validate` now **requires** `defaultParameters.seconds` for a video-generation service
-and rejects a published-but-unusable value — both at **config load**. Requiring it is the point:
-at runtime "unpublished" refuses every conforming create that omits the field, which is an
-operator config gap presenting as 503s on normal traffic, so the operator has to meet it at
-deploy time instead. A present-but-unusable `size` fails the boot for the mirror reason — it
-degrades *silently* (a YAML `size: 1080` decodes as an int, reports unpublished, and the reserve
-drops to the baseline ratio with no error, log or metric). `config.video-standard.example.yaml`
-publishes both.
+This makes a field that used to be pure `/v1/models` documentation load-bearing for billing, and
+the two failure modes get different treatment because they are differently visible:
+
+- **Present but unusable** fails the boot (`ModelInfo.Validate`). A YAML `size: 1080` decodes as
+  an int, `seconds: .nan` passes every ordered comparison, and both then report "unpublished" at
+  runtime — indistinguishable from the operator having published nothing, so the reserve moves
+  away from the bill with no error, log or metric. That is a typo the operator cannot otherwise
+  see, so it is worth refusing to start over.
+- **Absent** is warned at boot (per model, so a per-model `modelInfo` satisfies it and inheritance
+  from the service block still works) and refused at request time as a broker-attributed 503. Not
+  a boot failure: it would refuse to start every existing video deployment that has not added the
+  field, and the warning plus the 503's attribution already put it in front of the operator.
+
+`config.video-standard.example.yaml` publishes both fields.
 
 One non-obvious consequence: `constant.TargetRoute` is keyed on path only, so a bodyless
 `GET /videos` (the OpenAI Video API's list operation) reaches the same billing arm. It reserves
@@ -199,10 +205,12 @@ The basis is the requested duration weighted by the larger of two answers:
   at or above 1.0 is a misconfiguration, not a cheaper service. The comparison is `!(ratio >= 1)`
   so a `NaN` ratio cannot slip through into `videoOutputCount`'s NaN floor.
 - **the resolved model's own billing block**, when it prices that resolution
-  (`BillingConfig.HasResolution`). A **duration** the block does not tabulate at a resolution it
-  does carry rounds UP to the covering bucket, because that is what settlement's `NextBucketUnits`
-  bills — falling through to the seconds basis there was a 5.7× under-reserve on one legal integer
-  (`seconds:7` against rows at 6 and 10 reserved 7 units against a 40-unit bill). `GetVideoSizeRatio` knows only pixel keys, so on a tiered model a
+  (`BillingConfig.HasResolution`). A **duration** the block does not tabulate is answered the way
+  settlement answers it: rounded UP to the covering bucket (`NextBucketUnits`), or the table
+  **maximum** when nothing covers it. Falling through to the seconds basis on either was an
+  under-reserve on one legal integer — `seconds:7` against rows at 6 and 10 reserved 7 units
+  against a 40-unit bill (5.7×), and `seconds:12` above every bucket reserved 12 against 40
+  (3.3×). `GetVideoSizeRatio` knows only pixel keys, so on a tiered model a
   caller could name `"1080P"` and reserve the baseline against a 2× bucket. Exactness is checked
   separately rather than trusted from `OutputUnits`, because `resolutionMultiplier` answers a
   `per_video_second` miss with the 1.0 baseline *and a nil error* — indistinguishable from a tier
@@ -210,9 +218,13 @@ The basis is the requested duration weighted by the larger of two answers:
 
 A **resolution-keyed** model (`BillingConfig.IsResolutionKeyed`) prices in table units that bear
 no relation to seconds — a 6s clip at 2K can be 60 units — so the service-ratio basis is not a
-conservative fallback for one, it is a different scale. When neither the request nor the model's
-published `defaultParameters.size` names a tier such a model prices, the reserve is refused
-(`ErrVideoDefaultSizeUnpublished`, broker-attributed) rather than expressed on the wrong scale.
+conservative fallback for one, it is a different scale. The published `defaultParameters.size` is
+therefore used not only when the request names no size but also when it names one **this model
+prices nowhere** — including `"1280x720"`, the OpenAI Video API's documented shape. Both are the
+same situation from the gate's side: the upstream renders its configured tier and settlement bills
+from the response's tier either way. Only when neither the request nor the published default names
+a tier the model prices is the reserve refused (`ErrVideoDefaultSizeUnpublished`,
+broker-attributed) rather than expressed on the wrong scale.
 The per-model `videoSizeRatios` map is also consulted, taking the larger of it and the
 service-level map: it is a per-model-capable field that `GET /v1/models` advertises per model, and
 the reserve read only the service scope, so a published per-model ratio was used by nothing.

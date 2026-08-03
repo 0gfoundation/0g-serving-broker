@@ -1249,3 +1249,25 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 	}
 	return nil
 }
+
+// videoPricedModels lists every model id this service can be asked to price: the on-chain
+// advertised default plus each modelPricing entry. Used by the video config check so the
+// published-default requirement is verified for each model a request can resolve to, rather than
+// only for whichever ModelInfo block happens to exist. The wildcard catch-all is skipped — it has
+// no concrete id, and EffectiveModelInfo resolves any unmatched name through it anyway.
+func (s *Service) videoPricedModels() []string {
+	seen := map[string]bool{}
+	var models []string
+	add := func(m string) {
+		if m == "" || m == ModelWildcard || seen[m] {
+			return
+		}
+		seen[m] = true
+		models = append(models, m)
+	}
+	add(s.ModelType)
+	for i := range s.ModelPricing {
+		add(s.ModelPricing[i].Model)
+	}
+	return models
+}

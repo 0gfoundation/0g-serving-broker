@@ -452,7 +452,9 @@ func jsonFieldFolded(fields map[string]json.RawMessage, name string) (json.RawMe
 	matched := 0
 	for k, v := range fields {
 		if strings.EqualFold(k, name) {
-			raw = v
+			if matched == 0 {
+				raw = v
+			}
 			matched++
 		}
 	}
@@ -577,9 +579,13 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 		}
 		seconds = def
 	}
-	if size == "" {
-		// Same reasoning as the duration: the upstream applies its configured tier and
-		// settlement bills THAT, so an omitted size must not reserve the baseline.
+	// Fall back to the published tier when the request names none, AND when it names one this
+	// model prices nowhere. Both are the same situation from the gate's side: the upstream will
+	// render its configured tier and settlement bills from the RESPONSE's tier either way, so
+	// the published default is the best available proxy. Restricting this to size == "" refused
+	// `size:"1280x720"` — the OpenAI Video API's documented shape — on any tier-keyed model,
+	// with a message claiming the client had sent no size and the model published no default.
+	if size == "" || (entry != nil && entry.Billing.IsResolutionKeyed() && !entry.Billing.HasResolution(size)) {
 		if def, published := c.Service.DefaultVideoSizeFor(requestedModel); published {
 			size = def
 		}
@@ -649,10 +655,17 @@ func (c *Ctrl) videoModelUnits(entry *config.ModelPricingEntry, seconds int64, s
 	if err == nil && units > 0 {
 		return units, true
 	}
-	// Exact row missing at a resolution this block does price: track settlement's rounding.
+	// Exact row missing at a resolution this block does price. Track settlement's own two-step
+	// answer rather than falling through: it rounds UP to the covering bucket, and when nothing
+	// covers the observation it bills the table MAXIMUM. Falling through to the seconds x ratio
+	// basis was a 3.3x under-reserve for any duration above the top bucket for its resolution —
+	// `seconds:12` against rows at 6 and 10 reserved 12 units against a 40-unit bill.
 	if entry.Billing.Mode == config.BillingModePerUnitTable {
 		if bucket, ok := entry.Billing.NextBucketUnits(size, seconds); ok && bucket > 0 {
 			return bucket, true
+		}
+		if mx := entry.Billing.MaxTableUnits(); mx > 0 {
+			return mx, true
 		}
 	}
 	return 0, false
@@ -683,7 +696,9 @@ func (c *Ctrl) videoModelUnits(entry *config.ModelPricingEntry, seconds int64, s
 // request it cannot price is refused, and the caller gets a 400 naming the field rather
 // than a clip they did not ask for.
 var ErrVideoSecondsUnpriceable = errors.NewBadRequest(
-	"invalid `seconds`: must be a positive number this service can price, or omitted to accept the model's published default duration")
+	"invalid create body: `seconds`, `size` or `model` could not be read the way the upstream will read it. " +
+		"`seconds` must be a positive number this service can price (or omitted, to accept the model's published " +
+		"default duration); no billing field may be sent twice or under two spellings")
 
 // ErrVideoModelNotServed is returned when a video create names a model this service does
 // not serve. It exists so the reserve does not report an unserved model as an invalid

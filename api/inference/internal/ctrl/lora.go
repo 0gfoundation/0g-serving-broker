@@ -136,18 +136,31 @@ func ExtractModelName(body []byte, contentType string) string {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
 		return extractModelFromMultipart(body, contentType)
 	}
-	// json.Decoder, not json.Unmarshal: the upstream translator decodes the same body with a
-	// Decoder (which ignores trailing data), so Unmarshal's whole-input validation meant one
-	// byte appended after the object made this return "" while the upstream read the real
-	// model. Everything keyed on that answer then described a different request than the one
-	// served — the reserve priced the configured default model, the allowlist in
-	// ResolveModelForBilling passed a model the caller never named, and settlement billed the
-	// default's per-model price for whatever the vendor rendered.
-	var bodyMap map[string]interface{}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&bodyMap); err != nil {
+	// Read the way the upstream reads it, on both axes, because everything keyed on this answer
+	// (the video pre-flight reserve's price, ResolveModelForBilling's allowlist, settlement's
+	// per-model price, the metric label) otherwise describes a different request than the one
+	// served — the upstream renders the model the body names while the broker substitutes the
+	// configured default.
+	//
+	//   - json.Decoder, not json.Unmarshal: the translator decodes with a Decoder, which ignores
+	//     trailing data, so Unmarshal's whole-input validation made one appended byte return "".
+	//   - key-wise and CASE-INSENSITIVE: the translator decodes into a struct, and encoding/json
+	//     matches object keys onto struct fields regardless of case, so an exact-key read missed
+	//     `{"Model":"expensive"}` entirely.
+	//
+	// More than one spelling is reported absent rather than guessed at — Go resolves competing
+	// variants by document order, which an unordered map cannot see. Callers substitute the
+	// configured model; the video reserve refuses such a body outright.
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&fields); err != nil {
 		return ""
 	}
-	modelName, _ := bodyMap["model"].(string)
+	raw, matched := jsonFieldFolded(fields, "model")
+	if matched != 1 {
+		return ""
+	}
+	var modelName string
+	_ = json.Unmarshal(raw, &modelName)
 	return modelName
 }
 
