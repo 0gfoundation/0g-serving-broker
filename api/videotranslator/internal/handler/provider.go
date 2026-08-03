@@ -176,12 +176,21 @@ func (h *GenericVideoHandler) writeProviderError(c *gin.Context, logContext, fal
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": valErr.err.Error()}})
 		return
 	}
-	if statusCode, code, message, ok := extractVendorError(err); ok && statusCode >= 400 && statusCode < 500 {
-		if message == "" {
-			message = fmt.Sprintf("upstream rejected the request (status %d)", statusCode)
+	if statusCode, code, message, body, requestID, ok := extractVendorError(err); ok {
+		// Logged for EVERY status, not just 4xx: a 5xx is the more common outage
+		// shape and the one where the body is most likely to be the only
+		// explanation (a load balancer's HTML page) — see vendorErrorDetail.
+		h.logger.Errorf("%s: upstream rejected request: status %d %s", logContext, statusCode,
+			vendorErrorDetail(code, message, body, requestID))
+		if statusCode >= 400 && statusCode < 500 {
+			clientMessage := redactCredentials(message)
+			if clientMessage == "" {
+				clientMessage = fmt.Sprintf("upstream rejected the request (status %d)", statusCode)
+			}
+			c.JSON(statusCode, gin.H{"error": gin.H{"code": code, "message": clientMessage}})
+			return
 		}
-		h.logger.Errorf("%s: upstream rejected request: status %d code=%q message=%q", logContext, statusCode, code, message)
-		c.JSON(statusCode, gin.H{"error": gin.H{"code": code, "message": message}})
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
 		return
 	}
 	h.logger.Errorf("%s: %v", logContext, err)
@@ -191,22 +200,25 @@ func (h *GenericVideoHandler) writeProviderError(c *gin.Context, logContext, fal
 // extractVendorError recognizes any of this package's known vendor
 // *APIError types (dashscope, minimax, vidu — each package's own type, never
 // modified by this extraction) via errors.As, and reports the fields common
-// to all three (StatusCode, Code, Message) without requiring those vendor
-// packages to implement a shared interface themselves. ok is false when err
-// doesn't match any known vendor error type (a plain transport error, or an
-// adapter-internal sentinel like miniMaxProvider's "no task" case).
-func extractVendorError(err error) (statusCode int, code, message string, ok bool) {
+// to all three (StatusCode, Code, Message, Body) without requiring those
+// vendor packages to implement a shared interface themselves. requestID is
+// only populated for vendors whose APIError carries one (dashscope, minimax)
+// — vidu's does not, and vendorErrorDetail treats an empty one as absent.
+// ok is false when err doesn't match any known vendor error type (a plain
+// transport error, or an adapter-internal sentinel like miniMaxProvider's
+// "no task" case).
+func extractVendorError(err error) (statusCode int, code, message, body, requestID string, ok bool) {
 	var dsErr *dashscope.APIError
 	if errors.As(err, &dsErr) {
-		return dsErr.StatusCode, dsErr.Code, dsErr.Message, true
+		return dsErr.StatusCode, dsErr.Code, dsErr.Message, dsErr.Body, dsErr.RequestID, true
 	}
 	var mmErr *minimax.APIError
 	if errors.As(err, &mmErr) {
-		return mmErr.StatusCode, mmErr.Code, mmErr.Message, true
+		return mmErr.StatusCode, mmErr.Code, mmErr.Message, mmErr.Body, mmErr.RequestID, true
 	}
 	var vdErr *vidu.APIError
 	if errors.As(err, &vdErr) {
-		return vdErr.StatusCode, vdErr.Code, vdErr.Message, true
+		return vdErr.StatusCode, vdErr.Code, vdErr.Message, vdErr.Body, "", true
 	}
-	return 0, "", "", false
+	return 0, "", "", "", "", false
 }
