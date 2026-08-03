@@ -332,9 +332,20 @@ func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
 	if providerJobID == "" {
 		return "", nil
 	}
+	// ORDER BY id, because provider_job_id is a plain index, not unique: only
+	// request_hash is. Two different requests that draw the same job id from an
+	// upstream both insert (CreateVideoPollJob is a bare Create), so "which row"
+	// is a real question and must not be answered arbitrarily.
+	//
+	// Oldest wins, and that is not a coin flip. VideoJobOwner.ProviderJobID IS
+	// unique, so the second creator's ownership row is rejected and that user can
+	// never poll this id — see the collision note on model.VideoJobOwner. The only
+	// caller who can reach this lookup is therefore the first creator, whose handle
+	// is on the first row.
 	var chatKey string
 	err := d.db.Model(&model.VideoPollJob{}).
 		Where("provider_job_id = ?", providerJobID).
+		Order("id").
 		Limit(1).
 		Pluck("chat_key", &chatKey).Error
 	if err != nil {
