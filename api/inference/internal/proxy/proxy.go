@@ -820,9 +820,22 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
 	case "video-generation":
-		// Video billing is deferred to response time — the provider returns
-		// actual seconds/size in the JSON response, so we don't guess here.
-		expectedInputFee = "0"
+		// Video SETTLES at response time (the provider reports the actual seconds/size), but the gate
+		// still has to reserve something: validateBalanceAdequacy checks
+		// `fee + unsettled + MinimumLockedBalance <= lockBalance`, so "0" left MinimumLockedBalance
+		// (1 0G) as the only thing between a caller and a clip that bills many times that. Measured on
+		// mainnet: a wallet with exactly 1.0 0G locked passed and was billed 6.698 0G for one 5s clip.
+		//
+		// VideoCreateReserveFee is an upper bound, not an estimate — see its doc. Not a charge: the
+		// real fee is computed from the response and this number is never persisted.
+		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), ctx.Request.URL.RawQuery)
+		if err != nil {
+			// Broker-side: the only failure here is an unreadable configured price. Left unflagged so
+			// it reaches the broker-fault alert rather than being blamed on the caller.
+			p.handleBrokerError(ctx, err, "reserve video fee")
+			return
+		}
+		expectedInputFee = fee
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

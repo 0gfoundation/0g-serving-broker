@@ -349,6 +349,81 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 	return max
 }
 
+// MaxVideoOutputUnitsFor returns the largest number of output units this block can bill for a video of
+// the given duration, over EVERY resolution it prices. ok is false when the block cannot answer (no
+// multipliers and no table rows), leaving the caller to fall back.
+//
+// It exists for the pre-flight balance reserve, which knows the requested duration but must not trust
+// the requested resolution: the vendor picks the rendered tier (MiniMax renders MINIMAX_RESOLUTION from
+// the translator's own environment and uses pixel dimensions only for the aspect ratio; DashScope
+// derives it from max(width, height)), and settlement bills the tier that comes back. Reserving the
+// dearest tier is deliberately more than most requests cost — a reserve is not a charge, and the
+// alternative is a gate that admits a create it cannot cover.
+func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (int64, bool) {
+	if b == nil {
+		return 0, false
+	}
+	switch b.Mode {
+	case BillingModePerUnitTable:
+		// The dearest row that still covers this duration — what settlement's own round-up would
+		// charge at the priciest resolution. Nothing covers it (a duration past every bucket) → the
+		// table maximum, which is what settlement bills in that case too.
+		var max int64
+		for _, t := range b.Table {
+			if t.Duration >= seconds && t.Units > max {
+				max = t.Units
+			}
+		}
+		if max == 0 {
+			max = b.MaxTableUnits()
+		}
+		return max, max > 0
+	default:
+		var mult float64
+		for _, m := range b.ResolutionMultipliers {
+			if m > mult {
+				mult = m
+			}
+		}
+		if mult <= 0 {
+			return 0, false
+		}
+		return videoUnitsFor(seconds, mult), true
+	}
+}
+
+// MaxVideoSizeRatio returns the dearest multiplier in the service-level videoSizeRatios map (the
+// operator's own when non-empty, else the shipped defaults). The single-model counterpart of
+// MaxVideoOutputUnitsFor: settlement reads that map with the resolution the RESPONSE names, so the
+// reserve has to assume the dearest one.
+func (s *Service) MaxVideoSizeRatio() float64 {
+	ratios := DefaultVideoSizeRatios
+	if s.ModelInfo != nil && len(s.ModelInfo.VideoSizeRatios) > 0 {
+		ratios = s.ModelInfo.VideoSizeRatios
+	}
+	var max float64
+	for _, v := range ratios {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
+// videoUnitsFor is ceil(seconds x multiplier), floored at 1 and bounded so an absurd operator
+// multiplier cannot wrap the int64.
+func videoUnitsFor(seconds int64, multiplier float64) int64 {
+	v := math.Ceil(float64(seconds) * multiplier)
+	switch {
+	case math.IsNaN(v) || v < 1:
+		return 1
+	case v > float64(maxBillableUnits):
+		return maxBillableUnits
+	default:
+		return int64(v)
+	}
+}
+
 // validBillingModeForType reports whether a billing mode is allowed for a
 // service type. per_token is valid everywhere (the default); the non-token modes
 // are restricted to the modality whose output they price.

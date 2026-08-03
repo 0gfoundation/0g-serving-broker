@@ -233,6 +233,90 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 	return int64(math.Ceil(f)), multipartFormField(reqBody, contentType, "size")
 }
 
+// videoReserveFallbackSeconds is the duration the pre-flight reserve prices when the request names no
+// readable `seconds`. The vendor then applies its OWN default, which the broker cannot see, so this has
+// to be at or above the longest clip either live vendor will produce for such a create: MiniMax clamps
+// every duration to 15s, and the DashScope models this broker fronts top out below that.
+const videoReserveFallbackSeconds = 15
+
+// VideoCreateReserveFee is the fee the balance gate reserves for a video create, in wei.
+//
+// The gate used to pass "0" here because video settles at response time, which left
+// MinimumLockedBalance (1 0G) as the only thing between a caller and a clip that bills many times
+// that. Measured on mainnet: a wallet with exactly 1.0 0G locked passed the gate and was billed
+// 6.698 0G for one 5s 2K clip.
+//
+// Deliberately an upper bound, not an estimate:
+//
+//   - The requested `seconds` is read (query first, then the body, matching r.FormValue on the
+//     upstream's side), because duration dominates the fee and a caller who names one has said what
+//     they want. An unreadable or absent value prices videoReserveFallbackSeconds.
+//   - The requested SIZE is ignored entirely. The vendor picks the rendered tier, not the client, and
+//     settlement bills whichever tier comes back — so the reserve prices the dearest tier the model can
+//     bill. Reading the requested size instead is how a gate ends up reserving the cheap tier for a
+//     clip that renders dear.
+//
+// So this over-reserves for anything but a worst-case request. That is the intended direction: a
+// reserve is not a charge (settlement computes the real fee from the response), and the failure it
+// replaces was admitting a create the balance could not cover.
+func (c *Ctrl) VideoCreateReserveFee(ctx context.Context, reqBody []byte, contentType, rawQuery string) (string, error) {
+	seconds := videoReserveSeconds(reqBody, contentType, rawQuery)
+
+	units := int64(0)
+	if c.Service.HasMultiModelPricing() {
+		if e := c.resolveModelPricing(ctx); e != nil {
+			if u, ok := e.Billing.MaxVideoOutputUnitsFor(seconds); ok {
+				units = u
+			}
+		}
+	}
+	if units == 0 {
+		// Single-model, or a model whose billing block cannot answer: settlement reads the
+		// service-level videoSizeRatios map with the resolution the RESPONSE names, so mirror it at
+		// its dearest entry. A map with nothing usable leaves the 1.0 baseline.
+		ratio := c.Service.MaxVideoSizeRatio()
+		if !(ratio >= 1) {
+			ratio = 1
+		}
+		units = videoOutputCount(seconds, ratio)
+	}
+
+	prices, err := c.GetBillingPrices(ctx)
+	if err != nil {
+		return "", errors.Wrap(err, "get billing prices for video pre-flight reserve")
+	}
+	fee, err := util.Multiply(prices.OutputPrice, units)
+	if err != nil {
+		return "", errors.Wrap(err, "compute video pre-flight reserve")
+	}
+	return fee.String(), nil
+}
+
+// videoReserveSeconds resolves the duration the reserve prices, erring high at every step.
+//
+// The URL query is read BEFORE the body because that is the precedence the upstream applies: it reads
+// the create with r.FormValue, whose ParseMultipartForm seeds r.Form from the query and appends body
+// values after — so `?seconds=15` over a body of `seconds=1` renders 15. Reading the body only would
+// have priced 1.
+func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
+	if rawQuery != "" {
+		if q, err := url.ParseQuery(rawQuery); err == nil {
+			if v := strings.TrimSpace(q.Get("seconds")); v != "" {
+				if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
+					return int64(math.Ceil(f))
+				}
+				// Present but unreadable here: the upstream may still coerce it, so do not fall
+				// through to the body's cheaper value.
+				return videoReserveFallbackSeconds
+			}
+		}
+	}
+	if seconds, _ := videoSecondsSizeFromRequest(reqBody, contentType); seconds > 0 {
+		return seconds
+	}
+	return videoReserveFallbackSeconds
+}
+
 // videoOutputCount converts (seconds, sizeRatio) into the billable effective
 // output count: ceil(seconds × ratio), floored at 1. Bounds the int64 conversion
 // (an absurd seconds × ratio only over-charges the abusive caller, never wraps).
