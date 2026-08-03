@@ -839,6 +839,20 @@ func validateModelPricing(cfg *Config) error {
 		}
 	}
 
+	// service.model must be one of the entries (or a wildcard must cover it). A typo here is
+	// invisible at boot and pathological at request time: ResolveRequestedModel fails for the
+	// advertised name, so a video create that names NO model at all is refused with
+	// ErrVideoModelNotServed — a CLIENT-attributed 400 for every conforming create, which then
+	// feeds the wallet's model-mismatch enumeration limiter with an empty model name and
+	// progressively BLOCKS paying callers for an operator's typo. The example yaml said "must match
+	// one of the modelPricing[].model entries" in a comment; nothing enforced it.
+	if !hasWildcard && svc.ModelType != "" {
+		if _, _, ok := svc.ResolveRequestedModel(svc.ModelType); !ok {
+			return fmt.Errorf("service.model %q is not one of the service.modelPricing entries (and no %q wildcard covers it): "+
+				"every request would be refused as an unserved model", svc.ModelType, ModelWildcard)
+		}
+	}
+
 	// A wildcard entry silently turns the allowlist into serve-all: every model
 	// the upstream can answer is reachable and billed at the wildcard price.
 	// Warn loudly at load so an operator who added "*" expecting a default price
@@ -1285,6 +1299,50 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 	return nil
 }
 
+// effectiveVideoSizeRatios is the size->multiplier map that actually prices this service: the
+// operator's own when non-empty, else the shipped defaults. Emptiness, not nil-ness, matching
+// GetVideoSizeRatio.
+func (s *Service) effectiveVideoSizeRatios() map[string]float64 {
+	if s.ModelInfo != nil && len(s.ModelInfo.VideoSizeRatios) > 0 {
+		return s.ModelInfo.VideoSizeRatios
+	}
+	return DefaultVideoSizeRatios
+}
+
+// HasVideoSizeRatio reports whether this service's ratio map prices the given size, matched with
+// normalization like ReserveVideoSizeRatio's widened lookup.
+func (s *Service) HasVideoSizeRatio(size string) bool {
+	res := normalizeResolution(size)
+	if res == "" {
+		return false
+	}
+	for k := range s.effectiveVideoSizeRatios() {
+		if normalizeResolution(k) == res {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxVideoSizeRatio returns the dearest multiplier in this service's ratio map, or 0 when it has none.
+//
+// The single-model analogue of BillingConfig.MaxResolutionMultiplier, and needed for the same reason:
+// settlement reads the RESPONSE's size through GetVideoSizeRatio while the reserve reads the
+// REQUEST's, so a request whose size that map does not price has no ceiling. On a single-model video
+// service the per-model lift cannot run at all (there is no ModelPricingEntry), so before this an
+// omitted or unreadable `size` reserved the 1.0 baseline and settled at whatever the response named —
+// measured 2x on the shipped defaults (1024x1792 = 2.0, one of OpenAI's own documented Video sizes),
+// and unbounded on an operator-written map.
+func (s *Service) MaxVideoSizeRatio() float64 {
+	var max float64
+	for _, v := range s.effectiveVideoSizeRatios() {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
 // ReserveVideoSizeRatio is the size multiplier the pre-flight reserve should use for a request:
 // GetVideoSizeRatio's answer, widened to also match the resolution with NORMALIZATION.
 //
@@ -1293,13 +1351,14 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 // goes through normalizeResolution, so `size:"1024X1792"` — one capital letter — missed a 2.0 ratio
 // and reserved half of what the vendor's canonical echo settled at.
 //
-// It deliberately does NOT fold in the resolved model's own modelInfo.videoSizeRatios. Settlement
+// It takes no model argument, and that is the point: it deliberately does NOT fold in the resolved
+// model's own modelInfo.videoSizeRatios. Settlement
 // never reads that map: a per-model entry is priced through entry.Billing, and the service-ratio
 // fallback reads only the service block. For a per-model-billed model those ratios are /v1/models
 // display metadata — folding them in demanded 8x the real fee and refused solvent callers. A
 // per-model ratio that is meant to price belongs in entry.Billing.ResolutionMultipliers, which
 // settlement does read and videoModelUnits already covers.
-func (s *Service) ReserveVideoSizeRatio(model, size string) float64 {
+func (s *Service) ReserveVideoSizeRatio(size string) float64 {
 	ratio := s.GetVideoSizeRatio(size)
 	ratios := DefaultVideoSizeRatios
 	// Mirror GetVideoSizeRatio's own fallback, which is on EMPTINESS, not nil-ness: a modelInfo

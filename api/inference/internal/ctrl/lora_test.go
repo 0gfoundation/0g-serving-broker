@@ -265,8 +265,8 @@ func TestCheckLoRAOwnership_ArchivedAdapter(t *testing.T) {
 
 func TestCheckLoRAOwnership_NilManager(t *testing.T) {
 	c := &Ctrl{
-		Service: config.Service{ModelType: "Qwen2.5-7B"},
-		logger:  testLogger(),
+		Service:        config.Service{ModelType: "Qwen2.5-7B"},
+		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
 	}
 
@@ -501,8 +501,8 @@ func TestRewriteResponseModelLine_VLLMPathModel(t *testing.T) {
 
 func TestVllmModelNames(t *testing.T) {
 	c := &Ctrl{
-		Service: config.Service{ModelType: "Qwen2.5-7B"},
-		logger:  testLogger(),
+		Service:        config.Service{ModelType: "Qwen2.5-7B"},
+		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
 	}
 	cfg := config.LoRAConfig{BaseModel: "/models/Qwen2.5-7B"}
@@ -523,8 +523,8 @@ func TestVllmModelNames(t *testing.T) {
 
 func TestVllmModelNames_SameBaseAndService(t *testing.T) {
 	c := &Ctrl{
-		Service: config.Service{ModelType: "Qwen2.5-7B"},
-		logger:  testLogger(),
+		Service:        config.Service{ModelType: "Qwen2.5-7B"},
+		logger:         testLogger(),
 		whitelistUsers: make(map[string]struct{}),
 	}
 	cfg := config.LoRAConfig{BaseModel: "Qwen2.5-7B"}
@@ -569,6 +569,37 @@ func TestExtractModelName(t *testing.T) {
 			got := ExtractModelName([]byte(tt.body), tt.contentType)
 			if got != tt.expected {
 				t.Errorf("ExtractModelName(%q, %q) = %q, want %q", tt.body, tt.contentType, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestMultipartFormFieldsWalkedOK pins walkedOK to "reached the close delimiter", not "the error was
+// EOF-ish". go1.24's NextPart already wraps the sentinel, and it wraps precisely the truncated cases —
+// so errors.Is was true for all of them and reported a clean walk for a body whose tail was missing,
+// with a fee-setting field cut off with that tail read as ABSENT (the FUNDED state). `==` also matches
+// mime/multipart's own ReadForm, which is what the upstream's form parser uses.
+func TestMultipartFormFieldsWalkedOK(t *testing.T) {
+	const ct = `multipart/form-data; boundary=b`
+	part := "--b\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n15\r\n"
+
+	for _, tc := range []struct {
+		name        string
+		body        string
+		wantWalked  bool
+		wantSeconds []string
+	}{
+		{name: "close delimiter present", body: part + "--b--\r\n", wantWalked: true, wantSeconds: []string{"15"}},
+		{name: "no close delimiter", body: part, wantWalked: false, wantSeconds: []string{"15"}},
+		{name: "truncated mid-value", body: "--b\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n1", wantWalked: false, wantSeconds: []string{"1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields, walkedOK := multipartFormFields([]byte(tc.body), ct, "seconds")
+			if walkedOK != tc.wantWalked {
+				t.Errorf("walkedOK = %v, want %v", walkedOK, tc.wantWalked)
+			}
+			if got := fields["seconds"].Values; len(got) != len(tc.wantSeconds) {
+				t.Errorf("values = %v, want %v", got, tc.wantSeconds)
 			}
 		})
 	}

@@ -454,8 +454,9 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 const proofSkipLogWindow = 10 * time.Minute
 
 // maxProofSkipKeys bounds the distinct (reason, detail) pairs logProofSkip
-// remembers. Far above any real deployment — eleven reasons today (six routing-proof, two
-// billing-table, three video-reserve), and a healthy deployment has a single upstream host — and low
+// remembers. Far above any real deployment — ten reasons reach it today (five routing-proof, two
+// billing-table, three video-reserve; RoutingProofSkipSignError goes only to the counter, never here),
+// and a healthy deployment has a single upstream host — and low
 // enough that a misbehaving sidecar cannot turn the throttle into a leak. All
 // reasons share one memo, which is why no caller may key on a value the client or
 // the sidecar chooses: overflow flushes the map for everyone.
@@ -1101,15 +1102,24 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 
 	err := json.Unmarshal(body, &bodyMap)
 	if err != nil {
-		// Not decodable as a JSON object, so the body cannot be rewritten and is forwarded as-is.
-		// Deliberately NOT a rejection: Go refuses `NaN` and `Infinity` where CPython accepts them
-		// (verified both ways), so a Python client sending `temperature: NaN` reaches an upstream that
-		// serves it, and 400ing every body Go cannot decode would break those requests.
+		// The body is forwarded byte-for-byte, so no rewrite happens: not because it is unreadable
+		// (rawFields above just read the trailing-data case with a Decoder) but because re-marshalling
+		// a body this function could not fully validate would mean deciding what to do with the part
+		// Unmarshal choked on. The consequence is worth stating: on a service where UpstreamModel
+		// differs from ModelType, such a request reaches the upstream under the ADVERTISED id rather
+		// than the upstream one. Both CPython and Go reject trailing data, so that request was already
+		// failing upstream; the gate's job here is the allowlist, not JSON repair.
 		//
-		// The allowlist check needs no map, so it still runs on the folded read. That splits the two
-		// cases correctly: a body the DECODER can read (trailing data — which CPython also rejects)
-		// no longer bypasses the gate, while one it cannot (NaN) is left to the only reader that can
-		// price it.
+		// Deliberately NOT a blanket rejection: Go refuses `NaN` and `Infinity` where CPython accepts
+		// them (verified both ways), so a Python client sending `temperature: NaN` reaches an upstream
+		// that serves it, and 400ing every body Go cannot decode would break those requests.
+		//
+		// So the allowlist check runs on the folded read instead, which splits the cases on the right
+		// axis: a body the DECODER can read (trailing data) is checked, while one it cannot (NaN) is
+		// forwarded unchecked and unrewritten. That second half is a real residual, not a safe case —
+		// `{"model":"not-served","temperature":NaN}` skips the allowlist AND the upstream rewrite. It
+		// is pre-existing, single-model-only (one price, so no fee divergence), and closing it needs a
+		// decoder that accepts what CPython accepts.
 		if folded != "" && !c.modelAccepted(folded) {
 			c.recordModelMismatch(userAddr, folded)
 			return nil, fmt.Errorf("model not supported: requested %q, accepted: %q", folded, c.acceptedModelIDs())
@@ -1549,6 +1559,12 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	return nil
 }
 
+// ErrModelFieldAmbiguous is returned when the gate cannot read a multipart `model` the way the
+// upstream's form parser will. Its own sentinel so the proxy can classify the rejection: a request
+// refused at the billing gate is the "high RPS, zero revenue" shape that must not die unclassified,
+// and this one is attacker-reachable with a two-field body.
+var ErrModelFieldAmbiguous = errors.NewBadRequest("`model` could not be read unambiguously")
+
 // checkMultipartModelUnambiguous refuses a multipart body whose `model` field this gate would read
 // differently from the upstream's form parser.
 //
@@ -1570,14 +1586,16 @@ func checkMultipartModelUnambiguous(body []byte, contentType string) error {
 	}
 	fields, walkedOK := multipartFormFields(body, contentType, "model")
 	if !walkedOK {
-		return errors.NewBadRequest("request body could not be read to the end; `model` sets the price, so it must be unambiguous")
+		return fmt.Errorf("%w: request body could not be read to the end, and `model` sets the price", ErrModelFieldAmbiguous)
 	}
 	f := fields["model"]
 	if f.Truncated {
-		return errors.NewBadRequest("`model` is longer than %d bytes; the upstream would read a value this gate cannot", maxMultipartFieldBytes)
+		return fmt.Errorf("%w: `model` is longer than %d bytes, so the upstream would read a value this gate cannot",
+			ErrModelFieldAmbiguous, maxMultipartFieldBytes)
 	}
 	if len(f.Values) > 1 {
-		return errors.NewBadRequest("`model` was sent %d times; send it once — form parsers disagree on which value wins", len(f.Values))
+		return fmt.Errorf("%w: `model` was sent %d times; send it once — form parsers disagree on which value wins",
+			ErrModelFieldAmbiguous, len(f.Values))
 	}
 	return nil
 }

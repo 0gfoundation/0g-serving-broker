@@ -250,9 +250,12 @@ reserve's own clamped basis — treating it the same way refused creates that we
 bills the previous behaviour charged less for (`{"seconds":5,"size":"1280x720"}` against
 `{720p:1.0, 1080p:1.5}` with a published `1080p` default went 5 units → 8). The same scoping applies
 to the settlement-side substitution and the boot cross-check.
-The per-model `videoSizeRatios` map is also consulted, taking the larger of it and the
-service-level map: it is a per-model-capable field that `GET /v1/models` advertises per model, and
-the reserve read only the service scope, so a published per-model ratio was used by nothing.
+The per-model `videoSizeRatios` map is deliberately **not** consulted — an earlier revision folded it
+in, "taking the larger of it and the service-level map", and it was reverted: settlement never reads
+that map (a per-model-billed model is priced through `entry.Billing`, and the service-ratio fallback
+reads only the service block), so folding it in demanded 8× the real fee and refused solvent callers.
+A per-model ratio that is meant to price belongs in `entry.Billing.resolutionMultipliers`, which
+settlement does read. `ReserveVideoSizeRatio` takes no model argument, which is how the code says so.
 
 Two further properties are deliberate and worth not "fixing" by accident:
 
@@ -394,7 +397,17 @@ delta is expected to be non-zero, and why.
    can read it. `defaultParameters` closed the omitted cases the same way a published min/max would
    close these — and would also let the broker reject an out-of-range duration outright instead of
    having it silently clamped upstream, which is the better contract anyway.
-4. **It is now observed.** `broker_video_reserve_shortfall_total` counts settlements that billed more
+4. **`usage.output_video_duration` can carry INPUT seconds too.** The reserve prices the requested
+   duration; settlement prefers `usage.output_video_duration`, and the MiniMax translator fills that
+   field from `usage.total_seconds`, which is input **+** output ("MiniMax bills the account on
+   total_seconds"). For text-to-video the two are equal, and `input_reference` is a still image, so
+   nothing live carries a non-zero input term — but the vendor basis is input+output by the
+   translator's own account, and the reserve has no term for it. On a plausible H3 table a requested
+   `6s@2K` reserving 45 units settles at 80 if 8s comes back and 120 at 16s. Residual 3 covers the
+   clamp, not this route. The fix is an input term in the reserve (the gate can see
+   `input_reference`), or having the translator report output seconds separately from the billed
+   total.
+5. **It is now observed.** `broker_video_reserve_shortfall_total` counts settlements that billed more
    units than the reserve had gated. The reserve is not persisted, so `checkVideoReserveCoverage`
    RECOMPUTES it from the request body settlement already holds — one pure parse, no new column, no
    carrying it on the poll job.

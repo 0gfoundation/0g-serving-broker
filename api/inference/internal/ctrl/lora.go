@@ -220,8 +220,13 @@ func extractModelFromMultipart(body []byte, contentType string) string {
 // question (was this field repeated, was its value truncated, did the body walk cleanly) and to
 // do so it must always advance to io.EOF — and multipart.Reader.NextPart streams every part it
 // skips. This wrapper's callers want one short scalar from bodies that can be tens of
-// megabytes of audio or image, and they want it before the upload. Measured on a 25MB body: 3.9us
-// short-circuiting here against 7.7ms walking to EOF, ~2000x.
+// megabytes of audio or image, and they want it before the upload. Measured on a 25MB body with the
+// `model` part FIRST: 3.9us short-circuiting here against 7.7ms walking to EOF, ~2000x.
+//
+// That ratio is entirely a function of field order, and the ordering dependency matters more than the
+// headline: with the file part before `model` — a common client layout — the cheap reader must stream
+// past the file anyway, and both readers measure ~6.7ms, i.e. 1.0x. So this saves a lot for one layout
+// and nothing for the other.
 //
 // That is the right trade only because no caller of THIS wrapper sets a fee from the answer: they
 // label metrics and fill the audit row. The one read that does price — speech-to-text's and video's
@@ -311,10 +316,23 @@ func multipartFormFields(body []byte, contentType string, names ...string) (fiel
 	for {
 		part, err := reader.NextPart()
 		if err != nil {
-			// errors.Is rather than ==: NextPart returns the bare sentinel today, and if that
-			// ever becomes wrapped, an == check would report every body unwalkable and turn
-			// every multipart video create into a 400.
-			return found, errors.Is(err, io.EOF)
+			// The BARE sentinel, deliberately, and this is the opposite of what an earlier version of
+			// this comment argued. Measured on go1.24.9:
+			//
+			//   well formed (close delimiter present)  err="EOF"                      == io.EOF: true
+			//   no close delimiter                     err="multipart: NextPart: EOF" == io.EOF: false
+			//   truncated mid-value                    err="multipart: NextPart: EOF" == io.EOF: false
+			//
+			// So NextPart ALREADY wraps, and it wraps exactly the cases that did not reach the close
+			// delimiter — which makes `==` the test for "walked cleanly" and errors.Is a test for
+			// nothing (it is true for all three). Under errors.Is this reported walkedOK for a body
+			// whose tail was missing, and a fee-setting field cut off with that tail read as ABSENT,
+			// which is the FUNDED state.
+			//
+			// `==` also matches mime/multipart's own ReadForm, which is what the translator's form
+			// parser uses — so the gate and the upstream agree on which bodies are readable, the
+			// property this whole path exists to preserve.
+			return found, err == io.EOF
 		}
 		if name := part.FormName(); wanted[name] && part.FileName() == "" {
 			val, _ := io.ReadAll(io.LimitReader(part, maxMultipartFieldBytes+1))

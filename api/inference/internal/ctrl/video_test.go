@@ -1455,7 +1455,7 @@ func TestReserveVideoSizeRatioNormalizes(t *testing.T) {
 	// Single-model, default ratios (1024x1792 = 2.0) — the most common deployment.
 	svc := config.Service{}
 	for _, size := range []string{"1024x1792", "1024X1792", " 1024x1792", "1024x1792 "} {
-		if got := svc.ReserveVideoSizeRatio("any", size); got != 2.0 {
+		if got := svc.ReserveVideoSizeRatio(size); got != 2.0 {
 			// One capital letter used to miss the 2.0 ratio and reserve half of what the vendor's
 			// canonical echo settled at.
 			t.Errorf("ReserveVideoSizeRatio(%q) = %v, want 2", size, got)
@@ -1464,7 +1464,7 @@ func TestReserveVideoSizeRatioNormalizes(t *testing.T) {
 	// A modelInfo block with NO videoSizeRatios still falls back to the defaults — the shape this
 	// repo's video example config ships. Branching on nil-ness left the fix inert for it.
 	withInfo := config.Service{ModelInfo: &config.ModelInfo{}}
-	if got := withInfo.ReserveVideoSizeRatio("any", "1024X1792"); got != 2.0 {
+	if got := withInfo.ReserveVideoSizeRatio("1024X1792"); got != 2.0 {
 		t.Errorf("ratio with an empty videoSizeRatios map = %v, want the default 2", got)
 	}
 	// A per-model modelInfo.videoSizeRatios is NOT folded in: settlement prices a per-model entry
@@ -1476,11 +1476,11 @@ func TestReserveVideoSizeRatioNormalizes(t *testing.T) {
 		OutputPrice: "100",
 		ModelInfo:   &config.ModelInfo{VideoSizeRatios: map[string]float64{"1080P": 8.0}},
 	}}, "dear")
-	if got := perModel.ReserveVideoSizeRatio("dear", "1080P"); got != 1.0 {
+	if got := perModel.ReserveVideoSizeRatio("1080P"); got != 1.0 {
 		t.Errorf("per-model display ratio = %v, want the baseline 1 (settlement never reads it)", got)
 	}
 	// Unknown sizes stay at the baseline.
-	if got := svc.ReserveVideoSizeRatio("any", "2K"); got != 1.0 {
+	if got := svc.ReserveVideoSizeRatio("2K"); got != 1.0 {
 		t.Errorf("unlisted size ratio = %v, want 1", got)
 	}
 }
@@ -2104,4 +2104,48 @@ func TestCheckVideoReserveCoverageIncrementsTheRightCounter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVideoReserveSingleModelSizeCeiling pins the ceiling on the SINGLE-model path, which had none.
+// The dearest-tier lift is gated on a ModelPricingEntry, and a single-model video service has no
+// entry — so an unnamed size reserved the 1.0 baseline while settlement read the RESPONSE's size
+// through the same service ratio map. Measured 2x on the shipped defaults, unbounded on an
+// operator-written one, with no 503, no boot warning and no lift.
+func TestVideoReserveSingleModelSizeCeiling(t *testing.T) {
+	// ModelInfo nil -> config.DefaultVideoSizeRatios, dearest 2.0 (1024x1792 / 1792x1024).
+	bare := &Ctrl{logger: testLogger(), Service: config.Service{}}
+	custom := &Ctrl{logger: testLogger(), Service: config.Service{
+		ModelInfo: &config.ModelInfo{VideoSizeRatios: map[string]float64{"720x1280": 1.0, "2048x2048": 4.0}},
+	}}
+	publishedSize := &Ctrl{logger: testLogger(), Service: config.Service{
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720x1280"}},
+	}}
+
+	t.Run("no size and none published lifts to the dearest ratio", func(t *testing.T) {
+		// Settlement would read `1024x1792` (2.0) off the response and bill 12 against a 6-unit reserve.
+		assertUnits(t, bare, `{"seconds":6}`, 12)
+		// And it scales with the operator's own map rather than the shipped one.
+		assertUnits(t, custom, `{"seconds":6}`, 24)
+	})
+
+	t.Run("an unreadable size is the same case", func(t *testing.T) {
+		// A wrong-typed size degrades to "" (see videoReserveFromJSON) and must not be cheaper than
+		// omitting it — that would make a malformed body the cheapest way to ask.
+		for _, body := range []string{`{"seconds":6,"size":1024}`, `{"seconds":6,"size":true}`, `{"seconds":6,"size":null}`} {
+			assertUnits(t, bare, body, 12)
+		}
+	})
+
+	t.Run("a NAMED size is still trusted, priced or not", func(t *testing.T) {
+		// The measured live shape: 5s at "2K" billed exactly 5 units, because the vendors that accept
+		// a resolution token echo it back and settlement looks up the same unpriced string. Lifting
+		// here would have demanded 10 for a 5-unit clip.
+		assertUnits(t, bare, `{"seconds":5,"size":"2K"}`, 5)
+		assertUnits(t, bare, `{"seconds":5,"size":"1024x1792"}`, 10)
+	})
+
+	t.Run("a published default size is the operator's statement and wins", func(t *testing.T) {
+		// 720x1280 = 1.0, so publishing it means reserving the baseline rather than the dearest row.
+		assertUnits(t, publishedSize, `{"seconds":6}`, 6)
+	})
 }

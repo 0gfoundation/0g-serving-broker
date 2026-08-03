@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/0glabs/0g-serving-broker/common/errors"
+	"github.com/0glabs/0g-serving-broker/inference/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
@@ -64,6 +66,15 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	// Submit the job
 	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
 	if err != nil {
+		if errors.Is(err, ctrl.ErrImageNumAmbiguous) {
+			// A malformed body is the caller's, not ours. Without this the async route answered its
+			// own new refusal with ZG-Failure-Source: broker (resolveFailureSource only reads the flag
+			// for a 4xx, and an unflagged 400 falls to broker) and incremented the legacy broker error
+			// counter — so a two-field multipart body could drive the broker-fault alert at the
+			// caller's full rate-limit budget, on a path that was unreachable before this refusal
+			// existed. The sync route at proxy.go already flags it; the async twin did not.
+			ctx.Set("ignoreError", true)
+		}
 		handleBrokerError(ctx, err, "submit async job")
 		return
 	}

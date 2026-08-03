@@ -619,12 +619,33 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	if entry != nil && entry.Billing != nil && entry.Billing.Mode == config.BillingModePerUnitTable && !entry.Billing.HasResolution(size) {
 		return 0, ErrVideoDefaultSizeUnpublished
 	}
-	ratio := c.Service.ReserveVideoSizeRatio(requestedModel, size)
+	ratio := c.Service.ReserveVideoSizeRatio(size)
 	// !(ratio >= 1) rather than ratio < 1: a NaN ratio (an operator can write one into
 	// videoSizeRatios) is false for `<` and would slip past the clamp into
 	// videoOutputCount, whose NaN guard floors at 1 unit.
 	if !(ratio >= 1) {
 		ratio = 1
+	}
+	// Single-model service with NOTHING naming the size: there is no ModelPricingEntry, so the
+	// dearest-tier lift below cannot run, and the service ratio map is the whole rate card. Settlement
+	// reads that map with the RESPONSE's size, so with no size in the request and none published
+	// there was no ceiling at all — the reserve took the 1.0 baseline and settled at whatever came
+	// back (measured 2x on the shipped defaults, where 1024x1792 — one of OpenAI's own documented
+	// Video sizes — is 2.0, and unbounded on an operator-written map). Same argument as
+	// MaxResolutionMultiplier, other billing path.
+	//
+	// Scoped to size == "" on purpose. A size the client DID name is trusted as named, even one this
+	// map does not price: the vendors that accept a resolution token echo it back, so settlement looks
+	// up the same unpriced string and bills the same baseline. Lifting there instead over-reserved the
+	// measured live shape — `{"seconds":5,"size":"2K"}` billed exactly 5 units, and the dearest-ratio
+	// lift demanded 10. A dearer RENDERED size for a named one is residual 2(b), same as everywhere
+	// else in this function. By this point line ~608 has already substituted a published
+	// defaultParameters.size, so "" here means the operator published none either — the case the boot
+	// warning is for.
+	if size == "" && (entry == nil || entry.Billing == nil) {
+		if mx := c.Service.MaxVideoSizeRatio(); mx > ratio {
+			ratio = mx
+		}
 	}
 	units := videoOutputCount(seconds, ratio)
 	if modelUnits, priced := c.videoModelUnits(entry, seconds, size); priced && modelUnits > units {

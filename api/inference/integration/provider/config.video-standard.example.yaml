@@ -104,6 +104,11 @@ service:
           # its OWN default of 1080P (see videotranslator sizeToDashScopeParams). Publishing 720p
           # here reserved and billed the 1.0 baseline against a 1.5x render — the provider
           # under-billing itself, silently, on the config an operator copies.
+          #
+          # Publishing a value REPLACES the reserve's fallback ceiling (the dearest row this model can
+          # bill) rather than bounding it. So a wrong-and-cheap value is worse for solvency than
+          # publishing nothing at all: omitting the field over-reserves, while naming the cheap tier
+          # puts the reserve BELOW the bill. Get it right or leave it out.
           seconds: 5
           size: "1080p"
 
@@ -142,6 +147,11 @@ service:
           # its OWN default of 1080P (see videotranslator sizeToDashScopeParams). Publishing 720p
           # here reserved and billed the 1.0 baseline against a 1.5x render — the provider
           # under-billing itself, silently, on the config an operator copies.
+          #
+          # Publishing a value REPLACES the reserve's fallback ceiling (the dearest row this model can
+          # bill) rather than bounding it. So a wrong-and-cheap value is worse for solvency than
+          # publishing nothing at all: omitting the field over-reserves, while naming the cheap tier
+          # puts the reserve BELOW the bill. Get it right or leave it out.
           seconds: 5
           size: "1080p"
 

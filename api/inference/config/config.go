@@ -2182,17 +2182,24 @@ func loadConfig(cfg *Config) error {
 					"refuses the create (503) without it — which is the OpenAI Video API's default request "+
 					"shape. Publish the duration the upstream actually applies.", m)
 			}
-			// The size has the same runtime consequence, on the one mode that can 503 for it: a
-			// per_unit_table model with no published default refuses every create that omits `size`
-			// or names a pixel dimension. Warned for the same reason, and only for that mode.
-			if entry := cfg.Service.GetModelPricing(m); entry != nil && entry.Billing != nil &&
-				entry.Billing.Mode == BillingModePerUnitTable {
-				if _, published := cfg.Service.DefaultVideoSizeFor(m); !published {
+			// The size has a runtime consequence on EVERY mode, only a different one — and the
+			// earlier version of this check warned solely for per_unit_table, i.e. only for the mode
+			// that already fails loudly. The mode that fails quietly is the one that costs money.
+			if _, published := cfg.Service.DefaultVideoSizeFor(m); !published {
+				entry := cfg.Service.GetModelPricing(m)
+				if entry != nil && entry.Billing != nil && entry.Billing.Mode == BillingModePerUnitTable {
 					log.Printf("WARNING: video model %q uses per_unit_table pricing but publishes no "+
 						"modelInfo.defaultParameters.size. The pre-flight balance reserve prices a create "+
 						"that omits `size` — or names a pixel dimension like \"1280x720\" — at that value, "+
 						"and refuses the create (503) without it. Publish the resolution the upstream "+
 						"actually renders.", m)
+				} else {
+					log.Printf("WARNING: video model %q publishes no modelInfo.defaultParameters.size. "+
+						"With nothing naming the rendered resolution, the pre-flight reserve falls back to "+
+						"the DEAREST row this model can bill, so creates that omit `size` are over-reserved "+
+						"and solvent callers can be refused. Publish the resolution the upstream actually "+
+						"renders. (Publishing a value CHEAPER than what it renders is worse still: it "+
+						"replaces that ceiling, so the reserve then sits below the bill.)", m)
 				}
 			}
 		}

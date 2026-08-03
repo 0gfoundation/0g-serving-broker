@@ -896,6 +896,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		if err != nil {
 			// Invalid request body is a user-caused error
 			ctx.Set("ignoreError", true)
+			if errors.Is(err, ctrl.ErrImageNumAmbiguous) {
+				// Classified for the same reason the video gate's rejections are: `n` multiplies the
+				// fee, so this is a billing-gate refusal an attacker can drive with a two-field body,
+				// and it must not die with an empty reason label. Wrap context dropped with it —
+				// handleBrokerError prefixes that onto the body the CLIENT receives, and
+				// errors.Response only sanitizes at exactly 500.
+				p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+				p.handleBrokerError(ctx, err, "")
+				return
+			}
 			p.handleBrokerError(ctx, err, "get image-editing parameters")
 			return
 		}
@@ -1095,6 +1105,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 
 	httpReq, err := p.ctrl.PrepareHTTPRequest(ctx, targetURL, reqBody, svcType)
 	if err != nil {
+		if errors.Is(err, ctrl.ErrModelFieldAmbiguous) {
+			// `model` picks the per-model PRICE on the multi-model STT/video paths, so a body where
+			// this gate and the upstream's form parser would read different values is a billing-gate
+			// refusal, not a generic prep failure: it gets a reason label, and the wrap context is
+			// dropped so "prepare HTTP request: resolve model for billing: ..." does not ship to the
+			// caller (errors.Response sanitizes only at exactly 500).
+			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+			p.handleBrokerError(ctx, err, "")
+			return
+		}
 		p.handleBrokerError(ctx, err, "prepare HTTP request")
 		return
 	}
