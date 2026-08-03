@@ -1097,9 +1097,33 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		// Return original body for non-JSON requests
 		return body, nil
 	}
+	if bodyMap == nil {
+		// A literal `null` body unmarshals successfully into a nil map, and the write below panics
+		// on one. inference/cmd/server/main.go builds the engine with gin.New() and NO
+		// gin.Recovery(), so that is a dropped connection plus a stack trace, uncounted by
+		// FailureCount (monitor/server.go documents it as known gap #1), loopable by any
+		// authenticated caller. Every sibling body rewriter in this file already carries this guard.
+		bodyMap = map[string]interface{}{}
+	}
+
+	// Read through the same folded rules the metric label, the audit row and the LoRA/expiry gates
+	// use (ExtractModelName -> foldedModelName). Reading the exact key here while they folded let
+	// `{"Model":"not-served"}` take the no-model branch: served as the configured model, while the
+	// metric and the audit row recorded the requested one, and the mismatch rejection and its
+	// enumeration limiter never ran. The multi-model twin folds; this is the higher-volume path.
+	folded := foldedModelName(rawFields(body))
+	// Drop every case-variant of `model` so the canonical key below is the only one in the body.
+	// Leaving one in place made correctness depend on json.Marshal sorting keys bytewise: a variant
+	// must carry an uppercase letter, so the injected all-lowercase `model` sorted last and won a
+	// folding upstream's last-wins resolution. An undocumented dependency on a map encoder.
+	stripModelKeyVariants(bodyMap)
 
 	// Check if request contains a model field
 	requestModel, hasModel := bodyMap["model"]
+	if !hasModel && folded != "" {
+		// A variant key carried the only usable spelling; treat it as the requested model.
+		requestModel, hasModel = folded, true
+	}
 	if !hasModel {
 		// No model specified, add the configured upstream model
 		c.logger.Infof("No model specified in request, adding upstream model: %s", upstreamModel)
@@ -1336,12 +1360,6 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 	return c.imageStore.ttl
 }
 
-// ValidateModelAllowlist checks that the requested model (JSON body) is in the
-// configured allowlist for centralized multi-model providers. Unlike
-// EnforceConfiguredModel which overwrites the model field, this validates and
-// passes through the user's requested model, injecting the default model when
-// the request omits one. Stores the resolved model name in the gin.Context under
-// CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
 // stripModelKeyVariants deletes every case-variant of `model` from a decoded body, reporting whether
 // it removed any, so the caller can force a rewrite of the canonical key.
 //
@@ -1363,6 +1381,12 @@ func stripModelKeyVariants(bodyMap map[string]interface{}) bool {
 	return stripped
 }
 
+// ValidateModelAllowlist checks that the requested model (JSON body) is in the
+// configured allowlist for centralized multi-model providers. Unlike
+// EnforceConfiguredModel which overwrites the model field, this validates and
+// passes through the user's requested model, injecting the default model when
+// the request omits one. Stores the resolved model name in the gin.Context under
+// CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
 func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
 	if len(body) == 0 {
 		// No body to inspect — bill at the configured default model (guaranteed to

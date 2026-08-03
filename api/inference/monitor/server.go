@@ -852,7 +852,6 @@ var (
 	VideoReserveShortfallUnknownTotal prometheus.Counter
 )
 
-// RecordVideoTableMiss increments the per_unit_table miss counter.
 // RecordVideoReserveShortfall reports that settlement billed more units than the reserve gated.
 func RecordVideoReserveShortfall() {
 	if VideoReserveShortfallTotal != nil {
@@ -868,6 +867,7 @@ func RecordVideoReserveShortfallUnknown() {
 	}
 }
 
+// RecordVideoTableMiss increments the per_unit_table miss counter.
 func RecordVideoTableMiss(reason string) {
 	if VideoTableMissTotal == nil {
 		return

@@ -148,12 +148,14 @@ case. Folding the lookup makes a `{"Seconds":15}` read the same on both sides; m
 variant of a billing field is refused, because Go resolves competing variants by document order
 and a map has none.
 
-`seconds`, `size` and `model` are refused outright in the URL query, and `model` alone for
-`speech-to-text` — the other modality whose gate resolves a per-model price from the body while
-posting the same multipart transport. The check sits above the whitelist branch: a whitelisted create
-is unbilled, but it still writes the reconciliation rollup, which would otherwise name the body's
-values while the upstream served the query's. `image-editing` is deliberately not included — it has
-no per-model resolution behind it — and chatbot posts JSON, whose decoders read the body only. The broker forwards the query
+`seconds`, `size` and `model` are refused outright in the URL query, plus `model` for
+`speech-to-text` and `n` for `image-editing` — the other multipart modalities where a body field the
+gate reads sets the fee. The scoping property is "does a body field move the fee?", not "does the gate
+resolve a per-model price?": the second was the original rationale here and it let `image-editing`'s
+`n` through, where a body of `n=1` plus `?n=10` billed one image and rendered ten. `text-to-image` and
+chatbot post JSON, whose decoders read the body only. The check sits above the whitelist branch: a
+whitelisted create is unbilled, but it still writes the reconciliation rollup, which would otherwise
+name the body's values while the upstream served the query's. The broker forwards the query
 verbatim and the upstream reads the create with `r.FormValue`, whose `ParseMultipartForm` populates
 `r.Form` from the query *before* appending the body — so the query wins, and the gate is handed only
 the body. The OpenAI Video API puts none of them in the query, so refusing costs no legitimate
@@ -341,6 +343,14 @@ delta is expected to be non-zero, and why.
    file picks it", which is fixable directly (validate the two against each other, or have the
    translator echo its configured resolution in the create response) rather than paid for with a
    blanket over-reserve.
+
+   One half of this is closed rather than accepted: a pixel `size` whose height names a tier the model
+   DOES price is now spelled as that tier before any lookup (`PricedResolutionAlias`), so
+   `"1920x1080"` on a card keyed `{720p, 1080p}` reserves exactly what it settles. The residual below
+   is only the genuinely unnameable case — `"1920x1080"` against a card keyed `{2K, 4K}`, which is the
+   live MiniMax shape. Before that, comparing pixel dimensions against tier names as opaque strings
+   produced BOTH failures depending on which side the fallback picked: the 1.0 baseline (reserve 5,
+   bill 8) or the dearest row (reserve 40, bill 5 — an 8× refusal of solvent callers).
 
    Until then, two shapes:
 

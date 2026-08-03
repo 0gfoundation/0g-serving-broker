@@ -710,3 +710,84 @@ func TestIsUpstreamTimeout(t *testing.T) {
 		})
 	}
 }
+
+// TestEnforceConfiguredModel_NullBody pins the guard for a `null` body. json.Unmarshal accepts it,
+// yields a NIL map, and the model injection below writes to it — a panic. inference/cmd/server/main.go
+// builds the engine with gin.New() and no gin.Recovery(), so that is a dropped connection plus a stack
+// trace, uncounted by FailureCount, loopable by any authenticated caller with a 4-byte body. Every
+// sibling body rewriter in this file already carried the guard; this one did not, and nothing tested it.
+func TestEnforceConfiguredModel_NullBody(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "zai-org/GLM-5-FP8", "z-ai/glm-5")
+	for _, body := range []string{"null", " null ", "NULL"} {
+		t.Run(body, func(t *testing.T) {
+			got, err := c.EnforceConfiguredModel([]byte(body), "0xabc")
+			// "NULL" is not valid JSON, so it takes the non-JSON early return; the other two must
+			// come back as a well-formed body carrying the configured upstream model. Neither may
+			// panic.
+			t.Logf("body=%q -> %s (err %v)", body, got, err)
+		})
+	}
+	got, err := c.EnforceConfiguredModel([]byte("null"), "0xabc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("invalid json %q: %v", got, err)
+	}
+	if out["model"] != "z-ai/glm-5" {
+		t.Errorf("model = %q, want the configured upstream id", out["model"])
+	}
+}
+
+// TestEnforceConfiguredModel_CaseVariantModelKey pins the folded read and the variant strip on the
+// single-model path — the higher-volume twin of ValidateModelAllowlist.
+//
+// Two defects, both from reading the exact `model` key while ExtractModelName (the metric label, the
+// audit row, the LoRA/expiry gates) folds:
+//
+//  1. `{"Model":"not-served"}` took the "no model specified" branch, so the mismatch rejection and its
+//     enumeration limiter never ran, while the metric and audit row recorded the requested name.
+//  2. A surviving variant made correctness depend on json.Marshal's key ordering: a variant must carry
+//     an uppercase letter, so the injected all-lowercase `model` sorted last and happened to win a
+//     folding upstream's last-wins decode.
+func TestEnforceConfiguredModel_CaseVariantModelKey(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "zai-org/GLM-5-FP8", "z-ai/glm-5")
+
+	t.Run("variant carrying the configured id is accepted and canonicalized", func(t *testing.T) {
+		got, err := c.EnforceConfiguredModel([]byte(`{"Model":"zai-org/GLM-5-FP8","messages":[]}`), "0xabc")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("invalid json: %v", err)
+		}
+		if out["model"] != "z-ai/glm-5" {
+			t.Errorf("model = %q, want %q", out["model"], "z-ai/glm-5")
+		}
+		if _, present := out["Model"]; present {
+			t.Errorf("variant key survived the rewrite: %s — the forwarded body must carry exactly one spelling", got)
+		}
+	})
+
+	t.Run("variant carrying an unserved id is rejected, not silently served", func(t *testing.T) {
+		if _, err := c.EnforceConfiguredModel([]byte(`{"Model":"gpt-4-premium","messages":[]}`), "0xabc"); err == nil {
+			t.Error("a case-variant model key naming an unserved model was accepted; the mismatch gate must see it")
+		}
+	})
+
+	t.Run("competing spellings leave exactly one key", func(t *testing.T) {
+		got, err := c.EnforceConfiguredModel([]byte(`{"model":"zai-org/GLM-5-FP8","Model":"gpt-4-premium"}`), "0xabc")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("invalid json: %v", err)
+		}
+		if len(out) != 1 || out["model"] != "z-ai/glm-5" {
+			t.Errorf("forwarded %s, want exactly one key: model=z-ai/glm-5", got)
+		}
+	})
+}

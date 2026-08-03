@@ -241,7 +241,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	// queued/in_progress, so an intermediate malformed/empty poll response is far more
 	// likely a transient hiccup than a genuine synchronous completion.
 	//
-	// Only an EXPLICIT "completed" status ends the poll — NOT merely resolveVideoBilling
+	// Only an EXPLICIT "completed" status ends the poll — NOT merely videoBillingBasis
 	// finding a usable duration. A real OpenAI-Video-API-shaped job resource commonly echoes
 	// the requested top-level "seconds" as part of the object on every GET, including while
 	// still queued/in_progress (videoResponseFields.Seconds doubles as both the request-edge
@@ -525,7 +525,7 @@ func (c *Ctrl) doVideoPollRequest(job model.VideoPollJob) (body []byte, respHead
 	// (video.go) exactly: decode a compressed body first (an upstream that ignores our
 	// identity request would otherwise slip past the JSON status parse entirely, silently
 	// stalling this job's polling until it times out), then sanitize. Doing this here, once,
-	// means every downstream consumer in pollVideoJob (status check, resolveVideoBilling,
+	// means every downstream consumer in pollVideoJob (status check, videoBillingBasis,
 	// signChatWithKey) sees the same bytes — sanitize-before-sign keeps the signature bound to
 	// what the client will actually receive when it separately fetches /videos/{id}/content.
 	if c.Service.IsForwarder() {

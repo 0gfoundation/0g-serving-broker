@@ -744,7 +744,12 @@ func TestQueryNamesAny(t *testing.T) {
 		// url.Values DROPS this pair (Go refuses `;`), which is why the guard reads RawQuery: the raw
 		// string is still forwarded to an upstream whose parser may split on it.
 		{name: "semicolon separated", rawQuery: "seconds=15;x=1", names: []string{"seconds"}, want: true},
-		{name: "comma separated", rawQuery: "x=1,model=dear", names: []string{"model"}, want: true},
+		// A key only reachable past a `;` or `,` is a key no parser in this stack reads (Go drops
+		// the whole pair; CPython has been `&`-only since 3.10), so refusing these bought nothing
+		// and cost legitimate requests — the three below are why the split is on `&` alone.
+		{name: "name after a semicolon is not a field", rawQuery: "x=1;model=dear", names: []string{"model"}, want: false},
+		{name: "comma inside a value is not a separator", rawQuery: "prompt=a cat,model=of a dog", names: []string{"model", "seconds", "size"}, want: false},
+		{name: "comma separated is not a field either", rawQuery: "tags=a,seconds=2", names: []string{"seconds"}, want: false},
 		{name: "percent-encoded key", rawQuery: "%73econds=15", names: []string{"seconds"}, want: true},
 		{name: "bare key with no value", rawQuery: "seconds", names: []string{"seconds"}, want: true},
 		// Only the named keys are refused. A blanket refusal turned these away with a message naming

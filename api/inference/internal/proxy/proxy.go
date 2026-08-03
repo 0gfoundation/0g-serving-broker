@@ -231,9 +231,14 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 //
 // It reads RawQuery rather than url.Values because url.Values silently DROPS a pair whose separator
 // its parser rejects — Go refuses `;` — so `?seconds=15;x=1` produced an empty map while the raw
-// string was still forwarded verbatim to an upstream whose parser may well split on it. Splitting on
-// all three separators any mainstream parser uses closes that without assuming which one the upstream
-// picked.
+// string was still forwarded verbatim to an upstream whose parser may well split on it. Reading the
+// raw string keeps that case covered: the first `&`-field's key is still `seconds`.
+//
+// The split is on `&` alone, matching every parser in this stack (Go's url.parseQuery, and CPython's
+// parse_qsl since 3.10). Treating `;` and `,` as separators too looked stricter and refused legitimate
+// requests instead: `?prompt=a cat,model=of a dog` has no `model` field to any parser, but split on
+// `,` it produced a 400 naming three fields the caller never sent. Nothing was gained — a key only
+// reachable past a `;` or `,` is a key no upstream on this path reads.
 //
 // Only the named keys are refused, not every query: a blanket refusal turned away
 // `?api-version=2024-02-01` (how Azure-style clients address a transcription) and `?wait=…` (which
@@ -241,7 +246,7 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 // caller never sent. Matching is exact-case, like every mainstream form parser — `?SECONDS=15` is a
 // different field on both sides.
 func queryNamesAny(rawQuery string, names ...string) bool {
-	for _, pair := range strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' || r == ',' }) {
+	for _, pair := range strings.Split(rawQuery, "&") {
 		key := pair
 		if i := strings.IndexByte(key, '='); i >= 0 {
 			key = key[:i]
@@ -670,10 +675,13 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// a whitelisted create is unbilled but still writes the reconciliation rollup, which would
 	// otherwise name the body's values while the upstream served the query's.
 	//
-	// Scoped to the modalities whose gate resolves a per-model price from the body: video-generation
-	// (seconds/size/model) and speech-to-text (model). Chatbot posts JSON, whose decoders read the
-	// body only, and image-editing has no per-model resolution behind it (ResolveModelForBilling
-	// runs for STT and video only) — narrowing either contract would buy nothing.
+	// Scoped by the property that matters: does a field read from the multipart body SET THE FEE?
+	// video-generation (seconds/size/model), speech-to-text (model), and image-editing, which bills
+	// outputPrice x n with `n` read from the body — measured, body `n=1` plus `?n=10` billed one
+	// image and rendered ten. Scoping it instead to "the gate resolves a per-model price" (the
+	// earlier rationale here) is the wrong criterion and let `n` through: per-model price resolution
+	// is one way a body field moves the fee, not the only one. text-to-image and chatbot post JSON,
+	// whose decoders read the body only.
 	if ctx.Request.Method == http.MethodPost && ctx.Request.URL.RawQuery != "" {
 		var offending error
 		switch svcType {
@@ -684,6 +692,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		case "speech-to-text":
 			if queryNamesAny(ctx.Request.URL.RawQuery, "model") {
 				offending = errors.NewBadRequest("`model` must be sent in the request body, not the URL query")
+			}
+		case "image-editing":
+			if queryNamesAny(ctx.Request.URL.RawQuery, "n") {
+				offending = errors.NewBadRequest("`n` must be sent in the request body, not the URL query")
 			}
 		}
 		if offending != nil {
@@ -973,9 +985,7 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// unclassified") applies at least as strongly to a fault that is entirely on
 				// this side. The context string is dropped for the same reason as the 400 arm:
 				// errors.Response replaces the message only at exactly 500, so a 503 body ships
-				// whatever it is handed. No Errorf here — errors.Response already logs every status
-				// >= 500 with the error and the path, and a config gap that refuses EVERY conforming
-				// create would otherwise emit two unthrottled lines per request.
+				// whatever it is handed.
 				p.rejections.record(ctx, monitor.RejectionPricingUnavailable, userAddress)
 				// ErrPricingUnavailable's own text is replaced rather than passed through: it
 				// carries the internal wrap ("get service price for video pre-flight reserve"),
@@ -983,7 +993,17 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// the last update — and errors.Response sanitizes only at EXACTLY 500, so a 503
 				// ships whatever it is handed. The two Unpublished sentinels ARE passed through:
 				// their messages are curated and tell the caller what to do.
+				//
+				// Logged HERE, before the substitution, because this is the only point that still
+				// holds the cause: both downstream sinks (handleBrokerError and errors.Response)
+				// see the replacement, so a rate-feed outage previously produced a 503 whose
+				// staleness threshold and last-update age were logged nowhere. ignoreError silences
+				// handleBrokerError's generic restatement so the count stays at the two lines it
+				// was, with one of them now diagnostic; it cannot move attribution, which reads it
+				// only for a 4xx (monitor.resolveFailureSource) and this arm is 503.
 				if errors.Is(err, ctrl.ErrPricingUnavailable) {
+					p.logger.Errorf("video pre-flight reserve unavailable: %v", err)
+					ctx.Set("ignoreError", true)
 					err = errors.NewServiceUnavailable("video pricing temporarily unavailable; retry shortly")
 				}
 				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "")

@@ -43,7 +43,7 @@ type VideoPollJob struct {
 	// not need to reconstruct routing decisions later.
 	PollURL string `gorm:"type:text;not null" json:"pollUrl"`
 	// RequestBody is the original client request bytes, needed at completion time by
-	// resolveVideoBilling's request-duration fallback and by TEE signing (the signature
+	// resolveVideoBillingWithSizeSource's request-duration fallback and by TEE signing (the signature
 	// binds request+response hashes).
 	RequestBody []byte `gorm:"type:mediumblob" json:"-"`
 	// RequestContentType is the client's original Content-Type (multipart boundary or
