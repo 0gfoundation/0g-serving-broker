@@ -365,21 +365,48 @@ func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
 	if providerJobID == "" {
 		return "", nil
 	}
-	// Two rows fetched to detect ambiguity, not to choose between them. The
-	// provider_job_id column is utf8mb4_0900_bin (see the
-	// video-poll-job-binary-collation migration), so this comparison is
-	// case-significant and agrees with the authorization lookup on the same id.
-	var chatKeys []string
+	// The id is re-compared IN GO, byte for byte — that is why this selects
+	// provider_job_id back instead of just chat_key.
+	//
+	// This column inherits utf8mb4_0900_ai_ci (case-INSENSITIVE), while the
+	// video_job_owner column that authorizes the caller is utf8mb4_0900_bin. Public
+	// ids do carry case: `v0_` passes the vendor id through over a charset that
+	// accepts both, and `v2_` is base64url. So `v2_qujd` and `v2_QUJD` are two
+	// distinct jobs that this predicate alone would conflate, and /signature/{key}
+	// needs no session — that would hand a third party a proof over content they
+	// never requested. In Go rather than a per-query COLLATE (binds to the
+	// placeholder, so a DSN carrying charset=utf8 raises 1253 and every lookup
+	// silently loses the header) or a column conversion (ALGORITHM=COPY rebuild).
+	//
+	// Ambiguity yields nothing rather than a guess: provider_job_id is indexed, not
+	// unique (request_hash is), and the owner and poll inserts are separate
+	// non-transactional writes, so row order cannot identify the real creator.
+	// Limit(3) makes that check see one case-variant alongside a genuine duplicate;
+	// a set holding two variants AND a duplicate hides the duplicate and still
+	// returns a handle (measured, not theorised). Tolerable only because
+	// provider_job_id is vendor-assigned, never client-chosen, so a caller cannot
+	// manufacture that set — it is a corruption shape, not an attack path.
+	var rows []struct {
+		ProviderJobID string
+		ChatKey       string
+	}
 	err := d.db.Model(&model.VideoPollJob{}).
+		Select("provider_job_id", "chat_key").
 		Where("provider_job_id = ?", providerJobID).
 		Where("status = ?", model.VideoPollStatusCompleted).
-		Limit(2).
-		Pluck("chat_key", &chatKeys).Error
+		Limit(3).
+		Scan(&rows).Error
 	if err != nil {
 		return "", err
 	}
-	if len(chatKeys) != 1 {
+	var exact []string
+	for _, r := range rows {
+		if r.ProviderJobID == providerJobID {
+			exact = append(exact, r.ChatKey)
+		}
+	}
+	if len(exact) != 1 {
 		return "", nil
 	}
-	return chatKeys[0], nil
+	return exact[0], nil
 }

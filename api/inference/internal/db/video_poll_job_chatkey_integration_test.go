@@ -115,9 +115,14 @@ func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 	})
 
 	// The authorization side of this pair is case-SENSITIVE by migration, so this
-	// lookup must be too. If it folded case, a caller authorized for one id would
-	// be handed the handle of a job differing only in case — and /signature/{key}
-	// takes no session, so that is another user's proof.
+	// lookup must be too. If it folded case, a caller authorized for one id would be
+	// handed the handle of a job differing only in case — and /signature/{key} takes
+	// no session, so that is another user's proof.
+	//
+	// The column here is still ai_ci, deliberately: the case-significance comes from
+	// the Go-side byte comparison in GetVideoPollJobChatKey, not from the schema. So
+	// this is the test that pins that comparison — the SQL alone would match both
+	// rows.
 	t.Run("case-significant ids do not match each other", func(t *testing.T) {
 		seed("v2_QUJD", "hash-upper", "alice-handle")
 		seed("v2_qujd", "hash-lower", "bob-handle")
@@ -179,54 +184,4 @@ func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 			t.Fatalf("got %q/%v, want empty/nil", got, err)
 		}
 	})
-}
-
-func seedBulk(t *testing.T, d *DB, i int) {
-	t.Helper()
-	if err := d.db.Create(&model.VideoPollJob{
-		ProviderJobID: fmt.Sprintf("v0_bulk_%d", i),
-		RequestHash:   fmt.Sprintf("bulk-hash-%d", i),
-		PollURL:       "http://example.invalid/x",
-		OutputPrice:   "0",
-		ChatKey:       fmt.Sprintf("key-%d", i),
-		NextPollAt:    time.Now(),
-		ExpiresAt:     time.Now().Add(time.Hour),
-	}).Error; err != nil {
-		t.Fatalf("seed bulk %d: %v", i, err)
-	}
-}
-
-// A COLLATE in the WHERE can silently force a full scan when it disagrees with
-// the column's own collation — and at test-data volumes a scan is milliseconds and
-// passes every functional assertion, so "the query works" says nothing about
-// whether it scales. Pin the plan, not just the answer.
-func TestChatKeyLookupUsesIndex(t *testing.T) {
-	d := setupVideoPollDB(t)
-	for i := 0; i < 400; i++ {
-		seedBulk(t, d, i)
-	}
-	if err := d.db.Exec("ANALYZE TABLE video_poll_job").Error; err != nil {
-		t.Fatalf("analyze: %v", err)
-	}
-	var plan []struct {
-		Type string  `gorm:"column:type"`
-		Key  *string `gorm:"column:key"`
-		Rows int64   `gorm:"column:rows"`
-	}
-	if err := d.db.Raw(
-		"EXPLAIN SELECT chat_key FROM video_poll_job WHERE provider_job_id = ? COLLATE utf8mb4_0900_bin ORDER BY id LIMIT 1",
-		"v0_bulk_7").Scan(&plan).Error; err != nil {
-		t.Fatalf("explain: %v", err)
-	}
-	if len(plan) != 1 {
-		t.Fatalf("plan rows = %d", len(plan))
-	}
-	k := "<nil>"
-	if plan[0].Key != nil {
-		k = *plan[0].Key
-	}
-	t.Logf("EXPLAIN: type=%s key=%s rows=%d", plan[0].Type, k, plan[0].Rows)
-	if plan[0].Type == "ALL" || plan[0].Key == nil {
-		t.Errorf("COLLATE defeated the index: type=%s key=%s", plan[0].Type, k)
-	}
 }

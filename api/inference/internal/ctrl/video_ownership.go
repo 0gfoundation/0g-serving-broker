@@ -2,7 +2,6 @@ package ctrl
 
 import (
 	"strings"
-	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 )
@@ -60,56 +59,23 @@ func (c *Ctrl) AuthorizeVideoJobAccess(providerJobID, userAddress string) error 
 // The handle is minted and advertised once, on the create response
 // (handleVideoGenerationResponse). Video status and content are
 // AuthRequiredPrefixes passthroughs, and that path returns from
-// ProcessHTTPRequest before any signing or header work happens — so a client that
-// did not capture the header from the create response had no way to obtain it
-// again, and the signature it points at was unreachable for the whole life of the
-// job. Async image never had this gap: its status handler restores ZG-Res-Key
-// from the stored response headers. This is the same guarantee, read from the row
-// that owns the handle rather than a second copy of it.
+// ProcessHTTPRequest before any signing or header work — so a client that did not
+// capture the header from the create response had no way to obtain it again, and
+// the signature it points at was unreachable for the whole life of the job. Async
+// image never had this gap: its status handler restores ZG-Res-Key from the stored
+// response headers, gated on the job being completed.
 //
 // Errors are swallowed to "" on purpose. This is a best-effort convenience on a
 // path whose job is to return the customer's video: a DB blip must not fail the
 // poll, and the caller degrades to exactly the pre-existing behaviour (no header,
 // so the router falls back as it does today).
-//
-// The log is throttled, because this runs on a client poll loop that vendors
-// recommend driving every 5-15s: unthrottled, a DB outage with N jobs in flight
-// writes N/5 warning lines a second. Same reasoning, and the same window, as
-// logProofSkip.
 func (c *Ctrl) VideoJobChatKey(providerJobID string) string {
-	// Short-circuit where a handle cannot exist by construction: a service that
-	// does not sign records chat_key as "" on every row (see the pollChatKey
-	// assignment in handleVideoGenerationResponse), so the query could only ever
-	// return empty. Skipping it keeps the passthrough at the one DB read it had
-	// before this feature for every decentralized deployment.
-	if c.Service.TargetSeparated && !c.Service.IsCentralized() {
-		return ""
-	}
 	chatKey, err := c.videoPollDB.GetVideoPollJobChatKey(providerJobID)
 	if err != nil {
-		c.logChatKeyLookupFailure(providerJobID, err)
+		c.logger.Warnf("video job %s: could not read the signature handle to replay: %v", providerJobID, err)
 		return ""
 	}
 	return chatKey
-}
-
-// chatKeyLookupLogWindow throttles the lookup-failure log to one line per window
-// per process, matching proofSkipLogWindow's reasoning: a persistent
-// misconfiguration should cost a handful of lines an hour, not one per poll.
-const chatKeyLookupLogWindow = 10 * time.Minute
-
-func (c *Ctrl) logChatKeyLookupFailure(providerJobID string, err error) {
-	c.mu.Lock()
-	last := c.lastChatKeyLookupLog
-	now := time.Now()
-	if now.Sub(last) < chatKeyLookupLogWindow {
-		c.mu.Unlock()
-		return
-	}
-	c.lastChatKeyLookupLog = now
-	c.mu.Unlock()
-	c.logger.Warnf("video job %s: could not read the signature handle to replay (throttled to one line per %s): %v",
-		providerJobID, chatKeyLookupLogWindow, err)
 }
 
 // VideoJobChatKeyForTest exposes the raw lookup so an integration test can wait for

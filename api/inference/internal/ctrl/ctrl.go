@@ -95,11 +95,9 @@ type Ctrl struct {
 	videoPollDB      videoPollDB
 	reconciliationDB reconciliationDB
 	videoJobOwnerDB  videoJobOwnerDB
-	// lastChatKeyLookupLog throttles VideoJobChatKey's failure log; guarded by mu.
-	lastChatKeyLookupLog time.Time
-	contract             *providercontract.ProviderContract
-	svcCache             *cache.Cache
-	logger               log.Logger
+	contract         *providercontract.ProviderContract
+	svcCache         *cache.Cache
+	logger           log.Logger
 
 	autoSettleBufferTime time.Duration
 	minSettlementFee     *big.Int
