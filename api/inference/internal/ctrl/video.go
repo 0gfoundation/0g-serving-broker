@@ -644,13 +644,24 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 // RateClass is part of hourly_usage_stat's primary key.
 func (c *Ctrl) videoBillingBasis(ctx context.Context, respBody, reqBody []byte, contentType string) (seconds int64, size, source string) {
 	seconds, size, source, sizeFromResponse := resolveVideoBillingWithSizeSource(respBody, reqBody, contentType)
-	if sizeFromResponse {
-		// The upstream said what it rendered. Substituting over that would reprice a tier the
-		// vendor reported — and silence videoOutputUnits' per_unit_table miss signal, which is
-		// the only thing telling the operator to tabulate it.
+	substituted := c.videoBillingSize(ctx, size)
+	if substituted == size {
 		return seconds, size, source
 	}
-	return seconds, c.videoBillingSize(ctx, size), source
+	if sizeFromResponse {
+		// The upstream said what it rendered, and this model prices that tier NOWHERE. Both
+		// available answers are wrong in different directions: billing it (videoOutputUnits falls
+		// to the table maximum) over-charges the caller by the whole tier spread for a gap in the
+		// operator's table, while substituting silently agrees with the reserve but throws away
+		// the vendor's own statement. So substitute for the PRICE and keep the SIGNAL — the miss
+		// is what actually needs fixing, and suppressing it was how a reported `4K` went from a
+		// loud table-maximum bill to a silent cheap one.
+		monitor.RecordVideoTableMiss(monitor.VideoTableMissUncovered)
+		c.logProofSkip("video_reported_size_untabled", substituted,
+			"video settlement: upstream reported resolution %q, which this model prices nowhere; billing the published %q instead; operator should tabulate it",
+			truncateForLog([]byte(size), 80), substituted)
+	}
+	return seconds, substituted, source
 }
 
 // videoBillingSize substitutes the model's published default resolution when the size about to be

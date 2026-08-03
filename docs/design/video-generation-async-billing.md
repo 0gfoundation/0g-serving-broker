@@ -340,8 +340,10 @@ none of them is currently measured — see the last entry.
    and bill 5 units while the vendor charges 1080P. That is a broker-vs-vendor gap, not a
    reserve-vs-bill one, and it predates this change; closing it needs the rendered tier stated
    per-model in config (the two live translators derive it differently, so it cannot be a
-   broker-side constant). (b) A reported tier above both the requested and the published one still
-   costs that tier's factor — but it is reported, so the miss metric fires.
+   broker-side constant). (b) A reported tier the model DOES price, above both the requested and the
+   published one, costs that tier's factor: it is the upstream's own statement, so it is billed as
+   stated rather than repriced, and the gap is the reserve's. An UNTABLED reported tier is not in
+   this residual — it is substituted for the price and metered as a `per_unit_table` miss.
 3. **`seconds` the upstream clamps, in either direction.** `{"seconds":1}` prices at 1 unit while the
    translator raises it to the model floor (H3: 4s) and bills that — an under-reserve. Above the
    ceiling it is the mirror image and costs the *caller*: `{"seconds":60}` is priced at 60 units

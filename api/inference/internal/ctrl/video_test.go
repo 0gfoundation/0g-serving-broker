@@ -1627,13 +1627,18 @@ func TestVideoBillingBasisRespectsReportedSize(t *testing.T) {
 	ctx := ginCtxWithResolvedModel("bucketed")
 	reqBody := []byte(`{"model":"bucketed","seconds":6,"size":"1280x720"}`)
 
-	// Response REPORTS a tier the table does not carry: left alone, so videoOutputUnits still
-	// reaches its table-maximum fallback and still meters the miss for the operator.
+	// Response REPORTS a tier the table prices NOWHERE. Both readings are wrong in different
+	// directions — billing it reaches the table maximum and over-charges the caller by the whole
+	// tier spread for a gap in the operator's table, leaving it alone puts settlement above the
+	// reserve, which priced the published tier. So it is substituted for the PRICE (agreeing with
+	// the reserve) while the miss is still metered and logged, because the untabled tier is what
+	// actually needs fixing.
 	reported := []byte(`{"id":"v1","status":"completed","size":"4K","usage":{"output_video_duration":6}}`)
-	if _, size, _ := c.videoBillingBasis(ctx, reported, reqBody, "application/json"); size != "4K" {
-		t.Errorf("basis size = %q, want the upstream-reported %q left untouched", size, "4K")
+	if _, size, _ := c.videoBillingBasis(ctx, reported, reqBody, "application/json"); size != "768P" {
+		t.Errorf("basis size = %q, want the published %q for an untabled reported tier", size, "768P")
 	}
-	// Response reports a tier the table DOES carry: also left alone.
+	// Response reports a tier the table DOES carry: left exactly as the upstream stated it — this
+	// is the case where overwriting would have repriced a genuinely dearer rendered tier down.
 	priced := []byte(`{"id":"v1","status":"completed","size":"1080P","usage":{"output_video_duration":6}}`)
 	if _, size, _ := c.videoBillingBasis(ctx, priced, reqBody, "application/json"); size != "1080P" {
 		t.Errorf("basis size = %q, want %q", size, "1080P")
@@ -1714,5 +1719,48 @@ func TestVideoBillingBasisLeavesPerVideoSecondAlone(t *testing.T) {
 	// And an unlisted size is priced, not refused: the 503 is a per_unit_table-only answer.
 	if _, err := c.videoReserveUnitsFromRequest(reqBody, "application/json"); err != nil {
 		t.Errorf("a per_video_second model must price an unlisted size, not refuse it: %v", err)
+	}
+}
+
+// TestVideoReserveCoversEchoedRequestSize pins the shape that reconciled the two competing rules:
+// an upstream that ECHOES back a client size the model prices nowhere.
+//
+// "Never overwrite what the upstream reported" and "the reserve must cover the bill" collide there:
+// leaving the echoed size alone sends settlement to the table maximum while the reserve priced the
+// published tier. Neither live translator echoes a pixel size today (MiniMax reports its rendered
+// tier, DashScope reports none), but the broker is vendor-agnostic, so the invariant has to hold for
+// it.
+func TestVideoReserveCoversEchoedRequestSize(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bucketed",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 60},
+			},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "768P"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bucketed")}
+	ctx := ginCtxWithResolvedModel("bucketed")
+
+	for _, size := range []string{"1280x720", "2160P", "4K"} {
+		t.Run(size, func(t *testing.T) {
+			reqBody := []byte(`{"model":"bucketed","seconds":6,"size":"` + size + `"}`)
+			reserve, err := c.videoReserveUnitsFromRequest(reqBody, "application/json")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			respBody := []byte(`{"status":"completed","size":"` + size + `","usage":{"output_video_duration":6}}`)
+			seconds, basis, source := c.videoBillingBasis(ctx, respBody, reqBody, "application/json")
+			if source == "" {
+				t.Fatal("settlement resolved no basis")
+			}
+			if settled := c.videoOutputUnits(ctx, seconds, basis); reserve < settled {
+				t.Errorf("reserve %d < settled %d (basis %q) for an echoed unpriceable size", reserve, settled, basis)
+			}
+		})
 	}
 }
