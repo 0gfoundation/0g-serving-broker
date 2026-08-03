@@ -58,9 +58,10 @@ func setupVideoPollDB(t *testing.T) *DB {
 func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 	d := setupVideoPollDB(t)
 
-	seed := func(providerJobID, requestHash, chatKey string) {
+	seedStatus := func(providerJobID, requestHash, chatKey string, status model.VideoPollStatus) {
 		t.Helper()
 		if err := d.db.Create(&model.VideoPollJob{
+			Status:        status,
 			ProviderJobID: providerJobID,
 			RequestHash:   requestHash,
 			PollURL:       "http://example.invalid/videos/" + providerJobID,
@@ -71,6 +72,10 @@ func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 		}).Error; err != nil {
 			t.Fatalf("seed %s: %v", providerJobID, err)
 		}
+	}
+	seed := func(providerJobID, requestHash, chatKey string) {
+		t.Helper()
+		seedStatus(providerJobID, requestHash, chatKey, model.VideoPollStatusCompleted)
 	}
 
 	seed("v0_signed", "hash-signed", "d4f1e2c3-aaaa-bbbb-cccc-000000000001")
@@ -109,29 +114,6 @@ func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 		}
 	})
 
-	// provider_job_id is only a plain index, so a duplicate is insertable. The
-	// caller who can actually poll is the FIRST creator (VideoJobOwner's unique
-	// index rejects the second), so the first row's handle is the right answer.
-	//
-	// Coverage limit, stated so nobody reads more into this than it holds: dropping
-	// the ORDER BY does NOT turn this red. InnoDB happens to return this scan in
-	// primary-key order anyway, and there is no reliable way to make it not. So the
-	// ORDER BY is a determinism guarantee this test cannot falsify — it pins the
-	// ANSWER, not the clause that forces it.
-	t.Run("a duplicated job id resolves to the first row, deterministically", func(t *testing.T) {
-		seed("v0_dup", "hash-dup-1", "first-creators-handle")
-		seed("v0_dup", "hash-dup-2", "second-creators-handle")
-		for i := 0; i < 5; i++ {
-			got, err := d.GetVideoPollJobChatKey("v0_dup")
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != "first-creators-handle" {
-				t.Fatalf("attempt %d: got %q, want the first row's handle", i, got)
-			}
-		}
-	})
-
 	// The authorization side of this pair is case-SENSITIVE by migration, so this
 	// lookup must be too. If it folded case, a caller authorized for one id would
 	// be handed the handle of a job differing only in case — and /signature/{key}
@@ -147,6 +129,47 @@ func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 			if got != want {
 				t.Fatalf("%s: got %q, want %q — the lookup folded case", id, got, want)
 			}
+		}
+	})
+
+	// Before the poller sees a terminal state the cached signature is the create-time
+	// one, over the {"status":"queued"} envelope. Replaying the handle then would hand
+	// the client a proof that cannot describe the body it just received — the same
+	// objection that keeps the handle off /content. This is the guard the proxy-level
+	// test cannot reach (that fixture never gets a poll row at all), so it is pinned
+	// here, where the row's status is something a test can actually set.
+	t.Run("a job that has not completed yields no handle", func(t *testing.T) {
+		for _, st := range []model.VideoPollStatus{
+			model.VideoPollStatusPending,
+			model.VideoPollStatusPolling,
+		} {
+			id := "v0_" + string(st)
+			seedStatus(id, "hash-"+string(st), "handle-not-yet-valid", st)
+			got, err := d.GetVideoPollJobChatKey(id)
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", st, err)
+			}
+			if got != "" {
+				t.Errorf("status=%s returned %q; the signature still covers the queued envelope", st, got)
+			}
+		}
+	})
+
+	// An ambiguous id gets no answer rather than a guess. Ordering looked like it
+	// resolved this ("the owner table's unique index means only the first creator can
+	// poll, so take the lowest id"), but the owner insert and the poll insert are
+	// separate non-transactional writes with a client-facing response write between
+	// them — so the loser's row can hold the lower id and the guess can serve the
+	// wrong creator's handle.
+	t.Run("a duplicated job id yields no handle", func(t *testing.T) {
+		seed("v0_ambiguous", "hash-amb-1", "first-handle")
+		seed("v0_ambiguous", "hash-amb-2", "second-handle")
+		got, err := d.GetVideoPollJobChatKey("v0_ambiguous")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "" {
+			t.Fatalf("got %q; an ambiguous id must not be guessed at", got)
 		}
 	})
 

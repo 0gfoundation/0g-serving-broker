@@ -32,8 +32,16 @@ const (
 // create call that did not already carry the finished result.
 type VideoPollJob struct {
 	Model
-	ID            uint64 `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderJobID string `gorm:"type:varchar(255);not null;index" json:"providerJobId"`
+	ID uint64 `gorm:"primaryKey;autoIncrement" json:"id"`
+	// COLLATE ...bin, matching video_job_owner.provider_job_id, and for the same
+	// reason: the published job id's payload is case-SIGNIFICANT
+	// (translate.EncodeJobID emits hex for a UUID and base64url otherwise), so under
+	// the inherited utf8mb4_0900_ai_ci two ids differing only in case are one row
+	// here while being two rows on the owner table. The signature handle lives on
+	// this row and /signature/{key} needs no session, so that mismatch handed a
+	// caller another user's proof. The tag covers freshly created tables; existing
+	// ones are converted by the video-poll-job-binary-collation migration.
+	ProviderJobID string `gorm:"type:varchar(255) COLLATE utf8mb4_0900_bin;not null;index" json:"providerJobId"`
 	// RequestHash links back to the Request row created before dispatch (proxy.go's
 	// non-whitelisted path always creates one, with Fee/OutputCount at their zero values
 	// for video-generation — see the design doc's "already exists" note). One video job,

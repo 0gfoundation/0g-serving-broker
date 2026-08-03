@@ -410,6 +410,28 @@ func (d *DB) Migrate() error {
 				return tx.Exec("ALTER TABLE `video_job_owner` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
 			},
 		},
+		{
+			ID: "video-poll-job-binary-collation",
+			Migrate: func(tx *gorm.DB) error {
+				// The sibling of video-job-owner-binary-collation, for the same reason and
+				// on the same id. That migration made the OWNER column case-significant;
+				// this column stayed ai_ci, so the two lookups performed back to back on
+				// one incoming id disagreed about identity — a caller authorized for
+				// `v2_qujd` under bin matched `v2_QUJD`'s poll row here. That row carries
+				// the TEE signature handle, and /signature/{key} needs no session, so the
+				// mismatch handed a third party a proof over content they never requested.
+				//
+				// On the column rather than in the WHERE. An explicit per-query COLLATE
+				// works, but binds to the placeholder, so its validity depends on the
+				// connection charset: with `charset=utf8` in the DSN — ordinary for a
+				// legacy deployment — MySQL raises 1253 and every video status poll
+				// silently loses the header. It also degrades the plan from a ref const
+				// lookup to a range scan with a filesort, and it has to be remembered by
+				// every future query against this column. The column-level fix has none
+				// of those properties.
+				return tx.Exec("ALTER TABLE `video_poll_job` MODIFY `provider_job_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;").Error
+			},
+		},
 	})
 
 	return errors.Wrap(m.Migrate(), "migrate database")

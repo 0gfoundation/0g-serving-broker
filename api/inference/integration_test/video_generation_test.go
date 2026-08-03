@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -37,8 +38,25 @@ var mockVideoJobIDSeq atomic.Int64
 // unique job id it will use for every request in this server's lifetime.
 func newMockVideoProvider(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
+	jobID, h := mockVideoHandler(t)
+	return httptest.NewServer(h), jobID
+}
+
+// newMockVideoProviderTLS is newMockVideoProvider over TLS, so resp.TLS is
+// populated and a centralized service can capture the upstream certificate
+// fingerprint — which is what makes handleVideoGenerationResponse's `signs`
+// predicate true, and therefore the only way to exercise the signed side of the
+// ZG-Res-Key replay. Same handler, not a copy: a second mock would drift.
+func newMockVideoProviderTLS(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	jobID, h := mockVideoHandler(t)
+	return httptest.NewTLSServer(h), jobID
+}
+
+func mockVideoHandler(t *testing.T) (string, http.Handler) {
+	t.Helper()
 	jobID := fmt.Sprintf("video-test-%03d", mockVideoJobIDSeq.Add(1))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return jobID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
 		switch {
@@ -73,8 +91,7 @@ func newMockVideoProvider(t *testing.T) (*httptest.Server, string) {
 			t.Errorf("unexpected request: %s %s", r.Method, path)
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	return server, jobID
+	})
 }
 
 // ==========================================================================
@@ -1134,4 +1151,94 @@ func TestVideoGeneration_WaitParam(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A SIGNING video service, which is as close to the replay as this package can
+// get. Centralized + TLS is what makes handleVideoGenerationResponse sign at all
+// (the `signs` predicate needs a captured upstream certificate fingerprint, and
+// ProcessHTTPRequest only captures one from resp.TLS on a 200) — same recipe as
+// TestCentralizedProvider_NonStream.
+//
+// COVERAGE LIMIT, measured rather than assumed. These assertions do NOT exercise
+// the replay's guards, and removing either guard leaves them green. The reason is
+// upstream of both: this env runs no poll scheduler, so a non-terminal create hits
+// dropUnpollableVideoSignature — no poll row, no chat_key, and the replay
+// short-circuits before any guard is consulted. Reaching the guards from here
+// would mean standing up the background scheduler and driving a row to completed.
+// They are pinned instead at the layer where a test can set the row's state, in
+// TestGetVideoPollJobChatKey_Integration.
+//
+// What these DO pin is still worth having: a signing service does not leak the
+// handle onto /content or onto a refused request, and the ownership check runs
+// before anything is staged.
+func TestVideoGeneration_ResKeyReplay(t *testing.T) {
+	mockProvider, jobID := newMockVideoProviderTLS(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+	env.ctrl.SetHTTPClient(mockProvider.Client())
+
+	get := func(t *testing.T, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		return w
+	}
+
+	// Create. A signing service advertises the handle here — that part is
+	// pre-existing, and asserting it is how we know the fixture really signs
+	// (otherwise everything below would pass vacuously again).
+	createBody := `{"model":"sora-2","prompt":"a cat","seconds":5,"size":"720x1280"}`
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	createdKey := w.Header().Get("ZG-Res-Key")
+	if createdKey == "" {
+		t.Fatal("fixture does not sign; every assertion below would be vacuous")
+	}
+
+	// The job is still queued, so the only signature in the cache is the create-time
+	// one over the {"status":"queued"} envelope. Replaying the handle here would
+	// hand the client a proof that cannot describe the body it just received —
+	// the same objection that keeps the handle off /content.
+	t.Run("non-terminal poll does not replay", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID)
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("in_progress poll advertised %q; the signature covers the queued envelope, not this body", got)
+		}
+	})
+
+	// /content carries the mp4, which no signature binds.
+	t.Run("content never replays", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID+"/content")
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("content response advertised %q; the signature does not cover these bytes", got)
+		}
+	})
+
+	// The handle must not resolve for a job this caller does not own, and the
+	// ownership check must fire before the replay can stage anything.
+	t.Run("a foreign job is refused before any replay", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/video-test-not-mine")
+		if w.Code != http.StatusForbidden && w.Code != http.StatusBadRequest {
+			t.Errorf("expected a refusal, got %d: %s", w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("refused request still advertised %q", got)
+		}
+	})
 }

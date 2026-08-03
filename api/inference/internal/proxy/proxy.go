@@ -551,7 +551,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// capture the create-response header. Async image has always restored it
 				// (handler/async.go), and gates on the same two things this does.
 				//
-				// STATUS ONLY, never /videos/{id}/content. The signature binds the
+				// STATUS ONLY, never /videos/{id}/content. Expressed as a length
+				// comparison against the id that was just AUTHORIZED, so it cannot
+				// disagree with it — a second prefix test could, and would fail open
+				// (a prefix mismatch reads as "bare status path, replay it").
+				// The signature binds the
 				// terminal poll JSON, not the mp4 bytes (see video_poll.go's note), so
 				// advertising it alongside the file would hand a client a proof whose
 				// response hash cannot match what it just downloaded — indistinguishable
@@ -567,11 +571,14 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// rows survive. GetChatSignature is that proof, and it is a local map
 				// read, so honesty here is free.
 				//
-				// Set before the forward, because ProcessHTTPRequest writes the response.
-				if !hasVideoSubresource(targetPath) {
+				// STAGED, not written: ProcessHTTPRequest copies the upstream's headers
+				// over ours and returns early on a non-200, so writing here would let an
+				// echoing upstream overwrite the handle and would advertise one on a
+				// vendor error. It sets the header itself, after both.
+				if len(targetPath) == len(videoStatusPathPrefix)+len(jobID) {
 					if chatKey := p.ctrl.VideoJobChatKey(jobID); chatKey != "" {
 						if _, sigErr := p.ctrl.GetChatSignature(chatKey); sigErr == nil {
-							ctx.Header("ZG-Res-Key", chatKey)
+							ctx.Set(ctrl.CtxKeyReplayResKey, chatKey)
 						}
 					}
 				}
@@ -962,17 +969,6 @@ func extractVideoJobID(targetPath string) string {
 		rest = rest[:idx]
 	}
 	return rest
-}
-
-// hasVideoSubresource reports whether a video status path addresses something
-// under the job id — today only /videos/{id}/content. Derived from the same split
-// extractVideoJobID already performs, so "is this the bare status path" costs
-// nothing extra and cannot disagree with the id that was authorized.
-func hasVideoSubresource(targetPath string) bool {
-	if !strings.HasPrefix(strings.ToLower(targetPath), videoStatusPathPrefix) {
-		return false
-	}
-	return strings.Contains(targetPath[len(videoStatusPathPrefix):], "/")
 }
 
 // handleImageServeRoute serves broker-stored image bytes at

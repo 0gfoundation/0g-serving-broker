@@ -314,9 +314,9 @@ func (d *DB) GetVideoPollJobByRequestHash(requestHash string) (model.VideoPollJo
 	return job, err
 }
 
-// GetVideoPollJobChatKey returns the TEE signature-lookup handle recorded for a
-// provider job id, or "" when there is no poll job for it or the service does not
-// sign. Index-backed point read on provider_job_id.
+// GetVideoPollJobChatKey returns the TEE signature-lookup handle for a COMPLETED
+// video job, or "" when there is nothing safe to hand back. Index-backed read on
+// provider_job_id.
 //
 // It exists so a video STATUS poll can replay the ZG-Res-Key the create response
 // already advertised. Without that replay the handle is issued once and then
@@ -324,52 +324,50 @@ func (d *DB) GetVideoPollJobByRequestHash(requestHash string) (model.VideoPollJo
 // return early in ProcessHTTPRequest and never set the header, so a client that
 // did not capture it from the create response can never verify the attestation.
 // Async image has always replayed it (handler/async.go restores ZG-Res-Key from
-// the stored response headers); this is the same guarantee for video.
+// the stored response headers, gated on the job being completed); this is the same
+// guarantee for video, gated the same way.
 //
-// Not an error when absent: a synchronously-completed job has no poll row, and a
-// TargetSeparated service signs nothing. Both mean "no handle", not a fault.
+// COMPLETED only, and that is not tidiness. Before the poller observes a terminal
+// state the cached signature is the create-time one, made over the
+// {"status":"queued"} envelope — so replaying the handle on an in_progress poll
+// hands the client a proof whose response hash cannot describe the body it just
+// received. That is indistinguishable from tampering, which is the same reason the
+// caller refuses to replay on /videos/{id}/content.
+//
+// A DUPLICATED provider job id yields nothing, deliberately. provider_job_id is a
+// plain index (only request_hash is unique) and CreateVideoPollJob is a bare
+// Create, so two requests that draw the same upstream id both insert. Picking one
+// looks tempting — VideoJobOwner.ProviderJobID is unique, so only the first
+// creator can ever poll, so "oldest wins" seems to follow. It does not: the owner
+// insert and the poll insert are separate non-transactional writes with a
+// client-facing response write between them, so poll-row order does not track
+// owner-row order, and the loser's row can hold the lower id. Handing over the
+// wrong creator's handle is exactly the leak the collation migration closed, so
+// the answer for an ambiguous id is no answer. The collision already logs loudly
+// at the owner insert.
+//
+// Not an error when absent: a synchronously-completed job has no poll row, a
+// TargetSeparated service signs nothing, and an unfinished job is not yet
+// replayable. All three mean "no handle", not a fault.
 func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
 	if providerJobID == "" {
 		return "", nil
 	}
-	// ORDER BY id, because provider_job_id is a plain index, not unique: only
-	// request_hash is. Two different requests that draw the same job id from an
-	// upstream both insert (CreateVideoPollJob is a bare Create), so "which row"
-	// is a real question and must not be answered arbitrarily.
-	//
-	// Oldest wins, and that is not a coin flip. VideoJobOwner.ProviderJobID IS
-	// unique, so the second creator's ownership row is rejected and that user can
-	// never poll this id — see the collision note on model.VideoJobOwner. The only
-	// caller who can reach this lookup is therefore the first creator, whose handle
-	// is on the first row.
-	// COLLATE utf8mb4_0900_bin, matching video_job_owner.provider_job_id — which
-	// has a dedicated migration to get it, for a reason that applies verbatim here.
-	// Job ids are case-SIGNIFICANT (translate.EncodeJobID emits hex or base64url),
-	// and this column inherits the table's case-INSENSITIVE ai_ci. Without the
-	// override the authorization and the replay disagree about identity: a caller
-	// authorized for `v2_qujd` under bin would match `v2_QUJD`'s poll row here and
-	// be handed ANOTHER USER's handle. /signature/{key} needs no session, so that
-	// hands a third party a proof over content they never requested.
-	//
-	// ORDER BY id, because provider_job_id is a plain index, not unique: only
-	// request_hash is. Two different requests that draw the same job id from an
-	// upstream both insert (CreateVideoPollJob is a bare Create), so "which row" is
-	// a real question and must not be answered arbitrarily. Oldest wins because
-	// VideoJobOwner.ProviderJobID IS unique, so the second creator's ownership row
-	// is rejected and that user can never poll the id — the only caller who reaches
-	// this lookup is the first creator, whose handle is on the first row. That
-	// argument needs the collations to agree, which is what the clause above buys.
-	//
-	// Limit(1) is load-bearing beyond cost: gorm scans every matched row into the
-	// same *string, so without it the LAST row would win rather than the first.
-	var chatKey string
+	// Two rows fetched to detect ambiguity, not to choose between them. The
+	// provider_job_id column is utf8mb4_0900_bin (see the
+	// video-poll-job-binary-collation migration), so this comparison is
+	// case-significant and agrees with the authorization lookup on the same id.
+	var chatKeys []string
 	err := d.db.Model(&model.VideoPollJob{}).
-		Where("provider_job_id = ? COLLATE utf8mb4_0900_bin", providerJobID).
-		Order("id").
-		Limit(1).
-		Pluck("chat_key", &chatKey).Error
+		Where("provider_job_id = ?", providerJobID).
+		Where("status = ?", model.VideoPollStatusCompleted).
+		Limit(2).
+		Pluck("chat_key", &chatKeys).Error
 	if err != nil {
 		return "", err
 	}
-	return chatKey, nil
+	if len(chatKeys) != 1 {
+		return "", nil
+	}
+	return chatKeys[0], nil
 }

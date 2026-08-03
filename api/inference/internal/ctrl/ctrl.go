@@ -40,9 +40,9 @@ type asyncDB interface {
 // mock implementation. See docs/design/video-generation-async-billing.md.
 type videoPollDB interface {
 	CreateVideoPollJob(job model.VideoPollJob) error
-	// GetVideoPollJobChatKey returns the signature-lookup handle recorded at create
-	// time, or "" when there is no poll job or the service does not sign. Read on
-	// the video status/content passthrough so the handle can be replayed — see
+	// GetVideoPollJobChatKey returns the signature-lookup handle for a COMPLETED
+	// video job, or "" when there is none safe to hand back. Read on the video
+	// STATUS passthrough only, so the handle can be replayed — see
 	// Ctrl.VideoJobChatKey.
 	GetVideoPollJobChatKey(providerJobID string) (string, error)
 	ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]model.VideoPollJob, error)
@@ -95,9 +95,11 @@ type Ctrl struct {
 	videoPollDB      videoPollDB
 	reconciliationDB reconciliationDB
 	videoJobOwnerDB  videoJobOwnerDB
-	contract         *providercontract.ProviderContract
-	svcCache         *cache.Cache
-	logger           log.Logger
+	// lastChatKeyLookupLog throttles VideoJobChatKey's failure log; guarded by mu.
+	lastChatKeyLookupLog time.Time
+	contract             *providercontract.ProviderContract
+	svcCache             *cache.Cache
+	logger               log.Logger
 
 	autoSettleBufferTime time.Duration
 	minSettlementFee     *big.Int

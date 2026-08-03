@@ -390,6 +390,18 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 
 	ctx.Writer.Header().Add("provider", c.contract.ProviderAddress)
+
+	// Replay the video signature handle HERE, deliberately late: after the upstream
+	// header copy above, so an echoing sidecar or chained broker cannot overwrite a
+	// handle this broker minted, and after the non-200 return, so a vendor error
+	// never carries one. Every other ZG-Res-Key setter is downstream of the copy for
+	// the same reason; staging it before would have made "the broker's handle wins"
+	// incidental rather than true. The caller stages it only for an authorized,
+	// completed video STATUS poll — see proxy.handleAuthRequiredRoute.
+	if chatKey := ctx.GetString(CtxKeyReplayResKey); chatKey != "" {
+		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
+	}
+
 	c.addExposeHeaders(ctx)
 
 	ctx.Status(resp.StatusCode)
@@ -506,6 +518,12 @@ func (c *Ctrl) logProofSkip(reason, detail, format string, args ...interface{}) 
 // (the routing-proof signers) deliberately do not re-derive it, so that decision
 // lives in exactly one place.
 const CtxKeyUpstreamCertFingerprint = "upstreamCertFingerprint"
+
+// CtxKeyReplayResKey carries a ZG-Res-Key that the passthrough router has already
+// authorized and wants echoed on the response. Staged in the context rather than
+// written directly so the write lands after the upstream header copy — see the use
+// site in ProcessHTTPRequest.
+const CtxKeyReplayResKey = "replayResKey"
 
 // upstreamCertFingerprint returns the fingerprint the centralized routing proof
 // should bind, or "" when there is no usable TLS evidence (in which case
