@@ -1159,18 +1159,17 @@ func TestVideoGeneration_WaitParam(t *testing.T) {
 // ProcessHTTPRequest only captures one from resp.TLS on a 200) — same recipe as
 // TestCentralizedProvider_NonStream.
 //
-// COVERAGE LIMIT, measured rather than assumed. These assertions do NOT exercise
-// the replay's guards, and removing either guard leaves them green. The reason is
-// upstream of both: this env runs no poll scheduler, so a non-terminal create hits
-// dropUnpollableVideoSignature — no poll row, no chat_key, and the replay
-// short-circuits before any guard is consulted. Reaching the guards from here
-// would mean standing up the background scheduler and driving a row to completed.
-// They are pinned instead at the layer where a test can set the row's state, in
-// TestGetVideoPollJobChatKey_Integration.
+// The scheduler is ENABLED here, with intervals long enough that nothing is ever
+// polled. That one line is what makes these assertions mean something: without it
+// a non-terminal create hits dropUnpollableVideoSignature, which evicts the
+// create-time signature, and the replay then fails the existence gate — so every
+// assertion below would pass no matter what the guards did.
 //
-// What these DO pin is still worth having: a signing service does not leak the
-// handle onto /content or onto a refused request, and the ownership check runs
-// before anything is staged.
+// (An earlier version of this comment blamed a missing poll ROW. That was wrong:
+// deferVideoBillingToPoll drops the signature and then writes the row anyway, as
+// video.go says in as many words. The row and its chat_key exist; the cache entry
+// is what is gone. Same outcome, different mechanism, and the difference matters
+// because the row's existence is load-bearing for recoverability elsewhere.)
 func TestVideoGeneration_ResKeyReplay(t *testing.T) {
 	mockProvider, jobID := newMockVideoProviderTLS(t)
 	t.Cleanup(func() { mockProvider.Close() })
@@ -1184,6 +1183,26 @@ func TestVideoGeneration_ResKeyReplay(t *testing.T) {
 		cfg.Service.TargetSeparated = true
 	})
 	env.ctrl.SetHTTPClient(mockProvider.Client())
+
+	// Enabled so the create keeps its signature; intervals long enough that the job
+	// stays non-terminal for the whole test, which is the state under assertion.
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 1,
+		PollInterval:       time.Hour,
+		MaxPollDuration:    time.Hour,
+		ScanInterval:       time.Hour,
+		LeaseWindow:        time.Hour,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Hour,
+		// Every Duration must be positive: the scheduler starts a ticker per
+		// interval and NewTicker panics on zero. Omitting this one panicked the
+		// whole package.
+		CleanupInterval: time.Hour,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(env.ctrl.ShutdownVideoPollScheduler)
 
 	get := func(t *testing.T, path string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -1239,6 +1258,107 @@ func TestVideoGeneration_ResKeyReplay(t *testing.T) {
 		}
 		if got := w.Header().Get("ZG-Res-Key"); got != "" {
 			t.Errorf("refused request still advertised %q", got)
+		}
+	})
+}
+
+// The happy path, and the only place the status-only guard is falsifiable: that
+// guard sits behind the terminal check, so a non-terminal job never reaches it.
+// Drives the scheduler to completion, then asserts the replay actually works —
+// same handle as the create response, resolving to a real signature — and that
+// /content still refuses to carry it even now that a valid handle exists.
+func TestVideoGeneration_ResKeyReplayAfterCompletion(t *testing.T) {
+	mockProvider, jobID := newMockVideoProviderTLS(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+	env.ctrl.SetHTTPClient(mockProvider.Client())
+
+	// Short intervals so the job resolves within the test; the mock's status GET
+	// answers "completed" on the first poll.
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 1,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    time.Minute,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        time.Minute,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Hour,
+		CleanupInterval:    time.Hour,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(env.ctrl.ShutdownVideoPollScheduler)
+
+	createBody := `{"model":"sora-2","prompt":"a cat","seconds":5,"size":"720x1280"}`
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	createdKey := w.Header().Get("ZG-Res-Key")
+	if createdKey == "" {
+		t.Fatal("fixture does not sign; every assertion below would be vacuous")
+	}
+
+	// Wait for the scheduler to resolve the job. The replay is gated on the ROW's
+	// status, so poll the row rather than the API.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		key, err := env.ctrl.VideoJobChatKeyForTest(jobID)
+		if err != nil {
+			t.Fatalf("read chat key: %v", err)
+		}
+		if key != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("job did not reach completed within 20s; the replay path was never exercised")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	get := func(t *testing.T, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("a completed status poll replays the create-time handle", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID)
+		got := w.Header().Get("ZG-Res-Key")
+		if got == "" {
+			t.Fatal("completed poll did not replay the handle; the signature is unreachable")
+		}
+		if got != createdKey {
+			t.Errorf("replayed %q, want the create-time handle %q — a different key points at a different proof", got, createdKey)
+		}
+		if _, err := env.ctrl.GetChatSignature(got); err != nil {
+			t.Errorf("replayed handle does not resolve: %v", err)
+		}
+	})
+
+	// Now that a resolvable handle EXISTS, this is the assertion that pins the
+	// status-only guard: the signature binds the terminal poll JSON, not these mp4
+	// bytes, so a handle here would be a proof the client cannot match.
+	t.Run("content still refuses to carry it", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID+"/content")
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("content advertised %q; the signature does not cover these bytes", got)
 		}
 	})
 }

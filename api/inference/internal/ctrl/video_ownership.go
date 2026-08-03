@@ -111,3 +111,10 @@ func (c *Ctrl) logChatKeyLookupFailure(providerJobID string, err error) {
 	c.logger.Warnf("video job %s: could not read the signature handle to replay (throttled to one line per %s): %v",
 		providerJobID, chatKeyLookupLogWindow, err)
 }
+
+// VideoJobChatKeyForTest exposes the raw lookup so an integration test can wait for
+// the poll scheduler to resolve a job. The replay is gated on the ROW's status, so
+// polling the API cannot tell a test when that gate has opened.
+func (c *Ctrl) VideoJobChatKeyForTest(providerJobID string) (string, error) {
+	return c.videoPollDB.GetVideoPollJobChatKey(providerJobID)
+}

@@ -129,7 +129,7 @@ func TestIsWhitelistedUser(t *testing.T) {
 			expected:       false,
 		},
 		{
-			name: "multiple addresses in whitelist",
+			name:           "multiple addresses in whitelist",
 			whitelistAddrs: []string{
 				"0x1111111111111111111111111111111111111111",
 				"0x2222222222222222222222222222222222222222",
@@ -139,7 +139,7 @@ func TestIsWhitelistedUser(t *testing.T) {
 			expected:    true,
 		},
 		{
-			name: "address not in multiple whitelist",
+			name:           "address not in multiple whitelist",
 			whitelistAddrs: []string{
 				"0x1111111111111111111111111111111111111111",
 				"0x2222222222222222222222222222222222222222",
@@ -148,7 +148,7 @@ func TestIsWhitelistedUser(t *testing.T) {
 			expected:    false,
 		},
 		{
-			name: "invalid address format in whitelist gets skipped",
+			name:           "invalid address format in whitelist gets skipped",
 			whitelistAddrs: []string{
 				"invalid-address",
 				"0xabcdef1234567890abcdef1234567890abcdef12",
@@ -237,29 +237,29 @@ func TestWhitelistDisabled(t *testing.T) {
 // testLoggerImpl is a minimal logger implementation for testing
 type testLoggerImpl struct{}
 
-func (l *testLoggerImpl) Debug(args ...interface{})                   {}
-func (l *testLoggerImpl) Info(args ...interface{})                    {}
-func (l *testLoggerImpl) Print(args ...interface{})                   {}
-func (l *testLoggerImpl) Warn(args ...interface{})                    {}
-func (l *testLoggerImpl) Warning(args ...interface{})                 {}
-func (l *testLoggerImpl) Error(args ...interface{})                   {}
-func (l *testLoggerImpl) Fatal(args ...interface{})                   {}
-func (l *testLoggerImpl) Panic(args ...interface{})                   {}
-func (l *testLoggerImpl) Debugf(format string, args ...interface{})   {}
-func (l *testLoggerImpl) Infof(format string, args ...interface{})    {}
-func (l *testLoggerImpl) Printf(format string, args ...interface{})   {}
-func (l *testLoggerImpl) Warnf(format string, args ...interface{})    {}
-func (l *testLoggerImpl) Warningf(format string, args ...interface{}) {}
-func (l *testLoggerImpl) Errorf(format string, args ...interface{})   {}
-func (l *testLoggerImpl) Fatalf(format string, args ...interface{})   {}
-func (l *testLoggerImpl) Panicf(format string, args ...interface{})   {}
-func (l *testLoggerImpl) Debugln(args ...interface{})                 {}
-func (l *testLoggerImpl) Infoln(args ...interface{})                  {}
-func (l *testLoggerImpl) Println(args ...interface{})                 {}
-func (l *testLoggerImpl) Warnln(args ...interface{})                  {}
-func (l *testLoggerImpl) Warningln(args ...interface{})               {}
-func (l *testLoggerImpl) Errorln(args ...interface{})                 {}
-func (l *testLoggerImpl) Fatalln(args ...interface{})                 {}
-func (l *testLoggerImpl) Panicln(args ...interface{})                 {}
-func (l *testLoggerImpl) WithFields(fields logrus.Fields) log.Logger  { return l }
-func (l *testLoggerImpl) InnerLogger() *logrus.Logger                 { return nil }
+func (l *testLoggerImpl) Debug(args ...interface{})                      {}
+func (l *testLoggerImpl) Info(args ...interface{})                       {}
+func (l *testLoggerImpl) Print(args ...interface{})                      {}
+func (l *testLoggerImpl) Warn(args ...interface{})                       {}
+func (l *testLoggerImpl) Warning(args ...interface{})                    {}
+func (l *testLoggerImpl) Error(args ...interface{})                      {}
+func (l *testLoggerImpl) Fatal(args ...interface{})                      {}
+func (l *testLoggerImpl) Panic(args ...interface{})                      {}
+func (l *testLoggerImpl) Debugf(format string, args ...interface{})      {}
+func (l *testLoggerImpl) Infof(format string, args ...interface{})       {}
+func (l *testLoggerImpl) Printf(format string, args ...interface{})      {}
+func (l *testLoggerImpl) Warnf(format string, args ...interface{})       {}
+func (l *testLoggerImpl) Warningf(format string, args ...interface{})    {}
+func (l *testLoggerImpl) Errorf(format string, args ...interface{})      {}
+func (l *testLoggerImpl) Fatalf(format string, args ...interface{})      {}
+func (l *testLoggerImpl) Panicf(format string, args ...interface{})      {}
+func (l *testLoggerImpl) Debugln(args ...interface{})                    {}
+func (l *testLoggerImpl) Infoln(args ...interface{})                     {}
+func (l *testLoggerImpl) Println(args ...interface{})                    {}
+func (l *testLoggerImpl) Warnln(args ...interface{})                     {}
+func (l *testLoggerImpl) Warningln(args ...interface{})                  {}
+func (l *testLoggerImpl) Errorln(args ...interface{})                    {}
+func (l *testLoggerImpl) Fatalln(args ...interface{})                    {}
+func (l *testLoggerImpl) Panicln(args ...interface{})                    {}
+func (l *testLoggerImpl) WithFields(fields logrus.Fields) log.Logger     { return l }
+func (l *testLoggerImpl) InnerLogger() *logrus.Logger                    { return nil }
