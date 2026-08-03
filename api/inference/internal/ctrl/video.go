@@ -437,12 +437,22 @@ func videoReserveFromJSON(reqBody []byte) (int64, string, videoReserveDuration) 
 	// bill is computed against.
 	//
 	// Deliberately asymmetric with `seconds`, which IS refused when wrong-typed even though both
-	// feed the same fee. The asymmetry is in what a degraded read costs: an unreadable `size` falls
-	// through to the published-default / dearest-tier lift, which is a CEILING, so the reserve stays
-	// above the bill. An unreadable `seconds` has no such ceiling — the duration is unbounded from
-	// the gate's side — so it must be refused. The `size` argument does lean on one upstream's
-	// decoder (this contract also allows any OpenAI-compatible shim), which is exactly why the
-	// fallback is a ceiling and not a guess.
+	// feed the same fee. The asymmetry is in what a degraded read costs. An unreadable `seconds` has
+	// no ceiling at all — the duration is unbounded from the gate's side — so it must be refused.
+	// An unreadable `size` falls through to the size fallback, and the honest statement of that
+	// fallback is narrower than an earlier version of this comment claimed:
+	//
+	//   - nothing publishes a size -> the dearest tier / ratio this model can bill, a true CEILING
+	//   - a size IS published       -> that value, a POINT ESTIMATE. It substitutes before either
+	//     lift can run, so publishing one REPLACES the ceiling rather than bounding it, and a
+	//     published value cheaper than what the vendor renders leaves the reserve below the bill
+	//     (measured 2.0x single-model, 1.6x multi-model). That is residual 2(b), and it is why the
+	//     example yaml and the boot warning both say to get the value right or leave it out.
+	//
+	// So the degraded read is bounded when the operator published nothing, and carries residual 2(b)
+	// when they published something — in neither case does it invent a duration, which is what makes
+	// it different from `seconds`. Refusing a wrong-typed `size` instead would 400 conforming traffic
+	// for a field the reserve can still bound.
 	var size string
 	_ = json.Unmarshal(rawSize, &size)
 
@@ -494,11 +504,18 @@ func videoReserveFromMultipart(reqBody []byte, contentType string) (int64, strin
 	}
 	sec, sz, mdl := fields["seconds"], fields["size"], fields["model"]
 
-	// A value the reader could not return in full, or a field the client sent twice: in each
-	// case what the upstream will read is not what this gate read. Refuse rather than price one
-	// of the readings — Starlette/FastAPI take the LAST value of a repeated field where this
-	// reader takes the first, so a caller could otherwise price `seconds=1` and be rendered
-	// `seconds=15`. `model` is in the same set because it selects the price.
+	// A value the reader could not return in full, or a field the client sent twice: in each case
+	// what the upstream will read may not be what this gate read, so refuse rather than price one of
+	// the readings. `model` is in the same set because it selects the price.
+	//
+	// On the repetition half, be precise about the counterparty: the translator in front of the video
+	// vendors is GO (r.ParseMultipartForm + r.FormValue, which returns r.Form[key][0] — the same first
+	// value this reader takes), so the two agree today and this refusal is over-strict rather than
+	// load-bearing. It stays because the contract admits any OpenAI-compatible shim and a
+	// Starlette/FastAPI one returns the LAST value, where taking the first silently would let a caller
+	// price `seconds=1` and be rendered `seconds=15`. No real client sends a field twice, so refusing
+	// costs nothing and the gate stops depending on which shim is deployed. Truncation is a genuine
+	// divergence against BOTH: every form parser here reads the value in full and trims it.
 	if sec.Truncated || sz.Truncated || mdl.Truncated ||
 		len(sec.Values) > 1 || len(sz.Values) > 1 || len(mdl.Values) > 1 {
 		return 0, "", videoDurationUnpriceable
@@ -642,7 +659,7 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	// else in this function. By this point line ~608 has already substituted a published
 	// defaultParameters.size, so "" here means the operator published none either — the case the boot
 	// warning is for.
-	if size == "" && (entry == nil || entry.Billing == nil) {
+	if size == "" && !c.Service.HasMultiModelPricing() {
 		if mx := c.Service.MaxVideoSizeRatio(); mx > ratio {
 			ratio = mx
 		}

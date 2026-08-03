@@ -278,6 +278,12 @@ func (m *ModelInfo) Validate(serviceType string) error {
 		if err := validateVideoDefaultParameters(m); err != nil {
 			return fmt.Errorf("service.modelInfo: %w", err)
 		}
+		// videoSizeRatios is billing-relevant the same way, and now doubly so: the reserve takes its
+		// MAXIMUM when nothing names the size, so one junk entry moves from mispricing that one size
+		// to 402ing every create that omits `size`.
+		if err := validateVideoSizeRatios(m, "service.modelInfo"); err != nil {
+			return err
+		}
 	}
 	// Parse the optional expiration once at load time so the request path never
 	// re-parses it. An unparseable value is a config error (fail fast) rather

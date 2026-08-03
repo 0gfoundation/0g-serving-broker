@@ -277,9 +277,11 @@ const maxMultipartFieldBytes = 1024
 // client sent something we could not read the same way the upstream will":
 //
 //   - Values holds EVERY non-file part with this name, in order, so a caller can refuse a
-//     repeated field instead of guessing. The broker reads the first; Starlette / FastAPI form
-//     parsers return the LAST — so silently taking one of them lets a caller price
-//     `seconds=1` and be rendered `seconds=15`.
+//     repeated field instead of guessing. Which value the counterparty takes depends on the
+//     counterparty: Go's r.FormValue returns the FIRST (so the video translator agrees with this
+//     reader), Starlette / FastAPI return the LAST (so a Python STT or image upstream does not, and
+//     taking one silently lets a caller price `seconds=1` and be rendered `seconds=15`). Callers
+//     refuse repetition outright rather than encode which shim is deployed.
 //   - Truncated says a value hit maxMultipartFieldBytes. Padding a value past the cap makes it
 //     read as empty here while the upstream's own parser (no per-field cap, and it trims)
 //     reads the real value.

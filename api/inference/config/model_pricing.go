@@ -839,20 +839,6 @@ func validateModelPricing(cfg *Config) error {
 		}
 	}
 
-	// service.model must be one of the entries (or a wildcard must cover it). A typo here is
-	// invisible at boot and pathological at request time: ResolveRequestedModel fails for the
-	// advertised name, so a video create that names NO model at all is refused with
-	// ErrVideoModelNotServed — a CLIENT-attributed 400 for every conforming create, which then
-	// feeds the wallet's model-mismatch enumeration limiter with an empty model name and
-	// progressively BLOCKS paying callers for an operator's typo. The example yaml said "must match
-	// one of the modelPricing[].model entries" in a comment; nothing enforced it.
-	if !hasWildcard && svc.ModelType != "" {
-		if _, _, ok := svc.ResolveRequestedModel(svc.ModelType); !ok {
-			return fmt.Errorf("service.model %q is not one of the service.modelPricing entries (and no %q wildcard covers it): "+
-				"every request would be refused as an unserved model", svc.ModelType, ModelWildcard)
-		}
-	}
-
 	// A wildcard entry silently turns the allowlist into serve-all: every model
 	// the upstream can answer is reachable and billed at the wildcard price.
 	// Warn loudly at load so an operator who added "*" expecting a default price
@@ -927,6 +913,15 @@ func validateModelPricing(cfg *Config) error {
 	}
 	// Unless a wildcard entry catches all models, the default service.model must
 	// itself be a priced/allowlisted model, or model-less requests get rejected.
+	//
+	// Worth knowing what "get rejected" costs, because it is not a benign 500: ResolveRequestedModel
+	// fails for the ADVERTISED name, so a video create naming no model at all is refused with
+	// ErrVideoModelNotServed — a CLIENT-attributed 400 for every conforming create, which then feeds
+	// the wallet's model-mismatch enumeration limiter with an EMPTY model name and progressively
+	// blocks paying callers, all for one operator typo. Do not delete this check thinking something
+	// upstream covers it: a duplicate added at the top of validateModelPricing could not fire,
+	// because GetModelPricing and HasMultiModelPricing both read modelPricingMap and
+	// BuildModelPricingMap runs below.
 	if !hasWildcard && svc.GetModelPricing(svc.ModelType) == nil {
 		return fmt.Errorf("invalid config: service.model '%s' must be one of the service.modelPricing entries (or add a '%s' wildcard entry)", svc.ModelType, ModelWildcard)
 	}
@@ -1299,6 +1294,27 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 	return nil
 }
 
+// validateVideoSizeRatios rejects an unusable modelInfo.videoSizeRatios at load.
+//
+// BillingConfig.ResolutionMultipliers has had this check; this map did not, and until the reserve
+// started taking its MAXIMUM a bad entry only mispriced requests naming that exact size. Now the
+// dearest entry prices every create that omits `size` and publishes no default — the OpenAI Video
+// API's own default shape — so one junk value moves from "one odd request" to "every request":
+// measured, a `1e300` entry drove the reserve to the maxVideoOutputUnits clamp and 402'd every
+// size-less create. Fail-closed and operator-caused, but it should fail at boot, not per request.
+func validateVideoSizeRatios(info *ModelInfo, prefix string) error {
+	if info == nil {
+		return nil
+	}
+	for size, ratio := range info.VideoSizeRatios {
+		if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio > float64(maxBillableUnits) {
+			return fmt.Errorf("invalid config: %s.videoSizeRatios[%q] must be a finite number > 0 and <= %d, got %v",
+				prefix, size, maxBillableUnits, ratio)
+		}
+	}
+	return nil
+}
+
 // effectiveVideoSizeRatios is the size->multiplier map that actually prices this service: the
 // operator's own when non-empty, else the shipped defaults. Emptiness, not nil-ness, matching
 // GetVideoSizeRatio.
@@ -1307,21 +1323,6 @@ func (s *Service) effectiveVideoSizeRatios() map[string]float64 {
 		return s.ModelInfo.VideoSizeRatios
 	}
 	return DefaultVideoSizeRatios
-}
-
-// HasVideoSizeRatio reports whether this service's ratio map prices the given size, matched with
-// normalization like ReserveVideoSizeRatio's widened lookup.
-func (s *Service) HasVideoSizeRatio(size string) bool {
-	res := normalizeResolution(size)
-	if res == "" {
-		return false
-	}
-	for k := range s.effectiveVideoSizeRatios() {
-		if normalizeResolution(k) == res {
-			return true
-		}
-	}
-	return false
 }
 
 // MaxVideoSizeRatio returns the dearest multiplier in this service's ratio map, or 0 when it has none.

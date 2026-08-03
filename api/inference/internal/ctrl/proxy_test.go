@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"mime/multipart"
 	"strings"
@@ -893,4 +894,33 @@ func TestEnforceConfiguredModel_TrailingByte(t *testing.T) {
 			t.Logf("NaN body with an unserved model was rejected after all: %v", err)
 		}
 	})
+}
+
+// TestAmbiguityRefusalsShipCuratedMessages pins that the two ambiguity refusals this PR adds reach the
+// client as their own curated text, with no internal wrap chain. errors.Response sanitizes only at
+// EXACTLY 500, so a 400 ships whatever it is handed — and each of these was assembled through two
+// wraps before reaching it ("prepare HTTP request: resolve model for billing: ..." and "submit async
+// job: parse image-editing request: ...").
+func TestAmbiguityRefusalsShipCuratedMessages(t *testing.T) {
+	body := func(values ...string) ([]byte, string) {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		for _, v := range values {
+			f, _ := w.CreateFormField("model")
+			f.Write([]byte(v))
+		}
+		w.Close()
+		return buf.Bytes(), w.FormDataContentType()
+	}
+	b, ct := body("cheap", "dear")
+	err := checkMultipartModelUnambiguous(b, ct)
+	if err == nil {
+		t.Fatal("precondition: repeated model must be refused")
+	}
+	if strings.Contains(err.Error(), "resolve model for billing") || strings.Contains(err.Error(), "prepare HTTP request") {
+		t.Errorf("refusal carries an internal wrap: %q", err)
+	}
+	if !stderrors.Is(err, ErrModelFieldAmbiguous) {
+		t.Errorf("refusal does not match its sentinel, so the proxy cannot classify it: %q", err)
+	}
 }

@@ -168,6 +168,14 @@ func (c *Ctrl) SubmitAsyncJob(ctx *gin.Context, userAddress, svcType string, req
 	case "image-editing":
 		expectedInputFee, outputCount, err = c.GetImageEditingInputFeeAndImageNum(reqBody, extractContentType(reqHeaders))
 		if err != nil {
+			if errors.Is(err, ErrImageNumAmbiguous) {
+				// Returned unwrapped: this one reaches the CLIENT as a 400 body (errors.Response
+				// sanitizes only at exactly 500), and its message is already curated and actionable.
+				// Wrapping it made the async route answer "submit async job: parse image-editing
+				// request: `n` could not be read unambiguously: ..." where the sync twin answers just
+				// the last clause.
+				return "", err
+			}
 			return "", errors.Wrap(err, "parse image-editing request")
 		}
 	}

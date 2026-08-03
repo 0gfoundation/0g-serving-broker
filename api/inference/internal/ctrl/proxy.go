@@ -161,6 +161,13 @@ func (c *Ctrl) PrepareHTTPRequest(ctx *gin.Context, targetURL string, reqBody []
 		userAddrStr, _ := userAddr.(string)
 		if err := c.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddrStr); err != nil {
 			ctx.Set("ignoreError", true)
+			if errors.Is(err, ErrModelFieldAmbiguous) {
+				// Unwrapped: this is the one error from here that reaches the CLIENT as a 400 body
+				// (errors.Response sanitizes only at exactly 500), and its message is already curated.
+				// The proxy arm drops its own wrap context for the same reason; dropping only that one
+				// still shipped "resolve model for billing: ..." from here.
+				return nil, err
+			}
 			return nil, errors.Wrap(err, "resolve model for billing")
 		}
 	}

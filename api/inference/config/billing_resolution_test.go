@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestBillingResolutionVocabulary covers the question the pre-flight video reserve asks a billing
 // block before trusting it: does it carry the specific resolution the request named.
@@ -98,5 +101,35 @@ func TestVideoDefaultSizeCrossCheckedAgainstBilling(t *testing.T) {
 		DefaultParameters: map[string]interface{}{"size": "1080i"},
 	}); err == nil {
 		t.Error("an inherited service-level default size must be cross-checked too")
+	}
+}
+
+// TestValidateVideoSizeRatios pins the load-time check on modelInfo.videoSizeRatios. It went unvalidated
+// while a bad entry only mispriced requests naming that exact size; once the reserve started taking the
+// map's MAXIMUM for a create that names no size, one junk value 402s the OpenAI Video API's own default
+// request shape — measured, a 1e300 entry drove the reserve into the maxVideoOutputUnits clamp.
+func TestValidateVideoSizeRatios(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ratios  map[string]float64
+		wantErr bool
+	}{
+		{name: "nil map", ratios: nil},
+		{name: "ordinary map", ratios: map[string]float64{"1280x720": 1.0, "1024x1792": 2.0}},
+		{name: "zero", ratios: map[string]float64{"1280x720": 0}, wantErr: true},
+		{name: "negative", ratios: map[string]float64{"1280x720": -1}, wantErr: true},
+		{name: "NaN", ratios: map[string]float64{"1280x720": math.NaN()}, wantErr: true},
+		{name: "positive infinity", ratios: map[string]float64{"1280x720": math.Inf(1)}, wantErr: true},
+		{name: "absurdly large", ratios: map[string]float64{"1280x720": 1e300}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateVideoSizeRatios(&ModelInfo{VideoSizeRatios: tc.ratios}, "service.modelInfo")
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+	if err := validateVideoSizeRatios(nil, "service.modelInfo"); err != nil {
+		t.Errorf("nil ModelInfo must be accepted, got %v", err)
 	}
 }

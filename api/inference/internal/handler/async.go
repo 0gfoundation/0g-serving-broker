@@ -67,6 +67,11 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 	jobID, err := h.asyncCtrl.SubmitAsyncJob(ctx, userAddress, svcType, reqHeaders, reqBody, isWhitelisted)
 	if err != nil {
 		if errors.Is(err, ctrl.ErrImageNumAmbiguous) {
+			// Labelled AND unwrapped, matching the sync arm: a billing-gate refusal that lands on
+			// broker_request_failures_total with an empty reason code is the "high RPS, zero revenue"
+			// shape this path argues must not die unclassified, and the wrap context ships to the
+			// client on a 400.
+			ctx.Set(monitor.CtxKeyRejectionReason, monitor.RejectionInvalidRequest)
 			// A malformed body is the caller's, not ours. Without this the async route answered its
 			// own new refusal with ZG-Failure-Source: broker (resolveFailureSource only reads the flag
 			// for a 4xx, and an unflagged 400 falls to broker) and incremented the legacy broker error
@@ -74,6 +79,8 @@ func (h *Handler) submitAsyncJob(ctx *gin.Context, svcType string) {
 			// caller's full rate-limit budget, on a path that was unreachable before this refusal
 			// existed. The sync route at proxy.go already flags it; the async twin did not.
 			ctx.Set("ignoreError", true)
+			handleBrokerError(ctx, err, "")
+			return
 		}
 		handleBrokerError(ctx, err, "submit async job")
 		return

@@ -1109,8 +1109,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// `model` picks the per-model PRICE on the multi-model STT/video paths, so a body where
 			// this gate and the upstream's form parser would read different values is a billing-gate
 			// refusal, not a generic prep failure: it gets a reason label, and the wrap context is
-			// dropped so "prepare HTTP request: resolve model for billing: ..." does not ship to the
-			// caller (errors.Response sanitizes only at exactly 500).
+			// dropped so the caller sees only the curated message (errors.Response sanitizes at exactly
+			// 500, so a 400 ships whatever it is handed). Dropping it HERE is only half — the sentinel
+			// is also returned unwrapped by PrepareHTTPRequest, because dropping only this one still
+			// shipped "resolve model for billing: ..." from there.
 			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
 			p.handleBrokerError(ctx, err, "")
 			return
