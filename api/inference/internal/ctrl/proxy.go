@@ -454,8 +454,8 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 const proofSkipLogWindow = 10 * time.Minute
 
 // maxProofSkipKeys bounds the distinct (reason, detail) pairs logProofSkip
-// remembers. Far above any real deployment — six routing-proof reasons plus two
-// billing-table ones, and a healthy deployment has a single upstream host — and low
+// remembers. Far above any real deployment — eleven reasons today (six routing-proof, two
+// billing-table, three video-reserve), and a healthy deployment has a single upstream host — and low
 // enough that a misbehaving sidecar cannot turn the throttle into a leak. All
 // reasons share one memo, which is why no caller may key on a value the client or
 // the sidecar chooses: overflow flushes the map for everyone.
@@ -1092,9 +1092,28 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 
 	var bodyMap map[string]interface{}
 
+	// The folded read every other reader uses (ExtractModelName -> foldedModelName), computed BEFORE
+	// the decode because that decode is what a trailing byte defeats: json.Unmarshal validates the
+	// WHOLE input, so `{"model":"not-served"}x` took the non-JSON early return and was forwarded
+	// verbatim — no allowlist check, no mismatch recorded, no canonical->upstream rewrite. rawFields
+	// reads with a json.Decoder, which stops at the end of the object exactly as the upstream does.
+	folded := foldedModelName(rawFields(body))
+
 	err := json.Unmarshal(body, &bodyMap)
 	if err != nil {
-		// Return original body for non-JSON requests
+		// Not decodable as a JSON object, so the body cannot be rewritten and is forwarded as-is.
+		// Deliberately NOT a rejection: Go refuses `NaN` and `Infinity` where CPython accepts them
+		// (verified both ways), so a Python client sending `temperature: NaN` reaches an upstream that
+		// serves it, and 400ing every body Go cannot decode would break those requests.
+		//
+		// The allowlist check needs no map, so it still runs on the folded read. That splits the two
+		// cases correctly: a body the DECODER can read (trailing data — which CPython also rejects)
+		// no longer bypasses the gate, while one it cannot (NaN) is left to the only reader that can
+		// price it.
+		if folded != "" && !c.modelAccepted(folded) {
+			c.recordModelMismatch(userAddr, folded)
+			return nil, fmt.Errorf("model not supported: requested %q, accepted: %q", folded, c.acceptedModelIDs())
+		}
 		return body, nil
 	}
 	if bodyMap == nil {
@@ -1106,12 +1125,10 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 		bodyMap = map[string]interface{}{}
 	}
 
-	// Read through the same folded rules the metric label, the audit row and the LoRA/expiry gates
-	// use (ExtractModelName -> foldedModelName). Reading the exact key here while they folded let
-	// `{"Model":"not-served"}` take the no-model branch: served as the configured model, while the
-	// metric and the audit row recorded the requested one, and the mismatch rejection and its
-	// enumeration limiter never ran. The multi-model twin folds; this is the higher-volume path.
-	folded := foldedModelName(rawFields(body))
+	// Reading the exact key here while every other reader folded let `{"Model":"not-served"}` take
+	// the no-model branch: served as the configured model, while the metric and the audit row
+	// recorded the requested one, and the mismatch rejection and its enumeration limiter never ran.
+	//
 	// Drop every case-variant of `model` so the canonical key below is the only one in the body.
 	// Leaving one in place made correctness depend on json.Marshal sorting keys bytewise: a variant
 	// must carry an uppercase letter, so the injected all-lowercase `model` sorted last and won a
@@ -1136,9 +1153,7 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 			return nil, fmt.Errorf("invalid model type in request (expected string), configured model is: %s", c.Service.ModelType)
 		}
 
-		if requestModelStr != c.Service.ModelType &&
-			(c.Service.CanonicalID == "" || requestModelStr != c.Service.CanonicalID) &&
-			!isModelAlias(requestModelStr, c.Service.ModelAliases) {
+		if !c.modelAccepted(requestModelStr) {
 			// Model mismatch detected - record in rate limiter and REJECT
 			accepted := c.acceptedModelIDs()
 			c.logger.Warnf("Model mismatch detected and REJECTED: user=%s, requested=%s, accepted=%v",
@@ -1170,6 +1185,16 @@ func (c *Ctrl) EnforceConfiguredModel(body []byte, userAddr string) ([]byte, err
 	}
 
 	return modifiedBody, nil
+}
+
+// modelAccepted reports whether a requested model id is one this single-model service answers to:
+// the on-chain advertised name, the router-catalog canonical id when set, or a legacy alias. Shared by
+// EnforceConfiguredModel's two entry points (decodable body, and a body only the Decoder can read) so
+// they cannot drift apart on what "accepted" means.
+func (c *Ctrl) modelAccepted(name string) bool {
+	return name == c.Service.ModelType ||
+		(c.Service.CanonicalID != "" && name == c.Service.CanonicalID) ||
+		isModelAlias(name, c.Service.ModelAliases)
 }
 
 func isModelAlias(name string, aliases []string) bool {
@@ -1507,6 +1532,9 @@ func (c *Ctrl) enforceRequestFormat(ctx *gin.Context, resolvedModel string) erro
 // (content-type aware), defaults to the configured model when absent, enforces
 // the allowlist, and records the resolved model under CtxKeyResolvedModel.
 func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType, userAddr string) error {
+	if err := checkMultipartModelUnambiguous(body, contentType); err != nil {
+		return err
+	}
 	requestModel := ExtractModelName(body, contentType)
 	if requestModel == "" {
 		requestModel = c.Service.ModelType
@@ -1518,6 +1546,39 @@ func (c *Ctrl) ResolveModelForBilling(ctx *gin.Context, body []byte, contentType
 	}
 	ctx.Set(CtxKeyResolvedModel, resolved)
 	c.logger.Debugf("Model allowlist passed (billing-only): requested=%s resolved=%s", requestModel, resolved)
+	return nil
+}
+
+// checkMultipartModelUnambiguous refuses a multipart body whose `model` field this gate would read
+// differently from the upstream's form parser.
+//
+// On the paths that reach it, `model` selects the per-model PRICE (ResolveModelForBilling ->
+// CtxKeyResolvedModel -> GetBillingPrices), so the two readings disagreeing is a discount rather than a
+// cosmetic difference: ExtractModelName's reader takes the FIRST value while Starlette/FastAPI take the
+// LAST, so `model=cheap` followed by `model=dear` priced cheap and rendered dear. Measured. The video
+// reserve already refuses this shape for its own fields; speech-to-text prices from the same field and
+// did not.
+//
+// Only the money-grade caller pays for it. The guarded reader has to advance to io.EOF, which measures
+// 7.7ms on a 25MB upload against 3.9us for the short-circuiting one — real, but ~0.1% of a
+// transcription, and not a reason to leave a fee ambiguity open. ExtractModelName's other callers
+// (metric labels, the audit row) want a scalar before the upload and set no fee, so they keep the
+// cheap read.
+func checkMultipartModelUnambiguous(body []byte, contentType string) error {
+	if !isMultipartContentType(contentType) {
+		return nil
+	}
+	fields, walkedOK := multipartFormFields(body, contentType, "model")
+	if !walkedOK {
+		return errors.NewBadRequest("request body could not be read to the end; `model` sets the price, so it must be unambiguous")
+	}
+	f := fields["model"]
+	if f.Truncated {
+		return errors.NewBadRequest("`model` is longer than %d bytes; the upstream would read a value this gate cannot", maxMultipartFieldBytes)
+	}
+	if len(f.Values) > 1 {
+		return errors.NewBadRequest("`model` was sent %d times; send it once — form parsers disagree on which value wins", len(f.Values))
+	}
 	return nil
 }
 
@@ -1542,7 +1603,7 @@ func (c *Ctrl) recordModelMismatch(userAddr, requestModel string) {
 //
 // The video pre-flight reserve is one: it resolves the model to find the published defaults
 // that price the request, so it detects an unserved model at the balance gate — earlier than
-// ResolveModelForBilling, which used to be the only path that recorded the mismatch. Without
+// ResolveModelForBilling, which is the mismatch-recording path for THIS (video) route. Without
 // this the metric would still move while the per-user limiter that actually blocks name
 // enumeration never saw the request.
 func (c *Ctrl) RecordModelMismatch(userAddr, requestModel string) {

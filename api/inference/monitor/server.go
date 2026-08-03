@@ -202,15 +202,20 @@ const (
 	RejectionModelExpired    = "model_expired"
 	// RejectionInvalidRequest: the body carries a field the billing gate cannot
 	// price, so the request is refused before it reaches the upstream. Emitted by
-	// the video-generation pre-flight reserve for an unpriceable `seconds`. Its own
+	// the video-generation pre-flight reserve for an unpriceable `seconds`, and by the
+	// URL-query guard for a fee-setting field sent in the query instead of the body
+	// (`seconds`/`size`/`model` on video, `model` on speech-to-text, `n` on image-editing). Its own
 	// reason rather than the upstream_error catch-all because it is attacker-
 	// reachable — an out-of-range duration used to reserve the 1-unit floor while
 	// the translator clamped it down and billed in full, so a spike here is
 	// something an operator wants to see, not a request that dies unclassified.
 	RejectionInvalidRequest = "invalid_request"
-	// RejectionPricingUnavailable: the gate could not price the request through no fault of the
-	// caller — a stale USD rate snapshot, or a model whose published metadata does not say what
-	// an omitted field costs. Broker-attributed in the failure metric; given its own rejection
+	// RejectionPricingUnavailable: the gate could not price the request because of an operator-side
+	// gap — a stale USD rate snapshot, or a model whose published metadata does not say what a field
+	// the gate must price costs. The gap is always operator-side, but the TRIGGER need not be the
+	// caller's absence of a field: on a model publishing no default size, `size:"anything-untabled"`
+	// reaches this too, so with that config gap open a caller can drive the broker-fault signal at
+	// its full rate-limit budget. Publishing defaultParameters closes both. Broker-attributed in the failure metric; given its own rejection
 	// reason because an operator config gap otherwise refuses every conforming create with no
 	// classified signal, only a status label.
 	RejectionPricingUnavailable = "pricing_unavailable"

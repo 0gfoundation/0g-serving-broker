@@ -999,8 +999,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// see the replacement, so a rate-feed outage previously produced a 503 whose
 				// staleness threshold and last-update age were logged nowhere. ignoreError silences
 				// handleBrokerError's generic restatement so the count stays at the two lines it
-				// was, with one of them now diagnostic; it cannot move attribution, which reads it
-				// only for a 4xx (monitor.resolveFailureSource) and this arm is 503.
+				// was, with one of them now diagnostic.
+				//
+				// It cannot move attribution — monitor.resolveFailureSource reads the flag only for a
+				// 4xx and this arm is 503, so it pins broker either way. It DOES suppress the legacy
+				// monitor.ErrorCount (broker_requests_errors_total), which is gated on the same flag:
+				// measured, this becomes the only one of the three 503 classes here missing from that
+				// counter. Accepted, not worked around — the signals that matter still fire
+				// (RequestRejectedTotal{pricing_unavailable} and FailureCount{broker} both run before
+				// the flag and neither reads it), and the LoRA arm above makes the same trade. Named
+				// here because an earlier version of this comment enumerated the effects and left it out.
 				if errors.Is(err, ctrl.ErrPricingUnavailable) {
 					p.logger.Errorf("video pre-flight reserve unavailable: %v", err)
 					ctx.Set("ignoreError", true)

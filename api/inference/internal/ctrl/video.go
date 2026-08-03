@@ -435,6 +435,14 @@ func videoReserveFromJSON(reqBody []byte) (int64, string, videoReserveDuration) 
 	// Ignoring the error is safe rather than lax — the translator decodes `size` into a
 	// string, so a wrong-typed one fails its whole body and this fallback is never what a
 	// bill is computed against.
+	//
+	// Deliberately asymmetric with `seconds`, which IS refused when wrong-typed even though both
+	// feed the same fee. The asymmetry is in what a degraded read costs: an unreadable `size` falls
+	// through to the published-default / dearest-tier lift, which is a CEILING, so the reserve stays
+	// above the bill. An unreadable `seconds` has no such ceiling — the duration is unbounded from
+	// the gate's side — so it must be refused. The `size` argument does lean on one upstream's
+	// decoder (this contract also allows any OpenAI-compatible shim), which is exactly why the
+	// fallback is a ceiling and not a guess.
 	var size string
 	_ = json.Unmarshal(rawSize, &size)
 

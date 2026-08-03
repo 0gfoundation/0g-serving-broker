@@ -176,9 +176,11 @@ func rawFields(body []byte) map[string]json.RawMessage {
 //     folding struct decode reads "ft-victim" — so answering "" would hand the gates a name they
 //     treat as "use the default" and skip the check entirely.
 //   - otherwise "". Two usable spellings cannot be resolved from an unordered map (Go takes the last
-//     in document order), and no gate can be fooled by the ambiguity either: ValidateModelAllowlist
-//     and RewriteLoRARequest both read the exact key, so with none present the configured model is
-//     what gets served.
+//     in document order), and no gate can be fooled by the ambiguity either — but by a different
+//     mechanism than when this was written: ValidateModelAllowlist and EnforceConfiguredModel now
+//     read THIS function and then strip every variant (stripModelKeyVariants), so a "" answer serves
+//     the configured model from a body that carries exactly one spelling. RewriteLoRARequest still
+//     reads the exact key.
 func foldedModelName(fields map[string]json.RawMessage) string {
 	var usable []string
 	for k, v := range fields {
@@ -218,8 +220,15 @@ func extractModelFromMultipart(body []byte, contentType string) string {
 // question (was this field repeated, was its value truncated, did the body walk cleanly) and to
 // do so it must always advance to io.EOF — and multipart.Reader.NextPart streams every part it
 // skips. This wrapper's callers want one short scalar from bodies that can be tens of
-// megabytes of audio or image, and they want it before the upload. Delegating cost 34ms of CPU
-// per speech-to-text request at 25MB (measured ~2,600x) for an answer none of them read.
+// megabytes of audio or image, and they want it before the upload. Measured on a 25MB body: 3.9us
+// short-circuiting here against 7.7ms walking to EOF, ~2000x.
+//
+// That is the right trade only because no caller of THIS wrapper sets a fee from the answer: they
+// label metrics and fill the audit row. The one read that does price — speech-to-text's and video's
+// per-model resolution — pays the full walk via checkMultipartModelUnambiguous in
+// ResolveModelForBilling, because there the FIRST-vs-LAST disagreement with Starlette/FastAPI is a
+// discount (`model=cheap` then `model=dear` priced cheap, rendered dear). An earlier version of this
+// comment said the answer was read by nobody, which is how that got missed.
 func multipartFormField(body []byte, contentType, name string) string {
 	reader, ok := multipartReader(body, contentType)
 	if !ok {

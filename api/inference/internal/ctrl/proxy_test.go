@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"strings"
 	"testing"
 
@@ -788,6 +789,108 @@ func TestEnforceConfiguredModel_CaseVariantModelKey(t *testing.T) {
 		}
 		if len(out) != 1 || out["model"] != "z-ai/glm-5" {
 			t.Errorf("forwarded %s, want exactly one key: model=z-ai/glm-5", got)
+		}
+	})
+}
+
+// TestCheckMultipartModelUnambiguous pins the guard on the ONE multipart `model` read that sets a
+// price. ExtractModelName's reader short-circuits on the first match; Starlette/FastAPI form parsers
+// return the LAST — so on a multi-model speech-to-text service, `model=cheap` followed by `model=dear`
+// priced the cheap model and had the dear one rendered. The video reserve already refused this shape
+// for its own fields; the field that picks the PRICE did not, and a comment claimed the answer was
+// read by nobody.
+func TestCheckMultipartModelUnambiguous(t *testing.T) {
+	build := func(values ...string) ([]byte, string) {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		for _, v := range values {
+			f, err := w.CreateFormField("model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Write([]byte(v)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fw, _ := w.CreateFormFile("file", "a.wav")
+		fw.Write([]byte("audio"))
+		w.Close()
+		return buf.Bytes(), w.FormDataContentType()
+	}
+
+	t.Run("a single model is fine", func(t *testing.T) {
+		body, ct := build("cheap-model")
+		if err := checkMultipartModelUnambiguous(body, ct); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("repeated model is refused", func(t *testing.T) {
+		body, ct := build("cheap-model", "dear-model")
+		// The cheap reader's answer is the evidence: it is what the price would have been.
+		if got := ExtractModelName(body, ct); got != "cheap-model" {
+			t.Fatalf("precondition: unguarded read = %q, want the FIRST value", got)
+		}
+		if err := checkMultipartModelUnambiguous(body, ct); err == nil {
+			t.Error("repeated `model` accepted; the upstream reads the LAST value, so this priced cheap and rendered dear")
+		}
+	})
+
+	t.Run("over-long model is refused", func(t *testing.T) {
+		body, ct := build(strings.Repeat("m", maxMultipartFieldBytes+1))
+		if err := checkMultipartModelUnambiguous(body, ct); err == nil {
+			t.Error("over-long `model` accepted; the gate reads a truncated name the upstream does not")
+		}
+	})
+
+	t.Run("JSON bodies are not walked", func(t *testing.T) {
+		if err := checkMultipartModelUnambiguous([]byte(`{"model":"m"}`), "application/json"); err != nil {
+			t.Errorf("JSON body rejected: %v", err)
+		}
+	})
+}
+
+// TestEnforceConfiguredModel_TrailingByte pins that one byte appended after the JSON object no longer
+// bypasses the allowlist. json.Unmarshal validates the WHOLE input, so it failed and the body was
+// forwarded verbatim with err=nil: no rejection, no mismatch recorded for the enumeration limiter, and
+// the canonical->upstream rewrite silently skipped. The same PR closed this class in ExtractModelName
+// and the video reserve by switching to json.Decoder; the body rewriters stayed on Unmarshal.
+//
+// NaN is the reason this is a folded-read check rather than a blanket "reject what Go cannot decode":
+// Go refuses NaN/Infinity where CPython accepts them, so such a body reaches an upstream that serves
+// it and must keep being forwarded.
+func TestEnforceConfiguredModel_TrailingByte(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "served", "upstream-id")
+
+	for _, body := range []string{
+		`{"model":"not-served"}x`,
+		`{"Model":"not-served"}x`,
+		`{"model":"not-served"}{}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			if got, err := c.EnforceConfiguredModel([]byte(body), "0xabc"); err == nil {
+				t.Errorf("accepted and forwarded %s; the decoder-readable model was never allowlist-checked", got)
+			}
+		})
+	}
+
+	t.Run("a trailing byte with an ACCEPTED model is still forwarded", func(t *testing.T) {
+		// The gate's job is the allowlist, not JSON hygiene: a body it cannot rewrite is still passed
+		// through, and the upstream decides. Only the mismatch is now caught.
+		if _, err := c.EnforceConfiguredModel([]byte(`{"model":"served"}x`), "0xabc"); err != nil {
+			t.Errorf("unexpected rejection: %v", err)
+		}
+	})
+
+	t.Run("NaN stays a pass-through", func(t *testing.T) {
+		// CPython accepts NaN, Go does not — rejecting here would 400 a request the upstream serves.
+		if _, err := c.EnforceConfiguredModel([]byte(`{"model":"served","temperature":NaN}`), "0xabc"); err != nil {
+			t.Errorf("NaN body rejected: %v", err)
+		}
+		// And the same body naming an unserved model is NOT caught, because no reader on this side
+		// could read it. Stated so the gap is a decision on the record rather than an oversight.
+		if _, err := c.EnforceConfiguredModel([]byte(`{"model":"not-served","temperature":NaN}`), "0xabc"); err != nil {
+			t.Logf("NaN body with an unserved model was rejected after all: %v", err)
 		}
 	})
 }
