@@ -830,8 +830,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// real fee is computed from the response and this number is never persisted.
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), ctx.Request.URL.RawQuery)
 		if err != nil {
-			// Broker-side: the only failure here is an unreadable configured price. Left unflagged so
-			// it reaches the broker-fault alert rather than being blamed on the caller.
+			// Broker-side: an unreadable configured price, a contract read that could not reach the
+			// RPC endpoint, or a stale/unpopulated USD rate snapshot — GetBillingPrices reaches all
+			// three. Left unflagged so it lands in the broker bucket rather than being blamed on the
+			// caller (resolveFailureSource reads ignoreError only for a 4xx). GetBillingPrices already
+			// ran for this request further down, so this moves the same failure earlier rather than
+			// adding a class, and it now happens before CreateRequest instead of after.
 			p.handleBrokerError(ctx, err, "reserve video fee")
 			return
 		}

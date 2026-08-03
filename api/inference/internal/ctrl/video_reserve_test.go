@@ -3,10 +3,12 @@ package ctrl
 import (
 	"bytes"
 	"mime/multipart"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -43,9 +45,17 @@ func singleModelVideoCtrl(t *testing.T, ratios map[string]float64) *Ctrl {
 	return c
 }
 
+// gateCtx is the context the reserve actually runs with: the gate is upstream of PrepareHTTPRequest,
+// which is the only thing that stamps CtxKeyResolvedModel. Passing a pre-stamped context is how an
+// earlier revision of these tests asserted a per-model branch that was dead in production.
+func gateCtx() *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	return c
+}
+
 func videoReserve(t *testing.T, c *Ctrl, body, contentType, rawQuery string) int64 {
 	t.Helper()
-	fee, err := c.VideoCreateReserveFee(ginCtxWithResolvedModel("vid"), []byte(body), contentType, rawQuery)
+	fee, err := c.VideoCreateReserveFee(gateCtx(), []byte(body), contentType, rawQuery)
 	if err != nil {
 		t.Fatalf("VideoCreateReserveFee: %v", err)
 	}
@@ -162,7 +172,7 @@ func TestVideoReserveSecondsSources(t *testing.T) {
 func TestVideoReserveSingleModelUsesDearestServiceRatio(t *testing.T) {
 	// Shipped defaults: dearest is 1024x1792 / 1792x1024 at 2.0.
 	bare := singleModelVideoCtrl(t, nil)
-	fee, err := bare.VideoCreateReserveFee(ginCtxWithResolvedModel(""), []byte(`{"seconds":6,"size":"1280x720"}`), "application/json", "")
+	fee, err := bare.VideoCreateReserveFee(gateCtx(), []byte(`{"seconds":6,"size":"1280x720"}`), "application/json", "")
 	if err != nil {
 		t.Fatalf("VideoCreateReserveFee: %v", err)
 	}
@@ -171,7 +181,7 @@ func TestVideoReserveSingleModelUsesDearestServiceRatio(t *testing.T) {
 	}
 
 	custom := singleModelVideoCtrl(t, map[string]float64{"720x1280": 1.0, "2048x2048": 4.0})
-	fee, err = custom.VideoCreateReserveFee(ginCtxWithResolvedModel(""), []byte(`{"seconds":6}`), "application/json", "")
+	fee, err = custom.VideoCreateReserveFee(gateCtx(), []byte(`{"seconds":6}`), "application/json", "")
 	if err != nil {
 		t.Fatalf("VideoCreateReserveFee: %v", err)
 	}
@@ -196,7 +206,7 @@ func TestVideoReserveMeasuredMainnetCase(t *testing.T) {
 		},
 	}}, "vid")}
 
-	fee, err := c.VideoCreateReserveFee(ginCtxWithResolvedModel("vid"), []byte(`{"seconds":5,"size":"2K"}`), "application/json", "")
+	fee, err := c.VideoCreateReserveFee(gateCtx(), []byte(`{"seconds":5,"size":"2K"}`), "application/json", "")
 	if err != nil {
 		t.Fatalf("VideoCreateReserveFee: %v", err)
 	}
@@ -204,4 +214,118 @@ func TestVideoReserveMeasuredMainnetCase(t *testing.T) {
 	if fee != "6698000000000000000" {
 		t.Errorf("reserve = %s wei, want 6698000000000000000 (the fee this request actually incurred)", fee)
 	}
+}
+
+// TestVideoReserveResolvesTheModelItself is the regression test for the defect these tests hid: the
+// reserve used to read CtxKeyResolvedModel, which only PrepareHTTPRequest stamps — and the gate runs
+// BEFORE that. So the per-model billing branch was dead on every real create, and every case here
+// passed a pre-stamped context that the production path never has.
+func TestVideoReserveResolvesTheModelItself(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:  config.BillingModePerUnitTable,
+		Table: []config.BillingUnitTier{{Resolution: "2K", Duration: 15, Units: 120}},
+	})
+
+	// gateCtx() stamps nothing, exactly like the real gate.
+	if got := videoReserve(t, c, `{"model":"vid","seconds":15,"size":"2K"}`, "application/json", ""); got != 120 {
+		t.Errorf("reserve = %d, want 120 (the model's own table); the per-model branch is not running", got)
+	}
+	// And the key is stamped on the way out, so GetBillingPrices in the same call prices the requested
+	// model instead of logging "resolvedModel missing from context" and falling back.
+	ctx := gateCtx()
+	if _, err := c.VideoCreateReserveFee(ctx, []byte(`{"model":"vid","seconds":15}`), "application/json", ""); err != nil {
+		t.Fatalf("VideoCreateReserveFee: %v", err)
+	}
+	if got, _ := ctx.Get(CtxKeyResolvedModel); got != "vid" {
+		t.Errorf("resolved model stamped = %v, want \"vid\"", got)
+	}
+}
+
+// TestVideoReserveClampsToTheVendorFloor covers durations below what any vendor will render. Vendors
+// clamp UP as well as down (MiniMax to [4,15]) and bill what they rendered, so pricing the requested
+// duration reserved a quarter of the bill.
+func TestVideoReserveClampsToTheVendorFloor(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
+	for _, body := range []string{`{"seconds":1}`, `{"seconds":2}`, `{"seconds":3}`, `{"seconds":0.5}`} {
+		if got := videoReserve(t, c, body, "application/json", ""); got < videoReserveFloorSeconds {
+			t.Errorf("%s: reserve = %d, want >= %d (the vendor renders and bills its own minimum)",
+				body, got, videoReserveFloorSeconds)
+		}
+	}
+	// At or above the floor the request is taken at its word.
+	if got := videoReserve(t, c, `{"seconds":9}`, "application/json", ""); got != 9 {
+		t.Errorf("reserve = %d, want 9", got)
+	}
+}
+
+// TestVideoReserveQueryEdgeCases pins the two one-character ways the query used to defeat the
+// query-first read. Both are measured against real net/http behaviour, which is what the upstream uses.
+func TestVideoReserveQueryEdgeCases(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
+
+	t.Run("present but empty does not fall through to the body", func(t *testing.T) {
+		// `?seconds=` puts "" in r.Form and FormValue returns it, so the body is never consulted and
+		// the vendor applies its own default. Reading the body's 1 priced a quarter of the clip.
+		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds="); got != videoReserveFallbackSeconds {
+			t.Errorf("reserve = %d, want %d", got, videoReserveFallbackSeconds)
+		}
+		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=%20"); got != videoReserveFallbackSeconds {
+			t.Errorf("whitespace-only: reserve = %d, want %d", got, videoReserveFallbackSeconds)
+		}
+	})
+
+	t.Run("a malformed pair elsewhere does not discard a readable seconds", func(t *testing.T) {
+		// url.ParseQuery errors on %zz but still returns the pairs it parsed, and r.FormValue ignores
+		// that error too — so the upstream reads 15. Guarding on err == nil priced the body's 1.
+		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=15&junk=%zz"); got != 15 {
+			t.Errorf("reserve = %d, want 15", got)
+		}
+	})
+
+	t.Run("repeated seconds takes the first, like FormValue", func(t *testing.T) {
+		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=9&seconds=2"); got != 9 {
+			t.Errorf("reserve = %d, want 9", got)
+		}
+	})
+}
+
+// TestVideoReserveNeverBelowSettlementBaseline covers the two config shapes where the dearest
+// CONFIGURED price is below what settlement charges for a resolution the config does not mention.
+func TestVideoReserveNeverBelowSettlementBaseline(t *testing.T) {
+	t.Run("per_video_second with every multiplier below 1.0", func(t *testing.T) {
+		// resolutionMultiplier returns 1.0 for an unlisted resolution, so the map's max is below
+		// settlement's own floor. validateBillingConfig only requires mult > 0, so this loads.
+		c := videoReserveCtrl(t, &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"480p": 0.5},
+		})
+		reserve := videoReserve(t, c, `{"model":"vid","seconds":10,"size":"480p"}`, "application/json", "")
+		settled := c.videoOutputUnits(ginCtxWithResolvedModel("vid"), 10, "an-unlisted-tier")
+		if reserve < settled {
+			t.Errorf("reserve %d < settled %d — the map's max is below settlement's 1.0 baseline", reserve, settled)
+		}
+	})
+
+	t.Run("per_unit_table whose dearest row is at a shorter duration", func(t *testing.T) {
+		// Settlement reaches the table MAXIMUM whenever the resolution the response names has no
+		// covering row, independent of duration — so filtering rows by duration under-reserved.
+		c := videoReserveCtrl(t, &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "4K", Duration: 4, Units: 900},
+				{Resolution: "720p", Duration: 10, Units: 100},
+			},
+		})
+		reserve := videoReserve(t, c, `{"model":"vid","seconds":10,"size":"720p"}`, "application/json", "")
+		settled := c.videoOutputUnits(ginCtxWithResolvedModel("vid"), 10, "4K")
+		if reserve < settled {
+			t.Errorf("reserve %d < settled %d — the vendor rendered a tier with no covering row", reserve, settled)
+		}
+	})
 }

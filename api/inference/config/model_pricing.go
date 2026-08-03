@@ -349,9 +349,15 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 	return max
 }
 
-// MaxVideoOutputUnitsFor returns the largest number of output units this block can bill for a video of
-// the given duration, over EVERY resolution it prices. ok is false when the block cannot answer (no
-// multipliers and no table rows), leaving the caller to fall back.
+// MaxVideoOutputUnitsFor returns an upper bound on the output units this block can bill for a video of
+// the given duration, over every resolution — including the ones it does not list, which settle at the
+// 1.0 baseline (per_video_second) or the table maximum (per_unit_table). ok is false when the block
+// cannot answer at all: no rows, or a multiplier settlement itself would refuse.
+//
+// "for the given duration" bounds the SIZE axis only. The duration axis is not bounded by the request:
+// vendors clamp it (MiniMax to [4,15] — up as well as down), and settlement reads
+// usage.output_video_duration, which one vendor reports as input + output seconds. Callers handle those
+// separately; see videoReserveSeconds.
 //
 // It exists for the pre-flight balance reserve, which knows the requested duration but must not trust
 // the requested resolution: the vendor picks the rendered tier (MiniMax renders MINIMAX_RESOLUTION from
@@ -365,30 +371,29 @@ func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (int64, bool) {
 	}
 	switch b.Mode {
 	case BillingModePerUnitTable:
-		// The dearest row that still covers this duration — what settlement's own round-up would
-		// charge at the priciest resolution. Nothing covers it (a duration past every bucket) → the
-		// table maximum, which is what settlement bills in that case too.
-		var max int64
-		for _, t := range b.Table {
-			if t.Duration >= seconds && t.Units > max {
-				max = t.Units
-			}
-		}
-		if max == 0 {
-			max = b.MaxTableUnits()
-		}
-		return max, max > 0
+		// The table maximum, flat — NOT the dearest row that covers this duration. Settlement reaches
+		// MaxTableUnits whenever the resolution the RESPONSE names has no covering row, which is
+		// independent of the duration, so a table whose dearest row sits at a SHORTER duration than
+		// the request under-reserves: measured, rows {4K@4s=900, 720p@10s=100} with a 10s request
+		// reserved 100 and settled 900 once the vendor rendered its own 4K tier. Nothing enforces
+		// monotonicity across the table, so filtering by duration is a false economy.
+		mx := b.MaxTableUnits()
+		return mx, mx > 0
 	default:
-		var mult float64
+		mult := 1.0 // settlement's baseline for a resolution the map does not list
 		for _, m := range b.ResolutionMultipliers {
 			if m > mult {
 				mult = m
 			}
 		}
-		if mult <= 0 {
+		// scaledUnits rather than a local ceil: it is the same helper settlement uses, so a
+		// multiplier it refuses (NaN, ±Inf, or a product past maxBillableUnits) makes this block
+		// answer "cannot price" instead of returning 2^40 and refusing every solvent caller.
+		units, err := scaledUnits(seconds, mult)
+		if err != nil || units < 1 {
 			return 0, false
 		}
-		return videoUnitsFor(seconds, mult), true
+		return units, true
 	}
 }
 
@@ -408,20 +413,6 @@ func (s *Service) MaxVideoSizeRatio() float64 {
 		}
 	}
 	return max
-}
-
-// videoUnitsFor is ceil(seconds x multiplier), floored at 1 and bounded so an absurd operator
-// multiplier cannot wrap the int64.
-func videoUnitsFor(seconds int64, multiplier float64) int64 {
-	v := math.Ceil(float64(seconds) * multiplier)
-	switch {
-	case math.IsNaN(v) || v < 1:
-		return 1
-	case v > float64(maxBillableUnits):
-		return maxBillableUnits
-	default:
-		return int64(v)
-	}
 }
 
 // validBillingModeForType reports whether a billing mode is allowed for a

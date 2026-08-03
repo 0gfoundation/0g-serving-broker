@@ -239,6 +239,12 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 // every duration to 15s, and the DashScope models this broker fronts top out below that.
 const videoReserveFallbackSeconds = 15
 
+// videoReserveFloorSeconds is the shortest clip the reserve will price, whatever the request asks for.
+// Vendors clamp the duration UP as well as down — MiniMax to [4,15] — and bill what they rendered, so
+// `{"seconds":1}` reserved 1 unit against a 4-unit bill. The broker cannot see which vendor is behind a
+// given model, so it uses the highest floor among the ones it fronts.
+const videoReserveFloorSeconds = 4
+
 // VideoCreateReserveFee is the fee the balance gate reserves for a video create, in wei.
 //
 // The gate used to pass "0" here because video settles at response time, which left
@@ -246,34 +252,61 @@ const videoReserveFallbackSeconds = 15
 // that. Measured on mainnet: a wallet with exactly 1.0 0G locked passed the gate and was billed
 // 6.698 0G for one 5s 2K clip.
 //
-// Deliberately an upper bound, not an estimate:
+// On the SIZE axis it is a true upper bound; on the DURATION axis it is a bound on everything the
+// request and the vendors' clamps can express, with one residual named below.
 //
-//   - The requested `seconds` is read (query first, then the body, matching r.FormValue on the
-//     upstream's side), because duration dominates the fee and a caller who names one has said what
-//     they want. An unreadable or absent value prices videoReserveFallbackSeconds.
 //   - The requested SIZE is ignored entirely. The vendor picks the rendered tier, not the client, and
 //     settlement bills whichever tier comes back — so the reserve prices the dearest tier the model can
 //     bill. Reading the requested size instead is how a gate ends up reserving the cheap tier for a
 //     clip that renders dear.
+//   - The requested `seconds` IS read (query first, then the body, matching r.FormValue upstream),
+//     because duration dominates the fee and a caller who names one has said what they want. It is
+//     then raised to videoReserveFloorSeconds, because vendors clamp up as well as down and bill what
+//     they rendered. Unreadable, absent, or present-but-empty prices videoReserveFallbackSeconds.
 //
-// So this over-reserves for anything but a worst-case request. That is the intended direction: a
+// Residual, not bounded here: settlement prefers usage.output_video_duration, which one vendor reports
+// as input + output seconds (see actualSeconds). A create carrying a long reference video can therefore
+// settle at more seconds than any request-derived reserve can predict. Bounding that needs an input
+// term the gate does not have today.
+//
+// Everything else over-reserves relative to a typical request, which is the intended direction: a
 // reserve is not a charge (settlement computes the real fee from the response), and the failure it
 // replaces was admitting a create the balance could not cover.
-func (c *Ctrl) VideoCreateReserveFee(ctx context.Context, reqBody []byte, contentType, rawQuery string) (string, error) {
+func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentType, rawQuery string) (string, error) {
 	seconds := videoReserveSeconds(reqBody, contentType, rawQuery)
 
+	// Resolve the requested model HERE rather than reading CtxKeyResolvedModel. The gate runs before
+	// PrepareHTTPRequest, which is the only thing that stamps that key — so reading it meant
+	// resolveModelPricing returned nil on every single create, the per-model branch below was dead on
+	// the paying path, and GetBillingPrices logged "resolvedModel missing from context" twice per
+	// request. The tests hid it by pre-stamping the key the real gate lacks.
+	//
+	// Stamped once resolved, mirroring ResolveModelForBilling exactly (same extraction, same default,
+	// same resolved id), so GetBillingPrices below prices the requested model instead of falling back.
+	// A model this service does NOT serve is left alone: PrepareHTTPRequest rejects it further down, and
+	// duplicating that rejection here would move which of two 400s a caller sees first.
+	var entry *config.ModelPricingEntry
+	requested := ExtractModelName(reqBody, contentType)
+	if requested == "" {
+		requested = c.Service.ModelType
+	}
+	if e, resolved, ok := c.Service.ResolveRequestedModel(requested); ok {
+		entry = e
+		ctx.Set(CtxKeyResolvedModel, resolved)
+	}
+
 	units := int64(0)
-	if c.Service.HasMultiModelPricing() {
-		if e := c.resolveModelPricing(ctx); e != nil {
-			if u, ok := e.Billing.MaxVideoOutputUnitsFor(seconds); ok {
-				units = u
-			}
+	if entry != nil && entry.Billing != nil {
+		if u, ok := entry.Billing.MaxVideoOutputUnitsFor(seconds); ok {
+			units = u
 		}
 	}
 	if units == 0 {
 		// Single-model, or a model whose billing block cannot answer: settlement reads the
 		// service-level videoSizeRatios map with the resolution the RESPONSE names, so mirror it at
-		// its dearest entry. A map with nothing usable leaves the 1.0 baseline.
+		// its dearest entry. The `>= 1` clamp is load-bearing, not defensive: GetVideoSizeRatio returns
+		// 1.0 for a resolution the map does not list, so a map whose DEAREST entry is below 1.0 (an
+		// operator listing only discount tiers) has a maximum below settlement's own floor.
 		ratio := c.Service.MaxVideoSizeRatio()
 		if !(ratio >= 1) {
 			ratio = 1
@@ -292,7 +325,8 @@ func (c *Ctrl) VideoCreateReserveFee(ctx context.Context, reqBody []byte, conten
 	return fee.String(), nil
 }
 
-// videoReserveSeconds resolves the duration the reserve prices, erring high at every step.
+// videoReserveSeconds resolves the duration the reserve prices. Every branch that cannot read a value
+// resolves it UPWARD — to the vendor floor or to the fallback — never to the cheaper of two readings.
 //
 // The URL query is read BEFORE the body because that is the precedence the upstream applies: it reads
 // the create with r.FormValue, whose ParseMultipartForm seeds r.Form from the query and appends body
@@ -300,21 +334,39 @@ func (c *Ctrl) VideoCreateReserveFee(ctx context.Context, reqBody []byte, conten
 // have priced 1.
 func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	if rawQuery != "" {
-		if q, err := url.ParseQuery(rawQuery); err == nil {
-			if v := strings.TrimSpace(q.Get("seconds")); v != "" {
-				if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
-					return int64(math.Ceil(f))
+		// ParseQuery's error is IGNORED, matching r.FormValue: r.ParseForm returns the same error and
+		// FormValue ignores it, so `?seconds=15&junk=%zz` still resolves to 15 upstream. Guarding on
+		// err == nil discarded a readable value and priced the body's cheaper one.
+		q, _ := url.ParseQuery(rawQuery)
+		// PRESENCE, not non-emptiness. `?seconds=` puts an empty string in r.Form, and FormValue
+		// returns it — the body is never consulted — so the vendor applies its own default. Testing
+		// `!= ""` fell through to the body instead: one character priced 1s for a 4s clip.
+		if vs, present := q["seconds"]; present {
+			if len(vs) > 0 {
+				// First value, which is what FormValue takes for a repeated key.
+				if f, err := strconv.ParseFloat(strings.TrimSpace(vs[0]), 64); err == nil &&
+					f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
+					return videoReserveClampSeconds(int64(math.Ceil(f)))
 				}
-				// Present but unreadable here: the upstream may still coerce it, so do not fall
-				// through to the body's cheaper value.
-				return videoReserveFallbackSeconds
 			}
+			// Present but unreadable or empty: the upstream reads it and the vendor defaults, so do
+			// not fall through to the body's cheaper value.
+			return videoReserveFallbackSeconds
 		}
 	}
 	if seconds, _ := videoSecondsSizeFromRequest(reqBody, contentType); seconds > 0 {
-		return seconds
+		return videoReserveClampSeconds(seconds)
 	}
 	return videoReserveFallbackSeconds
+}
+
+// videoReserveClampSeconds raises a requested duration to the vendor floor. Below it the vendor renders
+// and bills its own minimum, so pricing what was asked for reserves less than the clip costs.
+func videoReserveClampSeconds(seconds int64) int64 {
+	if seconds < videoReserveFloorSeconds {
+		return videoReserveFloorSeconds
+	}
+	return seconds
 }
 
 // videoOutputCount converts (seconds, sizeRatio) into the billable effective
