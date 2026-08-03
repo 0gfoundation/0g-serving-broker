@@ -178,6 +178,17 @@ const (
 // that as degraded. source is "" (and ok=false) only when neither yields a
 // positive duration, in which case the caller skips billing loudly.
 func resolveVideoBilling(respBody, reqBody []byte, contentType string) (seconds int64, size, source string) {
+	seconds, size, source, _ = resolveVideoBillingWithSizeSource(respBody, reqBody, contentType)
+	return seconds, size, source
+}
+
+// resolveVideoBillingWithSizeSource is resolveVideoBilling plus the one thing the size axis needs
+// separately: whether the resolution came from the RESPONSE (the upstream stating what it rendered —
+// authoritative) or from the request (a client-controlled guess). `source` reports that distinction
+// for the DURATION only, and conflating the two let videoBillingSize overwrite a tier the vendor
+// itself had reported: an untabulated `size:"4K"` in a MiniMax poll response went from 60 units plus
+// a per_unit_table_uncovered alert to 6 units and silence.
+func resolveVideoBillingWithSizeSource(respBody, reqBody []byte, contentType string) (seconds int64, size, source string, sizeFromResponse bool) {
 	var rf videoResponseFields
 	_ = json.Unmarshal(respBody, &rf)
 	// The request (multipart /v1/videos, occasionally JSON) supplies size when the
@@ -187,7 +198,7 @@ func resolveVideoBilling(respBody, reqBody []byte, contentType string) (seconds 
 	// Resolution: response's own size wins; else the requested size (baseline 1.0
 	// when both empty). The resolution ratio is the same regardless of which
 	// duration source we bill on.
-	size = rf.Size
+	size, sizeFromResponse = rf.Size, rf.Size != ""
 	if size == "" {
 		size = reqSize
 	}
@@ -195,12 +206,12 @@ func resolveVideoBilling(respBody, reqBody []byte, contentType string) (seconds 
 	// Duration: the upstream's ACTUAL output (top-level seconds or usage) is
 	// authoritative; only when it reports nothing do we bill the requested length.
 	if s := rf.actualSeconds(); s > 0 {
-		return s, size, videoSourceResponse
+		return s, size, videoSourceResponse, sizeFromResponse
 	}
 	if reqSec > 0 {
-		return reqSec, size, videoSourceRequest
+		return reqSec, size, videoSourceRequest, sizeFromResponse
 	}
-	return 0, "", ""
+	return 0, "", "", false
 }
 
 // videoSecondsSizeFromRequest extracts the requested `seconds` and `size` for settlement's
@@ -592,7 +603,7 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	// the published default is the best available proxy. Restricting this to size == "" refused
 	// `size:"1280x720"` — the OpenAI Video API's documented shape — on any tier-keyed model,
 	// with a message claiming the client had sent no size and the model published no default.
-	if size == "" || (entry != nil && entry.Billing.IsResolutionKeyed() && !entry.Billing.HasResolution(size)) {
+	if size == "" || (entry != nil && entry.Billing != nil && entry.Billing.Mode == config.BillingModePerUnitTable && !entry.Billing.HasResolution(size)) {
 		if def, published := c.Service.DefaultVideoSizeFor(requestedModel); published {
 			size = def
 		}
@@ -603,7 +614,7 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	// model's own published default names a tier this model prices, the gate cannot express
 	// the reserve at all. Broker-attributed for the same reason the duration case is: the
 	// model publishing no usable default size is a config gap, not a malformed request.
-	if entry != nil && entry.Billing.IsResolutionKeyed() && !entry.Billing.HasResolution(size) {
+	if entry != nil && entry.Billing != nil && entry.Billing.Mode == config.BillingModePerUnitTable && !entry.Billing.HasResolution(size) {
 		return 0, ErrVideoDefaultSizeUnpublished
 	}
 	ratio := c.Service.ReserveVideoSizeRatio(requestedModel, size)
@@ -632,7 +643,13 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 // land under res:1080p or res:1280x720 depending on which path happened to settle it —
 // RateClass is part of hourly_usage_stat's primary key.
 func (c *Ctrl) videoBillingBasis(ctx context.Context, respBody, reqBody []byte, contentType string) (seconds int64, size, source string) {
-	seconds, size, source = resolveVideoBilling(respBody, reqBody, contentType)
+	seconds, size, source, sizeFromResponse := resolveVideoBillingWithSizeSource(respBody, reqBody, contentType)
+	if sizeFromResponse {
+		// The upstream said what it rendered. Substituting over that would reprice a tier the
+		// vendor reported — and silence videoOutputUnits' per_unit_table miss signal, which is
+		// the only thing telling the operator to tabulate it.
+		return seconds, size, source
+	}
 	return seconds, c.videoBillingSize(ctx, size), source
 }
 
@@ -649,20 +666,32 @@ func (c *Ctrl) videoBillingSize(ctx context.Context, size string) string {
 	if !c.Service.HasMultiModelPricing() {
 		return size
 	}
-	// Checked before resolveModelPricing so a context without the key (the background poller
-	// synthesizes one, and job.ResolvedModel can be empty for a row written before it was
-	// recorded) does not log "resolvedModel missing" on a path that simply has nothing to
-	// substitute.
-	if gc, ok := ctx.(*gin.Context); ok {
-		if v, exists := gc.Get(CtxKeyResolvedModel); !exists || v == "" {
-			return size
-		}
-	}
-	entry := c.resolveModelPricing(ctx)
-	if entry == nil || entry.Billing == nil || !entry.Billing.IsResolutionKeyed() || entry.Billing.HasResolution(size) {
+	// The RESOLVED model name, not entry.Model: a wildcard entry's Model is "*", which
+	// ResolveRequestedModel refuses by design, so keying the published-default lookup on it found
+	// nothing and left the substitution off — while the reserve, which asks with the requested
+	// name, applied it. Same request, reserve 6 vs bill 60.
+	gc, ok := ctx.(*gin.Context)
+	if !ok {
 		return size
 	}
-	if def, published := c.Service.DefaultVideoSizeFor(entry.Model); published && entry.Billing.HasResolution(def) {
+	resolved, _ := gc.Get(CtxKeyResolvedModel)
+	model, _ := resolved.(string)
+	if model == "" {
+		// A context with no resolved model has nothing to substitute; checked before
+		// resolveModelPricing so the background poller does not log "resolvedModel missing" for it.
+		return size
+	}
+	entry := c.Service.GetModelPricing(model)
+	// per_unit_table ONLY. A per_video_second block's resolutionMultipliers ARE seconds
+	// multipliers and answer a miss with the 1.0 baseline, which is directly comparable to the
+	// reserve's own clamped service-ratio basis — substituting there raised bills main charged
+	// less for (measured 5 -> 8 on {720p:1.0, 1080p:1.5} with a published 1080p default). Only a
+	// bucketed table prices in units unrelated to seconds, which is the scale mismatch this
+	// substitution exists for.
+	if entry == nil || entry.Billing == nil || entry.Billing.Mode != config.BillingModePerUnitTable || entry.Billing.HasResolution(size) {
+		return size
+	}
+	if def, published := c.Service.DefaultVideoSizeFor(model); published && entry.Billing.HasResolution(def) {
 		return def
 	}
 	return size

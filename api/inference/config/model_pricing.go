@@ -251,18 +251,12 @@ func (b *BillingConfig) HasResolution(resolution string) bool {
 	return false
 }
 
-// IsResolutionKeyed reports whether this block prices by resolution at all — i.e. whether
-// HasResolution can ever be true for it. A block that is resolution-keyed prices in units
-// that are NOT seconds (a per_unit_table row is an arbitrary integer), so a caller that
-// cannot resolve a resolution for it has no scale to fall back to; one that is not
-// resolution-keyed prices per second and the service-ratio basis is directly comparable.
-func (b *BillingConfig) IsResolutionKeyed() bool {
-	if b == nil {
-		return false
-	}
-	return len(b.ResolutionMultipliers) > 0 || len(b.Table) > 0
-}
-
+// resolutionMultiplier returns the configured cost multiplier for a resolution, or the baseline 1.0
+// when unset or unknown. Case- and space-insensitive (see normalizeResolution): a casing mismatch
+// would otherwise fall through to the baseline and UNDERBILL.
+//
+// Note the miss and a genuine 1.0 are indistinguishable in the return value — HasResolution is the
+// separate question a caller asks when it needs to tell them apart.
 func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
 	res := normalizeResolution(resolution)
 	for k, m := range b.ResolutionMultipliers {
@@ -1300,7 +1294,10 @@ func (s *Service) ReserveVideoSizeRatio(model, size string) float64 {
 // that omitted `size` or named a pixel dimension — the OpenAI default shapes — with a
 // broker-attributed 503.
 func validateVideoDefaultSizeAgainstBilling(entry *ModelPricingEntry, serviceInfo *ModelInfo) error {
-	if entry == nil || entry.Billing == nil || !entry.Billing.IsResolutionKeyed() {
+	// per_unit_table only, matching the request path: a per_video_second block's
+	// resolutionMultipliers answer a miss with the 1.0 baseline, so a published size it does not
+	// list is priced, not refused — and refusing it at boot rejected configs main served.
+	if entry == nil || entry.Billing == nil || entry.Billing.Mode != BillingModePerUnitTable {
 		return nil
 	}
 	mi := entry.ModelInfo

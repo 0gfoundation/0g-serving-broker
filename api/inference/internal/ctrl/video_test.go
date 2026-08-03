@@ -1601,3 +1601,118 @@ func TestExtractModelNameExactKeyMustBeUsable(t *testing.T) {
 		})
 	}
 }
+
+// TestVideoBillingBasisRespectsReportedSize pins that a resolution the UPSTREAM reported is never
+// overwritten.
+//
+// resolveVideoBilling returns either the response's size (the vendor stating what it rendered —
+// authoritative) or the request's (a client guess), and the substitution must only ever touch the
+// second. Conflating them repriced a tier the vendor itself reported: an untabulated `size:"4K"` in a
+// MiniMax poll response went from the table maximum plus a per_unit_table_uncovered alert to the
+// cheap published default and silence.
+func TestVideoBillingBasisRespectsReportedSize(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bucketed",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 60},
+			},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "768P"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bucketed")}
+	ctx := ginCtxWithResolvedModel("bucketed")
+	reqBody := []byte(`{"model":"bucketed","seconds":6,"size":"1280x720"}`)
+
+	// Response REPORTS a tier the table does not carry: left alone, so videoOutputUnits still
+	// reaches its table-maximum fallback and still meters the miss for the operator.
+	reported := []byte(`{"id":"v1","status":"completed","size":"4K","usage":{"output_video_duration":6}}`)
+	if _, size, _ := c.videoBillingBasis(ctx, reported, reqBody, "application/json"); size != "4K" {
+		t.Errorf("basis size = %q, want the upstream-reported %q left untouched", size, "4K")
+	}
+	// Response reports a tier the table DOES carry: also left alone.
+	priced := []byte(`{"id":"v1","status":"completed","size":"1080P","usage":{"output_video_duration":6}}`)
+	if _, size, _ := c.videoBillingBasis(ctx, priced, reqBody, "application/json"); size != "1080P" {
+		t.Errorf("basis size = %q, want %q", size, "1080P")
+	}
+	// Response reports NOTHING: only then does the client's unpriceable size become the published
+	// tier, which is what the reserve priced.
+	silent := []byte(`{"id":"v1","status":"completed","usage":{"output_video_duration":6}}`)
+	if _, size, _ := c.videoBillingBasis(ctx, silent, reqBody, "application/json"); size != "768P" {
+		t.Errorf("basis size = %q, want the published %q", size, "768P")
+	}
+}
+
+// TestVideoBillingBasisWildcardModel pins the substitution for a wildcard (`"*"`) pricing entry.
+//
+// videoBillingSize used to key the published-default lookup on entry.Model, which is `"*"` for a
+// wildcard — a name ResolveRequestedModel refuses by design — so the substitution silently did
+// nothing while the reserve, which asks with the REQUESTED name, applied it: reserve 6, async bill
+// 60 on the same request.
+func TestVideoBillingBasisWildcardModel(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       config.ModelWildcard,
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 60},
+			},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "768P"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, config.ModelWildcard)}
+	ctx := ginCtxWithResolvedModel("anything-at-all")
+	reqBody := []byte(`{"model":"anything-at-all","seconds":6,"size":"1280x720"}`)
+
+	reserve, err := c.videoReserveUnitsFromRequest(reqBody, "application/json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	seconds, size, source := c.videoBillingBasis(ctx, []byte(`{"status":"completed","usage":{"output_video_duration":6}}`), reqBody, "application/json")
+	if source == "" {
+		t.Fatal("settlement resolved no basis")
+	}
+	settled := c.videoOutputUnits(ctx, seconds, size)
+	if reserve < settled {
+		t.Errorf("reserve %d < settled %d (basis size %q) on a wildcard entry", reserve, settled, size)
+	}
+}
+
+// TestVideoBillingBasisLeavesPerVideoSecondAlone pins that a per_video_second block is NOT
+// substituted, and that its bills did not move.
+//
+// resolutionMultipliers ARE seconds multipliers there and answer a miss with the 1.0 baseline, which
+// is directly comparable to the reserve's own clamped service-ratio basis. Substituting anyway
+// raised bills: `{"seconds":5,"size":"1280x720"}` against {720p:1.0, 1080p:1.5} with a published
+// 1080p default went from 5 units to 8.
+func TestVideoBillingBasisLeavesPerVideoSecondAlone(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "1080p"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
+	ctx := ginCtxWithResolvedModel("tiered")
+	reqBody := []byte(`{"model":"tiered","seconds":5,"size":"1280x720"}`)
+
+	seconds, size, _ := c.videoBillingBasis(ctx, []byte(`{"status":"completed","usage":{"output_video_duration":5}}`), reqBody, "application/json")
+	if size != "1280x720" {
+		t.Errorf("basis size = %q, want the client's %q left alone on a per_video_second model", size, "1280x720")
+	}
+	if got := c.videoOutputUnits(ctx, seconds, size); got != 5 {
+		t.Errorf("settled units = %d, want 5 — the bill must not rise for a size this model prices at baseline", got)
+	}
+	// And an unlisted size is priced, not refused: the 503 is a per_unit_table-only answer.
+	if _, err := c.videoReserveUnitsFromRequest(reqBody, "application/json"); err != nil {
+		t.Errorf("a per_video_second model must price an unlisted size, not refuse it: %v", err)
+	}
+}

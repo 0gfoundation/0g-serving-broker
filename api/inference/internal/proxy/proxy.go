@@ -578,6 +578,44 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Store user address in context for rate limiting
 	ctx.Set("userAddress", userAddress)
 
+	// A price-setting field in the URL QUERY is refused before anything else looks at the request.
+	//
+	// proxyHTTPRequest forwards the query verbatim (targetURL keeps ctx.Request.RequestURI's
+	// query), and an upstream that reads the create with r.FormValue resolves it BEFORE the body:
+	// ParseMultipartForm populates r.Form from the query first and appends the body after. Every
+	// gate on this path is handed only the body, so `?seconds=15` against a body of `seconds=1`
+	// priced 1 and rendered 15 — and it composes across all three fields at once. Nothing in the
+	// OpenAI surface puts any of them in the query, so refusing costs no legitimate traffic;
+	// merging them would mean re-implementing Go's precedence as a second reader of one request.
+	//
+	// Above the whitelist branch on purpose: a whitelisted create is unbilled, so there is no
+	// money in it, but it still writes the reconciliation rollup — which is the only record that
+	// traffic produces, and it would name the body's values while the upstream served the query's.
+	//
+	// Scoped to the modalities whose gate resolves a per-model price from the body: video-generation
+	// (seconds/size/model) and speech-to-text (model). Chatbot posts JSON, whose decoders read the
+	// body only, and image-editing has no per-model resolution behind it (ResolveModelForBilling
+	// runs for STT and video only) — narrowing either contract would buy nothing.
+	if q := ctx.Request.URL.Query(); len(q) > 0 {
+		var offending error
+		switch svcType {
+		case "video-generation":
+			if q.Has("seconds") || q.Has("size") || q.Has("model") {
+				offending = ctrl.ErrVideoBillingFieldInQuery
+			}
+		case "speech-to-text":
+			if q.Has("model") {
+				offending = errors.NewBadRequest("`model` must be sent in the request body, not the URL query")
+			}
+		}
+		if offending != nil {
+			ctx.Set("ignoreError", true)
+			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+			p.handleBrokerError(ctx, offending, "")
+			return
+		}
+	}
+
 	// Check if user is whitelisted (checked early to skip per-user concurrency limit)
 	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
 
@@ -793,22 +831,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		UserAddress: userAddress,
 	}
 
-	// `model` in the URL QUERY is the same channel the video arm refuses below, and it reaches
-	// every modality that posts multipart and resolves a PER-MODEL price from the body alone:
-	// ParseMultipartForm populates r.Form from the query before appending the body, so an upstream
-	// reading the create with r.FormValue takes the query's model while the broker priced the
-	// body's. Scoped to the multipart modalities — chatbot posts JSON, whose decoders read the body
-	// only, and refusing a query param there would change a contract for no gain. Nothing in the
-	// OpenAI surface puts `model` in the query.
-	if svcType == "speech-to-text" || svcType == "image-editing" {
-		if ctx.Request.URL.Query().Has("model") {
-			ctx.Set("ignoreError", true)
-			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
-			p.handleBrokerError(ctx, errors.NewBadRequest("`model` must be sent in the request body, not the URL query"), "")
-			return
-		}
-	}
-
 	var expectedInputFee string
 	switch svcType {
 	case "zgStorage", "chatbot", "speech-to-text":
@@ -865,16 +887,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			// balance for a video nobody asked for, and refusing would 503 a read.
 			expectedInputFee = "0"
 			break
-		}
-		// The query is a price-setting channel the reserve cannot see: proxyHTTPRequest forwards
-		// it verbatim (targetURL keeps ctx.Request.RequestURI's query), and the upstream reads
-		// the create with r.FormValue, which resolves the QUERY before the body. See
-		// ErrVideoBillingFieldInQuery.
-		if q := ctx.Request.URL.Query(); q.Has("seconds") || q.Has("size") || q.Has("model") {
-			ctx.Set("ignoreError", true)
-			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
-			p.handleBrokerError(ctx, ctrl.ErrVideoBillingFieldInQuery, "")
-			return
 		}
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {

@@ -148,9 +148,12 @@ case. Folding the lookup makes a `{"Seconds":15}` read the same on both sides; m
 variant of a billing field is refused, because Go resolves competing variants by document order
 and a map has none.
 
-`seconds`, `size` and `model` are refused outright in the URL query — and `model` alone is refused for
-`speech-to-text` and `image-editing` too, since they post the same multipart transport and resolve a
-per-model price from the body alone. The broker forwards the query
+`seconds`, `size` and `model` are refused outright in the URL query, and `model` alone for
+`speech-to-text` — the other modality whose gate resolves a per-model price from the body while
+posting the same multipart transport. The check sits above the whitelist branch: a whitelisted create
+is unbilled, but it still writes the reconciliation rollup, which would otherwise name the body's
+values while the upstream served the query's. `image-editing` is deliberately not included — it has
+no per-model resolution behind it — and chatbot posts JSON, whose decoders read the body only. The broker forwards the query
 verbatim and the upstream reads the create with `r.FormValue`, whose `ParseMultipartForm` populates
 `r.Form` from the query *before* appending the body — so the query wins, and the gate is handed only
 the body. The OpenAI Video API puts none of them in the query, so refusing costs no legitimate
@@ -226,15 +229,21 @@ The basis is the requested duration weighted by the larger of two answers:
   `per_video_second` miss with the 1.0 baseline *and a nil error* — indistinguishable from a tier
   that genuinely costs 1.0.
 
-A **resolution-keyed** model (`BillingConfig.IsResolutionKeyed`) prices in table units that bear
-no relation to seconds — a 6s clip at 2K can be 60 units — so the service-ratio basis is not a
-conservative fallback for one, it is a different scale. The published `defaultParameters.size` is
-therefore used not only when the request names no size but also when it names one **this model
-prices nowhere** — including `"1280x720"`, the OpenAI Video API's documented shape. Both are the
-same situation from the gate's side: the upstream renders its configured tier and settlement bills
-from the response's tier either way. Only when neither the request nor the published default names
-a tier the model prices is the reserve refused (`ErrVideoDefaultSizeUnpublished`,
-broker-attributed) rather than expressed on the wrong scale.
+A **`per_unit_table`** model prices in units that bear no relation to seconds — a 6s clip at 2K can
+be 60 units — so the service-ratio basis is not a conservative fallback for one, it is a different
+scale. The published `defaultParameters.size` is therefore used not only when the request names no
+size but also when it names one **this model prices nowhere** — including `"1280x720"`, the OpenAI
+Video API's documented shape. Both are the same situation from the gate's side: the upstream renders
+its configured tier and settlement bills from the response's tier either way. Only when neither the
+request nor the published default names a tier the model prices is the reserve refused
+(`ErrVideoDefaultSizeUnpublished`, broker-attributed) rather than expressed on the wrong scale.
+
+Scoped to `per_unit_table` deliberately. A `per_video_second` block's `resolutionMultipliers` *are*
+seconds multipliers and answer a miss with the 1.0 baseline, which is directly comparable to the
+reserve's own clamped basis — treating it the same way refused creates that were priceable and raised
+bills the previous behaviour charged less for (`{"seconds":5,"size":"1280x720"}` against
+`{720p:1.0, 1080p:1.5}` with a published `1080p` default went 5 units → 8). The same scoping applies
+to the settlement-side substitution and the boot cross-check.
 The per-model `videoSizeRatios` map is also consulted, taking the larger of it and the
 service-level map: it is a per-model-capable field that `GET /v1/models` advertises per model, and
 the reserve read only the service scope, so a published per-model ratio was used by nothing.
@@ -322,13 +331,17 @@ none of them is currently measured — see the last entry.
    carrying reserves into `unsettled` needs `FailVideoPollJob` / `TimeOutVideoPollJob` to clear them,
    or a job that never delivers settles as real revenue and the caller pays for a video they never
    received. That is a poll-lifecycle change, not a reserve change.
-2. **A rendered tier above both the requested and the published one.** With
-   `defaultParameters.size` priced on the reserve side *and* substituted on the settlement side
-   (`videoBillingSize`, for a response that omits `size`), this needs the upstream to render a tier
-   that is neither what the client asked for nor what the model publishes — and to say so in the
-   response, since a response that stays silent is now billed on the published tier too. The gap is
-   then that tier's factor (config-bound; `resolutionMultipliers` reach 8 in this repo's own
-   examples). Closing it needs the rendered tier at request time, which only the upstream knows.
+2. **A rendered tier the response does not report.** For a `per_unit_table` model a silent response
+   is billed on the published tier, which is what the reserve priced, so the two agree. Two gaps
+   remain. (a) `per_video_second`: the substitution deliberately does not apply, so a silent response
+   is billed on the client's `size` — and DashScope, whose translator derives the tier from the pixel
+   size (max side ≤ 1280 → 720P, above → 1080P), can render and charge for a tier neither side
+   priced. On this repo's own DashScope example the three documented pixel sizes above 1280 reserve
+   and bill 5 units while the vendor charges 1080P. That is a broker-vs-vendor gap, not a
+   reserve-vs-bill one, and it predates this change; closing it needs the rendered tier stated
+   per-model in config (the two live translators derive it differently, so it cannot be a
+   broker-side constant). (b) A reported tier above both the requested and the published one still
+   costs that tier's factor — but it is reported, so the miss metric fires.
 3. **`seconds` the upstream clamps, in either direction.** `{"seconds":1}` prices at 1 unit while the
    translator raises it to the model floor (H3: 4s) and bills that — an under-reserve. Above the
    ceiling it is the mirror image and costs the *caller*: `{"seconds":60}` is priced at 60 units

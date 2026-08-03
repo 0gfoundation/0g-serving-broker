@@ -149,11 +149,18 @@ func ExtractModelName(body []byte, contentType string) string {
 	//     `{"Model":"expensive"}` entirely.
 	//
 	// Which spelling wins, and when two of them are irreconcilable, is foldedModelName's job.
+	return foldedModelName(rawFields(body))
+}
+
+// rawFields decodes a JSON object key-wise, tolerating trailing data the way the upstream's own
+// json.Decoder does. Returns nil when the body is not a JSON object, which every caller treats as
+// "nothing named here".
+func rawFields(body []byte) map[string]json.RawMessage {
 	var fields map[string]json.RawMessage
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&fields); err != nil {
-		return ""
+	if json.NewDecoder(bytes.NewReader(body)).Decode(&fields) != nil {
+		return nil
 	}
-	return foldedModelName(fields)
+	return fields
 }
 
 // foldedModelName picks the model name from a decoded JSON body the way the reader has to for a

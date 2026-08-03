@@ -1355,7 +1355,11 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		return nil, fmt.Errorf("invalid request body: %w", err)
 	}
 
-	requestModel, _ := bodyMap["model"].(string)
+	// Read through the same folded/usable-value rules as ExtractModelName, which is what the
+	// metric label, the audit row and the LoRA/expiry gates use. Reading the exact key here while
+	// they folded meant `{"Model":"dear"}` recorded and labelled "dear" while this function
+	// resolved, billed and forwarded the configured default — three names for one request.
+	requestModel := foldedModelName(rawFields(body))
 	if requestModel == "" {
 		// No model specified — bill and forward the configured default model.
 		requestModel = c.Service.ModelType
