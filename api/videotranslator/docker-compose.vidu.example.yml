@@ -11,7 +11,7 @@
 # region — the model, endpoint hostname, and API key must all belong to that
 # same region. There is no other region/endpoint variant.
 #
-# Broker-side wiring (three things):
+# Broker-side wiring (four things):
 #   1. Register the provider's on-chain Service.Url as this container's address
 #      (e.g. http://0g-vidu-video-translator:8090) instead of the vendor's real
 #      workspace endpoint.
@@ -29,6 +29,17 @@
 #      length and can diverge) onto the broker's usage.output_video_duration
 #      field, which resolveVideoBilling meters; resolution is derived from
 #      the vendor's own usage.SR field at poll time.
+#   4. Keep TEE verification: this sidecar reports the vendor's TLS certificate
+#      back to the broker (Zg-Upstream-Cert-Fingerprint), so the provider can stay
+#      providerType: centralized instead of falling back to the non-verifiable
+#      "standard" type. Set all four, and run this container in the SAME CVM as the
+#      broker — that co-location is what makes the report trustworthy:
+#        service:
+#          providerType: centralized
+#          providerIdentity: vidu
+#          targetTLSProxy: true
+#          upstreamDomain: your-workspace-id.cn-beijing.maas.aliyuncs.com
+#      See docs/design/sidecar-routing-proof.md.
 #
 # VIDU_BASE_URL is REQUIRED — there is no working default the way MiniMax's
 # api.minimax.io is one. The hostname itself embeds your workspace ID

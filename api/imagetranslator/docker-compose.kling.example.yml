@@ -13,7 +13,7 @@
 # region — the model, endpoint hostname, and API key must all belong to that
 # same region. There is no other region/endpoint variant.
 #
-# Broker-side wiring (three things):
+# Broker-side wiring (four things):
 #   1. Register the provider's on-chain endpoint as this container's address
 #      (e.g. http://0g-kling-image-translator:8091) instead of the vendor's
 #      real workspace endpoint.
@@ -26,6 +26,17 @@
 #   3. Configure per-image-count billing for the model (Kling bills on image
 #      count via the broker's existing OutputCount mechanism — no new
 #      per_video_second/per_unit_table pricing needed, unlike video).
+#   4. Keep TEE verification: this sidecar reports the vendor's TLS certificate
+#      back to the broker (Zg-Upstream-Cert-Fingerprint), so the provider can stay
+#      providerType: centralized instead of falling back to the non-verifiable
+#      "standard" type. Set all four, and run this container in the SAME CVM as the
+#      broker — that co-location is what makes the report trustworthy:
+#        service:
+#          providerType: centralized
+#          providerIdentity: kling
+#          targetTLSProxy: true
+#          upstreamDomain: your-workspace-id.cn-beijing.maas.aliyuncs.com
+#      See docs/design/sidecar-routing-proof.md.
 #
 # KLING_BASE_URL is REQUIRED — there is no working default. The hostname
 # itself embeds your workspace ID ({WorkspaceId}.cn-beijing.maas.aliyuncs.com);

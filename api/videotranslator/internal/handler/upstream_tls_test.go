@@ -9,6 +9,7 @@ import (
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/minimax"
+	"github.com/0glabs/0g-serving-broker/videotranslator/internal/vidu"
 )
 
 // TestUpstreamTLSReport_ReportsVendorCert is the end-to-end check for the whole
@@ -47,6 +48,38 @@ func TestUpstreamTLSReport_ReportsVendorCert(t *testing.T) {
 	// never have matched it anyway.
 	if got := rec.Header().Get(teeutil.HeaderUpstreamCertHost); got != "" {
 		t.Errorf("reported host %q for an IP-dialed upstream, want none", got)
+	}
+}
+
+// TestUpstreamTLSReport_ReportsVendorCert_Vidu is the same end-to-end check as
+// TestUpstreamTLSReport_ReportsVendorCert, but for Vidu specifically — its
+// client.go's do() previously had no teeutil.CertCaptureFromContext(...).Observe
+// call at all (unlike dashscope/minimax), so a Vidu deployment with
+// targetTLSProxy: true would have silently produced no routing proof for every
+// response despite otherwise looking identical to MiniMax/DashScope.
+func TestUpstreamTLSReport_ReportsVendorCert_Vidu(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"output":{"task_id":"t1","task_status":"SUCCEEDED"}}`))
+	}))
+	defer upstream.Close()
+
+	client := vidu.NewClient(upstream.URL, upstream.Client())
+	h := NewViduVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(UpstreamTLSReport())
+	engine.GET("/videos/:id", h.GetVideo)
+
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/videos/v0_t1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	want := teeutil.CertFingerprintFromX509(upstream.Certificate())
+	if got := rec.Header().Get(teeutil.HeaderUpstreamCertFingerprint); got != want {
+		t.Errorf("reported fingerprint %q, want the vendor's leaf cert %q", got, want)
 	}
 }
 
