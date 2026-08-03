@@ -212,6 +212,21 @@ func TestVideoGenerationFlow(t *testing.T) {
 		w := httptest.NewRecorder()
 		env.engine.ServeHTTP(w, req)
 
+		// This env is TargetSeparated (unsigned), so there is no handle to replay and
+		// the status poll must advertise none — the same contract image_editing_test
+		// asserts, for the same reason: a handle here could only point at a 404.
+		//
+		// This is the half of the replay worth pinning on the shipped path. The
+		// accessor's unit tests cannot see whether proxy.go sets the header at all,
+		// and over-advertising is the failure mode with teeth: it is the anti-pattern
+		// the design doc forbids as Rule 1 and a bug this repo has fixed once already.
+		// The positive direction (a signing provider replays a handle that resolves)
+		// has no fixture here — every env in this package is unsigned — so it is
+		// covered one layer down, by TestVideoJobChatKey and the DB integration test.
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("unsigned provider advertised ZG-Res-Key %q on a status poll; it can only 404", got)
+		}
+
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 		}
@@ -244,6 +259,14 @@ func TestVideoGenerationFlow(t *testing.T) {
 
 		w := httptest.NewRecorder()
 		env.engine.ServeHTTP(w, req)
+
+		// NOT on /content. The signature binds the terminal poll JSON, not the mp4
+		// bytes served here, so a handle alongside the file gives a client a proof
+		// whose response hash cannot match what it downloaded — indistinguishable
+		// from tampering, and worse than the 404 it would otherwise get.
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("content response carried ZG-Res-Key %q; the signature does not cover these bytes", got)
+		}
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())

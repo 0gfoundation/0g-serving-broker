@@ -342,9 +342,29 @@ func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
 	// never poll this id — see the collision note on model.VideoJobOwner. The only
 	// caller who can reach this lookup is therefore the first creator, whose handle
 	// is on the first row.
+	// COLLATE utf8mb4_0900_bin, matching video_job_owner.provider_job_id — which
+	// has a dedicated migration to get it, for a reason that applies verbatim here.
+	// Job ids are case-SIGNIFICANT (translate.EncodeJobID emits hex or base64url),
+	// and this column inherits the table's case-INSENSITIVE ai_ci. Without the
+	// override the authorization and the replay disagree about identity: a caller
+	// authorized for `v2_qujd` under bin would match `v2_QUJD`'s poll row here and
+	// be handed ANOTHER USER's handle. /signature/{key} needs no session, so that
+	// hands a third party a proof over content they never requested.
+	//
+	// ORDER BY id, because provider_job_id is a plain index, not unique: only
+	// request_hash is. Two different requests that draw the same job id from an
+	// upstream both insert (CreateVideoPollJob is a bare Create), so "which row" is
+	// a real question and must not be answered arbitrarily. Oldest wins because
+	// VideoJobOwner.ProviderJobID IS unique, so the second creator's ownership row
+	// is rejected and that user can never poll the id — the only caller who reaches
+	// this lookup is the first creator, whose handle is on the first row. That
+	// argument needs the collations to agree, which is what the clause above buys.
+	//
+	// Limit(1) is load-bearing beyond cost: gorm scans every matched row into the
+	// same *string, so without it the LAST row would win rather than the first.
 	var chatKey string
 	err := d.db.Model(&model.VideoPollJob{}).
-		Where("provider_job_id = ?", providerJobID).
+		Where("provider_job_id = ? COLLATE utf8mb4_0900_bin", providerJobID).
 		Order("id").
 		Limit(1).
 		Pluck("chat_key", &chatKey).Error

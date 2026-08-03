@@ -132,6 +132,24 @@ func TestGetVideoPollJobChatKey_Integration(t *testing.T) {
 		}
 	})
 
+	// The authorization side of this pair is case-SENSITIVE by migration, so this
+	// lookup must be too. If it folded case, a caller authorized for one id would
+	// be handed the handle of a job differing only in case — and /signature/{key}
+	// takes no session, so that is another user's proof.
+	t.Run("case-significant ids do not match each other", func(t *testing.T) {
+		seed("v2_QUJD", "hash-upper", "alice-handle")
+		seed("v2_qujd", "hash-lower", "bob-handle")
+		for id, want := range map[string]string{"v2_QUJD": "alice-handle", "v2_qujd": "bob-handle"} {
+			got, err := d.GetVideoPollJobChatKey(id)
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", id, err)
+			}
+			if got != want {
+				t.Fatalf("%s: got %q, want %q — the lookup folded case", id, got, want)
+			}
+		}
+	})
+
 	t.Run("empty id short-circuits without touching the DB", func(t *testing.T) {
 		got, err := d.GetVideoPollJobChatKey("")
 		if err != nil || got != "" {
