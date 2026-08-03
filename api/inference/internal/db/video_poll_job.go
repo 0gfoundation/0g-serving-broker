@@ -334,6 +334,18 @@ func (d *DB) GetVideoPollJobByRequestHash(requestHash string) (model.VideoPollJo
 // received. That is indistinguishable from tampering, which is the same reason the
 // caller refuses to replay on /videos/{id}/content.
 //
+// It narrows that window rather than closing it, and the residue is worth naming
+// instead of implying otherwise. The poller commits the status BEFORE it re-signs
+// (deliberately — video_poll.go explains that signing first lets a losing worker's
+// signature win the cache), so between those two statements a poll can see
+// status=completed while the cache still holds the placeholder. That is
+// microseconds inside one function, against a client polling every few seconds, and
+// one stale reading that the next poll corrects. Closing it properly would mean
+// recording "the signature is current" as new state, which is not worth carrying
+// for a window that size. A re-sign FAILURE is not part of this: it evicts the
+// entry (dropStaleVideoSignature), so the existence gate then finds nothing and no
+// handle goes out.
+//
 // A DUPLICATED provider job id yields nothing, deliberately. provider_job_id is a
 // plain index (only request_hash is unique) and CreateVideoPollJob is a bare
 // Create, so two requests that draw the same upstream id both insert. Picking one
