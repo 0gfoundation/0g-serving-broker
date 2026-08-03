@@ -219,16 +219,17 @@ func setupTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 
 	c := ctrl.New(database, provContract, cfg, svcCache, teeService, nil, logger)
 
-	// Pre-seed caches to avoid contract calls
+	// Pre-seed caches to avoid contract calls.
+	//
+	// The seeded Balance is 1000 0G, matching the DB lockBalance above. It used to be 1 0G, which is
+	// exactly MinimumLockedBalance — so validateBalanceAdequacy's fast path returned nil only while the
+	// estimated fee was "0", and any modality reserving a real fee fell through to the re-check. That is
+	// now every video create (see VideoCreateReserveFee), and the re-check calls SyncUserAccount ->
+	// GetUserAccount on this harness's nil contract binding, which SIGSEGVs and aborts the whole test
+	// binary. The wallet the harness was seeding is literally the mainnet incident's: 1.0 0G locked
+	// against a clip that bills several times that.
 	c.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
 		User:          userAddr,
-		// 1000 0G, matching the DB lockBalance seeded above. It used to be 1 0G, which was exactly
-		// MinimumLockedBalance — so validateBalanceAdequacy's fast path returned nil only while the
-		// estimated fee was "0", and every modality that reserves a real fee fell through to the
-		// re-check. That is now every video create (see VideoCreateReserveFee), and the re-check calls
-		// SyncUserAccount on this harness's non-chain-wired contract binding, which nil-derefs and
-		// aborts the whole test binary. The wallet the harness was seeding is literally the mainnet
-		// incident's: 1.0 0G locked against a clip that bills several times that.
 		Balance:       new(big.Int).Mul(big.NewInt(1000), big.NewInt(1e18)),
 		PendingRefund: big.NewInt(0),
 		Generation:    big.NewInt(0),
