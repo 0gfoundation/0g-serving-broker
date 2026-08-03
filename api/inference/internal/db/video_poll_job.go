@@ -381,6 +381,8 @@ func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
 	// Ambiguity yields nothing rather than a guess: provider_job_id is indexed, not
 	// unique (request_hash is), and the owner and poll inserts are separate
 	// non-transactional writes, so row order cannot identify the real creator.
+	// Ambiguity is judged among COMPLETED rows only — the status predicate runs
+	// first — so a reissued id whose rows differ in status looks unambiguous here.
 	// Limit(3) makes that check see one case-variant alongside a genuine duplicate;
 	// a set holding two variants AND a duplicate hides the duplicate and still
 	// returns a handle (measured, not theorised). Tolerable only because
