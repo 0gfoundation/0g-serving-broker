@@ -542,6 +542,46 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 					p.handleBrokerError(ctx, err, "authorize video job access")
 					return
 				}
+
+				// Replay the signature-lookup handle the CREATE response advertised.
+				// This path returns from ProcessHTTPRequest before any signing work, so
+				// without this the handle is issued once and is then unreachable — and
+				// the signature it points at, which the poll scheduler keeps re-signing
+				// under that same key, could never be fetched by a client that did not
+				// capture the create-response header. Async image has always restored it
+				// (handler/async.go), and gates on the same two things this does.
+				//
+				// STATUS ONLY, never /videos/{id}/content. Expressed as a length
+				// comparison against the id that was just AUTHORIZED, so it cannot
+				// disagree with it — a second prefix test could, and would fail open
+				// (a prefix mismatch reads as "bare status path, replay it").
+				// The signature binds the
+				// terminal poll JSON, not the mp4 bytes (see video_poll.go's note), so
+				// advertising it alongside the file would hand a client a proof whose
+				// response hash cannot match what it just downloaded — indistinguishable
+				// from tampering, and worse than the 404 it gets instead. Async image is
+				// the same: it serves bytes at /images/{key}/{i} and sets no handle there.
+				//
+				// And only when the signature ACTUALLY EXISTS. A handle that can only
+				// 404 is the anti-pattern this feature's design doc forbids as Rule 1,
+				// and a bug this repo has already fixed once. The column is not proof of
+				// existence: evictVideoSignature drops the cache entry without clearing
+				// chat_key, ChatCacheExpiration (20m) is shorter than the poll row's
+				// retention (30m), and a restart empties an in-process cache while the
+				// rows survive. GetChatSignature is that proof, and it is a local map
+				// read, so honesty here is free.
+				//
+				// STAGED, not written: ProcessHTTPRequest copies the upstream's headers
+				// over ours and returns early on a non-200, so writing here would let an
+				// echoing upstream overwrite the handle and would advertise one on a
+				// vendor error. It sets the header itself, after both.
+				if len(targetPath) == len(videoStatusPathPrefix)+len(jobID) {
+					if chatKey := p.ctrl.VideoJobChatKey(jobID); chatKey != "" {
+						if _, sigErr := p.ctrl.GetChatSignature(chatKey); sigErr == nil {
+							ctx.Set(ctrl.CtxKeyReplayResKey, chatKey)
+						}
+					}
+				}
 			}
 
 			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",

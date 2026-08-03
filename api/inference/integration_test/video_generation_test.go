@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/0glabs/0g-serving-broker/inference/config"
+	constant "github.com/0glabs/0g-serving-broker/inference/const"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 	"github.com/0glabs/0g-serving-broker/inference/model"
 )
@@ -37,8 +38,25 @@ var mockVideoJobIDSeq atomic.Int64
 // unique job id it will use for every request in this server's lifetime.
 func newMockVideoProvider(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
+	jobID, h := mockVideoHandler(t)
+	return httptest.NewServer(h), jobID
+}
+
+// newMockVideoProviderTLS is newMockVideoProvider over TLS, so resp.TLS is
+// populated and a centralized service can capture the upstream certificate
+// fingerprint — which is what makes handleVideoGenerationResponse's `signs`
+// predicate true, and therefore the only way to exercise the signed side of the
+// ZG-Res-Key replay. Same handler, not a copy: a second mock would drift.
+func newMockVideoProviderTLS(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	jobID, h := mockVideoHandler(t)
+	return httptest.NewTLSServer(h), jobID
+}
+
+func mockVideoHandler(t *testing.T) (string, http.Handler) {
+	t.Helper()
 	jobID := fmt.Sprintf("video-test-%03d", mockVideoJobIDSeq.Add(1))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return jobID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
 		switch {
@@ -73,8 +91,7 @@ func newMockVideoProvider(t *testing.T) (*httptest.Server, string) {
 			t.Errorf("unexpected request: %s %s", r.Method, path)
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	return server, jobID
+	})
 }
 
 // ==========================================================================
@@ -212,6 +229,21 @@ func TestVideoGenerationFlow(t *testing.T) {
 		w := httptest.NewRecorder()
 		env.engine.ServeHTTP(w, req)
 
+		// This env is TargetSeparated (unsigned), so there is no handle to replay and
+		// the status poll must advertise none — the same contract image_editing_test
+		// asserts, for the same reason: a handle here could only point at a 404.
+		//
+		// This is the half of the replay worth pinning on the shipped path. The
+		// accessor's unit tests cannot see whether proxy.go sets the header at all,
+		// and over-advertising is the failure mode with teeth: it is the anti-pattern
+		// the design doc forbids as Rule 1 and a bug this repo has fixed once already.
+		// The positive direction (a signing provider replays a handle that resolves)
+		// has no fixture here — every env in this package is unsigned — so it is
+		// covered one layer down, by TestVideoJobChatKey and the DB integration test.
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("unsigned provider advertised ZG-Res-Key %q on a status poll; it can only 404", got)
+		}
+
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 		}
@@ -244,6 +276,14 @@ func TestVideoGenerationFlow(t *testing.T) {
 
 		w := httptest.NewRecorder()
 		env.engine.ServeHTTP(w, req)
+
+		// NOT on /content. The signature binds the terminal poll JSON, not the mp4
+		// bytes served here, so a handle alongside the file gives a client a proof
+		// whose response hash cannot match what it downloaded — indistinguishable
+		// from tampering, and worse than the 404 it would otherwise get.
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("content response carried ZG-Res-Key %q; the signature does not cover these bytes", got)
+		}
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -1111,4 +1151,214 @@ func TestVideoGeneration_WaitParam(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A SIGNING video service, which is as close to the replay as this package can
+// get. Centralized + TLS is what makes handleVideoGenerationResponse sign at all
+// (the `signs` predicate needs a captured upstream certificate fingerprint, and
+// ProcessHTTPRequest only captures one from resp.TLS on a 200) — same recipe as
+// TestCentralizedProvider_NonStream.
+//
+// The scheduler is ENABLED here, with intervals long enough that nothing is ever
+// polled. That one line is what makes these assertions mean something: without it
+// a non-terminal create hits dropUnpollableVideoSignature, which evicts the
+// create-time signature, and the replay then fails the existence gate — so every
+// assertion below would pass no matter what the guards did.
+//
+// (An earlier version of this comment blamed a missing poll ROW. That was wrong:
+// deferVideoBillingToPoll drops the signature and then writes the row anyway, as
+// video.go says in as many words. The row and its chat_key exist; the cache entry
+// is what is gone. Same outcome, different mechanism, and the difference matters
+// because the row's existence is load-bearing for recoverability elsewhere.)
+func TestVideoGeneration_ResKeyReplay(t *testing.T) {
+	mockProvider, jobID := newMockVideoProviderTLS(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+	env.ctrl.SetHTTPClient(mockProvider.Client())
+
+	// Enabled so the create keeps its signature; intervals long enough that the job
+	// stays non-terminal for the whole test, which is the state under assertion.
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 1,
+		PollInterval:       time.Hour,
+		MaxPollDuration:    time.Hour,
+		ScanInterval:       time.Hour,
+		LeaseWindow:        time.Hour,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Hour,
+		// Every Duration must be positive: the scheduler starts a ticker per
+		// interval and NewTicker panics on zero. Omitting this one panicked the
+		// whole package.
+		CleanupInterval: time.Hour,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(env.ctrl.ShutdownVideoPollScheduler)
+
+	get := func(t *testing.T, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		return w
+	}
+
+	// Create. A signing service advertises the handle here — that part is
+	// pre-existing, and asserting it is how we know the fixture really signs
+	// (otherwise everything below would pass vacuously again).
+	createBody := `{"model":"sora-2","prompt":"a cat","seconds":5,"size":"720x1280"}`
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	createdKey := w.Header().Get("ZG-Res-Key")
+	if createdKey == "" {
+		t.Fatal("fixture does not sign; every assertion below would be vacuous")
+	}
+
+	// The job is still queued, so the only signature in the cache is the create-time
+	// one over the {"status":"queued"} envelope. Replaying the handle here would
+	// hand the client a proof that cannot describe the body it just received —
+	// the same objection that keeps the handle off /content.
+	t.Run("non-terminal poll does not replay", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID)
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("in_progress poll advertised %q; the signature covers the queued envelope, not this body", got)
+		}
+	})
+
+	// /content carries the mp4, which no signature binds.
+	t.Run("content never replays", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID+"/content")
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("content response advertised %q; the signature does not cover these bytes", got)
+		}
+	})
+
+	// The handle must not resolve for a job this caller does not own, and the
+	// ownership check must fire before the replay can stage anything.
+	t.Run("a foreign job is refused before any replay", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/video-test-not-mine")
+		if w.Code != http.StatusForbidden && w.Code != http.StatusBadRequest {
+			t.Errorf("expected a refusal, got %d: %s", w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("refused request still advertised %q", got)
+		}
+	})
+}
+
+// The happy path, and the only place the status-only guard is falsifiable: that
+// guard sits behind the terminal check, so a non-terminal job never reaches it.
+// Drives the scheduler to completion, then asserts the replay actually works —
+// same handle as the create response, resolving to a real signature — and that
+// /content still refuses to carry it even now that a valid handle exists.
+func TestVideoGeneration_ResKeyReplayAfterCompletion(t *testing.T) {
+	mockProvider, jobID := newMockVideoProviderTLS(t)
+	t.Cleanup(func() { mockProvider.Close() })
+
+	env := setupTestEnv(t, func(cfg *config.Config) {
+		cfg.Service.TargetURL = mockProvider.URL
+		cfg.Service.Type = "video-generation"
+		cfg.Service.ModelType = "sora-2"
+		cfg.Service.ProviderType = constant.ProviderTypeCentralized
+		cfg.Service.ProviderIdentity = constant.CentralizedProviderOpenAI
+		cfg.Service.TargetSeparated = true
+	})
+	env.ctrl.SetHTTPClient(mockProvider.Client())
+
+	// Short intervals so the job resolves within the test; the mock's status GET
+	// answers "completed" on the first poll.
+	if err := env.ctrl.InitVideoPollScheduler(config.VideoPollConfig{
+		Enabled:            true,
+		MaxConcurrentPolls: 1,
+		PollInterval:       50 * time.Millisecond,
+		MaxPollDuration:    time.Minute,
+		ScanInterval:       50 * time.Millisecond,
+		LeaseWindow:        time.Minute,
+		PollRequestTimeout: 5 * time.Second,
+		RetentionTTL:       time.Hour,
+		CleanupInterval:    time.Hour,
+	}); err != nil {
+		t.Fatalf("init video poll scheduler: %v", err)
+	}
+	t.Cleanup(env.ctrl.ShutdownVideoPollScheduler)
+
+	createBody := `{"model":"sora-2","prompt":"a cat","seconds":5,"size":"720x1280"}`
+	req := httptest.NewRequest("POST", "/v1/proxy/videos", strings.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	createdKey := w.Header().Get("ZG-Res-Key")
+	if createdKey == "" {
+		t.Fatal("fixture does not sign; every assertion below would be vacuous")
+	}
+
+	// Wait for the scheduler to resolve the job. The replay is gated on the ROW's
+	// status, so poll the row rather than the API.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		key, err := env.ctrl.VideoJobChatKeyForTest(jobID)
+		if err != nil {
+			t.Fatalf("read chat key: %v", err)
+		}
+		if key != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("job did not reach completed within 20s; the replay path was never exercised")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	get := func(t *testing.T, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", createAuthHeader(t, env.privateKey, env.providerAddr))
+		w := httptest.NewRecorder()
+		env.engine.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("a completed status poll replays the create-time handle", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID)
+		got := w.Header().Get("ZG-Res-Key")
+		if got == "" {
+			t.Fatal("completed poll did not replay the handle; the signature is unreachable")
+		}
+		if got != createdKey {
+			t.Errorf("replayed %q, want the create-time handle %q — a different key points at a different proof", got, createdKey)
+		}
+		if _, err := env.ctrl.GetChatSignature(got); err != nil {
+			t.Errorf("replayed handle does not resolve: %v", err)
+		}
+	})
+
+	// Now that a resolvable handle EXISTS, this is the assertion that pins the
+	// status-only guard: the signature binds the terminal poll JSON, not these mp4
+	// bytes, so a handle here would be a proof the client cannot match.
+	t.Run("content still refuses to carry it", func(t *testing.T) {
+		w := get(t, "/v1/proxy/videos/"+jobID+"/content")
+		if got := w.Header().Get("ZG-Res-Key"); got != "" {
+			t.Errorf("content advertised %q; the signature does not cover these bytes", got)
+		}
+	})
 }

@@ -26,6 +26,10 @@ type mockVideoPollDB struct {
 	jobs map[uint64]*model.VideoPollJob
 	next uint64
 
+	// errOnChatKeyLookup makes the signature-handle read fail, so the replay's
+	// degrade-to-no-header path can be exercised.
+	errOnChatKeyLookup error
+
 	errOnCreate              error
 	errOnComplete            error
 	errOnCompleteWhitelisted error
@@ -50,6 +54,24 @@ type mockVideoPollDB struct {
 
 func newMockVideoPollDB() *mockVideoPollDB {
 	return &mockVideoPollDB{jobs: make(map[uint64]*model.VideoPollJob)}
+}
+
+func (m *mockVideoPollDB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.errOnChatKeyLookup != nil {
+		// Poisoned value alongside the error, deliberately: a real gorm Pluck can
+		// leave the destination written, and returning "" here would make
+		// "degrade on error" and "return whatever came back" indistinguishable —
+		// the assertion would hold for both.
+		return "poisoned-do-not-replay", m.errOnChatKeyLookup
+	}
+	for _, j := range m.jobs {
+		if j.ProviderJobID == providerJobID {
+			return j.ChatKey, nil
+		}
+	}
+	return "", nil
 }
 
 func (m *mockVideoPollDB) CreateVideoPollJob(job model.VideoPollJob) error {

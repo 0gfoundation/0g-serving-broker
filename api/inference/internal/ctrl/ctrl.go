@@ -40,6 +40,11 @@ type asyncDB interface {
 // mock implementation. See docs/design/video-generation-async-billing.md.
 type videoPollDB interface {
 	CreateVideoPollJob(job model.VideoPollJob) error
+	// GetVideoPollJobChatKey returns the signature-lookup handle for a COMPLETED
+	// video job, or "" when there is none safe to hand back. Read on the video
+	// STATUS passthrough only, so the handle can be replayed — see
+	// Ctrl.VideoJobChatKey.
+	GetVideoPollJobChatKey(providerJobID string) (string, error)
 	ClaimDueVideoPollJobs(limit int, leaseWindow time.Duration) ([]model.VideoPollJob, error)
 	// claimAttempts fences every write below against a stale worker whose lease already
 	// expired and was reclaimed by someone else: it must be the Attempts value observed on

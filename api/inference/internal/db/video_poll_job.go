@@ -313,3 +313,102 @@ func (d *DB) GetVideoPollJobByRequestHash(requestHash string) (model.VideoPollJo
 	err := d.db.Where("request_hash = ?", requestHash).First(&job).Error
 	return job, err
 }
+
+// GetVideoPollJobChatKey returns the TEE signature-lookup handle for a COMPLETED
+// video job, or "" when there is nothing safe to hand back. Index-backed read on
+// provider_job_id.
+//
+// It exists so a video STATUS poll can replay the ZG-Res-Key the create response
+// already advertised. Without that replay the handle is issued once and then
+// unreachable: video status/content are AuthRequiredPrefixes passthroughs, which
+// return early in ProcessHTTPRequest and never set the header, so a client that
+// did not capture it from the create response can never verify the attestation.
+// Async image has always replayed it (handler/async.go restores ZG-Res-Key from
+// the stored response headers, gated on the job being completed); this is the same
+// guarantee for video, gated the same way.
+//
+// COMPLETED only, and that is not tidiness. Before the poller observes a terminal
+// state the cached signature is the create-time one, made over the
+// {"status":"queued"} envelope — so replaying the handle on an in_progress poll
+// hands the client a proof whose response hash cannot describe the body it just
+// received. That is indistinguishable from tampering, which is the same reason the
+// caller refuses to replay on /videos/{id}/content.
+//
+// It narrows that window rather than closing it, and the residue is worth naming
+// instead of implying otherwise. The poller commits the status BEFORE it re-signs
+// (deliberately — video_poll.go explains that signing first lets a losing worker's
+// signature win the cache), so between those two statements a poll can see
+// status=completed while the cache still holds the placeholder. That is
+// microseconds inside one function, against a client polling every few seconds, and
+// one stale reading that the next poll corrects. Closing it properly would mean
+// recording "the signature is current" as new state, which is not worth carrying
+// for a window that size. A re-sign FAILURE is not part of this: it evicts the
+// entry (dropStaleVideoSignature), so the existence gate then finds nothing and no
+// handle goes out.
+//
+// A DUPLICATED provider job id yields nothing, deliberately. provider_job_id is a
+// plain index (only request_hash is unique) and CreateVideoPollJob is a bare
+// Create, so two requests that draw the same upstream id both insert. Picking one
+// looks tempting — VideoJobOwner.ProviderJobID is unique, so only the first
+// creator can ever poll, so "oldest wins" seems to follow. It does not: the owner
+// insert and the poll insert are separate non-transactional writes with a
+// client-facing response write between them, so poll-row order does not track
+// owner-row order, and the loser's row can hold the lower id. Handing over the
+// wrong creator's handle is exactly the leak the collation migration closed, so
+// the answer for an ambiguous id is no answer. The collision already logs loudly
+// at the owner insert.
+//
+// Not an error when absent: a synchronously-completed job has no poll row, a
+// TargetSeparated service signs nothing, and an unfinished job is not yet
+// replayable. All three mean "no handle", not a fault.
+func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
+	if providerJobID == "" {
+		return "", nil
+	}
+	// The id is re-compared IN GO, byte for byte — that is why this selects
+	// provider_job_id back instead of just chat_key.
+	//
+	// This column inherits utf8mb4_0900_ai_ci (case-INSENSITIVE), while the
+	// video_job_owner column that authorizes the caller is utf8mb4_0900_bin. Public
+	// ids do carry case: `v0_` passes the vendor id through over a charset that
+	// accepts both, and `v2_` is base64url. So `v2_qujd` and `v2_QUJD` are two
+	// distinct jobs that this predicate alone would conflate, and /signature/{key}
+	// needs no session — that would hand a third party a proof over content they
+	// never requested. In Go rather than a per-query COLLATE (binds to the
+	// placeholder, so a DSN carrying charset=utf8 raises 1253 and every lookup
+	// silently loses the header) or a column conversion (ALGORITHM=COPY rebuild).
+	//
+	// Ambiguity yields nothing rather than a guess: provider_job_id is indexed, not
+	// unique (request_hash is), and the owner and poll inserts are separate
+	// non-transactional writes, so row order cannot identify the real creator.
+	// Ambiguity is judged among COMPLETED rows only — the status predicate runs
+	// first — so a reissued id whose rows differ in status looks unambiguous here.
+	// Limit(3) makes that check see one case-variant alongside a genuine duplicate;
+	// a set holding two variants AND a duplicate hides the duplicate and still
+	// returns a handle (measured, not theorised). Tolerable only because
+	// provider_job_id is vendor-assigned, never client-chosen, so a caller cannot
+	// manufacture that set — it is a corruption shape, not an attack path.
+	var rows []struct {
+		ProviderJobID string
+		ChatKey       string
+	}
+	err := d.db.Model(&model.VideoPollJob{}).
+		Select("provider_job_id", "chat_key").
+		Where("provider_job_id = ?", providerJobID).
+		Where("status = ?", model.VideoPollStatusCompleted).
+		Limit(3).
+		Scan(&rows).Error
+	if err != nil {
+		return "", err
+	}
+	var exact []string
+	for _, r := range rows {
+		if r.ProviderJobID == providerJobID {
+			exact = append(exact, r.ChatKey)
+		}
+	}
+	if len(exact) != 1 {
+		return "", nil
+	}
+	return exact[0], nil
+}
