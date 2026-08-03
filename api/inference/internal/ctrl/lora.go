@@ -156,6 +156,20 @@ func ExtractModelName(body []byte, contentType string) string {
 		return ""
 	}
 	raw, matched := jsonFieldFolded(fields, "model")
+	if exact, ok := fields["model"]; ok {
+		// The exact spelling wins when the body carries it. This answer feeds AUTHORIZATION
+		// gates — CheckLoRAOwnership, which short-circuits on IsLoRAModel("") and is the only
+		// ownership check on a private fine-tuned adapter, and the model-expiry 410 — so
+		// answering "no model named" for a body that plainly names one skips them. Which is
+		// exactly what folding alone did: `{"model":"ft-victim","Model":"ft-victim"}` reported
+		// two variants and returned "", while ValidateModelAllowlist read the exact key and
+		// admitted the adapter.
+		//
+		// The money path does not rely on this tie-break: the video reserve refuses a body with
+		// competing spellings of any price-setting field outright, rather than picking a reading
+		// the upstream may not share.
+		raw, matched = exact, 1
+	}
 	if matched != 1 {
 		return ""
 	}

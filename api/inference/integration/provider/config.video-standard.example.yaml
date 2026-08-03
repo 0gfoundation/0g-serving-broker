@@ -93,12 +93,12 @@ service:
         # documentation: the pre-flight balance reserve prices a create that OMITS
         # `seconds` / `size` at these values, because the upstream applies its own
         # defaults and bills them. Publish what the upstream actually applies —
-        # Omitting `seconds` is WARNED about at boot and refused at request time
-        # (a broker-attributed 503) — refusing every conforming create that omits
-        # the field is the alternative, so publish it. A PRESENT-but-unusable
-        # value for either field fails the boot instead, because that one is a typo
-        # the operator cannot otherwise see: a wrong `size` silently moves the
-        # reserve away from the bill.
+        # Omitting `seconds` is WARNED about at boot and then refused at request
+        # time (a broker-attributed 503), because refusing every conforming create
+        # that omits the field is the alternative — so publish it. A PRESENT-but-
+        # unusable value for either field fails the boot instead: that one is a typo
+        # the operator cannot otherwise see (a wrong `size` silently moves the
+        # reserve away from the bill, with no error, log or metric).
         defaultParameters:
           seconds: 5
           size: "720p"
@@ -127,12 +127,12 @@ service:
         # documentation: the pre-flight balance reserve prices a create that OMITS
         # `seconds` / `size` at these values, because the upstream applies its own
         # defaults and bills them. Publish what the upstream actually applies —
-        # Omitting `seconds` is WARNED about at boot and refused at request time
-        # (a broker-attributed 503) — refusing every conforming create that omits
-        # the field is the alternative, so publish it. A PRESENT-but-unusable
-        # value for either field fails the boot instead, because that one is a typo
-        # the operator cannot otherwise see: a wrong `size` silently moves the
-        # reserve away from the bill.
+        # Omitting `seconds` is WARNED about at boot and then refused at request
+        # time (a broker-attributed 503), because refusing every conforming create
+        # that omits the field is the alternative — so publish it. A PRESENT-but-
+        # unusable value for either field fails the boot instead: that one is a typo
+        # the operator cannot otherwise see (a wrong `size` silently moves the
+        # reserve away from the bill, with no error, log or metric).
         defaultParameters:
           seconds: 5
           size: "720p"

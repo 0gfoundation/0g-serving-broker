@@ -1226,16 +1226,18 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 	if mi == nil {
 		return nil
 	}
-	// REQUIRED, not merely validated: the reserve prices a create that omits `seconds` at this
-	// value, and with nothing published it refuses the create instead (a 503, since it is an
-	// operator gap and not a bad request). Omitting `seconds` is the OpenAI Video API's default
-	// request shape, so a video service that publishes no default answers conforming traffic
-	// with 503s. Failing the boot puts that in front of the operator at deploy time.
+	// A PRESENT-but-unusable value fails the boot; an ABSENT one does not. The two are different
+	// problems: a typo (`seconds: .nan`, `seconds: "auto"`, `seconds: 0.4`) is invisible at
+	// runtime — it reports "unpublished" exactly like publishing nothing, so the reserve silently
+	// moves away from the bill — whereas simply not publishing it is loud (every create that
+	// omits `seconds` gets a broker-attributed 503) and is warned about at config load. Erroring
+	// on absent as well would refuse to start every existing video deployment that has not added
+	// the field, which is not this change's call to make.
 	raw, ok := mi.DefaultParameters["seconds"]
+	if !ok || raw == nil {
+		return nil
+	}
 	if _, usable := videoDefaultSeconds(mi.DefaultParameters); !usable {
-		if !ok || raw == nil {
-			return fmt.Errorf("modelInfo.defaultParameters.seconds is required for video-generation: the pre-flight balance reserve prices a create that omits `seconds` at this value, and refuses the create when nothing is published")
-		}
 		return fmt.Errorf("invalid modelInfo.defaultParameters.seconds %v: must be a number between 1 and %d", raw, maxDefaultVideoSeconds)
 	}
 	// `size` is load-bearing the same way and fails SILENTLY rather than loudly: a YAML `size:
@@ -1248,6 +1250,43 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 		}
 	}
 	return nil
+}
+
+// ReserveVideoSizeRatio is the size multiplier the pre-flight reserve should use for a request:
+// the larger of the service-level and the resolved model's videoSizeRatios, looked up with
+// resolution NORMALIZATION as well as verbatim.
+//
+// Both widenings exist because the reserve reads the REQUEST's size while settlement reads the
+// RESPONSE's, so neither can move a bill:
+//
+//   - per-model scope: videoSizeRatios is a per-model-capable field that GET /v1/models advertises
+//     per model, and GetVideoSizeRatio reads only the service block — so a published per-model
+//     ratio was used by nothing.
+//   - normalization: the map is indexed verbatim while BillingConfig matching goes through
+//     normalizeResolution, so `size:"1024X1792"` — one capital letter — missed a 2.0 ratio and
+//     reserved half of what the vendor's canonical echo settled at.
+//
+// Taking the max rather than switching keeps it monotone: settlement's own fallback still reads
+// the service map verbatim, so preferring another value outright could reserve below the bill.
+func (s *Service) ReserveVideoSizeRatio(model, size string) float64 {
+	ratio := s.GetVideoSizeRatio(size)
+	consider := func(ratios map[string]float64) {
+		res := normalizeResolution(size)
+		for k, v := range ratios {
+			if (k == size || normalizeResolution(k) == res) && v > ratio {
+				ratio = v
+			}
+		}
+	}
+	if s.ModelInfo != nil {
+		consider(s.ModelInfo.VideoSizeRatios)
+	} else {
+		consider(DefaultVideoSizeRatios)
+	}
+	if mi := s.EffectiveModelInfo(model); mi != nil {
+		consider(mi.VideoSizeRatios)
+	}
+	return ratio
 }
 
 // videoPricedModels lists every model id this service can be asked to price: the on-chain

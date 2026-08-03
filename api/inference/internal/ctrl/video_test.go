@@ -828,6 +828,14 @@ func TestVideoReserveSecondsSizeFromRequest(t *testing.T) {
 			wantState:   videoDurationUnpriceable,
 		},
 		{
+			// BYPASS: the JSON arm guarded `seconds` and `size` but not `model`, so
+			// `{"model":"cheap","Model":"dear"}` priced (and settled) the cheap model while the
+			// translator's folded decode rendered the dear one.
+			name:      "bypass: competing json model spellings are unpriceable",
+			reqBody:   []byte(`{"model":"cheap","Model":"dear","seconds":6,"size":"1080P"}`),
+			wantState: videoDurationUnpriceable,
+		},
+		{
 			// `model` selects the price, so it is in the same refuse-on-ambiguity set as the
 			// duration and the size.
 			name: "bypass: repeated multipart model is unpriceable",
@@ -1307,16 +1315,18 @@ func TestVideoDefaultParametersValidatedAtLoad(t *testing.T) {
 		}
 		return mi
 	}
-	// Required, not merely validated: with nothing published the reserve refuses every create
-	// that omits `seconds` — the OpenAI Video API's default request shape — so the operator has
-	// to learn about it at deploy time rather than from 503s on conforming traffic.
-	if err := newInfo(nil).Validate("video-generation"); err == nil {
-		t.Error("a video model publishing no default duration must fail config load")
+	// ABSENT is not a boot error — loadConfig warns and the reserve refuses the create at request
+	// time. Erroring here would refuse to start every existing video deployment that has not
+	// added the field yet, which is a bigger call than this gate should make.
+	if err := newInfo(nil).Validate("video-generation"); err != nil {
+		t.Errorf("an absent default duration must not fail the boot: %v", err)
 	}
-	// A blank `seconds:` in YAML decodes to nil: that is "published nothing", the same state as
-	// omitting the key, and must produce the required-field error rather than a typo error.
-	if err := newInfo(nil).Validate("video-generation"); err == nil || !strings.Contains(err.Error(), "is required") {
-		t.Errorf("err = %v, want the required-field error", err)
+	// A blank `seconds:` in YAML decodes to nil, which is "published nothing" — the same state as
+	// omitting the key, not a typo to fail the boot on.
+	mi := newInfo(nil)
+	mi.DefaultParameters = map[string]interface{}{"seconds": nil}
+	if err := mi.Validate("video-generation"); err != nil {
+		t.Errorf("a blank `seconds:` must be treated as unpublished, not a typo: %v", err)
 	}
 	if err := newInfo(4).Validate("video-generation"); err != nil {
 		t.Errorf("a usable published default must load: %v", err)
@@ -1338,9 +1348,9 @@ func TestVideoDefaultParametersValidatedAtLoad(t *testing.T) {
 	}
 
 	// Non-video services are unaffected: the field is pure /v1/models metadata there.
-	mi := newInfo("auto")
-	mi.ContextLength = 4096
-	if err := mi.Validate("chatbot"); err != nil {
+	chat := newInfo("auto")
+	chat.ContextLength = 4096
+	if err := chat.Validate("chatbot"); err != nil {
 		t.Errorf("a chatbot model must not be gated on video defaults: %v", err)
 	}
 }
@@ -1409,9 +1419,14 @@ func TestExtractModelNameMatchesUpstreamReading(t *testing.T) {
 		// Read by exact key this was invisible; the upstream reads it as the model.
 		{name: "case-variant key", body: `{"Model":"expensive","seconds":6}`, want: "expensive"},
 		{name: "upper-case key", body: `{"MODEL":"expensive"}`, want: "expensive"},
-		// Go resolves competing variants by document order, which an unordered map cannot see, so
-		// neither reading can be trusted: reported absent, and the video reserve refuses the body.
-		{name: "competing key variants", body: `{"model":"cheap","Model":"expensive"}`, want: ""},
+		// The EXACT spelling wins when present. Reporting "absent" here disabled the LoRA
+		// ownership gate and the expiry gate, which short-circuit on an empty model name while
+		// ValidateModelAllowlist read the exact key and admitted the adapter. The money path does
+		// not rely on this tie-break: the video reserve refuses a body with competing spellings.
+		{name: "competing variants, exact key wins", body: `{"model":"cheap","Model":"expensive"}`, want: "cheap"},
+		// No exact key and no single folded match: nothing can be trusted, and no gate can be
+		// fooled either — the allowlist also reads nothing, so the configured model is served.
+		{name: "competing variants, no exact key", body: `{"Model":"a","MODEL":"b"}`, want: ""},
 		{name: "absent", body: `{"seconds":6}`, want: ""},
 		{name: "wrong-typed model degrades to absent", body: `{"model":123}`, want: ""},
 		{name: "unparseable", body: `not json`, want: ""},
@@ -1422,5 +1437,75 @@ func TestExtractModelNameMatchesUpstreamReading(t *testing.T) {
 				t.Errorf("ExtractModelName() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestReserveVideoSizeRatioNormalizes covers the two widenings the reserve's ratio lookup needs.
+// Neither can move a bill: the reserve reads the REQUEST's size, settlement reads the RESPONSE's.
+func TestReserveVideoSizeRatioNormalizes(t *testing.T) {
+	// Single-model, default ratios (1024x1792 = 2.0) — the most common deployment.
+	svc := config.Service{}
+	for _, size := range []string{"1024x1792", "1024X1792", " 1024x1792", "1024x1792 "} {
+		if got := svc.ReserveVideoSizeRatio("any", size); got != 2.0 {
+			// One capital letter used to miss the 2.0 ratio and reserve half of what the
+			// vendor's canonical echo settled at.
+			t.Errorf("ReserveVideoSizeRatio(%q) = %v, want 2", size, got)
+		}
+	}
+	// A per-model map is consulted too: videoSizeRatios is per-model-capable and advertised per
+	// model in GET /v1/models, while GetVideoSizeRatio reads only the service block.
+	perModel := newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
+		Model:       "dear",
+		OutputPrice: "100",
+		ModelInfo:   &config.ModelInfo{VideoSizeRatios: map[string]float64{"1080P": 4.0}},
+	}}, "dear")
+	if got := perModel.ReserveVideoSizeRatio("dear", "1080p"); got != 4.0 {
+		t.Errorf("per-model ratio = %v, want 4", got)
+	}
+	// Unknown sizes stay at the baseline.
+	if got := svc.ReserveVideoSizeRatio("any", "2K"); got != 1.0 {
+		t.Errorf("unlisted size ratio = %v, want 1", got)
+	}
+}
+
+// TestVideoBillingSizeSubstitutesPublishedTier covers the settlement-side half of the size
+// vocabulary problem: when the upstream omits `size`, resolveVideoBilling falls back to the
+// REQUEST's, and a tier-keyed model prices a client shape like "1280x720" nowhere — so
+// videoOutputUnits billed the table MAXIMUM, over-charging the caller and disagreeing with the
+// reserve, which prices the published tier for exactly that case.
+func TestVideoBillingSizeSubstitutesPublishedTier(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bucketed",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 40},
+			},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "768P"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bucketed")}
+	ctx := ginCtxWithResolvedModel("bucketed")
+
+	// A tier the model prices nowhere becomes the published one.
+	if got := c.videoBillingSize(ctx, "1280x720"); got != "768P" {
+		t.Errorf("videoBillingSize(%q) = %q, want the published %q", "1280x720", got, "768P")
+	}
+	// A tier it does price is left alone, in any casing.
+	for _, size := range []string{"1080P", "1080p"} {
+		if got := c.videoBillingSize(ctx, size); got != size {
+			t.Errorf("videoBillingSize(%q) = %q, want it unchanged", size, got)
+		}
+	}
+	// And the reserve and the bill now agree on the substituted tier.
+	reserve, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"bucketed","seconds":6,"size":"1280x720"}`), "application/json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	settled := c.videoOutputUnits(ctx, 6, c.videoBillingSize(ctx, "1280x720"))
+	if reserve != settled {
+		t.Errorf("reserve %d != settled %d for a client tier the model prices nowhere", reserve, settled)
 	}
 }

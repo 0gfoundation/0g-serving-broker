@@ -208,6 +208,12 @@ const (
 	// the translator clamped it down and billed in full, so a spike here is
 	// something an operator wants to see, not a request that dies unclassified.
 	RejectionInvalidRequest = "invalid_request"
+	// RejectionPricingUnavailable: the gate could not price the request through no fault of the
+	// caller — a stale USD rate snapshot, or a model whose published metadata does not say what
+	// an omitted field costs. Broker-attributed in the failure metric; given its own rejection
+	// reason because an operator config gap otherwise refuses every conforming create with no
+	// classified signal, only a status label.
+	RejectionPricingUnavailable = "pricing_unavailable"
 )
 
 // CtxKeyRejectionReason is the gin context key under which a request handler
@@ -432,7 +438,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	RequestRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_requests_rejected_total",
-			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error, model_expired, invalid_request).",
+			Help:        "Total number of requests rejected before reaching the upstream, labeled by reason (rate_limit, tpm_limit, ipm_limit, concurrency, model_mismatch, insufficient_balance, not_acknowledged, account_not_exist, upstream_error, model_expired, invalid_request, pricing_unavailable).",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},

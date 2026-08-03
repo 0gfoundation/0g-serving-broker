@@ -109,10 +109,23 @@ func TestModelInfo_Validate_VideoGeneration_NullContextLength(t *testing.T) {
 // API's default request shape — so the operator has to learn about it at deploy time rather than
 // from 503s on conforming traffic.
 func TestModelInfo_Validate_VideoGeneration_RequiresDefaultSeconds(t *testing.T) {
+	// ABSENT is not a boot error: erroring would refuse to start every existing video deployment
+	// that has not added the field. loadConfig warns instead, and the reserve refuses the create
+	// at request time with a broker-attributed 503.
 	m := validModelInfo()
 	m.ContextLength = 0
-	if err := m.Validate("video-generation"); err == nil {
-		t.Error("expected video-generation to require modelInfo.defaultParameters.seconds")
+	if err := m.Validate("video-generation"); err != nil {
+		t.Errorf("an absent default duration must not fail the boot: %v", err)
+	}
+	// PRESENT-but-unusable is, because at runtime it is indistinguishable from absent and moves
+	// the reserve away from the bill with no error, log or metric.
+	for _, bad := range []interface{}{0, 3601, "auto", true, 0.4} {
+		m := validModelInfo()
+		m.ContextLength = 0
+		m.DefaultParameters = map[string]interface{}{"seconds": bad}
+		if err := m.Validate("video-generation"); err == nil {
+			t.Errorf("defaultParameters.seconds = %v must fail the boot", bad)
+		}
 	}
 	// Non-video service types are unaffected: there the field is pure /v1/models metadata.
 	if err := validModelInfo().Validate("chatbot"); err != nil {

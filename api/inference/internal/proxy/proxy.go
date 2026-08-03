@@ -850,6 +850,16 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			expectedInputFee = "0"
 			break
 		}
+		// The query is a price-setting channel the reserve cannot see: proxyHTTPRequest forwards
+		// it verbatim (targetURL keeps ctx.Request.RequestURI's query), and the upstream reads
+		// the create with r.FormValue, which resolves the QUERY before the body. See
+		// ErrVideoBillingFieldInQuery.
+		if q := ctx.Request.URL.Query(); q.Has("seconds") || q.Has("size") || q.Has("model") {
+			ctx.Set("ignoreError", true)
+			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+			p.handleBrokerError(ctx, ctrl.ErrVideoBillingFieldInQuery, "")
+			return
+		}
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"))
 		if err != nil {
 			switch {
@@ -895,7 +905,17 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// 503 does not depend on each listed sentinel already carrying one: a future
 				// addition built with errors.New would otherwise fall to errors.Response's
 				// 400 default and be attributed to the caller.
-				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "estimate video pre-flight reserve")
+				//
+				// Recorded too, with its own reason: an operator whose config publishes no
+				// default duration answers EVERY conforming create with a 503, and the
+				// argument for classifying the client-caused rejections ("must not die
+				// unclassified") applies at least as strongly to a fault that is entirely on
+				// this side. The context string is dropped for the same reason as the 400 arm:
+				// errors.Response replaces the message only at exactly 500, so a 503 body ships
+				// whatever it is handed, and the log line below carries the cause instead.
+				p.rejections.record(ctx, monitor.RejectionPricingUnavailable, userAddress)
+				p.logger.Errorf("video pre-flight reserve unavailable: %v", err)
+				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "")
 				return
 			default:
 				// Anything else here is broker infrastructure: a contract read that could not

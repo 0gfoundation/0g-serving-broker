@@ -709,3 +709,23 @@ func TestHandleBrokerError_PricingUnavailableMapsTo503(t *testing.T) {
 		})
 	}
 }
+
+// TestVideoBillingFieldInQueryIsClientFault pins the classification of the query-channel refusal.
+// The broker forwards the query verbatim and the upstream reads the create with r.FormValue, whose
+// ParseMultipartForm resolves the QUERY before the body — so `?seconds=15` against a body of
+// `seconds=1` had the gate price 1 while the upstream rendered 15. The gate never sees the URL, so
+// the only safe answer is to refuse, and it must be attributed to the caller.
+func TestVideoBillingFieldInQueryIsClientFault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/proxy/videos?seconds=15", nil)
+	ctx.Set("ignoreError", true)
+	newTestProxy(t, nil).handleBrokerError(ctx, ctrl.ErrVideoBillingFieldInQuery, "")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d (body %s)", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "reserve") {
+		t.Errorf("client body carries an internal breadcrumb: %s", w.Body.String())
+	}
+}

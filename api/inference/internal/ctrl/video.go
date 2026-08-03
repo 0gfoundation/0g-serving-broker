@@ -415,6 +415,13 @@ func videoReserveFromJSON(reqBody []byte) (int64, string, videoReserveDuration) 
 		// read this request; something downstream still might.
 		return 0, "", videoDurationUnpriceable
 	}
+	// `model` selects the price, so it is guarded like the other two — the multipart path already
+	// refused a repeated `model` part, and leaving JSON unguarded meant
+	// `{"model":"cheap","Model":"dear"}` priced (and settled) the cheap model while the
+	// translator's folded decode rendered the dear one.
+	if _, modelVariants := jsonFieldFolded(fields, "model"); modelVariants > 1 {
+		return 0, "", videoDurationUnpriceable
+	}
 	rawSize, sizeVariants := jsonFieldFolded(fields, "size")
 	if sizeVariants > 1 {
 		return 0, "", videoDurationUnpriceable
@@ -599,7 +606,7 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	if entry != nil && entry.Billing.IsResolutionKeyed() && !entry.Billing.HasResolution(size) {
 		return 0, ErrVideoDefaultSizeUnpublished
 	}
-	ratio := c.videoReserveSizeRatio(requestedModel, size)
+	ratio := c.Service.ReserveVideoSizeRatio(requestedModel, size)
 	// !(ratio >= 1) rather than ratio < 1: a NaN ratio (an operator can write one into
 	// videoSizeRatios) is false for `<` and would slip past the clamp into
 	// videoOutputCount, whose NaN guard floors at 1 unit.
@@ -613,23 +620,27 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	return units, nil
 }
 
-// videoReserveSizeRatio is GetVideoSizeRatio widened to the per-model scope the rest of the
-// reserve resolves in, taking the LARGER of the two.
+// videoBillingSize substitutes the model's published default resolution when the size about to be
+// billed is one this model prices NOWHERE.
 //
-// GetVideoSizeRatio reads only the SERVICE-level ModelInfo, while videoSizeRatios is a
-// per-model-capable field that GET /v1/models advertises per model — so a per-model ratio was
-// published and used by nothing, and the reserve fell to the service map. Taking the max
-// rather than switching scopes keeps this monotone: settlement's own fallback still uses the
-// service scope, so preferring the per-model value outright could reserve BELOW what
-// settlement bills whenever the per-model ratio is the smaller of the two.
-func (c *Ctrl) videoReserveSizeRatio(requestedModel, size string) float64 {
-	ratio := c.Service.GetVideoSizeRatio(size)
-	if mi := c.Service.EffectiveModelInfo(requestedModel); mi != nil && len(mi.VideoSizeRatios) > 0 {
-		if perModel, ok := mi.VideoSizeRatios[size]; ok && perModel > ratio {
-			ratio = perModel
-		}
+// It only ever fires on the degraded path: resolveVideoBilling prefers the response's own size and
+// falls back to the REQUEST's when the upstream omits it, and a client size like "1280x720" (the
+// OpenAI Video API's documented shape) is not in a tier-keyed vocabulary. videoOutputUnits then
+// finds no covering bucket and bills the table MAXIMUM — over-charging the caller by the whole
+// tier spread for a shape the API documents, and disagreeing with the reserve, which prices the
+// published default for exactly this case. Substituting here makes both sides read one tier.
+func (c *Ctrl) videoBillingSize(ctx context.Context, size string) string {
+	if !c.Service.HasMultiModelPricing() {
+		return size
 	}
-	return ratio
+	entry := c.resolveModelPricing(ctx)
+	if entry == nil || entry.Billing == nil || !entry.Billing.IsResolutionKeyed() || entry.Billing.HasResolution(size) {
+		return size
+	}
+	if def, published := c.Service.DefaultVideoSizeFor(entry.Model); published && entry.Billing.HasResolution(def) {
+		return def
+	}
+	return size
 }
 
 // videoModelUnits prices (seconds, size) through the resolved model's billing block,
@@ -664,6 +675,12 @@ func (c *Ctrl) videoModelUnits(entry *config.ModelPricingEntry, seconds int64, s
 		if bucket, ok := entry.Billing.NextBucketUnits(size, seconds); ok && bucket > 0 {
 			return bucket, true
 		}
+		// The GLOBAL table maximum, matching settlement exactly. Scoping it to the requested
+		// resolution looks tighter and breaks the invariant: when the duration exceeds every
+		// bucket AT that resolution, settlement's NextBucketUnits finds nothing either and it
+		// bills MaxTableUnits over the whole table. Reserving the per-resolution max would then
+		// sit below the bill (measured: reserve 20, settled 40). The resulting over-reserve when
+		// the upstream clamps the duration down is residual 3, not a scoping bug.
 		if mx := entry.Billing.MaxTableUnits(); mx > 0 {
 			return mx, true
 		}
@@ -724,6 +741,20 @@ var ErrVideoModelNotServed = errors.NewBadRequest("model not supported: not avai
 // silently be off by the table's units-per-second (measured at 10x on a plausible config).
 // Broker-attributed for the same reason as its sibling: publishing a usable default size is
 // the operator's job, not the caller's.
+// ErrVideoBillingFieldInQuery is returned when a create puts `seconds`, `size` or `model` in the
+// URL QUERY. The broker forwards the query verbatim, and the upstream reads the create with
+// r.FormValue — whose ParseMultipartForm populates r.Form from the QUERY FIRST and appends the
+// body after, so the query value wins. The gate is handed only the body, so it cannot see that
+// channel at all: `?seconds=15` against a body of `seconds=1` priced 1 and rendered 15, and it
+// composes across all three fields at once.
+//
+// Refused rather than merged because the OpenAI Video API puts none of these in the query, so
+// nothing legitimate is turned away — and because merging would mean re-implementing Go's
+// query-then-body precedence here, which is the kind of second reader of one request that
+// produced every bypass in this path's history.
+var ErrVideoBillingFieldInQuery = errors.NewBadRequest(
+	"`seconds`, `size` and `model` must be sent in the request body, not the URL query")
+
 var ErrVideoDefaultSizeUnpublished = errors.NewServiceUnavailable(
 	"video pricing unavailable: this model publishes no default resolution; send an explicit `size` this model prices")
 
@@ -1024,6 +1055,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		c.logger.Warnf("video billed on REQUESTED duration (upstream did not report actual output) for request %s; configure the upstream/shim to echo seconds or usage.output_video_duration", reqModel.RequestHash)
 	}
 
+	size = c.videoBillingSize(ctx, size)
 	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
 	outputCount := c.videoOutputUnits(ctx, seconds, size)
 

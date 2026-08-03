@@ -139,6 +139,7 @@ is a fixed discount, so these are all `unpriceable`:
 | a multipart field sent twice (`seconds`, `size` or `model`) | first value | Starlette/FastAPI return the **last** |
 | a multipart body that cannot be walked to the end | absent | repaired or sniffed downstream |
 | a body that is not a JSON object at all | absent | — |
+| a billing field in the URL **query** (`?seconds=15`) | the body's value | the query's — `r.FormValue` resolves the query before the body, and the gate is handed only the body |
 | `{"seconds":1,"Seconds":15}` | 1 | 15 — Go matches keys onto struct fields case-insensitively and resolves competing variants by document order, so an unordered map cannot know which the upstream took |
 
 Keys are matched case-**insensitively**, which is the price of decoding key-wise: the upstream
@@ -146,6 +147,13 @@ decodes into a struct, and `encoding/json` matches object keys onto struct field
 case. Folding the lookup makes a `{"Seconds":15}` read the same on both sides; more than one
 variant of a billing field is refused, because Go resolves competing variants by document order
 and a map has none.
+
+`seconds`, `size` and `model` are refused outright in the URL query. The broker forwards the query
+verbatim and the upstream reads the create with `r.FormValue`, whose `ParseMultipartForm` populates
+`r.Form` from the query *before* appending the body — so the query wins, and the gate is handed only
+the body. The OpenAI Video API puts none of them in the query, so refusing costs no legitimate
+traffic; merging them here would mean re-implementing Go's precedence as a second reader of one
+request, which is the shape that produced every bypass in this list.
 
 Transport is chosen by **Content-Type**, the way `ExtractModelName` chooses it — not by "did this
 parse as JSON". `ExtractModelName` itself decodes with a `json.Decoder`, key-wise and case-folded, for the same
@@ -259,6 +267,7 @@ and broker faults:
 |---|---|---|---|
 | `ErrVideoSecondsUnpriceable` | 400 | client | `invalid_request` |
 | `ErrVideoModelNotServed` | 400 | client | `model_mismatch` |
+| `ErrVideoBillingFieldInQuery` | 400 | client | `invalid_request` |
 | `ErrVideoDefaultDurationUnpublished` | 503 | broker | — |
 | `ErrVideoDefaultSizeUnpublished` | 503 | broker | — |
 | `ErrPricingUnavailable` (stale USD snapshot) | 503 | broker | — |
@@ -298,20 +307,24 @@ none of them is currently measured — see the last entry.
    carrying reserves into `unsettled` needs `FailVideoPollJob` / `TimeOutVideoPollJob` to clear them,
    or a job that never delivers settles as real revenue and the caller pays for a video they never
    received. That is a poll-lifecycle change, not a reserve change.
-2. **A rendered tier above both the requested and the published one.** With `defaultParameters.size`
-   priced, this now needs the upstream to render a tier that is neither what the client asked for nor
-   what the model publishes. The gap is then that tier's factor (config-bound; `resolutionMultipliers`
-   reach 8 in this repo's own examples). Closing it needs the rendered tier at request time, which
-   only the upstream knows — the fix is the create response echoing it, not the broker guessing.
+2. **A rendered tier above both the requested and the published one.** With
+   `defaultParameters.size` priced on the reserve side *and* substituted on the settlement side
+   (`videoBillingSize`, for a response that omits `size`), this needs the upstream to render a tier
+   that is neither what the client asked for nor what the model publishes — and to say so in the
+   response, since a response that stays silent is now billed on the published tier too. The gap is
+   then that tier's factor (config-bound; `resolutionMultipliers` reach 8 in this repo's own
+   examples). Closing it needs the rendered tier at request time, which only the upstream knows.
 3. **`seconds` the upstream clamps, in either direction.** `{"seconds":1}` prices at 1 unit while the
    translator raises it to the model floor (H3: 4s) and bills that — an under-reserve. Above the
    ceiling it is the mirror image and costs the *caller*: `{"seconds":60}` is priced at 60 units
    though the translator clamps to 15 and bills 15, so a solvent caller can be refused for a request
-   the upstream would have served (the 0G Router accepts up to 3600). Both come from one gap: the
-   model's priceable duration range is published nowhere the gate can read it. `defaultParameters`
-   closed the omitted cases the same way a published min/max would close these — and would also let
-   the broker reject an out-of-range duration outright instead of having it silently clamped
-   upstream, which is the better contract anyway.
+   the upstream would have served (the 0G Router accepts up to 3600). On a `per_unit_table` model the
+   over-reserve does not scale with the requested duration — it jumps to the table maximum, because
+   the reserve must mirror what settlement bills when no bucket covers the observation. Both
+   directions come from one gap: the model's priceable duration range is published nowhere the gate
+   can read it. `defaultParameters` closed the omitted cases the same way a published min/max would
+   close these — and would also let the broker reject an out-of-range duration outright instead of
+   having it silently clamped upstream, which is the better contract anyway.
 4. **None of the above is observed.** The reserve is never persisted, so nothing in production
    compares it to what settled — every bound here is an argument, not a measurement. The cheap fix is
    a `settledFee / reservedFee` counter at settlement, which needs the reserve carried on the poll
