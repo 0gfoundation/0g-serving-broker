@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -135,5 +136,38 @@ func TestParseMultipartN_RejectsNonNumericAndOversized(t *testing.T) {
 		// Just invoking without OOM / panic is the assertion. The error or
 		// success value is incidental.
 		_, _ = parseMultipartN(body, `multipart/form-data; boundary=b`)
+	})
+}
+
+// TestGetImageEditingInputFeeAndImageNum_Multipart_DisagreementIsRefused pins the two shapes where
+// this gate used to read a CHEAPER `n` than the upstream's form parser would. `n` multiplies the fee,
+// so each was a measured discount: bill one image, render ten.
+func TestGetImageEditingInputFeeAndImageNum_Multipart_DisagreementIsRefused(t *testing.T) {
+	c := &Ctrl{logger: testLogger()}
+	part := func(name, value string) string {
+		return "--b\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"
+	}
+
+	t.Run("repeated n is refused, not read as the first value", func(t *testing.T) {
+		body := []byte(part("n", "1") + part("n", "10") + "--b--\r\n")
+		if _, n, err := c.GetImageEditingInputFeeAndImageNum(body, `multipart/form-data; boundary=b`); err == nil {
+			t.Errorf("repeated n accepted as %d; Starlette/FastAPI take the LAST value, so this billed 1 and rendered 10", n)
+		}
+	})
+
+	t.Run("n padded past the read cap is refused, not defaulted to 1", func(t *testing.T) {
+		padded := strings.Repeat(" ", maxMultipartFieldBytes+1) + "10"
+		body := []byte(part("n", padded) + "--b--\r\n")
+		if _, n, err := c.GetImageEditingInputFeeAndImageNum(body, `multipart/form-data; boundary=b`); err == nil {
+			t.Errorf("over-long n accepted as %d; the upstream trims the padding and reads 10", n)
+		}
+	})
+
+	t.Run("a single well-formed n still works", func(t *testing.T) {
+		body := []byte(part("n", "10") + "--b--\r\n")
+		_, n, err := c.GetImageEditingInputFeeAndImageNum(body, `multipart/form-data; boundary=b`)
+		if err != nil || n != 10 {
+			t.Errorf("n = %d (err %v), want 10", n, err)
+		}
 	})
 }

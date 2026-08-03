@@ -100,8 +100,12 @@ service:
         # the operator cannot otherwise see (a wrong `size` silently moves the
         # reserve away from the bill, with no error, log or metric).
         defaultParameters:
+          # 1080p, NOT the cheaper 720p row: with no resolution in the request DashScope applies
+          # its OWN default of 1080P (see videotranslator sizeToDashScopeParams). Publishing 720p
+          # here reserved and billed the 1.0 baseline against a 1.5x render — the provider
+          # under-billing itself, silently, on the config an operator copies.
           seconds: 5
-          size: "720p"
+          size: "1080p"
 
     - model: "happyhorse-1.0"
       # TODO: same as above — set to DashScope's exact model identifier.
@@ -134,8 +138,12 @@ service:
         # the operator cannot otherwise see (a wrong `size` silently moves the
         # reserve away from the bill, with no error, log or metric).
         defaultParameters:
+          # 1080p, NOT the cheaper 720p row: with no resolution in the request DashScope applies
+          # its OWN default of 1080P (see videotranslator sizeToDashScopeParams). Publishing 720p
+          # here reserved and billed the 1.0 baseline against a 1.5x render — the provider
+          # under-billing itself, silently, on the config an operator copies.
           seconds: 5
-          size: "720p"
+          size: "1080p"
 
 # Optional: rate limiting and concurrency configuration (RPM applies to every
 # service type; video-generation has no dedicated per-minute dimension of its

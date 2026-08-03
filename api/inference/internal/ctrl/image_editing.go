@@ -1,12 +1,9 @@
 package ctrl
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
-	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,11 +55,18 @@ func (c *Ctrl) GetImageEditingInputFeeAndImageNum(reqBody []byte, contentType st
 	imageNum := int64(1) // default
 
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/") {
-		if n, err := parseMultipartN(reqBody, contentType); err == nil && n > 0 {
+		n, err := parseMultipartN(reqBody, contentType)
+		switch {
+		case errors.Is(err, ErrImageNumAmbiguous):
+			// The gate and the upstream's form parser would read DIFFERENT values, and `n`
+			// multiplies the fee — so this is the one class that must not be defaulted away.
+			return "", 0, err
+		case err == nil && n > 0:
 			imageNum = n
 		}
-		// Parse failure is non-fatal: imageNum stays at the default of 1. The
-		// upstream provider will surface any real structural issue.
+		// Any other parse failure stays non-fatal: imageNum stays at the default of 1. The
+		// upstream provider will surface any real structural issue, and its own validation
+		// rejects the values this reader cannot parse, so there is no cheaper reading to reach.
 	} else {
 		// JSON path (or unknown content-type, assumed JSON).
 		var request ImageEditingRequest
@@ -76,46 +80,48 @@ func (c *Ctrl) GetImageEditingInputFeeAndImageNum(reqBody []byte, contentType st
 	return "0", imageNum, nil
 }
 
-// parseMultipartN walks the multipart body with mime/multipart.Reader and
-// returns the integer value of the "n" form field, or an error if the body
-// cannot be parsed or the field is absent / non-numeric.
-func parseMultipartN(body []byte, contentType string) (int64, error) {
-	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return 0, fmt.Errorf("parse content-type %q: %w", contentType, err)
-	}
-	boundary, ok := params["boundary"]
-	if !ok || boundary == "" {
-		return 0, fmt.Errorf("content-type %q has no boundary", contentType)
-	}
+// ErrImageNumAmbiguous is returned when the gate cannot read `n` the way the upstream's form parser
+// will. `n` multiplies the fee (outputPrice x n), so a difference between the two readings is a
+// discount, not a cosmetic disagreement — the same reasoning as ErrVideoSecondsUnpriceable, and the
+// reason these shapes are refused rather than defaulted to 1.
+var ErrImageNumAmbiguous = errors.NewBadRequest("`n` could not be read unambiguously")
 
-	reader := multipart.NewReader(bytes.NewReader(body), boundary)
-	for {
-		part, pErr := reader.NextPart()
-		if pErr == io.EOF {
-			return 0, fmt.Errorf("n field not found")
-		}
-		if pErr != nil {
-			return 0, fmt.Errorf("read part: %w", pErr)
-		}
-		if part.FormName() != "n" {
-			_ = part.Close()
-			continue
-		}
-		// Cap the read — n is a small integer, not a file. 32 bytes is more
-		// than enough for any legitimate int and prevents a malicious upload
-		// that labels itself name="n" from streaming gigabytes into memory.
-		raw, rErr := io.ReadAll(io.LimitReader(part, 32))
-		_ = part.Close()
-		if rErr != nil {
-			return 0, fmt.Errorf("read n value: %w", rErr)
-		}
-		n, parseErr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
-		if parseErr != nil {
-			return 0, fmt.Errorf("parse n value %q: %w", raw, parseErr)
-		}
-		return n, nil
+// parseMultipartN returns the integer value of the "n" form field, or an error when the gate cannot
+// read it the way the upstream will.
+//
+// `n` multiplies the fee (outputPrice x n), so any way this reader disagrees with the upstream's form
+// parser is a discount: bill one image, render ten. Two such disagreements were measured and are now
+// refused rather than defaulted, matching the video gate's rule for its own fee-setting fields:
+//
+//   - the field sent TWICE — this returned the first value, Starlette/FastAPI take the LAST
+//     (`n=1` then `n=10` billed 1 and rendered 10)
+//   - a value padded past the read cap — the truncated bytes failed ParseInt and fell to the default
+//     of 1, while the upstream trims the padding and reads the full number
+//
+// A present-but-unparseable `n` is still non-fatal: the upstream's own validation rejects those, so
+// there is no cheaper reading for a caller to reach. Absent means the OpenAI default of 1.
+func parseMultipartN(body []byte, contentType string) (int64, error) {
+	fields, walkedOK := multipartFormFields(body, contentType, "n")
+	if !walkedOK {
+		return 0, fmt.Errorf("%w: multipart body could not be read to the end", ErrImageNumAmbiguous)
 	}
+	f := fields["n"]
+	if f.Truncated {
+		return 0, fmt.Errorf("%w: `n` is longer than %d bytes, so the upstream would read a value this gate cannot",
+			ErrImageNumAmbiguous, maxMultipartFieldBytes)
+	}
+	if len(f.Values) > 1 {
+		return 0, fmt.Errorf("%w: `n` was sent %d times; send it once — form parsers disagree on which value wins",
+			ErrImageNumAmbiguous, len(f.Values))
+	}
+	if len(f.Values) == 0 {
+		return 0, fmt.Errorf("n field not found")
+	}
+	n, parseErr := strconv.ParseInt(f.Values[0], 10, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse n value %q: %w", f.Values[0], parseErr)
+	}
+	return n, nil
 }
 
 // findSubstring returns the index of substr in s, or -1 if not found

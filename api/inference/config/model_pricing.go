@@ -217,62 +217,23 @@ func normalizeResolution(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// PricedResolutionAlias returns the tier name this block prices for a WIDTHxHEIGHT size, or "" when
-// the size is not pixel dimensions or names no tier the block prices.
-//
-// The OpenAI Video API documents `size` as pixel dimensions ("1280x720"), while rate cards are keyed
-// by tier name ("720p"). The reserve looked those up as opaque strings, so a size the model DID price
-// missed the lookup and fell into the "vendor picks the tier" fallback — which then either reserved
-// the 1.0 baseline and settled at the tier (`1920x1080` on {720p:1.0, 1080p:1.5}: reserved 5, billed
-// 8) or, reserving the dearest row instead, refused `1280x720` at 8x its real cost on a card with a
-// 4K row. Both were the same root cause: the gate could not spell a tier it already prices. Naming it
-// removes the choice between those two failures rather than picking a side.
-//
-// Reserve-side only, and deliberately one-directional: settlement reads the tier the RESPONSE names,
-// so nothing here can move a bill. A tier name is not translated back to pixels — that needs an
-// aspect-ratio assumption, and no rate card in this repo is keyed that way.
-func (b *BillingConfig) PricedResolutionAlias(size string) string {
-	if b == nil {
-		return ""
-	}
-	height, ok := pixelHeight(size)
-	if !ok {
-		return ""
-	}
-	alias := fmt.Sprintf("%dp", height)
-	if b.HasResolution(alias) {
-		return alias
-	}
-	return ""
-}
-
-// pixelHeight parses a WIDTHxHEIGHT size into its height. Both parts must be all-digits and positive:
-// anything else is a tier name (or nonsense) and must not be guessed at.
-func pixelHeight(size string) (int, bool) {
-	w, h, found := strings.Cut(normalizeResolution(size), "x")
-	if !found || w == "" || h == "" {
-		return 0, false
-	}
-	if _, err := strconv.Atoi(w); err != nil {
-		return 0, false
-	}
-	height, err := strconv.Atoi(h)
-	if err != nil || height <= 0 {
-		return 0, false
-	}
-	return height, true
-}
-
 // MaxResolutionMultiplier returns the dearest configured resolution multiplier, or 0 when the block
 // has none.
 //
 // The pre-flight reserve uses it for the one case where it cannot identify the tier at all: a size
-// this model prices NOWHERE, and whose pixel height names no priced tier either (PricedResolutionAlias
-// returns ""). The vendor picks the tier then, not the client, so the only reserve that is a true
-// ceiling is the dearest the model can bill. `size:"1920x1080"` against a MiniMax-shaped card keyed
-// {2K, 4K} is the live shape: 1080p is priced nowhere, MINIMAX_RESOLUTION in the translator decides
-// the render, and without this the reserve sat at the 1.0 baseline and settled at whichever tier came
-// back.
+// this model prices NOWHERE — in practice any pixel-dimension size, because no live translator lets
+// the client's pixel dimensions name the tier. MiniMax uses them for the ASPECT RATIO only and renders
+// MINIMAX_RESOLUTION from its own environment (`minimax.go`: "deriving a tier from pixels would
+// produce a value H3 rejects"); DashScope derives the tier from `max(width, height) > 1280`, not from
+// either dimension alone. So the vendor picks the tier, not the client, and the only reserve that is a
+// true ceiling is the dearest the model can bill. Without it the reserve sat at the 1.0 baseline and
+// settled at whichever tier came back — `size:"1920x1080"` against `{720p:1.0, 1080p:1.5}` reserved 5
+// and billed 8.
+//
+// Deriving the tier from the pixel height instead was tried and reverted: it made the reserve agree
+// with NEITHER translator, so `size:"1280x720"` reserved the 720p row against a 2K render (MiniMax)
+// and `size:"1920x720"` reserved 720p against DashScope's max-side 1080P. Trading a known
+// over-reserve for an under-reserve is trading a refused request for a free one.
 //
 // Reserve-side only: settlement reads the resolution the response names, so nothing here moves a bill.
 func (b *BillingConfig) MaxResolutionMultiplier() float64 {

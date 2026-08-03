@@ -153,7 +153,11 @@ and a map has none.
 gate reads sets the fee. The scoping property is "does a body field move the fee?", not "does the gate
 resolve a per-model price?": the second was the original rationale here and it let `image-editing`'s
 `n` through, where a body of `n=1` plus `?n=10` billed one image and rendered ten. `text-to-image` and
-chatbot post JSON, whose decoders read the body only. The check sits above the whitelist branch: a
+chatbot post JSON, whose decoders read the body only. The query was one of three channels on `n`; the
+other two — the field sent twice (this gate took the first value, Starlette/FastAPI take the last) and
+a value padded past the read cap (truncated to an unparseable string, defaulted to 1, while the
+upstream trims and reads it in full) — are refused now too, via the same `multipartFormFields` reader
+the video gate uses. Each was measured at bill-one-render-ten. The check sits above the whitelist branch: a
 whitelisted create is unbilled, but it still writes the reconciliation rollup, which would otherwise
 name the body's values while the upstream served the query's. The broker forwards the query
 verbatim and the upstream reads the create with `r.FormValue`, whose `ParseMultipartForm` populates
@@ -344,13 +348,21 @@ delta is expected to be non-zero, and why.
    translator echo its configured resolution in the create response) rather than paid for with a
    blanket over-reserve.
 
-   One half of this is closed rather than accepted: a pixel `size` whose height names a tier the model
-   DOES price is now spelled as that tier before any lookup (`PricedResolutionAlias`), so
-   `"1920x1080"` on a card keyed `{720p, 1080p}` reserves exactly what it settles. The residual below
-   is only the genuinely unnameable case — `"1920x1080"` against a card keyed `{2K, 4K}`, which is the
-   live MiniMax shape. Before that, comparing pixel dimensions against tier names as opaque strings
-   produced BOTH failures depending on which side the fallback picked: the 1.0 baseline (reserve 5,
-   bill 8) or the dearest row (reserve 40, bill 5 — an 8× refusal of solvent callers).
+   **A pixel-dimension `size` cannot be resolved to a tier by the broker, and trying is worse than
+   the residual.** Resolving `"1920x1080"` to `"1080p"` by pixel height was implemented and reverted:
+   neither live translator reads pixel dimensions that way. MiniMax uses them for the ASPECT RATIO
+   only and renders `MINIMAX_RESOLUTION` (its own comment: "deriving a tier from pixels would produce
+   a value H3 rejects"); DashScope derives the tier from `max(width, height) > 1280`. So the alias
+   under-reserved against BOTH — `"1280x720"` reserved the 720p row against a 2K render, `"1920x720"`
+   reserved 720p against DashScope's max-side 1080P — and the giveaway was that the identical request
+   one pixel taller reserved correctly. Trading a known over-reserve for an under-reserve is trading
+   a refused request for a free one. `TestVideoReservePixelSizeIsNotATierName` states the counterparty
+   rule so this does not get re-invented a third time.
+
+   The cost of that is real and accepted: with no published `defaultParameters.size` the reserve falls
+   to the model's dearest tier, which over-reserves whenever the vendor renders something cheaper. The
+   fix is publishing the field to match `MINIMAX_RESOLUTION` (or DashScope's default), which the boot
+   validator warns about — not guessing the tier from the request.
 
    Until then, two shapes:
 

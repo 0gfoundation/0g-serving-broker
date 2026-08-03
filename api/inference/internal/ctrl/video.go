@@ -591,16 +591,6 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 		}
 		seconds = def
 	}
-	// Pixel dimensions name a tier this model prices ("1920x1080" -> "1080p"): spell it, so the
-	// lookups below see a priced size instead of an opaque string. Without this the OpenAI Video
-	// API's documented shape fell into the "vendor picks the tier" fallback even when the client had
-	// named a tier on the rate card — see PricedResolutionAlias for the two opposite failures that
-	// produced.
-	if entry != nil && entry.Billing != nil && !entry.Billing.HasResolution(size) {
-		if alias := entry.Billing.PricedResolutionAlias(size); alias != "" {
-			size = alias
-		}
-	}
 	// Fall back to the published tier when the request names none, AND when it names one this
 	// model prices nowhere. Both are the same situation from the gate's side: the upstream will
 	// render its configured tier and settlement bills from the RESPONSE's tier either way, so
@@ -639,13 +629,16 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	//
 	// This is the mirror of the per_unit_table MaxTableUnits fallback in videoModelUnits, and it
 	// exists because scoping the published-size substitution to per_unit_table left per_video_second
-	// with nothing to lift it off the 1.0 baseline. It fires only for a size that names no priced
-	// tier even after PricedResolutionAlias — `size:"1920x1080"` on a card keyed {2K, 4K}, where the
-	// translator's MINIMAX_RESOLUTION decides the render. A pixel size whose height IS a priced tier
-	// no longer reaches here at all.
+	// with nothing to lift it off the 1.0 baseline: `size:"1920x1080"` against `{720p:1.0, 1080p:1.5}`
+	// reserved 5 and settled 8.
+	//
+	// A pixel-dimension size ALWAYS lands here, deliberately. Spelling one as a tier ("1920x1080" ->
+	// "1080p") was tried and reverted: neither live translator reads pixel dimensions that way, so it
+	// under-reserved against both (see MaxResolutionMultiplier's godoc and
+	// TestVideoReservePixelSizeIsNotATierName).
 	if entry != nil && entry.Billing != nil && !entry.Billing.HasResolution(size) {
-		// The model prices this size nowhere and its pixel height names no priced tier either, so
-		// the tier is decided elsewhere — for the MiniMax path, by MINIMAX_RESOLUTION in the
+		// The model prices this size nowhere, so the tier is decided elsewhere — for the MiniMax
+		// path, by MINIMAX_RESOLUTION in the
 		// TRANSLATOR's own environment (a separate process, default "2K"). The broker's only proxy
 		// for that is the model's published defaultParameters.size, so prefer it whenever the block
 		// actually prices it: that keeps both billing modes answering this situation the same way,

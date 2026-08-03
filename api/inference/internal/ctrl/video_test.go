@@ -1769,68 +1769,60 @@ func TestVideoReserveCoversEchoedRequestSize(t *testing.T) {
 	}
 }
 
-// TestVideoReservePixelSizeNamesItsTier pins the fix for the root cause behind two opposite reserve
-// failures: the OpenAI Video API documents `size` as pixel dimensions, rate cards are keyed by tier
-// name, and the gate compared them as opaque strings. So a size the model DID price missed the lookup
-// and fell into the "vendor picks the tier" fallback — which reserved either the 1.0 baseline (5
-// against an 8-unit bill for `1920x1080`) or the dearest row (40 against a 5-unit bill for
-// `1280x720`, an 8x refusal of callers who could afford it). Naming the tier removes the choice.
+// TestVideoReservePixelSizeIsNotATierName pins that a pixel-dimension `size` is never read as a tier
+// name, however much it looks like one. This area has flipped three times, so the test states the
+// COUNTERPARTY rule rather than the broker's preference:
 //
-// The published default is irrelevant here and both ctrls are asserted to agree: once the size names a
-// priced tier, the client named it, exactly as if they had typed "720p".
-func TestVideoReservePixelSizeNamesItsTier(t *testing.T) {
-	billing := func() *config.BillingConfig {
-		return &config.BillingConfig{
+//   - MiniMax (videotranslator/internal/translate/minimax.go): a pixel size informs the ASPECT RATIO
+//     only; the tier is MINIMAX_RESOLUTION from the translator's own environment. Its comment says
+//     deriving a tier from pixels "would produce a value H3 rejects".
+//   - DashScope (translate.go): the tier is max(width, height) > 1280 ? 1080P : 720P — not either
+//     dimension alone.
+//
+// So resolving "1920x1080" to "1080p" by pixel height agrees with neither. It was implemented and
+// reverted: it made `size:"1280x720"` reserve the 720p row against a 2K render, and `size:"1920x720"`
+// reserve 720p against DashScope's 1080P. Both are the under-reserve this whole PR exists to close,
+// and both are invisible to a suite that only asserts the reserve is not excessive.
+func TestVideoReservePixelSizeIsNotATierName(t *testing.T) {
+	// Every tier on this card is spelled exactly as a pixel height would render it, which is the
+	// configuration that makes the wrong implementation look right.
+	entry := config.ModelPricingEntry{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
 			Mode:                  config.BillingModePerVideoSecond,
 			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5, "2160p": 8.0},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "1080p"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
+
+	// The published tier (1080p -> 8 units) is the operator's statement of what gets rendered, so it
+	// is what every pixel spelling must reserve — including "1280x720", whose height names the
+	// CHEAPEST row on the card.
+	for _, size := range []string{"1280x720", "1920x1080", "1920x720", "720x1280", "3840x2160"} {
+		got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+size+`"}`), "application/json")
+		if err != nil {
+			t.Fatalf("size %q: unexpected error: %v", size, err)
+		}
+		if got != 8 {
+			t.Errorf("reserve for pixel size %q = %d, want 8 (the published tier); a pixel size must not name its own tier", size, got)
 		}
 	}
-	withDefault := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
-		Model:       "tiered",
-		OutputPrice: "100",
-		Billing:     billing(),
-		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
-	}}, "tiered")}
-	noDefault := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
-		Model:       "tiered",
-		OutputPrice: "100",
-		Billing:     billing(),
-		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5}},
-	}}, "tiered")}
 
-	// want == exactly what the equivalent tier NAME reserves, and == what settlement bills when the
-	// response reports that tier. No slack in either direction.
-	for _, tc := range []struct {
-		pixels string
-		tier   string
-		want   int64
-	}{
-		{pixels: "1280x720", tier: "720p", want: 5},
-		{pixels: "1920x1080", tier: "1080p", want: 8},
-		{pixels: "3840x2160", tier: "2160p", want: 40},
-		{pixels: "1920X1080", tier: "1080p", want: 8}, // case-insensitive, like every other size read
-	} {
-		for name, c := range map[string]*Ctrl{"with_published_default": withDefault, "no_published_default": noDefault} {
-			t.Run(name+"/"+tc.pixels, func(t *testing.T) {
-				got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+tc.pixels+`"}`), "application/json")
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if got != tc.want {
-					t.Errorf("reserve for %q = %d, want %d (what %q reserves)", tc.pixels, got, tc.want, tc.tier)
-				}
-				named, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+tc.tier+`"}`), "application/json")
-				if err != nil || named != got {
-					t.Errorf("pixel size reserved %d but the tier name %q reserved %d (err %v); they must agree", got, tc.tier, named, err)
-				}
-			})
+	// A tier NAME is still trusted as named — that is the client addressing the tier directly, which
+	// both translators do honour.
+	for name, want := range map[string]int64{"720p": 5, "1080p": 8, "2160p": 40} {
+		got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+name+`"}`), "application/json")
+		if err != nil || got != want {
+			t.Errorf("reserve for tier name %q = %d (err %v), want %d", name, got, err, want)
 		}
 	}
 }
 
 // TestVideoReserveUnpricedSizePrefersPublishedTier pins the reserve for a size the model prices
-// NOWHERE — including after PricedResolutionAlias, i.e. its pixel height names no priced tier either.
-// That is the live MiniMax shape: a card keyed {2K, 4K} asked for "1920x1080".
+// NOWHERE, which in practice is every pixel-dimension size (see TestVideoReservePixelSizeIsNotATierName)
+// plus any free text. The live MiniMax shape is a card keyed {2K, 4K} asked for "1920x1080".
 //
 // The tier is decided elsewhere for such a size (on the MiniMax path, by MINIMAX_RESOLUTION in the
 // translator's own environment), so the broker's only proxy is the model's published
