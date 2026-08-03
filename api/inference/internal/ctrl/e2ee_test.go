@@ -11,6 +11,7 @@ import (
 	"time"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -41,6 +42,72 @@ func recoverEIP191(t *testing.T, text, sigHex string) common.Address {
 		t.Fatalf("SigToPub: %v", err)
 	}
 	return crypto.PubkeyToAddress(*pub)
+}
+
+// ethRecover is a proof.RecoverFunc backed by go-ethereum, standing in for the
+// client's secp256k1/keccak recovery when driving the shared §8 verifier from
+// broker tests. It undoes Ethereum's 27/28 recovery-id offset before recovery.
+func ethRecover(text string, sig []byte) (string, error) {
+	s := make([]byte, len(sig))
+	copy(s, sig)
+	if len(s) == 65 && s[64] >= 27 {
+		s[64] -= 27
+	}
+	pub, err := crypto.SigToPub(accounts.TextHash([]byte(text)), s)
+	if err != nil {
+		return "", err
+	}
+	return crypto.PubkeyToAddress(*pub).Hex(), nil
+}
+
+// brokerChatSig adapts the broker's cached ChatSignature to the client-side
+// proof.ChatSignature, mirroring the JSON the SDK unmarshals from
+// /v1/proxy/signature/{chatKey}, so tests verify through the exact shared code.
+func brokerChatSig(s *ChatSignature) proof.ChatSignature {
+	return proof.ChatSignature{
+		Text:           s.Text,
+		Signature:      s.SignatureEcdsa,
+		SigningAddress: s.SigningAddressEcdsa.Hex(),
+		SigningAlgo:    s.SigningAlgo,
+	}
+}
+
+// sealRequestEnv seals a request to this enclave and returns it as a wire.Request
+// envelope (the on-wire bytes the §8 request binding hashes).
+func (f *e2eeTestFixture) sealRequestEnv(t *testing.T) wire.Request {
+	t.Helper()
+	var env wire.Request
+	if err := json.Unmarshal(f.sealRequest(t, f.signerAddr), &env); err != nil {
+		t.Fatalf("unmarshal sealed request: %v", err)
+	}
+	return env
+}
+
+// reqBindHash returns a valid §8 request binding hash for a freshly sealed
+// request, for tests that mark a context sealed by hand (newResponseFrameSealer
+// requires it, exactly as MaybeUnsealRequest sets it in production).
+func (f *e2eeTestFixture) reqBindHash(t *testing.T) [32]byte {
+	t.Helper()
+	h, err := proof.FrameBindingHash(f.sealRequestEnv(t))
+	if err != nil {
+		t.Fatalf("request binding: %v", err)
+	}
+	return h
+}
+
+// sealResponseFrame seals respJSON to the client's ephemeral key with the same
+// unbound set the handler uses, returning the sealed on-wire frame.
+func (f *e2eeTestFixture) sealResponseFrame(t *testing.T, respJSON string) wire.Response {
+	t.Helper()
+	var resp wire.Response
+	if err := json.Unmarshal([]byte(respJSON), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	frame, err := wire.SealResponse(f.clientEphPub, resp, nil, e2eeResponseUnboundFields...)
+	if err != nil {
+		t.Fatalf("SealResponse: %v", err)
+	}
+	return frame
 }
 
 // e2eeTestFixture builds a Ctrl with a working enc key + signer, plus a matching
@@ -278,10 +345,11 @@ func TestSealNonStreamResponse_RoundTrip(t *testing.T) {
 	// Mark the context sealed as MaybeUnsealRequest would.
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"chatcmpl-x","model":"gpt-4o","usage":{"total_tokens":30},"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
 
-	sealed, isSealed, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if err != nil {
 		t.Fatalf("maybeSealNonStreamResponse: %v", err)
 	}
@@ -346,9 +414,10 @@ func TestSealNonStreamResponse_UnboundTraceInjectable(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	respBody := []byte(`{"id":"x","model":"gpt-4o","usage":{"total_tokens":3},"choices":[{"message":{"content":"hi"}}]}`)
-	sealed, isSealed, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
+	sealed, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, respBody)
 	if err != nil || !isSealed {
 		t.Fatalf("maybeSealNonStreamResponse: sealed=%v err=%v", isSealed, err)
 	}
@@ -396,6 +465,7 @@ func TestStreamFrameSealer_UnboundTrace(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	rs, err := f.c.newResponseFrameSealer(ctx)
 	if err != nil {
@@ -440,7 +510,7 @@ func TestSealNonStreamResponse_NotSealed(t *testing.T) {
 	f := newE2EEFixture(t)
 	ctx := newGinCtx() // not marked sealed
 	body := []byte(`{"choices":[]}`)
-	out, isSealed, err := f.c.maybeSealNonStreamResponse(ctx, body)
+	out, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, body)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -457,6 +527,7 @@ func TestStreamFrameSealer_RoundTrip(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	rs, err := f.c.newResponseFrameSealer(ctx)
 	if err != nil {
@@ -539,6 +610,7 @@ func TestStreamFrameSealer_SyntheticFinalOnDone(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	rs, err := f.c.newResponseFrameSealer(ctx)
 	if err != nil {
@@ -642,6 +714,7 @@ func TestStreamFrameSealer_ExactlyOneFinal(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	cases := map[string][]string{
 		"empty usage mid-stream": {
@@ -686,6 +759,7 @@ func TestStreamFrameSealer_FinalFrameLineIdempotent(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	rs, err := f.c.newResponseFrameSealer(ctx)
 	if err != nil {
@@ -711,10 +785,11 @@ func TestSealNonStreamResponse_NullBodyFailsClosed(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	// A literal JSON null unmarshals to a nil map without error — must fail closed,
 	// not panic.
-	_, isSealed, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
+	_, isSealed, _, err := f.c.maybeSealNonStreamResponse(ctx, []byte("null"))
 	if !isSealed {
 		t.Fatal("expected isSealed=true for a sealed request")
 	}
@@ -786,6 +861,7 @@ func TestStreamFrameSealer_EventsBlankLineDelimited(t *testing.T) {
 	ctx := newGinCtx()
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, f.clientEphPub)
+	ctx.Set(CtxKeyE2EEReqBindHash, f.reqBindHash(t))
 
 	rs, err := f.c.newResponseFrameSealer(ctx)
 	if err != nil {
@@ -832,10 +908,23 @@ func TestStreamFrameSealer_EventsBlankLineDelimited(t *testing.T) {
 
 func TestSignChatE2EE_NonStream(t *testing.T) {
 	f := newE2EEFixture(t)
-	req := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
-	resp := []byte(`{"id":"x","choices":[{"message":{"content":"yo"}}],"usage":{"total_tokens":3}}`)
 
-	if err := f.c.signChatE2EE(req, resp, "ck-ns", false); err != nil {
+	// The non-stream §8 signature binds the on-wire aad‖ciphertext of the sealed
+	// request and the single sealed response frame.
+	reqEnv := f.sealRequestEnv(t)
+	respEnv := f.sealResponseFrame(t, `{"id":"x","choices":[{"message":{"content":"yo"}}],"usage":{"total_tokens":3}}`)
+
+	reqH, err := proof.FrameBindingHash(reqEnv)
+	if err != nil {
+		t.Fatalf("request binding: %v", err)
+	}
+	respH, err := proof.FrameBindingHash(respEnv)
+	if err != nil {
+		t.Fatalf("response binding: %v", err)
+	}
+	text := proof.SignedTextE2EEFromHashes(reqH, respH)
+
+	if err := f.c.signChatE2EE(text, "ck-ns"); err != nil {
 		t.Fatalf("signChatE2EE: %v", err)
 	}
 	sig, err := f.c.GetChatSignature("ck-ns")
@@ -843,11 +932,11 @@ func TestSignChatE2EE_NonStream(t *testing.T) {
 		t.Fatalf("GetChatSignature: %v", err)
 	}
 
-	// Non-stream binds JCS(request):JCS(response).
-	wantReq, _ := jcsSha256Hex(req)
-	wantResp, _ := jcsSha256Hex(resp)
-	if want := wantReq + ":" + wantResp; sig.Text != want {
-		t.Errorf("text = %q, want %q", sig.Text, want)
+	if !strings.HasPrefix(sig.Text, proof.SchemeE2EECiphertext+":") {
+		t.Errorf("text %q missing scheme %q", sig.Text, proof.SchemeE2EECiphertext)
+	}
+	if sig.Text != text {
+		t.Errorf("cached text = %q, want %q", sig.Text, text)
 	}
 	if sig.SigningAddressEcdsa != f.c.teeService.Address {
 		t.Errorf("signing_address = %s, want %s", sig.SigningAddressEcdsa, f.c.teeService.Address)
@@ -855,16 +944,56 @@ func TestSignChatE2EE_NonStream(t *testing.T) {
 	if got := recoverEIP191(t, sig.Text, sig.SignatureEcdsa); got != f.c.teeService.Address {
 		t.Errorf("recovered %s, want %s", got, f.c.teeService.Address)
 	}
+	// The client's shared verifier accepts the signature over the same envelopes.
+	if err := brokerChatSig(sig).VerifyE2EE(reqEnv, respEnv, f.signerAddr, ethRecover); err != nil {
+		t.Fatalf("client VerifyE2EE: %v", err)
+	}
 }
 
 func TestSignChatE2EE_Stream(t *testing.T) {
 	f := newE2EEFixture(t)
-	req := []byte(`{"model":"gpt-4o","messages":[]}`)
-	// Provisional streaming binding: ordered plaintext-frame concatenation, hashed
-	// as-is (no JCS on the response side).
-	respConcat := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\ndata: {\"choices\":[]}\n")
 
-	if err := f.c.signChatE2EE(req, respConcat, "ck-s", true); err != nil {
+	reqEnv := f.sealRequestEnv(t)
+	reqH, err := proof.FrameBindingHash(reqEnv)
+	if err != nil {
+		t.Fatalf("request binding: %v", err)
+	}
+
+	// Seal two frames in send order under one context (final last) and fold them
+	// into the streaming aggregate exactly as the handler's frame sealer does.
+	sealer, err := wire.NewResponseSealer(f.clientEphPub, e2eeResponseUnboundFields...)
+	if err != nil {
+		t.Fatalf("NewResponseSealer: %v", err)
+	}
+	binder := proof.NewStreamBinderFromReqHash(reqH)
+	specs := []struct {
+		body  string
+		final bool
+	}{
+		{`{"choices":[{"delta":{"content":"a"}}]}`, false},
+		{`{"choices":[]}`, true},
+	}
+	var frames []map[string]json.RawMessage
+	for _, spec := range specs {
+		var fr wire.Response
+		if err := json.Unmarshal([]byte(spec.body), &fr); err != nil {
+			t.Fatalf("unmarshal frame: %v", err)
+		}
+		out, err := sealer.SealFrame(fr, nil, spec.final)
+		if err != nil {
+			t.Fatalf("SealFrame: %v", err)
+		}
+		if err := binder.AddFrame(out); err != nil {
+			t.Fatalf("AddFrame: %v", err)
+		}
+		frames = append(frames, out)
+	}
+	text, err := binder.Text()
+	if err != nil {
+		t.Fatalf("binder.Text: %v", err)
+	}
+
+	if err := f.c.signChatE2EE(text, "ck-s"); err != nil {
 		t.Fatalf("signChatE2EE: %v", err)
 	}
 	sig, err := f.c.GetChatSignature("ck-s")
@@ -872,12 +1001,15 @@ func TestSignChatE2EE_Stream(t *testing.T) {
 		t.Fatalf("GetChatSignature: %v", err)
 	}
 
-	wantReq, _ := jcsSha256Hex(req)
-	if want := wantReq + ":" + sha256Hex(respConcat); sig.Text != want {
-		t.Errorf("stream text = %q, want %q", sig.Text, want)
+	if !strings.HasPrefix(sig.Text, proof.SchemeE2EECiphertextStream+":") {
+		t.Errorf("stream text %q missing scheme %q", sig.Text, proof.SchemeE2EECiphertextStream)
 	}
 	if got := recoverEIP191(t, sig.Text, sig.SignatureEcdsa); got != f.c.teeService.Address {
 		t.Errorf("recovered %s, want %s", got, f.c.teeService.Address)
+	}
+	// The client's shared verifier accepts the ordered aggregate.
+	if err := brokerChatSig(sig).VerifyE2EEStream(reqEnv, frames, f.signerAddr, ethRecover); err != nil {
+		t.Fatalf("client VerifyE2EEStream: %v", err)
 	}
 }
 

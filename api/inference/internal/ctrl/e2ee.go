@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	pccrypto "github.com/0gfoundation/0g-pc-e2ee/protocol/crypto"
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
 	"github.com/0gfoundation/0g-pc-e2ee/protocol/wire"
 	"github.com/gin-gonic/gin"
 
@@ -53,10 +54,17 @@ const (
 	CtxKeyE2EEClientEphPub = "e2eeClientEphPub"
 	// CtxKeyE2EEPlaintextReq holds the reconstructed plaintext request bytes
 	// ([]byte) captured immediately after unsealing, BEFORE the proxy's upstream
-	// rewrites (model enforcement, stream_options injection, …). The response
-	// signature (§8) must bind the request the CLIENT reconstructs, not the
-	// modified upstream body.
+	// rewrites (model enforcement, stream_options injection, …). Retained for
+	// observability/audit; the §8 signature no longer binds plaintext (see
+	// CtxKeyE2EEReqBindHash).
 	CtxKeyE2EEPlaintextReq = "e2eePlaintextReq"
+	// CtxKeyE2EEReqBindHash holds the §8 request binding hash ([32]byte =
+	// proof.FrameBindingHash of the sealed request: sha256(sha256(aad)‖sha256(ct)))
+	// captured at unseal time. The response signature binds the on-wire
+	// ciphertext, but the proxy replaces the sealed request with its plaintext
+	// before forwarding, so the response path can no longer recompute it — the
+	// binding is stashed here and combined with the response hash at sign time.
+	CtxKeyE2EEReqBindHash = "e2eeReqBindHash"
 )
 
 // e2eeResponseUnboundFields are declared in every sealed response's
@@ -152,6 +160,16 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 		return nil, fmt.Errorf("sealed request client_eph_pub is not a usable X25519 key: %w", err)
 	}
 
+	// §8 request binding: hash the on-wire aad‖ciphertext of the sealed request
+	// NOW, while we still hold the envelope. The proxy replaces reqBody with the
+	// reconstructed plaintext before forwarding upstream, so the response-signing
+	// path (which runs post-inference) can no longer see these bytes. Stash the
+	// 32-byte binding so signChatE2EE can combine it with the response hash.
+	reqBindHash, err := proof.FrameBindingHash(env)
+	if err != nil {
+		return nil, fmt.Errorf("compute e2ee request binding: %w", err)
+	}
+
 	// Open (verifies v/kem_id, recomputes AAD, HPKE-Open fail-closed, checks
 	// decrypted keys == sealed_fields with no cleartext collision, and reconstructs
 	// the original request = cleartext ∪ decrypted). SPEC §6.
@@ -168,6 +186,7 @@ func (c *Ctrl) MaybeUnsealRequest(ctx *gin.Context, reqBody []byte) ([]byte, err
 	ctx.Set(CtxKeyE2EESealed, true)
 	ctx.Set(CtxKeyE2EEClientEphPub, pccrypto.PublicKey(clientEphPub))
 	ctx.Set(CtxKeyE2EEPlaintextReq, plaintext)
+	ctx.Set(CtxKeyE2EEReqBindHash, reqBindHash)
 	c.logger.Debugf("E2EE: unsealed request (sealed_fields=%v, key_id=%s)", e2ee.SealedFields, e2ee.KeyID)
 	return plaintext, nil
 }
@@ -214,42 +233,51 @@ func e2eePlaintextRequest(ctx *gin.Context) ([]byte, bool) {
 	return b, ok && len(b) > 0
 }
 
+// e2eeReqBindHash returns the §8 request binding hash (sha256 of the sealed
+// request's aad‖ciphertext) captured at unseal time, used as the request half of
+// the E2EE response signature.
+func e2eeReqBindHash(ctx *gin.Context) ([32]byte, bool) {
+	v, ok := ctx.Get(CtxKeyE2EEReqBindHash)
+	if !ok {
+		return [32]byte{}, false
+	}
+	h, ok := v.([32]byte)
+	return h, ok
+}
+
 // maybeSealNonStreamResponse seals the sensitive fields (v1 default: choices) of
 // a non-streaming response (SPEC §7) when the request was sealed; otherwise it
 // returns body unchanged with sealed=false. Fail-closed: when the request was
 // sealed but sealing fails, it returns an error and the caller MUST NOT forward
 // the plaintext body.
-func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []byte, sealed bool, err error) {
+func (c *Ctrl) maybeSealNonStreamResponse(ctx *gin.Context, body []byte) (out []byte, sealed bool, respBindHash [32]byte, err error) {
 	ephPub, isSealed := e2eeSealedRequest(ctx)
 	if !isSealed {
-		return body, false, nil
+		return body, false, respBindHash, nil
 	}
 	var resp wire.Response
 	// A literal JSON `null` unmarshals into a nil map WITHOUT error; ensureChoices
 	// would then panic writing to it. Reject any non-object body fail-closed.
-	if err := json.Unmarshal(body, &resp); err != nil || resp == nil {
-		return nil, true, fmt.Errorf("seal response: body is not a JSON object")
+	if uerr := json.Unmarshal(body, &resp); uerr != nil || resp == nil {
+		return nil, true, respBindHash, fmt.Errorf("seal response: body is not a JSON object")
 	}
 	ensureChoices(resp)
-	out, err = sealResponseMarshal(ephPub, resp)
-	if err != nil {
-		return nil, true, err
-	}
-	return out, true, nil
-}
-
-func sealResponseMarshal(ephPub pccrypto.PublicKey, resp wire.Response) ([]byte, error) {
 	// nil sealedFields → v1 default ["choices"]; declare model + x_0g_trace unbound
 	// so the router may rewrite/inject them downstream (SPEC §5.2).
-	out, err := wire.SealResponse(ephPub, resp, nil, e2eeResponseUnboundFields...)
+	frame, err := wire.SealResponse(ephPub, resp, nil, e2eeResponseUnboundFields...)
 	if err != nil {
-		return nil, fmt.Errorf("seal response: %w", err)
+		return nil, true, respBindHash, fmt.Errorf("seal response: %w", err)
 	}
-	b, err := json.Marshal(out)
+	// §8 response binding over the exact sealed frame the client receives.
+	respBindHash, err = proof.FrameBindingHash(frame)
 	if err != nil {
-		return nil, fmt.Errorf("encode sealed response: %w", err)
+		return nil, true, respBindHash, fmt.Errorf("seal response binding: %w", err)
 	}
-	return b, nil
+	out, err = json.Marshal(frame)
+	if err != nil {
+		return nil, true, respBindHash, fmt.Errorf("encode sealed response: %w", err)
+	}
+	return out, true, respBindHash, nil
 }
 
 // responseFrameSealer seals a sequence of streaming SSE frames under one HPKE
@@ -257,7 +285,9 @@ func sealResponseMarshal(ephPub pccrypto.PublicKey, resp wire.Response) ([]byte,
 // in the same order.
 type responseFrameSealer struct {
 	sealer       *wire.ResponseSealer
+	binder       *proof.StreamBinder
 	emittedFinal bool
+	frameCount   int
 }
 
 // newResponseFrameSealer returns a per-stream frame sealer when the request was
@@ -274,7 +304,14 @@ func (c *Ctrl) newResponseFrameSealer(ctx *gin.Context) (*responseFrameSealer, e
 	if err != nil {
 		return nil, fmt.Errorf("set up response sealer: %w", err)
 	}
-	return &responseFrameSealer{sealer: s}, nil
+	// Seed the §8 streaming binding with the request hash captured at unseal time.
+	// Its absence means the response path ran without a prior unseal — fail closed
+	// rather than sign a stream bound to a zero request hash.
+	reqBindHash, ok := e2eeReqBindHash(ctx)
+	if !ok {
+		return nil, fmt.Errorf("e2ee stream: request binding hash missing from context")
+	}
+	return &responseFrameSealer{sealer: s, binder: proof.NewStreamBinderFromReqHash(reqBindHash)}, nil
 }
 
 // sealSSELine transforms one already-sanitized SSE line into its sealed form
@@ -337,6 +374,13 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 	if err != nil {
 		return "", fmt.Errorf("seal frame: %w", err)
 	}
+	// Fold the exact on-wire frame into the §8 streaming binding, in send order
+	// (the final frame last), so the signed aggregate matches what the client
+	// recomputes over the frames it receives.
+	if err := rs.binder.AddFrame(out); err != nil {
+		return "", fmt.Errorf("bind sealed frame: %w", err)
+	}
+	rs.frameCount++
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("encode sealed frame: %w", err)
@@ -345,6 +389,18 @@ func (rs *responseFrameSealer) sealFrame(frame wire.Response, final bool) (strin
 		rs.emittedFinal = true
 	}
 	return "data: " + string(b) + "\n\n", nil
+}
+
+// signedText finalizes the §8 streaming binding and returns the scheme-tagged
+// signed text (proof.StreamBinder.Text). ok is false when no frame was sealed (a
+// degenerate empty stream), so the caller skips caching a signature rather than
+// binding sha256("").
+func (rs *responseFrameSealer) signedText() (text string, ok bool, err error) {
+	if rs.frameCount == 0 {
+		return "", false, nil
+	}
+	text, err = rs.binder.Text()
+	return text, err == nil, err
 }
 
 // ensureChoices guarantees a "choices" field is present so SealFrame (whose v1

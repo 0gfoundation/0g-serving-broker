@@ -63,40 +63,19 @@ func jcsSha256Hex(b []byte) (string, error) {
 	return sha256Hex(canon), nil
 }
 
-// signChatE2EE is the E2EE (0g-pc SPEC §8) variant of signChatWithKey. The
-// client verifies the signature over the DECRYPTED content, so the signed text
-// binds the JCS-canonical reconstructed request and the JCS-canonical decrypted
-// response — not the sealed bytes the client received over the wire.
+// signChatE2EE caches the E2EE (0g-pc SPEC §8) response signature under chatKey.
+// Unlike signChatWithKey (which binds plaintext), the E2EE signature binds the
+// on-wire aad‖ciphertext: the client that just decrypted the response already
+// holds those exact bytes, so it can verify without reconstructing or
+// re-canonicalizing any plaintext, and Go/TS/Rust hash identical bytes.
 //
-// reqPlaintext is the reconstructed request captured at unseal time (before the
-// proxy's upstream rewrites), matching what the client reconstructs.
-// respPlaintext is the sanitized cleartext response the broker sealed.
-//
-// Streaming note (TODO, tracked in 0g-serving-broker#552 and 0g-pc#7): a
-// streaming response has no single canonical JSON object, so the exact
-// canonicalization the client will recompute is not yet finalized. As a
-// provisional binding we hash the ordered concatenation of the delivered
-// plaintext frames as-is (whole-frame plaintext concatenation). This MUST be
-// reconciled with the client verify implementation before streaming E2EE
-// signatures are relied upon.
-func (c *Ctrl) signChatE2EE(reqPlaintext, respPlaintext []byte, chatKey string, isStream bool) error {
-	requestSha256, err := jcsSha256Hex(reqPlaintext)
-	if err != nil {
-		return fmt.Errorf("e2ee request hash: %w", err)
-	}
-
-	var responseSha256 string
-	if isStream {
-		// Provisional: ordered plaintext-frame concatenation (see doc comment).
-		responseSha256 = sha256Hex(respPlaintext)
-	} else {
-		responseSha256, err = jcsSha256Hex(respPlaintext)
-		if err != nil {
-			return fmt.Errorf("e2ee response hash: %w", err)
-		}
-	}
-
-	text := fmt.Sprintf("%s:%s", requestSha256, responseSha256)
+// text is the scheme-tagged signed text assembled by the shared proof package
+// from the exact sealed bytes emitted to the client —
+// proof.SignedTextE2EEFromHashes for a non-stream response,
+// proof.StreamBinder for a stream. Assembling it there (not here) is what keeps
+// the broker's signed bytes and the client's recomputed bytes byte-for-byte
+// identical; this function is a thin signer over the finished text.
+func (c *Ctrl) signChatE2EE(text, chatKey string) error {
 	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
 	if err != nil {
 		return err
