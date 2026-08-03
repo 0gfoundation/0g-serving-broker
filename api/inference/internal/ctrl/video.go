@@ -62,7 +62,7 @@ func parseMultipartField(bodyStr, fieldName string) string {
 // actual output duration the way an OpenAI-compatible shim in front of an async
 // vendor (e.g. Alibaba Wan2.7 → usage.output_video_duration) surfaces it. The
 // same seconds/size shape is also the broker's request edge contract, so the
-// struct doubles as the request-fallback parse — see resolveVideoBilling.
+// struct doubles as the request-fallback parse — see resolveVideoBillingWithSizeSource.
 type videoResponseFields struct {
 	ID      string      `json:"id"`
 	Status  string      `json:"status"`
@@ -169,16 +169,15 @@ const (
 	videoSourceRequest  = "request"
 )
 
-// resolveVideoBilling picks the billable (seconds, size) for a video request and
-// reports its source. It prefers the upstream RESPONSE's actual output duration
-// (top-level seconds or a usage block — covering OpenAI-compatible shims over
-// async vendors like Wan2.7), satisfying "bill actual output". Only when the
-// upstream reports no duration does it fall back to the client request
-// (videoSourceRequest), which bills the REQUESTED duration — the caller logs
-// that as degraded. source is "" (and ok=false) only when neither yields a
-// positive duration, in which case the caller skips billing loudly.
-// resolveVideoBillingWithSizeSource is resolveVideoBilling plus the one thing the size axis needs
-// separately: whether the resolution came from the RESPONSE (the upstream stating what it rendered —
+// resolveVideoBillingWithSizeSource picks the billable (seconds, size) for a video request and
+// reports where each came from. It prefers the upstream RESPONSE's actual output duration
+// (top-level seconds or a usage block — covering OpenAI-compatible shims over async vendors like
+// Wan2.7), satisfying "bill actual output". Only when the upstream reports no duration does it fall
+// back to the client request (videoSourceRequest), which bills the REQUESTED duration — the caller
+// logs that as degraded. source is "" (and ok=false) only when neither yields a positive duration, in
+// which case the caller skips billing loudly.
+//
+// sizeFromResponse is the one thing the size axis needs separately: whether the resolution came from the RESPONSE (the upstream stating what it rendered —
 // authoritative) or from the request (a client-controlled guess). `source` reports that distinction
 // for the DURATION only, and conflating the two let videoBillingSize overwrite a tier the vendor
 // itself had reported: an untabulated `size:"4K"` in a MiniMax poll response went from 60 units plus
@@ -592,6 +591,16 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 		}
 		seconds = def
 	}
+	// Pixel dimensions name a tier this model prices ("1920x1080" -> "1080p"): spell it, so the
+	// lookups below see a priced size instead of an opaque string. Without this the OpenAI Video
+	// API's documented shape fell into the "vendor picks the tier" fallback even when the client had
+	// named a tier on the rate card — see PricedResolutionAlias for the two opposite failures that
+	// produced.
+	if entry != nil && entry.Billing != nil && !entry.Billing.HasResolution(size) {
+		if alias := entry.Billing.PricedResolutionAlias(size); alias != "" {
+			size = alias
+		}
+	}
 	// Fall back to the published tier when the request names none, AND when it names one this
 	// model prices nowhere. Both are the same situation from the gate's side: the upstream will
 	// render its configured tier and settlement bills from the RESPONSE's tier either way, so
@@ -630,21 +639,24 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	//
 	// This is the mirror of the per_unit_table MaxTableUnits fallback in videoModelUnits, and it
 	// exists because scoping the published-size substitution to per_unit_table left per_video_second
-	// with nothing to lift it off the 1.0 baseline: `size:"1920x1080"` against `{720p:1.0, 1080p:1.5}`
-	// reserved 5 and settled 8 with no vendor divergence, since the gate cannot see that
-	// 1920x1080 IS 1080p.
+	// with nothing to lift it off the 1.0 baseline. It fires only for a size that names no priced
+	// tier even after PricedResolutionAlias — `size:"1920x1080"` on a card keyed {2K, 4K}, where the
+	// translator's MINIMAX_RESOLUTION decides the render. A pixel size whose height IS a priced tier
+	// no longer reaches here at all.
 	if entry != nil && entry.Billing != nil && !entry.Billing.HasResolution(size) {
-		// The model prices this size nowhere, so the tier is decided elsewhere — for the MiniMax
-		// path, by MINIMAX_RESOLUTION in the TRANSLATOR's own environment (a separate process,
-		// default "2K"). The broker's only proxy for that is the model's published
-		// defaultParameters.size, so prefer it whenever the block actually prices it: that keeps
-		// both billing modes answering this situation the same way, and it stops the OpenAI-
-		// documented `size:"1280x720"` from being reserved at the dearest tier (measured 8x on a
-		// rate card with a 4K row — a refusal for callers who can afford the real bill, which is
-		// the outcome this file rejects twice for the table path).
+		// The model prices this size nowhere and its pixel height names no priced tier either, so
+		// the tier is decided elsewhere — for the MiniMax path, by MINIMAX_RESOLUTION in the
+		// TRANSLATOR's own environment (a separate process, default "2K"). The broker's only proxy
+		// for that is the model's published defaultParameters.size, so prefer it whenever the block
+		// actually prices it: that keeps both billing modes answering this situation the same way,
+		// and it reserves the tier the operator says gets rendered rather than the dearest row on
+		// the card.
 		//
 		// Only with no usable published default is there nothing left to name the tier with, and
-		// then the dearest the model can bill is the sole true ceiling.
+		// then the dearest the model can bill is the sole true ceiling. That is an over-reserve
+		// whenever the vendor renders something cheaper; the fix is publishing
+		// defaultParameters.size to match MINIMAX_RESOLUTION, which validateVideoDefaultParameters
+		// warns about at boot.
 		lifted := units
 		if def, published := c.Service.DefaultVideoSizeFor(requestedModel); published && entry.Billing.HasResolution(def) {
 			if u, priced := c.videoModelUnits(entry, seconds, def); priced && u > lifted {
@@ -660,7 +672,7 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	return units, nil
 }
 
-// videoBillingBasis is resolveVideoBilling plus the resolution normalization every settlement
+// videoBillingBasis is resolveVideoBillingWithSizeSource plus the resolution normalization every settlement
 // site needs. All three sites (create-time, whitelist, and the async poller) must go through it:
 // the async path is the production one and the one that needs it most, because
 // translate.FromGetTaskResponse never sets Size, so a poll settlement ALWAYS falls back to the
@@ -746,7 +758,7 @@ func (c *Ctrl) checkVideoReserveCoverage(reqBody []byte, contentType string, set
 // videoBillingSize substitutes the model's published default resolution when the size about to be
 // billed is one this model prices NOWHERE.
 //
-// It only ever fires on the degraded path: resolveVideoBilling prefers the response's own size and
+// It only ever fires on the degraded path: resolveVideoBillingWithSizeSource prefers the response's own size and
 // falls back to the REQUEST's when the upstream omits it, and a client size like "1280x720" (the
 // OpenAI Video API's documented shape) is not in a tier-keyed vocabulary. videoOutputUnits then
 // finds no covering bucket and bills the table MAXIMUM — over-charging the caller by the whole
@@ -997,7 +1009,7 @@ func (c *Ctrl) signVideoResponse(ctx *gin.Context, reqBody, respBody []byte, cha
 
 // handleVideoGenerationResponse handles the POST /videos response from the provider.
 // Billing prefers the provider's response (actual seconds/size) and falls back to
-// the client request when the upstream doesn't echo them (see resolveVideoBilling).
+// the client request when the upstream doesn't echo them (see resolveVideoBillingWithSizeSource).
 // Fee = ceil(seconds × sizeRatio) × outputPrice.
 func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Response, account model.User, outputPrice string, reqBody []byte, reqModel model.Request) error {
 	defer resp.Body.Close()
@@ -1132,7 +1144,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		}
 
 		// videoActionBillNow: provider reported completed (or omitted status entirely, the
-		// synchronous-shim case) — resolveVideoBilling's result is trustworthy right now, so
+		// synchronous-shim case) — videoBillingBasis's result is trustworthy right now, so
 		// record it immediately instead of deferring.
 		var seconds int64
 		var rateClass string
@@ -1205,7 +1217,6 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
 	outputCount := c.videoOutputUnits(ctx, seconds, size)
-	c.checkVideoReserveCoverage(reqBody, contentType, outputCount)
 
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
@@ -1220,6 +1231,10 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
 		return errors.Wrap(err, "update request video billing in database")
 	}
+
+	// After the write, matching the poll path: a bill that failed to persist was not charged, so
+	// metering it as a shortfall would report a gate failure for a request nobody paid for.
+	c.checkVideoReserveCoverage(reqBody, contentType, outputCount)
 
 	monitor.RecordTokens("video-generation", c.metricModel(ctx), 0, outputCount)
 	return nil

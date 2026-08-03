@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/patrickmn/go-cache"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/model"
+	"github.com/0glabs/0g-serving-broker/inference/monitor"
 )
 
 // multipartBody is a helper to build multipart/form-data body for tests.
@@ -1766,8 +1769,68 @@ func TestVideoReserveCoversEchoedRequestSize(t *testing.T) {
 	}
 }
 
+// TestVideoReservePixelSizeNamesItsTier pins the fix for the root cause behind two opposite reserve
+// failures: the OpenAI Video API documents `size` as pixel dimensions, rate cards are keyed by tier
+// name, and the gate compared them as opaque strings. So a size the model DID price missed the lookup
+// and fell into the "vendor picks the tier" fallback — which reserved either the 1.0 baseline (5
+// against an 8-unit bill for `1920x1080`) or the dearest row (40 against a 5-unit bill for
+// `1280x720`, an 8x refusal of callers who could afford it). Naming the tier removes the choice.
+//
+// The published default is irrelevant here and both ctrls are asserted to agree: once the size names a
+// priced tier, the client named it, exactly as if they had typed "720p".
+func TestVideoReservePixelSizeNamesItsTier(t *testing.T) {
+	billing := func() *config.BillingConfig {
+		return &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5, "2160p": 8.0},
+		}
+	}
+	withDefault := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing:     billing(),
+		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+	}}, "tiered")}
+	noDefault := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing:     billing(),
+		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5}},
+	}}, "tiered")}
+
+	// want == exactly what the equivalent tier NAME reserves, and == what settlement bills when the
+	// response reports that tier. No slack in either direction.
+	for _, tc := range []struct {
+		pixels string
+		tier   string
+		want   int64
+	}{
+		{pixels: "1280x720", tier: "720p", want: 5},
+		{pixels: "1920x1080", tier: "1080p", want: 8},
+		{pixels: "3840x2160", tier: "2160p", want: 40},
+		{pixels: "1920X1080", tier: "1080p", want: 8}, // case-insensitive, like every other size read
+	} {
+		for name, c := range map[string]*Ctrl{"with_published_default": withDefault, "no_published_default": noDefault} {
+			t.Run(name+"/"+tc.pixels, func(t *testing.T) {
+				got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+tc.pixels+`"}`), "application/json")
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got != tc.want {
+					t.Errorf("reserve for %q = %d, want %d (what %q reserves)", tc.pixels, got, tc.want, tc.tier)
+				}
+				named, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+tc.tier+`"}`), "application/json")
+				if err != nil || named != got {
+					t.Errorf("pixel size reserved %d but the tier name %q reserved %d (err %v); they must agree", got, tc.tier, named, err)
+				}
+			})
+		}
+	}
+}
+
 // TestVideoReserveUnpricedSizePrefersPublishedTier pins the reserve for a size the model prices
-// NOWHERE — and pins it from BOTH directions.
+// NOWHERE — including after PricedResolutionAlias, i.e. its pixel height names no priced tier either.
+// That is the live MiniMax shape: a card keyed {2K, 4K} asked for "1920x1080".
 //
 // The tier is decided elsewhere for such a size (on the MiniMax path, by MINIMAX_RESOLUTION in the
 // translator's own environment), so the broker's only proxy is the model's published
@@ -1781,17 +1844,16 @@ func TestVideoReserveUnpricedSizePrefersPublishedTier(t *testing.T) {
 	billing := func() *config.BillingConfig {
 		return &config.BillingConfig{
 			Mode:                  config.BillingModePerVideoSecond,
-			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5, "2160p": 8.0},
+			ResolutionMultipliers: map[string]float64{"2K": 1.0, "4K": 8.0},
 		}
 	}
 	published := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
 		Model:       "tiered",
 		OutputPrice: "100",
 		Billing:     billing(),
-		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "2K"}},
 	}}, "tiered")}
-	// Same model, but publishing a size its own block prices nowhere — so there is nothing to name
-	// the tier with.
+	// Same model, but publishing no size — so there is nothing to name the tier with.
 	unpublished := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
 		Model:       "tiered",
 		OutputPrice: "100",
@@ -1799,14 +1861,15 @@ func TestVideoReserveUnpricedSizePrefersPublishedTier(t *testing.T) {
 		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5}},
 	}}, "tiered")}
 
-	for _, size := range []string{"1280x720", "1920x1080", "3840x2160"} {
+	// None of these names a tier on this card, and none of their pixel heights does either.
+	for _, size := range []string{"1280x720", "1920x1080", "portrait"} {
 		t.Run("published/"+size, func(t *testing.T) {
 			got, err := published.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+size+`"}`), "application/json")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			// The published 720p tier, not the 8.0 one: reserving the dearest here refused callers
-			// who could afford the real bill on the API's documented request shape.
+			// The published 2K tier, not the 8.0 one: reserving the dearest here refused callers
+			// who could afford the real bill.
 			if got != 5 {
 				t.Errorf("reserve = %d, want 5 (the published tier's multiplier)", got)
 			}
@@ -1825,8 +1888,8 @@ func TestVideoReserveUnpricedSizePrefersPublishedTier(t *testing.T) {
 
 	// A size the model DOES price is trusted as named — a dearer RENDERED tier is residual 2(b),
 	// not something to tax every request for.
-	if got, err := published.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"1080p"}`), "application/json"); err != nil || got != 8 {
-		t.Errorf("reserve for an explicitly named tier = %d (err %v), want 8", got, err)
+	if got, err := published.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"4K"}`), "application/json"); err != nil || got != 40 {
+		t.Errorf("reserve for an explicitly named tier = %d (err %v), want 40", got, err)
 	}
 }
 
@@ -1995,4 +2058,58 @@ func TestCheckVideoReserveCoverage(t *testing.T) {
 			t.Errorf("logged %d times, want 0", rec.errors)
 		}
 	})
+}
+
+// TestCheckVideoReserveCoverageIncrementsTheRightCounter pins which Prometheus counter each outcome
+// feeds. Every other test here counts LOG lines, so the two counters could be swapped — a shortfall
+// reported as "detector blind" and vice versa — and the suite would stay green. They alert differently
+// (one is a drift signal on the gate, the other says the detector is not looking), so a swap sends the
+// operator to the wrong question.
+func TestCheckVideoReserveCoverageIncrementsTheRightCounter(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 4.0},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
+
+	shortfall, unknown := monitor.VideoReserveShortfallTotal, monitor.VideoReserveShortfallUnknownTotal
+	t.Cleanup(func() {
+		monitor.VideoReserveShortfallTotal, monitor.VideoReserveShortfallUnknownTotal = shortfall, unknown
+	})
+	reset := func() {
+		monitor.VideoReserveShortfallTotal = prometheus.NewCounter(prometheus.CounterOpts{Name: "test_video_reserve_shortfall_total"})
+		monitor.VideoReserveShortfallUnknownTotal = prometheus.NewCounter(prometheus.CounterOpts{Name: "test_video_reserve_shortfall_unknown_total"})
+	}
+	got := func() (float64, float64) {
+		return testutil.ToFloat64(monitor.VideoReserveShortfallTotal), testutil.ToFloat64(monitor.VideoReserveShortfallUnknownTotal)
+	}
+	priced := []byte(`{"model":"tiered","seconds":5,"size":"720p"}`) // reserve = 5 units
+	// A model this service does not serve: the recompute returns ErrVideoModelNotServed, which is
+	// the "cannot tell" case, NOT a shortfall.
+	unpriceable := []byte(`{"model":"not-served","seconds":5,"size":"720p"}`)
+
+	for _, tc := range []struct {
+		name              string
+		body              []byte
+		settled           int64
+		wantShort, wantUn float64
+	}{
+		{name: "settlement outran the reserve", body: priced, settled: 20, wantShort: 1, wantUn: 0},
+		{name: "reserve covered the bill", body: priced, settled: 5, wantShort: 0, wantUn: 0},
+		{name: "reserve could not be recomputed", body: unpriceable, settled: 20, wantShort: 0, wantUn: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset()
+			c.checkVideoReserveCoverage(tc.body, "application/json", tc.settled)
+			short, un := got()
+			if short != tc.wantShort || un != tc.wantUn {
+				t.Errorf("shortfall=%v unknown=%v, want shortfall=%v unknown=%v", short, un, tc.wantShort, tc.wantUn)
+			}
+		})
+	}
 }
