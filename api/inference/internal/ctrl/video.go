@@ -620,6 +620,22 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 	return units, nil
 }
 
+// videoBillingBasis is resolveVideoBilling plus the resolution normalization every settlement
+// site needs. All three sites (create-time, whitelist, and the async poller) must go through it:
+// the async path is the production one and the one that needs it most, because
+// translate.FromGetTaskResponse never sets Size, so a poll settlement ALWAYS falls back to the
+// client's verbatim free-text size — exactly the input videoBillingSize exists to normalize.
+// Wiring the substitution at one call site instead left the poller billing the table maximum
+// (measured: reserve 12, async bill 40) while the create-time path billed 12.
+//
+// It also keeps the reconciliation rate_class on the same value as the units, so one clip cannot
+// land under res:1080p or res:1280x720 depending on which path happened to settle it —
+// RateClass is part of hourly_usage_stat's primary key.
+func (c *Ctrl) videoBillingBasis(ctx context.Context, respBody, reqBody []byte, contentType string) (seconds int64, size, source string) {
+	seconds, size, source = resolveVideoBilling(respBody, reqBody, contentType)
+	return seconds, c.videoBillingSize(ctx, size), source
+}
+
 // videoBillingSize substitutes the model's published default resolution when the size about to be
 // billed is one this model prices NOWHERE.
 //
@@ -632,6 +648,15 @@ func (c *Ctrl) videoReserveUnitsFromRequest(reqBody []byte, contentType string) 
 func (c *Ctrl) videoBillingSize(ctx context.Context, size string) string {
 	if !c.Service.HasMultiModelPricing() {
 		return size
+	}
+	// Checked before resolveModelPricing so a context without the key (the background poller
+	// synthesizes one, and job.ResolvedModel can be empty for a row written before it was
+	// recorded) does not log "resolvedModel missing" on a path that simply has nothing to
+	// substitute.
+	if gc, ok := ctx.(*gin.Context); ok {
+		if v, exists := gc.Get(CtxKeyResolvedModel); !exists || v == "" {
+			return size
+		}
 	}
 	entry := c.resolveModelPricing(ctx)
 	if entry == nil || entry.Billing == nil || !entry.Billing.IsResolutionKeyed() || entry.Billing.HasResolution(size) {
@@ -724,42 +749,41 @@ var ErrVideoSecondsUnpriceable = errors.NewBadRequest(
 // mismatch ever reaching recordModelMismatch or the model_mismatch rejection reason.
 var ErrVideoModelNotServed = errors.NewBadRequest("model not supported: not available for this service")
 
-// ErrVideoDefaultDurationUnpublished is returned when a create omits `seconds` and the
-// resolved model publishes no defaultParameters.seconds for the gate to price.
+// ErrVideoDefaultDurationUnpublished is returned when a create omits `seconds` and the resolved
+// model publishes no defaultParameters.seconds for the gate to price.
 //
-// Broker-attributed, unlike the two above, because it is an operator config gap and not
-// something the caller can fix: omitting `seconds` is legal, the upstream will apply its
-// own default and bill it, and the only reason the gate cannot price that is that the
-// model's own GET /v1/models metadata does not say what the default is. Folding it into
-// ErrVideoSecondsUnpriceable told the caller their `seconds` was invalid and recorded a
-// client-fault rejection for every conforming request, with no broker-side signal at all.
-// ErrVideoDefaultSizeUnpublished is the size counterpart of
-// ErrVideoDefaultDurationUnpublished, and only reachable for a model whose billing block is
-// keyed on resolution. Such a block prices in table units, which bear no relation to seconds,
-// so when neither the request nor the model's published defaultParameters.size names a tier it
-// prices, there is no scale on which to express the reserve — the service-ratio basis would
-// silently be off by the table's units-per-second (measured at 10x on a plausible config).
-// Broker-attributed for the same reason as its sibling: publishing a usable default size is
-// the operator's job, not the caller's.
-// ErrVideoBillingFieldInQuery is returned when a create puts `seconds`, `size` or `model` in the
-// URL QUERY. The broker forwards the query verbatim, and the upstream reads the create with
-// r.FormValue — whose ParseMultipartForm populates r.Form from the QUERY FIRST and appends the
-// body after, so the query value wins. The gate is handed only the body, so it cannot see that
-// channel at all: `?seconds=15` against a body of `seconds=1` priced 1 and rendered 15, and it
-// composes across all three fields at once.
-//
-// Refused rather than merged because the OpenAI Video API puts none of these in the query, so
-// nothing legitimate is turned away — and because merging would mean re-implementing Go's
-// query-then-body precedence here, which is the kind of second reader of one request that
-// produced every bypass in this path's history.
-var ErrVideoBillingFieldInQuery = errors.NewBadRequest(
-	"`seconds`, `size` and `model` must be sent in the request body, not the URL query")
+// Broker-attributed, unlike the client-caused sentinels above, because it is an operator config gap
+// and not something the caller can fix: omitting `seconds` is legal, the upstream will apply its own
+// default and bill it, and the only reason the gate cannot price that is that the model's own
+// GET /v1/models metadata does not say what the default is. Folding it into
+// ErrVideoSecondsUnpriceable told the caller their `seconds` was invalid and recorded a client-fault
+// rejection for every conforming request, with no broker-side signal at all.
+var ErrVideoDefaultDurationUnpublished = errors.NewServiceUnavailable(
+	"video pricing unavailable: this model publishes no default duration; send an explicit `seconds`")
 
+// ErrVideoDefaultSizeUnpublished is the size counterpart of ErrVideoDefaultDurationUnpublished, and
+// only reachable for a model whose billing block is keyed on resolution. Such a block prices in
+// table units, which bear no relation to seconds, so when neither the request nor the model's
+// published defaultParameters.size names a tier it prices, there is no scale on which to express the
+// reserve — the service-ratio basis would silently be off by the table's units-per-second (measured
+// at 10x on a plausible config). Broker-attributed for the same reason as its sibling: publishing a
+// usable default size is the operator's job, not the caller's.
 var ErrVideoDefaultSizeUnpublished = errors.NewServiceUnavailable(
 	"video pricing unavailable: this model publishes no default resolution; send an explicit `size` this model prices")
 
-var ErrVideoDefaultDurationUnpublished = errors.NewServiceUnavailable(
-	"video pricing unavailable: this model publishes no default duration; send an explicit `seconds`")
+// ErrVideoBillingFieldInQuery is returned when a create puts `seconds`, `size` or `model` in the URL
+// QUERY. The broker forwards the query verbatim, and the upstream reads the create with
+// r.FormValue — whose ParseMultipartForm populates r.Form from the QUERY FIRST and appends the body
+// after, so the query value wins. The gate is handed only the body, so it cannot see that channel at
+// all: `?seconds=15` against a body of `seconds=1` priced 1 and rendered 15, and it composes across
+// all three fields at once.
+//
+// Refused rather than merged because the OpenAI Video API puts none of these in the query, so
+// nothing legitimate is turned away — and because merging would mean re-implementing Go's
+// query-then-body precedence here, which is the kind of second reader of one request that produced
+// every bypass in this path's history.
+var ErrVideoBillingFieldInQuery = errors.NewBadRequest(
+	"`seconds`, `size` and `model` must be sent in the request body, not the URL query")
 
 // VideoCreateReserveFee is the pre-flight reserve for a video create: the fee this
 // request bills if the upstream renders the duration it asked for, priced at the
@@ -988,7 +1012,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		// record it immediately instead of deferring.
 		var seconds int64
 		var rateClass string
-		if sec, size, source := resolveVideoBilling(body, reqBody, contentType); source != "" {
+		if sec, size, source := c.videoBillingBasis(ctx, body, reqBody, contentType); source != "" {
 			seconds = sec
 			rateClass = resolutionRateClass(size)
 			outputCount := c.videoOutputUnits(ctx, sec, size)
@@ -1039,7 +1063,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 
 	// Resolve billable seconds/size, preferring the upstream response (actual
 	// output) and falling back to the client request.
-	seconds, size, source := resolveVideoBilling(body, reqBody, contentType)
+	seconds, size, source := c.videoBillingBasis(ctx, body, reqBody, contentType)
 	if source == "" {
 		// Returning here would serve the video FREE — make it loud + metered,
 		// not a silent skip (this was a Warnf that hid Wan2.7 mis-parsing).
@@ -1055,7 +1079,6 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		c.logger.Warnf("video billed on REQUESTED duration (upstream did not report actual output) for request %s; configure the upstream/shim to echo seconds or usage.output_video_duration", reqModel.RequestHash)
 	}
 
-	size = c.videoBillingSize(ctx, size)
 	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
 	outputCount := c.videoOutputUnits(ctx, seconds, size)
 

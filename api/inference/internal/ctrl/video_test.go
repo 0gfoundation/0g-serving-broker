@@ -1088,6 +1088,10 @@ func TestVideoReserveNeverBelowSettlement(t *testing.T) {
 		{name: "per_unit_table: duration above every bucket", model: "bucketed", body: `{"model":"bucketed","seconds":12,"size":"768P"}`, renderedSize: "768P", renderedSecond: 12},
 		{name: "per_unit_table: duration above every bucket at the dear tier", model: "bucketed", body: `{"model":"bucketed","seconds":15,"size":"1080P"}`, renderedSize: "1080P", renderedSecond: 15},
 		{name: "per_unit_table: pixel size the table prices nowhere", model: "bucketed", body: `{"model":"bucketed","seconds":6,"size":"1280x720"}`, renderedSize: "1080P", renderedSecond: 6},
+		// The async poll response reports usage.output_video_duration and NO size (see
+		// translate.FromGetTaskResponse), so resolveVideoBilling falls back to the client's
+		// verbatim size — the only path videoBillingSize exists for, and the one a hand-written
+		// renderedSize can never exercise. Driven end to end below.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1440,27 +1444,36 @@ func TestExtractModelNameMatchesUpstreamReading(t *testing.T) {
 	}
 }
 
-// TestReserveVideoSizeRatioNormalizes covers the two widenings the reserve's ratio lookup needs.
-// Neither can move a bill: the reserve reads the REQUEST's size, settlement reads the RESPONSE's.
+// TestReserveVideoSizeRatioNormalizes covers the reserve's ratio lookup. The normalization widening
+// cannot move a bill — the reserve reads the REQUEST's size, settlement the RESPONSE's — and the
+// per-model map is deliberately NOT folded in.
 func TestReserveVideoSizeRatioNormalizes(t *testing.T) {
 	// Single-model, default ratios (1024x1792 = 2.0) — the most common deployment.
 	svc := config.Service{}
 	for _, size := range []string{"1024x1792", "1024X1792", " 1024x1792", "1024x1792 "} {
 		if got := svc.ReserveVideoSizeRatio("any", size); got != 2.0 {
-			// One capital letter used to miss the 2.0 ratio and reserve half of what the
-			// vendor's canonical echo settled at.
+			// One capital letter used to miss the 2.0 ratio and reserve half of what the vendor's
+			// canonical echo settled at.
 			t.Errorf("ReserveVideoSizeRatio(%q) = %v, want 2", size, got)
 		}
 	}
-	// A per-model map is consulted too: videoSizeRatios is per-model-capable and advertised per
-	// model in GET /v1/models, while GetVideoSizeRatio reads only the service block.
+	// A modelInfo block with NO videoSizeRatios still falls back to the defaults — the shape this
+	// repo's video example config ships. Branching on nil-ness left the fix inert for it.
+	withInfo := config.Service{ModelInfo: &config.ModelInfo{}}
+	if got := withInfo.ReserveVideoSizeRatio("any", "1024X1792"); got != 2.0 {
+		t.Errorf("ratio with an empty videoSizeRatios map = %v, want the default 2", got)
+	}
+	// A per-model modelInfo.videoSizeRatios is NOT folded in: settlement prices a per-model entry
+	// through entry.Billing and never reads that map, so honouring it here demanded 8x the real
+	// fee and refused solvent callers. A ratio meant to price belongs in
+	// entry.Billing.ResolutionMultipliers, which videoModelUnits already covers.
 	perModel := newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
 		Model:       "dear",
 		OutputPrice: "100",
-		ModelInfo:   &config.ModelInfo{VideoSizeRatios: map[string]float64{"1080P": 4.0}},
+		ModelInfo:   &config.ModelInfo{VideoSizeRatios: map[string]float64{"1080P": 8.0}},
 	}}, "dear")
-	if got := perModel.ReserveVideoSizeRatio("dear", "1080p"); got != 4.0 {
-		t.Errorf("per-model ratio = %v, want 4", got)
+	if got := perModel.ReserveVideoSizeRatio("dear", "1080P"); got != 1.0 {
+		t.Errorf("per-model display ratio = %v, want the baseline 1 (settlement never reads it)", got)
 	}
 	// Unknown sizes stay at the baseline.
 	if got := svc.ReserveVideoSizeRatio("any", "2K"); got != 1.0 {
@@ -1507,5 +1520,84 @@ func TestVideoBillingSizeSubstitutesPublishedTier(t *testing.T) {
 	settled := c.videoOutputUnits(ctx, 6, c.videoBillingSize(ctx, "1280x720"))
 	if reserve != settled {
 		t.Errorf("reserve %d != settled %d for a client tier the model prices nowhere", reserve, settled)
+	}
+}
+
+// TestVideoReserveNeverBelowSettlement_AsyncPollBasis drives the settlement basis the way the async
+// poller does — through resolveVideoBilling on a response that reports a duration and NO size — and
+// asserts the reserve still covers it.
+//
+// This is the assertion the invariant needed: every other case supplies renderedSize as a literal,
+// so none of them exercises the request-size fallback, which is exactly where the reserve and the
+// bill drifted apart (measured: reserve 6, async bill 60). translate.FromGetTaskResponse never sets
+// Size, so on the async path this is not an edge case — it is every settlement.
+func TestVideoReserveNeverBelowSettlement_AsyncPollBasis(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bucketed",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode: config.BillingModePerUnitTable,
+			Table: []config.BillingUnitTier{
+				{Resolution: "768P", Duration: 6, Units: 6},
+				{Resolution: "1080P", Duration: 6, Units: 60},
+			},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 6, "size": "768P"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bucketed")}
+	ctx := ginCtxWithResolvedModel("bucketed")
+
+	for _, body := range []string{
+		`{"model":"bucketed","seconds":6,"size":"1280x720"}`, // the OpenAI documented shape
+		`{"model":"bucketed","seconds":6,"size":"2160P"}`,    // a tier this model prices nowhere
+		`{"model":"bucketed","seconds":6}`,                   // size omitted
+		`{"model":"bucketed","seconds":6,"size":"768P"}`,     // a tier it does price
+	} {
+		t.Run(body, func(t *testing.T) {
+			reserve, err := c.videoReserveUnitsFromRequest([]byte(body), "application/json")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// Shaped like translate.FromGetTaskResponse: a duration, no size.
+			pollBody := []byte(`{"id":"v1","status":"completed","usage":{"output_video_duration":6}}`)
+			seconds, size, source := c.videoBillingBasis(ctx, pollBody, []byte(body), "application/json")
+			if source == "" {
+				t.Fatal("settlement resolved no basis")
+			}
+			settled := c.videoOutputUnits(ctx, seconds, size)
+			if reserve < settled {
+				t.Errorf("reserve %d < settled %d (basis size %q) — the gate admitted a request it cannot cover", reserve, settled, size)
+			}
+		})
+	}
+}
+
+// TestExtractModelNameExactKeyMustBeUsable pins that the exact-key tie-break is gated on the value
+// being usable, not merely present.
+//
+// This answer feeds two AUTHORIZATION gates — CheckLoRAOwnership, the only ownership check on a
+// private fine-tuned adapter, and the model-expiry 410 — and both short-circuit on an empty model
+// name. Winning the tie-break on presence and then failing to decode produced exactly the ""
+// the preference exists to prevent.
+func TestExtractModelNameExactKeyMustBeUsable(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "usable exact key wins", body: `{"model":"cheap","Model":"dear"}`, want: "cheap"},
+		{name: "wrong-typed exact key falls back to the folded match", body: `{"model":123,"Model":"ft-victim"}`, want: "ft-victim"},
+		{name: "empty exact key falls back to the folded match", body: `{"model":"","Model":"ft-victim"}`, want: "ft-victim"},
+		// No usable reading at all: both spellings are ambiguous, so nothing is claimed. The
+		// allowlist also reads nothing here, so no gate can be fooled.
+		{name: "two ambiguous variants", body: `{"Model":"a","MODEL":"b"}`, want: ""},
+		{name: "wrong-typed sole key", body: `{"model":123}`, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExtractModelName([]byte(tt.body), "application/json"); got != tt.want {
+				t.Errorf("ExtractModelName() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

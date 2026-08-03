@@ -801,6 +801,13 @@ func validateModelPricing(cfg *Config) error {
 		if err := validateModelPricingEntry(i, entry, svc.Type, isUSD); err != nil {
 			return err
 		}
+		// Needs the entry's sibling Billing block AND the service-level modelInfo it may inherit
+		// from, so it cannot live on ModelInfo.Validate.
+		if svc.Type == constant.ServiceTypeVideoGeneration {
+			if err := validateVideoDefaultSizeAgainstBilling(entry, svc.ModelInfo); err != nil {
+				return fmt.Errorf("invalid config: service.modelPricing[%d]: %w", i, err)
+			}
+		}
 		if entry.Model == ModelWildcard {
 			hasWildcard = true
 		}
@@ -1246,47 +1253,68 @@ func validateVideoDefaultParameters(mi *ModelInfo) error {
 	// billing is not resolution-keyed does not need it — but a present one must be usable.
 	if raw, ok := mi.DefaultParameters["size"]; ok && raw != nil {
 		if _, usable := mi.defaultVideoSize(); !usable {
-			return fmt.Errorf("invalid modelInfo.defaultParameters.size %v: must be a non-empty string naming a resolution this model prices", raw)
+			return fmt.Errorf("invalid modelInfo.defaultParameters.size %v: must be a non-empty string", raw)
 		}
 	}
 	return nil
 }
 
 // ReserveVideoSizeRatio is the size multiplier the pre-flight reserve should use for a request:
-// the larger of the service-level and the resolved model's videoSizeRatios, looked up with
-// resolution NORMALIZATION as well as verbatim.
+// GetVideoSizeRatio's answer, widened to also match the resolution with NORMALIZATION.
 //
-// Both widenings exist because the reserve reads the REQUEST's size while settlement reads the
-// RESPONSE's, so neither can move a bill:
+// The widening cannot move a bill, which is why it is safe: the reserve reads the REQUEST's size
+// while settlement reads the RESPONSE's. The map is indexed verbatim while BillingConfig matching
+// goes through normalizeResolution, so `size:"1024X1792"` — one capital letter — missed a 2.0 ratio
+// and reserved half of what the vendor's canonical echo settled at.
 //
-//   - per-model scope: videoSizeRatios is a per-model-capable field that GET /v1/models advertises
-//     per model, and GetVideoSizeRatio reads only the service block — so a published per-model
-//     ratio was used by nothing.
-//   - normalization: the map is indexed verbatim while BillingConfig matching goes through
-//     normalizeResolution, so `size:"1024X1792"` — one capital letter — missed a 2.0 ratio and
-//     reserved half of what the vendor's canonical echo settled at.
-//
-// Taking the max rather than switching keeps it monotone: settlement's own fallback still reads
-// the service map verbatim, so preferring another value outright could reserve below the bill.
+// It deliberately does NOT fold in the resolved model's own modelInfo.videoSizeRatios. Settlement
+// never reads that map: a per-model entry is priced through entry.Billing, and the service-ratio
+// fallback reads only the service block. For a per-model-billed model those ratios are /v1/models
+// display metadata — folding them in demanded 8x the real fee and refused solvent callers. A
+// per-model ratio that is meant to price belongs in entry.Billing.ResolutionMultipliers, which
+// settlement does read and videoModelUnits already covers.
 func (s *Service) ReserveVideoSizeRatio(model, size string) float64 {
 	ratio := s.GetVideoSizeRatio(size)
-	consider := func(ratios map[string]float64) {
-		res := normalizeResolution(size)
-		for k, v := range ratios {
-			if (k == size || normalizeResolution(k) == res) && v > ratio {
-				ratio = v
-			}
+	ratios := DefaultVideoSizeRatios
+	// Mirror GetVideoSizeRatio's own fallback, which is on EMPTINESS, not nil-ness: a modelInfo
+	// block with no videoSizeRatios still uses the defaults, and branching on nil left the
+	// normalization inert for exactly the config shape this repo's video example ships.
+	if s.ModelInfo != nil && len(s.ModelInfo.VideoSizeRatios) > 0 {
+		ratios = s.ModelInfo.VideoSizeRatios
+	}
+	res := normalizeResolution(size)
+	for k, v := range ratios {
+		if normalizeResolution(k) == res && v > ratio {
+			ratio = v
 		}
 	}
-	if s.ModelInfo != nil {
-		consider(s.ModelInfo.VideoSizeRatios)
-	} else {
-		consider(DefaultVideoSizeRatios)
-	}
-	if mi := s.EffectiveModelInfo(model); mi != nil {
-		consider(mi.VideoSizeRatios)
-	}
 	return ratio
+}
+
+// validateVideoDefaultSizeAgainstBilling cross-checks a published defaultParameters.size against
+// the billing block that will price it. Lives here rather than on ModelInfo because it needs the
+// sibling Billing block.
+//
+// Without it the boot check accepted the one typo it exists to catch: `size: "1080i"` against a
+// table keyed on 2K is a non-empty string, so it passed, and then the reserve refused every create
+// that omitted `size` or named a pixel dimension — the OpenAI default shapes — with a
+// broker-attributed 503.
+func validateVideoDefaultSizeAgainstBilling(entry *ModelPricingEntry, serviceInfo *ModelInfo) error {
+	if entry == nil || entry.Billing == nil || !entry.Billing.IsResolutionKeyed() {
+		return nil
+	}
+	mi := entry.ModelInfo
+	if mi == nil {
+		mi = serviceInfo
+	}
+	def, published := mi.defaultVideoSize()
+	if !published {
+		return nil
+	}
+	if !entry.Billing.HasResolution(def) {
+		return fmt.Errorf("model %q: modelInfo.defaultParameters.size %q names no resolution this model's billing block prices: the pre-flight reserve prices an omitted or unlisted size at this value and refuses the create when it cannot", entry.Model, def)
+	}
+	return nil
 }
 
 // videoPricedModels lists every model id this service can be asked to price: the on-chain

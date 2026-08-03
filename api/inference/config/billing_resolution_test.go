@@ -69,3 +69,57 @@ func TestBillingResolutionVocabulary(t *testing.T) {
 		}
 	})
 }
+
+// TestVideoDefaultSizeCrossCheckedAgainstBilling pins the boot cross-check. A published default size
+// that names no tier the model's billing block prices is the one typo the boot policy used to miss:
+// it is a non-empty string, so it passed, and then the reserve refused every create that omitted
+// `size` or named a pixel dimension — the OpenAI default shapes — with a broker-attributed 503.
+func TestVideoDefaultSizeCrossCheckedAgainstBilling(t *testing.T) {
+	billing := &BillingConfig{
+		Mode:  BillingModePerUnitTable,
+		Table: []BillingUnitTier{{Resolution: "2K", Duration: 6, Units: 60}},
+	}
+	newEntry := func(size interface{}) *ModelPricingEntry {
+		params := map[string]interface{}{"seconds": 6}
+		if size != nil {
+			params["size"] = size
+		}
+		return &ModelPricingEntry{
+			Model:       "bucketed",
+			OutputPrice: "100",
+			Billing:     billing,
+			ModelInfo:   &ModelInfo{DefaultParameters: params},
+		}
+	}
+	if err := validateVideoDefaultSizeAgainstBilling(newEntry("2K"), nil); err != nil {
+		t.Errorf("a published tier the table prices must load: %v", err)
+	}
+	// Case- and space-insensitive, matching how billing normalizes the keys.
+	if err := validateVideoDefaultSizeAgainstBilling(newEntry(" 2k "), nil); err != nil {
+		t.Errorf("a case/space variant of a priced tier must load: %v", err)
+	}
+	// Plausible typos the runtime cannot distinguish from "unpublished": must fail the boot.
+	for _, bad := range []interface{}{"1080i", "1280x720", "2k!"} {
+		if err := validateVideoDefaultSizeAgainstBilling(newEntry(bad), nil); err == nil {
+			t.Errorf("defaultParameters.size = %v must fail config load", bad)
+		}
+	}
+	// Publishing none is legal — the reserve then refuses at request time, which is loud.
+	if err := validateVideoDefaultSizeAgainstBilling(newEntry(nil), nil); err != nil {
+		t.Errorf("publishing no default size must not fail the boot: %v", err)
+	}
+	// A model whose billing is not resolution-keyed has nothing to cross-check against.
+	notKeyed := newEntry("anything")
+	notKeyed.Billing = &BillingConfig{Mode: BillingModePerVideoSecond}
+	if err := validateVideoDefaultSizeAgainstBilling(notKeyed, nil); err != nil {
+		t.Errorf("a non-resolution-keyed model must not be gated on its default size: %v", err)
+	}
+	// Inheritance: with no per-model modelInfo the service-level one is cross-checked.
+	inherit := newEntry(nil)
+	inherit.ModelInfo = nil
+	if err := validateVideoDefaultSizeAgainstBilling(inherit, &ModelInfo{
+		DefaultParameters: map[string]interface{}{"size": "1080i"},
+	}); err == nil {
+		t.Error("an inherited service-level default size must be cross-checked too")
+	}
+}

@@ -148,34 +148,49 @@ func ExtractModelName(body []byte, contentType string) string {
 	//     matches object keys onto struct fields regardless of case, so an exact-key read missed
 	//     `{"Model":"expensive"}` entirely.
 	//
-	// More than one spelling is reported absent rather than guessed at — Go resolves competing
-	// variants by document order, which an unordered map cannot see. Callers substitute the
-	// configured model; the video reserve refuses such a body outright.
+	// Which spelling wins, and when two of them are irreconcilable, is foldedModelName's job.
 	var fields map[string]json.RawMessage
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&fields); err != nil {
 		return ""
 	}
-	raw, matched := jsonFieldFolded(fields, "model")
-	if exact, ok := fields["model"]; ok {
-		// The exact spelling wins when the body carries it. This answer feeds AUTHORIZATION
-		// gates — CheckLoRAOwnership, which short-circuits on IsLoRAModel("") and is the only
-		// ownership check on a private fine-tuned adapter, and the model-expiry 410 — so
-		// answering "no model named" for a body that plainly names one skips them. Which is
-		// exactly what folding alone did: `{"model":"ft-victim","Model":"ft-victim"}` reported
-		// two variants and returned "", while ValidateModelAllowlist read the exact key and
-		// admitted the adapter.
-		//
-		// The money path does not rely on this tie-break: the video reserve refuses a body with
-		// competing spellings of any price-setting field outright, rather than picking a reading
-		// the upstream may not share.
-		raw, matched = exact, 1
+	return foldedModelName(fields)
+}
+
+// foldedModelName picks the model name from a decoded JSON body the way the reader has to for a
+// value that feeds AUTHORIZATION gates — CheckLoRAOwnership, the only ownership check on a private
+// fine-tuned adapter, and the model-expiry 410 — both of which short-circuit on an empty name.
+//
+// Rules, in order:
+//
+//   - the exact `model` key when it decodes to a non-empty string. The common case, and the one the
+//     upstream agrees with.
+//   - otherwise the single USABLE case-variant. `{"model":123,"Model":"ft-victim"}` is the shape
+//     that matters: the exact key wins on presence but decodes to nothing, and the upstream's
+//     folding struct decode reads "ft-victim" — so answering "" would hand the gates a name they
+//     treat as "use the default" and skip the check entirely.
+//   - otherwise "". Two usable spellings cannot be resolved from an unordered map (Go takes the last
+//     in document order), and no gate can be fooled by the ambiguity either: ValidateModelAllowlist
+//     and RewriteLoRARequest both read the exact key, so with none present the configured model is
+//     what gets served.
+func foldedModelName(fields map[string]json.RawMessage) string {
+	var usable []string
+	for k, v := range fields {
+		if !strings.EqualFold(k, "model") {
+			continue
+		}
+		var name string
+		if json.Unmarshal(v, &name) != nil || name == "" {
+			continue
+		}
+		if k == "model" {
+			return name
+		}
+		usable = append(usable, name)
 	}
-	if matched != 1 {
-		return ""
+	if len(usable) == 1 {
+		return usable[0]
 	}
-	var modelName string
-	_ = json.Unmarshal(raw, &modelName)
-	return modelName
+	return ""
 }
 
 // extractModelFromMultipart reads the "model" form field from a multipart/form-data

@@ -264,7 +264,16 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		upstreamCertFingerprint = c.upstreamCertFingerprint(respHeader, respTLS)
 	}
 
-	seconds, size, source := resolveVideoBilling(body, job.RequestBody, job.RequestContentType)
+	// videoBillingBasis and videoOutputUnits (multi-model paths) resolve per-model pricing from a
+	// *gin.Context carrying CtxKeyResolvedModel — there is no live HTTP request in the background
+	// scheduler, so synthesize a minimal one carrying just the value captured at create time. A
+	// bare &gin.Context{} is sufficient: Get/Set only touch its Keys map.
+	pollCtx := &gin.Context{}
+	if job.ResolvedModel != "" {
+		pollCtx.Set(CtxKeyResolvedModel, job.ResolvedModel)
+	}
+
+	seconds, size, source := c.videoBillingBasis(pollCtx, body, job.RequestBody, job.RequestContentType)
 
 	if source == "" {
 		// Reported completed but no usable duration anywhere (response nor the original
@@ -298,14 +307,6 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			job.ID, job.RequestHash)
 	}
 
-	// videoOutputUnits (multi-model path) resolves per-model pricing from a *gin.Context
-	// carrying CtxKeyResolvedModel — there is no live HTTP request in the background
-	// scheduler, so synthesize a minimal one carrying just the value captured at create
-	// time. A bare &gin.Context{} is sufficient: Get/Set only touch its Keys map.
-	pollCtx := &gin.Context{}
-	if job.ResolvedModel != "" {
-		pollCtx.Set(CtxKeyResolvedModel, job.ResolvedModel)
-	}
 	outputCount := c.videoOutputUnits(pollCtx, seconds, size)
 	rateClass := resolutionRateClass(size)
 

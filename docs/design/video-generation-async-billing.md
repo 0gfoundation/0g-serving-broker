@@ -148,7 +148,9 @@ case. Folding the lookup makes a `{"Seconds":15}` read the same on both sides; m
 variant of a billing field is refused, because Go resolves competing variants by document order
 and a map has none.
 
-`seconds`, `size` and `model` are refused outright in the URL query. The broker forwards the query
+`seconds`, `size` and `model` are refused outright in the URL query — and `model` alone is refused for
+`speech-to-text` and `image-editing` too, since they post the same multipart transport and resolve a
+per-model price from the body alone. The broker forwards the query
 verbatim and the upstream reads the create with `r.FormValue`, whose `ParseMultipartForm` populates
 `r.Form` from the query *before* appending the body — so the query wins, and the gate is handed only
 the body. The OpenAI Video API puts none of them in the query, so refusing costs no legitimate
@@ -268,10 +270,23 @@ and broker faults:
 | `ErrVideoSecondsUnpriceable` | 400 | client | `invalid_request` |
 | `ErrVideoModelNotServed` | 400 | client | `model_mismatch` |
 | `ErrVideoBillingFieldInQuery` | 400 | client | `invalid_request` |
-| `ErrVideoDefaultDurationUnpublished` | 503 | broker | — |
-| `ErrVideoDefaultSizeUnpublished` | 503 | broker | — |
-| `ErrPricingUnavailable` (stale USD snapshot) | 503 | broker | — |
-| anything else (contract RPC failure, unparseable configured price) | 503 | broker | — |
+| `ErrVideoDefaultDurationUnpublished` | 503 | broker | `pricing_unavailable` |
+| `ErrVideoDefaultSizeUnpublished` | 503 | broker | `pricing_unavailable` |
+| `ErrPricingUnavailable` (stale USD snapshot) | 503 | broker | `pricing_unavailable` |
+| anything else (contract RPC failure, unparseable configured price) | 503 | broker | `upstream_error` |
+
+Every row is recorded, including the broker-caused ones. The argument for classifying the
+client-caused rejections — a request refused at the billing gate must not die unclassified — applies
+at least as strongly to a fault entirely on this side: an operator whose config publishes no default
+duration refuses *every* conforming create, and a contract-RPC outage refuses all of them, both with
+nothing but a status label to see it by. `upstream_error` is the documented catch-all for a
+server-side failure with no more specific classification.
+
+Only `ErrPricingUnavailable`'s message is replaced before it reaches the client: it carries the
+internal wrap, that pricing is USD-denominated, the feed's staleness threshold and the age of the
+last update — and `errors.Response` sanitizes only at *exactly* 500, so a 503 ships whatever it is
+handed. The two `Unpublished` sentinels are passed through: their text is curated and tells the
+caller what to do.
 
 `ErrVideoModelNotServed` exists because the allowlist's own check runs in `PrepareHTTPRequest`,
 *after* this gate: without it, a caller enumerating model names on the video path was told their

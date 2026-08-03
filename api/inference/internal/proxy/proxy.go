@@ -793,6 +793,22 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		UserAddress: userAddress,
 	}
 
+	// `model` in the URL QUERY is the same channel the video arm refuses below, and it reaches
+	// every modality that posts multipart and resolves a PER-MODEL price from the body alone:
+	// ParseMultipartForm populates r.Form from the query before appending the body, so an upstream
+	// reading the create with r.FormValue takes the query's model while the broker priced the
+	// body's. Scoped to the multipart modalities — chatbot posts JSON, whose decoders read the body
+	// only, and refusing a query param there would change a contract for no gain. Nothing in the
+	// OpenAI surface puts `model` in the query.
+	if svcType == "speech-to-text" || svcType == "image-editing" {
+		if ctx.Request.URL.Query().Has("model") {
+			ctx.Set("ignoreError", true)
+			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+			p.handleBrokerError(ctx, errors.NewBadRequest("`model` must be sent in the request body, not the URL query"), "")
+			return
+		}
+	}
+
 	var expectedInputFee string
 	switch svcType {
 	case "zgStorage", "chatbot", "speech-to-text":
@@ -915,6 +931,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// whatever it is handed, and the log line below carries the cause instead.
 				p.rejections.record(ctx, monitor.RejectionPricingUnavailable, userAddress)
 				p.logger.Errorf("video pre-flight reserve unavailable: %v", err)
+				// ErrPricingUnavailable's own text is replaced rather than passed through: it
+				// carries the internal wrap ("get service price for video pre-flight reserve"),
+				// that pricing is USD-denominated, the feed's staleness threshold and the age of
+				// the last update — and errors.Response sanitizes only at EXACTLY 500, so a 503
+				// ships whatever it is handed. The two Unpublished sentinels ARE passed through:
+				// their messages are curated and tell the caller what to do.
+				if errors.Is(err, ctrl.ErrPricingUnavailable) {
+					err = errors.NewServiceUnavailable("video pricing temporarily unavailable; retry shortly")
+				}
 				p.handleBrokerError(ctx, errors.ServiceUnavailable(err), "")
 				return
 			default:
@@ -932,6 +957,12 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// 503 body ships whatever it was handed: "dial tcp 10.x.x.x:8545: connect:
 				// connection refused" went straight to the caller. The cause is logged here
 				// and the client gets a generic 503.
+				// Recorded for the same reason the arm above is: a contract-RPC outage is
+				// entirely on this side, this arm is a NEW dependency for multi-model video
+				// providers, and without a reason the unified failure counter gets a bare 503
+				// with no code label. upstream_error is the documented catch-all for a
+				// server-side validation failure with no more specific classification.
+				p.rejections.record(ctx, monitor.RejectionUpstreamError, userAddress)
 				p.logger.Errorf("video pre-flight reserve failed (broker infrastructure): %v", err)
 				p.handleBrokerError(ctx, errors.ServiceUnavailable(errors.New("video pricing temporarily unavailable")), "")
 				return
