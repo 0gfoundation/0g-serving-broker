@@ -55,6 +55,23 @@ func gateCtx() *gin.Context {
 	return c
 }
 
+// multipartSeconds builds a multipart body carrying only `seconds`, for the cases where the transport
+// decides which source the upstream reads.
+func multipartSeconds(t *testing.T, seconds string) (string, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	f, err := w.CreateFormField("seconds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(seconds)); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	return buf.String(), w.FormDataContentType()
+}
+
 func videoReserve(t *testing.T, c *Ctrl, body, contentType, rawQuery string) int64 {
 	t.Helper()
 	fee, err := c.VideoCreateReserveFee(gateCtx(), []byte(body), contentType, rawQuery)
@@ -162,9 +179,17 @@ func TestVideoReserveSecondsSources(t *testing.T) {
 			}
 		}
 	})
-	t.Run("unreadable query value does not fall through to a cheaper body", func(t *testing.T) {
-		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=abc"); got != videoReserveFallbackSeconds {
-			t.Errorf("reserve = %d, want %d", got, videoReserveFallbackSeconds)
+	t.Run("an unreadable query is ignored on JSON, and shadows on multipart", func(t *testing.T) {
+		// On a JSON create the query reaches no reader — the translator decodes the body — so the
+		// body's duration stands (raised to the vendor floor). On multipart the query IS the reader's
+		// source: FormValue returns its unusable value and never consults the body, so the vendor
+		// applies its own default and the reserve has to fall back.
+		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=abc"); got != videoReserveFloorSeconds {
+			t.Errorf("json: reserve = %d, want %d (the body's value, floored)", got, videoReserveFloorSeconds)
+		}
+		mp, ct := multipartSeconds(t, "1")
+		if got := videoReserve(t, c, mp, ct, "seconds=abc"); got != videoReserveFallbackSeconds {
+			t.Errorf("multipart: reserve = %d, want %d (the query shadows the body upstream)", got, videoReserveFallbackSeconds)
 		}
 	})
 }
@@ -271,14 +296,19 @@ func TestVideoReserveQueryEdgeCases(t *testing.T) {
 		ResolutionMultipliers: map[string]float64{"2K": 1.0},
 	})
 
-	t.Run("present but empty does not fall through to the body", func(t *testing.T) {
-		// `?seconds=` puts "" in r.Form and FormValue returns it, so the body is never consulted and
-		// the vendor applies its own default. Reading the body's 1 priced a quarter of the clip.
-		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds="); got != videoReserveFallbackSeconds {
-			t.Errorf("reserve = %d, want %d", got, videoReserveFallbackSeconds)
-		}
-		if got := videoReserve(t, c, `{"seconds":1}`, "application/json", "seconds=%20"); got != videoReserveFallbackSeconds {
-			t.Errorf("whitespace-only: reserve = %d, want %d", got, videoReserveFallbackSeconds)
+	t.Run("present but empty shadows the body only where the query is read", func(t *testing.T) {
+		// multipart: `?seconds=` puts "" in r.Form, FormValue returns it, the body is never consulted,
+		// and the vendor applies its own default — so the fallback, not the body's value.
+		for _, q := range []string{"seconds=", "seconds=%20"} {
+			mp, ct := multipartSeconds(t, "1")
+			if got := videoReserve(t, c, mp, ct, q); got != videoReserveFallbackSeconds {
+				t.Errorf("multipart %q: reserve = %d, want %d", q, got, videoReserveFallbackSeconds)
+			}
+			// JSON: the query reaches nobody, so it must not quadruple the reserve for a caller who
+			// named a duration in the body.
+			if got := videoReserve(t, c, `{"seconds":9}`, "application/json", q); got != 9 {
+				t.Errorf("json %q: reserve = %d, want 9 (the body's value)", q, got)
+			}
 		}
 	})
 
@@ -356,6 +386,13 @@ func TestVideoReserveTakesTheMaxOfQueryAndBody(t *testing.T) {
 			t.Errorf("reserve = %d, want 15 (the query's value)", got)
 		}
 	})
+	t.Run("a readable query is used when the body names nothing", func(t *testing.T) {
+		// The caller DID name a duration. Treating the fallback as a candidate value rather than an
+		// unknown sentinel reserved 15 here and ignored them.
+		if got := videoReserve(t, c, `{"prompt":"a cat"}`, "application/json", "seconds=6"); got != 6 {
+			t.Errorf("reserve = %d, want 6 (the query's value)", got)
+		}
+	})
 	t.Run("an unreadable query does not undercut a dearer body", func(t *testing.T) {
 		if got := videoReserve(t, c, `{"seconds":30}`, "application/json", "seconds="); got != 30 {
 			t.Errorf("reserve = %d, want 30", got)
@@ -423,5 +460,40 @@ func TestVideoReserveDoesNotStampRawClientInputOnSingleModel(t *testing.T) {
 	if v, exists := ctx.Get(CtxKeyResolvedModel); exists {
 		t.Errorf("stamped %q (len %d) on a single-model service; PrepareHTTPRequest's ModelType default must stay in charge",
 			v, len(v.(string)))
+	}
+}
+
+// TestVideoReserveServiceRatioClampIsLoadBearing guards the `!(ratio >= 1)` clamp on the single-model
+// path. Mutation testing found it was the one logic guard in the diff that no test covered, and
+// videoSizeRatios is validated nowhere — so an operator listing only discount tiers halves every
+// reserve without it, while settlement charges the 1.0 baseline for any resolution the map omits.
+func TestVideoReserveServiceRatioClampIsLoadBearing(t *testing.T) {
+	c := singleModelVideoCtrl(t, map[string]float64{"832x480": 0.5})
+	fee, err := c.VideoCreateReserveFee(gateCtx(), []byte(`{"seconds":6,"size":"832x480"}`), "application/json", "")
+	if err != nil {
+		t.Fatalf("VideoCreateReserveFee: %v", err)
+	}
+	// Settlement's floor for a resolution the map does not list is 1.0, so 6 units. Without the clamp
+	// the reserve would be 6 x 0.5 = 3.
+	if fee != "6" {
+		t.Errorf("reserve = %s, want 6 (settlement's 1.0 baseline); a below-1.0 map must not lower it", fee)
+	}
+}
+
+// TestVideoReserveOnlyGatesCreates guards the POST-only check. `/videos` is an exact-match route with no
+// method gate, so the OpenAI list endpoint reached the billing switch and demanded a create-sized lock
+// to list videos — measured at 160.75 0G on a 4K-tiered config. Mutation testing found no test covered
+// it.
+func TestVideoReserveOnlyGatesCreates(t *testing.T) {
+	// The reserve function itself is method-agnostic; the gate lives in the proxy arm. Assert the
+	// property that makes the gate necessary: a bodyless request reserves a full fallback clip, so it
+	// must not be reached by a GET.
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"4K": 8.0},
+	})
+	if got := videoReserve(t, c, "", "", ""); got != videoReserveFallbackSeconds*8 {
+		t.Errorf("bodyless reserve = %d, want %d — if this ever becomes cheap, the POST gate stops mattering and the assertion below is what should change",
+			got, videoReserveFallbackSeconds*8)
 	}
 }

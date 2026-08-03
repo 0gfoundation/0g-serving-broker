@@ -360,7 +360,10 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 //
 // mayFallBack reports whether SETTLEMENT could end up on the service size-ratio for this block: it
 // cannot price at all, or it holds an entry settlement would refuse for a request naming that
-// resolution. The caller floors against that scale only then — flooring unconditionally over-reserved
+// resolution. Evaluated AT THIS DURATION — scaledUnits' overflow check is duration-dependent, so a
+// multiplier skipped at the reserve's seconds can still price at the shorter duration a vendor renders.
+// That window opens only above ~2^40/seconds (~7e10), a multiplier that already prices every ordinary
+// clip at ~1e11 units, so it is documented rather than closed. The caller floors against that scale only then — flooring unconditionally over-reserved
 // every ordinary multi-model create by the shipped default ratio (2.0), for a fallback that a sane
 // config never reaches.
 //
@@ -387,6 +390,8 @@ func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (units int64, ok b
 		// the request under-reserves: measured, rows {4K@4s=900, 720p@10s=100} with a 10s request
 		// reserved 100 and settled 900 once the vendor rendered its own 4K tier. Nothing enforces
 		// monotonicity across the table, so filtering by duration is a false economy.
+		// mx <= 0 cannot happen for a loaded config (validateBillingConfig rejects an empty table and
+		// any units <= 0); kept so the contract holds for a caller that has not been through it.
 		mx := b.MaxTableUnits()
 		return mx, mx > 0, mx <= 0
 	case BillingModePerVideoSecond:
@@ -417,12 +422,13 @@ func (b *BillingConfig) MaxVideoOutputUnitsFor(seconds int64) (units int64, ok b
 		}
 		return best, best > 0, skipped || best <= 0
 	default:
-		// per_token, or `mode:` omitted entirely — both of which validBillingModeForType accepts for
-		// ANY service type, so a video model carrying one loads fine. Settlement cannot price video
-		// from such a block either (OutputUnits errors and videoOutputUnits falls back to the service
-		// size-ratio), so answering "cannot price" here is what makes the two agree. Claiming the
-		// multiplier path for them reserved the ratio-less duration against a ratio-scaled bill —
-		// measured reserve 10, settlement 20, from nothing worse than a forgotten `mode:`.
+		// per_token, or `mode:` omitted entirely. validBillingModeForType admits both for any service
+		// type, but validateVideoModelEntry then rejects them for a video model — so this is
+		// defence-in-depth against a caller that reaches here without config load, NOT a shape a
+		// running broker can hold. An earlier revision claimed the opposite ("a video model carrying
+		// one loads fine"), acted on it, and was wrong; the arm is still correct because settlement
+		// cannot price video from such a block either (OutputUnits errors and videoOutputUnits falls
+		// back to the service size-ratio), so "cannot price" is what makes the two agree.
 		return 0, false, true
 	}
 }

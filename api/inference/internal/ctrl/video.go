@@ -268,10 +268,12 @@ const videoReserveFloorSeconds = 4
 //     settlement bills whichever tier comes back — so the reserve prices the dearest tier the model can
 //     bill. Reading the requested size instead is how a gate ends up reserving the cheap tier for a
 //     clip that renders dear.
-//   - The requested `seconds` IS read (query first, then the body, matching r.FormValue upstream),
-//     because duration dominates the fee and a caller who names one has said what they want. It is
+//   - The requested `seconds` IS read, from the query AND the body, taking the larger — the three
+//     consumers of that field disagree on which one they look at, so see videoReserveSeconds. It is
 //     then raised to videoReserveFloorSeconds, because vendors clamp up as well as down and bill what
-//     they rendered. Unreadable, absent, or present-but-empty prices videoReserveFallbackSeconds.
+//     they rendered. Only when NEITHER source names a usable duration does videoReserveFallbackSeconds
+//     apply. A vendor ceiling is deliberately not applied: MiniMax clamps a 60s request down to 15 and
+//     bills 15, but DashScope has no ceiling this repo can read, so clamping would under-reserve there.
 //
 // Residual, not bounded here: settlement prefers usage.output_video_duration, which one vendor reports
 // as input + output seconds (see actualSeconds). A create carrying a long reference video can therefore
@@ -326,10 +328,11 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 		if ok {
 			units = u
 		} else {
-			// A block that exists and cannot price video is a misconfiguration, and this is the only
-			// place that learns it before the clip is rendered. Settlement's counterpart logs the same
-			// condition (videoOutputUnits, "model billing misconfigured"); staying silent here meant
-			// the reserve quietly changed scale with no signal until the bill arrived.
+			// A block that exists and cannot price video is a misconfiguration. Not reachable on a
+			// loaded config — validateVideoModelEntry rejects the modes that get here — so this is
+			// fail-loud defence rather than an expected condition, and it carries only config-derived
+			// values (no client input) into an unthrottled line. Settlement's counterpart logs the
+			// same condition (videoOutputUnits, "model billing misconfigured").
 			c.logger.Errorf("video pre-flight reserve: model %q has a billing block that cannot price video (mode %q); reserving from the service size-ratio instead",
 				entry.Model, entry.Billing.Mode)
 		}
@@ -383,20 +386,35 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 // multipart the same pair settled at the body's 12 whenever the response omitted its duration. The
 // maximum is above whichever one the deployed combination picks, for every transport and provenance.
 func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
-	body := int64(videoReserveFallbackSeconds)
-	if seconds, _ := videoSecondsSizeFromRequest(reqBody, contentType); seconds > 0 {
-		body = videoReserveClampSeconds(seconds)
+	bodySeconds, _ := videoSecondsSizeFromRequest(reqBody, contentType)
+	querySeconds, queryShadowsBody := videoReserveQuerySeconds(rawQuery, contentType)
+
+	best := bodySeconds
+	if querySeconds > best {
+		best = querySeconds
 	}
-	query := videoReserveQuerySeconds(rawQuery)
-	if query > body {
-		return query
+	// The fallback is an UNKNOWN sentinel, not a candidate value: it only applies when no source named
+	// a duration, or when the one the upstream will read named nothing usable. Treating it as a value
+	// and max()ing it in meant a readable duration lost to it — `{}` plus `?seconds=4` reserved 15s
+	// after the caller had said 4, and `{"seconds":4}` plus a bare `?seconds=` did the same on a JSON
+	// create where the query never reaches the vendor at all. 3.75x the required lock, for a request
+	// that named what it wanted.
+	if best <= 0 || queryShadowsBody {
+		if int64(videoReserveFallbackSeconds) > best {
+			best = videoReserveFallbackSeconds
+		}
 	}
-	return body
+	return videoReserveClampSeconds(best)
 }
 
-// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does, or reports 0
-// when the query names it nowhere.
-func videoReserveQuerySeconds(rawQuery string) int64 {
+// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does.
+//
+// shadowsBody reports that the query named `seconds` unusably ON A TRANSPORT WHERE THE QUERY WINS —
+// i.e. multipart, where ParseMultipartForm seeds r.Form from the query and FormValue therefore returns
+// the query's empty value and never consults the body. There the vendor applies its own default and the
+// body's value is irrelevant, so the caller must fall back. On a JSON create the query reaches no
+// reader at all, so an unusable one is simply ignored rather than allowed to quadruple the reserve.
+func videoReserveQuerySeconds(rawQuery, contentType string) (seconds int64, shadowsBody bool) {
 	if rawQuery != "" {
 		// ParseQuery's error is IGNORED, matching r.FormValue: r.ParseForm returns the same error and
 		// FormValue ignores it, so `?seconds=15&junk=%zz` still resolves to 15 upstream. Guarding on
@@ -410,16 +428,14 @@ func videoReserveQuerySeconds(rawQuery string) int64 {
 				// First value, which is what FormValue takes for a repeated key.
 				if f, err := strconv.ParseFloat(strings.TrimSpace(vs[0]), 64); err == nil &&
 					f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
-					return videoReserveClampSeconds(int64(math.Ceil(f)))
+					return int64(math.Ceil(f)), false
 				}
 			}
-			// Present but unreadable or empty: on the transport where the query wins, the upstream
-			// reads it and the vendor applies its own default, so this is the no-readable-duration
-			// case rather than a reason to trust the body alone.
-			return videoReserveFallbackSeconds
+			// Present but unreadable or empty. Only shadowing where the query is the reader's source.
+			return 0, strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/")
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // videoReserveClampSeconds raises a requested duration to the vendor floor. Below it the vendor renders
