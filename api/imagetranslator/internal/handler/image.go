@@ -424,13 +424,22 @@ func (h *KlingHandler) writeKlingImageError(c *gin.Context, imgResp *translate.I
 // vendor detail.
 func (h *KlingHandler) writeKlingError(c *gin.Context, logContext, fallbackMessage string, err error) {
 	var apiErr *kling.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
-		message := apiErr.Message
-		if message == "" {
-			message = fmt.Sprintf("kling rejected the request (status %d)", apiErr.StatusCode)
+	if errors.As(err, &apiErr) {
+		// Logged for EVERY status, not just 4xx: a 5xx is the more common outage
+		// shape and the one where the body is most likely to be the only
+		// explanation (a load balancer's HTML page) — mirrors videotranslator's
+		// writeProviderError/vendorErrorDetail.
+		h.logger.Errorf("%s: kling rejected request: status %d %s", logContext, apiErr.StatusCode,
+			vendorErrorDetail(apiErr.Code, apiErr.Message, apiErr.Body, apiErr.RequestID))
+		if apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
+			message := redactCredentials(apiErr.Message)
+			if message == "" {
+				message = fmt.Sprintf("kling rejected the request (status %d)", apiErr.StatusCode)
+			}
+			c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
+			return
 		}
-		h.logger.Errorf("%s: kling rejected request: status %d code=%q message=%q", logContext, apiErr.StatusCode, apiErr.Code, apiErr.Message)
-		c.JSON(apiErr.StatusCode, gin.H{"error": gin.H{"code": apiErr.Code, "message": message}})
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fallbackMessage}})
 		return
 	}
 	h.logger.Errorf("%s: %v", logContext, err)

@@ -128,8 +128,8 @@ type TaskOutput struct {
 // the vendor's own docs flag as potentially diverging). Size/SR are the
 // output resolution in vendor-native formats ("828*624" / "540") — neither
 // is in the "540P"-style vocabulary the broker's billing needs, so the
-// translate layer echoes the originally-requested resolution forward
-// instead of deriving one from these fields (see the integration plan §2.2).
+// translate layer derives one from SR (see translate.vidu.go, which appends
+// "P" to SR rather than echoing the originally-requested resolution forward).
 // All numeric fields are json.Number since the vendor may encode them as
 // integer or float.
 type TaskUsage struct {

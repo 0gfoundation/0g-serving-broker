@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
 )
 
 // createPath / getTaskPathFmt are the only region documented by the vendor
@@ -166,6 +168,9 @@ type APIError struct {
 	// couldn't be parsed out of it (a non-JSON or differently-shaped error
 	// page, e.g. from a proxy/load balancer in front of the vendor).
 	Body string
+	// RequestID is the vendor's own correlation id — what their support asks
+	// for. Mirrors dashscope.APIError/minimax.APIError's field.
+	RequestID string
 }
 
 func (e *APIError) Error() string {
@@ -176,8 +181,9 @@ func (e *APIError) Error() string {
 // returns — {code, message, request_id} — the same shape CreateFailure
 // documents for a create-time rejection.
 type errorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id"`
 }
 
 func (c *Client) do(httpReq *http.Request, out interface{}) error {
@@ -186,6 +192,11 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// See the mirror of this line in internal/dashscope/client.go and
+	// internal/minimax/client.go: this hop is where the TLS a centralized
+	// routing proof attests to actually happens, so report the vendor
+	// certificate back to the inbound request's capture.
+	teeutil.CertCaptureFromContext(httpReq.Context()).Observe(resp.TLS)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -197,6 +208,7 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 		if json.Unmarshal(respBody, &eb) == nil {
 			apiErr.Code = eb.Code
 			apiErr.Message = eb.Message
+			apiErr.RequestID = eb.RequestID
 		}
 		return apiErr
 	}

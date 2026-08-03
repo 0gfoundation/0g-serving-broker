@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/imagetranslator/config"
 	"github.com/0glabs/0g-serving-broker/imagetranslator/internal/handler"
@@ -71,8 +69,7 @@ func Main() {
 	client := kling.NewClient(cfg.KlingBaseURL, &http.Client{Timeout: cfg.RequestTimeout, Transport: transport}, handler.KlingImageFetchTimeout)
 	imageHandler := handler.NewKlingHandler(client, logger)
 
-	engine := gin.New()
-	engine.Use(gin.Recovery())
+	engine := handler.NewEngine()
 	engine.POST("/images/generations", imageHandler.CreateImage)
 
 	addr := ":" + cfg.Port
