@@ -1342,6 +1342,27 @@ func (c *Ctrl) ImageCacheTTL() time.Duration {
 // passes through the user's requested model, injecting the default model when
 // the request omits one. Stores the resolved model name in the gin.Context under
 // CtxKeyResolvedModel. Used by the chatbot path, which sends JSON.
+// stripModelKeyVariants deletes every case-variant of `model` from a decoded body, reporting whether
+// it removed any, so the caller can force a rewrite of the canonical key.
+//
+// Leaving a variant in place meant the broker billed one spelling while the upstream's folding decode
+// read another — `{"model":"cheap","Model":"dear"}` was billed as `cheap` and rendered as `dear`. The
+// shapes that happened to work only worked because json.Marshal sorts keys bytewise and every variant
+// must carry an uppercase letter, so an injected lowercase `model` sorted last and won the upstream's
+// last-wins resolution: an undocumented dependency on a map encoder's ordering. Shared by both
+// rewrite paths — the single-model one (EnforceConfiguredModel) is most deployments, and fixing only
+// the multi-model one left the dependency in place there.
+func stripModelKeyVariants(bodyMap map[string]interface{}) bool {
+	stripped := false
+	for k := range bodyMap {
+		if k != "model" && strings.EqualFold(k, "model") {
+			delete(bodyMap, k)
+			stripped = true
+		}
+	}
+	return stripped
+}
+
 func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr string) ([]byte, error) {
 	if len(body) == 0 {
 		// No body to inspect — bill at the configured default model (guaranteed to
@@ -1353,6 +1374,12 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("invalid request body: %w", err)
+	}
+	if bodyMap == nil {
+		// A literal `null` body unmarshals successfully into a nil map, and writing to one panics —
+		// which gin recovers into a 500 with no ignoreError, i.e. attributed to the BROKER, once per
+		// request from any authenticated caller.
+		bodyMap = map[string]interface{}{}
 	}
 
 	// Read through the same folded/usable-value rules as ExtractModelName, which is what the
@@ -1382,21 +1409,7 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		c.logger.Debugf("Model served via wildcard catch-all pricing: requested=%s", requestModel)
 	}
 
-	// Drop every case-variant of `model` and always write the canonical key. Leaving a variant in
-	// place meant the broker billed one spelling while the upstream's folding decode read another —
-	// `{"model":"cheap","Model":"dear"}` was billed as `cheap` and rendered as `dear`. The shapes
-	// that happened to work only worked because json.Marshal sorts keys bytewise and every variant
-	// must carry an uppercase letter, so the injected lowercase `model` sorted last and won the
-	// upstream's last-wins resolution. That is an undocumented dependency on a map encoder's
-	// ordering; canonicalizing removes it.
-	strippedVariant := false
-	for k := range bodyMap {
-		if k != "model" && strings.EqualFold(k, "model") {
-			delete(bodyMap, k)
-			strippedVariant = true
-		}
-	}
-	if cur, _ := bodyMap["model"].(string); strippedVariant || cur != forwardModel {
+	if cur, _ := bodyMap["model"].(string); stripModelKeyVariants(bodyMap) || cur != forwardModel {
 		bodyMap["model"] = forwardModel
 		modifiedBody, err := json.Marshal(bodyMap)
 		if err != nil {

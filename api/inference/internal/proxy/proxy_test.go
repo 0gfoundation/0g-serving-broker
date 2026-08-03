@@ -729,3 +729,39 @@ func TestVideoBillingFieldInQueryIsClientFault(t *testing.T) {
 		t.Errorf("client body carries an internal breadcrumb: %s", w.Body.String())
 	}
 }
+
+// TestQueryNamesAny covers the query-channel detector where it lives. Neither the `;` case that
+// motivated reading RawQuery nor the over-refusal it caused had any coverage.
+func TestQueryNamesAny(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawQuery string
+		names    []string
+		want     bool
+	}{
+		{name: "plain hit", rawQuery: "seconds=15", names: []string{"seconds", "size", "model"}, want: true},
+		{name: "ampersand separated", rawQuery: "a=1&size=1080p", names: []string{"seconds", "size", "model"}, want: true},
+		// url.Values DROPS this pair (Go refuses `;`), which is why the guard reads RawQuery: the raw
+		// string is still forwarded to an upstream whose parser may split on it.
+		{name: "semicolon separated", rawQuery: "seconds=15;x=1", names: []string{"seconds"}, want: true},
+		{name: "comma separated", rawQuery: "x=1,model=dear", names: []string{"model"}, want: true},
+		{name: "percent-encoded key", rawQuery: "%73econds=15", names: []string{"seconds"}, want: true},
+		{name: "bare key with no value", rawQuery: "seconds", names: []string{"seconds"}, want: true},
+		// Only the named keys are refused. A blanket refusal turned these away with a message naming
+		// fields the caller never sent.
+		{name: "azure-style api version", rawQuery: "api-version=2024-02-01", names: []string{"model"}, want: false},
+		{name: "wait, which this broker itself appends on the image path", rawQuery: "wait=true", names: []string{"seconds", "size", "model"}, want: false},
+		{name: "unrelated trace id", rawQuery: "trace_id=abc", names: []string{"seconds", "size", "model"}, want: false},
+		// Exact-case, like every mainstream form parser — so it is a different field on both sides.
+		{name: "case variant is a different field", rawQuery: "SECONDS=15", names: []string{"seconds"}, want: false},
+		{name: "value containing the name", rawQuery: "prompt=a%20model%20of%20a%20cat", names: []string{"model"}, want: false},
+		{name: "empty", rawQuery: "", names: []string{"seconds"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := queryNamesAny(tt.rawQuery, tt.names...); got != tt.want {
+				t.Errorf("queryNamesAny(%q, %v) = %v, want %v", tt.rawQuery, tt.names, got, tt.want)
+			}
+		})
+	}
+}

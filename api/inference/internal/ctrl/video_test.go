@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1765,42 +1766,67 @@ func TestVideoReserveCoversEchoedRequestSize(t *testing.T) {
 	}
 }
 
-// TestVideoReserveDearestTierForUnpricedSize pins the reserve for a size the model prices NOWHERE.
+// TestVideoReserveUnpricedSizePrefersPublishedTier pins the reserve for a size the model prices
+// NOWHERE — and pins it from BOTH directions.
 //
-// The gate cannot name the tier at all there, and the vendor — not the client — picks it, so the
-// dearest the model can bill is the only true ceiling. Scoping the published-size substitution to
-// per_unit_table had left per_video_second with nothing to lift it off the 1.0 baseline:
-// `size:"1920x1080"` against {720p:1.0, 1080p:1.5} reserved 5 and settled 8 with no vendor
-// divergence, because the gate cannot see that 1920x1080 IS 1080p.
-func TestVideoReserveDearestTierForUnpricedSize(t *testing.T) {
-	entry := config.ModelPricingEntry{
+// The tier is decided elsewhere for such a size (on the MiniMax path, by MINIMAX_RESOLUTION in the
+// translator's own environment), so the broker's only proxy is the model's published
+// defaultParameters.size. Preferring it keeps both billing modes answering the same situation the
+// same way; the dearest multiplier is the last resort for when no usable default is published.
+//
+// The upper bound is the half nobody was asserting: every other invariant test here checks only
+// `reserve >= settled`, which is why reaching for the dearest tier unconditionally — an 8x refusal on
+// the OpenAI-documented `size:"1280x720"` — landed silently.
+func TestVideoReserveUnpricedSizePrefersPublishedTier(t *testing.T) {
+	billing := func() *config.BillingConfig {
+		return &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5, "2160p": 8.0},
+		}
+	}
+	published := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
 		Model:       "tiered",
 		OutputPrice: "100",
-		Billing: &config.BillingConfig{
-			Mode:                  config.BillingModePerVideoSecond,
-			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5},
-		},
-		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
-	}
-	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
-	ctx := ginCtxWithResolvedModel("tiered")
+		Billing:     billing(),
+		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+	}}, "tiered")}
+	// Same model, but publishing a size its own block prices nowhere — so there is nothing to name
+	// the tier with.
+	unpublished := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing:     billing(),
+		ModelInfo:   &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5}},
+	}}, "tiered")}
 
-	// Unlisted spellings of a tier the model DOES render: reserve the dearest (5 x 1.5 = 8), which
-	// covers the vendor reporting 1080p.
-	for _, size := range []string{"1920x1080", "1280x720", "2160P"} {
-		got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+size+`"}`), "application/json")
-		if err != nil {
-			t.Fatalf("size %q: unexpected error: %v", size, err)
-		}
-		settled := c.videoOutputUnits(ctx, 5, "1080p")
-		if got < settled {
-			t.Errorf("size %q: reserve %d < settled %d for the dearest tier this model can bill", size, got, settled)
-		}
+	for _, size := range []string{"1280x720", "1920x1080", "3840x2160"} {
+		t.Run("published/"+size, func(t *testing.T) {
+			got, err := published.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+size+`"}`), "application/json")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// The published 720p tier, not the 8.0 one: reserving the dearest here refused callers
+			// who could afford the real bill on the API's documented request shape.
+			if got != 5 {
+				t.Errorf("reserve = %d, want 5 (the published tier's multiplier)", got)
+			}
+		})
+		t.Run("unpublished/"+size, func(t *testing.T) {
+			got, err := unpublished.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+size+`"}`), "application/json")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// Nothing names the tier, so the dearest the model can bill is the only true ceiling.
+			if got != 40 {
+				t.Errorf("reserve = %d, want 40 (the dearest multiplier, 5 x 8.0)", got)
+			}
+		})
 	}
-	// A size the model DOES price is trusted as named — the client asked for that tier, and a
-	// dearer RENDERED tier is residual 2(b), not something to tax every request for.
-	if got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"720p"}`), "application/json"); err != nil || got != 5 {
-		t.Errorf("reserve for an explicitly priced cheap tier = %d (err %v), want 5", got, err)
+
+	// A size the model DOES price is trusted as named — a dearer RENDERED tier is residual 2(b),
+	// not something to tax every request for.
+	if got, err := published.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"1080p"}`), "application/json"); err != nil || got != 8 {
+		t.Errorf("reserve for an explicitly named tier = %d (err %v), want 8", got, err)
 	}
 }
 
@@ -1881,4 +1907,92 @@ func TestValidateModelAllowlistCanonicalizesModelKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVideoReserveShortfallThrottleKeyIsNotClientMintable is the test whose absence let the shortfall
+// log ship with a caller-derived throttle key.
+//
+// logProofSkip keys its memo on (reason, detail) and its contract is that the detail never comes from
+// the request. The shortfall's `settledUnits` is ceil(seconds x multiplier), so keying on it gave one
+// ERROR line per distinct duration — and past maxProofSkipKeys the overflow handler flushes the whole
+// memo, un-throttling the routing-proof reasons for everyone. That is this repo's #542 shape, and the
+// sibling per_unit_table site already had this exact invariant test.
+func TestVideoReserveShortfallThrottleKeyIsNotClientMintable(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 4.0},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	// One operator condition (the vendor renders the dear tier) plus callers varying only `seconds`:
+	// the shortfall is real every time, but it is ONE condition and must log once.
+	for i := 1; i <= maxProofSkipKeys*4; i++ {
+		body := []byte(`{"model":"tiered","seconds":` + strconv.Itoa(i) + `,"size":"720p"}`)
+		c.checkVideoReserveCoverage(body, "application/json", int64(i)*4)
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d times for one operator condition, want 1 — settledUnits is in the throttle key", rec.errors)
+	}
+}
+
+// TestCheckVideoReserveCoverage covers the detector itself: it must fire when settlement outran the
+// reserve, stay quiet when it did not, and say so loudly when it cannot tell.
+func TestCheckVideoReserveCoverage(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 4.0},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+	}
+	newCtrl := func() (*Ctrl, *countingLogger) {
+		c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
+		rec := &countingLogger{Logger: c.logger}
+		c.logger = rec
+		return c, rec
+	}
+	body := []byte(`{"model":"tiered","seconds":5,"size":"720p"}`) // reserve = 5 units
+
+	t.Run("fires when settlement outran the reserve", func(t *testing.T) {
+		c, rec := newCtrl()
+		c.checkVideoReserveCoverage(body, "application/json", 20)
+		if rec.errors != 1 {
+			t.Errorf("logged %d times, want 1", rec.errors)
+		}
+	})
+	t.Run("quiet when the reserve covered it", func(t *testing.T) {
+		c, rec := newCtrl()
+		c.checkVideoReserveCoverage(body, "application/json", 5)
+		c.checkVideoReserveCoverage(body, "application/json", 1)
+		if rec.errors != 0 {
+			t.Errorf("logged %d times for a covered bill, want 0", rec.errors)
+		}
+	})
+	t.Run("loud when the reserve cannot be recomputed", func(t *testing.T) {
+		// A body the gate would refuse today: the recompute reads CURRENT config, so this is the
+		// config-drift case. Returning quietly turned the detector off in exactly the scenario it
+		// exists for.
+		c, rec := newCtrl()
+		c.checkVideoReserveCoverage([]byte(`{"model":"tiered","seconds":1e20}`), "application/json", 20)
+		if rec.errors != 1 {
+			t.Errorf("logged %d times for an unrecomputable reserve, want 1", rec.errors)
+		}
+	})
+	t.Run("no-ops on an empty body or a zero bill", func(t *testing.T) {
+		c, rec := newCtrl()
+		c.checkVideoReserveCoverage(nil, "application/json", 20)
+		c.checkVideoReserveCoverage(body, "application/json", 0)
+		if rec.errors != 0 {
+			t.Errorf("logged %d times, want 0", rec.errors)
+		}
+	})
 }

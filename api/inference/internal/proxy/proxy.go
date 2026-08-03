@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -224,6 +225,37 @@ func New(ctrl *ctrl.Ctrl, engine *gin.Engine, allowOrigins []string, enableMonit
 	p.serviceGroup.Use(middleware.RequestSizeLimitMiddleware(middleware.MaxRequestSize))
 
 	return p
+}
+
+// queryNamesAny reports whether a raw query string carries any of the named keys.
+//
+// It reads RawQuery rather than url.Values because url.Values silently DROPS a pair whose separator
+// its parser rejects — Go refuses `;` — so `?seconds=15;x=1` produced an empty map while the raw
+// string was still forwarded verbatim to an upstream whose parser may well split on it. Splitting on
+// all three separators any mainstream parser uses closes that without assuming which one the upstream
+// picked.
+//
+// Only the named keys are refused, not every query: a blanket refusal turned away
+// `?api-version=2024-02-01` (how Azure-style clients address a transcription) and `?wait=…` (which
+// this broker itself appends as a query parameter on the image path) with a message naming fields the
+// caller never sent. Matching is exact-case, like every mainstream form parser — `?SECONDS=15` is a
+// different field on both sides.
+func queryNamesAny(rawQuery string, names ...string) bool {
+	for _, pair := range strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' || r == ',' }) {
+		key := pair
+		if i := strings.IndexByte(key, '='); i >= 0 {
+			key = key[:i]
+		}
+		if decoded, err := url.QueryUnescape(key); err == nil {
+			key = decoded
+		}
+		for _, n := range names {
+			if key == n {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildPerUserOverrides converts the operator-supplied per-address override
@@ -644,16 +676,15 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// runs for STT and video only) — narrowing either contract would buy nothing.
 	if ctx.Request.Method == http.MethodPost && ctx.Request.URL.RawQuery != "" {
 		var offending error
-		// RawQuery, not Query(): url.Values silently DROPS a pair its parser rejects (Go refuses
-		// `;` as a separator), so `?seconds=15;x=1` produced an empty map and skipped the guard
-		// while the raw string was still forwarded verbatim to an upstream whose parser may split
-		// on it. Nothing in the OpenAI surface puts a query on a create, so any non-empty query is
-		// refusable and there is no parser to out-read.
 		switch svcType {
 		case "video-generation":
-			offending = ctrl.ErrVideoBillingFieldInQuery
+			if queryNamesAny(ctx.Request.URL.RawQuery, "seconds", "size", "model") {
+				offending = ctrl.ErrVideoBillingFieldInQuery
+			}
 		case "speech-to-text":
-			offending = errors.NewBadRequest("`model` must be sent in the request body, not the URL query")
+			if queryNamesAny(ctx.Request.URL.RawQuery, "model") {
+				offending = errors.NewBadRequest("`model` must be sent in the request body, not the URL query")
+			}
 		}
 		if offending != nil {
 			ctx.Set("ignoreError", true)
@@ -942,9 +973,10 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				// unclassified") applies at least as strongly to a fault that is entirely on
 				// this side. The context string is dropped for the same reason as the 400 arm:
 				// errors.Response replaces the message only at exactly 500, so a 503 body ships
-				// whatever it is handed, and the log line below carries the cause instead.
+				// whatever it is handed. No Errorf here — errors.Response already logs every status
+				// >= 500 with the error and the path, and a config gap that refuses EVERY conforming
+				// create would otherwise emit two unthrottled lines per request.
 				p.rejections.record(ctx, monitor.RejectionPricingUnavailable, userAddress)
-				p.logger.Errorf("video pre-flight reserve unavailable: %v", err)
 				// ErrPricingUnavailable's own text is replaced rather than passed through: it
 				// carries the internal wrap ("get service price for video pre-flight reserve"),
 				// that pricing is USD-denominated, the feed's staleness threshold and the age of

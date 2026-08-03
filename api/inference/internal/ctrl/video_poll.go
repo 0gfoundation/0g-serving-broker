@@ -308,7 +308,6 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	}
 
 	outputCount := c.videoOutputUnits(pollCtx, seconds, size)
-	c.checkVideoReserveCoverage(job.RequestBody, job.RequestContentType, outputCount)
 	rateClass := resolutionRateClass(size)
 
 	if job.IsWhitelisted {
@@ -388,6 +387,12 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		c.logger.Errorf("video poll job %d (request %s): complete with billing: %v", job.ID, job.RequestHash, err)
 		return
 	}
+
+	// Only now: the bill is committed, this worker won the attempts fence, and the whitelist branch
+	// returned long ago. Metering above the whitelist branch counted requests that never passed the
+	// balance gate at all (whitelisted creates skip it), and metering before the fenced write
+	// double-counted a stale-lease reclaim — both of which poison the rate that IS the signal.
+	c.checkVideoReserveCoverage(job.RequestBody, job.RequestContentType, outputCount)
 
 	if job.ChatKey != "" {
 		// Re-sign under the SAME chatKey already returned to the client via the create

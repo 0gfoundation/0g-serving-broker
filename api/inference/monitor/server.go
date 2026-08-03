@@ -421,7 +421,15 @@ func PrometheusInit(serverName, providerAddress string) {
 	VideoReserveShortfallTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_reserve_shortfall_total",
-			Help:        "Video-generation settlements that billed MORE units than the pre-flight balance reserve had gated — the gate admitted a request it could not cover. The reserve reads the request, settlement reads the response; a moving rate means that model has drifted. Some non-zero value is expected (a vendor rendering a dearer tier than asked for is a documented residual); the RATE is the signal.",
+			Help:        "Video-generation settlements that billed MORE units than the pre-flight balance reserve had gated. Compares UNITS, not fees: the gate priced its units at the service ceiling over all models, so on a multi-model service a units shortfall can still be covered in neurons — this is a drift signal, not proof the balance gate was inadequate. The reserve reads the request, settlement reads the response; some non-zero value is expected (a vendor rendering a dearer tier than asked for is a documented residual), so the RATE is what to alert on.",
+			ConstLabels: constLabels,
+		},
+	)
+
+	VideoReserveShortfallUnknownTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "broker_video_reserve_shortfall_unknown_total",
+			Help:        "Video-generation settlements where the pre-flight reserve could not be recomputed, so whether the gate covered the bill is unknown. Non-zero means config changed between create and settlement (the request body is persisted across restarts) — the shortfall detector is blind for those requests.",
 			ConstLabels: constLabels,
 		},
 	)
@@ -470,6 +478,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(VideoTableMissTotal)
 	prometheus.MustRegister(VideoReserveShortfallTotal)
+	prometheus.MustRegister(VideoReserveShortfallUnknownTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -835,6 +844,12 @@ var (
 	// asked for is a known, documented residual. But a RATE that moves means the reserve's model of
 	// the upstream has drifted, which is exactly when someone should look.
 	VideoReserveShortfallTotal prometheus.Counter
+
+	// VideoReserveShortfallUnknownTotal counts settlements where the reserve could not be recomputed
+	// at all, so coverage is unknown rather than confirmed either way. The recompute reads CURRENT
+	// config while the gate ran under create-time config, so this is the config-drift case — the
+	// detector going blind, which must be visible instead of reading as healthy.
+	VideoReserveShortfallUnknownTotal prometheus.Counter
 )
 
 // RecordVideoTableMiss increments the per_unit_table miss counter.
@@ -842,6 +857,14 @@ var (
 func RecordVideoReserveShortfall() {
 	if VideoReserveShortfallTotal != nil {
 		VideoReserveShortfallTotal.Inc()
+	}
+}
+
+// RecordVideoReserveShortfallUnknown reports that the reserve could not be recomputed at settlement,
+// so coverage for that request is unknown.
+func RecordVideoReserveShortfallUnknown() {
+	if VideoReserveShortfallUnknownTotal != nil {
+		VideoReserveShortfallUnknownTotal.Inc()
 	}
 }
 

@@ -320,8 +320,9 @@ a terminal 400 as well.
 
 ### Known residuals
 
-Named because they are the difference between "the gap is closed" and "the gap is smaller", and
-none of them is currently measured — see the last entry.
+Named because they are the difference between "the gap is closed" and "the gap is smaller". The
+reserve-vs-bill delta itself IS measured now (entry 4); what these describe is the shapes where the
+delta is expected to be non-zero, and why.
 
 1. **The reserve bounds the size of one request, not the number of them.** An async create writes
    its `Request` row with `Fee = "0"` and it stays there until the poller resolves it minutes
@@ -331,19 +332,35 @@ none of them is currently measured — see the last entry.
    carrying reserves into `unsettled` needs `FailVideoPollJob` / `TimeOutVideoPollJob` to clear them,
    or a job that never delivers settles as real revenue and the caller pays for a video they never
    received. That is a poll-lifecycle change, not a reserve change.
-2. **A rendered tier the response does not report.** For a `per_unit_table` model a silent response
-   is billed on the published tier, which is what the reserve priced, so the two agree. Two gaps
-   remain. (a) `per_video_second`: the substitution deliberately does not apply, so a silent response
-   is billed on the client's `size` — and DashScope, whose translator derives the tier from the pixel
-   size (max side ≤ 1280 → 720P, above → 1080P), can render and charge for a tier neither side
-   priced. On this repo's own DashScope example the three documented pixel sizes above 1280 reserve
-   and bill 5 units while the vendor charges 1080P. That is a broker-vs-vendor gap, not a
-   reserve-vs-bill one, and it predates this change; closing it needs the rendered tier stated
-   per-model in config (the two live translators derive it differently, so it cannot be a
-   broker-side constant). (b) A reported tier the model DOES price, above both the requested and the
-   published one, costs that tier's factor: it is the upstream's own statement, so it is billed as
-   stated rather than repriced, and the gap is the reserve's. An UNTABLED reported tier is not in
-   this residual — it is substituted for the price and metered as a `per_unit_table` miss.
+2. **The tier is decided by a config the gate cannot read.** This is one root cause, not two
+   residuals, and naming it that way is the point: for a pixel-dimension `size` the rendered
+   resolution comes from `MINIMAX_RESOLUTION` in the **translator's** environment — a separate
+   process, defaulting to `"2K"` — and the broker's only proxy for it is the model's published
+   `defaultParameters.size`. Two independent configs that must agree, with nothing enforcing
+   coherence and no signal when they diverge. "The vendor picks the tier" is really "a second config
+   file picks it", which is fixable directly (validate the two against each other, or have the
+   translator echo its configured resolution in the create response) rather than paid for with a
+   blanket over-reserve.
+
+   Until then, two shapes:
+
+   (a) **The published default disagrees with what the translator renders.** The reserve prices the
+   published tier and settlement bills what the response reports, so the gap is the distance between
+   the two configs. On the DashScope path the translator derives the tier from the pixel size (max
+   side ≤ 1280 → 720P, above → 1080P) and reports no `size` at all, so a mismatch is invisible on
+   both sides — a broker-vs-vendor gap rather than a reserve-vs-bill one.
+
+   (b) **A reported tier the model prices, above the tier the reserve priced.** Note the condition:
+   not "above both the requested and the published one". With a DEAR published default,
+   `{"seconds":6,"size":"768P"}` against a table whose `1080P@6` row is 60 units reserves 6 and
+   settles 60 — **10×** — as soon as the upstream reports the published tier. Every fixture in this
+   repo publishes the cheap tier, which is why that shape needs saying out loud. It is the upstream's
+   own statement, so it is billed as stated rather than repriced, and closing it would mean reserving
+   the model's dearest tier for every create — taxing the common case to cover the uncommon one.
+   Entry 4's counter fires on exactly this.
+
+   An UNTABLED reported tier is in neither: it is substituted for the price and metered as a
+   `per_unit_table` miss.
 3. **`seconds` the upstream clamps, in either direction.** `{"seconds":1}` prices at 1 unit while the
    translator raises it to the model floor (H3: 4s) and bills that — an under-reserve. Above the
    ceiling it is the mirror image and costs the *caller*: `{"seconds":60}` is priced at 60 units
