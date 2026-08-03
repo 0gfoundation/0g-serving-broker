@@ -51,3 +51,29 @@ func (c *Ctrl) AuthorizeVideoJobAccess(providerJobID, userAddress string) error 
 	}
 	return nil
 }
+
+// VideoJobChatKey returns the ZG-Res-Key handle to replay on a video status or
+// content response, or "" when there is none to replay.
+//
+// The handle is minted and advertised once, on the create response
+// (handleVideoGenerationResponse). Video status and content are
+// AuthRequiredPrefixes passthroughs, and that path returns from
+// ProcessHTTPRequest before any signing or header work happens — so a client that
+// did not capture the header from the create response had no way to obtain it
+// again, and the signature it points at was unreachable for the whole life of the
+// job. Async image never had this gap: its status handler restores ZG-Res-Key
+// from the stored response headers. This is the same guarantee, read from the row
+// that owns the handle rather than a second copy of it.
+//
+// Errors are swallowed to "" on purpose. This is a best-effort convenience on a
+// path whose job is to return the customer's video: a DB blip must not fail the
+// poll, and the caller degrades to exactly the pre-existing behaviour (no header,
+// so the router falls back as it does today).
+func (c *Ctrl) VideoJobChatKey(providerJobID string) string {
+	chatKey, err := c.videoPollDB.GetVideoPollJobChatKey(providerJobID)
+	if err != nil {
+		c.logger.Warnf("video job %s: could not read the signature handle to replay: %v", providerJobID, err)
+		return ""
+	}
+	return chatKey
+}

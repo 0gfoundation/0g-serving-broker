@@ -151,3 +151,54 @@ func assertForbidden(t *testing.T, err error) {
 		t.Errorf("status = %d, want %d", httpErr.Status(), http.StatusForbidden)
 	}
 }
+
+// The handle is minted once, on the create response. Video status and content are
+// AuthRequiredPrefixes passthroughs that return from ProcessHTTPRequest before any
+// header work, so before this replay a client that did not capture the create
+// header could never fetch the signature — for the whole life of the job, even
+// though the poll scheduler keeps re-signing under that same key. Async image
+// never had the gap; this closes it for video.
+func TestVideoJobChatKey(t *testing.T) {
+	newCtrl := func(store *mockVideoPollDB) *Ctrl {
+		return &Ctrl{videoPollDB: store, logger: testLogger()}
+	}
+
+	t.Run("replays the handle recorded at create time", func(t *testing.T) {
+		store := newMockVideoPollDB()
+		store.jobs[1] = &model.VideoPollJob{ProviderJobID: "v0_123", ChatKey: "d4f1e2c3-aaaa-bbbb-cccc-000000000001"}
+		if got := newCtrl(store).VideoJobChatKey("v0_123"); got != "d4f1e2c3-aaaa-bbbb-cccc-000000000001" {
+			t.Fatalf("got %q, want the recorded handle", got)
+		}
+	})
+
+	// Both mean "nothing to replay", not a fault: a synchronously-completed job has
+	// no poll row, and a TargetSeparated service signs nothing at all. The caller
+	// must not set an empty header — a client would take that for a real handle and
+	// fetch a signature that can only 404.
+	t.Run("no poll row and no signing both yield no handle", func(t *testing.T) {
+		store := newMockVideoPollDB()
+		store.jobs[1] = &model.VideoPollJob{ProviderJobID: "v0_signed", ChatKey: ""}
+		c := newCtrl(store)
+		if got := c.VideoJobChatKey("v0_missing"); got != "" {
+			t.Errorf("unknown job: got %q, want empty", got)
+		}
+		if got := c.VideoJobChatKey("v0_signed"); got != "" {
+			t.Errorf("unsigned service: got %q, want empty", got)
+		}
+		if got := c.VideoJobChatKey(""); got != "" {
+			t.Errorf("empty id: got %q, want empty", got)
+		}
+	})
+
+	// Degrade, never fail. This runs on the path that returns the customer's video;
+	// a DB blip must cost the header, not the poll. The result is exactly the
+	// pre-existing behaviour, so the bad case is no worse than before.
+	t.Run("a read failure degrades to no handle", func(t *testing.T) {
+		store := newMockVideoPollDB()
+		store.jobs[1] = &model.VideoPollJob{ProviderJobID: "v0_123", ChatKey: "would-have-worked"}
+		store.errOnChatKeyLookup = errors.New("db down")
+		if got := newCtrl(store).VideoJobChatKey("v0_123"); got != "" {
+			t.Fatalf("got %q, want empty on a read failure", got)
+		}
+	})
+}

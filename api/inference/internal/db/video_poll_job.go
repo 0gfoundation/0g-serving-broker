@@ -313,3 +313,32 @@ func (d *DB) GetVideoPollJobByRequestHash(requestHash string) (model.VideoPollJo
 	err := d.db.Where("request_hash = ?", requestHash).First(&job).Error
 	return job, err
 }
+
+// GetVideoPollJobChatKey returns the TEE signature-lookup handle recorded for a
+// provider job id, or "" when there is no poll job for it or the service does not
+// sign. Index-backed point read on provider_job_id.
+//
+// It exists so a video STATUS poll can replay the ZG-Res-Key the create response
+// already advertised. Without that replay the handle is issued once and then
+// unreachable: video status/content are AuthRequiredPrefixes passthroughs, which
+// return early in ProcessHTTPRequest and never set the header, so a client that
+// did not capture it from the create response can never verify the attestation.
+// Async image has always replayed it (handler/async.go restores ZG-Res-Key from
+// the stored response headers); this is the same guarantee for video.
+//
+// Not an error when absent: a synchronously-completed job has no poll row, and a
+// TargetSeparated service signs nothing. Both mean "no handle", not a fault.
+func (d *DB) GetVideoPollJobChatKey(providerJobID string) (string, error) {
+	if providerJobID == "" {
+		return "", nil
+	}
+	var chatKey string
+	err := d.db.Model(&model.VideoPollJob{}).
+		Where("provider_job_id = ?", providerJobID).
+		Limit(1).
+		Pluck("chat_key", &chatKey).Error
+	if err != nil {
+		return "", err
+	}
+	return chatKey, nil
+}

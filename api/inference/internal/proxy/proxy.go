@@ -544,6 +544,22 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 				}
 			}
 
+			// Replay the signature-lookup handle the create response advertised.
+			// This path returns from ProcessHTTPRequest before any signing work, so
+			// without this the handle is issued once and then unreachable — and the
+			// signature it points at, which the poll scheduler keeps re-signing under
+			// that same key, could never be fetched by a client that did not capture
+			// the create response header. Async image has always restored it this way.
+			//
+			// Set before the forward, because ProcessHTTPRequest writes the response.
+			// Empty means there is nothing to replay (no poll job, or a service that
+			// does not sign), and is simply not set — same as today.
+			if strings.HasPrefix(strings.ToLower(targetPath), videoStatusPathPrefix) {
+				if chatKey := p.ctrl.VideoJobChatKey(extractVideoJobID(targetPath)); chatKey != "" {
+					ctx.Header("ZG-Res-Key", chatKey)
+				}
+			}
+
 			p.logger.Infof("Auth-required endpoint access: path=%s, method=%s",
 				targetPath, ctx.Request.Method)
 
