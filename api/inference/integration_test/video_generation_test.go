@@ -1140,8 +1140,14 @@ func TestVideoGenerationListIsNotGated(t *testing.T) {
 
 	// A wallet funded for MinimumLockedBalance plus 1000 wei. A bodyless create would reserve the
 	// fallback duration at the dearest service ratio — 15s x 2.0 x 100 wei = 3000 wei — so the gate's
-	// absence is observable here as a 402, and its presence as a clean pass. Without this the harness's
-	// 1000 0G covers even a create-sized reserve and the assertion below cannot fail.
+	// absence is observable here and its presence is a clean pass. Without this the harness's 1000 0G
+	// covers even a create-sized reserve and the assertions below cannot fail (measured: with the gate
+	// deleted AND this reseed deleted, the test passes).
+	//
+	// Observable as a NON-200, not as a 402: any refusal reaches validateBalanceAdequacy's re-check,
+	// which SIGSEGVs on this harness's nil contract binding (see the note below), so the failure mode is
+	// a recovered panic. The 402 assertion is kept as the statement of intent and is currently
+	// unreachable here.
 	userAddr := crypto.PubkeyToAddress(env.privateKey.PublicKey)
 	env.ctrl.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
 		User:          userAddr,

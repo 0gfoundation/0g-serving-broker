@@ -830,8 +830,11 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		// real fee is computed from the response and this number is never persisted.
 		// POST only. `/videos` is an exact-match TargetRoute with no method gate, so GET /v1/proxy/videos
 		// — the OpenAI list endpoint — reaches this switch too, and reserving there demanded ~20 0G to
-		// LIST videos where main demanded 1 0G, turning an upstream 400/404 into a 402. Nothing but a
-		// create renders a clip, so nothing but a create needs a reserve.
+		// LIST videos where main demanded 1 0G, turning an upstream 400/404 into a 402.
+		//
+		// Every route that reaches THIS switch and renders a clip is a POST /videos. `POST
+		// /videos/{id}/remix` does render one, but it matches AuthRequiredPrefixes and never arrives
+		// here — unreserved and unbilled, on main as much as here, and not this change's to fix.
 		if ctx.Request.Method != http.MethodPost {
 			expectedInputFee = "0"
 			break

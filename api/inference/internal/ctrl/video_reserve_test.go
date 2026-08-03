@@ -512,3 +512,59 @@ func TestVideoReserveBodylessRequestIsExpensive(t *testing.T) {
 			got, videoReserveFallbackSeconds*8)
 	}
 }
+
+// TestVideoReserveWhitespacePaddedSecondsFallsBack pins the reading divergence that made a single space
+// character cheap. This package trims a multipart form value; both vendor translators call
+// strconv.ParseFloat on the verbatim one. So `seconds=" 1"` read as 1 here — floored to the 4s vendor
+// minimum — while DashScope's parse failed, `duration` was omitted, and the vendor picked a duration the
+// broker cannot see. Reserving 4 against that unknown is the cheap side of the divergence.
+//
+// The earlier disclosure of this used " 8", which is the OVER-reserve direction and therefore the half
+// that does not matter.
+func TestVideoReserveWhitespacePaddedSecondsFallsBack(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
+
+	for _, padded := range []string{" 1", "1 ", "\t2", " 0.5", "\r\n3"} {
+		mp, ct := multipartSeconds(t, padded)
+		if got := videoReserve(t, c, mp, ct, ""); got != videoReserveFallbackSeconds {
+			t.Errorf("multipart seconds=%q: reserve = %d, want %d — the vendor cannot parse this value, so it picks its own duration",
+				padded, got, videoReserveFallbackSeconds)
+		}
+	}
+	// The same padding in the query, which is what FormValue hands the translator on multipart.
+	if got := videoReserve(t, c, `{}`, "multipart/form-data; boundary=b", "seconds=%201"); got != videoReserveFallbackSeconds {
+		t.Errorf("query seconds=%%201: reserve = %d, want %d", got, videoReserveFallbackSeconds)
+	}
+	// Unpadded still counts, on both sources.
+	mp, ct := multipartSeconds(t, "9")
+	if got := videoReserve(t, c, mp, ct, ""); got != 9 {
+		t.Errorf("multipart seconds=9: reserve = %d, want 9", got)
+	}
+}
+
+// TestVideoReserveIsMultipartRequestIsLax pins the deliberate laxness of the transport check, the one
+// guard mutation testing found unpinned. It is looser than the translator's own case-sensitive
+// `multipart/form-data` prefix, and that direction is the safe one: every content type where this says
+// multipart and the translator does not ends in an upstream 400, so the resulting over-reserve is never
+// billed. Tightening it to match the translator would make the query stop counting on shapes where
+// FormValue still reads it.
+func TestVideoReserveIsMultipartRequestIsLax(t *testing.T) {
+	for _, ct := range []string{
+		"multipart/form-data; boundary=b",
+		"MULTIPART/FORM-DATA; boundary=b",
+		"  multipart/form-data; boundary=b",
+		"multipart/mixed; boundary=b",
+	} {
+		if !isMultipartRequest(ct) {
+			t.Errorf("isMultipartRequest(%q) = false; the query is still a reader on this transport", ct)
+		}
+	}
+	for _, ct := range []string{"application/json", "", "text/plain", "application/x-www-form-urlencoded"} {
+		if isMultipartRequest(ct) {
+			t.Errorf("isMultipartRequest(%q) = true; the query reaches no reader here", ct)
+		}
+	}
+}

@@ -182,6 +182,35 @@ func multipartFormField(body []byte, contentType, name string) string {
 	}
 }
 
+// multipartFormFieldRaw is multipartFormField without the trim, plus whether the field was present at
+// all. Both matter to one caller only: the video reserve has to know whether the VENDOR can read a
+// `seconds` value, and the vendor translators call strconv.ParseFloat on the verbatim form value — so a
+// padded " 1" that this package trims into a usable 1 is unreadable to them, and they fall back to a
+// vendor default the broker cannot see.
+func multipartFormFieldRaw(body []byte, contentType, name string) (value string, present bool) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", false
+	}
+	boundary, ok := params["boundary"]
+	if !ok {
+		return "", false
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return "", false
+		}
+		if part.FormName() == name && part.FileName() == "" {
+			val, _ := io.ReadAll(io.LimitReader(part, 1024))
+			part.Close()
+			return string(val), true
+		}
+		part.Close()
+	}
+}
+
 // rewriteResponseModel patches the "model" field in a non-streaming JSON response
 // to return the original ft-* model name instead of the base model name that vLLM returns.
 // Uses JSON unmarshal/marshal to handle any JSON whitespace formatting.

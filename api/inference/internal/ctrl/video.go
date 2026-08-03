@@ -297,7 +297,10 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 	//
 	// Gated on HasMultiModelPricing, and that gate is load-bearing rather than an optimisation: for a
 	// single-model service ResolveRequestedModel returns ok=true with the RAW REQUESTED STRING, so an
-	// ungated stamp wrote unbounded client input into the key. That value reaches
+	// ungated stamp wrote unbounded client input into the key. It closes the case this reserve would
+	// have ADDED, not the whole class: a multi-model service with a "*" entry also resolves to the raw
+	// string, and ResolveModelForBilling already stamps it there on main today, so that half is
+	// pre-existing and out of scope here. That value reaches
 	// VideoPollJob.ResolvedModel, a varchar(255) — a 300-character `model` field made the poll-job
 	// insert fail with MySQL 1406 AFTER the create had returned a job id and registered the caller as
 	// its owner, so the clip stayed retrievable and was never billed. Repeatable, one field. Before
@@ -387,7 +390,7 @@ func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentTy
 // maximum is above whichever one the deployed combination picks, for every transport and provenance.
 func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	bodySeconds, _ := videoSecondsSizeFromRequest(reqBody, contentType)
-	querySeconds, queryNamedUnusable := videoReserveQuerySeconds(rawQuery)
+	querySeconds := videoReserveQuerySeconds(rawQuery)
 	queryIsRead := isMultipartRequest(contentType)
 
 	// Two separate questions, and conflating them is how this went wrong twice.
@@ -410,25 +413,52 @@ func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	//     multipart: ParseMultipartForm seeds r.Form from the query, so FormValue returns the query's
 	//     value whenever the key is present — usable or not — and never consults the body.
 	//     anything else: the translator decodes the body and ignores the query entirely.
-	upstreamNamedDuration := bodySeconds > 0
-	if queryIsRead {
-		switch {
-		case queryNamedUnusable:
-			upstreamNamedDuration = false
-		case querySeconds > 0:
-			upstreamNamedDuration = true
-		}
-	}
+	upstreamNamedDuration := videoUpstreamNamedDuration(reqBody, contentType, rawQuery, bodySeconds, queryIsRead)
 	if !upstreamNamedDuration && int64(videoReserveFallbackSeconds) > best {
 		best = videoReserveFallbackSeconds
 	}
 	return videoReserveClampSeconds(best)
 }
 
-// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does. namedUnusable
-// reports that the key was present but held nothing a duration could be read from — which matters only
-// on the transport where the query is what the upstream reads; the caller decides that.
-func videoReserveQuerySeconds(rawQuery string) (seconds int64, namedUnusable bool) {
+// videoUpstreamNamedDuration reports whether the value the UPSTREAM will read parses as a duration on
+// the vendor's own terms. Only this decides whether the unknown-duration fallback applies.
+//
+// "On the vendor's own terms" is the whole point, and it is not the same as "this package could read
+// it": both translators call strconv.ParseFloat on the verbatim form value, while this package trims
+// first. So a multipart `seconds` of " 1" reads as 1 here — floored to the 4s vendor minimum — and as a
+// parse error there, which makes DashScope omit `duration` and let the vendor pick. Reserving 4 against
+// an unknown vendor default is the cheap side of a reading divergence, which is the exact shape this
+// gate exists to close; a padded value now falls back like any other unreadable one.
+//
+// JSON needs no such care: the translator's own field is a string it ParseFloats identically, and a JSON
+// body whose `seconds` is unquoted (the only form this package reads as a number) cannot carry
+// whitespace inside the token.
+func videoUpstreamNamedDuration(reqBody []byte, contentType, rawQuery string, bodySeconds int64, queryIsRead bool) bool {
+	if queryIsRead {
+		// FormValue answers from the query whenever the key is present, usable or not.
+		if q, _ := url.ParseQuery(rawQuery); q != nil {
+			if vs, present := q["seconds"]; present {
+				return len(vs) > 0 && vendorParsesSeconds(vs[0])
+			}
+		}
+		if raw, present := multipartFormFieldRaw(reqBody, contentType, "seconds"); present {
+			return vendorParsesSeconds(raw)
+		}
+		return false
+	}
+	return bodySeconds > 0
+}
+
+// vendorParsesSeconds mirrors the translators' own duration read: strconv.ParseFloat on the verbatim
+// value, positive and finite. Deliberately NOT trimmed — see videoUpstreamNamedDuration.
+func vendorParsesSeconds(raw string) bool {
+	f, err := strconv.ParseFloat(raw, 64)
+	return err == nil && f > 0 && !math.IsInf(f, 0)
+}
+
+// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does, for SIZING only
+// — whether the upstream can read it is videoUpstreamNamedDuration's question.
+func videoReserveQuerySeconds(rawQuery string) int64 {
 	if rawQuery != "" {
 		// ParseQuery's error is IGNORED, matching r.FormValue: r.ParseForm returns the same error and
 		// FormValue ignores it, so `?seconds=15&junk=%zz` still resolves to 15 upstream. Guarding on
@@ -442,14 +472,14 @@ func videoReserveQuerySeconds(rawQuery string) (seconds int64, namedUnusable boo
 				// First value, which is what FormValue takes for a repeated key.
 				if f, err := strconv.ParseFloat(strings.TrimSpace(vs[0]), 64); err == nil &&
 					f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
-					return int64(math.Ceil(f)), false
+					return int64(math.Ceil(f))
 				}
 			}
-			// Present but unreadable or empty.
-			return 0, true
+			// Present but unreadable or empty: nothing to size from.
+			return 0
 		}
 	}
-	return 0, false
+	return 0
 }
 
 // isMultipartRequest reports whether the upstream will read this create with r.FormValue's form
