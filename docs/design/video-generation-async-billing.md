@@ -355,11 +355,17 @@ none of them is currently measured — see the last entry.
    can read it. `defaultParameters` closed the omitted cases the same way a published min/max would
    close these — and would also let the broker reject an out-of-range duration outright instead of
    having it silently clamped upstream, which is the better contract anyway.
-4. **None of the above is observed.** The reserve is never persisted, so nothing in production
-   compares it to what settled — every bound here is an argument, not a measurement. The cheap fix is
-   a `settledFee / reservedFee` counter at settlement, which needs the reserve carried on the poll
-   job or the `Request` row. `TestVideoReserveNeverBelowSettlement` pins the known-good pairs as a
-   unit test in the meantime; the residuals above are exactly the pairs it does not assert.
+4. **It is now observed.** `broker_video_reserve_shortfall_total` counts settlements that billed more
+   units than the reserve had gated. The reserve is not persisted, so `checkVideoReserveCoverage`
+   RECOMPUTES it from the request body settlement already holds — one pure parse, no new column, no
+   carrying it on the poll job.
+
+   This is the signal that catches the class rather than an instance of it. Every under-reserve this
+   path has had was the reserve (reading the REQUEST) and settlement (reading the RESPONSE)
+   disagreeing, and each fix for one instance opened its mirror — three rounds running, on the same
+   axis. A non-zero value is expected (residual 2b is exactly that shape); a moving RATE means the
+   reserve's model of the upstream has drifted, which is when someone should look. It cannot refuse
+   anything: by settlement the video exists, and refusing to bill would serve it free.
 
 
 ## Data model

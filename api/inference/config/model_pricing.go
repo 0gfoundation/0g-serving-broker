@@ -217,6 +217,30 @@ func normalizeResolution(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// MaxResolutionMultiplier returns the dearest configured resolution multiplier, or 0 when the block
+// has none.
+//
+// The pre-flight reserve uses it for the one case where it cannot identify the tier at all: a size
+// this model prices NOWHERE. The vendor picks the tier, not the client, so with no way to name it the
+// only reserve that is a true ceiling is the dearest the model can bill. Without it a
+// per_video_second model reserved the 1.0 baseline for an unlisted spelling and settled at the tier —
+// `size:"1920x1080"` against `{720p:1.0, 1080p:1.5}` reserved 5 and billed 8 with no vendor
+// divergence at all, because the gate cannot see that 1920x1080 IS 1080p.
+//
+// Reserve-side only: settlement reads the resolution the response names, so nothing here moves a bill.
+func (b *BillingConfig) MaxResolutionMultiplier() float64 {
+	if b == nil {
+		return 0
+	}
+	var max float64
+	for _, v := range b.ResolutionMultipliers {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
 // resolutionMultiplier returns the configured cost multiplier for a resolution,
 // or the baseline 1.0 when unset/unknown. Matching is case/whitespace
 // insensitive (see normalizeResolution); validateBillingConfig rejects keys

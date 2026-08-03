@@ -578,44 +578,6 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 	// Store user address in context for rate limiting
 	ctx.Set("userAddress", userAddress)
 
-	// A price-setting field in the URL QUERY is refused before anything else looks at the request.
-	//
-	// proxyHTTPRequest forwards the query verbatim (targetURL keeps ctx.Request.RequestURI's
-	// query), and an upstream that reads the create with r.FormValue resolves it BEFORE the body:
-	// ParseMultipartForm populates r.Form from the query first and appends the body after. Every
-	// gate on this path is handed only the body, so `?seconds=15` against a body of `seconds=1`
-	// priced 1 and rendered 15 — and it composes across all three fields at once. Nothing in the
-	// OpenAI surface puts any of them in the query, so refusing costs no legitimate traffic;
-	// merging them would mean re-implementing Go's precedence as a second reader of one request.
-	//
-	// Above the whitelist branch on purpose: a whitelisted create is unbilled, so there is no
-	// money in it, but it still writes the reconciliation rollup — which is the only record that
-	// traffic produces, and it would name the body's values while the upstream served the query's.
-	//
-	// Scoped to the modalities whose gate resolves a per-model price from the body: video-generation
-	// (seconds/size/model) and speech-to-text (model). Chatbot posts JSON, whose decoders read the
-	// body only, and image-editing has no per-model resolution behind it (ResolveModelForBilling
-	// runs for STT and video only) — narrowing either contract would buy nothing.
-	if q := ctx.Request.URL.Query(); len(q) > 0 {
-		var offending error
-		switch svcType {
-		case "video-generation":
-			if q.Has("seconds") || q.Has("size") || q.Has("model") {
-				offending = ctrl.ErrVideoBillingFieldInQuery
-			}
-		case "speech-to-text":
-			if q.Has("model") {
-				offending = errors.NewBadRequest("`model` must be sent in the request body, not the URL query")
-			}
-		}
-		if offending != nil {
-			ctx.Set("ignoreError", true)
-			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
-			p.handleBrokerError(ctx, offending, "")
-			return
-		}
-	}
-
 	// Check if user is whitelisted (checked early to skip per-user concurrency limit)
 	isWhitelisted := p.ctrl.IsWhitelistedUser(userAddress)
 
@@ -658,6 +620,46 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			if p.perUserIPMLimiter != nil {
 				ctx.Set("ipmLimiter", p.perUserIPMLimiter)
 			}
+		}
+	}
+
+	// A price-setting field in the URL QUERY is refused before anything else looks at the request.
+	//
+	// proxyHTTPRequest forwards the query verbatim (targetURL keeps ctx.Request.RequestURI's
+	// query), and an upstream that reads the create with r.FormValue resolves it BEFORE the body:
+	// ParseMultipartForm populates r.Form from the query first and appends the body after. Every
+	// gate on this path is handed only the body, so `?seconds=15` against a body of `seconds=1`
+	// priced 1 and rendered 15 — and it composes across all three fields at once. Nothing in the
+	// OpenAI surface puts any of them in the query, so refusing costs no legitimate traffic;
+	// merging them would mean re-implementing Go's precedence as a second reader of one request.
+	//
+	// Placed below the per-user rate limiter and above the whitelist branch. Below the limiter so a
+	// caller cannot mint unlimited 400s outside their RPM budget; above the whitelist branch because
+	// a whitelisted create is unbilled but still writes the reconciliation rollup, which would
+	// otherwise name the body's values while the upstream served the query's.
+	//
+	// Scoped to the modalities whose gate resolves a per-model price from the body: video-generation
+	// (seconds/size/model) and speech-to-text (model). Chatbot posts JSON, whose decoders read the
+	// body only, and image-editing has no per-model resolution behind it (ResolveModelForBilling
+	// runs for STT and video only) — narrowing either contract would buy nothing.
+	if ctx.Request.Method == http.MethodPost && ctx.Request.URL.RawQuery != "" {
+		var offending error
+		// RawQuery, not Query(): url.Values silently DROPS a pair its parser rejects (Go refuses
+		// `;` as a separator), so `?seconds=15;x=1` produced an empty map and skipped the guard
+		// while the raw string was still forwarded verbatim to an upstream whose parser may split
+		// on it. Nothing in the OpenAI surface puts a query on a create, so any non-empty query is
+		// refusable and there is no parser to out-read.
+		switch svcType {
+		case "video-generation":
+			offending = ctrl.ErrVideoBillingFieldInQuery
+		case "speech-to-text":
+			offending = errors.NewBadRequest("`model` must be sent in the request body, not the URL query")
+		}
+		if offending != nil {
+			ctx.Set("ignoreError", true)
+			p.rejections.record(ctx, monitor.RejectionInvalidRequest, userAddress)
+			p.handleBrokerError(ctx, offending, "")
+			return
 		}
 	}
 

@@ -1382,7 +1382,21 @@ func (c *Ctrl) ValidateModelAllowlist(ctx *gin.Context, body []byte, userAddr st
 		c.logger.Debugf("Model served via wildcard catch-all pricing: requested=%s", requestModel)
 	}
 
-	if cur, _ := bodyMap["model"].(string); cur != forwardModel {
+	// Drop every case-variant of `model` and always write the canonical key. Leaving a variant in
+	// place meant the broker billed one spelling while the upstream's folding decode read another —
+	// `{"model":"cheap","Model":"dear"}` was billed as `cheap` and rendered as `dear`. The shapes
+	// that happened to work only worked because json.Marshal sorts keys bytewise and every variant
+	// must carry an uppercase letter, so the injected lowercase `model` sorted last and won the
+	// upstream's last-wins resolution. That is an undocumented dependency on a map encoder's
+	// ordering; canonicalizing removes it.
+	strippedVariant := false
+	for k := range bodyMap {
+		if k != "model" && strings.EqualFold(k, "model") {
+			delete(bodyMap, k)
+			strippedVariant = true
+		}
+	}
+	if cur, _ := bodyMap["model"].(string); strippedVariant || cur != forwardModel {
 		bodyMap["model"] = forwardModel
 		modifiedBody, err := json.Marshal(bodyMap)
 		if err != nil {

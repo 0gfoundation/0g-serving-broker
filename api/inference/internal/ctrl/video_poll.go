@@ -308,6 +308,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	}
 
 	outputCount := c.videoOutputUnits(pollCtx, seconds, size)
+	c.checkVideoReserveCoverage(job.RequestBody, job.RequestContentType, outputCount)
 	rateClass := resolutionRateClass(size)
 
 	if job.IsWhitelisted {

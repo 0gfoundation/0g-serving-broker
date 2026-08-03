@@ -418,6 +418,14 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
+	VideoReserveShortfallTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "broker_video_reserve_shortfall_total",
+			Help:        "Video-generation settlements that billed MORE units than the pre-flight balance reserve had gated — the gate admitted a request it could not cover. The reserve reads the request, settlement reads the response; a moving rate means that model has drifted. Some non-zero value is expected (a vendor rendering a dearer tier than asked for is a documented residual); the RATE is the signal.",
+			ConstLabels: constLabels,
+		},
+	)
+
 	VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
@@ -461,6 +469,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoPollTimedOutTotal)
 	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(VideoTableMissTotal)
+	prometheus.MustRegister(VideoReserveShortfallTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -812,7 +821,30 @@ const (
 	VideoTableMissUncovered = "uncovered"
 )
 
+var (
+	// VideoReserveShortfallTotal counts video settlements that billed MORE units than the pre-flight
+	// reserve had gated, i.e. the gate admitted a request it could not cover.
+	//
+	// This is the one signal that catches the whole class rather than an instance of it. The reserve
+	// reads what the REQUEST asked for; settlement reads what the RESPONSE delivered; every
+	// under-reserve this path has ever had was those two disagreeing, and each fix for one instance
+	// opened the mirror of it — three times over. A counter on the delta is what makes the next one
+	// visible on a dashboard instead of in a review.
+	//
+	// Non-zero is not automatically a bug: an upstream that renders a dearer tier than the client
+	// asked for is a known, documented residual. But a RATE that moves means the reserve's model of
+	// the upstream has drifted, which is exactly when someone should look.
+	VideoReserveShortfallTotal prometheus.Counter
+)
+
 // RecordVideoTableMiss increments the per_unit_table miss counter.
+// RecordVideoReserveShortfall reports that settlement billed more units than the reserve gated.
+func RecordVideoReserveShortfall() {
+	if VideoReserveShortfallTotal != nil {
+		VideoReserveShortfallTotal.Inc()
+	}
+}
+
 func RecordVideoTableMiss(reason string) {
 	if VideoTableMissTotal == nil {
 		return

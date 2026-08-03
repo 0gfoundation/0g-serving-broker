@@ -323,7 +323,7 @@ func TestResolveVideoBilling(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sec, size, source := resolveVideoBilling([]byte(tt.respBody), []byte(tt.reqBody), tt.contentType)
+			sec, size, source, _ := resolveVideoBillingWithSizeSource([]byte(tt.respBody), []byte(tt.reqBody), tt.contentType)
 			if source != tt.wantSource {
 				t.Fatalf("source = %q, want %q", source, tt.wantSource)
 			}
@@ -1760,6 +1760,124 @@ func TestVideoReserveCoversEchoedRequestSize(t *testing.T) {
 			}
 			if settled := c.videoOutputUnits(ctx, seconds, basis); reserve < settled {
 				t.Errorf("reserve %d < settled %d (basis %q) for an echoed unpriceable size", reserve, settled, basis)
+			}
+		})
+	}
+}
+
+// TestVideoReserveDearestTierForUnpricedSize pins the reserve for a size the model prices NOWHERE.
+//
+// The gate cannot name the tier at all there, and the vendor — not the client — picks it, so the
+// dearest the model can bill is the only true ceiling. Scoping the published-size substitution to
+// per_unit_table had left per_video_second with nothing to lift it off the 1.0 baseline:
+// `size:"1920x1080"` against {720p:1.0, 1080p:1.5} reserved 5 and settled 8 with no vendor
+// divergence, because the gate cannot see that 1920x1080 IS 1080p.
+func TestVideoReserveDearestTierForUnpricedSize(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "tiered",
+		OutputPrice: "100",
+		Billing: &config.BillingConfig{
+			Mode:                  config.BillingModePerVideoSecond,
+			ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5},
+		},
+		ModelInfo: &config.ModelInfo{DefaultParameters: map[string]interface{}{"seconds": 5, "size": "720p"}},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "tiered")}
+	ctx := ginCtxWithResolvedModel("tiered")
+
+	// Unlisted spellings of a tier the model DOES render: reserve the dearest (5 x 1.5 = 8), which
+	// covers the vendor reporting 1080p.
+	for _, size := range []string{"1920x1080", "1280x720", "2160P"} {
+		got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"`+size+`"}`), "application/json")
+		if err != nil {
+			t.Fatalf("size %q: unexpected error: %v", size, err)
+		}
+		settled := c.videoOutputUnits(ctx, 5, "1080p")
+		if got < settled {
+			t.Errorf("size %q: reserve %d < settled %d for the dearest tier this model can bill", size, got, settled)
+		}
+	}
+	// A size the model DOES price is trusted as named — the client asked for that tier, and a
+	// dearer RENDERED tier is residual 2(b), not something to tax every request for.
+	if got, err := c.videoReserveUnitsFromRequest([]byte(`{"model":"tiered","seconds":5,"size":"720p"}`), "application/json"); err != nil || got != 5 {
+		t.Errorf("reserve for an explicitly priced cheap tier = %d (err %v), want 5", got, err)
+	}
+}
+
+// TestMaxResolutionMultiplier covers the helper the reserve leans on for an unnameable tier.
+func TestMaxResolutionMultiplier(t *testing.T) {
+	tests := []struct {
+		name string
+		b    *config.BillingConfig
+		want float64
+	}{
+		{name: "nil block", b: nil, want: 0},
+		{name: "no multipliers", b: &config.BillingConfig{Mode: config.BillingModePerVideoSecond}, want: 0},
+		{name: "dearest wins", b: &config.BillingConfig{ResolutionMultipliers: map[string]float64{"720p": 1.0, "1080p": 1.5, "2160p": 8.0}}, want: 8.0},
+		{name: "all below baseline", b: &config.BillingConfig{ResolutionMultipliers: map[string]float64{"480p": 0.5}}, want: 0.5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.b.MaxResolutionMultiplier(); got != tt.want {
+				t.Errorf("MaxResolutionMultiplier() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateModelAllowlistCanonicalizesModelKey pins the chat path's folded read — the highest-volume
+// modality this PR touches, and previously untested for anything but a lowercase `model`.
+//
+// The invariant that matters: whatever the broker resolves (and therefore bills and labels) is what
+// the FORWARDED body says, with no surviving case-variant for the upstream's folding decode to pick
+// instead. Before canonicalization the shapes that worked did so only because json.Marshal sorts keys
+// bytewise and every variant carries an uppercase letter, so the injected lowercase key sorted last.
+func TestValidateModelAllowlistCanonicalizesModelKey(t *testing.T) {
+	c := newTestCtrlForEnforceModel(t, "cheap", "")
+	c.Service.ModelPricing = []config.ModelPricingEntry{
+		{Model: "cheap", InputPrice: "1", OutputPrice: "1"},
+		{Model: "dear", InputPrice: "9", OutputPrice: "9"},
+	}
+	if err := c.Service.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{name: "canonical key", body: `{"model":"dear"}`, want: "dear"},
+		{name: "case-variant key is honoured, not silently defaulted", body: `{"Model":"dear"}`, want: "dear"},
+		{name: "upper-case key", body: `{"MODEL":"dear"}`, want: "dear"},
+		{name: "wrong-typed canonical key falls back to the variant", body: `{"model":123,"Model":"dear"}`, want: "dear"},
+		// Two usable variants cannot be resolved from an unordered map; the configured model is used,
+		// and canonicalization makes sure the upstream sees exactly that.
+		{name: "two ambiguous variants use the configured model", body: `{"Model":"dear","MODEL":"cheap"}`, want: "cheap"},
+		{name: "unserved model named in a variant is rejected", body: `{"Model":"not-served"}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := c.ValidateModelAllowlist(ginCtxWithResolvedModel(""), []byte(tt.body), "0xtest")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("forwarded body is not JSON: %v", err)
+			}
+			if got["model"] != tt.want {
+				t.Errorf("forwarded model = %v, want %q", got["model"], tt.want)
+			}
+			// No surviving spelling for the upstream's folding decode to prefer.
+			for k := range got {
+				if k != "model" && strings.EqualFold(k, "model") {
+					t.Errorf("forwarded body still carries the variant %q: %v", k, got)
+				}
 			}
 		})
 	}
