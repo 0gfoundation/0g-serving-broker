@@ -330,6 +330,21 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string,
 	}
 	if c.Service.HasMultiModelPricing() {
 		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
+			// per_video_token with NO observed token count is the token-billing
+			// analogue of "billing indeterminate" (the sibling seconds-based
+			// modes fail loud via resolveVideoBilling's source=="" path — see
+			// handleVideoGenerationResponse/pollVideoJob). BillingConfig.OutputUnits
+			// deliberately returns (0, nil) for CompletionTokens==0 (a real
+			// completed task should never observe 0 — the vendor documents a
+			// minimum-token floor — so 0 here means the response's usage block
+			// was missing/malformed, not a genuine zero-cost generation), so
+			// nothing downstream would otherwise notice this request was served
+			// for free. Log it loudly here, at the one call site that already
+			// knows both the resolved billing mode and the observed token count.
+			if e.Billing.Mode == config.BillingModePerVideoToken && tokens <= 0 {
+				c.logger.Errorf("video per_video_token billing: no positive completion_tokens observed for a billable request; billing 0 units (served free) — the vendor response's usage.completion_tokens was missing, zero, or malformed")
+				monitor.RecordVideoBillingSkipped()
+			}
 			units, err := e.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size, CompletionTokens: tokens})
 			if err == nil {
 				return units

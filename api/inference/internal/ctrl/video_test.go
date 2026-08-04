@@ -458,6 +458,41 @@ func TestVideoOutputUnits_PerVideoToken(t *testing.T) {
 	}
 }
 
+// TestVideoOutputUnits_PerVideoToken_ZeroTokensLogsLoudly pins that a
+// per_video_token request resolving to 0 completion tokens — which a real
+// completed Seedance task should never do, per the vendor's documented
+// minimum-token floor — is NOT silently billed for free the way a genuine
+// per_video_token=0 config value would be: it must log an error (mirroring
+// the sibling "billing indeterminate" loud-failure convention elsewhere in
+// this file), while still returning 0 units rather than guessing a seconds-
+// based fee.
+func TestVideoOutputUnits_PerVideoToken_ZeroTokensLogsLoudly(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bytedance-seedance",
+		OutputPrice: "1",
+		Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoToken},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bytedance-seedance")}
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p", 0); got != 0 {
+		t.Errorf("units = %d, want 0", got)
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d errors for a zero-completion-tokens per_video_token request, want 1 (a silent free bill must not go unnoticed)", rec.errors)
+	}
+
+	// A genuine positive token count must NOT trip the same warning.
+	rec.errors = 0
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p", 246840); got != 246840 {
+		t.Errorf("units = %d, want 246840", got)
+	}
+	if rec.errors != 0 {
+		t.Errorf("logged %d errors for a normal positive-token request, want 0", rec.errors)
+	}
+}
+
 // TestVideoOutputUnits_PerUnitTableMiss verifies a bucketed-model request for an
 // unlisted (resolution, duration) stays inside the table — rounding up to the
 // bucket that covers it, or the table MAX when none does — never the seconds×ratio
