@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -65,6 +66,9 @@ type jsonCreateVideoRequest struct {
 	ReferenceImages []string `json:"reference_images"`
 	ReferenceVideos []string `json:"reference_videos"`
 	ReferenceAudio  []string `json:"reference_audio"`
+	// CameraFixed: Seedance's top-level "camera_fixed" boolean. A *bool so an
+	// absent field (nil) is distinguishable from an explicit false.
+	CameraFixed *bool `json:"camera_fixed"`
 }
 
 // maxCreateVideoBodyBytes bounds the total POST /videos request body.
@@ -277,6 +281,14 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		req.ReferenceImageURLs = append([]string(nil), r.PostForm["reference_images"]...)
 		req.ReferenceVideoURLs = append([]string(nil), r.PostForm["reference_videos"]...)
 		req.ReferenceAudioURLs = append([]string(nil), r.PostForm["reference_audio"]...)
+		// camera_fixed: a plain form value, parsed as a bool. Absent or
+		// unparsable (not "true"/"false"/"1"/"0"/etc.) leaves it nil, matching
+		// every other optional field's "absent means vendor default" handling.
+		if v := r.FormValue("camera_fixed"); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				req.CameraFixed = &b
+			}
+		}
 		return req, nil
 	}
 
@@ -301,6 +313,7 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 	req.ReferenceImageURLs = jr.ReferenceImages
 	req.ReferenceVideoURLs = jr.ReferenceVideos
 	req.ReferenceAudioURLs = jr.ReferenceAudio
+	req.CameraFixed = jr.CameraFixed
 	return req, nil
 }
 

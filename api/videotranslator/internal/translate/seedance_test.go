@@ -158,6 +158,21 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 		if got.GenerateAudio != nil {
 			t.Errorf("generate_audio must be omitted (nil), got %+v", got.GenerateAudio)
 		}
+		if got.CameraFixed != nil {
+			t.Errorf("camera_fixed must be omitted (nil) when the client didn't specify it, got %+v", got.CameraFixed)
+		}
+	})
+
+	t.Run("camera_fixed is passed through unchanged, both true and false", func(t *testing.T) {
+		trueVal, falseVal := true, false
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "a cat", Seconds: "5", CameraFixed: &trueVal})
+		if got.CameraFixed == nil || *got.CameraFixed != true {
+			t.Fatalf("camera_fixed=true not passed through, got %+v", got.CameraFixed)
+		}
+		got = ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "a cat", Seconds: "5", CameraFixed: &falseVal})
+		if got.CameraFixed == nil || *got.CameraFixed != false {
+			t.Fatalf("camera_fixed=false not passed through (must be distinguishable from omitted), got %+v", got.CameraFixed)
+		}
 	})
 
 	t.Run("first_frame only -> [text, first_frame], ratio forced adaptive", func(t *testing.T) {

@@ -63,6 +63,11 @@ type CreateVideoRequest struct {
 	ReferenceImageURLs []string
 	ReferenceVideoURLs []string
 	ReferenceAudioURLs []string
+	// CameraFixed is Seedance's top-level "camera_fixed" boolean (whether the
+	// camera stays static during generation). Nil means the client did not
+	// specify it, in which case the field is omitted and the vendor default
+	// applies. Currently read by the Seedance mapping only.
+	CameraFixed *bool
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for
