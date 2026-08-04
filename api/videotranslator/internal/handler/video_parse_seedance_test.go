@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -124,6 +125,70 @@ func TestParseCreateVideoRequest_ReferenceArrays_MultipartRepeatedFields(t *test
 	}
 	if len(got.ReferenceAudioURLs) != 0 {
 		t.Errorf("ReferenceAudioURLs = %v, want empty", got.ReferenceAudioURLs)
+	}
+}
+
+func TestParseCreateVideoRequest_CameraFixed_JSON(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		body := `{"prompt":"p","camera_fixed":` + strconv.FormatBool(want) + `}`
+		req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		got, err := parseCreateVideoRequest(req)
+		if err != nil {
+			t.Fatalf("parseCreateVideoRequest: %v", err)
+		}
+		if got.CameraFixed == nil || *got.CameraFixed != want {
+			t.Errorf("camera_fixed=%v: got %+v", want, got.CameraFixed)
+		}
+	}
+}
+
+func TestParseCreateVideoRequest_CameraFixed_Absent_YieldsNil(t *testing.T) {
+	const body = `{"prompt":"p"}`
+	req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.CameraFixed != nil {
+		t.Errorf("camera_fixed absent must parse to nil (not a false default), got %+v", got.CameraFixed)
+	}
+}
+
+func TestParseCreateVideoRequest_CameraFixed_Multipart(t *testing.T) {
+	body, contentType := newMultipartBody(t, map[string]string{
+		"prompt":       "p",
+		"camera_fixed": "true",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/videos", body)
+	req.Header.Set("Content-Type", contentType)
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.CameraFixed == nil || *got.CameraFixed != true {
+		t.Errorf("camera_fixed = %+v, want true", got.CameraFixed)
+	}
+}
+
+func TestParseCreateVideoRequest_CameraFixed_MultipartUnparsable_YieldsNil(t *testing.T) {
+	body, contentType := newMultipartBody(t, map[string]string{
+		"prompt":       "p",
+		"camera_fixed": "not-a-bool",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/videos", body)
+	req.Header.Set("Content-Type", contentType)
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.CameraFixed != nil {
+		t.Errorf("unparsable camera_fixed must fall back to nil (vendor default), got %+v", got.CameraFixed)
 	}
 }
 

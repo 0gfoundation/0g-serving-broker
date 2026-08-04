@@ -365,13 +365,14 @@ func ToSeedanceCreateRequest(req CreateVideoRequest) seedance.CreateRequest {
 	watermark := false
 
 	return seedance.CreateRequest{
-		Model:      seedanceWireModel(req.Model),
-		Content:    content,
-		Resolution: normalizeSeedanceResolution(req.Size),
-		Ratio:      ratio,
-		Duration:   parseSeedanceDuration(req.Seconds),
-		Watermark:  &watermark,
-		Seed:       parseSeedanceSeed(req.Seed),
+		Model:       seedanceWireModel(req.Model),
+		Content:     content,
+		Resolution:  normalizeSeedanceResolution(req.Size),
+		Ratio:       ratio,
+		Duration:    parseSeedanceDuration(req.Seconds),
+		Watermark:   &watermark,
+		Seed:        parseSeedanceSeed(req.Seed),
+		CameraFixed: req.CameraFixed,
 	}
 }
 

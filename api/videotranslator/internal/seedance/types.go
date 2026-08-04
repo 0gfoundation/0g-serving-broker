@@ -44,6 +44,9 @@ type CreateRequest struct {
 	GenerateAudio *bool  `json:"generate_audio,omitempty"`
 	Watermark     *bool  `json:"watermark,omitempty"`
 	Seed          *int64 `json:"seed,omitempty"`
+	// CameraFixed: whether the camera stays static during generation. Omitted
+	// (nil) lets the vendor apply its own default.
+	CameraFixed *bool `json:"camera_fixed,omitempty"`
 }
 
 // ContentItem is one element of a create request's content array. Type is a
