@@ -245,7 +245,10 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		signData = respBody
 	}
 	if err := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText); err != nil {
-		c.handleBrokerError(ctx, err, "sign response")
+		// A signing failure here is a broker fault (signChatE2EE/signChatWithKey
+		// only fail when crypto.Sign does, i.e. a bad ProviderSigner), so surface
+		// it as 500, not the errors.Response default of 400.
+		c.handleBrokerError(ctx, errors.Internal(err), "sign response")
 		return err
 	}
 
