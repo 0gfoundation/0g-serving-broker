@@ -27,6 +27,11 @@ type Config struct {
 	// "size" isn't itself a resolution token. Defaults to "2K" (MiniMax-H3's
 	// only supported value).
 	MiniMaxResolution string
+	// SeedanceBaseURL overrides the ByteDance Seedance API base URL (defaults
+	// to the BytePlus ap-southeast-1 endpoint when empty). MUST be scheme+host
+	// only (no path) — the /api/v3 version lives in the client's path
+	// constants; a path suffix here would double-prefix every call.
+	SeedanceBaseURL string
 	// RequestTimeout bounds each outbound API call to the vendor.
 	RequestTimeout time.Duration
 	// Logger configures the translator's own logger.
@@ -51,7 +56,7 @@ func GetConfig() *Config {
 	// Either vendor's timeout env sets the single outbound-call timeout; a
 	// given deployment only runs one translator, so whichever it configures
 	// wins (MiniMax checked last so it takes precedence if both are set).
-	for _, envName := range []string{"DASHSCOPE_REQUEST_TIMEOUT_SECONDS", "MINIMAX_REQUEST_TIMEOUT_SECONDS"} {
+	for _, envName := range []string{"DASHSCOPE_REQUEST_TIMEOUT_SECONDS", "MINIMAX_REQUEST_TIMEOUT_SECONDS", "SEEDANCE_REQUEST_TIMEOUT_SECONDS"} {
 		if v := os.Getenv(envName); v != "" {
 			if s, err := strconv.Atoi(v); err == nil && s > 0 {
 				timeout = time.Duration(s) * time.Second
@@ -78,6 +83,7 @@ func GetConfig() *Config {
 		DashScopeBaseURL:  os.Getenv("DASHSCOPE_BASE_URL"),
 		MiniMaxBaseURL:    os.Getenv("MINIMAX_BASE_URL"),
 		MiniMaxResolution: miniMaxResolution,
+		SeedanceBaseURL:   os.Getenv("SEEDANCE_BASE_URL"),
 		RequestTimeout:    timeout,
 		Logger: &commonconfig.LoggerConfig{
 			Level:  level,

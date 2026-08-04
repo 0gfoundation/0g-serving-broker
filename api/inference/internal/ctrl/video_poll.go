@@ -306,7 +306,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	if job.ResolvedModel != "" {
 		pollCtx.Set(CtxKeyResolvedModel, job.ResolvedModel)
 	}
-	outputCount := c.videoOutputUnits(pollCtx, seconds, size)
+	// completionTokens is Seedance's per_video_token billing signal — the poll
+	// response's usage.completion_tokens, ignored (0) by every other vendor/mode.
+	// This is the actual live path for Seedance, which always creates "queued"
+	// and resolves here, not in the synchronous handleVideoGenerationResponse path.
+	outputCount := c.videoOutputUnits(pollCtx, seconds, size, fields.completionTokens())
 	rateClass := resolutionRateClass(size)
 
 	if job.IsWhitelisted {
