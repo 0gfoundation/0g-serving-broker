@@ -169,6 +169,17 @@ const (
 	BillingModePerImage       BillingMode = "per_image"
 	BillingModePerVideoSecond BillingMode = "per_video_second"
 	BillingModePerUnitTable   BillingMode = "per_unit_table"
+	// BillingModePerVideoToken is video-generation billing where the vendor
+	// itself reports the billable token count (ByteDance Seedance's
+	// usage.completion_tokens already bakes in BOTH input-reference-media
+	// duration and output duration). OutputUnits is a straight passthrough of
+	// the observed token count; the per-unit PRICE (not the unit count) is
+	// what varies by resolution/reference-media-input tier — that variance
+	// lives in the caller's own price table, not here. Distinct from the
+	// general BillingModePerToken (chat/LLM), whose only per-request-shape
+	// variance is input-length tiering, not resolution/media-type — the
+	// wrong axis for a video model.
+	BillingModePerVideoToken BillingMode = "per_video_token"
 )
 
 // BillingUnitTier maps a (resolution, duration) combination to a fixed billable
@@ -218,6 +229,10 @@ type BillingObservables struct {
 	Seconds    int64
 	ImageCount int64
 	Resolution string
+	// CompletionTokens is the vendor-reported billable token count for
+	// BillingModePerVideoToken (ByteDance Seedance's usage.completion_tokens).
+	// Unused by every other mode.
+	CompletionTokens int64
 }
 
 // normalizeResolution canonicalizes a resolution token for case- and
@@ -250,9 +265,17 @@ func (b *BillingConfig) resolutionMultiplier(resolution string) float64 {
 // effective unit); per_image returns the raw scaled count (0 images → 0 units,
 // so a failed/empty generation is not charged); per_unit_table looks up the
 // exact (resolution, duration) row and errors when absent (fail rather than
-// mis-bill). per_token is billed elsewhere and is not a valid input here.
+// mis-bill); per_video_token passes the vendor-reported token count straight
+// through (the caller's own price table, keyed by resolution/reference-media
+// tier, is what turns that count into a fee — see docs/design). per_token is
+// billed elsewhere and is not a valid input here.
 func (b *BillingConfig) OutputUnits(obs BillingObservables) (int64, error) {
 	switch b.Mode {
+	case BillingModePerVideoToken:
+		if obs.CompletionTokens < 0 {
+			return 0, fmt.Errorf("negative completion token count")
+		}
+		return obs.CompletionTokens, nil
 	case BillingModePerImage:
 		units, err := scaledUnits(obs.ImageCount, b.resolutionMultiplier(obs.Resolution))
 		if err != nil {
@@ -373,7 +396,7 @@ func validBillingModeForType(mode BillingMode, serviceType string) bool {
 		return true
 	case BillingModePerImage:
 		return serviceType == constant.ServiceTypeTextToImage || serviceType == constant.ServiceTypeImageEditing
-	case BillingModePerVideoSecond, BillingModePerUnitTable:
+	case BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken:
 		return serviceType == constant.ServiceTypeVideoGeneration
 	default:
 		return false
@@ -384,7 +407,7 @@ func validBillingModeForType(mode BillingMode, serviceType string) bool {
 // type. prefix labels errors (e.g. "service.modelPricing[0].billing").
 func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) error {
 	switch b.Mode {
-	case "", BillingModePerToken, BillingModePerImage, BillingModePerVideoSecond, BillingModePerUnitTable:
+	case "", BillingModePerToken, BillingModePerImage, BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken:
 	default:
 		return fmt.Errorf("invalid config: %s.mode %q is not a known billing mode", prefix, b.Mode)
 	}
@@ -1048,8 +1071,8 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 			}
 		}
 	}
-	if entry.Billing == nil || (entry.Billing.Mode != BillingModePerVideoSecond && entry.Billing.Mode != BillingModePerUnitTable) {
-		return fmt.Errorf("invalid config: service.modelPricing[%d].billing.mode must be '%s' or '%s' for video model '%s'", i, BillingModePerVideoSecond, BillingModePerUnitTable, entry.Model)
+	if entry.Billing == nil || (entry.Billing.Mode != BillingModePerVideoSecond && entry.Billing.Mode != BillingModePerUnitTable && entry.Billing.Mode != BillingModePerVideoToken) {
+		return fmt.Errorf("invalid config: service.modelPricing[%d].billing.mode must be '%s', '%s', or '%s' for video model '%s'", i, BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken, entry.Model)
 	}
 	// Video uses billing.resolutionMultipliers, not token-length tiers.
 	if len(entry.Tiers) > 0 {

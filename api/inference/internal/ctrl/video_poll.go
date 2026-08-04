@@ -311,7 +311,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	// reports no resolution back leaves settlement holding the size the CLIENT
 	// sent, which for pixel dimensions is not a price-table key at all.
 	tier := c.VideoBillingTier(pollCtx, size)
-	outputCount := c.videoOutputUnits(pollCtx, seconds, tier)
+	// completionTokens is Seedance's per_video_token billing signal — the poll
+	// response's usage.completion_tokens, ignored (0) by every other vendor/mode.
+	// This is the actual live path for Seedance, which always creates "queued"
+	// and resolves here, not in the synchronous handleVideoGenerationResponse path.
+	outputCount := c.videoOutputUnits(pollCtx, seconds, tier, fields.completionTokens())
 	rateClass := resolutionRateClass(tier)
 
 	// Same check as the synchronous path (video.go), and the one that matters:

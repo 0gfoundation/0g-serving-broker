@@ -87,6 +87,55 @@ func TestVideoResponseFieldsParsing(t *testing.T) {
 	}
 }
 
+// TestVideoResponseFields_CompletionTokens pins the ByteDance Seedance billing
+// signal: usage.completion_tokens is read independently of the duration
+// fields (output_video_duration/duration/top-level seconds) and never
+// confused with them.
+func TestVideoResponseFields_CompletionTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		respJSON string
+		want     int64
+	}{
+		{
+			name:     "usage.completion_tokens present",
+			respJSON: `{"status":"completed","usage":{"completion_tokens":246840,"total_tokens":246840}}`,
+			want:     246840,
+		},
+		{
+			name:     "usage present but no completion_tokens (DashScope/MiniMax shape)",
+			respJSON: `{"status":"completed","usage":{"output_video_duration":5}}`,
+			want:     0,
+		},
+		{
+			name:     "no usage block at all",
+			respJSON: `{"status":"completed","seconds":5}`,
+			want:     0,
+		},
+		{
+			name:     "zero completion_tokens is not billed as a positive count",
+			respJSON: `{"status":"completed","usage":{"completion_tokens":0}}`,
+			want:     0,
+		},
+		{
+			name:     "float-encoded completion_tokens tolerated",
+			respJSON: `{"status":"completed","usage":{"completion_tokens":246840.0}}`,
+			want:     246840,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var fields videoResponseFields
+			if err := json.Unmarshal([]byte(tt.respJSON), &fields); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := fields.completionTokens(); got != tt.want {
+				t.Errorf("completionTokens() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 // ==========================================================================
 // parseVideoGenerationModel
 // ==========================================================================
@@ -382,6 +431,30 @@ func TestVideoOutputUnits_PerModelAndFallback(t *testing.T) {
 	cs := &Ctrl{logger: testLogger(), Service: config.Service{}}
 	if got := cs.videoOutputUnits(ginCtxWithResolvedModel(""), 5, "1024x1792"); got != 10 {
 		t.Errorf("single-model fallback units = %d, want 10", got)
+	}
+}
+
+// TestVideoOutputUnits_PerVideoToken pins the ByteDance Seedance billing path:
+// the vendor-reported completion-token count is billed directly, ignoring
+// seconds/size entirely, and the variadic completionTokens argument is a pure
+// backward-compatible addition (every pre-existing 3-arg call site above
+// keeps compiling and behaving unchanged).
+func TestVideoOutputUnits_PerVideoToken(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bytedance-seedance",
+		OutputPrice: "1",
+		Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoToken},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bytedance-seedance")}
+
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p", 246840); got != 246840 {
+		t.Errorf("per_video_token units = %d, want the vendor's completion_tokens (246840) passed straight through", got)
+	}
+	// Omitting the variadic arg entirely (as every DashScope/MiniMax call site
+	// does) must not panic and must resolve to 0 tokens, not some seconds-based
+	// guess — the mode's whole point is that seconds/size are irrelevant to it.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p"); got != 0 {
+		t.Errorf("per_video_token units with no completionTokens arg = %d, want 0", got)
 	}
 }
 

@@ -50,6 +50,27 @@ type CreateVideoRequest struct {
 	// (e.g. MiniMax first_frame + mm_file://) lives in the translate.To* funcs.
 	InputReferenceImageURL string
 	InputReferenceFileID   string
+	// LastFrameReferenceImageURL is the last-frame counterpart to
+	// InputReferenceImageURL's first frame, used for first+last-frame i2v
+	// control (currently read by the Seedance mapping only). Named
+	// byte-for-byte identically to the Vidu integration's field of the same
+	// name (feat/kling-vidu-integration) so the two vendors share one field
+	// rather than reconciling two. No file_id counterpart: the OpenAI
+	// last_frame_reference carries only image_url, and no vendor-native
+	// handle scheme is used for it here.
+	LastFrameReferenceImageURL string
+	// ReferenceImageURLs / ReferenceVideoURLs / ReferenceAudioURLs carry
+	// loose multimodal reference-composition inputs (role:"reference_image"/
+	// "reference_video"/"reference_audio", referenced from the prompt text
+	// via bracket notation like "[Image 1]") — DISTINCT from
+	// InputReferenceImageURL/LastFrameReferenceImageURL, which are
+	// positional frame control (first/last frame of an i2v generation). The
+	// two families are mutually exclusive per request; see
+	// ValidateSeedanceCreateRequest. Currently read by the Seedance mapping
+	// only.
+	ReferenceImageURLs []string
+	ReferenceVideoURLs []string
+	ReferenceAudioURLs []string
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for
@@ -70,10 +91,17 @@ type VideoResponse struct {
 	Error     *Error `json:"error,omitempty"`
 }
 
-// Usage carries the actual output duration DashScope reported, renamed to
-// the field the broker's resolveVideoBilling recognizes.
+// Usage carries the billing-relevant actuals a vendor reported. DashScope and
+// MiniMax report an actual OUTPUT DURATION (renamed to the field the
+// broker's resolveVideoBilling recognizes); ByteDance Seedance instead
+// reports a vendor-computed BILLABLE TOKEN COUNT (usage.completion_tokens),
+// which already bakes in any billable input-reference-media duration on top
+// of output duration — see the design doc's §13.1. Only Seedance populates
+// CompletionTokens; DashScope/MiniMax/Vidu leave it unset and keep using
+// OutputVideoDuration, so this is purely additive.
 type Usage struct {
 	OutputVideoDuration json.Number `json:"output_video_duration,omitempty"`
+	CompletionTokens    json.Number `json:"completion_tokens,omitempty"`
 }
 
 // Error is populated when the underlying DashScope task failed.

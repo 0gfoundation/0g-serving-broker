@@ -113,9 +113,18 @@ func classifyVideoStatus(status string) videoBillingAction {
 // videoUsage is the optional usage block of a video response. output_video_duration
 // is the canonical actual-output field (Wan2.7 / DashScope-style); duration is a
 // common alias. Both are the ACTUAL generated length, which is what we bill on.
+// completion_tokens is a DIFFERENT vendor's billing signal entirely (ByteDance
+// Seedance): a vendor-computed billable TOKEN count, not a duration — see
+// completionTokens()/BillingModePerVideoToken. It coexists with, rather than
+// replaces, the duration fields: a model still configured in the legacy
+// per_video_second/per_unit_table shape keeps billing off the duration fields
+// (which the Seedance translator ALSO echoes, defensively, at the top-level
+// "seconds" field — see actualSeconds()'s fallback), while a model configured
+// per_video_token bills off this field instead.
 type videoUsage struct {
 	OutputVideoDuration json.Number `json:"output_video_duration"`
 	Duration            json.Number `json:"duration"`
+	CompletionTokens    json.Number `json:"completion_tokens"`
 }
 
 // actualSeconds returns the upstream-reported ACTUAL output duration from the
@@ -143,6 +152,24 @@ func (f videoResponseFields) actualSeconds() int64 {
 		return s
 	}
 	return 0
+}
+
+// completionTokens returns the vendor-reported billable token count from
+// usage.completion_tokens (ByteDance Seedance's per_video_token billing
+// signal — see config.BillingModePerVideoToken), or 0 when absent/
+// non-positive. Unlike actualSeconds, this is NOT a duration and must never
+// be treated as one; it is read independently and passed straight into
+// BillingObservables.CompletionTokens, never combined with actualSeconds's
+// result.
+func (f videoResponseFields) completionTokens() int64 {
+	if f.Usage == nil || f.Usage.CompletionTokens == "" {
+		return 0
+	}
+	v, ok := ceilSeconds(f.Usage.CompletionTokens)
+	if !ok {
+		return 0
+	}
+	return v
 }
 
 // ceilSeconds parses a duration json.Number that may be integer- OR float-encoded
@@ -289,10 +316,21 @@ func resolutionRateClass(size string) string {
 // seconds×serviceRatio formula, which uses an unrelated resolution vocabulary and
 // would underbill the bucket (a client could force this by requesting an unlisted
 // combo). Either way the miss is metered and logged so the operator adds the row.
-func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string) int64 {
+//
+// completionTokens is optional (variadic, not a required 4th positional arg)
+// so every pre-existing call site — none of which know about token-based
+// billing — keeps compiling unchanged; only the caller that has a Seedance-
+// style vendor-reported token count passes one. It is used exclusively by
+// BillingModePerVideoToken (see BillingConfig.OutputUnits); every other mode
+// ignores it.
+func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string, completionTokens ...int64) int64 {
+	var tokens int64
+	if len(completionTokens) > 0 {
+		tokens = completionTokens[0]
+	}
 	if c.Service.HasMultiModelPricing() {
 		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
-			units, err := e.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size})
+			units, err := e.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size, CompletionTokens: tokens})
 			if err == nil {
 				return units
 			}
@@ -543,7 +581,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			// reconciles against the same price class it would have been billed at.
 			tier := c.VideoBillingTier(ctx, size)
 			rateClass = resolutionRateClass(tier)
-			outputCount := c.videoOutputUnits(ctx, sec, tier)
+			outputCount := c.videoOutputUnits(ctx, sec, tier, respFields.completionTokens())
 			metricModel := c.metricModel(ctx)
 			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
@@ -612,8 +650,11 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// the amount charged agree with the amount the gate held.
 	tier := c.VideoBillingTier(ctx, size)
 
-	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
-	outputCount := c.videoOutputUnits(ctx, seconds, tier)
+	// Fee stays the resolution-weighted amount (units × price); billing is unchanged
+	// for every mode except per_video_token, which ignores seconds/size entirely and
+	// bills on respFields.completionTokens() instead (harmlessly 0 for every other
+	// vendor, which never populates usage.completion_tokens).
+	outputCount := c.videoOutputUnits(ctx, seconds, tier, respFields.completionTokens())
 
 	// The gate reserved for a length the recorded rules predicted; say so if the
 	// vendor rendered another. Does not change the fee.
