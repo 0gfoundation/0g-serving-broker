@@ -234,6 +234,24 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		e2eeSignedText = proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
 	}
 
+	// Cache the signature BEFORE flushing the body, so that by the time the client
+	// reads ZG-Res-Key and fetches GET /v1/proxy/signature/{chatID}, the signature
+	// already resolves rather than racing a post-flush cache write (issue #619).
+	// signData is the plaintext the client can verify (clientBody); fall back to the
+	// raw upstream body only if nothing was forwarded. A signing failure fails the
+	// request closed rather than flushing a body the client cannot verify.
+	signData := clientBody
+	if len(signData) == 0 {
+		signData = respBody
+	}
+	if err := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText); err != nil {
+		// A signing failure here is a broker fault (signChatE2EE/signChatWithKey
+		// only fail when crypto.Sign does, i.e. a bad ProviderSigner), so surface
+		// it as 500, not the errors.Response default of 400.
+		c.handleBrokerError(ctx, errors.Internal(err), "sign response")
+		return err
+	}
+
 	// Attempt to write the response to the client. If the client has already
 	// disconnected (broken pipe, connection reset), log a warning but continue
 	// to billing so GPU work is not wasted without payment.
@@ -247,9 +265,9 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 		}
 	}
 
-	// Always process billing regardless of client connection state. Billing uses
-	// the raw respBody; signing uses clientBody (what the client received).
-	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, clientBody, chatKey, e2eeSignedText); err != nil {
+	// Always process billing regardless of client connection state; billing uses
+	// the raw respBody. The signature was already cached above, before the flush.
+	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqModel); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
@@ -296,7 +314,6 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	}
 
 	var streamErr error = nil
-	var responseChunk []byte = nil
 	var clientDisconnected bool = false
 	var silentReadBytes int64 = 0
 	const maxSilentReadBytes int64 = 10 * 1024 * 1024 // 10MB limit to prevent abuse
@@ -324,10 +341,6 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				c.handleBrokerError(ctx, err, "read from body")
 				streamErr = err
 				return false
-			}
-
-			if responseChunk == nil {
-				responseChunk = []byte(strings.TrimSpace(strings.TrimPrefix(line, "data: ")))
 			}
 
 			// Sanitize before forwarding: drop SSE keepalive/comment lines and strip
@@ -411,7 +424,21 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			}
 		}
 
-		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, clientBody.Bytes(), chatKey, e2eeSignedText); err != nil {
+		// Cache the signature the moment the stream completes — before billing,
+		// which may settle synchronously — so a client already holding ZG-Res-Key
+		// can resolve GET /v1/proxy/signature/{chatID} without racing settlement
+		// (issue #619). Streaming inherently cannot sign before the last frame is
+		// flushed, so this narrows the window to the cache write itself. A signing
+		// failure is logged, never returned, so it cannot skip billing below.
+		signData := clientBody.Bytes()
+		if len(signData) == 0 {
+			signData = rawBody.Bytes()
+		}
+		if signErr := c.signChatResponse(ctx, reqBody, signData, chatKey, e2eeSignedText); signErr != nil {
+			c.logger.Errorf("sign streaming response: %v", signErr)
+		}
+
+		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqModel); err != nil {
 			c.logger.Errorf("Failed to process response for billing: %v", err)
 			// If we had a stream error, return it; otherwise return the decode error
 			if streamErr != nil {
@@ -435,16 +462,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, signData []byte, chatKey string, e2eeSignedText string) error {
-	// signData is the exact byte stream delivered to the client (after model
-	// rewrite / leak-field stripping). The TEE signature must attest what the
-	// client can verify, not the raw upstream — billing below still uses raw `data`.
-	// Falls back to raw data when the caller supplies nothing (e.g. a stream with
-	// no forwarded content), preserving the legacy behaviour.
-	if len(signData) == 0 {
-		signData = data
-	}
-
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqModel model.Request) error {
 	// Decode the raw data
 	decodeReader := initializeReader(bytes.NewReader(data), encodingType)
 	decodedBody, err := io.ReadAll(decodeReader)
@@ -517,12 +535,29 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 		c.recordWhitelistedUsage(reqModel, input, output, cached, cacheWrite, rateClass)
 	}
 
-	// E2EE (§8): a sealed request is signed over the DECRYPTED content the client
-	// verifies — the JCS-canonical reconstructed request and plaintext response —
-	// regardless of provider type. This takes precedence over the routing-proof
-	// path so a sealed request to a centralized provider still gets a §8 signature
-	// an E2EE client can verify (rather than a routing proof over the modified
-	// upstream body).
+	return nil
+}
+
+// signChatResponse caches the TEE signature for a completed chat response under
+// chatKey, selecting the scheme by request/provider type:
+//   - E2EE sealed request → §8 signature over the on-wire aad‖ciphertext
+//     (e2eeSignedText, pre-assembled by the caller from the exact sealed bytes).
+//     This takes precedence over the routing-proof path so a sealed request to a
+//     centralized provider still gets a §8 signature the E2EE client can verify.
+//   - centralized provider → routing proof carrying the upstream TLS fingerprint.
+//   - decentralized in-network LLM → plaintext sha256(req):sha256(resp) binding.
+//
+// signData is the exact byte stream delivered to the client (after model rewrite
+// / leak-field stripping), so the signature attests what the client can verify —
+// callers resolve it (falling back to the raw upstream body when nothing was
+// forwarded) before calling.
+//
+// This is deliberately split out of decodeAndProcess (billing) so the caller can
+// cache the signature BEFORE the response body is flushed: by the time the client
+// learns the chatID via ZG-Res-Key, GET /v1/proxy/signature/{chatID} already
+// resolves (issue #619). The streaming path cannot sign until every frame has
+// been emitted, so it calls this the moment the stream completes.
+func (c *Ctrl) signChatResponse(ctx context.Context, reqBody, signData []byte, chatKey, e2eeSignedText string) error {
 	e2eeActive := false
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		if _, sealed := e2eeSealedRequest(ginCtx); sealed {
@@ -531,20 +566,19 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	}
 
 	if e2eeActive {
-		// The §8 signature binds the on-wire aad‖ciphertext; the scheme-tagged text
-		// was assembled by the caller from the exact sealed bytes (proof package).
 		// An empty text means a degenerate sealed response with nothing to attest
 		// (e.g. an empty stream) — skip caching rather than sign a zero binding.
 		if e2eeSignedText == "" {
 			c.logger.Warn("E2EE sealed request produced no signable content; skipping §8 signature")
-		} else {
-			c.logger.Debug("E2EE sealed request, signing on-wire ciphertext (§8)")
-			if err := c.signChatE2EE(e2eeSignedText, chatKey); err != nil {
-				return err
-			}
+			return nil
 		}
-	} else if c.Service.IsCentralized() {
-		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
+		c.logger.Debug("E2EE sealed request, signing on-wire ciphertext (§8)")
+		return c.signChatE2EE(e2eeSignedText, chatKey)
+	}
+
+	if c.Service.IsCentralized() {
+		// Centralized provider: broker TEE signs a routing proof with the TLS cert
+		// fingerprint captured on the upstream request (available before the flush).
 		var fingerprint string
 		if ginCtx, ok := ctx.(*gin.Context); ok {
 			if fingerprint = ginCtx.GetString(CtxKeyUpstreamCertFingerprint); fingerprint == "" {
@@ -554,18 +588,18 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 			c.logger.Warn("context is not *gin.Context, cannot retrieve upstream cert fingerprint")
 		}
 		c.logger.Debug("Centralized provider, signing routing proof")
-		// Signing failure is non-fatal: the response and billing are already
-		// complete at this point.  Without a cached signature the SDK will get
-		// a 404 on /v1/proxy/signature/{chatID}, which is more honest than a
-		// TEE-signed proof that lacks TLS evidence.
+		// Signing failure is non-fatal: without a cached signature the SDK gets a
+		// 404 on /v1/proxy/signature/{chatID}, which is more honest than a
+		// TEE-signed proof that lacks TLS evidence — don't block the response on it.
 		if err := c.signCentralizedRoutingProof(reqBody, signData, chatKey, fingerprint); err != nil {
 			c.logger.Errorf("routing proof not created: %v", err)
 		}
-	} else if !c.Service.TargetSeparated {
+		return nil
+	}
+
+	if !c.Service.TargetSeparated {
 		c.logger.Debug("LLM server in the same network, signing chat response")
-		if err := c.signChatWithKey(reqBody, signData, chatKey); err != nil {
-			return err
-		}
+		return c.signChatWithKey(reqBody, signData, chatKey)
 	}
 
 	return nil

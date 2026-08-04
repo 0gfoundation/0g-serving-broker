@@ -438,9 +438,12 @@ func (c *Ctrl) ProcessHTTPRequest(ctx *gin.Context, svcType string, req *http.Re
 	}
 }
 
-// ErrChatIDNotFound is returned when a signature lookup misses the cache.
-// The miss is client-caused (stale chatID past the cache TTL, or never-issued ID),
-// so callers should treat it as a 4xx, not a broker-side error.
+// ErrChatIDNotFound is the sentinel a signature lookup returns on a cache miss.
+// The miss is client-caused (stale chatID past the cache TTL, or a never-issued
+// ID), so it must surface as a 404, not a broker-side 400. GetChatSignature
+// wraps it as an *HTTPError{404} (see below) so errors.Response maps it to 404
+// while errors.Is(err, ErrChatIDNotFound) still traverses the wrap — the
+// E2EE client retries on 404 (not on 400), so the status code is contractual.
 var ErrChatIDNotFound = errors.New("Chat id not found or expired, chat_id_not_found")
 
 func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
@@ -448,7 +451,7 @@ func (c *Ctrl) GetChatSignature(chatID string) (*ChatSignature, error) {
 	c.logger.Debugf("get signature for chat: %v", chatID)
 	val, exist := c.svcCache.Get(key)
 	if !exist {
-		return nil, ErrChatIDNotFound
+		return nil, errors.NotFound(ErrChatIDNotFound)
 	}
 
 	chatSignature, ok := val.(ChatSignature)
