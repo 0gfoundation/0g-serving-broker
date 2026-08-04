@@ -19,6 +19,8 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 
+	"github.com/0gfoundation/0g-pc-e2ee/protocol/proof"
+
 	"github.com/0glabs/0g-serving-broker/common/errors"
 	"github.com/0glabs/0g-serving-broker/common/middleware"
 	"github.com/0glabs/0g-serving-broker/common/util"
@@ -171,7 +173,10 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 	// Set ZG-Res-Key for broker-signed responses:
 	// - Decentralized: when LLM is in same network (!TargetSeparated)
 	// - Centralized: always (broker TEE signs routing proof)
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+	// - E2EE sealed: always (broker TEE signs the §8 ciphertext binding), so the
+	//   client can fetch the signature even from a TargetSeparated provider.
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		c.logger.Debug("Setting ZG-Res-Key header for broker-signed response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
@@ -206,16 +211,27 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	// E2EE (0g-pc SPEC §7): if the request arrived sealed, seal the sensitive
 	// response fields (choices) to the client's ephemeral key before forwarding.
-	// clientBody stays PLAINTEXT — billing (raw respBody) and the §8 content
-	// binding both operate on cleartext; only the bytes sent to the client change.
+	// clientBody stays PLAINTEXT for billing (which reads raw respBody); the §8
+	// signature instead binds the on-wire aad‖ciphertext of the sealed frame.
 	outBody := clientBody
-	if sealed, isSealed, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody); isSealed {
+	var e2eeSignedText string
+	if sealed, isSealed, respBindHash, sealErr := c.maybeSealNonStreamResponse(ctx, clientBody); isSealed {
 		if sealErr != nil {
 			// Fail-closed: never forward plaintext for a sealed request.
 			c.handleBrokerError(ctx, sealErr, "seal response")
 			return sealErr
 		}
 		outBody = sealed
+		// Assemble the §8 signed text from the on-wire request/response bindings
+		// (proof package) while the sealed bytes are in hand; the request half was
+		// captured at unseal time.
+		reqBindHash, ok := e2eeReqBindHash(ctx)
+		if !ok {
+			err := fmt.Errorf("e2ee response: request binding hash missing from context")
+			c.handleBrokerError(ctx, err, "sign response")
+			return err
+		}
+		e2eeSignedText = proof.SignedTextE2EEFromHashes(reqBindHash, respBindHash)
 	}
 
 	// Attempt to write the response to the client. If the client has already
@@ -233,7 +249,7 @@ func (c *Ctrl) handleChargingResponse(ctx *gin.Context, resp *http.Response, acc
 
 	// Always process billing regardless of client connection state. Billing uses
 	// the raw respBody; signing uses clientBody (what the client received).
-	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, clientBody, chatKey); err != nil {
+	if err := c.decodeAndProcess(ctx, respBody, resp.Header.Get("Content-Encoding"), account, outputPrice, false, reqBody, reqModel, respBody, clientBody, chatKey, e2eeSignedText); err != nil {
 		c.logger.Errorf("decode and process failed: %v", err)
 		return err
 	}
@@ -257,7 +273,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	chatKey := uuid.NewString()
 
 	// Set ZG-Res-Key for broker-signed responses (see handleChargingResponse for details)
-	if !c.Service.TargetSeparated || c.Service.IsCentralized() {
+	_, e2eeSealed := e2eeSealedRequest(ctx)
+	if !c.Service.TargetSeparated || c.Service.IsCentralized() || e2eeSealed {
 		c.logger.Debug("Setting ZG-Res-Key header for broker-signed streaming response")
 		ctx.Writer.Header().Set("ZG-Res-Key", chatKey)
 	}
@@ -265,8 +282,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	var rawBody bytes.Buffer
 	// clientBody accumulates the sanitized PLAINTEXT SSE lines (comment lines
 	// dropped, leak fields stripped, model rewritten). Under E2EE the bytes sent
-	// to the client are sealed, but clientBody stays plaintext so the §8 content
-	// binding attests the decrypted content the client can verify.
+	// to the client are sealed; clientBody stays plaintext for billing, while the
+	// §8 signature binds the on-wire aad‖ciphertext of each sealed frame.
 	var clientBody bytes.Buffer
 
 	// E2EE (0g-pc SPEC §7): per-stream frame sealer, nil when the request is not
@@ -373,6 +390,18 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// Process billing regardless of stream error
 	// If client disconnected but we continued reading, we have complete data for accurate billing
 	// If there was a read error from backend, we still bill for what we received
+	// Finalize the §8 streaming binding over the sealed frames actually emitted
+	// (in send order, final frame last). ok is false for a degenerate empty
+	// stream, so we skip caching a signature rather than bind sha256("").
+	var e2eeSignedText string
+	if frameSealer != nil {
+		if text, ok, terr := frameSealer.signedText(); terr != nil {
+			c.logger.Errorf("e2ee stream signing text: %v", terr)
+		} else if ok {
+			e2eeSignedText = text
+		}
+	}
+
 	if rawBody.Len() > 0 {
 		if streamErr != nil {
 			if clientDisconnected {
@@ -382,7 +411,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			}
 		}
 
-		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, clientBody.Bytes(), chatKey); err != nil {
+		if err := c.decodeAndProcess(ctx, rawBody.Bytes(), resp.Header.Get("Content-Encoding"), account, outputPrice, true, reqBody, reqModel, responseChunk, clientBody.Bytes(), chatKey, e2eeSignedText); err != nil {
 			c.logger.Errorf("Failed to process response for billing: %v", err)
 			// If we had a stream error, return it; otherwise return the decode error
 			if streamErr != nil {
@@ -406,7 +435,7 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 
 	return nil
 }
-func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, signData []byte, chatKey string) error {
+func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType string, account model.User, outputPrice string, isStream bool, reqBody []byte, reqModel model.Request, respChunk []byte, signData []byte, chatKey string, e2eeSignedText string) error {
 	// signData is the exact byte stream delivered to the client (after model
 	// rewrite / leak-field stripping). The TEE signature must attest what the
 	// client can verify, not the raw upstream — billing below still uses raw `data`.
@@ -495,21 +524,24 @@ func (c *Ctrl) decodeAndProcess(ctx context.Context, data []byte, encodingType s
 	// an E2EE client can verify (rather than a routing proof over the modified
 	// upstream body).
 	e2eeActive := false
-	var reqPlaintext []byte
 	if ginCtx, ok := ctx.(*gin.Context); ok {
 		if _, sealed := e2eeSealedRequest(ginCtx); sealed {
 			e2eeActive = true
-			reqPlaintext = reqBody
-			if pt, ok := e2eePlaintextRequest(ginCtx); ok {
-				reqPlaintext = pt
-			}
 		}
 	}
 
 	if e2eeActive {
-		c.logger.Debug("E2EE sealed request, signing decrypted content (§8)")
-		if err := c.signChatE2EE(reqPlaintext, signData, chatKey, isStream); err != nil {
-			return err
+		// The §8 signature binds the on-wire aad‖ciphertext; the scheme-tagged text
+		// was assembled by the caller from the exact sealed bytes (proof package).
+		// An empty text means a degenerate sealed response with nothing to attest
+		// (e.g. an empty stream) — skip caching rather than sign a zero binding.
+		if e2eeSignedText == "" {
+			c.logger.Warn("E2EE sealed request produced no signable content; skipping §8 signature")
+		} else {
+			c.logger.Debug("E2EE sealed request, signing on-wire ciphertext (§8)")
+			if err := c.signChatE2EE(e2eeSignedText, chatKey); err != nil {
+				return err
+			}
 		}
 	} else if c.Service.IsCentralized() {
 		// Centralized provider: broker TEE signs routing proof with TLS cert fingerprint
