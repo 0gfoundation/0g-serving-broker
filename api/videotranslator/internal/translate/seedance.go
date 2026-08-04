@@ -503,15 +503,23 @@ func ValidateSeedanceCreateRequest(req CreateVideoRequest) error {
 		return fmt.Errorf("last_frame_reference requires a usable input_reference (first frame)")
 	}
 
-	hasFrameControl := req.InputReferenceImageURL != "" || req.LastFrameReferenceImageURL != ""
-	hasReferenceArray := len(req.ReferenceImageURLs) > 0 || len(req.ReferenceVideoURLs) > 0 || len(req.ReferenceAudioURLs) > 0
-	if hasFrameControl && hasReferenceArray {
-		return fmt.Errorf("cannot combine first_frame/last_frame with reference_image/reference_video/reference_audio in one request")
-	}
-
 	images := resolveSeedanceReferenceImages(req.ReferenceImageURLs)
 	videos := resolveSeedanceReferenceMedia(req.ReferenceVideoURLs)
 	audio := resolveSeedanceReferenceMedia(req.ReferenceAudioURLs)
+
+	// Resolved-value check, like every other check in this function (and like
+	// the last-frame-requires-first-frame check above): a raw-presence check
+	// here would disagree with ToSeedanceCreateRequest, which builds the wire
+	// request from these same resolved values. A first_frame/last_frame field
+	// carrying an unusable, non-asset:// scheme (e.g. "ftp://...", which
+	// seedanceFirstFrame/seedanceLastFrame drop to "") resolves to no frame
+	// control at all, and a request whose ONLY real content is a reference
+	// array must not be rejected over that leftover, inert value.
+	hasFrameControl := seedanceFirstFrame(req) != "" || seedanceLastFrame(req) != ""
+	hasReferenceArray := len(images) > 0 || len(videos) > 0 || len(audio) > 0
+	if hasFrameControl && hasReferenceArray {
+		return fmt.Errorf("cannot combine first_frame/last_frame with reference_image/reference_video/reference_audio in one request")
+	}
 
 	if len(images) > maxSeedanceReferenceImages {
 		return fmt.Errorf("reference_images: at most %d allowed", maxSeedanceReferenceImages)

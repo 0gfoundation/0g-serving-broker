@@ -443,6 +443,8 @@ func TestValidateSeedanceCreateRequest(t *testing.T) {
 		{"4 reference audio exceeds the cap of 3", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/i.png"}, ReferenceAudioURLs: repeatURL("https://cdn/a.mp3", 4)}, true},
 		{"cardinality caps count RESOLVED urls, not raw: unusable entries don't count against the cap", CreateVideoRequest{ReferenceImageURLs: append(repeatURL("https://cdn/i.png", 9), "asset://dropped")}, false},
 		{"mutual exclusivity: first_frame + reference_image together is rejected", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", ReferenceImageURLs: []string{"https://cdn/b.png"}}, true},
+		{"mutual exclusivity uses RESOLVED values: an UNUSABLE input_reference scheme alongside a reference array is valid (no real frame-control content)", CreateVideoRequest{InputReferenceImageURL: "ftp://cdn/a.png", ReferenceImageURLs: []string{"https://cdn/b.png"}}, false},
+		{"mutual exclusivity uses RESOLVED values: an UNUSABLE last_frame_reference scheme alongside a reference array is valid", CreateVideoRequest{LastFrameReferenceImageURL: "ftp://cdn/b.png", ReferenceVideoURLs: []string{"https://cdn/v.mp4"}}, false},
 		{"mutual exclusivity: last_frame + reference_video together is rejected", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", LastFrameReferenceImageURL: "https://cdn/b.png", ReferenceVideoURLs: []string{"https://cdn/v.mp4"}}, true},
 	}
 	for _, tt := range tests {
