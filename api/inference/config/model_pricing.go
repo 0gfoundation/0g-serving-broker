@@ -44,13 +44,18 @@ type ModelPricingEntry struct {
 	InputPriceUSDPerMillionTokens  string `yaml:"inputPriceUSDPerMillionTokens"`
 	OutputPriceUSDPerMillionTokens string `yaml:"outputPriceUSDPerMillionTokens"`
 
-	// OutputPriceUSDPerSecond is the USD price per effective output second for a
+	// OutputPriceUSDPerSecond is the USD price per effective output UNIT for a
 	// USD-denominated video-generation model (decimal string). Required iff the
 	// service priceDenomination is USD and type is video-generation; forbidden
-	// otherwise. The effective output second already folds in the resolution
-	// multiplier (videoOutputUnits), so this is "USD per billed unit". At config
-	// load it is normalized into OutputPriceUSDPerMillionTokens (×1e6) so the
-	// existing token-shaped USD machinery prices and advertises it unchanged.
+	// otherwise. Despite the "PerSecond" name (kept for the per_video_second/
+	// per_unit_table models this field predates), the unit is NOT always a
+	// second: for a per_video_token model (e.g. Seedance) it is per completion
+	// token — OutputUnits (videoOutputUnits / BillingModePerVideoToken's
+	// passthrough) decides what one unit means, this field only prices it. The
+	// effective unit already folds in any resolution/dimension multiplier, so
+	// this is "USD per billed unit," whatever that unit is. At config load it is
+	// normalized into OutputPriceUSDPerMillionTokens (×1e6) so the existing
+	// token-shaped USD machinery prices and advertises it unchanged.
 	OutputPriceUSDPerSecond string `yaml:"outputPriceUSDPerSecond"`
 
 	// Tiers is optional per-model input-length tiered pricing. When empty, the
@@ -994,10 +999,14 @@ func validateModelPricingEntry(i int, entry *ModelPricingEntry, serviceType stri
 }
 
 // validateVideoModelEntry validates a video-generation entry. Billing is
-// OutputUnits × per-effective-second price (NATIVE outputPrice neuron, or USD
-// outputPriceUSDPerSecond); input tokens don't apply. A USD entry's per-second
-// price is normalized into the per-1M-unit USD representation the shared pipeline
-// consumes (see ModelPricingEntry.OutputPriceUSDPerSecond).
+// OutputUnits × per-effective-unit price (NATIVE outputPrice neuron, or USD
+// outputPriceUSDPerSecond); input tokens don't apply. The "unit" is a second
+// for per_video_second/per_unit_table but a completion token for
+// per_video_token (see BillingMode.OutputUnits) — this field and its USD
+// normalization below are unit-agnostic, they just price whatever OutputUnits
+// counted. A USD entry's per-unit price is normalized into the per-1M-unit USD
+// representation the shared pipeline consumes (see
+// ModelPricingEntry.OutputPriceUSDPerSecond).
 func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error {
 	if entry.InputPriceUSDPerMillionTokens != "" || entry.OutputPriceUSDPerMillionTokens != "" {
 		return fmt.Errorf("invalid config: service.modelPricing[%d]: video-generation uses outputPrice (NATIVE) or outputPriceUSDPerSecond (USD), not the per-1M-tokens USD fields (model '%s')", i, entry.Model)
