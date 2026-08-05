@@ -58,10 +58,10 @@
 #     input_reference/last_frame_reference in the same request.
 #     reference_audio alone (no reference_images/reference_videos) is
 #     rejected — the vendor documents audio-alone as invalid.
-#   - video editing / video extension are NOT separate endpoints or fields:
-#     per the vendor's own documentation these are expressed through the
-#     exact same reference-array content shape, distinguished only by the
-#     prompt's wording (e.g. "extend this clip by 3 seconds...").
+#   - video editing / video extension are explicitly OUT OF SCOPE for this
+#     integration (a separate non-goal from multimodal reference generation —
+#     see the design doc's non-goals section) and are not implemented as a
+#     distinct feature or endpoint here.
 #
 # SEEDANCE_BASE_URL, if set, MUST be scheme+host only (e.g.
 # https://ark.ap-southeast.bytepluses.com) — NOT
