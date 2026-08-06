@@ -3,8 +3,10 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -168,6 +170,109 @@ const (
 	okStream     = `{"status":"Pulling from 0gfoundation/0g-serving-broker","id":"latest"}
 {"status":"Status: Downloaded newer image for 0g-serving-broker"}`
 )
+
+// fakeContainerDaemon serves the container list plus a stop endpoint, and
+// records which container IDs were actually stopped. The list is what both
+// getContainerID and selfContainerID read, so it is enough to exercise the
+// self-guard end to end.
+func fakeContainerDaemon(t *testing.T, containers []map[string]any, stopped *[]string) *Client {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode(containers)
+		case strings.HasSuffix(r.URL.Path, "/stop"):
+			parts := strings.Split(strings.TrimSuffix(r.URL.Path, "/stop"), "/")
+			*stopped = append(*stopped, parts[len(parts)-1])
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.NewClientWithOpts(client.WithHost(srv.URL), client.WithVersion("1.47"))
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	return &Client{cli: cli}
+}
+
+// The controller identifies itself by hostname, so the fixtures are built
+// around the hostname this test process actually has — the same mechanism the
+// production code uses, with nothing stubbed out.
+func TestStopContainerRefusesSelf(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname() = %v", err)
+	}
+	if hostname == "" {
+		t.Skip("empty hostname: nothing to match a container ID against")
+	}
+
+	// Padded to a plausible ID length: RecreateContainer slices [:12], and a
+	// fixture that only works because nothing slices it would rot silently.
+	selfID := (hostname + strings.Repeat("0", 64))[:64]
+	const otherID = "1111111111111111111111111111111111111111111111111111111111111111"
+
+	// The controller container's name CONTAINS the broker's, which is exactly
+	// the case the substring fallback in getContainerID gets wrong: with the
+	// real broker absent it is the only match, so "stop the broker" resolves to
+	// the controller itself.
+	self := map[string]any{"Id": selfID, "Names": []string{"/0g-serving-provider-broker-controller"}}
+	other := map[string]any{"Id": otherID, "Names": []string{"/0g-serving-provider-event"}}
+
+	t.Run("stopping a name that resolves to the controller is refused", func(t *testing.T) {
+		var stopped []string
+		c := fakeContainerDaemon(t, []map[string]any{self, other}, &stopped)
+
+		err := c.StopContainer(context.Background(), "0g-serving-provider-broker")
+		if err == nil {
+			t.Fatal("StopContainer() = nil, want refusal")
+		}
+		var selfErr *SelfOperationError
+		if !errors.As(err, &selfErr) {
+			t.Fatalf("StopContainer() = %v, want *SelfOperationError", err)
+		}
+		if len(stopped) != 0 {
+			t.Errorf("daemon was asked to stop %v, want nothing", stopped)
+		}
+	})
+
+	t.Run("stopping another container still works", func(t *testing.T) {
+		var stopped []string
+		c := fakeContainerDaemon(t, []map[string]any{self, other}, &stopped)
+
+		if err := c.StopContainer(context.Background(), "0g-serving-provider-event"); err != nil {
+			t.Fatalf("StopContainer() = %v, want nil", err)
+		}
+		if len(stopped) != 1 || stopped[0] != otherID {
+			t.Errorf("daemon stopped %v, want [%s]", stopped, otherID)
+		}
+	})
+
+	t.Run("unidentifiable self blocks the write", func(t *testing.T) {
+		// A deployment that overrides the controller's hostname: no container ID
+		// carries it, so nothing can be ruled out as self and the write is
+		// refused rather than proceeding blind.
+		var stopped []string
+		c := fakeContainerDaemon(t, []map[string]any{other}, &stopped)
+
+		err := c.StopContainer(context.Background(), "0g-serving-provider-event")
+		var unknownErr *SelfUnidentifiedError
+		if !errors.As(err, &unknownErr) {
+			t.Fatalf("StopContainer() = %v, want *SelfUnidentifiedError", err)
+		}
+		if len(stopped) != 0 {
+			t.Errorf("daemon was asked to stop %v, want nothing", stopped)
+		}
+	})
+}
 
 func TestPullImage(t *testing.T) {
 	const repo = "ghcr.io/0gfoundation/0g-serving-broker"
