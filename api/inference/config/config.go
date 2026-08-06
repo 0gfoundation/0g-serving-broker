@@ -1188,6 +1188,17 @@ type ControllerConfig struct {
 	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
 	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
 	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
+
+	// Deprecated: the managed container names are compile-time constants in
+	// controller/internal/ctrl and nothing reads this field.
+	//
+	// It is still declared because config parsing is strict and this whole
+	// struct is shared with the broker and event binaries: dropping the key
+	// outright would turn every deployment still carrying it into a boot
+	// failure of all three, controller disabled or not. Kept as an untyped map
+	// so both the flat shape the code used to accept and the nested one the
+	// design doc used to show still parse.
+	Containers map[string]interface{} `yaml:"containers"`
 }
 
 // DockerConfig Docker connection configuration
@@ -1681,6 +1692,17 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	config.MigrateDurationFromInt(raw,
 		[]string{"providerHttp", "responseHeaderTimeoutMinutes"}, []string{"providerHttp", "responseHeaderTimeout"},
 		&cfg.ProviderHttp.ResponseHeaderTimeout, int64(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes), time.Minute)
+
+	// Removed: controller.containers. The names are constants in the controller
+	// now. The key still parses so that a config carrying it boots, but it
+	// steers nothing, and saying so is the only thing standing between an
+	// operator and the belief that they renamed a container.
+	//
+	// Not WarnDeprecated: nothing replaced this key, and its message would
+	// name a replacement and a removal date that do not exist.
+	if config.RawHasKey(raw, "controller", "containers") {
+		log.Printf("[CONFIG-REMOVED] %q is ignored: the controller's container names are fixed in code; delete the key", "controller.containers")
+	}
 
 	// Rename: database.provider → database.dsn
 	config.MigrateStringRename(raw, []string{"database", "provider"}, []string{"database", "dsn"},

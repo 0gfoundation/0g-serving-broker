@@ -47,9 +47,9 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 		config.PUT("/prometheus", h.UpdatePrometheusConfig)
 	}
 
-	// Admin whitelist inspection. Read-only by design: the whitelists are the
-	// authorisation boundary for every other route in this group, so they are
-	// fixed at startup and can only be changed by redeploying.
+	// Admin whitelist inspection. Read-only by design: the wallet list is the
+	// authorisation boundary for every other route here, so it is fixed at
+	// startup rather than editable through the routes it guards.
 	admin := v1.Group("/admin")
 	{
 		admin.GET("/wallets", h.ListAdminWallets)

@@ -119,10 +119,12 @@ ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
 | GET    | `/v1/admin/wallets` | Get current admin wallet address list |
 | GET    | `/v1/admin/ips` | Get current IP whitelist |
 
-Read-only. Both whitelists are read from config at startup and cannot be changed
-at runtime: they are the authorisation boundary for every other route here, so
-an API that widened them would be a way to escalate past it. Changing either one
-means editing the config and redeploying.
+Read-only. Both whitelists are read once at startup — from config, or from
+`ADMIN_ADDRESS` / `ALLOWED_IPS` where those are set (§3.2) — and cannot be
+changed at runtime: the wallet list is the authorisation boundary for every
+other route here, so an API that widened it would be a way to escalate past it.
+Changing either one means restarting the controller with a new value; if the
+environment variable is set, editing the config file alone will not do it.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now

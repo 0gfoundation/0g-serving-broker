@@ -46,10 +46,16 @@ type Ctrl struct {
 	providerAddress string
 	logger          log.Logger
 
-	// Authorisation boundary, fixed at startup and read-only afterwards. There
-	// is no API that mutates either set: a request that could widen the set of
-	// callers allowed to change the running image would be a way to escalate
-	// past the boundary it is supposed to enforce.
+	// Both fixed at startup; no API mutates either.
+	//
+	// adminAddresses is enforced, live, by middleware.AuthMiddleware — an API
+	// that could add an address would be a way to escalate past the boundary
+	// that decides who may change the running image.
+	//
+	// allowedIPs is reported, not enforced: middleware.IPWhitelistMiddleware
+	// holds its own startup snapshot of the config slice and never consults
+	// this map. Freezing it is what stops GET /v1/admin/ips from disagreeing
+	// with what is actually being enforced.
 	adminAddresses map[string]bool
 	allowedIPs     map[string]bool
 }

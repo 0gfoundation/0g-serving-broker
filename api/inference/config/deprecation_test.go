@@ -376,3 +376,40 @@ zk:
 		t.Errorf("ZK.URL = %q", cfg.ZK.URL)
 	}
 }
+
+// --- controller.containers removal ------------------------------------------
+
+// The managed container names became constants in the controller, but the key
+// lived in the design doc's config example and in this package's own defaults,
+// so deployed configs carry it. Parsing is strict and this struct is shared
+// with the broker and event binaries, so rejecting the key would take all three
+// down at boot — including with controller.enable false, which spec invariant 1
+// says must behave exactly as before.
+func TestLoadConfig_ControllerContainers_AcceptedAndIgnored(t *testing.T) {
+	// Both shapes that ever appeared: the flat one the struct used to accept,
+	// and the nested one the design doc used to show.
+	bodies := map[string]string{
+		"flat": `
+controller:
+  enable: false
+  containers:
+    broker: "0g-serving-provider-broker"
+    event: "0g-serving-provider-event"
+`,
+		"nested": `
+controller:
+  enable: false
+  containers:
+    broker:
+      name: "0g-serving-provider-broker"
+`,
+	}
+
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadFromYAML(t, body); err != nil {
+				t.Fatalf("loadConfig with controller.containers: %v", err)
+			}
+		})
+	}
+}
