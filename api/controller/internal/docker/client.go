@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -319,29 +320,89 @@ type ImageUpdateResult struct {
 	Error             string                  `json:"error,omitempty"`
 }
 
-// PullImage pulls an image from the registry and returns the image info
-func (c *Client) PullImage(ctx context.Context, imageName string) (*ImageInfo, error) {
-	reader, err := c.cli.ImagePull(ctx, imageName, image.PullOptions{})
+// PullImage pulls an image from the registry and returns the image info.
+//
+// For a "repo@sha256:D" reference the reported digest is D itself. Docker
+// verifies a digest reference against its content on pull, so the registry can
+// only serve exactly D or fail. Reverse-looking it up would be worse: the
+// daemon orders RepoDigests by repo, so its first entry — the one GetImageInfo
+// reads — belongs to whichever repo sorts first among all of them, which for a
+// mirrored image is not the one that was asked for. That still applies to the
+// unpinned branch below, which has no reference digest to prefer.
+//
+// D may be an index digest; for a multi-arch reference the bytes on disk are a
+// platform-specific child manifest. D is what docker reports for the reference,
+// which is the identity being attested.
+func (c *Client) PullImage(ctx context.Context, imageRef string) (*ImageInfo, error) {
+	reader, err := c.cli.ImagePull(ctx, imageRef, image.PullOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pulling %s: %w", imageRef, err)
 	}
 	defer reader.Close()
 
-	// Read all output to ensure the pull completes
-	decoder := json.NewDecoder(reader)
-	for {
-		var event map[string]any
-		if err := decoder.Decode(&event); err != nil {
-			if err == io.EOF {
-				break
-			}
-			// Ignore JSON decode errors, just continue
-			continue
-		}
+	if err := drainPullProgress(reader); err != nil {
+		return nil, fmt.Errorf("pulling %s: %w", imageRef, err)
 	}
 
-	// Get the image info after pull
-	return c.GetImageInfo(ctx, imageName)
+	info, err := c.GetImageInfo(ctx, imageRef)
+	if err != nil {
+		return nil, fmt.Errorf("inspecting %s after pull: %w", imageRef, err)
+	}
+	if _, digest, pinned := strings.Cut(imageRef, "@"); pinned {
+		info.Digest = digest
+	}
+
+	return info, nil
+}
+
+// drainPullProgress consumes docker's pull progress stream and decides whether
+// it describes a successful pull.
+//
+// ImagePull returns a reader, not a result: the daemon reports a failed pull as
+// an error frame inside the stream while returning nil itself. Discarding the
+// frames therefore reads a failed pull as a successful one. Decode errors are
+// fatal for the same reason — a truncated stream is not evidence the pull
+// finished — and a body with no frames at all is rejected, since "raised no
+// error" and "said nothing" are otherwise indistinguishable.
+//
+// This is not a completion check: no terminal frame is required, so a clean
+// result means "something was said and none of it was a failure".
+func drainPullProgress(r io.Reader) error {
+	decoder := json.NewDecoder(r)
+	frames := 0
+	for {
+		// Both spellings: docker sends both, but marks "error" deprecated since
+		// API v1.4 and slated for removal, with "errorDetail" as the live field.
+		// ErrorDetail is a pointer because it is omitempty — presence is the
+		// failure signal, and its message is omitempty too, so keying off a
+		// non-empty message would walk past a frame carrying only a code.
+		var frame struct {
+			ErrorDetail *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"errorDetail"`
+			Error string `json:"error"`
+		}
+		if err := decoder.Decode(&frame); err != nil {
+			if errors.Is(err, io.EOF) {
+				if frames == 0 {
+					return errors.New("pull stream carried no frames")
+				}
+				return nil
+			}
+			return fmt.Errorf("decoding pull progress: %w", err)
+		}
+		frames++
+		if frame.ErrorDetail != nil {
+			if msg := frame.ErrorDetail.Message; msg != "" {
+				return errors.New(msg)
+			}
+			return fmt.Errorf("daemon reported a failure with no detail (code %d)", frame.ErrorDetail.Code)
+		}
+		if frame.Error != "" {
+			return errors.New(frame.Error)
+		}
+	}
 }
 
 // GetImageInfo returns information about an image
