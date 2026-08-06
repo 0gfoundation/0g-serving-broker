@@ -81,11 +81,13 @@ or exec into the controller's own container, identified by matching
 `os.Hostname()` against container IDs.
 
 This requires the controller to run as a container with docker's **default**
-hostname. Where it does not — an explicit `hostname:`, `network_mode: host`, or
-the bare-process mode of §8.1 — every route that touches a container fails with
-`cannot identify the controller's own container`. Note that `PUT /v1/config/core`
-writes the config file before restarting anything, so in that state it returns
-500 with the file already rewritten, to take effect at the next restart.
+hostname: do not set `hostname:` on the controller service, do not use
+`network_mode: host`, and note that the bare-process mode of §8.1 does not
+satisfy it either. Where it is not satisfied, the operations listed above are
+refused with `cannot identify the controller's own container`; reads are
+unaffected. Worth knowing before it happens: `PUT /v1/config/core` writes the
+config file before it restarts anything, so it returns 500 with the file already
+rewritten, to take effect at the next restart.
 
 ### 3.2 Environment Variable Support
 
