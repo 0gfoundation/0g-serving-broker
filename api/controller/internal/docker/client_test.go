@@ -232,10 +232,8 @@ func selfAndOther() []map[string]any {
 	}
 }
 
-// Every method that stops, removes, recreates or execs must refuse. Covering
-// only one of them would leave the other five free to be quietly repointed at
-// unguardedContainerID with the suite still green — and RecreateContainer, the
-// one that removes, is the method UpdateImages drives.
+// All six write methods must refuse. Covering one would leave the rest free to be
+// repointed at unguardedContainerID with the suite still green.
 func TestWritePathsRefuseSelf(t *testing.T) {
 	stubHostname(t, selfHost)
 
@@ -309,10 +307,8 @@ func TestSelfIdentification(t *testing.T) {
 	})
 
 	t.Run("self absent blocks the write", func(t *testing.T) {
-		// Nothing in the list carries the hostname: the controller is not a
-		// container the daemon knows about — bare process, host networking, or
-		// an overridden hostname. Nothing can be ruled out as self, so the
-		// write is refused rather than proceeding blind.
+		// Nothing in the list carries the hostname, so nothing can be ruled out
+		// as self and the write is refused rather than proceeding blind.
 		stubHostname(t, selfHost)
 		var stopped []string
 		c := fakeContainerDaemon(t, []map[string]any{
@@ -333,13 +329,11 @@ func TestSelfIdentification(t *testing.T) {
 	})
 
 	t.Run("a hostname too short to be an ID blocks the write", func(t *testing.T) {
-		// Each hostname here is short enough to prefix-match a container that is
-		// NOT the controller, so without the length guard the code would name
-		// that container as self and refuse a write it should have allowed.
-		// Distinguishing the two refusals is the whole point of asserting the
-		// error type rather than merely that an error came back: "" would match
-		// both containers (ambiguous) and "1" would match only the event one
-		// (a confident, wrong answer).
+		// Each hostname here prefix-matches a container that is not the
+		// controller, so without the length guard the code would name that
+		// container as self and refuse a write it should have allowed. Asserting
+		// the error type rather than merely that an error came back is what
+		// separates the length refusal from the other reasons.
 		for _, host := range []string{"", "1"} {
 			stubHostname(t, host)
 			var stopped []string
@@ -360,8 +354,8 @@ func TestSelfIdentification(t *testing.T) {
 	})
 
 	t.Run("an ambiguous prefix blocks the write", func(t *testing.T) {
-		// Two IDs carry the hostname. Picking either would be a guess decided
-		// by the daemon's list order, which is not stable across recreates.
+		// Two IDs carry the hostname. Picking either would be a guess decided by
+		// the daemon's list order.
 		stubHostname(t, selfHost)
 		var stopped []string
 		c := fakeContainerDaemon(t, []map[string]any{

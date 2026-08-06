@@ -21,16 +21,9 @@ import (
 
 // Names of the containers the controller manages.
 //
-// Constants rather than configuration because the config file is not a trusted
-// input here: ApplyCoreConfig rewrites that very file through the controller's
-// own API, so a name read from it can be changed by anyone who reaches the API,
-// and takes effect on the next restart. Compiling the names in means redirecting
-// an operation requires replacing the controller image instead.
-//
-// That is only as strong as the image reference: attestation covers these
-// constants only where the compose file pins the controller image by digest,
-// which is a deployment-side decision. Under a mutable tag the binary — and so
-// these names — can change without changing compose_hash.
+// Constants rather than configuration: ApplyCoreConfig rewrites the same config
+// file the controller loads, so a name read from there is editable through the
+// controller's own API.
 const (
 	containerBroker         = "0g-serving-provider-broker"
 	containerEvent          = "0g-serving-provider-event"
@@ -50,20 +43,13 @@ type Ctrl struct {
 	providerAddress string
 	logger          log.Logger
 
-	// Both fixed at startup; no API mutates either.
+	// Both fixed at startup; no API mutates either. middleware.AuthMiddleware
+	// gates the whole /v1 group on the wallet list, so a route that edited it
+	// would sit inside the boundary it enforces.
 	//
-	// adminAddresses is enforced, live, by middleware.AuthMiddleware — an API
-	// that could add an address would be a way to escalate past the boundary
-	// that decides who may change the running image. Removing that API does not
-	// close the escalation on its own: ApplyCoreConfig can still write
-	// controller.adminAddresses into the config file, taking effect on the next
-	// restart, unless ADMIN_ADDRESS is set in the compose file and wins.
-	//
-	// allowedIPs is reported, not enforced: middleware.IPWhitelistMiddleware
-	// holds its own startup snapshot of the config slice and never consults this
-	// map. Freezing it removes the runtime drift between the two; it does not
-	// make them agree in every case, because the middleware also trims entries
-	// and drops the ones that fail to parse, while this map keeps them verbatim.
+	// adminAddresses is read per request by middleware.AuthMiddleware.
+	// allowedIPs is read by nothing that filters: middleware
+	// .IPWhitelistMiddleware holds its own snapshot of the config slice.
 	adminAddresses map[string]bool
 	allowedIPs     map[string]bool
 }
@@ -154,10 +140,9 @@ func (c *Ctrl) GetAdminAddresses() []string {
 
 // GetAllowedIPs returns the configured IP whitelist verbatim.
 //
-// Reporting only, and not identical to what is enforced: the enforced whitelist
-// is middleware.IPWhitelistMiddleware's own startup snapshot, which trims each
-// entry and discards those that are neither an IP nor a CIDR. A malformed entry
-// appears here and filters nothing.
+// Reporting only, and not the same list as the enforced one: enforcement uses
+// middleware.IPWhitelistMiddleware's own snapshot, which trims each entry and
+// keeps only those that parse as an IP or a CIDR.
 func (c *Ctrl) GetAllowedIPs() []string {
 	ips := make([]string, 0, len(c.allowedIPs))
 	for ip := range c.allowedIPs {
@@ -503,12 +488,10 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	// Reload ingress container (to re-resolve broker's new IP)
 	c.logger.Infof("[UpdateImages] Reloading ingress container: %s", ingressName)
 	if err := c.dockerClient.ReloadNginx(ctx, ingressName); err != nil {
-		// Warn but don't fail: the deployment may have no ingress at all. Note
-		// this swallows every other reason too — including the self-guard's —
-		// and the broker has a new IP by now, so nginx keeps resolving the old
-		// one while the update still reports success. Narrowing it would change
-		// what a successful update means to callers, which this change is
-		// required to leave alone; tracked separately.
+		// Warn but don't fail: the deployment may have no ingress. This also
+		// swallows every other reason, including the self-guard's, while the
+		// update still reports success. Narrowing it would change what a
+		// successful update means to callers; tracked separately.
 		c.logger.Warnf("[UpdateImages] Failed to reload ingress container %s: %v", ingressName, err)
 	} else {
 		c.logger.Info("[UpdateImages] Ingress container reloaded successfully")

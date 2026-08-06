@@ -64,30 +64,27 @@ controller:
 The names of the managed containers are **not** configurable. They are constants
 in `controller/internal/ctrl` (`0g-serving-provider-broker`,
 `0g-serving-provider-event`, `broker-ingress`, `prometheus-init`,
-`prometheus`), so redirecting an operation requires replacing the controller
-image rather than editing a file — and `PUT /v1/config/core` can rewrite that
-file. Attestation covers the names only where the compose file pins the
-controller image **by digest**; under a mutable tag the binary, and therefore
-the names, can change without changing `compose_hash`.
+`prometheus`). `PUT /v1/config/core` can rewrite the config file, so a name read
+from there would be editable through the controller's own API; changing a
+constant needs a different controller image.
 
-A `controller.containers` key left over from an earlier release is **accepted
-and ignored**, and a `[CONFIG-REMOVED]` line naming it is logged at startup. It
-is not rejected on purpose: this config struct is shared with the broker and
-event binaries, so refusing the key would stop all three from booting. Delete
-it anyway — it steers nothing.
+A `controller.containers` key left over from an earlier release is **accepted and
+ignored**, and a `[CONFIG-REMOVED]` line naming it is logged at startup. It is
+not rejected on purpose: this config struct is shared with the broker and event
+binaries, so refusing the key would stop all three from booting. Delete it anyway
+— it steers nothing.
 
 The docker layer additionally refuses to start, stop, restart, remove, recreate
 or exec into the controller's own container, identified by matching
 `os.Hostname()` against container IDs.
 
-This requires the controller to run as a container with docker's **default**
-hostname: do not set `hostname:` on the controller service, do not use
-`network_mode: host`, and note that the bare-process mode of §8.1 does not
-satisfy it either. Where it is not satisfied, the operations listed above are
-refused with `cannot identify the controller's own container`; reads are
-unaffected. Worth knowing before it happens: `PUT /v1/config/core` writes the
-config file before it restarts anything, so it returns 500 with the file already
-rewritten, to take effect at the next restart.
+**This requires the controller to run as a container with docker's default
+hostname.** Do not set `hostname:` on the controller service and do not use
+`network_mode: host`. Where the hostname does not resolve to a container ID, the
+operations listed above are refused with `cannot identify the controller's own
+container`; reads are unaffected. `PUT /v1/config/core` writes the config file
+before it restarts anything, so in that state it returns 500 with the file
+already rewritten.
 
 ### 3.2 Environment Variable Support
 
@@ -146,22 +143,22 @@ every other route here, so a route that widened it would be a way to escalate
 past it. Changing either one means restarting the controller with a new value;
 if the environment variable is set, editing the config file alone will not do it.
 
-**This closes the direct route only.** `PUT /v1/config/core` validates YAML
-syntax and nothing else, and it writes the same file the controller loads, so a
-caller holding one admin wallet can still write `controller.adminAddresses`,
-`controller.allowedIPs` or `controller.image` and have it take effect at the next
-controller restart — unless `ADMIN_ADDRESS` / `ALLOWED_IPS` are set in the
-measured compose file, which override it. Two consequences worth stating: set
-those env vars, and note that with them unset an attacker can write themselves in
-*and remove every other admin*, which even the deleted
-`DELETE /v1/admin/wallets/:address` refused to do (it would not drop the last
-admin).
+**This closes the direct route only.** `PUT /v1/config/core` validates YAML syntax
+and nothing else, and it writes the same file the controller loads. A caller
+holding one admin wallet can write `controller.adminAddresses`,
+`controller.allowedIPs`, `controller.image` or `controller.docker.host` there, and
+the controller reads them at its next start. `ADMIN_ADDRESS` / `ALLOWED_IPS`
+override the first two (§3.2); nothing overrides the other two. **Set those env
+vars in the compose file** — and note that no code path enforces a floor on the
+number of remaining admins.
 
-Revocation is now offline. There is no way to invalidate a leaked admin session
-token while the controller runs, and `SessionToken` currently accepts
-`ExpiresAt: 0` as "never expires" — so a leaked token is a permanent credential
-until the controller is redeployed. Bounding token lifetime is tracked
-separately.
+Revocation is offline. Nothing invalidates a leaked admin session token while the
+controller runs, and `SessionToken` treats `ExpiresAt: 0` as never expiring.
+Bounding token lifetime is tracked separately.
+
+Read the container guard as a safety interlock, not containment: an admin who can
+set `controller.image` and call `POST /v1/images/update` runs an image of their
+choosing.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now

@@ -2,11 +2,9 @@ package ctrl
 
 import "testing"
 
-// The constants are the whole point of C5: they are what makes "which container
-// does this operation act on" a property of the controller image rather than of
-// a file the controller's own API can rewrite. A typo in one of them silently
-// redirects every managed operation at a different container, or at nothing —
-// so the literals are pinned here rather than only in the code that uses them.
+// The literals are pinned here, not only in the code that uses them: they decide
+// which container a managed operation acts on, and before this test a typo in one
+// of them was killed by nothing in the suite.
 //
 // getContainerName reads no field of Ctrl, so a zero value is the whole fixture.
 func TestGetContainerName(t *testing.T) {
@@ -17,8 +15,7 @@ func TestGetContainerName(t *testing.T) {
 		"prometheus-init": "prometheus-init",
 		"prometheus":      "prometheus",
 
-		// Not a managed alias. The empty string is what every caller checks to
-		// turn a request into InvalidContainerError, so returning a real name
+		// Not a managed alias. Callers key off the empty string, so a real name
 		// here would hand an unmanaged container to a write path.
 		"":                       "",
 		"controller":             "",

@@ -1694,12 +1694,11 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 		&cfg.ProviderHttp.ResponseHeaderTimeout, int64(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes), time.Minute)
 
 	// Removed: controller.containers. The names are constants in the controller
-	// now. The key still parses so that a config carrying it boots, but it
-	// steers nothing, and saying so is the only thing standing between an
-	// operator and the belief that they renamed a container.
+	// now. The key still parses so that a config carrying it boots; this line is
+	// what tells the operator it no longer steers anything.
 	//
-	// Not WarnDeprecated: nothing replaced this key, and its message would
-	// name a replacement and a removal date that do not exist.
+	// Not WarnDeprecated: nothing replaced this key, and its message would name a
+	// replacement and a removal date that do not exist.
 	if config.RawHasKey(raw, "controller", "containers") {
 		log.Printf("[CONFIG-REMOVED] %q is ignored: the controller's container names are fixed in code; delete the key", "controller.containers")
 	}

@@ -224,20 +224,17 @@ func (c *Client) unguardedContainerID(ctx context.Context, containerName string)
 	return "", &ContainerNotFoundError{Name: containerName}
 }
 
-// getContainerID resolves containerName to a container the controller is
-// allowed to write to, refusing to hand back the controller's own container.
+// getContainerID resolves containerName to a container the controller may write
+// to, refusing to return the controller's own container.
 //
-// The resolution falls back to substring matching, so a container whose name
-// merely contains a managed name can be selected — and in a deployment that
-// names the controller after the broker it manages, that container is the
-// controller. Stopping or removing ourselves halfway through an upgrade tears
-// the deployment down with, at best, a restart policy to put it back, so the
+// Resolution falls back to substring matching, so a container whose name merely
+// contains a managed name can be selected — including the controller's own, in a
+// deployment that names it after the broker. Stopping or removing ourselves
+// mid-upgrade aborts the upgrade with the containers already torn down, so the
 // docker layer refuses rather than relying on every caller to check.
 //
-// This name is the obvious one on purpose: a write path added later that
-// reaches for the resolver by the name it expects gets the guarded one. Read
-// paths must ask for unguardedContainerID explicitly — inspecting ourselves is
-// harmless, and only writes can strand a deployment.
+// This holds the obvious name so that a write path added later gets the guard by
+// default; read paths ask for unguardedContainerID explicitly.
 func (c *Client) getContainerID(ctx context.Context, containerName string) (string, error) {
 	containerID, err := c.unguardedContainerID(ctx, containerName)
 	if err != nil {
@@ -258,23 +255,15 @@ func (c *Client) getContainerID(ctx context.Context, containerName string) (stri
 // selfContainerID returns the ID of the container the controller runs in.
 //
 // Docker sets a container's hostname to its own short ID, so the container whose
-// ID carries that prefix is us. The broker relies on the same property, in
-// ProviderContract.GetImageInfo's helper getContainerImageID
-// (inference/internal/contract/provider_contract.go); the checks below are not
-// mirrored there, and nothing keeps the two implementations in step.
+// ID carries that prefix is us.
 //
-// The prefix has to be long enough to be an ID: a short hostname is a prefix of
-// many IDs, and matching one would both refuse writes to an innocent container
-// and leave the real controller unguarded. For the same reason an ambiguous
-// match is refused rather than resolved by list order, which is not stable.
+// The prefix must be at least shortIDLen, since a shorter one is a prefix of many
+// IDs. An ambiguous match is refused rather than resolved by list order.
 //
-// Failing to identify ourselves is an error rather than a shrug: every caller
-// is about to write, and "we could not tell whether that container is us" is
-// not a safe basis for stopping it. The cost is that the controller only has
-// container management when it runs as a container with docker's default
-// hostname — not under an explicit compose `hostname:`, not on `network_mode:
-// host`, not on Kubernetes, not as a bare process against a mounted socket.
-// That is loud on the first write rather than silent.
+// Failing to identify ourselves is an error rather than a shrug: every caller is
+// about to write, and "we could not tell whether that container is us" is not a
+// safe basis for stopping it. What the controller's deployment must look like for
+// this to resolve is in doc/controller-design.md §3.1.
 //
 // ponytail: not cached — this and unguardedContainerID list separately, so a
 // write costs two lists against a local socket.
@@ -324,13 +313,9 @@ type SelfOperationError struct {
 	Name string
 }
 
-// Error names both readings, because in practice the second is the likelier
-// one: an exact name match always wins over a substring, so a managed container
-// that exists is never mistaken for us. The guard fires when that container is
-// gone and the controller was the only thing left containing the name.
 func (e *SelfOperationError) Error() string {
-	return "resolving " + e.Name + " selected the controller's own container by substring; " +
-		"no container is named " + e.Name
+	return "refusing to operate on the controller's own container: " + e.Name +
+		" resolved to it"
 }
 
 // SelfUnidentifiedError is returned when the controller cannot work out which
