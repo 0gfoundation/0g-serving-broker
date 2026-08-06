@@ -1186,7 +1186,6 @@ type ControllerConfig struct {
 	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
 	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
 	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
-	Containers     ContainersConfig     `yaml:"containers"`     // All managed containers
 	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
 	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
 }
@@ -1195,15 +1194,6 @@ type ControllerConfig struct {
 type DockerConfig struct {
 	Host       string `yaml:"host"`       // Docker socket path, default unix:///var/run/docker.sock
 	APIVersion string `yaml:"apiVersion"` // Docker API version, default 1.41
-}
-
-// ContainersConfig all managed containers configuration
-type ContainersConfig struct {
-	Broker         string `yaml:"broker"`         // Broker container name, default "0g-serving-provider-broker"
-	Event          string `yaml:"event"`          // Event container name, default "0g-serving-provider-event"
-	Ingress        string `yaml:"ingress"`        // Ingress container name, default "broker-ingress"
-	PrometheusInit string `yaml:"prometheusInit"` // Prometheus init container name, default "prometheus-init"
-	Prometheus     string `yaml:"prometheus"`     // Prometheus container name, default "prometheus"
 }
 
 // IngressAllowedEnvKeys whitelist of environment variables that can be modified for ingress
@@ -2264,13 +2254,6 @@ func GetConfig() *Config {
 				Docker: DockerConfig{
 					Host:       "unix:///var/run/docker.sock",
 					APIVersion: "1.41",
-				},
-				Containers: ContainersConfig{
-					Broker:         "0g-serving-provider-broker",
-					Event:          "0g-serving-provider-event",
-					Ingress:        "broker-ingress",
-					PrometheusInit: "prometheus-init",
-					Prometheus:     "prometheus",
 				},
 				Logger: &config.LoggerConfig{
 					Format:        "text",

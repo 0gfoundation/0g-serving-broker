@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -20,10 +19,26 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
 
+// Names of the containers the controller manages.
+//
+// These are constants rather than configuration on purpose: the controller runs
+// inside the TEE whose measurements the compose file pins, so anything that
+// decides which container gets stopped, removed or recreated has to be covered
+// by compose_hash. A config-supplied name is not — it can be edited after
+// attestation and redirect every operation at a container the operator never
+// authorised.
+const (
+	containerBroker         = "0g-serving-provider-broker"
+	containerEvent          = "0g-serving-provider-event"
+	containerIngress        = "broker-ingress"
+	containerPrometheusInit = "prometheus-init"
+	containerPrometheus     = "prometheus"
+)
+
 // Ctrl is the controller for managing containers and configs
 type Ctrl struct {
-	config     config.ControllerConfig
-	fullConfig *config.Config // Full config for accessing Service configuration
+	config       config.ControllerConfig
+	fullConfig   *config.Config // Full config for accessing Service configuration
 	dockerClient *docker.Client
 
 	// Contract for syncing services
@@ -31,8 +46,10 @@ type Ctrl struct {
 	providerAddress string
 	logger          log.Logger
 
-	// Dynamic whitelists (protected by mutex)
-	mu             sync.RWMutex
+	// Authorisation boundary, fixed at startup and read-only afterwards. There
+	// is no API that mutates either set: a request that could widen the set of
+	// callers allowed to change the running image would be a way to escalate
+	// past the boundary it is supposed to enforce.
 	adminAddresses map[string]bool
 	allowedIPs     map[string]bool
 }
@@ -109,16 +126,11 @@ func (c *Ctrl) Close() error {
 
 // IsAdminAddress checks if an address is in the admin whitelist
 func (c *Ctrl) IsAdminAddress(addr string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.adminAddresses[strings.ToLower(addr)]
 }
 
 // GetAdminAddresses returns all admin addresses
 func (c *Ctrl) GetAdminAddresses() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	addrs := make([]string, 0, len(c.adminAddresses))
 	for addr := range c.adminAddresses {
 		addrs = append(addrs, addr)
@@ -126,33 +138,11 @@ func (c *Ctrl) GetAdminAddresses() []string {
 	return addrs
 }
 
-// AddAdminAddress adds an address to the admin whitelist
-func (c *Ctrl) AddAdminAddress(addr string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.adminAddresses[strings.ToLower(addr)] = true
-}
-
-// RemoveAdminAddress removes an address from the admin whitelist
-// Returns false if it's the last admin address
-func (c *Ctrl) RemoveAdminAddress(addr string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Prevent removing the last admin
-	if len(c.adminAddresses) <= 1 {
-		return false
-	}
-
-	delete(c.adminAddresses, strings.ToLower(addr))
-	return true
-}
-
-// GetAllowedIPs returns all allowed IPs
+// GetAllowedIPs returns the configured IP whitelist.
+//
+// Reporting only: the whitelist that is actually enforced is the startup
+// snapshot held by middleware.IPWhitelistMiddleware.
 func (c *Ctrl) GetAllowedIPs() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	ips := make([]string, 0, len(c.allowedIPs))
 	for ip := range c.allowedIPs {
 		ips = append(ips, ip)
@@ -160,33 +150,20 @@ func (c *Ctrl) GetAllowedIPs() []string {
 	return ips
 }
 
-// AddAllowedIP adds an IP to the whitelist
-func (c *Ctrl) AddAllowedIP(ip string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.allowedIPs[ip] = true
-}
-
-// RemoveAllowedIP removes an IP from the whitelist
-func (c *Ctrl) RemoveAllowedIP(ip string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.allowedIPs, ip)
-}
-
-// getContainerName returns the container name for a given alias
+// getContainerName returns the container name for a given alias, or "" if the
+// alias names nothing the controller manages.
 func (c *Ctrl) getContainerName(alias string) string {
 	switch alias {
 	case "broker":
-		return c.config.Containers.Broker
+		return containerBroker
 	case "event":
-		return c.config.Containers.Event
+		return containerEvent
 	case "ingress":
-		return c.config.Containers.Ingress
+		return containerIngress
 	case "prometheus-init":
-		return c.config.Containers.PrometheusInit
+		return containerPrometheusInit
 	case "prometheus":
-		return c.config.Containers.Prometheus
+		return containerPrometheus
 	default:
 		return ""
 	}
@@ -452,9 +429,9 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
 	}
 
-	brokerName := c.config.Containers.Broker
-	eventName := c.config.Containers.Event
-	ingressName := c.config.Containers.Ingress
+	brokerName := containerBroker
+	eventName := containerEvent
+	ingressName := containerIngress
 
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
@@ -556,8 +533,8 @@ func (c *Ctrl) UpdatePrometheusConfig(ctx context.Context, base64Config string) 
 		return &InvalidConfigError{Err: fmt.Errorf("invalid base64 encoding: %w", err)}
 	}
 
-	initContainer := c.config.Containers.PrometheusInit
-	promContainer := c.config.Containers.Prometheus
+	initContainer := containerPrometheusInit
+	promContainer := containerPrometheus
 
 	c.logger.Infof("[UpdatePrometheusConfig] Rerunning %s with new config", initContainer)
 
@@ -596,7 +573,7 @@ func (c *Ctrl) UpdateIngressConfig(ctx context.Context, envUpdates map[string]st
 		}
 	}
 
-	ingressName := c.config.Containers.Ingress
+	ingressName := containerIngress
 	c.logger.Infof("[UpdateIngressConfig] Updating ingress container %s with env keys: %v", ingressName, mapKeys(envUpdates))
 
 	if err := c.dockerClient.UpdateContainerEnv(ctx, ingressName, envUpdates); err != nil {
@@ -609,13 +586,13 @@ func (c *Ctrl) UpdateIngressConfig(ctx context.Context, envUpdates map[string]st
 
 // GetIngressEnv returns the current environment variables of the ingress container
 func (c *Ctrl) GetIngressEnv(ctx context.Context) (map[string]string, error) {
-	ingressName := c.config.Containers.Ingress
+	ingressName := containerIngress
 	return c.dockerClient.GetContainerEnv(ctx, ingressName, config.IngressAllowedEnvKeys)
 }
 
 // GetPrometheusConfig returns the current Prometheus configuration (base64 encoded)
 func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
-	initContainer := c.config.Containers.PrometheusInit
+	initContainer := containerPrometheusInit
 	env, err := c.dockerClient.GetContainerEnv(ctx, initContainer, []string{"PROMETHEUS_CONFIG"})
 	if err != nil {
 		return "", err

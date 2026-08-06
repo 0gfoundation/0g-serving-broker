@@ -59,12 +59,20 @@ controller:
   docker:
     host: "unix:///var/run/docker.sock"
     apiVersion: "1.41"
-  containers:
-    broker:
-      name: "0g-serving-provider-broker"
-    event:
-      name: "0g-serving-provider-event"
 ```
+
+The names of the managed containers are **not** configurable. They are constants
+in `controller/internal/ctrl` (`0g-serving-provider-broker`,
+`0g-serving-provider-event`, `broker-ingress`, `prometheus-init`,
+`prometheus`), so which container an operation acts on is covered by the
+compose file's `compose_hash` and cannot be redirected by editing config after
+attestation. A `controller.containers` key left over from an earlier release
+must be deleted — config parsing is strict and will reject it.
+
+The docker layer additionally refuses to stop, remove, recreate or exec into the
+controller's own container, identified by matching `os.Hostname()` against
+container IDs. A deployment that overrides the controller container's
+`hostname` therefore loses container management; do not set one.
 
 ### 3.2 Environment Variable Support
 
@@ -109,11 +117,18 @@ ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
 | Method | Path | Description |
 |--------|------|-------------|
 | GET    | `/v1/admin/wallets` | Get current admin wallet address list |
-| POST   | `/v1/admin/wallets` | Add new admin wallet address |
-| DELETE | `/v1/admin/wallets/:address` | Remove admin wallet address |
 | GET    | `/v1/admin/ips` | Get current IP whitelist |
-| POST   | `/v1/admin/ips` | Add new IP to whitelist |
-| DELETE | `/v1/admin/ips/:ip` | Remove IP from whitelist |
+
+Read-only. Both whitelists are read from config at startup and cannot be changed
+at runtime: they are the authorisation boundary for every other route here, so
+an API that widened them would be a way to escalate past it. Changing either one
+means editing the config and redeploying.
+
+**Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
+`POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
+return 404. `DELETE /v1/admin/ips/:ip` never affected traffic in the first place —
+enforcement uses the startup snapshot held by `IPWhitelistMiddleware`, so the
+route only ever edited what `GET /v1/admin/ips` reported.
 
 ---
 
