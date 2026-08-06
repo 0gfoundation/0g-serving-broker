@@ -78,12 +78,14 @@ it anyway — it steers nothing.
 
 The docker layer additionally refuses to start, stop, restart, remove, recreate
 or exec into the controller's own container, identified by matching
-`os.Hostname()` against container IDs. This requires the controller to run as a
-container with docker's **default** hostname. Every write API returns
-`cannot identify the controller's own container` when it does not — so do not
-set `hostname:` on the controller service, do not run it with
-`network_mode: host`, and note that running the binary as a bare process
-against a mounted socket (§8.1) has no container management at all.
+`os.Hostname()` against container IDs.
+
+This requires the controller to run as a container with docker's **default**
+hostname. Where it does not — an explicit `hostname:`, `network_mode: host`, or
+the bare-process mode of §8.1 — every route that touches a container fails with
+`cannot identify the controller's own container`. Note that `PUT /v1/config/core`
+writes the config file before restarting anything, so in that state it returns
+500 with the file already rewritten, to take effect at the next restart.
 
 ### 3.2 Environment Variable Support
 
@@ -161,8 +163,8 @@ separately.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
-return 404 (not 405 — no `NoRoute` handler distinguishes them from an unknown
-path). Neither `/v1/admin/ips` write route ever affected traffic: enforcement
+return 404, indistinguishable from an unknown path. Neither `/v1/admin/ips`
+write route ever affected traffic: enforcement
 uses the startup snapshot held by `IPWhitelistMiddleware`, so both only ever
 edited what `GET /v1/admin/ips` reported.
 

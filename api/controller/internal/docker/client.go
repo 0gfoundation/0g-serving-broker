@@ -257,11 +257,11 @@ func (c *Client) getContainerID(ctx context.Context, containerName string) (stri
 
 // selfContainerID returns the ID of the container the controller runs in.
 //
-// Docker sets a container's hostname to its own short ID, so the container
-// whose ID carries that prefix is us. The broker identifies itself the same way,
-// in ProviderContract.GetImageInfo's helper getContainerImageID
-// (inference/internal/contract/provider_contract.go) — which lists with
-// All: false, so unlike here a stopped container is never matched.
+// Docker sets a container's hostname to its own short ID, so the container whose
+// ID carries that prefix is us. The broker relies on the same property, in
+// ProviderContract.GetImageInfo's helper getContainerImageID
+// (inference/internal/contract/provider_contract.go); the checks below are not
+// mirrored there, and nothing keeps the two implementations in step.
 //
 // The prefix has to be long enough to be an ID: a short hostname is a prefix of
 // many IDs, and matching one would both refuse writes to an innocent container
