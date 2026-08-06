@@ -232,8 +232,9 @@ func selfAndOther() []map[string]any {
 	}
 }
 
-// All six write methods must refuse. Covering one would leave the rest free to be
-// repointed at unguardedContainerID with the suite still green.
+// One entry per getContainerID call site, so none of them can be repointed at
+// unguardedContainerID with the suite still green. RecreateContainerWithEnv is
+// covered through UpdateContainerEnv, which is one of its two wrappers.
 func TestWritePathsRefuseSelf(t *testing.T) {
 	stubHostname(t, selfHost)
 
@@ -329,11 +330,11 @@ func TestSelfIdentification(t *testing.T) {
 	})
 
 	t.Run("a hostname too short to be an ID blocks the write", func(t *testing.T) {
-		// Each hostname here prefix-matches a container that is not the
-		// controller, so without the length guard the code would name that
-		// container as self and refuse a write it should have allowed. Asserting
-		// the error type rather than merely that an error came back is what
-		// separates the length refusal from the other reasons.
+		// Without the length guard neither hostname refuses for the reason it
+		// should: "" prefixes both containers and reaches the ambiguity branch,
+		// while "1" prefixes only the event container and names it as self,
+		// refusing a write that should have been allowed. The Ambiguous
+		// assertion below is what separates those from the length refusal.
 		for _, host := range []string{"", "1"} {
 			stubHostname(t, host)
 			var stopped []string

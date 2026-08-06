@@ -1195,9 +1195,11 @@ type ControllerConfig struct {
 	// It is still declared because config parsing is strict and this whole
 	// struct is shared with the broker and event binaries: dropping the key
 	// outright would turn every deployment still carrying it into a boot
-	// failure of all three, controller disabled or not. Kept as an untyped map
-	// so both the flat shape the code used to accept and the nested one the
-	// design doc used to show still parse.
+	// failure of all three, controller disabled or not.
+	//
+	// The shape a deployment can be carrying is the flat one, since that is what
+	// the previous struct accepted. The map is wider than that and accepts
+	// anything under the key, which no longer steers anything either way.
 	Containers map[string]interface{} `yaml:"containers"`
 }
 

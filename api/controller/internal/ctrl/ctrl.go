@@ -48,8 +48,8 @@ type Ctrl struct {
 	// would sit inside the boundary it enforces.
 	//
 	// adminAddresses is read per request by middleware.AuthMiddleware.
-	// allowedIPs is read by nothing that filters: middleware
-	// .IPWhitelistMiddleware holds its own snapshot of the config slice.
+	// allowedIPs is read by nothing that filters — IPWhitelistMiddleware holds
+	// its own snapshot of the config slice.
 	adminAddresses map[string]bool
 	allowedIPs     map[string]bool
 }
@@ -138,11 +138,12 @@ func (c *Ctrl) GetAdminAddresses() []string {
 	return addrs
 }
 
-// GetAllowedIPs returns the configured IP whitelist verbatim.
+// GetAllowedIPs returns the configured IP whitelist as map keys, so the order
+// differs between calls and duplicates are collapsed.
 //
 // Reporting only, and not the same list as the enforced one: enforcement uses
-// middleware.IPWhitelistMiddleware's own snapshot, which trims each entry and
-// keeps only those that parse as an IP or a CIDR.
+// IPWhitelistMiddleware's own snapshot, which trims each entry and keeps only
+// those that parse as an IP or a CIDR.
 func (c *Ctrl) GetAllowedIPs() []string {
 	ips := make([]string, 0, len(c.allowedIPs))
 	for ip := range c.allowedIPs {
@@ -489,9 +490,9 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	c.logger.Infof("[UpdateImages] Reloading ingress container: %s", ingressName)
 	if err := c.dockerClient.ReloadNginx(ctx, ingressName); err != nil {
 		// Warn but don't fail: the deployment may have no ingress. This also
-		// swallows every other reason, including the self-guard's, while the
-		// update still reports success. Narrowing it would change what a
-		// successful update means to callers; tracked separately.
+		// swallows a SelfOperationError on the ingress name, while the update
+		// still reports success. Narrowing it would change what a successful
+		// update means to callers; tracked separately.
 		c.logger.Warnf("[UpdateImages] Failed to reload ingress container %s: %v", ingressName, err)
 	} else {
 		c.logger.Info("[UpdateImages] Ingress container reloaded successfully")

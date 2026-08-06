@@ -381,19 +381,20 @@ zk:
 
 // --- controller.containers removal ------------------------------------------
 
-// The managed container names became constants in the controller, but the key
-// was in the design doc's config example, so deployed configs carry it. Parsing
-// is strict and this struct is shared with the broker and event binaries, so
+// The managed container names became constants in the controller, but the key was
+// in the design doc's config example, so deployed configs carry it. Parsing is
+// strict and this struct is shared with the broker and event binaries, so
 // rejecting the key would stop all three from booting — including a deployment
-// running with controller.enable false, whose behaviour this change is required
-// to leave untouched.
+// running with controller.enable false, whose boot this change is required to
+// leave untouched. Its startup output is not: the notice below is new.
 //
-// Accepting it silently would be the other failure: the operator who edits the
-// key and restarts must be told it steers nothing, or they will believe they
-// renamed a container.
+// Accepting the key silently would be the other failure, so the notice is
+// asserted here rather than only its absence of an error.
 func TestLoadConfig_ControllerContainers_AcceptedAndAnnounced(t *testing.T) {
-	// Both shapes that ever appeared: the flat one the struct used to accept,
-	// and the nested one the design doc used to show.
+	// "flat" is the shape a deployment can be carrying — the only one the
+	// previous struct accepted. "nested" is the shape the design doc showed,
+	// which that struct rejected, so no deployment boots with it; it is here
+	// because the replacement field is an untyped map and this pins that.
 	bodies := map[string]string{
 		"flat": `
 controller:

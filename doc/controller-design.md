@@ -19,6 +19,11 @@ Create a subproject named `controller` that provides HTTP APIs to remotely manag
 
 - `0g-serving-provider-broker` - Main broker service
 - `0g-serving-provider-event` - Event processing service
+- `broker-ingress` - nginx front end
+- `prometheus-init` - Prometheus config init container
+- `prometheus` - Prometheus
+
+The names are constants, not configuration — see §3.1.
 
 ---
 
@@ -62,7 +67,7 @@ controller:
 ```
 
 The names of the managed containers are **not** configurable. They are constants
-in `controller/internal/ctrl` (`0g-serving-provider-broker`,
+in `api/controller/internal/ctrl` (`0g-serving-provider-broker`,
 `0g-serving-provider-event`, `broker-ingress`, `prometheus-init`,
 `prometheus`). `PUT /v1/config/core` can rewrite the config file, so a name read
 from there would be editable through the controller's own API; changing a
@@ -81,10 +86,9 @@ or exec into the controller's own container, identified by matching
 **This requires the controller to run as a container with docker's default
 hostname.** Do not set `hostname:` on the controller service and do not use
 `network_mode: host`. Where the hostname does not resolve to a container ID, the
-operations listed above are refused with `cannot identify the controller's own
-container`; reads are unaffected. `PUT /v1/config/core` writes the config file
-before it restarts anything, so in that state it returns 500 with the file
-already rewritten.
+operations listed above are refused and the error names the hostname; reads are
+unaffected. `PUT /v1/config/core` writes the config file before it restarts
+anything, so in that state it returns 500 with the file already rewritten.
 
 ### 3.2 Environment Variable Support
 
@@ -97,8 +101,7 @@ ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
 ALLOWED_IPS=127.0.0.1,192.168.1.0/24
 ```
 
-Setting these in the compose file is worth doing: it is what keeps
-`PUT /v1/config/core` from being able to change who counts as an admin.
+Set these in the compose file. §4.4 covers what that does and does not close.
 
 ---
 
@@ -156,9 +159,10 @@ Revocation is offline. Nothing invalidates a leaked admin session token while th
 controller runs, and `SessionToken` treats `ExpiresAt: 0` as never expiring.
 Bounding token lifetime is tracked separately.
 
-Read the container guard as a safety interlock, not containment: an admin who can
-set `controller.image` and call `POST /v1/images/update` runs an image of their
-choosing.
+Read the container guard as a safety interlock, not containment. `controller.image`
+is one of the fields above, and the controller reads it at its own next start — no
+route here restarts the controller, so this one waits for a host reboot or a
+`compose up`.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
@@ -356,13 +360,13 @@ Where:
 
 2. **Wallet Address Whitelist** (Second Layer) - Identity verification based on Ethereum signatures
    - Ethereum address format: `0x1234...`
-   - Session Token supports expiration time
-   - Nonce prevents replay attacks
+   - Session Token carries an expiry, and `ExpiresAt: 0` means it never expires
+   - Nonce is carried in the token but never checked — see §4.4
 
 ### 7.2 Operational Security
 
 - Validate YAML format before config updates
-- Keep at least one admin wallet address to prevent lockout
+- Keep at least one admin wallet address to prevent lockout — no code enforces this
 - Use EIP-191 standard personal sign for signature verification
 
 ---
@@ -374,6 +378,9 @@ Where:
 ```bash
 ./0g-serving-broker 0g-controller
 ```
+
+Run this way the controller serves reads but cannot manage containers — see the
+deployment requirement in §3.1.
 
 ### 8.2 Docker Compose Deployment
 

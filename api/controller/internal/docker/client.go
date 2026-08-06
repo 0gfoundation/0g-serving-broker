@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,6 +187,7 @@ func (c *Client) GetContainerLogs(ctx context.Context, containerName string, tai
 //
 // Named for what it lacks: it will happily return the controller's own
 // container. Only read paths may call it; writes go through getContainerID.
+// GetContainerStatus carries a third copy of this walk and is also read-only.
 func (c *Client) unguardedContainerID(ctx context.Context, containerName string) (string, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
@@ -302,9 +304,9 @@ func (c *Client) selfContainerID(ctx context.Context) (string, error) {
 // container's default hostname.
 const shortIDLen = 12
 
-// hostnameFn is os.Hostname, indirected so the identification logic is
-// reachable from a test — the production hostname is whatever the machine
-// running the test has, which is the one input a test cannot arrange.
+// hostnameFn is os.Hostname, indirected because a test can build fixtures around
+// the machine's hostname but cannot choose it, and the short-hostname branch is
+// only reachable by choosing one.
 var hostnameFn = os.Hostname
 
 // SelfOperationError is returned when an operation would modify the controller's
@@ -325,18 +327,19 @@ type SelfUnidentifiedError struct {
 	Ambiguous bool // several container IDs carried the hostname as a prefix
 }
 
+// Each branch carries its own remedy: the deployment advice that fits the other
+// two is useless against an ID collision, where the hostname is already docker's.
 func (e *SelfUnidentifiedError) Error() string {
-	const remedy = "; the controller must run as a container with docker's default hostname"
+	const prefix = "cannot identify the controller's own container: hostname "
+	const asContainer = "; the controller must run as a container with docker's default hostname"
 	switch {
 	case e.Ambiguous:
-		return "cannot identify the controller's own container: hostname " + e.Hostname +
-			" is a prefix of more than one container ID" + remedy
+		return prefix + e.Hostname + " is a prefix of more than one container ID" +
+			"; recreate one of the colliding containers"
 	case len(e.Hostname) < shortIDLen:
-		return "cannot identify the controller's own container: hostname " + e.Hostname +
-			" is too short to be a container ID" + remedy
+		return prefix + strconv.Quote(e.Hostname) + " is too short to be a container ID" + asContainer
 	default:
-		return "cannot identify the controller's own container: no container ID starts with hostname " +
-			e.Hostname + remedy
+		return prefix + e.Hostname + " matches no container ID" + asContainer
 	}
 }
 
