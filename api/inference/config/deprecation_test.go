@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -380,12 +382,16 @@ zk:
 // --- controller.containers removal ------------------------------------------
 
 // The managed container names became constants in the controller, but the key
-// lived in the design doc's config example and in this package's own defaults,
-// so deployed configs carry it. Parsing is strict and this struct is shared
-// with the broker and event binaries, so rejecting the key would take all three
-// down at boot — including with controller.enable false, which spec invariant 1
-// says must behave exactly as before.
-func TestLoadConfig_ControllerContainers_AcceptedAndIgnored(t *testing.T) {
+// was in the design doc's config example, so deployed configs carry it. Parsing
+// is strict and this struct is shared with the broker and event binaries, so
+// rejecting the key would stop all three from booting — including a deployment
+// running with controller.enable false, whose behaviour this change is required
+// to leave untouched.
+//
+// Accepting it silently would be the other failure: the operator who edits the
+// key and restarts must be told it steers nothing, or they will believe they
+// renamed a container.
+func TestLoadConfig_ControllerContainers_AcceptedAndAnnounced(t *testing.T) {
 	// Both shapes that ever appeared: the flat one the struct used to accept,
 	// and the nested one the design doc used to show.
 	bodies := map[string]string{
@@ -407,9 +413,42 @@ controller:
 
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
+			logged := captureLog(t)
+
 			if _, err := loadFromYAML(t, body); err != nil {
 				t.Fatalf("loadConfig with controller.containers: %v", err)
 			}
+			if got := logged.String(); !strings.Contains(got, "[CONFIG-REMOVED]") ||
+				!strings.Contains(got, "controller.containers") {
+				t.Errorf("startup log = %q, want it to name controller.containers as removed", got)
+			}
 		})
 	}
+}
+
+// A config without the key must stay quiet, or the notice means nothing.
+func TestLoadConfig_NoControllerContainers_NoNotice(t *testing.T) {
+	logged := captureLog(t)
+
+	if _, err := loadFromYAML(t, "\ncontroller:\n  enable: false\n"); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if got := logged.String(); strings.Contains(got, "[CONFIG-REMOVED]") {
+		t.Errorf("startup log = %q, want no removal notice when the key is absent", got)
+	}
+}
+
+// captureLog redirects the stdlib logger — which is what config loading uses,
+// since it runs before the structured logger exists — for the duration of a test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return &buf
 }

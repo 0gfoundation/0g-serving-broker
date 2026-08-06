@@ -64,24 +64,40 @@ controller:
 The names of the managed containers are **not** configurable. They are constants
 in `controller/internal/ctrl` (`0g-serving-provider-broker`,
 `0g-serving-provider-event`, `broker-ingress`, `prometheus-init`,
-`prometheus`), so which container an operation acts on is covered by the
-compose file's `compose_hash` and cannot be redirected by editing config after
-attestation. A `controller.containers` key left over from an earlier release
-must be deleted — config parsing is strict and will reject it.
+`prometheus`), so redirecting an operation requires replacing the controller
+image rather than editing a file — and `PUT /v1/config/core` can rewrite that
+file. Attestation covers the names only where the compose file pins the
+controller image **by digest**; under a mutable tag the binary, and therefore
+the names, can change without changing `compose_hash`.
 
-The docker layer additionally refuses to stop, remove, recreate or exec into the
-controller's own container, identified by matching `os.Hostname()` against
-container IDs. A deployment that overrides the controller container's
-`hostname` therefore loses container management; do not set one.
+A `controller.containers` key left over from an earlier release is **accepted
+and ignored**, and a `[CONFIG-REMOVED]` line naming it is logged at startup. It
+is not rejected on purpose: this config struct is shared with the broker and
+event binaries, so refusing the key would stop all three from booting. Delete
+it anyway — it steers nothing.
+
+The docker layer additionally refuses to start, stop, restart, remove, recreate
+or exec into the controller's own container, identified by matching
+`os.Hostname()` against container IDs. This requires the controller to run as a
+container with docker's **default** hostname. Every write API returns
+`cannot identify the controller's own container` when it does not — so do not
+set `hostname:` on the controller service, do not run it with
+`network_mode: host`, and note that running the binary as a bare process
+against a mounted socket (§8.1) has no container management at all.
 
 ### 3.2 Environment Variable Support
 
-Admin addresses can be configured via environment variables (takes precedence over config file):
+Both whitelists can be configured via environment variables, which **replace**
+the config file's values rather than adding to them:
 
 ```bash
-# Multiple addresses separated by commas
+# Multiple entries separated by commas
 ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
+ALLOWED_IPS=127.0.0.1,192.168.1.0/24
 ```
+
+Setting these in the compose file is worth doing: it is what keeps
+`PUT /v1/config/core` from being able to change who counts as an admin.
 
 ---
 
@@ -120,17 +136,35 @@ ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
 | GET    | `/v1/admin/ips` | Get current IP whitelist |
 
 Read-only. Both whitelists are read once at startup — from config, or from
-`ADMIN_ADDRESS` / `ALLOWED_IPS` where those are set (§3.2) — and cannot be
-changed at runtime: the wallet list is the authorisation boundary for every
-other route here, so an API that widened it would be a way to escalate past it.
-Changing either one means restarting the controller with a new value; if the
-environment variable is set, editing the config file alone will not do it.
+`ADMIN_ADDRESS` / `ALLOWED_IPS` where those are set (§3.2) — and there is no
+longer any API that edits them: the wallet list is the authorisation boundary for
+every other route here, so a route that widened it would be a way to escalate
+past it. Changing either one means restarting the controller with a new value;
+if the environment variable is set, editing the config file alone will not do it.
+
+**This closes the direct route only.** `PUT /v1/config/core` validates YAML
+syntax and nothing else, and it writes the same file the controller loads, so a
+caller holding one admin wallet can still write `controller.adminAddresses`,
+`controller.allowedIPs` or `controller.image` and have it take effect at the next
+controller restart — unless `ADMIN_ADDRESS` / `ALLOWED_IPS` are set in the
+measured compose file, which override it. Two consequences worth stating: set
+those env vars, and note that with them unset an attacker can write themselves in
+*and remove every other admin*, which even the deleted
+`DELETE /v1/admin/wallets/:address` refused to do (it would not drop the last
+admin).
+
+Revocation is now offline. There is no way to invalidate a leaked admin session
+token while the controller runs, and `SessionToken` currently accepts
+`ExpiresAt: 0` as "never expires" — so a leaked token is a permanent credential
+until the controller is redeployed. Bounding token lifetime is tracked
+separately.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
-return 404. `DELETE /v1/admin/ips/:ip` never affected traffic in the first place —
-enforcement uses the startup snapshot held by `IPWhitelistMiddleware`, so the
-route only ever edited what `GET /v1/admin/ips` reported.
+return 404 (not 405 — no `NoRoute` handler distinguishes them from an unknown
+path). Neither `/v1/admin/ips` write route ever affected traffic: enforcement
+uses the startup snapshot held by `IPWhitelistMiddleware`, so both only ever
+edited what `GET /v1/admin/ips` reported.
 
 ---
 
