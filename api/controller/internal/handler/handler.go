@@ -47,16 +47,13 @@ func (h *Handler) RegisterRoutes(v1 *gin.RouterGroup) {
 		config.PUT("/prometheus", h.UpdatePrometheusConfig)
 	}
 
-	// Admin whitelist management
+	// Admin whitelist inspection. Read-only by design: AuthMiddleware gates this
+	// whole group on the wallet list, so it is fixed at startup rather than
+	// editable through the routes it guards.
 	admin := v1.Group("/admin")
 	{
 		admin.GET("/wallets", h.ListAdminWallets)
-		admin.POST("/wallets", h.AddAdminWallet)
-		admin.DELETE("/wallets/:address", h.RemoveAdminWallet)
-
 		admin.GET("/ips", h.ListAllowedIPs)
-		admin.POST("/ips", h.AddAllowedIP)
-		admin.DELETE("/ips/:ip", h.RemoveAllowedIP)
 	}
 
 	// Image management
@@ -191,64 +188,10 @@ func (h *Handler) ListAdminWallets(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"addresses": addrs})
 }
 
-// AddWalletRequest is the request body for adding a wallet
-type AddWalletRequest struct {
-	Address string `json:"address" binding:"required"`
-}
-
-// AddAdminWallet adds an admin wallet address
-func (h *Handler) AddAdminWallet(ctx *gin.Context) {
-	var req AddWalletRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-
-	h.ctrl.AddAdminAddress(req.Address)
-	ctx.JSON(http.StatusOK, gin.H{"message": "admin wallet added"})
-}
-
-// RemoveAdminWallet removes an admin wallet address
-func (h *Handler) RemoveAdminWallet(ctx *gin.Context) {
-	address := ctx.Param("address")
-
-	if !h.ctrl.RemoveAdminAddress(address) {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "cannot remove the last admin address"})
-		return
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{"message": "admin wallet removed"})
-}
-
 // ListAllowedIPs returns all allowed IPs
 func (h *Handler) ListAllowedIPs(ctx *gin.Context) {
 	ips := h.ctrl.GetAllowedIPs()
 	ctx.JSON(http.StatusOK, gin.H{"ips": ips})
-}
-
-// AddIPRequest is the request body for adding an IP
-type AddIPRequest struct {
-	IP string `json:"ip" binding:"required"`
-}
-
-// AddAllowedIP adds an IP to the whitelist
-func (h *Handler) AddAllowedIP(ctx *gin.Context) {
-	var req AddIPRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-
-	h.ctrl.AddAllowedIP(req.IP)
-	ctx.JSON(http.StatusOK, gin.H{"message": "IP added to whitelist"})
-}
-
-// RemoveAllowedIP removes an IP from the whitelist
-func (h *Handler) RemoveAllowedIP(ctx *gin.Context) {
-	ip := ctx.Param("ip")
-
-	h.ctrl.RemoveAllowedIP(ip)
-	ctx.JSON(http.StatusOK, gin.H{"message": "IP removed from whitelist"})
 }
 
 // GetImageInfo returns information about the current image

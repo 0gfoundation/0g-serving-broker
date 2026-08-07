@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -168,6 +169,214 @@ const (
 	okStream     = `{"status":"Pulling from 0gfoundation/0g-serving-broker","id":"latest"}
 {"status":"Status: Downloaded newer image for 0g-serving-broker"}`
 )
+
+// fakeContainerDaemon serves the container list plus a stop endpoint, and
+// records which container IDs the daemon was actually asked to stop. The list
+// is what both unguardedContainerID and selfContainerID read, so it is enough
+// to exercise the self-guard end to end.
+func fakeContainerDaemon(t *testing.T, containers []map[string]any, stopped *[]string) *Client {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode(containers)
+		case strings.HasSuffix(r.URL.Path, "/stop"):
+			parts := strings.Split(strings.TrimSuffix(r.URL.Path, "/stop"), "/")
+			*stopped = append(*stopped, parts[len(parts)-1])
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.NewClientWithOpts(client.WithHost(srv.URL), client.WithVersion("1.47"))
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	return &Client{cli: cli}
+}
+
+// stubHostname points the identification logic at a hostname the test chooses.
+// The real one belongs to whichever machine runs the test, which is the one
+// input a test cannot arrange — and without arranging it the short-hostname and
+// ambiguous-prefix branches are unreachable.
+func stubHostname(t *testing.T, name string) {
+	t.Helper()
+	prev := hostnameFn
+	hostnameFn = func() (string, error) { return name, nil }
+	t.Cleanup(func() { hostnameFn = prev })
+}
+
+const (
+	// A full-length ID whose first shortIDLen characters are what docker would
+	// hand the container as its hostname.
+	selfID     = "abc123def456000000000000000000000000000000000000000000000000cafe"
+	selfHost   = "abc123def456"
+	otherID    = "1111111111111111111111111111111111111111111111111111111111111111"
+	brokerName = "0g-serving-provider-broker"
+)
+
+// The controller container's name CONTAINS the broker's, which is what the
+// substring fallback gets wrong: with the real broker absent it is the only
+// match, so "stop the broker" resolves to the controller itself.
+func selfAndOther() []map[string]any {
+	return []map[string]any{
+		{"Id": selfID, "Names": []string{"/" + brokerName + "-controller"}},
+		{"Id": otherID, "Names": []string{"/0g-serving-provider-event"}},
+	}
+}
+
+// One entry per getContainerID call site, so none of them can be repointed at
+// unguardedContainerID with the suite still green. RecreateContainerWithEnv is
+// covered through UpdateContainerEnv, which is one of its two wrappers.
+func TestWritePathsRefuseSelf(t *testing.T) {
+	stubHostname(t, selfHost)
+
+	writes := map[string]func(*Client) error{
+		"StartContainer":   func(c *Client) error { return c.StartContainer(context.Background(), brokerName) },
+		"StopContainer":    func(c *Client) error { return c.StopContainer(context.Background(), brokerName) },
+		"RestartContainer": func(c *Client) error { return c.RestartContainer(context.Background(), brokerName) },
+		"RecreateContainer": func(c *Client) error {
+			_, err := c.RecreateContainer(context.Background(), brokerName, "img@sha256:"+strings.Repeat("0", 64))
+			return err
+		},
+		"ReloadNginx": func(c *Client) error { return c.ReloadNginx(context.Background(), brokerName) },
+		"UpdateContainerEnv": func(c *Client) error {
+			return c.UpdateContainerEnv(context.Background(), brokerName, map[string]string{"A": "B"})
+		},
+	}
+
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			var stopped []string
+			c := fakeContainerDaemon(t, selfAndOther(), &stopped)
+
+			err := write(c)
+			var selfErr *SelfOperationError
+			if !errors.As(err, &selfErr) {
+				t.Fatalf("%s() = %v, want *SelfOperationError", name, err)
+			}
+			// The daemon has no endpoints beyond list and stop, so anything
+			// that got past the guard would fail on a 404 rather than here.
+			// Asserting the stop specifically is what proves the refusal
+			// happened before the container was touched.
+			if len(stopped) != 0 {
+				t.Errorf("daemon was asked to stop %v, want nothing", stopped)
+			}
+		})
+	}
+}
+
+func TestSelfIdentification(t *testing.T) {
+	t.Run("another container is still writable", func(t *testing.T) {
+		stubHostname(t, selfHost)
+		var stopped []string
+		c := fakeContainerDaemon(t, selfAndOther(), &stopped)
+
+		if err := c.StopContainer(context.Background(), "0g-serving-provider-event"); err != nil {
+			t.Fatalf("StopContainer() = %v, want nil", err)
+		}
+		if len(stopped) != 1 || stopped[0] != otherID {
+			t.Errorf("daemon stopped %v, want [%s]", stopped, otherID)
+		}
+	})
+
+	t.Run("the hostname must be a prefix, not a substring", func(t *testing.T) {
+		// An ID that merely contains the hostname is a different container.
+		// Reading the match as "contains" would refuse writes to it forever.
+		stubHostname(t, "cafe000000000000")
+		var stopped []string
+		c := fakeContainerDaemon(t, []map[string]any{
+			{"Id": "0000cafe0000000000000000000000000000000000000000000000000000beef",
+				"Names": []string{"/0g-serving-provider-event"}},
+			{"Id": "cafe000000000000000000000000000000000000000000000000000000000000",
+				"Names": []string{"/0g-controller"}},
+		}, &stopped)
+
+		if err := c.StopContainer(context.Background(), "0g-serving-provider-event"); err != nil {
+			t.Fatalf("StopContainer() = %v, want nil", err)
+		}
+		if len(stopped) != 1 {
+			t.Errorf("daemon stopped %v, want the event container", stopped)
+		}
+	})
+
+	t.Run("self absent blocks the write", func(t *testing.T) {
+		// Nothing in the list carries the hostname, so nothing can be ruled out
+		// as self and the write is refused rather than proceeding blind.
+		stubHostname(t, selfHost)
+		var stopped []string
+		c := fakeContainerDaemon(t, []map[string]any{
+			{"Id": otherID, "Names": []string{"/0g-serving-provider-event"}},
+		}, &stopped)
+
+		err := c.StopContainer(context.Background(), "0g-serving-provider-event")
+		var unknownErr *SelfUnidentifiedError
+		if !errors.As(err, &unknownErr) {
+			t.Fatalf("StopContainer() = %v, want *SelfUnidentifiedError", err)
+		}
+		if unknownErr.Ambiguous {
+			t.Errorf("Ambiguous = true, want false for an absent self")
+		}
+		if len(stopped) != 0 {
+			t.Errorf("daemon was asked to stop %v, want nothing", stopped)
+		}
+	})
+
+	t.Run("a hostname too short to be an ID blocks the write", func(t *testing.T) {
+		// Without the length guard neither hostname refuses for the reason it
+		// should: "" prefixes both containers and reaches the ambiguity branch,
+		// while "1" prefixes only the event container and names it as self,
+		// refusing a write that should have been allowed. The Ambiguous
+		// assertion below is what separates those from the length refusal.
+		for _, host := range []string{"", "1"} {
+			stubHostname(t, host)
+			var stopped []string
+			c := fakeContainerDaemon(t, selfAndOther(), &stopped)
+
+			err := c.StopContainer(context.Background(), "0g-serving-provider-event")
+			var unknownErr *SelfUnidentifiedError
+			if !errors.As(err, &unknownErr) {
+				t.Fatalf("hostname %q: StopContainer() = %v, want *SelfUnidentifiedError", host, err)
+			}
+			if unknownErr.Ambiguous {
+				t.Errorf("hostname %q: Ambiguous = true, want the length to be the stated reason", host)
+			}
+			if len(stopped) != 0 {
+				t.Errorf("hostname %q: daemon was asked to stop %v, want nothing", host, stopped)
+			}
+		}
+	})
+
+	t.Run("an ambiguous prefix blocks the write", func(t *testing.T) {
+		// Two IDs carry the hostname. Picking either would be a guess decided by
+		// the daemon's list order.
+		stubHostname(t, selfHost)
+		var stopped []string
+		c := fakeContainerDaemon(t, []map[string]any{
+			{"Id": selfHost + strings.Repeat("a", 52), "Names": []string{"/0g-controller"}},
+			{"Id": selfHost + strings.Repeat("b", 52), "Names": []string{"/0g-serving-provider-event"}},
+		}, &stopped)
+
+		err := c.StopContainer(context.Background(), "0g-serving-provider-event")
+		var unknownErr *SelfUnidentifiedError
+		if !errors.As(err, &unknownErr) {
+			t.Fatalf("StopContainer() = %v, want *SelfUnidentifiedError", err)
+		}
+		if !unknownErr.Ambiguous {
+			t.Errorf("Ambiguous = false, want true when two IDs share the prefix")
+		}
+		if len(stopped) != 0 {
+			t.Errorf("daemon was asked to stop %v, want nothing", stopped)
+		}
+	})
+}
 
 func TestPullImage(t *testing.T) {
 	const repo = "ghcr.io/0gfoundation/0g-serving-broker"

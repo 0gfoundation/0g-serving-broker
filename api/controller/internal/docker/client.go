@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,8 +32,7 @@ type ContainerStatus struct {
 
 // Client wraps the Docker client
 type Client struct {
-	cli    *client.Client
-	config config.ControllerConfig
+	cli *client.Client
 }
 
 // NewClient creates a new Docker client
@@ -50,10 +51,7 @@ func NewClient(cfg config.ControllerConfig) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{
-		cli:    cli,
-		config: cfg,
-	}, nil
+	return &Client{cli: cli}, nil
 }
 
 // Close closes the Docker client
@@ -124,35 +122,6 @@ func (c *Client) inspectContainerStatus(ctx context.Context, containerID, contai
 	}, nil
 }
 
-// GetAllContainersStatus gets status of all managed containers
-func (c *Client) GetAllContainersStatus(ctx context.Context) ([]ContainerStatus, error) {
-	var statuses []ContainerStatus
-
-	// Get all managed container names
-	containerNames := []string{
-		c.config.Containers.Broker,
-		c.config.Containers.Event,
-		c.config.Containers.Ingress,
-		c.config.Containers.PrometheusInit,
-		c.config.Containers.Prometheus,
-	}
-
-	for _, name := range containerNames {
-		if name == "" {
-			continue
-		}
-		status, err := c.GetContainerStatus(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		if status != nil {
-			statuses = append(statuses, *status)
-		}
-	}
-
-	return statuses, nil
-}
-
 // StartContainer starts a container by name
 func (c *Client) StartContainer(ctx context.Context, containerName string) error {
 	containerID, err := c.getContainerID(ctx, containerName)
@@ -187,7 +156,7 @@ func (c *Client) RestartContainer(ctx context.Context, containerName string) err
 
 // GetContainerLogs gets logs from a container
 func (c *Client) GetContainerLogs(ctx context.Context, containerName string, tail string) (string, error) {
-	containerID, err := c.getContainerID(ctx, containerName)
+	containerID, err := c.unguardedContainerID(ctx, containerName)
 	if err != nil {
 		return "", err
 	}
@@ -212,10 +181,14 @@ func (c *Client) GetContainerLogs(ctx context.Context, containerName string, tai
 	return string(logs), nil
 }
 
-// getContainerID gets container ID by name
+// unguardedContainerID gets container ID by name.
 // The containerName can be a partial match (e.g., "broker" matches "project-0g-serving-provider-broker-1")
 // Matching priority: exact match > substring match (prefer shortest container name to avoid ambiguity)
-func (c *Client) getContainerID(ctx context.Context, containerName string) (string, error) {
+//
+// Named for what it lacks: it will happily return the controller's own
+// container. Only read paths may call it; writes go through getContainerID.
+// GetContainerStatus carries a third copy of this walk and is also read-only.
+func (c *Client) unguardedContainerID(ctx context.Context, containerName string) (string, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return "", err
@@ -253,9 +226,126 @@ func (c *Client) getContainerID(ctx context.Context, containerName string) (stri
 	return "", &ContainerNotFoundError{Name: containerName}
 }
 
+// getContainerID resolves containerName to a container the controller may write
+// to, refusing to return the controller's own container.
+//
+// Resolution falls back to substring matching, so a container whose name merely
+// contains a managed name can be selected — including the controller's own, in a
+// deployment that names it after the broker. Stopping or removing ourselves
+// mid-upgrade aborts the upgrade with the containers already torn down, so the
+// docker layer refuses rather than relying on every caller to check.
+//
+// This holds the obvious name so that a write path added later gets the guard by
+// default; read paths ask for unguardedContainerID explicitly.
+func (c *Client) getContainerID(ctx context.Context, containerName string) (string, error) {
+	containerID, err := c.unguardedContainerID(ctx, containerName)
+	if err != nil {
+		return "", err
+	}
+
+	selfID, err := c.selfContainerID(ctx)
+	if err != nil {
+		return "", err
+	}
+	if containerID == selfID {
+		return "", &SelfOperationError{Name: containerName}
+	}
+
+	return containerID, nil
+}
+
+// selfContainerID returns the ID of the container the controller runs in.
+//
+// Docker sets a container's hostname to its own short ID, so the container whose
+// ID carries that prefix is us.
+//
+// The prefix must be at least shortIDLen, since a shorter one is a prefix of many
+// IDs. An ambiguous match is refused rather than resolved by list order.
+//
+// Failing to identify ourselves is an error rather than a shrug: every caller is
+// about to write, and "we could not tell whether that container is us" is not a
+// safe basis for stopping it. What the controller's deployment must look like for
+// this to resolve is in doc/controller-design.md §3.1.
+//
+// ponytail: not cached — this and unguardedContainerID list separately, so a
+// write costs two lists against a local socket.
+func (c *Client) selfContainerID(ctx context.Context) (string, error) {
+	hostname, err := hostnameFn()
+	if err != nil {
+		return "", fmt.Errorf("reading hostname to identify the controller's own container: %w", err)
+	}
+	if len(hostname) < shortIDLen {
+		return "", &SelfUnidentifiedError{Hostname: hostname}
+	}
+
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return "", fmt.Errorf("listing containers to identify the controller's own: %w", err)
+	}
+
+	var selfID string
+	for _, cont := range containers {
+		if !strings.HasPrefix(cont.ID, hostname) {
+			continue
+		}
+		if selfID != "" && selfID != cont.ID {
+			return "", &SelfUnidentifiedError{Hostname: hostname, Ambiguous: true}
+		}
+		selfID = cont.ID
+	}
+	if selfID == "" {
+		return "", &SelfUnidentifiedError{Hostname: hostname}
+	}
+
+	return selfID, nil
+}
+
+// shortIDLen is the length of the container ID prefix docker uses as a
+// container's default hostname.
+const shortIDLen = 12
+
+// hostnameFn is os.Hostname, indirected because a test can build fixtures around
+// the machine's hostname but cannot choose it, and the short-hostname branch is
+// only reachable by choosing one.
+var hostnameFn = os.Hostname
+
+// SelfOperationError is returned when an operation would modify the controller's
+// own container.
+type SelfOperationError struct {
+	Name string
+}
+
+func (e *SelfOperationError) Error() string {
+	return "refusing to operate on the controller's own container: " + e.Name +
+		" resolved to it"
+}
+
+// SelfUnidentifiedError is returned when the controller cannot work out which
+// container it is running in, and therefore cannot rule out modifying itself.
+type SelfUnidentifiedError struct {
+	Hostname  string
+	Ambiguous bool // several container IDs carried the hostname as a prefix
+}
+
+// Each branch carries its own remedy: the deployment advice that fits the other
+// two is useless against an ID collision, where the hostname is already docker's.
+func (e *SelfUnidentifiedError) Error() string {
+	const prefix = "cannot identify the controller's own container: hostname "
+	const asContainer = "; the controller must run as a container with docker's default hostname"
+	switch {
+	case e.Ambiguous:
+		return prefix + e.Hostname + " is a prefix of more than one container ID" +
+			"; recreate one of the colliding containers"
+	case len(e.Hostname) < shortIDLen:
+		return prefix + strconv.Quote(e.Hostname) + " is too short to be a container ID" + asContainer
+	default:
+		return prefix + e.Hostname + " matches no container ID" + asContainer
+	}
+}
+
 // GetContainerEnv gets environment variables from a container, filtered by allowed keys
 func (c *Client) GetContainerEnv(ctx context.Context, containerName string, allowedKeys []string) (map[string]string, error) {
-	containerID, err := c.getContainerID(ctx, containerName)
+	containerID, err := c.unguardedContainerID(ctx, containerName)
 	if err != nil {
 		return nil, err
 	}
@@ -551,11 +641,6 @@ type ContainerNotHealthyError struct {
 
 func (e *ContainerNotHealthyError) Error() string {
 	return "container " + e.Name + " is not healthy: " + e.State
-}
-
-// GetImage returns the configured image
-func (c *Client) GetImage() string {
-	return c.config.Image
 }
 
 // ReloadNginx sends a reload signal to nginx in the specified container

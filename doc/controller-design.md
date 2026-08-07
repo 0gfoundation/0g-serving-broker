@@ -19,6 +19,11 @@ Create a subproject named `controller` that provides HTTP APIs to remotely manag
 
 - `0g-serving-provider-broker` - Main broker service
 - `0g-serving-provider-event` - Event processing service
+- `broker-ingress` - nginx front end
+- `prometheus-init` - Prometheus config init container
+- `prometheus` - Prometheus
+
+The names are constants, not configuration — see §3.1.
 
 ---
 
@@ -59,21 +64,44 @@ controller:
   docker:
     host: "unix:///var/run/docker.sock"
     apiVersion: "1.41"
-  containers:
-    broker:
-      name: "0g-serving-provider-broker"
-    event:
-      name: "0g-serving-provider-event"
 ```
+
+The names of the managed containers are **not** configurable. They are constants
+in `api/controller/internal/ctrl` (`0g-serving-provider-broker`,
+`0g-serving-provider-event`, `broker-ingress`, `prometheus-init`,
+`prometheus`). `PUT /v1/config/core` can rewrite the config file, so a name read
+from there would be editable through the controller's own API; changing a
+constant needs a different controller image.
+
+A `controller.containers` key left over from an earlier release is **accepted and
+ignored**, and a `[CONFIG-REMOVED]` line naming it is logged at startup. It is
+not rejected on purpose: this config struct is shared with the broker and event
+binaries, so refusing the key would stop all three from booting. Delete it anyway
+— it steers nothing.
+
+The docker layer additionally refuses to start, stop, restart, remove, recreate
+or exec into the controller's own container, identified by matching
+`os.Hostname()` against container IDs.
+
+**This requires the controller to run as a container with docker's default
+hostname.** Do not set `hostname:` on the controller service and do not use
+`network_mode: host`. Where the hostname does not resolve to a container ID, the
+operations listed above are refused and the error names the hostname; reads are
+unaffected. `PUT /v1/config/core` writes the config file before it restarts
+anything, so in that state it returns 500 with the file already rewritten.
 
 ### 3.2 Environment Variable Support
 
-Admin addresses can be configured via environment variables (takes precedence over config file):
+Both whitelists can be configured via environment variables, which **replace**
+the config file's values rather than adding to them:
 
 ```bash
-# Multiple addresses separated by commas
+# Multiple entries separated by commas
 ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
+ALLOWED_IPS=127.0.0.1,192.168.1.0/24
 ```
+
+Set these in the compose file. §4.4 covers what that does and does not close.
 
 ---
 
@@ -109,11 +137,43 @@ ADMIN_ADDRESS=0xaddr1,0xaddr2,0xaddr3
 | Method | Path | Description |
 |--------|------|-------------|
 | GET    | `/v1/admin/wallets` | Get current admin wallet address list |
-| POST   | `/v1/admin/wallets` | Add new admin wallet address |
-| DELETE | `/v1/admin/wallets/:address` | Remove admin wallet address |
 | GET    | `/v1/admin/ips` | Get current IP whitelist |
-| POST   | `/v1/admin/ips` | Add new IP to whitelist |
-| DELETE | `/v1/admin/ips/:ip` | Remove IP from whitelist |
+
+Read-only. Both whitelists are read once at startup — from config, or from
+`ADMIN_ADDRESS` / `ALLOWED_IPS` where those are set (§3.2) — and there is no
+longer any API that edits them: the wallet list is the authorisation boundary for
+every other route here, so a route that widened it would be a way to escalate
+past it. Changing either one means restarting the controller with a new value;
+if the environment variable is set, editing the config file alone will not do it.
+
+**This closes the direct route only.** `PUT /v1/config/core` validates YAML syntax
+and nothing else, and it writes the same file the controller loads. A caller
+holding one admin wallet can write `controller.adminAddresses`,
+`controller.allowedIPs`, `controller.image` or `controller.docker.host` there, and
+the controller reads them at its next start. `ADMIN_ADDRESS` / `ALLOWED_IPS`
+override the first two (§3.2); nothing overrides the other two. **Set those env
+vars in the compose file** — and note that no code path enforces a floor on the
+number of remaining admins.
+
+Revocation is offline. Nothing invalidates a leaked admin session token while the
+controller runs, and `SessionToken` treats `ExpiresAt: 0` as never expiring.
+Bounding token lifetime is tracked separately.
+
+Read the container guard as a safety interlock, not containment. `controller.image`
+and `controller.docker.host` are read by the **broker** too
+(`inference/internal/contract/provider_contract.go`), and `PUT /v1/config/core`
+restarts the broker in the same call — so a write to either lands there within
+seconds, and `controller.image` is what the broker reports on-chain as
+`ImageName`, with the digest read from whatever daemon `controller.docker.host`
+names. The controller's own copy of `controller.image` waits for the controller to
+restart, which no route here triggers.
+
+**Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
+`POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
+return 404, indistinguishable from an unknown path. Neither `/v1/admin/ips`
+write route ever affected traffic: enforcement
+uses the startup snapshot held by `IPWhitelistMiddleware`, so both only ever
+edited what `GET /v1/admin/ips` reported.
 
 ---
 
@@ -304,13 +364,13 @@ Where:
 
 2. **Wallet Address Whitelist** (Second Layer) - Identity verification based on Ethereum signatures
    - Ethereum address format: `0x1234...`
-   - Session Token supports expiration time
-   - Nonce prevents replay attacks
+   - Session Token carries an expiry, and `ExpiresAt: 0` means it never expires
+   - Nonce is carried in the token but never checked — see §4.4
 
 ### 7.2 Operational Security
 
 - Validate YAML format before config updates
-- Keep at least one admin wallet address to prevent lockout
+- Keep at least one admin wallet address to prevent lockout — no code enforces this
 - Use EIP-191 standard personal sign for signature verification
 
 ---
@@ -322,6 +382,10 @@ Where:
 ```bash
 ./0g-serving-broker 0g-controller
 ```
+
+This is also what §8.2's compose runs. What decides whether container management
+works is the deployment shape, not the entry point: run directly on a host, the
+controller serves reads and refuses every container write. See §3.1.
 
 ### 8.2 Docker Compose Deployment
 

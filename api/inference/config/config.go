@@ -1186,24 +1186,27 @@ type ControllerConfig struct {
 	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
 	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
 	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
-	Containers     ContainersConfig     `yaml:"containers"`     // All managed containers
 	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
 	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
+
+	// Deprecated: the managed container names are compile-time constants in
+	// controller/internal/ctrl and nothing reads this field.
+	//
+	// It is still declared because config parsing is strict and this whole
+	// struct is shared with the broker and event binaries: dropping the key
+	// outright would turn every deployment still carrying it into a boot
+	// failure of all three, controller disabled or not.
+	//
+	// The shape a deployment can be carrying is the flat one, since that is what
+	// the previous struct accepted. The map is wider than that and accepts
+	// anything under the key, which no longer steers anything either way.
+	Containers map[string]interface{} `yaml:"containers"`
 }
 
 // DockerConfig Docker connection configuration
 type DockerConfig struct {
 	Host       string `yaml:"host"`       // Docker socket path, default unix:///var/run/docker.sock
 	APIVersion string `yaml:"apiVersion"` // Docker API version, default 1.41
-}
-
-// ContainersConfig all managed containers configuration
-type ContainersConfig struct {
-	Broker         string `yaml:"broker"`         // Broker container name, default "0g-serving-provider-broker"
-	Event          string `yaml:"event"`          // Event container name, default "0g-serving-provider-event"
-	Ingress        string `yaml:"ingress"`        // Ingress container name, default "broker-ingress"
-	PrometheusInit string `yaml:"prometheusInit"` // Prometheus init container name, default "prometheus-init"
-	Prometheus     string `yaml:"prometheus"`     // Prometheus container name, default "prometheus"
 }
 
 // IngressAllowedEnvKeys whitelist of environment variables that can be modified for ingress
@@ -1691,6 +1694,16 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	config.MigrateDurationFromInt(raw,
 		[]string{"providerHttp", "responseHeaderTimeoutMinutes"}, []string{"providerHttp", "responseHeaderTimeout"},
 		&cfg.ProviderHttp.ResponseHeaderTimeout, int64(cfg.ProviderHttp.ResponseHeaderTimeoutMinutes), time.Minute)
+
+	// Removed: controller.containers. The names are constants in the controller
+	// now. The key still parses so that a config carrying it boots; this line is
+	// what tells the operator it no longer steers anything.
+	//
+	// Not WarnDeprecated: nothing replaced this key, and its message would name a
+	// replacement and a removal date that do not exist.
+	if config.RawHasKey(raw, "controller", "containers") {
+		log.Printf("[CONFIG-REMOVED] %q is ignored: the controller's container names are fixed in code; delete the key", "controller.containers")
+	}
 
 	// Rename: database.provider → database.dsn
 	config.MigrateStringRename(raw, []string{"database", "provider"}, []string{"database", "dsn"},
@@ -2264,13 +2277,6 @@ func GetConfig() *Config {
 				Docker: DockerConfig{
 					Host:       "unix:///var/run/docker.sock",
 					APIVersion: "1.41",
-				},
-				Containers: ContainersConfig{
-					Broker:         "0g-serving-provider-broker",
-					Event:          "0g-serving-provider-event",
-					Ingress:        "broker-ingress",
-					PrometheusInit: "prometheus-init",
-					Prometheus:     "prometheus",
 				},
 				Logger: &config.LoggerConfig{
 					Format:        "text",
