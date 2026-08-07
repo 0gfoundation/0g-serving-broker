@@ -69,7 +69,7 @@ func (e *fakeEmitter) EmitEvent(_ context.Context, event string, payload []byte)
 // out so UpdateImages runs its whole broker half and then stops where it cannot
 // resolve that container — past everything being asserted, and short of the
 // contract sync, which would need a chain to talk to.
-func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool) *docker.Client {
+func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool, pullBody string) *docker.Client {
 	t.Helper()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +78,7 @@ func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool) *docker.Client {
 			w.Header().Set("Api-Version", "1.47")
 		case strings.Contains(r.URL.Path, "/images/create"):
 			l.add("pull")
-			_, _ = w.Write([]byte(okPull))
+			_, _ = w.Write([]byte(pullBody))
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
 			list := []map[string]any{
 				{"Id": brokerID, "Names": []string{"/0g-serving-provider-broker"}},
@@ -111,7 +111,7 @@ func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool) *docker.Client {
 				"Name":        "/0g-serving-provider-broker",
 				"RepoDigests": []string{"ghcr.io/0gfoundation/0g-serving-broker@" + testDigest},
 				"Created":     "2026-01-01T00:00:00Z",
-				"Config":      map[string]any{"Image": "old:tag"},
+				"Config":      map[string]any{"Image": prevRef},
 				"State":       map[string]any{"Status": "running"},
 				"NetworkSettings": map[string]any{
 					"Networks": map[string]any{"default": map[string]any{}},
@@ -152,7 +152,12 @@ const (
 	selfID     = "cccc333333333333333333333333333333333333333333333333333333333333"
 	selfHost   = "cccc33333333"
 	testDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	okPull     = `{"status":"Status: Downloaded newer image for 0g-serving-broker"}`
+	prevDigest = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+	imageRepo  = "ghcr.io/0gfoundation/0g-serving-broker"
+	// What the broker container is currently on, digest-pinned as a verifiable
+	// deployment must be. The abort paths read it back off the container.
+	prevRef = imageRepo + "@" + prevDigest
+	okPull  = `{"status":"Status: Downloaded newer image for 0g-serving-broker"}`
 )
 
 func testLogger(t *testing.T) log.Logger {
@@ -164,15 +169,15 @@ func testLogger(t *testing.T) log.Logger {
 	return l
 }
 
-func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, withEvent bool) *Ctrl {
+func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, withEvent bool, pullBody string) *Ctrl {
 	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
 	return &Ctrl{
 		config: config.ControllerConfig{
-			ImageRepo:  "ghcr.io/0gfoundation/0g-serving-broker",
+			ImageRepo:  imageRepo,
 			ConfigFile: configFile,
 		},
-		dockerClient: fakeChangeDaemon(t, l, withEvent),
+		dockerClient: fakeChangeDaemon(t, l, withEvent, pullBody),
 		emitter:      &fakeEmitter{log: l, err: emitErr},
 		logger:       testLogger(t),
 	}
@@ -192,7 +197,7 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	}
 
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, path, true)
+	c := newChangeCtrl(t, l, nil, path, true, okPull)
 
 	const content = "service:\n  name: after\n"
 	if err := c.ApplyCoreConfig(context.Background(), content); err != nil {
@@ -234,7 +239,7 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 	}
 
 	l := &opLog{}
-	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, true)
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, true, okPull)
 
 	if err := c.ApplyCoreConfig(context.Background(), "service:\n  name: after\n"); err == nil {
 		t.Fatal("ApplyCoreConfig() = nil, want an error when the change cannot be recorded")
@@ -257,7 +262,7 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 // pull is already a change to the machine's state.
 func TestImageChangeIsRecordedBeforeItHappens(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, "", false)
+	c := newChangeCtrl(t, l, nil, "", false, okPull)
 
 	// Fails at the end, when the absent event container cannot be resolved. That
 	// is past everything this test is about, and short of the contract sync, which
@@ -282,9 +287,118 @@ func TestImageChangeIsRecordedBeforeItHappens(t *testing.T) {
 	}
 }
 
+// The property a reader actually depends on: the last image record names the image
+// the broker will be running when it next serves a quote. Recording first is what
+// makes an unrecorded change impossible; this is what stops a record outliving the
+// change it describes.
+//
+// Without it, the two-call downgrade works: install an older published image, then
+// ask to upgrade to the current one with a digest the registry cannot serve. The
+// pull fails, nothing is touched, and the ledger names the digest a verifier is
+// looking for while the superseded image serves traffic. Nothing privileged is
+// needed — a well-formed digest that does not exist is enough.
+func TestFailedImageChangeRestoresTheRecord(t *testing.T) {
+	l := &opLog{}
+	failedPull := `{"errorDetail":{"message":"manifest unknown"}}`
+	c := newChangeCtrl(t, l, nil, "", false, failedPull)
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want the pull to fail")
+	}
+
+	ops := l.all()
+	want := []string{
+		"emit " + eventImageUpdate + " " + imageRepo + "@" + testDigest,
+		"pull",
+		"emit " + eventImageUpdate + " " + prevRef,
+	}
+	if len(ops) != len(want) {
+		t.Fatalf("ops = %v, want %v", ops, want)
+	}
+	for i := range want {
+		if ops[i] != want[i] {
+			t.Errorf("ops[%d] = %q, want %q", i, ops[i], want[i])
+		}
+	}
+	// The restoring record has to be last, because that is the one a reader reads.
+	// Appending it is the only correction an append-only ledger allows.
+	if got := ops[len(ops)-1]; !strings.HasSuffix(got, prevRef) {
+		t.Errorf("last op = %q, want it to name the running image %q", got, prevRef)
+	}
+}
+
+// Once the broker is on the new image the record is already right, so the later
+// failures must NOT append anything — restoring there would replace a true record
+// with a false one.
+func TestImageChangeAfterTheBrokerMovedDoesNotRestore(t *testing.T) {
+	l := &opLog{}
+	// withEvent=false, so this fails at the event container — after the broker has
+	// been recreated on the new image.
+	c := newChangeCtrl(t, l, nil, "", false, okPull)
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want the event container to be unresolvable")
+	}
+
+	var emits []string
+	for _, op := range l.all() {
+		if strings.HasPrefix(op, "emit ") {
+			emits = append(emits, op)
+		}
+	}
+	if len(emits) != 1 {
+		t.Errorf("emits = %v, want only the original record — the broker did reach that image", emits)
+	}
+}
+
+// Same property for the config path. The recorded hash would otherwise name content
+// that was never applied, and the caller chooses what content that is.
+func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	const onDisk = "service:\n  name: on-disk\n"
+	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
+		t.Fatalf("seeding the config file: %v", err)
+	}
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, path, true, okPull)
+
+	// Called directly: making os.WriteFile fail on demand needs either a
+	// root-dependent chmod or a path whose re-read fails too, and neither exercises
+	// the restore itself. The wiring from the write's error to here is one line in
+	// ApplyCoreConfig.
+	cause := errors.New("write /etc/config/config.yaml: read-only file system")
+	if err := c.abortConfigChange(context.Background(), cause); !errors.Is(err, cause) {
+		t.Errorf("abortConfigChange() = %v, want it to carry the original cause", err)
+	}
+
+	sum := sha256.Sum256([]byte(onDisk))
+	want := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	if ops := l.all(); len(ops) != 1 || ops[0] != want {
+		t.Errorf("ops = %v, want %q — the hash of what is actually on disk", ops, want)
+	}
+}
+
+// A restore that itself fails must be loud in the returned error, because the
+// ledger is then left overstating and only an operator can resolve it.
+func TestFailedRestoreIsReported(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "gone", "config.yaml"), true, okPull)
+
+	cause := errors.New("original failure")
+	err := c.abortConfigChange(context.Background(), cause)
+	if !errors.Is(err, cause) {
+		t.Errorf("abortConfigChange() = %v, want it to carry the original cause", err)
+	}
+	if !strings.Contains(err.Error(), "RTMR3 still names") {
+		t.Errorf("abortConfigChange() = %v, want it to say the record was left overstating", err)
+	}
+}
+
 func TestImageChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), "", false)
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), "", false, okPull)
 
 	result, err := c.UpdateImages(context.Background(), testDigest)
 	if err == nil {
@@ -306,7 +420,7 @@ func TestImageChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 // refused rather than queued: it has to know its digest is not the one that won.
 func TestConcurrentChangesAreRefused(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), true)
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), true, okPull)
 
 	c.changing.Lock()
 	defer c.changing.Unlock()

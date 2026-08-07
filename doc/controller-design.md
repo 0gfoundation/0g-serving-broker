@@ -293,16 +293,43 @@ Three properties this rests on, none of them visible from the call site:
 - **`zg-` is a namespace.** dstack already writes `app-id`, `compose-hash`,
   `os-image-hash` and `system-ready` into RTMR3, and other components may add
   their own.
-- **Every emit is followed by a broker restart in the same call.** The broker
-  takes its quote once at startup and serves it from cache, so an event emitted
-  while it runs reaches no reader until it restarts. Both paths above already
-  recreate or restart it; `controller/internal/ctrl/rtmr3_test.go` is what keeps
-  that true.
+- **A change is published by restarting the broker.** The broker takes its quote
+  once at startup and serves it from cache, so an event emitted while it runs
+  reaches no reader until it restarts. Both paths above recreate or restart it.
 
-A failure to record aborts the change with nothing touched. The asymmetry is
-deliberate: crashing between the record and the change leaves a claim about an
-image that is not running, which a reader compares against what it expected and
-rejects. Recording afterwards would invert that into a silent upgrade.
+#### The invariant, stated properly
+
+> The **last** image record names the image the broker will be running when it next
+> serves a quote, and the last config record names the file it will read.
+
+Recording *before* the change is one half of that: it makes an unrecorded change
+impossible, which is the silent-upgrade failure. A failure to record aborts with
+nothing touched.
+
+The other half is that **a record must not outlive the change it describes**, and
+RTMR3 cannot be rewound — so every abort path *appends the truth*:
+`UpdateImages` re-reads the reference off the broker container and records it;
+`ApplyCoreConfig` re-reads the file and records its hash. A reader takes the last
+record, so appending restores the answer.
+
+Leaving the stale record instead is **not** the conservative direction, which is
+why this half is load-bearing rather than tidy. The stale record names the digest
+the caller asked for — for an attacker, exactly the digest a verifier is looking for
+— while the broker keeps running whatever it ran before. Reaching that state needs
+nothing privileged: ask to upgrade to a well-formed digest the registry cannot
+serve, and the pull fails with every container untouched. Do it after installing an
+older *published* image and the ledger names the current release while a superseded
+one serves traffic. "A reader would reject it" only holds when the stale record
+names something the reader was **not** looking for.
+
+Boundary: once the broker has been recreated on the new image, the record is already
+correct, so the remaining failures (health wait, ingress reload, event container,
+contract sync) must *not* restore — doing so would replace a true record with a
+false one.
+
+If a restore itself fails, the ledger is left overstating and the API error says so;
+only an operator can resolve that. `controller/internal/ctrl/rtmr3_test.go` covers
+both halves and the boundary.
 
 `zg-config-update` records **behaviour, not just code**. Pricing, verifiability
 and `targetUrl` all live in that config file; an image digest alone would leave

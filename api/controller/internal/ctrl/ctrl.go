@@ -33,6 +33,14 @@ import (
 // — the record outlives the process that wrote it and does not depend on the
 // process being honest later.
 //
+// The property the two change paths owe a reader is therefore not "a record exists"
+// but: **the last image record names the image the broker will be running when it
+// next serves a quote, and the last config record names the file it will read.**
+// Recording first is how a change cannot happen unrecorded; appending the truth on
+// abort (abortImageChange, abortConfigChange) is how a record cannot outlive the
+// change it describes. Both halves are needed — the ledger is append-only, so the
+// second cannot be done by rewinding.
+//
 // An interface only so the ordering below can be tested; production is the dstack
 // client over /var/run/dstack.sock.
 type EventEmitter interface {
@@ -372,10 +380,12 @@ func (c *Ctrl) GetCoreConfig() (string, error) {
 // It is hashed and recorded in RTMR3 before the file is written, so a reader can
 // tell whether the running configuration is still the one the compose_hash
 // pinned — and if not, which content replaced it. A failure to record aborts
-// before the write: an unrecorded change is a change nobody can see.
+// before the write: an unrecorded change is a change nobody can see. A write that
+// then fails restores the record, for the reasons in abortConfigChange.
 //
-// The restarts are not only how the new config takes effect, they are what makes
-// the record visible: see the note on the emit in UpdateImages.
+// The restarts are not only how the new config takes effect, they are also what
+// publishes the record — the broker serves a quote it took at startup, so an event
+// emitted while it runs reaches no reader until it restarts.
 func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error {
 	// Validate YAML format (but don't use parsed result to preserve original content)
 	var tmp interface{}
@@ -394,7 +404,7 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	}
 
 	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
-		return err
+		return c.abortConfigChange(ctx, err)
 	}
 
 	// Restart both broker and event since they share the config
@@ -406,6 +416,84 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	}
 
 	return nil
+}
+
+// abortImageChange restores the image record and returns the error to report.
+//
+// Called on every path that fails between recording an image change and the broker
+// actually running it.
+func (c *Ctrl) abortImageChange(ctx context.Context, cause error) error {
+	if err := c.restoreImageRecord(ctx); err != nil {
+		c.logger.Errorf("[UpdateImages] RTMR3 names an image the broker is not running and the record could not be restored: %v", err)
+		return errors.Join(cause, fmt.Errorf("RTMR3 still names the image this upgrade did not reach, and restoring it failed: %w", err))
+	}
+	c.logger.Info("[UpdateImages] Upgrade aborted; RTMR3 record restored to the image the broker is running")
+	return cause
+}
+
+// restoreImageRecord appends a record naming the image the broker is actually on.
+//
+// RTMR3 cannot be edited or rewound, so a record that turned out not to describe
+// reality is corrected the only way an append-only ledger allows: by appending the
+// truth after it. A reader takes the last image record as what is running, which is
+// what this restores.
+//
+// Leaving the overstatement instead is not the conservative direction, which is
+// what makes this load-bearing rather than tidy. The stale record names the digest
+// the caller asked for — for an attacker, the digest a verifier is looking for —
+// while the broker keeps running whatever it ran before. Reaching that state needs
+// nothing privileged: ask to upgrade to a well-formed digest the registry cannot
+// serve, and the pull fails with every container untouched. Do it after installing
+// an older published image and the ledger says the current release while a
+// superseded one serves traffic. "A reader would reject it" only holds when the
+// stale record names something the reader was not looking for.
+//
+// The broker's current reference is re-read rather than captured beforehand,
+// because the abort paths differ in how far they got: some leave it running the old
+// image, one leaves it created-but-not-started on the new one. Whatever the
+// container says now is the answer in both.
+func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
+	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	if err != nil {
+		return fmt.Errorf("reading the broker's image: %w", err)
+	}
+	if status == nil {
+		// The abort removed the container and did not get one back. There is no
+		// running image to name, and no vocabulary for "none" — the operator has to
+		// resolve it, and the error says so.
+		return fmt.Errorf("no %s container to read an image from", containerBroker)
+	}
+
+	// A reference with no digest is nothing a reader can act on, and a deployment
+	// that has one is not verifiable to begin with: attest refuses a compose file
+	// that pins the broker by tag. Recording it would add noise, not truth.
+	if _, digest, pinned := strings.Cut(status.Image, "@"); !pinned || !imageDigestPattern.MatchString(digest) {
+		return fmt.Errorf("the broker runs %q, which pins no digest", status.Image)
+	}
+
+	return c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(status.Image))
+}
+
+// abortConfigChange restores the config record and returns the error to report.
+//
+// Same reasoning as restoreImageRecord: the recorded hash would otherwise name
+// content that was never applied, and an attacker picks which content that is.
+//
+// The file is re-read rather than assumed unchanged, because os.WriteFile truncates
+// before it writes — a failure part-way through leaves content that is neither the
+// old nor the new, and that is what the record has to name.
+func (c *Ctrl) abortConfigChange(ctx context.Context, cause error) error {
+	content, err := os.ReadFile(c.config.ConfigFile)
+	if err == nil {
+		sum := sha256.Sum256(content)
+		err = c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:])))
+	}
+	if err != nil {
+		c.logger.Errorf("[ApplyCoreConfig] RTMR3 names config content that was not applied and the record could not be restored: %v", err)
+		return errors.Join(cause, fmt.Errorf("RTMR3 still names the config this change did not apply, and restoring it failed: %w", err))
+	}
+	c.logger.Info("[ApplyCoreConfig] Change aborted; RTMR3 record restored to the config on disk")
+	return cause
 }
 
 // InvalidContainerError is returned when an invalid container alias is provided
@@ -595,18 +683,13 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	ref := c.config.ImageRepo + "@" + digest
 
 	// Recorded before anything is pulled, stopped or created, and a failure to
-	// record aborts the upgrade with every container untouched.
+	// record aborts the upgrade with every container untouched. Recording
+	// afterwards would leave a window in which the broker runs an image nothing
+	// accounted for, which is the silent upgrade this whole path exists to prevent.
 	//
-	// The asymmetry is deliberate. Crashing between the record and the recreate
-	// leaves a claim about an image that is not running: conservative, and
-	// visible — a reader compares it against the digest it expected and rejects.
-	// Recording afterwards would invert that into a silent upgrade, which is the
-	// failure this whole path exists to make impossible.
-	//
-	// Load-bearing, and not visible from here: the broker takes its quote once at
-	// startup and serves it from cache, so an event emitted while it runs does not
-	// reach any reader until it restarts. Every emit therefore has to be followed
-	// by a broker restart within the same call. This one recreates it at step 3.
+	// Recording first means the record can outlive an upgrade that then fails, so
+	// every abort path below restores it — see restoreImageRecord for why the
+	// overstatement is the dangerous direction and not the safe one.
 	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
 		return nil, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
 	}
@@ -624,6 +707,11 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	c.logger.Info("[UpdateImages] Pulling latest image...")
 	imageInfo, err := c.dockerClient.PullImage(ctx, ref)
 	if err != nil {
+		// Reassigned first, so a restore that failed reaches the caller: the
+		// handler reports result.Error, not the returned error, when the result
+		// is non-nil — and "RTMR3 is left overstating" is the half an operator
+		// has to act on.
+		err = c.abortImageChange(ctx, err)
 		result.Success = false
 		result.Error = "failed to pull image: " + err.Error()
 		return result, err
@@ -637,6 +725,11 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	if err := c.dockerClient.StopContainer(ctx, eventName); err != nil {
 		// Log error but continue - container might not exist
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+			// Reassigned first, so a restore that failed reaches the caller: the
+			// handler reports result.Error, not the returned error, when the result
+			// is non-nil — and "RTMR3 is left overstating" is the half an operator
+			// has to act on.
+			err = c.abortImageChange(ctx, err)
 			result.Success = false
 			result.Error = "failed to stop event container: " + err.Error()
 			return result, err
@@ -646,6 +739,11 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Then stop broker
 	if err := c.dockerClient.StopContainer(ctx, brokerName); err != nil {
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
+			// Reassigned first, so a restore that failed reaches the caller: the
+			// handler reports result.Error, not the returned error, when the result
+			// is non-nil — and "RTMR3 is left overstating" is the half an operator
+			// has to act on.
+			err = c.abortImageChange(ctx, err)
 			result.Success = false
 			result.Error = "failed to stop broker container: " + err.Error()
 			return result, err
@@ -659,10 +757,20 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		result.UpdatedContainers = append(result.UpdatedContainers, *brokerResult)
 	}
 	if err != nil {
+		// Reassigned first, so a restore that failed reaches the caller: the
+		// handler reports result.Error, not the returned error, when the result
+		// is non-nil — and "RTMR3 is left overstating" is the half an operator
+		// has to act on.
+		err = c.abortImageChange(ctx, err)
 		result.Success = false
 		result.Error = "failed to recreate broker container: " + err.Error()
 		return result, err
 	}
+
+	// Past here the broker is on ref, so the record already says the right thing
+	// and the abort paths below must NOT restore it. Everything that remains —
+	// the health wait, the ingress reload, the event container, the contract sync
+	// — can fail without changing which image the broker is running.
 
 	// Wait for broker to become healthy before starting event
 	if err := c.dockerClient.WaitForHealthy(ctx, brokerName, 2*time.Minute); err != nil {
