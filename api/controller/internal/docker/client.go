@@ -309,6 +309,19 @@ const shortIDLen = 12
 // only reachable by choosing one.
 var hostnameFn = os.Hostname
 
+// SetHostnameForTests points self-identification at a chosen hostname and returns
+// a function restoring the previous source.
+//
+// Exported only because the ctrl package's tests drive write paths through this
+// client, and every write asks which container is us by matching os.Hostname()
+// against container IDs — the one input a test cannot arrange for itself. Nothing
+// in production calls this; os.Hostname is the default.
+func SetHostnameForTests(name string) (restore func()) {
+	prev := hostnameFn
+	hostnameFn = func() (string, error) { return name, nil }
+	return func() { hostnameFn = prev }
+}
+
 // SelfOperationError is returned when an operation would modify the controller's
 // own container.
 type SelfOperationError struct {

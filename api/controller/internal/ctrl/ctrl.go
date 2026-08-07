@@ -2,15 +2,19 @@ package ctrl
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Dstack-TEE/dstack/sdk/go/dstack"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"gopkg.in/yaml.v3"
@@ -20,6 +24,43 @@ import (
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
 )
+
+// EventEmitter extends RTMR3 with one runtime event.
+//
+// RTMR3 is append-only hardware state: an event folded into it cannot be edited
+// or removed, and it is covered by the signature over any quote taken afterwards.
+// That is the whole reason the controller records a change here before making it
+// — the record outlives the process that wrote it and does not depend on the
+// process being honest later.
+//
+// An interface only so the ordering below can be tested; production is the dstack
+// client over /var/run/dstack.sock.
+type EventEmitter interface {
+	EmitEvent(ctx context.Context, event string, payload []byte) error
+}
+
+// The two events the controller records, and their payloads.
+//
+// This is a wire contract with every verifier that reads RTMR3, and the payload
+// bytes go into the event's digest — so a change to a name or an encoding is a
+// change to the measurement, and old readers stop being able to explain new logs.
+// Payloads are bare bytes rather than JSON for that reason: a verifier has to
+// reproduce them exactly, and JSON leaves key order, spacing and escaping free.
+//
+// The zg- prefix is a namespace. dstack already writes app-id, compose-hash and
+// system-ready into RTMR3, and other components may add their own.
+const (
+	// Payload: "<repo>@sha256:<64hex>", the reference the upgrade runs on.
+	eventImageUpdate = "zg-image-update"
+	// Payload: hex(sha256(config file content)). Records behaviour, not just
+	// code: pricing, verifiability and targetUrl all live in that file, and an
+	// image digest alone would leave them changeable without a trace.
+	eventConfigUpdate = "zg-config-update"
+)
+
+// ErrChangeInProgress is returned when a change is refused because another one
+// holds the controller.
+var ErrChangeInProgress = errors.New("another image or config change is in progress")
 
 // Names of the containers the controller manages.
 //
@@ -87,6 +128,16 @@ type Ctrl struct {
 	config       config.ControllerConfig
 	fullConfig   *config.Config // Full config for accessing Service configuration
 	dockerClient *docker.Client
+	emitter      EventEmitter
+
+	// Serializes the two paths that record into RTMR3 and then act.
+	//
+	// RTMR3 is a ledger, and two upgrades interleaving would write one whose
+	// events do not describe the order things happened in: the last
+	// zg-image-update is what a reader believes is running, and with concurrent
+	// callers the last event and the last container created can come from
+	// different requests. Held for the whole operation, not just the emit.
+	changing sync.Mutex
 
 	// Contract for syncing services
 	servingContract *contract.ServingContract
@@ -130,9 +181,15 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	}
 
 	ctrl := &Ctrl{
-		config:         cfg,
-		fullConfig:     fullConfig,
-		dockerClient:   dockerClient,
+		config:       cfg,
+		fullConfig:   fullConfig,
+		dockerClient: dockerClient,
+		// Talks to /var/run/dstack.sock, which the controller's compose entry has
+		// to mount. Not dialled here: the client is lazy, and a controller that
+		// refused to start without it would take the read-only endpoints down too.
+		// An upgrade attempted without the socket fails at the emit, before
+		// anything is touched, which is the outcome that matters.
+		emitter:        dstack.NewDstackClient(),
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
 		logger:         logger,
@@ -308,13 +365,32 @@ func (c *Ctrl) GetCoreConfig() (string, error) {
 	return string(data), nil
 }
 
-// ApplyCoreConfig updates the shared config file and restarts both broker and event containers
-// configContent is raw YAML string to avoid parsing issues with hex addresses
+// ApplyCoreConfig updates the shared config file and restarts both broker and
+// event containers.
+//
+// configContent is a raw YAML string, to avoid parsing issues with hex addresses.
+// It is hashed and recorded in RTMR3 before the file is written, so a reader can
+// tell whether the running configuration is still the one the compose_hash
+// pinned — and if not, which content replaced it. A failure to record aborts
+// before the write: an unrecorded change is a change nobody can see.
+//
+// The restarts are not only how the new config takes effect, they are what makes
+// the record visible: see the note on the emit in UpdateImages.
 func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error {
 	// Validate YAML format (but don't use parsed result to preserve original content)
 	var tmp interface{}
 	if err := yaml.Unmarshal([]byte(configContent), &tmp); err != nil {
 		return &InvalidConfigError{Err: err}
+	}
+
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
+	sum := sha256.Sum256([]byte(configContent))
+	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
+		return fmt.Errorf("recording the config change in RTMR3: %w", err)
 	}
 
 	if err := os.WriteFile(c.config.ConfigFile, []byte(configContent), 0644); err != nil {
@@ -496,8 +572,10 @@ func (c *Ctrl) SyncService(ctx context.Context, imageName, imageDigest string) e
 // so the reference built here is the only description of what runs — which is
 // what lets it later be recorded as one, in a log that cannot be rewritten.
 //
-// The order of operations is unchanged, and still leaves the contract for last
-// so it is only updated once the containers are running the new image:
+// The order of the container work is unchanged, and still leaves the contract
+// for last so it is only updated once the containers are running the new image.
+// The RTMR3 record goes in front of all of it:
+// 0. Record the reference in RTMR3
 // 1. Pull image
 // 2. Stop containers (event -> broker)
 // 3. Recreate containers (broker -> event)
@@ -507,9 +585,31 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return nil, err
 	}
 
-	// The one reference this upgrade runs on. Built once so pull, recreate and
-	// the contract sync cannot end up describing different images.
+	if !c.changing.TryLock() {
+		return nil, ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
+	// The one reference this upgrade runs on. Built once so the record, the pull,
+	// the recreate and the contract sync cannot end up describing different images.
 	ref := c.config.ImageRepo + "@" + digest
+
+	// Recorded before anything is pulled, stopped or created, and a failure to
+	// record aborts the upgrade with every container untouched.
+	//
+	// The asymmetry is deliberate. Crashing between the record and the recreate
+	// leaves a claim about an image that is not running: conservative, and
+	// visible — a reader compares it against the digest it expected and rejects.
+	// Recording afterwards would invert that into a silent upgrade, which is the
+	// failure this whole path exists to make impossible.
+	//
+	// Load-bearing, and not visible from here: the broker takes its quote once at
+	// startup and serves it from cache, so an event emitted while it runs does not
+	// reach any reader until it restarts. Every emit therefore has to be followed
+	// by a broker restart within the same call. This one recreates it at step 3.
+	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
+		return nil, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
+	}
 
 	result := &docker.ImageUpdateResult{
 		Image:             ref,

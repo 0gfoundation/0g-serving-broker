@@ -199,7 +199,9 @@ so there is no request shape that pulls by tag.
 
 The digest is validated before anything is stopped, removed or created — a
 malformed one cannot leave the deployment half-upgraded with the event container
-already down.
+already down. It is then recorded in RTMR3 before the pull (§5.1a); if the record
+fails the request returns **500** and nothing was touched, and if another change
+holds the controller it returns **409** (`PUT /v1/config/core` shares that lock).
 
 `GET /v1/images/info` reports the image the **broker container** is running,
 read off the container rather than off config. It used to inspect the configured
@@ -269,7 +271,55 @@ Therefore, restart order should be:
 - **Stop**: event → broker
 - **Start**: broker → event (wait for broker healthy)
 
+### 5.1a RTMR3 accounting
+
+Every change the controller makes inside the TEE is recorded in **RTMR3 before it
+is made**. RTMR3 is append-only hardware state: an event folded into it cannot be
+edited or removed, and it is covered by the signature over any quote taken
+afterwards — so the record outlives the process that wrote it and does not depend
+on that process being honest later.
+
+| event | payload (bare bytes, not JSON) | emitted before |
+|---|---|---|
+| `zg-image-update` | `<repo>@sha256:<64hex>` — the reference the upgrade runs on | `POST /v1/images/update` pulls or touches any container |
+| `zg-config-update` | `hex(sha256(<config file content>))` | `PUT /v1/config/core` writes the file |
+
+Three properties this rests on, none of them visible from the call site:
+
+- **Payloads are bare bytes.** They go into the event's SHA-384 digest, and a
+  verifier has to reproduce them exactly. JSON leaves key order, spacing and
+  escaping free; a bare string does not. Changing a name or an encoding changes
+  the measurement and breaks every existing reader.
+- **`zg-` is a namespace.** dstack already writes `app-id`, `compose-hash`,
+  `os-image-hash` and `system-ready` into RTMR3, and other components may add
+  their own.
+- **Every emit is followed by a broker restart in the same call.** The broker
+  takes its quote once at startup and serves it from cache, so an event emitted
+  while it runs reaches no reader until it restarts. Both paths above already
+  recreate or restart it; `controller/internal/ctrl/rtmr3_test.go` is what keeps
+  that true.
+
+A failure to record aborts the change with nothing touched. The asymmetry is
+deliberate: crashing between the record and the change leaves a claim about an
+image that is not running, which a reader compares against what it expected and
+rejects. Recording afterwards would invert that into a silent upgrade.
+
+`zg-config-update` records **behaviour, not just code**. Pricing, verifiability
+and `targetUrl` all live in that config file; an image digest alone would leave
+them changeable without a trace.
+
+Both paths are serialized against each other, and a second caller gets **409**
+rather than being queued. RTMR3 is a ledger — the last `zg-image-update` in it is
+what a reader believes is running — and two interleaved upgrades would leave the
+last event and the last container created coming from different requests.
+
+This requires `/var/run/dstack.sock` mounted into the controller. It is not
+dialled at startup, so the read-only endpoints keep working without it; an upgrade
+attempted without it fails at the record, before anything is touched.
+
 ### 5.2 Image Update Workflow
+
+Step 1 below is preceded by the `zg-image-update` record described in §5.1a.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐

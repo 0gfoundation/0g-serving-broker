@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -175,6 +176,10 @@ func (h *Handler) UpdateCoreConfig(ctx *gin.Context) {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ctrl.ErrChangeInProgress) {
+			ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -226,6 +231,13 @@ func (h *Handler) UpdateImages(ctx *gin.Context) {
 	if err != nil {
 		if _, ok := err.(*ctrl.InvalidDigestError); ok {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// 409 rather than 500: nothing was touched, and retrying once the other
+		// change finishes is the right move. Reporting it as a server error would
+		// invite a client to retry immediately, into the same refusal.
+		if errors.Is(err, ctrl.ErrChangeInProgress) {
+			ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
 		// Return the result even on error, as it contains partial progress info
