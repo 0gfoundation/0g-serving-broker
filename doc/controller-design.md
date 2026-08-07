@@ -60,11 +60,27 @@ controller:
   allowedIPs:                    # IP whitelist, empty list allows all IPs
     - "127.0.0.1"
     - "192.168.1.0/24"           # CIDR format supported
-  image: "ghcr.io/0gfoundation/0g-serving-broker:latest"
+  imageRepo: "ghcr.io/0gfoundation/0g-serving-broker"   # repository only: no tag, no digest
+  image: "ghcr.io/0gfoundation/0g-serving-broker:latest" # deprecated, see below — still needed by the broker
   docker:
     host: "unix:///var/run/docker.sock"
     apiVersion: "1.41"
 ```
+
+`controller.imageRepo` names a repository and nothing else. A value carrying a
+`:tag` or an `@digest` is rejected at startup, because the upgrade path builds
+exactly one reference — `imageRepo@<digest>` — and which image runs has to be
+decided by the digest in the request, never by a tag the registry can re-point
+between two pulls. A port on the registry host is fine (`localhost:5000/broker`);
+only the last path segment is checked for a tag.
+
+`controller.image` is **deprecated and no longer read by the controller**, but
+must stay set for now: the broker still reads it (`provider_contract.go`) to
+report `additionalInfo.ImageName` on-chain and to resolve that name's digest
+against the local daemon. Deleting it early empties both image fields, and the
+contract reads an image change as grounds to un-acknowledge the provider. It can
+be removed once the broker takes `IMAGE_REPO` / `IMAGE_DIGEST` from its
+environment instead.
 
 The names of the managed containers are **not** configurable. They are constants
 in `api/controller/internal/ctrl` (`0g-serving-provider-broker`,
@@ -129,8 +145,31 @@ Set these in the compose file. §4.4 covers what that does and does not close.
 
 | Method | Path                | Description                                           |
 | ------ | ------------------- | ----------------------------------------------------- |
-| POST   | `/v1/images/update` | Pull latest image, sync service to contract, rebuild containers |
-| GET    | `/v1/images/info`   | Get current image information                         |
+| POST   | `/v1/images/update` | Pull `imageRepo@<digest>`, rebuild containers, sync service to contract |
+| GET    | `/v1/images/info`   | Get information about the image the broker is running |
+
+`POST /v1/images/update` takes the digest and nothing else:
+
+```json
+{ "digest": "sha256:<64 lowercase hex characters>" }
+```
+
+**Breaking change**: the body used to be empty and the image came from
+`controller.image`, so the endpoint pulled whatever the configured tag pointed at.
+A request with no `digest`, or one that is not `sha256:` followed by 64 lowercase
+hex characters, now returns **400** and touches no container. The repository still
+comes from config (`controller.imageRepo`); only the digest is caller-supplied,
+so there is no request shape that pulls by tag.
+
+The digest is validated before anything is stopped, removed or created — a
+malformed one cannot leave the deployment half-upgraded with the event container
+already down.
+
+`GET /v1/images/info` reports the image the **broker container** is running,
+read off the container rather than off config. It used to inspect the configured
+reference; that stopped being answerable once the config became a bare
+repository, since docker resolves a bare name to `:latest` and pulling
+`repo@digest` never creates that tag.
 
 ### 4.4 Admin Whitelist API
 
@@ -149,8 +188,8 @@ if the environment variable is set, editing the config file alone will not do it
 **This closes the direct route only.** `PUT /v1/config/core` validates YAML syntax
 and nothing else, and it writes the same file the controller loads. A caller
 holding one admin wallet can write `controller.adminAddresses`,
-`controller.allowedIPs`, `controller.image` or `controller.docker.host` there, and
-the controller reads them at its next start. `ADMIN_ADDRESS` / `ALLOWED_IPS`
+`controller.allowedIPs`, `controller.imageRepo` or `controller.docker.host` there,
+and the controller reads them at its next start. `ADMIN_ADDRESS` / `ALLOWED_IPS`
 override the first two (§3.2); nothing overrides the other two. **Set those env
 vars in the compose file** — and note that no code path enforces a floor on the
 number of remaining admins.
@@ -165,8 +204,12 @@ and `controller.docker.host` are read by the **broker** too
 restarts the broker in the same call — so a write to either lands there within
 seconds, and `controller.image` is what the broker reports on-chain as
 `ImageName`, with the digest read from whatever daemon `controller.docker.host`
-names. The controller's own copy of `controller.image` waits for the controller to
-restart, which no route here triggers.
+names. The controller's own copy of `controller.imageRepo` waits for the
+controller to restart, which no route here triggers.
+
+Writing `controller.imageRepo` does not by itself choose an image: the digest
+still comes from the request, so the reachable outcome is an upgrade to the same
+digest out of a different repository — a mirror the caller controls.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
@@ -202,8 +245,8 @@ Therefore, restart order should be:
                    ┌──────────────────┐
                    │  Step 1:         │
                    │  Docker Pull     │
-                   │  Pull latest     │
-                   │  image           │
+                   │  imageRepo@      │
+                   │  <digest>        │
                    └──────────────────┘
                               │
                   ┌───────────┴───────────┐
@@ -275,7 +318,10 @@ Therefore, restart order should be:
 
 **Key Steps Explained**:
 
-1. **Pull Latest Image**: Pull the image with latest tag from the registry, obtain new image digest
+1. **Pull the requested image**: Pull `imageRepo@<digest>`, the digest coming from
+   the request body. Nothing resolves a tag, so the image that gets run is the one
+   that was asked for, and a failed pull is reported as a failure rather than read
+   as a successful one.
 
 2. **Sync Service to Contract**:
    - Retrieve existing service information from contract
@@ -389,7 +435,7 @@ controller serves reads and refuses every container write. See §3.1.
 
 ### 8.2 Docker Compose Deployment
 
-**Important**: broker, event, and controller all use the same fixed image. The Controller's image update API can uniformly pull the latest image and rebuild containers.
+**Important**: broker, event, and controller all use the same fixed image. The Controller's image update API pulls the requested digest and rebuilds the containers on it.
 
 ```yaml
 services:
@@ -412,4 +458,4 @@ services:
 
 - Controller uses the same configuration file as broker/event
 - Controller requires Docker socket mount to manage other containers
-- During image update, Controller pulls the latest image, syncs service info to contract, then rebuilds containers in dependency order
+- During image update, Controller pulls `imageRepo@<digest>`, rebuilds containers in dependency order, then syncs service info to contract
