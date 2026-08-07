@@ -1,13 +1,38 @@
-// Package attest reads what a dstack CVM is actually running out of its
-// attestation report, without having to believe anything the CVM says about
-// itself.
+// Package attest reads what a dstack CVM reports it is running out of its
+// attestation report.
 //
 // A signed TDX quote carries measurements of what booted. It does not carry what
 // changed afterwards — an image upgrade performed inside the TEE leaves the boot
-// measurements untouched. What it does carry is RTMR3, which the controller
-// extends with one event per change before making it (see
-// controller/internal/ctrl). RTMR3 is append-only, so those events cannot be
-// edited or dropped, and the quote's signature covers the resulting value.
+// measurements untouched. What it does carry is RTMR3, which the controller extends
+// with one event per change before making it (see controller/internal/ctrl). RTMR3 is
+// append-only, so those events cannot be edited or dropped, and the quote's signature
+// covers the resulting value.
+//
+// # What this does not establish
+//
+// RTMR3 says what was written, not who wrote it. dstack serves EmitEvent on
+// /var/run/dstack.sock from the same unauthenticated handler as GetQuote, binds that
+// socket 0777, and restricts neither the event name nor the payload — and the broker
+// must mount it, because it needs GetQuote and DeriveKey. So a provider running a
+// modified broker image can append its own zg-image-update naming any digest and then
+// take a quote over it.
+//
+// That quote is genuine: the replay matches, the compose hash matches, the signature
+// verifies. Nothing in this package can tell it from a real upgrade, and nothing in a
+// later version could — the payloads are unauthenticated bytes and any container on the
+// socket can derive the same keys, so there is no signature to check. A fresh challenge
+// nonce does not help either: it defeats replay of an old quote, not forgery of a new
+// one.
+//
+// Read a DigestSourceEvent answer accordingly: it is what the ledger says, and the
+// ledger is trustworthy exactly as far as "only the controller can write it" holds.
+// Today that holds against an honest provider whose upgrade went wrong, and does not
+// hold against one who replaced the broker image. Closing it needs the broker to stop
+// holding that socket, or the record payloads to be signed with a key the broker cannot
+// obtain — both decisions outside this package. doc/controller-design.md §5.1a carries
+// the current state.
+//
+// # Scope
 //
 // This package holds the authoritative implementation of the replay, because the
 // events are produced in this repository: the format and the reader have to

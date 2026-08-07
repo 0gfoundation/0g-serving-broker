@@ -44,6 +44,12 @@ const (
 )
 
 // Where a resolved broker digest came from.
+//
+// The two are not equally strong. DigestSourceCompose is bound to the quote by the
+// compose hash in the signed report body, so it holds against anyone. DigestSourceEvent
+// rests on the RTMR3 ledger, which says what was written and not who wrote it — see the
+// package doc. Treat an event-sourced digest as the ledger's claim, sound against an
+// honest provider and forgeable by one running a modified broker image.
 const (
 	DigestSourceCompose = "compose" // no upgrade recorded; the digest the deployment booted on
 	DigestSourceEvent   = "event"   // the last recorded upgrade
@@ -89,6 +95,11 @@ type RunningState struct {
 // DCAP signature and compares nothing against an expected value; both need inputs
 // only the caller has (Intel's collateral, and a list of digests that must come
 // from software the user installed).
+//
+// Nor does it establish who wrote the records it reads. An answer carrying
+// DigestSourceEvent is the ledger's claim, and any container holding
+// /var/run/dstack.sock — the broker included — can add to that ledger. The package doc
+// sets out what that does and does not buy.
 //
 // Unknown events are handled asymmetrically on purpose. A zg- event this reader
 // does not know is an error: the namespace is ours, so an unknown one means the
