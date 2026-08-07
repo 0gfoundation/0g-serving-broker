@@ -414,8 +414,18 @@ func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	//     value whenever the key is present — usable or not — and never consults the body.
 	//     anything else: the translator decodes the body and ignores the query entirely.
 	upstreamNamedDuration := videoUpstreamNamedDuration(reqBody, contentType, rawQuery, bodySeconds, queryIsRead)
-	if !upstreamNamedDuration && int64(videoReserveFallbackSeconds) > best {
-		best = videoReserveFallbackSeconds
+	//     Note the `best <= 0` term: it is not redundant with (2), it is what makes the whole shape safe
+	//     against the NEXT divergence between these two questions. Sizing has caps that the naming
+	//     predicate does not (`> maxVideoOutputUnits` is rejected as a size; the multipart read stops at
+	//     maxMultipartScalarBytes), so "named" and "sized" can disagree — and when they did, the reserve
+	//     fell all the way to the vendor floor. Measured: a multipart `seconds=2e12` sized 0, named true,
+	//     and reserved 4 units where MiniMax renders its 15s ceiling and bills 15. `seconds=2^40` reserved
+	//     1099511627776 while `2^40+1` reserved 4 — one character across a cliff, same rendered clip.
+	//     Requiring a POSITIVE size means any future predicate mismatch can only raise the reserve.
+	if best <= 0 || !upstreamNamedDuration {
+		if int64(videoReserveFallbackSeconds) > best {
+			best = videoReserveFallbackSeconds
+		}
 	}
 	return videoReserveClampSeconds(best)
 }
@@ -442,6 +452,13 @@ func videoUpstreamNamedDuration(reqBody []byte, contentType, rawQuery string, bo
 			}
 		}
 		if raw, present := multipartFormFieldRaw(reqBody, contentType, "seconds"); present {
+			// A value that filled the read cap is one the broker did not see the end of, while the
+			// vendor's r.FormValue has no cap and parses all of it. Measured: `"5." + 1022 zeros + "e3"`
+			// reads as 5 here and as 5000 there, which MiniMax renders as its 15s ceiling. A truncated
+			// read is not a read.
+			if len(raw) >= maxMultipartScalarBytes {
+				return false
+			}
 			return vendorParsesSeconds(raw)
 		}
 		return false
@@ -451,6 +468,12 @@ func videoUpstreamNamedDuration(reqBody []byte, contentType, rawQuery string, bo
 
 // vendorParsesSeconds mirrors the translators' own duration read: strconv.ParseFloat on the verbatim
 // value, positive and finite. Deliberately NOT trimmed — see videoUpstreamNamedDuration.
+//
+// It deliberately does NOT reproduce every bound either side applies. MiniMax has no upper bound (it
+// clamps to 15 and bills 15); DashScope adds `s <= maxDashScopeSeconds`; the broker's SIZING readers
+// reject `> maxVideoOutputUnits`. So this predicate is broader than what any one reader accepts, and
+// callers must not treat "named" as implying "sized" — videoReserveSeconds requires a positive size
+// independently, which is what keeps a mismatch from dropping the reserve to the vendor floor.
 func vendorParsesSeconds(raw string) bool {
 	f, err := strconv.ParseFloat(raw, 64)
 	return err == nil && f > 0 && !math.IsInf(f, 0)

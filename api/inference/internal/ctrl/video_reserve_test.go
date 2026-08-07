@@ -568,3 +568,63 @@ func TestVideoReserveIsMultipartRequestIsLax(t *testing.T) {
 		}
 	}
 }
+
+// TestVideoReserveOversizedAndTruncatedSecondsFallBack covers the window seven review rounds never
+// probed: `seconds` values around maxVideoOutputUnits (2^40) and at the multipart read cap.
+//
+// Both are the same defect. The naming predicate (vendorParsesSeconds) is broader than the sizing
+// readers — sizing rejects `> maxVideoOutputUnits` and stops reading at maxMultipartScalarBytes — so a
+// value could be "named" while contributing nothing to the size, and the reserve fell all the way to the
+// 4s vendor floor. MiniMax renders its 15s ceiling for every one of these and bills 15.
+//
+// The earlier tests only ever used `1e30` as a poison MULTIPLIER and long strings as a `model` value;
+// `seconds` was never exercised anywhere near either bound, which is why the iteration converged without
+// finding this.
+func TestVideoReserveOversizedAndTruncatedSecondsFallBack(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
+
+	t.Run("past the sizing cap, on both sources", func(t *testing.T) {
+		// 2^40 sizes fine (and self-refuses at the gate, which is the caller's problem); 2^40+1 and up
+		// size to nothing, and must reserve the unknown-duration fallback rather than the floor.
+		for _, v := range []string{"1099511627777", "1.1e12", "2e12", "1e30", "1e308", strings.Repeat("9", 40)} {
+			mp, ct := multipartSeconds(t, v)
+			if got := videoReserve(t, c, mp, ct, ""); got < videoReserveFallbackSeconds {
+				t.Errorf("multipart seconds=%q: reserve = %d, want >= %d — the vendor renders its ceiling for this",
+					v, got, videoReserveFallbackSeconds)
+			}
+			// Same value through the query, which is what FormValue hands the vendor on multipart.
+			if got := videoReserve(t, c, `{}`, ct, "seconds="+v); got < videoReserveFallbackSeconds {
+				t.Errorf("query seconds=%q: reserve = %d, want >= %d", v, got, videoReserveFallbackSeconds)
+			}
+		}
+	})
+
+	t.Run("exactly at the sizing cap still sizes", func(t *testing.T) {
+		// The boundary itself is readable by both sides, so it must NOT collapse to the fallback — that
+		// would be an over-reserve masking the bug rather than fixing it.
+		mp, ct := multipartSeconds(t, "1099511627776")
+		if got := videoReserve(t, c, mp, ct, ""); got != 1099511627776 {
+			t.Errorf("reserve at exactly maxVideoOutputUnits = %d, want 1099511627776", got)
+		}
+	})
+
+	t.Run("a value that filled the read cap is not a read", func(t *testing.T) {
+		// The broker stops at maxMultipartScalarBytes; the vendor's r.FormValue has no cap. This value
+		// reads as 5 here and 5000 there.
+		padded := "5." + strings.Repeat("0", maxMultipartScalarBytes-2) + "e3"
+		mp, ct := multipartSeconds(t, padded)
+		if got := videoReserve(t, c, mp, ct, ""); got < videoReserveFallbackSeconds {
+			t.Errorf("reserve = %d for a %d-byte value, want >= %d — the broker never saw its end",
+				got, len(padded), videoReserveFallbackSeconds)
+		}
+		// One byte under the cap is fully read and must still be trusted.
+		short := strings.Repeat("9", maxMultipartScalarBytes-1)
+		mp2, ct2 := multipartSeconds(t, short)
+		if got := videoReserve(t, c, mp2, ct2, ""); got < videoReserveFallbackSeconds {
+			t.Errorf("reserve = %d for a fully-read %d-byte value, want >= %d", got, len(short), videoReserveFallbackSeconds)
+		}
+	})
+}
