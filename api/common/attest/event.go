@@ -18,19 +18,23 @@
 // take a quote over it.
 //
 // That quote is genuine: the replay matches, the compose hash matches, the signature
-// verifies. Nothing in this package can tell it from a real upgrade, and nothing in a
-// later version could — the payloads are unauthenticated bytes and any container on the
-// socket can derive the same keys, so there is no signature to check. A fresh challenge
+// verifies. No signature on the record could help — the payloads are unauthenticated
+// bytes and any container on the socket can derive the same keys. A fresh challenge
 // nonce does not help either: it defeats replay of an old quote, not forgery of a new
 // one.
 //
-// Read a DigestSourceEvent answer accordingly: it is what the ledger says, and the
-// ledger is trustworthy exactly as far as "only the controller can write it" holds.
-// Today that holds against an honest provider whose upgrade went wrong, and does not
-// hold against one who replaced the broker image. Closing it needs the broker to stop
-// holding that socket, or the record payloads to be signed with a key the broker cannot
-// obtain — both decisions outside this package. doc/controller-design.md §5.1a carries
-// the current state.
+// So the question is not answered, it is *checked*. Who holds the socket is written in
+// the compose file, and compose_hash binds that file to the quote — which makes it an
+// authenticated input rather than a claim. ResolveRunningState reads it and refuses an
+// event-sourced digest when the broker, or anything sharing the broker's image, can write
+// the ledger. What survives is either a digest bound by compose_hash, or a ledger nobody
+// upgradeable can write.
+//
+// Deployments today mount that socket into the broker, because that is how it gets
+// GetQuote and DeriveKey — so their event-sourced records are refused, and correctly so.
+// Making them readable means giving the broker its quotes some other way (the controller,
+// whose image compose_hash pins and which cannot upgrade itself, is the obvious
+// candidate). doc/controller-design.md §5.1a carries the current state.
 //
 // # Scope
 //

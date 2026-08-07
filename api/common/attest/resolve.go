@@ -45,11 +45,11 @@ const (
 
 // Where a resolved broker digest came from.
 //
-// The two are not equally strong. DigestSourceCompose is bound to the quote by the
-// compose hash in the signed report body, so it holds against anyone. DigestSourceEvent
-// rests on the RTMR3 ledger, which says what was written and not who wrote it — see the
-// package doc. Treat an event-sourced digest as the ledger's claim, sound against an
-// honest provider and forgeable by one running a modified broker image.
+// The two are not equally strong, but both are checked. DigestSourceCompose is bound to
+// the quote by the compose hash in the signed report body. DigestSourceEvent rests on the
+// RTMR3 ledger, which says what was written and not who wrote it — so it is only returned
+// once the compose file has shown that nothing running the broker's image can write that
+// ledger. See the package doc.
 const (
 	DigestSourceCompose = "compose" // no upgrade recorded; the digest the deployment booted on
 	DigestSourceEvent   = "event"   // the last recorded upgrade
@@ -78,6 +78,14 @@ type RunningState struct {
 	ConfigSHA256 string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
+	// LedgerWriters names the services whose compose entry mounts the dstack socket,
+	// and which can therefore append to RTMR3 — read out of the authenticated compose
+	// file, so this is a fact about the deployment and not a claim about it.
+	//
+	// A service here whose image the provider can replace can forge any record. The
+	// broker and anything sharing its image are checked below; judge the rest against
+	// what else the deployment lets change.
+	LedgerWriters []string
 }
 
 // ResolveRunningState answers "what is this CVM running", and only that.
@@ -96,10 +104,11 @@ type RunningState struct {
 // only the caller has (Intel's collateral, and a list of digests that must come
 // from software the user installed).
 //
-// Nor does it establish who wrote the records it reads. An answer carrying
-// DigestSourceEvent is the ledger's claim, and any container holding
-// /var/run/dstack.sock — the broker included — can add to that ledger. The package doc
-// sets out what that does and does not buy.
+// It does, however, establish who *could have* written the records it reads. Any container
+// holding /var/run/dstack.sock can append to RTMR3, so an event-sourced digest is returned
+// only when the compose file — authenticated by compose_hash — shows that neither the
+// broker nor anything sharing its image holds that socket. Otherwise the record describes
+// a service that could have written it, and this refuses rather than answering.
 //
 // Unknown events are handled asymmetrically on purpose. A zg- event this reader
 // does not know is an error: the namespace is ours, so an unknown one means the
@@ -183,10 +192,29 @@ func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService 
 		return nil, configErr
 	}
 
+	writers, brokerWrites, err := ledgerWriters(appCompose, brokerService)
+	if err != nil {
+		return nil, err
+	}
+	state.LedgerWriters = writers
+
 	// Not the compose fallback: an image record exists, it just did not resolve, and
 	// falling back would answer with the digest the deployment booted on while the
 	// ledger says it was changed to something the writer could not name.
 	if state.DigestSource == DigestSourceEvent {
+		// The record is only worth reading if the thing it describes could not have
+		// written it. dstack serves EmitEvent on the same unauthenticated socket as
+		// GetQuote, so a service holding that socket can append any record it likes —
+		// and this one's image is exactly what the provider gets to replace. The
+		// compose file says who holds it, and compose_hash makes that answer binding.
+		//
+		// Refused rather than returned with a caveat: a caller comparing this digest
+		// against a list of published ones cannot tell the difference, which is the
+		// whole failure.
+		if len(brokerWrites) > 0 {
+			return nil, fmt.Errorf("the last %s record cannot be trusted: %v mount the dstack socket and run the broker's image, so they can append any record — the ledger only describes the broker if the broker cannot write it",
+				EventImageUpdate, brokerWrites)
+		}
 		return state, nil
 	}
 
@@ -241,22 +269,97 @@ func PinnedImages(tcbInfoJSON []byte) (map[string]string, error) {
 		return nil, fmt.Errorf("app_compose carries no docker_compose_file")
 	}
 
-	var compose struct {
-		Services map[string]struct {
-			Image string `yaml:"image"`
-		} `yaml:"services"`
-	}
-	if err := yaml.Unmarshal([]byte(manifest.DockerComposeFile), &compose); err != nil {
-		return nil, fmt.Errorf("parsing docker_compose_file: %w", err)
+	compose, err := composeServices(manifest.DockerComposeFile)
+	if err != nil {
+		return nil, err
 	}
 
-	images := make(map[string]string, len(compose.Services))
-	for name, service := range compose.Services {
+	images := make(map[string]string, len(compose))
+	for name, service := range compose {
 		if service.Image != "" {
 			images[name] = service.Image
 		}
 	}
 	return images, nil
+}
+
+// composeService is the part of a compose service entry this package reads.
+type composeService struct {
+	Image string `yaml:"image"`
+	// Volumes accepts both compose syntaxes: the short "src:dst[:opts]" string and the
+	// long mapping. Typed loosely because only the source is read, and refusing a
+	// deployment over a shape we do not use would fail closed for the wrong reason.
+	Volumes []yaml.Node `yaml:"volumes"`
+}
+
+func composeServices(dockerComposeFile string) (map[string]composeService, error) {
+	var compose struct {
+		Services map[string]composeService `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(dockerComposeFile), &compose); err != nil {
+		return nil, fmt.Errorf("parsing docker_compose_file: %w", err)
+	}
+	return compose.Services, nil
+}
+
+// ledgerWriters returns every service whose compose entry mounts the dstack socket, and
+// separately those among them that also run the broker's image.
+//
+// The second list is what makes an event record unreadable. A service running the
+// broker's image is one the upgrade path replaces, so its contents are the provider's
+// choice; holding the socket then lets it append a record about itself. The broker's own
+// entry counts, and so does any sibling sharing its image — the event container shares it
+// in every deployment of this project.
+func ledgerWriters(appCompose, brokerService string) (all, brokerImaged []string, err error) {
+	var manifest struct {
+		DockerComposeFile string `json:"docker_compose_file"`
+	}
+	if err := json.Unmarshal([]byte(appCompose), &manifest); err != nil {
+		return nil, nil, fmt.Errorf("parsing app_compose: %w", err)
+	}
+	services, err := composeServices(manifest.DockerComposeFile)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	brokerImage := services[brokerService].Image
+	for name, service := range services {
+		if !mountsDstackSocket(service) {
+			continue
+		}
+		all = append(all, name)
+		if name == brokerService || (brokerImage != "" && service.Image == brokerImage) {
+			brokerImaged = append(brokerImaged, name)
+		}
+	}
+	slices.Sort(all)
+	slices.Sort(brokerImaged)
+	return all, brokerImaged, nil
+}
+
+// dstackSocket is the host path that grants RTMR3 write access. Matched on the source
+// side of a mount, since that is what confers the access — where it is mounted inside the
+// container is the container's own business.
+const dstackSocket = "dstack.sock"
+
+func mountsDstackSocket(service composeService) bool {
+	for _, volume := range service.Volumes {
+		switch volume.Kind {
+		case yaml.ScalarNode: // "src:dst[:opts]"
+			source, _, _ := strings.Cut(volume.Value, ":")
+			if strings.Contains(source, dstackSocket) {
+				return true
+			}
+		default: // long syntax, or anything else that might carry a source
+			var long struct {
+				Source string `yaml:"source"`
+			}
+			if err := volume.Decode(&long); err == nil && strings.Contains(long.Source, dstackSocket) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // afterSystemReady returns the events a container wrote, which is everything past
