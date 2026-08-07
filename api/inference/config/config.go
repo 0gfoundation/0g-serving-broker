@@ -1184,7 +1184,7 @@ type ControllerConfig struct {
 	Port           int                  `yaml:"port"`           // HTTP service port, default 3090
 	AdminAddresses []string             `yaml:"adminAddresses"` // Authorized admin wallet addresses
 	AllowedIPs     []string             `yaml:"allowedIPs"`     // IP whitelist, empty means allow all
-	Image          string               `yaml:"image"`          // Image for broker/event containers, default ghcr.io/0gfoundation/0g-serving-broker:latest
+	ImageRepo      string               `yaml:"imageRepo"`      // Repository broker/event images are pulled from, no tag and no digest, default ghcr.io/0gfoundation/0g-serving-broker
 	Docker         DockerConfig         `yaml:"docker"`         // Docker connection config
 	Logger         *config.LoggerConfig `yaml:"logger"`         // Logger config
 	ConfigFile     string               `yaml:"-"`              // Resolved config file path (set at runtime, not from yaml)
@@ -1201,6 +1201,22 @@ type ControllerConfig struct {
 	// the previous struct accepted. The map is wider than that and accepts
 	// anything under the key, which no longer steers anything either way.
 	Containers map[string]interface{} `yaml:"containers"`
+
+	// Deprecated: superseded by ImageRepo for everything the controller does.
+	// What gets run is now imageRepo@<digest from the request>, so a reference
+	// carrying its own tag has nothing left to select, and no controller path
+	// reads this field any more.
+	//
+	// The broker still does: provider_contract.go reports it on-chain as
+	// additionalInfo.ImageName and resolves its digest against the local daemon.
+	// Keep the key set until that reader moves to the IMAGE_REPO / IMAGE_DIGEST
+	// environment variables — dropping it early empties both image fields, which
+	// the contract reads as an image change and un-acknowledges the provider.
+	//
+	// Pointing this at ImageRepo instead would be worse, not a fix: a bare repo
+	// resolves to :latest, a tag a digest-pinned deployment need not have, so
+	// the broker would compare the running image against the wrong one.
+	Image string `yaml:"image"`
 }
 
 // DockerConfig Docker connection configuration
@@ -2273,7 +2289,13 @@ func GetConfig() *Config {
 				Port:           3090,
 				AdminAddresses: []string{},
 				AllowedIPs:     []string{},
-				Image:          "ghcr.io/0gfoundation/0g-serving-broker:latest",
+				ImageRepo:      "ghcr.io/0gfoundation/0g-serving-broker",
+				// Deprecated, and defaulted anyway: no repo config sets it, so
+				// this default is what every deployment actually runs on, and
+				// the broker reports it on-chain. Dropping the default empties
+				// additionalInfo.ImageName / ImageDigest, which the contract
+				// reads as an image change and un-acknowledges the provider for.
+				Image: "ghcr.io/0gfoundation/0g-serving-broker:latest",
 				Docker: DockerConfig{
 					Host:       "unix:///var/run/docker.sock",
 					APIVersion: "1.41",
