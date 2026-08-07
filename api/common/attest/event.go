@@ -1,5 +1,5 @@
 // Package attest reads what a dstack CVM reports it is running out of its
-// attestation report.
+// attestation report, and is explicit about which parts of that report are binding.
 //
 // A signed TDX quote carries measurements of what booted. It does not carry what
 // changed afterwards — an image upgrade performed inside the TEE leaves the boot
@@ -8,33 +8,43 @@
 // append-only, so those events cannot be edited or dropped, and the quote's signature
 // covers the resulting value.
 //
-// # What this does not establish
+// # What this does not establish, and who must establish it
 //
 // RTMR3 says what was written, not who wrote it. dstack serves EmitEvent on
 // /var/run/dstack.sock from the same unauthenticated handler as GetQuote, binds that
-// socket 0777, and restricts neither the event name nor the payload — and the broker
-// must mount it, because it needs GetQuote and DeriveKey. So a provider running a
-// modified broker image can append its own zg-image-update naming any digest and then
-// take a quote over it.
+// socket 0777, and restricts neither the event name nor the payload. Any container that
+// can reach it can append any record — and deployments today mount it into the broker,
+// because that is how the broker gets GetQuote and DeriveKey.
 //
-// That quote is genuine: the replay matches, the compose hash matches, the signature
-// verifies. No signature on the record could help — the payloads are unauthenticated
-// bytes and any container on the socket can derive the same keys. A fresh challenge
-// nonce does not help either: it defeats replay of an old quote, not forgery of a new
-// one.
+// So a provider running a modified broker image can append its own zg-image-update naming
+// any digest and take a quote over it. That quote is genuine: the replay matches, the
+// compose hash matches, the signature verifies. No signature on the record could help,
+// since GetKey derives by path and any container may ask for any path, so there is no key
+// the broker cannot also derive. A challenge nonce does not help either — it defeats
+// replay of an old quote, not forgery of a new one.
 //
-// So the question is not answered, it is *checked*. Who holds the socket is written in
-// the compose file, and compose_hash binds that file to the quote — which makes it an
-// authenticated input rather than a claim. ResolveRunningState reads it and refuses an
-// event-sourced digest when the broker, or anything sharing the broker's image, can write
-// the ledger. What survives is either a digest bound by compose_hash, or a ledger nobody
-// upgradeable can write.
+// **A DigestSourceEvent answer is therefore only as good as the deployment's confinement
+// of RTMR3 writers, and this package cannot check that.** It is a property of the compose
+// file, and the caller already holds the means to settle it: RunningState.ComposeHash is
+// the hash of the compose the CVM actually booted, bound to the quote by hardware. Compare
+// it against the hash of a compose you published and reviewed, and you know — by reading a
+// document you control — whether anything upgradeable can write the ledger. That is the
+// same discipline as the expected-digest set: the answer comes from software the user
+// installed, never from the party being checked.
 //
-// Deployments today mount that socket into the broker, because that is how it gets
-// GetQuote and DeriveKey — so their event-sourced records are refused, and correctly so.
-// Making them readable means giving the broker its quotes some other way (the controller,
-// whose image compose_hash pins and which cannot upgrade itself, is the obvious
-// candidate). doc/controller-design.md §5.1a carries the current state.
+// Do not expect this package to derive it from app_compose instead. That was tried and
+// reverted: the mount shapes that reach a socket are an open set (a whole-directory bind,
+// a named volume with a bind driver_opt, a YAML alias, extends:, an interpolation that
+// splits the path — app_compose stores the compose text uninterpolated), and the fields
+// that would identify the broker are the wrong ones (the controller locates containers by
+// container_name, and in this project the controller shares the broker's image string and
+// differs only by command:). A parser that answers "probably not" here is worse than no
+// parser, because it reads as a guarantee.
+//
+// Until a deployment keeps that socket away from the broker — routing its quotes through
+// the controller, whose image compose_hash pins and which cannot upgrade itself — treat an
+// event-sourced digest as an audit record of what the controller did, not as proof of what
+// is running. doc/controller-design.md §5.1a carries the current state.
 //
 // # Scope
 //

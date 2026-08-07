@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -464,113 +463,5 @@ func TestPinnedImages(t *testing.T) {
 				t.Errorf("PinnedImages(%s) = nil, want an error", name)
 			}
 		})
-	}
-}
-
-// composeWithSocket builds a compose file where the named services mount the dstack
-// socket, which is what grants RTMR3 write access.
-func composeWithSocket(t *testing.T, brokerImage string, mounting ...string) string {
-	t.Helper()
-	holds := map[string]bool{}
-	for _, name := range mounting {
-		holds[name] = true
-	}
-	socket := "\n    volumes:\n      - /var/run/dstack.sock:/var/run/dstack.sock"
-
-	var b strings.Builder
-	b.WriteString("services:\n")
-	for _, svc := range []struct{ name, image string }{
-		{brokerService, brokerImage},
-		{"0g-serving-provider-event", brokerImage},
-		{"0g-controller", "ghcr.io/0gfoundation/0g-serving-broker@sha256:" + strings.Repeat("c", 64)},
-	} {
-		b.WriteString("  " + svc.name + ":\n    image: " + svc.image + "\n")
-		if holds[svc.name] {
-			b.WriteString(socket[1:] + "\n")
-		}
-	}
-	return composeManifest(t, b.String())
-}
-
-// An event record only describes the broker if the broker could not have written it.
-//
-// dstack serves EmitEvent on the same unauthenticated socket as GetQuote, and binds it
-// 0777, so any service holding that socket can append any record. The broker's image is
-// exactly what a provider replaces, so a broker holding the socket can name any digest
-// and quote over it — a genuine quote no replay or compose-hash check can distinguish.
-//
-// The compose file says who holds the socket, and compose_hash makes that answer
-// binding, so this is checkable rather than assumed. Refused, not returned with a
-// caveat: a caller comparing the digest against a published list cannot tell.
-func TestResolveRefusesAnEventRecordTheBrokerCouldHaveForged(t *testing.T) {
-	const brokerImage = "ghcr.io/0gfoundation/0g-serving-broker@" + bootDigest
-	events := append(bootEvents(),
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)})
-
-	t.Run("the broker itself holds the socket", func(t *testing.T) {
-		compose := composeWithSocket(t, brokerImage, brokerService, "0g-controller")
-
-		_, err := resolve(t, compose, events)
-		if err == nil {
-			t.Fatal("ResolveRunningState() = nil, want a refusal")
-		}
-		if !strings.Contains(err.Error(), brokerService) {
-			t.Errorf("ResolveRunningState() = %v, want it to name the service that can forge", err)
-		}
-	})
-
-	// The event container runs the broker's image in every deployment of this project,
-	// so the upgrade path replaces it too and it forges just as well.
-	t.Run("a sibling on the broker's image holds the socket", func(t *testing.T) {
-		compose := composeWithSocket(t, brokerImage, "0g-serving-provider-event", "0g-controller")
-
-		_, err := resolve(t, compose, events)
-		if err == nil {
-			t.Fatal("ResolveRunningState() = nil, want a refusal")
-		}
-		if !strings.Contains(err.Error(), "0g-serving-provider-event") {
-			t.Errorf("ResolveRunningState() = %v, want it to name the sibling", err)
-		}
-	})
-
-	// The target deployment: only the controller holds the socket, and its image is
-	// pinned by compose_hash and cannot upgrade itself. The ledger is then worth reading.
-	t.Run("only the controller holds the socket", func(t *testing.T) {
-		compose := composeWithSocket(t, brokerImage, "0g-controller")
-
-		state, err := resolve(t, compose, events)
-		if err != nil {
-			t.Fatalf("ResolveRunningState() = %v, want the record to be readable", err)
-		}
-		if state.BrokerDigest != upgradeDigest {
-			t.Errorf("BrokerDigest = %q, want %q", state.BrokerDigest, upgradeDigest)
-		}
-		if got := state.LedgerWriters; len(got) != 1 || got[0] != "0g-controller" {
-			t.Errorf("LedgerWriters = %v, want just the controller", got)
-		}
-	})
-}
-
-// The real deployment, from the real report: both the broker and the event container hold
-// the socket today, so event-sourced records in a production CVM are forgeable. This is
-// the fact the check exists to surface, and it is read out of an authenticated input.
-func TestLedgerWritersOnTheGoldenReport(t *testing.T) {
-	_, _, tcb := goldenReport(t)
-
-	all, brokerImaged, err := ledgerWriters(tcb.AppCompose, brokerService)
-	if err != nil {
-		t.Fatalf("ledgerWriters() = %v", err)
-	}
-	for _, want := range []string{brokerService, "0g-serving-provider-event"} {
-		if !slices.Contains(all, want) {
-			t.Errorf("LedgerWriters = %v, want it to include %q", all, want)
-		}
-		if !slices.Contains(brokerImaged, want) {
-			t.Errorf("brokerImaged = %v, want it to include %q — it runs the broker's image", brokerImaged, want)
-		}
-	}
-	// mysql has a volume, just not this one.
-	if slices.Contains(all, "mysql") {
-		t.Errorf("LedgerWriters = %v, want a service with unrelated volumes excluded", all)
 	}
 }
