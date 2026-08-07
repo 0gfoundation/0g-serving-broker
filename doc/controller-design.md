@@ -160,9 +160,13 @@ controller runs, and `SessionToken` treats `ExpiresAt: 0` as never expiring.
 Bounding token lifetime is tracked separately.
 
 Read the container guard as a safety interlock, not containment. `controller.image`
-is one of the fields above, and the controller reads it at its own next start — no
-route here restarts the controller, so this one waits for a host reboot or a
-`compose up`.
+and `controller.docker.host` are read by the **broker** too
+(`inference/internal/contract/provider_contract.go`), and `PUT /v1/config/core`
+restarts the broker in the same call — so a write to either lands there within
+seconds, and `controller.image` is what the broker reports on-chain as
+`ImageName`, with the digest read from whatever daemon `controller.docker.host`
+names. The controller's own copy of `controller.image` waits for the controller to
+restart, which no route here triggers.
 
 **Breaking change**: `POST /v1/admin/wallets`, `DELETE /v1/admin/wallets/:address`,
 `POST /v1/admin/ips` and `DELETE /v1/admin/ips/:ip` have been removed and now
@@ -379,8 +383,9 @@ Where:
 ./0g-serving-broker 0g-controller
 ```
 
-Run this way the controller serves reads but cannot manage containers — see the
-deployment requirement in §3.1.
+This is also what §8.2's compose runs. What decides whether container management
+works is the deployment shape, not the entry point: run directly on a host, the
+controller serves reads and refuses every container write. See §3.1.
 
 ### 8.2 Docker Compose Deployment
 
