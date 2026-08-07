@@ -273,16 +273,23 @@ Therefore, restart order should be:
 
 ### 5.1a RTMR3 accounting
 
-Every change the controller makes inside the TEE is recorded in **RTMR3 before it
-is made**. RTMR3 is append-only hardware state: an event folded into it cannot be
+The controller records the broker's image and the shared config file in **RTMR3
+before changing either**. RTMR3 is append-only hardware state: an event folded into it cannot be
 edited or removed, and it is covered by the signature over any quote taken
 afterwards — so the record outlives the process that wrote it and does not depend
 on that process being honest later.
 
 | event | payload (bare bytes, not JSON) | emitted before |
 |---|---|---|
-| `zg-image-update` | `<repo>@sha256:<64hex>` — the reference the upgrade runs on | `POST /v1/images/update` pulls or touches any container |
+| `zg-image-update` | `<repo>@sha256:<64hex>` — the reference the upgrade runs on | `POST /v1/images/update` touches any container |
 | `zg-config-update` | `hex(sha256(<config file content>))` | `PUT /v1/config/core` writes the file |
+
+**Not everything is covered.** `PUT /v1/config/ingress` and
+`PUT /v1/config/prometheus` change in-TEE state with no record at all, and
+`TARGET_ENDPOINT` is on the ingress whitelist — so the ingress upstream can be
+repointed without a trace. That gap predates this accounting and closing it needs a
+third event, i.e. a wire-contract change; tracked separately. Read the guarantee
+below as being about the broker's image and its core config, nothing wider.
 
 Three properties this rests on, none of them visible from the call site:
 
@@ -293,52 +300,74 @@ Three properties this rests on, none of them visible from the call site:
 - **`zg-` is a namespace.** dstack already writes `app-id`, `compose-hash`,
   `os-image-hash` and `system-ready` into RTMR3, and other components may add
   their own.
-- **A change is published by restarting the broker.** The broker takes its quote
-  once at startup and serves it from cache, so an event emitted while it runs
-  reaches no reader until it restarts. Both paths above recreate or restart it.
+- **A quote is sealed when a broker process starts.** The broker takes its quote
+  once at startup and caches the whole quote / event-log / tcb_info triple for its
+  lifetime, so an event emitted while it runs reaches no reader until it restarts.
+  This cuts both ways: it is why both paths above recreate or restart the broker, and
+  it is why the ledger has to be true *at those instants* rather than merely
+  eventually.
 
 #### The invariant, stated properly
 
 > The **last** image record names the image the broker will be running when it next
 > serves a quote, and the last config record names the file it will read.
 
-Recording *before* the change is one half of that: it makes an unrecorded change
-impossible, which is the silent-upgrade failure. A failure to record aborts with
-nothing touched.
+Three things hold it up, and each one is load-bearing.
 
-The other half is that **a record must not outlive the change it describes**, and
-RTMR3 cannot be rewound — so every abort path *appends the truth*:
-`UpdateImages` re-reads the reference off the broker container and records it;
-`ApplyCoreConfig` re-reads the file and records its hash. A reader takes the last
-record, so appending restores the answer.
+**1. The record comes before the change.** That is what makes an unrecorded change
+impossible — the silent-upgrade failure. A failure to record aborts with every
+container untouched.
 
-Leaving the stale record instead is **not** the conservative direction, which is
-why this half is load-bearing rather than tidy. The stale record names the digest
-the caller asked for — for an attacker, exactly the digest a verifier is looking for
-— while the broker keeps running whatever it ran before. Reaching that state needs
-nothing privileged: ask to upgrade to a well-formed digest the registry cannot
-serve, and the pull fails with every container untouched. Do it after installing an
-older *published* image and the ledger names the current release while a superseded
-one serves traffic. "A reader would reject it" only holds when the stale record
-names something the reader was **not** looking for.
+**2. The record comes as late as it can.** For the image path that means *after the
+pull*, not at the top of the call. The pull changes no container, so recording after
+it still precedes the change; but a record written before it leaves the whole pull —
+unbounded, and the one step a caller can make fail on demand with any well-formed
+digest the registry cannot serve — as a window in which the still-running broker
+could be restarted and seal a quote naming an image that was never even fetched.
+From the record onward the broker is being stopped: docker's restart policy does not
+fire on a deliberate stop, and `POST /v1/containers/:name/{start,stop,restart}` are
+behind the **same lock** the upgrade holds, so they cannot slip a broker start into
+the middle of one. (That lock is the only reason those routes have one; they record
+nothing themselves.)
 
-Boundary: once the broker has been recreated on the new image, the record is already
+**3. A record must not outlive the change it describes.** RTMR3 cannot be rewound, so
+the abort paths *append the truth*: the two stops and the recreate re-read the
+reference off the broker container and record it; a config write that fails re-reads
+the file and records its actual hash. A reader takes the last record, so appending
+restores the answer.
+
+Leaving a stale record instead is **not** the conservative direction. It names the
+digest the caller asked for — for an attacker, exactly the digest a verifier is
+looking for — while the broker keeps running whatever it ran before. Install an older
+*published* image, then fail an "upgrade" to the current one, and the ledger names the
+current release while a superseded build serves traffic. "A reader would reject it"
+only holds when the stale record names something the reader was **not** looking for.
+
+For the same reason the restore **fails closed**: every outcome emits something, and
+when the truth cannot be established — no broker container, an unreadable file, a
+name that resolved to a neighbouring container — the payload deliberately names no
+digest or no hash, which `attest.ResolveRunningState` refuses. Refusing beats
+believing the record being replaced. Only the emit itself failing can leave the ledger
+overstating, and then the API error says so; an operator has to resolve it.
+
+Boundary: once the broker has been recreated on the new image the record is already
 correct, so the remaining failures (health wait, ingress reload, event container,
-contract sync) must *not* restore — doing so would replace a true record with a
-false one.
+contract sync) must *not* restore — that would replace a true record with a false one.
 
-If a restore itself fails, the ledger is left overstating and the API error says so;
-only an operator can resolve that. `controller/internal/ctrl/rtmr3_test.go` covers
-both halves and the boundary.
+`controller/internal/ctrl/rtmr3_test.go` covers all three, the boundary, and the
+fail-closed path.
 
 `zg-config-update` records **behaviour, not just code**. Pricing, verifiability
 and `targetUrl` all live in that config file; an image digest alone would leave
 them changeable without a trace.
 
-Both paths are serialized against each other, and a second caller gets **409**
-rather than being queued. RTMR3 is a ledger — the last `zg-image-update` in it is
-what a reader believes is running — and two interleaved upgrades would leave the
-last event and the last container created coming from different requests.
+Both recorded paths are serialized against each other **and against
+`POST /v1/containers/:name/{start,stop,restart}`**; a caller that arrives mid-change
+gets **409** rather than being queued, with nothing touched. RTMR3 is a ledger — the
+last `zg-image-update` in it is what a reader believes is running — so two interleaved
+upgrades would leave the last event and the last container created coming from
+different requests, and a bare start slipped into the middle would seal a quote around
+a ledger that does not describe the container it just started.
 
 This requires `/var/run/dstack.sock` mounted into the controller. It is not
 dialled at startup, so the read-only endpoints keep working without it; an upgrade

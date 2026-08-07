@@ -339,6 +339,16 @@ func (c *Ctrl) StartContainer(ctx context.Context, alias string) error {
 		return &InvalidContainerError{Alias: alias}
 	}
 
+	// Under the same lock as the recorded changes, even though this records
+	// nothing itself. Starting the broker is what seals a quote around whatever
+	// the ledger says at that moment, so a start let through the middle of an
+	// upgrade would hand a reader a quote describing an image the upgrade had
+	// announced but not yet installed.
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
 	return c.dockerClient.StartContainer(ctx, containerName)
 }
 
@@ -349,6 +359,16 @@ func (c *Ctrl) StopContainer(ctx context.Context, alias string) error {
 		return &InvalidContainerError{Alias: alias}
 	}
 
+	// Under the same lock as the recorded changes, even though this records
+	// nothing itself. Starting the broker is what seals a quote around whatever
+	// the ledger says at that moment, so a start let through the middle of an
+	// upgrade would hand a reader a quote describing an image the upgrade had
+	// announced but not yet installed.
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
+
 	return c.dockerClient.StopContainer(ctx, containerName)
 }
 
@@ -358,6 +378,16 @@ func (c *Ctrl) RestartContainer(ctx context.Context, alias string) error {
 	if containerName == "" {
 		return &InvalidContainerError{Alias: alias}
 	}
+
+	// Under the same lock as the recorded changes, even though this records
+	// nothing itself. Starting the broker is what seals a quote around whatever
+	// the ledger says at that moment, so a start let through the middle of an
+	// upgrade would hand a reader a quote describing an image the upgrade had
+	// announced but not yet installed.
+	if !c.changing.TryLock() {
+		return ErrChangeInProgress
+	}
+	defer c.changing.Unlock()
 
 	return c.dockerClient.RestartContainer(ctx, containerName)
 }
@@ -407,11 +437,14 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 		return c.abortConfigChange(ctx, err)
 	}
 
-	// Restart both broker and event since they share the config
-	if err := c.RestartContainer(ctx, "broker"); err != nil {
+	// Restart both broker and event since they share the config.
+	//
+	// Straight to the docker client, not through the Ctrl methods: those take
+	// `changing`, which this call already holds.
+	if err := c.dockerClient.RestartContainer(ctx, containerBroker); err != nil {
 		return fmt.Errorf("failed to restart broker: %w", err)
 	}
-	if err := c.RestartContainer(ctx, "event"); err != nil {
+	if err := c.dockerClient.RestartContainer(ctx, containerEvent); err != nil {
 		return fmt.Errorf("failed to restart event: %w", err)
 	}
 
@@ -420,8 +453,11 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 
 // abortImageChange restores the image record and returns the error to report.
 //
-// Called on every path that fails between recording an image change and the broker
-// actually running it.
+// Called by the paths that fail after the record and before the broker is on the new
+// image: the two stops and the recreate. The pull runs before the record exists, so
+// there is nothing to restore there; everything after the recreate has the broker on
+// the new image, so the record is already right and restoring would replace a true
+// record with a false one.
 func (c *Ctrl) abortImageChange(ctx context.Context, cause error) error {
 	if err := c.restoreImageRecord(ctx); err != nil {
 		c.logger.Errorf("[UpdateImages] RTMR3 names an image the broker is not running and the record could not be restored: %v", err)
@@ -438,57 +474,71 @@ func (c *Ctrl) abortImageChange(ctx context.Context, cause error) error {
 // truth after it. A reader takes the last image record as what is running, which is
 // what this restores.
 //
-// Leaving the overstatement instead is not the conservative direction, which is
-// what makes this load-bearing rather than tidy. The stale record names the digest
-// the caller asked for — for an attacker, the digest a verifier is looking for —
-// while the broker keeps running whatever it ran before. Reaching that state needs
-// nothing privileged: ask to upgrade to a well-formed digest the registry cannot
-// serve, and the pull fails with every container untouched. Do it after installing
-// an older published image and the ledger says the current release while a
-// superseded one serves traffic. "A reader would reject it" only holds when the
-// stale record names something the reader was not looking for.
+// Leaving the overstatement instead is not the conservative direction, which is what
+// makes this load-bearing rather than tidy. The stale record names the digest the
+// caller asked for — for an attacker, the digest a verifier is looking for — while
+// the broker keeps running whatever it ran before. "A reader would reject it" only
+// holds when the stale record names something the reader was not looking for.
 //
-// The broker's current reference is re-read rather than captured beforehand,
-// because the abort paths differ in how far they got: some leave it running the old
-// image, one leaves it created-but-not-started on the new one. Whatever the
-// container says now is the answer in both.
+// It follows that this must fail CLOSED. Every outcome emits something, and when the
+// truth cannot be established the payload deliberately names no digest, which
+// attest.ResolveRunningState refuses. An earlier version returned an error instead
+// for those cases, on the reasoning that a broker whose reference carries no digest
+// belongs to a deployment attest cannot verify anyway — which is wrong: the
+// compose-pinned fallback is only consulted when there is no image record at all, so
+// the stale one would have made an unverifiable deployment verifiably wrong.
+//
+// The broker's reference is re-read rather than captured beforehand, because the
+// abort paths differ in how far they got: one leaves it stopped on the old image,
+// another created-but-not-started on the new one, another with no container at all.
 func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
-	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
-	if err != nil {
-		return fmt.Errorf("reading the broker's image: %w", err)
-	}
-	if status == nil {
-		// The abort removed the container and did not get one back. There is no
-		// running image to name, and no vocabulary for "none" — the operator has to
-		// resolve it, and the error says so.
-		return fmt.Errorf("no %s container to read an image from", containerBroker)
+	// Names no digest, so a reader refuses rather than believing the record this is
+	// replacing. Used whenever the broker's own reference cannot be established.
+	unknown := c.config.ImageRepo
+
+	payload := unknown
+	switch status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker); {
+	case err != nil:
+		c.logger.Warnf("[UpdateImages] Could not read the broker's image to restore the RTMR3 record, recording it as unknown: %v", err)
+	case status == nil:
+		// The abort removed the container and did not get one back.
+		c.logger.Warnf("[UpdateImages] No %s container to read an image from, recording the running image as unknown", containerBroker)
+	case status.Name != containerBroker:
+		// GetContainerStatus falls back to a shortest-substring match, so a
+		// deployment that does not pin container_name can resolve this to a
+		// neighbour — "0g-serving-provider-broker-db" contains the broker's whole
+		// name. Fine for a status endpoint, not for something a reader treats as
+		// the attested image.
+		c.logger.Warnf("[UpdateImages] %q resolved to container %q, recording the running image as unknown", containerBroker, status.Name)
+	default:
+		payload = status.Image
 	}
 
-	// A reference with no digest is nothing a reader can act on, and a deployment
-	// that has one is not verifiable to begin with: attest refuses a compose file
-	// that pins the broker by tag. Recording it would add noise, not truth.
-	if _, digest, pinned := strings.Cut(status.Image, "@"); !pinned || !imageDigestPattern.MatchString(digest) {
-		return fmt.Errorf("the broker runs %q, which pins no digest", status.Image)
-	}
-
-	return c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(status.Image))
+	return c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(payload))
 }
 
 // abortConfigChange restores the config record and returns the error to report.
 //
-// Same reasoning as restoreImageRecord: the recorded hash would otherwise name
-// content that was never applied, and an attacker picks which content that is.
+// Same reasoning as restoreImageRecord, including the fail-closed part: the recorded
+// hash would otherwise name content that was never applied, and the caller picks
+// which content that is. When the file cannot be read the payload deliberately names
+// no hash, which attest.ResolveRunningState refuses.
 //
 // The file is re-read rather than assumed unchanged, because os.WriteFile truncates
 // before it writes — a failure part-way through leaves content that is neither the
 // old nor the new, and that is what the record has to name.
 func (c *Ctrl) abortConfigChange(ctx context.Context, cause error) error {
-	content, err := os.ReadFile(c.config.ConfigFile)
-	if err == nil {
+	// Not a hex sha256, so a reader refuses rather than believing the record this
+	// is replacing.
+	payload := "unknown"
+	if content, err := os.ReadFile(c.config.ConfigFile); err != nil {
+		c.logger.Warnf("[ApplyCoreConfig] Could not re-read the config file to restore the RTMR3 record, recording it as unknown: %v", err)
+	} else {
 		sum := sha256.Sum256(content)
-		err = c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:])))
+		payload = hex.EncodeToString(sum[:])
 	}
-	if err != nil {
+
+	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(payload)); err != nil {
 		c.logger.Errorf("[ApplyCoreConfig] RTMR3 names config content that was not applied and the record could not be restored: %v", err)
 		return errors.Join(cause, fmt.Errorf("RTMR3 still names the config this change did not apply, and restoring it failed: %w", err))
 	}
@@ -682,18 +732,6 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// the recreate and the contract sync cannot end up describing different images.
 	ref := c.config.ImageRepo + "@" + digest
 
-	// Recorded before anything is pulled, stopped or created, and a failure to
-	// record aborts the upgrade with every container untouched. Recording
-	// afterwards would leave a window in which the broker runs an image nothing
-	// accounted for, which is the silent upgrade this whole path exists to prevent.
-	//
-	// Recording first means the record can outlive an upgrade that then fails, so
-	// every abort path below restores it — see restoreImageRecord for why the
-	// overstatement is the dangerous direction and not the safe one.
-	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
-		return nil, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
-	}
-
 	result := &docker.ImageUpdateResult{
 		Image:             ref,
 		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
@@ -707,11 +745,6 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	c.logger.Info("[UpdateImages] Pulling latest image...")
 	imageInfo, err := c.dockerClient.PullImage(ctx, ref)
 	if err != nil {
-		// Reassigned first, so a restore that failed reaches the caller: the
-		// handler reports result.Error, not the returned error, when the result
-		// is non-nil — and "RTMR3 is left overstating" is the half an operator
-		// has to act on.
-		err = c.abortImageChange(ctx, err)
 		result.Success = false
 		result.Error = "failed to pull image: " + err.Error()
 		return result, err
@@ -720,14 +753,34 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	result.Digest = imageInfo.Digest
 	c.logger.Infof("[UpdateImages] Image pulled - ID=%s, Digest=%s", imageInfo.ImageID, imageInfo.Digest)
 
+	// Recorded after the pull and before anything touches a container, and a failure
+	// to record aborts with every container untouched.
+	//
+	// Before the change, so a change cannot happen unrecorded: the create below is
+	// the first step that alters which image the broker runs.
+	//
+	// After the pull, which is the part that matters for what a reader sees. A quote
+	// is sealed when a broker process starts — it caches the whole
+	// quote/event-log/tcb_info triple for its lifetime — so the ledger only has to be
+	// true at those instants. Recording at the top of this function left the whole
+	// pull as a window in which the still-running broker could be restarted and seal
+	// a quote naming an image the pull had not even fetched, and the pull is both
+	// unbounded and the step a caller can make fail on demand: any well-formed digest
+	// the registry cannot serve. From here on the broker is being stopped, docker's
+	// restart policy does not fire on a deliberate stop, and the start/stop/restart
+	// routes are behind the lock this call holds.
+	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
+		return nil, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
+	}
+
 	// Step 2: Stop containers in reverse dependency order (event -> broker)
 	c.logger.Info("[UpdateImages] Stopping containers...")
 	if err := c.dockerClient.StopContainer(ctx, eventName); err != nil {
 		// Log error but continue - container might not exist
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-			// Reassigned first, so a restore that failed reaches the caller: the
-			// handler reports result.Error, not the returned error, when the result
-			// is non-nil — and "RTMR3 is left overstating" is the half an operator
+			// After the record, so the ledger has to be brought back to what the
+			// broker is actually on. Reassigned before result.Error because the
+			// handler surfaces that, and a failed restore is the half an operator
 			// has to act on.
 			err = c.abortImageChange(ctx, err)
 			result.Success = false
@@ -739,9 +792,9 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Then stop broker
 	if err := c.dockerClient.StopContainer(ctx, brokerName); err != nil {
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-			// Reassigned first, so a restore that failed reaches the caller: the
-			// handler reports result.Error, not the returned error, when the result
-			// is non-nil — and "RTMR3 is left overstating" is the half an operator
+			// After the record, so the ledger has to be brought back to what the
+			// broker is actually on. Reassigned before result.Error because the
+			// handler surfaces that, and a failed restore is the half an operator
 			// has to act on.
 			err = c.abortImageChange(ctx, err)
 			result.Success = false

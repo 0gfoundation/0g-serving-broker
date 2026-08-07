@@ -134,6 +134,33 @@ func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool, pullBody string) *
 	return c
 }
 
+// fakeEmptyDaemon serves a container list with no broker in it, which is what an
+// abort that removed it and could not create a replacement leaves behind.
+func fakeEmptyDaemon(t *testing.T, l *opLog) *docker.Client {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := docker.NewClient(config.ControllerConfig{
+		Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"},
+	})
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 func containerOf(path, suffix string) string {
 	parts := strings.Split(strings.TrimSuffix(path, suffix), "/")
 	switch parts[len(parts)-1] {
@@ -183,12 +210,13 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, wit
 	}
 }
 
-// The load-bearing invariant: a change is in RTMR3 before it happens, and the
-// broker restarts within the same call so the record reaches the quote it serves.
+// The load-bearing invariant for the config path: the change is in RTMR3 before it
+// happens, and the broker restarts within the same call so the record reaches the
+// quote it serves.
 //
-// The broker takes its quote once at startup and serves it from cache, so an
-// event emitted while it runs is invisible to every reader until it restarts.
-// Nothing in the type system says so — this is the test that says it.
+// A broker seals its quote when it starts — it caches the whole
+// quote/event-log/tcb_info triple for its lifetime — so an event emitted while it
+// runs reaches no reader until it restarts. Nothing in the type system says so.
 func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -205,7 +233,7 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	}
 
 	sum := sha256.Sum256([]byte(content))
-	wantEmit := "emit zg-config-update " + hex.EncodeToString(sum[:])
+	wantEmit := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	ops := l.all()
 	if len(ops) == 0 || ops[0] != wantEmit {
 		t.Fatalf("ops = %v, want %q first", ops, wantEmit)
@@ -216,9 +244,6 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 		t.Errorf("ops = %v, want the broker restarted in the same call", ops)
 	}
 
-	// Written after the record, not before: the point of the order is that a
-	// crash in between leaves a recorded change that did not take effect, never
-	// an unrecorded one that did.
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the config file back: %v", err)
@@ -257,73 +282,98 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 	}
 }
 
-// Same invariant on the upgrade path, which has more ways to get the order wrong:
-// the record has to precede the pull as well as the container work, because a
-// pull is already a change to the machine's state.
-func TestImageChangeIsRecordedBeforeItHappens(t *testing.T) {
+// The image record sits immediately before the step that changes which image the
+// broker runs — after the pull and after the containers are stopped, before the
+// create.
+//
+// Not at the top of the call, which is where it started out. A quote is sealed when a
+// broker process starts, so the ledger only has to be true at those instants; a
+// record written before the pull leaves that whole unbounded, caller-influenced wait
+// as a window in which the still-running broker can be restarted and seal a quote
+// naming an image the pull had not even fetched. Recorded here, no broker is in a
+// state that can start: it has just been stopped, docker's restart policy does not
+// fire on a deliberate stop, and the start/stop/restart routes are behind the same
+// lock this call holds.
+func TestImageChangeIsRecordedAfterThePullAndBeforeAnyContainerWork(t *testing.T) {
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, "", false, okPull)
 
-	// Fails at the end, when the absent event container cannot be resolved. That
-	// is past everything this test is about, and short of the contract sync, which
-	// needs a chain.
-	_, err := c.UpdateImages(context.Background(), testDigest)
-	if err == nil {
+	// Fails at the end, on the absent event container — past everything asserted
+	// here, and short of the contract sync, which needs a chain.
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
 		t.Fatal("UpdateImages() = nil, want the event container to be unresolvable")
 	}
 
-	ops := l.all()
-	want := "emit zg-image-update ghcr.io/0gfoundation/0g-serving-broker@" + testDigest
-	if len(ops) == 0 || ops[0] != want {
-		t.Fatalf("ops = %v, want %q first", ops, want)
+	emit := l.indexOf("emit " + eventImageUpdate + " " + imageRepo + "@" + testDigest)
+	if emit < 0 {
+		t.Fatalf("ops = %v, want the image change recorded", l.all())
 	}
-	// Named individually rather than as "anything after index 0": the pull is the
-	// one people read as harmless, and it is not — it changes which images the
-	// daemon holds, and it is the step a failed upgrade can stop at.
-	for _, op := range []string{"pull", "stop broker", "remove", "create broker"} {
-		if l.indexOf(op) <= 0 {
-			t.Errorf("ops = %v, want %q after the record", ops, op)
+	// Before every container write: a change must not happen unrecorded.
+	for _, after := range []string{"stop broker", "remove", "create broker"} {
+		if i := l.indexOf(after); i < 0 || i < emit {
+			t.Errorf("ops = %v, want %q after the record at %d", l.all(), after, emit)
 		}
+	}
+	// After the pull, which is what closed the window an attacker could steer: the
+	// pull is unbounded and can be made to fail on demand with any well-formed digest
+	// the registry cannot serve, and a record written before it left the running
+	// broker restartable while the ledger already named the new image.
+	if i := l.indexOf("pull"); i < 0 || i > emit {
+		t.Errorf("ops = %v, want the pull before the record at %d", l.all(), emit)
 	}
 }
 
-// The property a reader actually depends on: the last image record names the image
-// the broker will be running when it next serves a quote. Recording first is what
-// makes an unrecorded change impossible; this is what stops a record outliving the
-// change it describes.
+// A pull failure is the failure an attacker can summon at will — ask to upgrade to a
+// well-formed digest the registry cannot serve — and it now happens before anything
+// is recorded, so there is nothing to overstate and nothing to restore.
 //
-// Without it, the two-call downgrade works: install an older published image, then
-// ask to upgrade to the current one with a digest the registry cannot serve. The
-// pull fails, nothing is touched, and the ledger names the digest a verifier is
-// looking for while the superseded image serves traffic. Nothing privileged is
-// needed — a well-formed digest that does not exist is enough.
-func TestFailedImageChangeRestoresTheRecord(t *testing.T) {
+// This is what killed the two-call downgrade: install an older published image, then
+// "upgrade" to the current digest with an unpullable one, and the ledger used to name
+// the digest a verifier is looking for while the superseded image served traffic.
+func TestFailedPullRecordsNothing(t *testing.T) {
 	l := &opLog{}
-	failedPull := `{"errorDetail":{"message":"manifest unknown"}}`
-	c := newChangeCtrl(t, l, nil, "", false, failedPull)
+	c := newChangeCtrl(t, l, nil, "", false, `{"errorDetail":{"message":"manifest unknown"}}`)
 
 	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
 		t.Fatal("UpdateImages() = nil, want the pull to fail")
 	}
 
+	if ops := l.all(); len(ops) != 1 || ops[0] != "pull" {
+		t.Errorf("ops = %v, want the pull and nothing else", ops)
+	}
+}
+
+// When the truth cannot be established the record must name no digest, so a reader
+// refuses rather than believing the record it replaces.
+//
+// The earlier version returned an error here instead, reasoning that a broker whose
+// reference carries no digest is in a deployment attest cannot verify anyway. That is
+// wrong, and it was exploitable: the compose-pinned fallback is consulted only when
+// there is no image record at all, so leaving the stale one turned an unverifiable
+// deployment into a verifiably wrong one.
+func TestRestoreFailsClosedWhenTheImageIsUnknown(t *testing.T) {
+	l := &opLog{}
+	// No broker in the container list, so nothing can be read back.
+	c := &Ctrl{
+		config:       config.ControllerConfig{ImageRepo: imageRepo},
+		dockerClient: fakeEmptyDaemon(t, l),
+		emitter:      &fakeEmitter{log: l},
+		logger:       testLogger(t),
+	}
+
+	if err := c.restoreImageRecord(context.Background()); err != nil {
+		t.Fatalf("restoreImageRecord() = %v, want it to record something", err)
+	}
+
 	ops := l.all()
-	want := []string{
-		"emit " + eventImageUpdate + " " + imageRepo + "@" + testDigest,
-		"pull",
-		"emit " + eventImageUpdate + " " + prevRef,
+	if len(ops) != 1 {
+		t.Fatalf("ops = %v, want exactly one record", ops)
 	}
-	if len(ops) != len(want) {
-		t.Fatalf("ops = %v, want %v", ops, want)
-	}
-	for i := range want {
-		if ops[i] != want[i] {
-			t.Errorf("ops[%d] = %q, want %q", i, ops[i], want[i])
-		}
-	}
-	// The restoring record has to be last, because that is the one a reader reads.
-	// Appending it is the only correction an append-only ledger allows.
-	if got := ops[len(ops)-1]; !strings.HasSuffix(got, prevRef) {
-		t.Errorf("last op = %q, want it to name the running image %q", got, prevRef)
+	// attest.ResolveRunningState refuses a payload that pins no digest, which is the
+	// whole point: refusing beats believing the record being replaced.
+	payload := strings.TrimPrefix(ops[0], "emit "+eventImageUpdate+" ")
+	if strings.Contains(payload, "@") {
+		t.Errorf("recorded %q, want a payload that pins no digest", payload)
 	}
 }
 
@@ -380,11 +430,19 @@ func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
 	}
 }
 
-// A restore that itself fails must be loud in the returned error, because the
-// ledger is then left overstating and only an operator can resolve it.
+// A restore that itself fails must be loud in the returned error, because the ledger
+// is then left overstating and only an operator can resolve it. An unreadable file no
+// longer reaches this — it records "unknown", which a reader refuses — so the only way
+// left is the emit itself failing.
 func TestFailedRestoreIsReported(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("service:\n  name: x\n"), 0o644); err != nil {
+		t.Fatalf("seeding the config file: %v", err)
+	}
+
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "gone", "config.yaml"), true, okPull)
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, true, okPull)
 
 	cause := errors.New("original failure")
 	err := c.abortConfigChange(context.Background(), cause)
@@ -393,24 +451,6 @@ func TestFailedRestoreIsReported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "RTMR3 still names") {
 		t.Errorf("abortConfigChange() = %v, want it to say the record was left overstating", err)
-	}
-}
-
-func TestImageChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
-	l := &opLog{}
-	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), "", false, okPull)
-
-	result, err := c.UpdateImages(context.Background(), testDigest)
-	if err == nil {
-		t.Fatal("UpdateImages() = nil, want an error when the change cannot be recorded")
-	}
-	// The handler reads a non-nil result as partial progress. There was none, not
-	// even a pull.
-	if result != nil {
-		t.Errorf("UpdateImages() = %+v, want a nil result", result)
-	}
-	if ops := l.all(); len(ops) != 1 {
-		t.Errorf("ops = %v, want the failed record and nothing else", ops)
 	}
 }
 

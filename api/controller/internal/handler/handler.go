@@ -107,6 +107,13 @@ func (h *Handler) StartContainer(ctx *gin.Context) {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// Refused rather than run, because an image or config change is mid-flight
+		// and starting a container now would seal a quote around a ledger that does
+		// not yet describe it. Nothing was touched; retry when it finishes.
+		if errors.Is(err, ctrl.ErrChangeInProgress) {
+			ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -123,6 +130,13 @@ func (h *Handler) StopContainer(ctx *gin.Context) {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// Refused rather than run, because an image or config change is mid-flight
+		// and starting a container now would seal a quote around a ledger that does
+		// not yet describe it. Nothing was touched; retry when it finishes.
+		if errors.Is(err, ctrl.ErrChangeInProgress) {
+			ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -137,6 +151,13 @@ func (h *Handler) RestartContainer(ctx *gin.Context) {
 	if err := h.ctrl.RestartContainer(ctx, name); err != nil {
 		if _, ok := err.(*ctrl.InvalidContainerError); ok {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// Refused rather than run, because an image or config change is mid-flight
+		// and starting a container now would seal a quote around a ledger that does
+		// not yet describe it. Nothing was touched; retry when it finishes.
+		if errors.Is(err, ctrl.ErrChangeInProgress) {
+			ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
