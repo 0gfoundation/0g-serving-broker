@@ -596,8 +596,16 @@ func TestVideoReserveOversizedAndTruncatedSecondsFallBack(t *testing.T) {
 					v, got, videoReserveFallbackSeconds)
 			}
 			// Same value through the query, which is what FormValue hands the vendor on multipart.
-			if got := videoReserve(t, c, `{}`, ct, "seconds="+v); got < videoReserveFallbackSeconds {
-				t.Errorf("query seconds=%q: reserve = %d, want >= %d", v, got, videoReserveFallbackSeconds)
+			// The body here carries a POSITIVE `seconds`, and that is the whole point: the earlier
+			// version of this case used a `{}` body, which sized to 0 and so was rescued by the
+			// positive-size check rather than by the source decision. A real multipart body with a
+			// usable duration is what exposed the third revision of this logic.
+			for _, bodySeconds := range []string{"4", "9", "14"} {
+				mp2, ct2 := multipartSeconds(t, bodySeconds)
+				if got := videoReserve(t, c, mp2, ct2, "seconds="+v); got < videoReserveFallbackSeconds {
+					t.Errorf("multipart body seconds=%s + query seconds=%q: reserve = %d, want >= %d — the vendor reads the QUERY here, so the body's size must not cancel the fallback",
+						bodySeconds, v, got, videoReserveFallbackSeconds)
+				}
 			}
 		}
 	})
@@ -620,11 +628,21 @@ func TestVideoReserveOversizedAndTruncatedSecondsFallBack(t *testing.T) {
 			t.Errorf("reserve = %d for a %d-byte value, want >= %d — the broker never saw its end",
 				got, len(padded), videoReserveFallbackSeconds)
 		}
-		// One byte under the cap is fully read and must still be trusted.
+		// One byte under the cap IS fully read — but 1023 nines overflow ParseFloat to +Inf, so this
+		// still resolves to the fallback, by the size check rather than by the truncation guard. Both
+		// routes must land >= the fallback; the assertion does not care which, and the reason is spelled
+		// out here because an earlier version of this comment claimed the value was "trusted", which it
+		// is not.
 		short := strings.Repeat("9", maxMultipartScalarBytes-1)
 		mp2, ct2 := multipartSeconds(t, short)
 		if got := videoReserve(t, c, mp2, ct2, ""); got < videoReserveFallbackSeconds {
-			t.Errorf("reserve = %d for a fully-read %d-byte value, want >= %d", got, len(short), videoReserveFallbackSeconds)
+			t.Errorf("reserve = %d for a %d-byte value, want >= %d", got, len(short), videoReserveFallbackSeconds)
+		}
+		// A short value that IS fully read and parses is trusted, which is the property the line above
+		// was reaching for.
+		mp3, ct3 := multipartSeconds(t, "11")
+		if got := videoReserve(t, c, mp3, ct3, ""); got != 11 {
+			t.Errorf("reserve = %d for a fully-read parseable value, want 11", got)
 		}
 	})
 }

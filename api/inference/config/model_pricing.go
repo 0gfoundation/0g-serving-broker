@@ -363,8 +363,10 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 // resolution. Evaluated AT THIS DURATION — scaledUnits' overflow check is duration-dependent, so a
 // multiplier skipped at the reserve's seconds can still price at the shorter duration a vendor renders.
 // That window opens only above ~2^40/seconds (~7e10), a multiplier that already prices every ordinary
-// clip at ~1e11 units, so it is documented rather than closed. The caller floors against that scale only then — flooring unconditionally over-reserved
-// every ordinary multi-model create by the shipped default ratio (2.0), for a fallback that a sane
+// clip at ~1e11 units, so it is documented rather than closed.
+//
+// The caller floors against the service ratio only when this is true — flooring unconditionally
+// over-reserved every ordinary multi-model create by the shipped default ratio (2.0), for a fallback that a sane
 // config never reaches.
 //
 // "for the given duration" bounds the SIZE axis only. The duration axis is not bounded by the request:

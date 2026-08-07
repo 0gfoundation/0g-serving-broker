@@ -151,13 +151,13 @@ func extractModelFromMultipart(body []byte, contentType string) string {
 	return multipartFormField(body, contentType, "model")
 }
 
-// multipartFormField returns the value of a named non-file form field from a
-// maxMultipartScalarBytes caps what the scalar form readers below will pull from one part, so a
-// mislabeled file part cannot stream unbounded memory. Exported to callers as a LIMIT they must reason
-// about, not an implementation detail: the vendor's own r.FormValue has no such cap, so a value at or
-// past this length is one the broker cannot claim to have read the way the upstream will.
+// maxMultipartScalarBytes caps what the scalar form readers here will pull from one part, so a
+// mislabeled file part cannot stream unbounded memory. Callers on a money path must reason about it
+// rather than treat it as an implementation detail: the vendor's own r.FormValue has no such cap, so a
+// value at or past this length is one the broker cannot claim to have read the way the upstream will.
 const maxMultipartScalarBytes = 1024
 
+// multipartFormField returns the value of a named non-file form field from a
 // multipart/form-data body using a real MIME reader (NOT a substring scan), so
 // adversarial content in another field — e.g. a prompt body containing the
 // literal name="seconds" — cannot be mistaken for the field. Returns "" when the

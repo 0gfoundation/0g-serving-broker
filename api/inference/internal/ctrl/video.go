@@ -393,36 +393,39 @@ func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	querySeconds := videoReserveQuerySeconds(rawQuery)
 	queryIsRead := isMultipartRequest(contentType)
 
-	// Two separate questions, and conflating them is how this went wrong twice.
+	// Two questions, and this is the THIRD revision of how they combine — the first two each shipped an
+	// under-reserve, so the shape matters more than either answer.
 	//
-	// (1) How large a duration did ANY source name? That sets the reserve, so it takes the maximum —
-	//     the three consumers of `seconds` disagree on where they look (see below), and the largest
-	//     reading is above whichever one the deployed combination picks.
+	// (1) SIZING: how large a duration did any source name? The maximum, because the three consumers of
+	//     `seconds` disagree on where they look (multipart create: the query, via r.FormValue; JSON
+	//     create: the body; settlement's degraded path: the body), and the largest reading is at or above
+	//     whichever one the deployed combination picks.
 	best := bodySeconds
 	if querySeconds > best {
 		best = querySeconds
 	}
 
-	// (2) Did the source the UPSTREAM will read name a usable duration? Only that decides whether the
-	//     fallback applies, because the fallback stands in for "the vendor will pick a duration we
-	//     cannot see". Asking (1) instead let a value the upstream provably discards cancel the
-	//     sentinel: on a JSON create the query reaches no reader, yet `?seconds=1` over a body naming
-	//     none reserved 4 units where the same create with no query reserved 23 — 74% deleted by a
-	//     string nothing upstream reads.
+	// (2) THE SENTINEL: does the source the UPSTREAM reads yield a duration at all? The fallback stands
+	//     in for "the vendor will choose one we cannot see", so only that source can cancel it.
 	//
-	//     multipart: ParseMultipartForm seeds r.Form from the query, so FormValue returns the query's
-	//     value whenever the key is present — usable or not — and never consults the body.
-	//     anything else: the translator decodes the body and ignores the query entirely.
-	upstreamNamedDuration := videoUpstreamNamedDuration(reqBody, contentType, rawQuery, bodySeconds, queryIsRead)
-	//     Note the `best <= 0` term: it is not redundant with (2), it is what makes the whole shape safe
-	//     against the NEXT divergence between these two questions. Sizing has caps that the naming
-	//     predicate does not (`> maxVideoOutputUnits` is rejected as a size; the multipart read stops at
-	//     maxMultipartScalarBytes), so "named" and "sized" can disagree — and when they did, the reserve
-	//     fell all the way to the vendor floor. Measured: a multipart `seconds=2e12` sized 0, named true,
-	//     and reserved 4 units where MiniMax renders its 15s ceiling and bills 15. `seconds=2^40` reserved
-	//     1099511627776 while `2^40+1` reserved 4 — one character across a cliff, same rendered clip.
-	//     Requiring a POSITIVE size means any future predicate mismatch can only raise the reserve.
-	if best <= 0 || !upstreamNamedDuration {
+	//     Both halves of this now come from ONE function and ONE source decision, which is the actual
+	//     fix. Previously (2) was a bool computed from the upstream's source while the positive-size
+	//     check was applied to (1)'s maximum — so they could disagree about WHICH SOURCE, and every
+	//     under-reserve in this function's history was that disagreement:
+	//
+	//       revision 1  fallback keyed on (1) alone  -> `?seconds=1` on a JSON create, which reaches no
+	//                   reader, cancelled the sentinel: 23 units -> 6.
+	//       revision 2  fallback keyed on (2) alone  -> a query value past the sizing cap was "named"
+	//                   but sized 0, so the reserve fell to the vendor floor: 4 against a 15-unit bill.
+	//       revision 3  added `best <= 0` to (2)     -> the positive size could come from the BODY while
+	//                   the vendor read the QUERY: multipart body `seconds=4` plus `?seconds=2e12`
+	//                   reserved 4 against the same 15-unit bill. Measured 5.358 0G reserved against
+	//                   20.094 0G billed at the mainnet unit price.
+	//
+	//     Asking one function for both the sized value and its readability removes the class: there is no
+	//     longer a second place that could pick a different source.
+	upstreamSeconds, upstreamReadable := videoUpstreamSeconds(reqBody, contentType, rawQuery, bodySeconds, querySeconds, queryIsRead)
+	if upstreamSeconds <= 0 || !upstreamReadable {
 		if int64(videoReserveFallbackSeconds) > best {
 			best = videoReserveFallbackSeconds
 		}
@@ -430,40 +433,40 @@ func videoReserveSeconds(reqBody []byte, contentType, rawQuery string) int64 {
 	return videoReserveClampSeconds(best)
 }
 
-// videoUpstreamNamedDuration reports whether the value the UPSTREAM will read parses as a duration on
-// the vendor's own terms. Only this decides whether the unknown-duration fallback applies.
+// videoUpstreamSeconds answers both questions about the ONE source the upstream will actually read:
+// what duration this package can size from it, and whether the vendor can parse it at all. Returning
+// them together is deliberate — the caller must never combine a size taken from one source with a
+// readability verdict taken from another, which is exactly how three revisions of the caller each
+// shipped an under-reserve.
 //
-// "On the vendor's own terms" is the whole point, and it is not the same as "this package could read
-// it": both translators call strconv.ParseFloat on the verbatim form value, while this package trims
-// first. So a multipart `seconds` of " 1" reads as 1 here — floored to the 4s vendor minimum — and as a
-// parse error there, which makes DashScope omit `duration` and let the vendor pick. Reserving 4 against
-// an unknown vendor default is the cheap side of a reading divergence, which is the exact shape this
-// gate exists to close; a padded value now falls back like any other unreadable one.
+// Which source the upstream reads:
+//   - multipart: ParseMultipartForm seeds r.Form from the query, so r.FormValue answers from the query
+//     whenever the key is PRESENT — usable or not — and never consults the body.
+//   - anything else: the translator decodes the body and ignores the query entirely.
 //
-// JSON needs no such care: the translator's own field is a string it ParseFloats identically, and a JSON
-// body whose `seconds` is unquoted (the only form this package reads as a number) cannot carry
-// whitespace inside the token.
-func videoUpstreamNamedDuration(reqBody []byte, contentType, rawQuery string, bodySeconds int64, queryIsRead bool) bool {
+// Readability is judged on the vendor's own terms, not this package's: both translators ParseFloat the
+// verbatim value while this package trims, so a padded " 1" is readable here and not there. A value that
+// filled the read cap counts as unreadable too — the broker never saw its end, while the vendor's
+// FormValue has no cap and parses all of it.
+func videoUpstreamSeconds(reqBody []byte, contentType, rawQuery string, bodySeconds, querySeconds int64, queryIsRead bool) (seconds int64, readable bool) {
 	if queryIsRead {
-		// FormValue answers from the query whenever the key is present, usable or not.
 		if q, _ := url.ParseQuery(rawQuery); q != nil {
 			if vs, present := q["seconds"]; present {
-				return len(vs) > 0 && vendorParsesSeconds(vs[0])
+				if len(vs) == 0 {
+					return 0, false
+				}
+				return querySeconds, vendorParsesSeconds(vs[0])
 			}
 		}
-		if raw, present := multipartFormFieldRaw(reqBody, contentType, "seconds"); present {
-			// A value that filled the read cap is one the broker did not see the end of, while the
-			// vendor's r.FormValue has no cap and parses all of it. Measured: `"5." + 1022 zeros + "e3"`
-			// reads as 5 here and as 5000 there, which MiniMax renders as its 15s ceiling. A truncated
-			// read is not a read.
-			if len(raw) >= maxMultipartScalarBytes {
-				return false
-			}
-			return vendorParsesSeconds(raw)
+		raw, present := multipartFormFieldRaw(reqBody, contentType, "seconds")
+		if !present || len(raw) >= maxMultipartScalarBytes {
+			return 0, false
 		}
-		return false
+		return bodySeconds, vendorParsesSeconds(raw)
 	}
-	return bodySeconds > 0
+	// JSON: the body is the only reader, and a JSON number token cannot carry the surrounding
+	// whitespace that makes the vendors' untrimmed parse diverge from this package's.
+	return bodySeconds, bodySeconds > 0
 }
 
 // vendorParsesSeconds mirrors the translators' own duration read: strconv.ParseFloat on the verbatim
