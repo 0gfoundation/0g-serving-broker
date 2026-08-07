@@ -196,7 +196,7 @@ func (h *Handler) ListAllowedIPs(ctx *gin.Context) {
 
 // GetImageInfo returns information about the current image
 func (h *Handler) GetImageInfo(ctx *gin.Context) {
-		info, err := h.ctrl.GetImageInfo(ctx)
+	info, err := h.ctrl.GetImageInfo(ctx)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -205,10 +205,29 @@ func (h *Handler) GetImageInfo(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, info)
 }
 
-// UpdateImages pulls the latest image and updates containers
+// UpdateImagesRequest is the request body for an image upgrade.
+//
+// The digest is required and is the whole of what the caller gets to choose:
+// the repository comes from controller.imageRepo, so there is no request shape
+// that pulls by tag.
+type UpdateImagesRequest struct {
+	Digest string `json:"digest" binding:"required"` // "sha256:" followed by 64 lowercase hex characters
+}
+
+// UpdateImages recreates the containers on the image named by the given digest
 func (h *Handler) UpdateImages(ctx *gin.Context) {
-	result, err := h.ctrl.UpdateImages(ctx)
+	var req UpdateImagesRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "digest field is required"})
+		return
+	}
+
+	result, err := h.ctrl.UpdateImages(ctx, req.Digest)
 	if err != nil {
+		if _, ok := err.(*ctrl.InvalidDigestError); ok {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		// Return the result even on error, as it contains partial progress info
 		if result != nil {
 			ctx.JSON(http.StatusInternalServerError, result)

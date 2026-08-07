@@ -74,6 +74,11 @@ func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, l
 			logger.Warnf("Failed to create Docker client: %v", err)
 		} else {
 			pc.dockerClient = dockerCli
+			// Still controller.image, not controller.imageRepo: this resolves the
+			// name against the local daemon, and a bare repo resolves to :latest —
+			// a tag a digest-pinned deployment need not have. The whole reader is
+			// being replaced by the IMAGE_REPO / IMAGE_DIGEST environment
+			// variables, which is what removes the daemon from this path.
 			pc.imageName = conf.Controller.Image
 		}
 	}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +34,54 @@ const (
 	containerPrometheus     = "prometheus"
 )
 
+// imageDigestPattern is what the upgrade entry point accepts as a digest.
+//
+// Lowercase hex only, because that is what docker's own digest parser accepts:
+// anything else names an image no daemon will resolve, and letting it through
+// would only move the failure to the pull.
+var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// InvalidDigestError is returned when an upgrade is asked for by something
+// other than a well-formed image digest.
+type InvalidDigestError struct {
+	Digest string
+}
+
+func (e *InvalidDigestError) Error() string {
+	return fmt.Sprintf("invalid image digest %q: expected \"sha256:\" followed by 64 lowercase hex characters", e.Digest)
+}
+
+// ValidateDigest checks that digest names an image by content.
+func ValidateDigest(digest string) error {
+	if !imageDigestPattern.MatchString(digest) {
+		return &InvalidDigestError{Digest: digest}
+	}
+	return nil
+}
+
+// validateImageRepo rejects a configured repository that already carries a tag
+// or a digest.
+//
+// UpdateImages builds exactly one reference, imageRepo + "@" + digest. A repo
+// carrying either produces a reference docker cannot resolve, and defeats the
+// point of a digest-only entry point: which image runs is the caller's digest,
+// never something the config or a re-pointed tag decides.
+//
+// Only the last path segment is checked for ':', since a registry host may
+// carry a port — "localhost:5000/0g-serving-broker" is a bare repo.
+func validateImageRepo(repo string) error {
+	if repo == "" {
+		return errors.New("controller.imageRepo is required")
+	}
+	if strings.Contains(repo, "@") {
+		return fmt.Errorf("controller.imageRepo %q must name a repository only, without a digest", repo)
+	}
+	if strings.Contains(repo[strings.LastIndex(repo, "/")+1:], ":") {
+		return fmt.Errorf("controller.imageRepo %q must name a repository only, without a tag", repo)
+	}
+	return nil
+}
+
 // Ctrl is the controller for managing containers and configs
 type Ctrl struct {
 	config       config.ControllerConfig
@@ -57,6 +107,16 @@ type Ctrl struct {
 // NewCtrl creates a new controller
 func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	cfg := fullConfig.Controller
+
+	if err := validateImageRepo(cfg.ImageRepo); err != nil {
+		return nil, err
+	}
+	// Not [CONFIG-REMOVED] like controller.containers: the broker still reports
+	// controller.image on-chain, so this warns that the controller stopped
+	// reading it without telling an operator to delete it yet.
+	if cfg.Image != "" {
+		logger.Warnf("controller.image no longer selects what the controller runs — upgrades run %s@<digest from the request>. It is still read by the broker for on-chain ImageName, so leave it set until that moves to IMAGE_REPO / IMAGE_DIGEST.", cfg.ImageRepo)
+	}
 
 	dockerClient, err := docker.NewClient(cfg)
 	if err != nil {
@@ -306,9 +366,24 @@ func (e *InvalidConfigError) Error() string {
 	return "invalid config format: " + e.Err.Error()
 }
 
-// GetImageInfo returns information about the current image
+// GetImageInfo returns information about the image the broker is running.
+//
+// It reads the reference off the broker container rather than off the config.
+// The config now holds a bare repository, and docker resolves a bare name to
+// its :latest tag — a tag a digest-pinned deployment need not have locally at
+// all, and one that pulling repo@digest does not create. Inspecting the config
+// would therefore answer with a different image than the one running, or fail
+// outright, exactly on the deployments this change exists to serve.
 func (c *Ctrl) GetImageInfo(ctx context.Context) (*docker.ImageInfo, error) {
-	return c.dockerClient.GetImageInfo(ctx, c.config.Image)
+	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	if err != nil {
+		return nil, err
+	}
+	if status == nil {
+		return nil, &docker.ContainerNotFoundError{Name: containerBroker}
+	}
+
+	return c.dockerClient.GetImageInfo(ctx, status.Image)
 }
 
 // GetService gets the current service from the contract
@@ -419,15 +494,31 @@ func (c *Ctrl) SyncService(ctx context.Context, imageName, imageDigest string) e
 	return nil
 }
 
-// UpdateImages pulls the latest image and recreates broker and event containers
-// The order of operations ensures contract is only updated after containers are successfully recreated:
+// UpdateImages recreates broker and event on imageRepo@digest.
+//
+// Which image runs is decided by the caller's digest, not by a tag: a tag is a
+// registry-side pointer, so pulling one twice can yield two different images
+// and nothing downstream can tell which one is live. The digest is the image,
+// so the reference built here is the only description of what runs — which is
+// what lets it later be recorded as one, in a log that cannot be rewritten.
+//
+// The order of operations is unchanged, and still leaves the contract for last
+// so it is only updated once the containers are running the new image:
 // 1. Pull image
 // 2. Stop containers (event -> broker)
 // 3. Recreate containers (broker -> event)
 // 4. Sync service to contract (only after containers are running with new image)
-func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, error) {
+func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUpdateResult, error) {
+	if err := ValidateDigest(digest); err != nil {
+		return nil, err
+	}
+
+	// The one reference this upgrade runs on. Built once so pull, recreate and
+	// the contract sync cannot end up describing different images.
+	ref := c.config.ImageRepo + "@" + digest
+
 	result := &docker.ImageUpdateResult{
-		Image:             c.config.Image,
+		Image:             ref,
 		UpdatedContainers: make([]docker.ContainerUpdateResult, 0),
 	}
 
@@ -437,7 +528,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
-	imageInfo, err := c.dockerClient.PullImage(ctx, c.config.Image)
+	imageInfo, err := c.dockerClient.PullImage(ctx, ref)
 	if err != nil {
 		result.Success = false
 		result.Error = "failed to pull image: " + err.Error()
@@ -469,7 +560,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 
 	// Step 3: Recreate containers in dependency order (broker -> event)
 	// First recreate broker
-	brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerName, c.config.Image)
+	brokerResult, err := c.dockerClient.RecreateContainer(ctx, brokerName, ref)
 	if brokerResult != nil {
 		result.UpdatedContainers = append(result.UpdatedContainers, *brokerResult)
 	}
@@ -499,7 +590,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	}
 
 	// Then recreate event
-	eventResult, err := c.dockerClient.RecreateContainer(ctx, eventName, c.config.Image)
+	eventResult, err := c.dockerClient.RecreateContainer(ctx, eventName, ref)
 	if eventResult != nil {
 		result.UpdatedContainers = append(result.UpdatedContainers, *eventResult)
 	}
@@ -513,7 +604,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 	// This is done AFTER containers are successfully recreated to ensure
 	// the contract always reflects the actual running state
 	c.logger.Info("[UpdateImages] Syncing service with new image digest...")
-	if err := c.SyncService(ctx, c.config.Image, imageInfo.Digest); err != nil {
+	if err := c.SyncService(ctx, c.config.ImageRepo, imageInfo.Digest); err != nil {
 		result.Success = false
 		result.Error = "failed to sync service: " + err.Error()
 		return result, err
@@ -521,11 +612,6 @@ func (c *Ctrl) UpdateImages(ctx context.Context) (*docker.ImageUpdateResult, err
 
 	result.Success = true
 	return result, nil
-}
-
-// GetConfiguredImage returns the configured image name
-func (c *Ctrl) GetConfiguredImage() string {
-	return c.config.Image
 }
 
 // UpdatePrometheusConfig updates the Prometheus configuration
