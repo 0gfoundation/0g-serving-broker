@@ -49,6 +49,7 @@ services:
 
   # Main broker starts after nginx is ready
   0g-serving-provider-broker:
+    container_name: 0g-serving-provider-broker
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
     environment:
       - PORT=3080
@@ -81,6 +82,7 @@ services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
+    container_name: 0g-serving-provider-event
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
     environment:
       - CONFIG_FILE=/etc/config.yaml

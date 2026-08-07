@@ -57,7 +57,13 @@ type fakeEmitter struct {
 	err error
 }
 
-func (e *fakeEmitter) EmitEvent(_ context.Context, event string, payload []byte) error {
+// Honours the context, as the real client does: the dstack SDK builds every call with
+// http.NewRequestWithContext, so an expired one fails before anything is written. A
+// fake that ignored it would let a restore inheriting a dead context look fine here.
+func (e *fakeEmitter) EmitEvent(ctx context.Context, event string, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	e.log.add("emit " + event + " " + string(payload))
 	return e.err
 }
@@ -584,5 +590,39 @@ func TestUpgradeRefusesAContainerItCannotNameExactly(t *testing.T) {
 	}
 	if ops := l.all(); len(ops) != 0 {
 		t.Errorf("ops = %v, want nothing touched", ops)
+	}
+}
+
+// A restore runs on its own context, not the one whose expiry may be why it is
+// running.
+//
+// The upgrade holds a deadline so it cannot pin the lock forever, and that deadline is
+// one of the things that can abort it. A restore inheriting an expired context cannot
+// make a single call, which leaves the ledger overstating on precisely the path that
+// exists to prevent that — reachable by slow-serving the pull until the deadline lands
+// between the record and the recreate.
+func TestRestoreRunsOnItsOwnContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	const onDisk = "service:\n  name: on-disk\n"
+	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
+		t.Fatalf("seeding the config file: %v", err)
+	}
+
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, path, okPull)
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cause := errors.New("write /etc/config/config.yaml: read-only file system")
+	if err := c.abortConfigChange(expired, cause); !errors.Is(err, cause) {
+		t.Errorf("abortConfigChange() = %v, want it to carry the original cause", err)
+	}
+
+	sum := sha256.Sum256([]byte(onDisk))
+	want := "emit " + eventConfigUpdate + " " + hex.EncodeToString(sum[:])
+	if ops := l.all(); len(ops) != 1 || ops[0] != want {
+		t.Errorf("ops = %v, want %q — the restore must run even on a dead context", ops, want)
 	}
 }

@@ -892,7 +892,12 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// The broker is stopped and nothing was recorded, so the ledger is still
 		// truthful — but leaving it down would turn a dstack hiccup into an outage.
 		// Best effort: on failure the caller gets an error either way.
-		if startErr := c.dockerClient.StartContainer(ctx, brokerName); startErr != nil {
+		// Its own context, for the reason in abortImageChange: if the record failed
+		// because this call's deadline expired, so would the restart, and the broker
+		// would be left stopped for exactly the reason this branch exists to avoid.
+		startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+		defer cancelStart()
+		if startErr := c.dockerClient.StartContainer(startCtx, brokerName); startErr != nil {
 			c.logger.Errorf("[UpdateImages] Could not restart the broker after failing to record the change: %v", startErr)
 		}
 		result.Success = false
