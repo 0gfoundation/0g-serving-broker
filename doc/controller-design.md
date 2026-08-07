@@ -307,6 +307,30 @@ Three properties this rests on, none of them visible from the call site:
   it is why the ledger has to be true *at those instants* rather than merely
   eventually.
 
+#### What this does not prove, and why
+
+**Any container holding `/var/run/dstack.sock` can write RTMR3 directly.** dstack's
+guest agent serves `EmitEvent` on that socket from the same unmediated handler as
+`GetQuote` and `GetKey`, and binds it `0777` — "Allow any user to connect to the
+socket" (`guest-agent/src/main.rs`, `rpc_service.rs`). There is no authorization and no
+restriction on the event name or payload. The broker mounts that socket because it
+needs `GetQuote` and `DeriveKey`.
+
+So a provider running a modified broker image can append its own `zg-image-update`
+naming any digest and then take a quote over it. Payloads are unauthenticated bare
+bytes, and `report_data` carries no nonce, so such a quote replays forever. **No
+placement of the controller's record changes that**, and neither does locking the
+container routes: the writer and the adversary are the same process.
+
+Read the accounting below accordingly. Against a provider who has replaced the broker
+image, RTMR3 proves nothing on its own — that case needs either a capability split (the
+broker asking the controller for quotes instead of holding the socket) or freshness
+binding on the verifier side (a challenge nonce in `report_data`), and both are
+decisions outside this repository. What the accounting does give you today is a
+truthful account of what the *controller* did: it makes an in-TEE upgrade impossible to
+perform silently or to misreport by accident, which is what closes the gap that
+motivated it — an upgrade leaving no trace at all.
+
 #### The invariant, stated properly
 
 > The **last** image record names the image the broker will be running when it next
@@ -321,13 +345,12 @@ container untouched.
 **2. The record comes as late as it can — once no broker is running.** For the image
 path that means *after both containers are stopped*, immediately before the create.
 
-This is the security property, not a detail. A reader believes the last image record,
-so the ledger has to be true at every instant a quote can be taken — and a quote can
-be taken by whatever image is **currently running**, which is the image under
-suspicion. The broker mounts `/var/run/dstack.sock` because it needs `GetQuote`, and
-`report_data` carries no nonce, so any quote it collects can be replayed forever.
-Locking the start/stop/restart routes does not help against that: the adversary is the
-live process itself, not a second API call.
+A reader believes the last image record, so the ledger has to be true at every instant a
+quote can be taken — and a quote can be taken by whatever image is currently running.
+Against a *modified* broker that is unwinnable (see above); against an unmodified one it
+means the record must not exist while a broker is alive that is not on the new
+reference, because an ordinary restart in that window — a crash, an OOM kill, docker's
+restart policy — would seal a quote around a ledger that does not describe it.
 
 So the record must not exist while a broker is alive that is not on the new reference.
 At the point it is written, none is: both containers were just stopped, docker's
@@ -342,6 +365,15 @@ and with the pull unbounded and failable on demand that was a window a caller co
 hold open. A record that cannot be written restarts the broker rather than leaving it
 stopped: nothing was recorded, so the ledger is still truthful, and a dstack hiccup
 must not become an outage.
+
+An upgrade also **refuses to start** unless both managed containers resolve by their
+exact names. Container lookup otherwise falls back to a shortest-substring match, which
+is fine for a status endpoint and destructive here: once an attempt has removed the
+broker container and failed to create a replacement, the shortest remaining name
+containing `0g-serving-provider-broker` is `0g-serving-provider-broker-db` — the
+database in this project's own compose file. A retry would stop it, record an image
+change, and recreate the database container running the broker image, reporting success.
+**Set `container_name:` on both services**; the error names the missing one.
 
 Both recorded paths also run on a **detached, bounded** context. Detached so a client
 disconnect cannot abort a change half way, or make the record and the restore fail

@@ -65,12 +65,14 @@ func (e *fakeEmitter) EmitEvent(_ context.Context, event string, payload []byte)
 // Every docker endpoint the two change paths touch, each one logging the write it
 // performs.
 //
-// withEvent decides whether the event container exists. The upgrade test leaves it
-// out so UpdateImages runs its whole broker half and then stops where it cannot
-// resolve that container — past everything being asserted, and short of the
-// contract sync, which would need a chain to talk to.
-func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool, pullBody string) *docker.Client {
+// Both managed containers are always present, because UpdateImages now refuses to
+// proceed unless each resolves by its exact name. The upgrade tests instead fail the
+// *second* container create — the event container's — which is past everything they
+// assert and short of the contract sync, which would need a chain to talk to.
+func fakeChangeDaemon(t *testing.T, l *opLog, pullBody string) *docker.Client {
 	t.Helper()
+
+	creates := 0
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -80,17 +82,21 @@ func fakeChangeDaemon(t *testing.T, l *opLog, withEvent bool, pullBody string) *
 			l.add("pull")
 			_, _ = w.Write([]byte(pullBody))
 		case strings.HasSuffix(r.URL.Path, "/containers/json"):
-			list := []map[string]any{
+			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"Id": brokerID, "Names": []string{"/0g-serving-provider-broker"}},
+				{"Id": eventID, "Names": []string{"/0g-serving-provider-event"}},
 				{"Id": selfID, "Names": []string{"/0g-controller"}},
-			}
-			if withEvent {
-				list = append(list, map[string]any{"Id": eventID, "Names": []string{"/0g-serving-provider-event"}})
-			}
-			_ = json.NewEncoder(w).Encode(list)
+			})
 		case strings.HasSuffix(r.URL.Path, "/containers/create"):
-			l.add("create broker")
-			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "beef" + strings.Repeat("0", 60)})
+			creates++
+			if creates == 1 {
+				l.add("create broker")
+				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "beef" + strings.Repeat("0", 60)})
+				return
+			}
+			l.add("create event refused")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "no space left on device"})
 		case strings.HasSuffix(r.URL.Path, "/stop"):
 			l.add("stop " + containerOf(r.URL.Path, "/stop"))
 			w.WriteHeader(http.StatusNoContent)
@@ -196,7 +202,7 @@ func testLogger(t *testing.T) log.Logger {
 	return l
 }
 
-func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, withEvent bool, pullBody string) *Ctrl {
+func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string) *Ctrl {
 	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
 	return &Ctrl{
@@ -204,7 +210,7 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, wit
 			ImageRepo:  imageRepo,
 			ConfigFile: configFile,
 		},
-		dockerClient: fakeChangeDaemon(t, l, withEvent, pullBody),
+		dockerClient: fakeChangeDaemon(t, l, pullBody),
 		emitter:      &fakeEmitter{log: l, err: emitErr},
 		logger:       testLogger(t),
 	}
@@ -225,7 +231,7 @@ func TestConfigChangeIsRecordedBeforeItHappens(t *testing.T) {
 	}
 
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, path, true, okPull)
+	c := newChangeCtrl(t, l, nil, path, okPull)
 
 	const content = "service:\n  name: after\n"
 	if err := c.ApplyCoreConfig(context.Background(), content); err != nil {
@@ -264,7 +270,7 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 	}
 
 	l := &opLog{}
-	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, true, okPull)
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, okPull)
 
 	if err := c.ApplyCoreConfig(context.Background(), "service:\n  name: after\n"); err == nil {
 		t.Fatal("ApplyCoreConfig() = nil, want an error when the change cannot be recorded")
@@ -296,12 +302,12 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 // lock this call holds.
 func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, "", false, okPull)
+	c := newChangeCtrl(t, l, nil, "", okPull)
 
 	// Fails at the end, on the absent event container — past everything asserted
 	// here, and short of the contract sync, which needs a chain.
 	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
-		t.Fatal("UpdateImages() = nil, want the event container to be unresolvable")
+		t.Fatal("UpdateImages() = nil, want the event container recreate to fail")
 	}
 
 	ops := l.all()
@@ -334,7 +340,7 @@ func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 // outage.
 func TestFailedRecordRestartsTheBroker(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), "", false, okPull)
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), "", okPull)
 
 	result, err := c.UpdateImages(context.Background(), testDigest)
 	if err == nil {
@@ -365,7 +371,7 @@ func TestFailedRecordRestartsTheBroker(t *testing.T) {
 // the digest a verifier is looking for while the superseded image served traffic.
 func TestFailedPullRecordsNothing(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, "", false, `{"errorDetail":{"message":"manifest unknown"}}`)
+	c := newChangeCtrl(t, l, nil, "", `{"errorDetail":{"message":"manifest unknown"}}`)
 
 	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
 		t.Fatal("UpdateImages() = nil, want the pull to fail")
@@ -417,10 +423,10 @@ func TestImageChangeAfterTheBrokerMovedDoesNotRestore(t *testing.T) {
 	l := &opLog{}
 	// withEvent=false, so this fails at the event container — after the broker has
 	// been recreated on the new image.
-	c := newChangeCtrl(t, l, nil, "", false, okPull)
+	c := newChangeCtrl(t, l, nil, "", okPull)
 
 	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
-		t.Fatal("UpdateImages() = nil, want the event container to be unresolvable")
+		t.Fatal("UpdateImages() = nil, want the event container recreate to fail")
 	}
 
 	var emits []string
@@ -445,7 +451,7 @@ func TestFailedConfigWriteRestoresTheRecord(t *testing.T) {
 	}
 
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, path, true, okPull)
+	c := newChangeCtrl(t, l, nil, path, okPull)
 
 	// Called directly: making os.WriteFile fail on demand needs either a
 	// root-dependent chmod or a path whose re-read fails too, and neither exercises
@@ -475,7 +481,7 @@ func TestFailedRestoreIsReported(t *testing.T) {
 	}
 
 	l := &opLog{}
-	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, true, okPull)
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), path, okPull)
 
 	cause := errors.New("original failure")
 	err := c.abortConfigChange(context.Background(), cause)
@@ -493,7 +499,7 @@ func TestFailedRestoreIsReported(t *testing.T) {
 // refused rather than queued: it has to know its digest is not the one that won.
 func TestConcurrentChangesAreRefused(t *testing.T) {
 	l := &opLog{}
-	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), true, okPull)
+	c := newChangeCtrl(t, l, nil, filepath.Join(t.TempDir(), "config.yaml"), okPull)
 
 	c.changing.Lock()
 	defer c.changing.Unlock()
@@ -506,5 +512,77 @@ func TestConcurrentChangesAreRefused(t *testing.T) {
 	}
 	if ops := l.all(); len(ops) != 0 {
 		t.Errorf("ops = %v, want nothing recorded or touched", ops)
+	}
+}
+
+// An upgrade refuses to run unless both managed containers resolve by their exact
+// names.
+//
+// Lookup falls back to a shortest-substring match. Once a previous attempt removed the
+// broker container and failed to create a replacement, the shortest remaining name
+// containing "0g-serving-provider-broker" is "0g-serving-provider-broker-db" — the
+// database in this project's own compose file. Without this guard a retry stops it,
+// records an image change, and recreates the database container running the broker
+// image, reporting success.
+func TestUpgradeRefusesAContainerItCannotNameExactly(t *testing.T) {
+	l := &opLog{}
+	t.Cleanup(docker.SetHostnameForTests(selfHost))
+
+	// The broker is gone; only the database is left carrying its name as a prefix.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": "dddd444444444444444444444444444444444444444444444444444444444444",
+					"Names": []string{"/0g-serving-provider-broker-db"}},
+				{"Id": eventID, "Names": []string{"/0g-serving-provider-event"}},
+				{"Id": selfID, "Names": []string{"/0g-controller"}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			// The inspect GetContainerStatus does after resolving a name. Read-only,
+			// so it is not "touching" anything.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id":     "dddd444444444444444444444444444444444444444444444444444444444444",
+				"Name":   "/0g-serving-provider-broker-db",
+				"Config": map[string]any{"Image": "mysql:8.0"},
+				"State":  map[string]any{"Status": "running"},
+			})
+		default:
+			l.add("touched " + r.Method + " " + r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dc, err := docker.NewClient(config.ControllerConfig{
+		Docker: config.DockerConfig{Host: srv.URL, APIVersion: "1.47"},
+	})
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = dc.Close() })
+
+	c := &Ctrl{
+		config:       config.ControllerConfig{ImageRepo: imageRepo},
+		dockerClient: dc,
+		emitter:      &fakeEmitter{log: l},
+		logger:       testLogger(t),
+	}
+
+	result, err := c.UpdateImages(context.Background(), testDigest)
+	var ambiguous *AmbiguousContainerError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("UpdateImages() = %v, want *AmbiguousContainerError", err)
+	}
+	if ambiguous.Got != "0g-serving-provider-broker-db" {
+		t.Errorf("Got = %q, want the database container it would have destroyed", ambiguous.Got)
+	}
+	// Refused before anything at all: no pull, no record, no container write.
+	if result != nil {
+		t.Errorf("UpdateImages() = %+v, want a nil result", result)
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing touched", ops)
 	}
 }

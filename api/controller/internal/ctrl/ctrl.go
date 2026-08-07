@@ -76,6 +76,11 @@ const (
 const (
 	upgradeTimeout      = 30 * time.Minute
 	configChangeTimeout = 5 * time.Minute
+
+	// restoreTimeout bounds putting the ledger back. Deliberately separate: a restore
+	// runs *because* something failed, often the deadline above, and must not inherit
+	// the context that expired.
+	restoreTimeout = 30 * time.Second
 )
 
 // ErrChangeInProgress is returned when a change is refused because another one
@@ -467,6 +472,36 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	return nil
 }
 
+// AmbiguousContainerError is returned when a container the upgrade must act on cannot
+// be found under its exact name.
+type AmbiguousContainerError struct {
+	Want string
+	Got  string // the name resolution settled on, or "" if nothing matched
+}
+
+func (e *AmbiguousContainerError) Error() string {
+	if e.Got == "" {
+		return fmt.Sprintf("no container named %q; set container_name: %s in the compose file", e.Want, e.Want)
+	}
+	return fmt.Sprintf("no container named %q — %q matched instead, and acting on it would recreate the wrong service; set container_name: %s in the compose file", e.Want, e.Got, e.Want)
+}
+
+// verifyExactContainer refuses to proceed unless name resolves to a container of
+// exactly that name.
+func (c *Ctrl) verifyExactContainer(ctx context.Context, name string) error {
+	status, err := c.dockerClient.GetContainerStatus(ctx, name)
+	if err != nil {
+		return fmt.Errorf("looking up container %s: %w", name, err)
+	}
+	if status == nil {
+		return &AmbiguousContainerError{Want: name}
+	}
+	if status.Name != name {
+		return &AmbiguousContainerError{Want: name, Got: status.Name}
+	}
+	return nil
+}
+
 // abortImageChange restores the image record and returns the error to report.
 //
 // One caller: the recreate. Everything before it — the pull, the two stops, the
@@ -474,6 +509,13 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 // everything after it has the broker on the new image, so the record is already right
 // and restoring would replace a true record with a false one.
 func (c *Ctrl) abortImageChange(ctx context.Context, cause error) error {
+	// Its own context, not the upgrade's. The upgrade's deadline may be exactly what
+	// aborted it, and a restore that inherits an expired one cannot run at all —
+	// which leaves the ledger overstating on precisely the path that exists to stop
+	// that. Two local calls, so the budget is small.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+	defer cancel()
+
 	if err := c.restoreImageRecord(ctx); err != nil {
 		c.logger.Errorf("[UpdateImages] RTMR3 names an image the broker is not running and the record could not be restored: %v", err)
 		return errors.Join(cause, fmt.Errorf("RTMR3 still names the image this upgrade did not reach, and restoring it failed: %w", err))
@@ -543,6 +585,10 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 // before it writes — a failure part-way through leaves content that is neither the
 // old nor the new, and that is what the record has to name.
 func (c *Ctrl) abortConfigChange(ctx context.Context, cause error) error {
+	// Its own context, for the reason given in abortImageChange.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+	defer cancel()
+
 	// Not a hex sha256, so a reader refuses rather than believing the record this
 	// is replacing.
 	payload := "unknown"
@@ -766,6 +812,25 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	brokerName := containerBroker
 	eventName := containerEvent
 	ingressName := containerIngress
+
+	// Both containers must resolve by their exact names before anything is touched.
+	//
+	// Container lookup falls back to a shortest-substring match, which is fine for a
+	// status endpoint and destructive here. Once a previous attempt has removed the
+	// broker container and failed to create a replacement, the shortest remaining name
+	// containing "0g-serving-provider-broker" is "0g-serving-provider-broker-db" — the
+	// database in this project's own compose file. A retry would then stop it, record
+	// an image change, and recreate the database container running the broker image,
+	// reporting success.
+	//
+	// It is also what the record means: a reader treats the last image record as a
+	// statement about the broker, so the upgrade has to know it acted on the broker.
+	if err := c.verifyExactContainer(ctx, brokerName); err != nil {
+		return nil, err
+	}
+	if err := c.verifyExactContainer(ctx, eventName); err != nil {
+		return nil, err
+	}
 
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
