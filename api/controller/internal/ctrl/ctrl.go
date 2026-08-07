@@ -603,8 +603,17 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Step 4: Sync service in the contract with new image digest
 	// This is done AFTER containers are successfully recreated to ensure
 	// the contract always reflects the actual running state
+	//
+	// ImageName stays controller.image, deliberately, even though ref is the
+	// truer description of what now runs. additionalInfo has a second writer:
+	// the broker rewrites both image fields from controller.image every time it
+	// starts. Writing a different value here would not correct that one, it
+	// would just make the two disagree — and the contract treats each flip as
+	// an image change and un-acknowledges the provider for it. Both writers
+	// move together when the broker takes IMAGE_REPO / IMAGE_DIGEST from its
+	// environment; until then the field is only as precise as the older one.
 	c.logger.Info("[UpdateImages] Syncing service with new image digest...")
-	if err := c.SyncService(ctx, c.config.ImageRepo, imageInfo.Digest); err != nil {
+	if err := c.SyncService(ctx, c.config.Image, imageInfo.Digest); err != nil {
 		result.Success = false
 		result.Error = "failed to sync service: " + err.Error()
 		return result, err

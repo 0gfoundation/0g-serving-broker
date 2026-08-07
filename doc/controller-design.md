@@ -75,12 +75,19 @@ between two pulls. A port on the registry host is fine (`localhost:5000/broker`)
 only the last path segment is checked for a tag.
 
 `controller.image` is **deprecated and no longer read by the controller**, but
-must stay set for now: the broker still reads it (`provider_contract.go`) to
-report `additionalInfo.ImageName` on-chain and to resolve that name's digest
-against the local daemon. Deleting it early empties both image fields, and the
-contract reads an image change as grounds to un-acknowledge the provider. It can
-be removed once the broker takes `IMAGE_REPO` / `IMAGE_DIGEST` from its
-environment instead.
+must stay set: the broker still reads it (`provider_contract.go`) to report
+`additionalInfo.ImageName` on-chain and to resolve that name's digest against
+the local daemon. Deleting it empties both image fields, and the contract reads
+an image change as grounds to un-acknowledge the provider.
+
+It also means **this change must be released together with the broker's move to
+`IMAGE_REPO` / `IMAGE_DIGEST`**, not before it. Pulling `repo@digest` does not
+move the local `:latest` tag, which pulling `repo:latest` did. So after a digest
+upgrade the broker's next start resolves `controller.image` to the image from
+before the upgrade, finds it does not match the container it is running in, and
+reports an empty digest on-chain — un-acknowledging the provider on exactly the
+path that was supposed to prove what it runs. Taking the repository and digest
+from the environment removes the daemon lookup, and this key with it.
 
 The names of the managed containers are **not** configurable. They are constants
 in `api/controller/internal/ctrl` (`0g-serving-provider-broker`,

@@ -2290,6 +2290,12 @@ func GetConfig() *Config {
 				AdminAddresses: []string{},
 				AllowedIPs:     []string{},
 				ImageRepo:      "ghcr.io/0gfoundation/0g-serving-broker",
+				// Deprecated, and defaulted anyway: no repo config sets it, so
+				// this default is what every deployment actually runs on, and
+				// the broker reports it on-chain. Dropping the default empties
+				// additionalInfo.ImageName / ImageDigest, which the contract
+				// reads as an image change and un-acknowledges the provider for.
+				Image: "ghcr.io/0gfoundation/0g-serving-broker:latest",
 				Docker: DockerConfig{
 					Host:       "unix:///var/run/docker.sock",
 					APIVersion: "1.41",
