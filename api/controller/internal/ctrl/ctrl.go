@@ -66,6 +66,18 @@ const (
 	eventConfigUpdate = "zg-config-update"
 )
 
+// Ceilings on how long a recorded change may hold the controller.
+//
+// Not tuning knobs: they exist so the lock cannot be held forever. Both paths hold a
+// lock that also gates start/stop/restart, and an upgrade's pull has no timeout of its
+// own, so without these a registry that never answers would leave an operator unable
+// to restart the broker to recover. Generous enough for a multi-gigabyte pull plus the
+// two-minute health wait.
+const (
+	upgradeTimeout      = 30 * time.Minute
+	configChangeTimeout = 5 * time.Minute
+)
+
 // ErrChangeInProgress is returned when a change is refused because another one
 // holds the controller.
 var ErrChangeInProgress = errors.New("another image or config change is in progress")
@@ -428,6 +440,10 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	}
 	defer c.changing.Unlock()
 
+	// Detached and bounded for the same reasons as UpdateImages.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), configChangeTimeout)
+	defer cancel()
+
 	sum := sha256.Sum256([]byte(configContent))
 	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
 		return fmt.Errorf("recording the config change in RTMR3: %w", err)
@@ -453,11 +469,10 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 
 // abortImageChange restores the image record and returns the error to report.
 //
-// Called by the paths that fail after the record and before the broker is on the new
-// image: the two stops and the recreate. The pull runs before the record exists, so
-// there is nothing to restore there; everything after the recreate has the broker on
-// the new image, so the record is already right and restoring would replace a true
-// record with a false one.
+// One caller: the recreate. Everything before it — the pull, the two stops, the
+// record itself — runs before the record exists or leaves nothing to correct;
+// everything after it has the broker on the new image, so the record is already right
+// and restoring would replace a true record with a false one.
 func (c *Ctrl) abortImageChange(ctx context.Context, cause error) error {
 	if err := c.restoreImageRecord(ctx); err != nil {
 		c.logger.Errorf("[UpdateImages] RTMR3 names an image the broker is not running and the record could not be restored: %v", err)
@@ -728,6 +743,17 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	}
 	defer c.changing.Unlock()
 
+	// Detached from the caller's request, and bounded.
+	//
+	// Detached because a client disconnect must not abort an upgrade half way, and
+	// must not be able to make the record and the restore fail selectively — that is
+	// the caller choosing which half of the accounting happens. Bounded because this
+	// call holds the lock that now also gates start/stop/restart, and PullImage has no
+	// timeout of its own: an unbounded pull would otherwise leave an operator unable
+	// to so much as restart the broker to recover.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upgradeTimeout)
+	defer cancel()
+
 	// The one reference this upgrade runs on. Built once so the record, the pull,
 	// the recreate and the contract sync cannot end up describing different images.
 	ref := c.config.ImageRepo + "@" + digest
@@ -753,36 +779,11 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	result.Digest = imageInfo.Digest
 	c.logger.Infof("[UpdateImages] Image pulled - ID=%s, Digest=%s", imageInfo.ImageID, imageInfo.Digest)
 
-	// Recorded after the pull and before anything touches a container, and a failure
-	// to record aborts with every container untouched.
-	//
-	// Before the change, so a change cannot happen unrecorded: the create below is
-	// the first step that alters which image the broker runs.
-	//
-	// After the pull, which is the part that matters for what a reader sees. A quote
-	// is sealed when a broker process starts — it caches the whole
-	// quote/event-log/tcb_info triple for its lifetime — so the ledger only has to be
-	// true at those instants. Recording at the top of this function left the whole
-	// pull as a window in which the still-running broker could be restarted and seal
-	// a quote naming an image the pull had not even fetched, and the pull is both
-	// unbounded and the step a caller can make fail on demand: any well-formed digest
-	// the registry cannot serve. From here on the broker is being stopped, docker's
-	// restart policy does not fire on a deliberate stop, and the start/stop/restart
-	// routes are behind the lock this call holds.
-	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
-		return nil, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
-	}
-
 	// Step 2: Stop containers in reverse dependency order (event -> broker)
 	c.logger.Info("[UpdateImages] Stopping containers...")
 	if err := c.dockerClient.StopContainer(ctx, eventName); err != nil {
 		// Log error but continue - container might not exist
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-			// After the record, so the ledger has to be brought back to what the
-			// broker is actually on. Reassigned before result.Error because the
-			// handler surfaces that, and a failed restore is the half an operator
-			// has to act on.
-			err = c.abortImageChange(ctx, err)
 			result.Success = false
 			result.Error = "failed to stop event container: " + err.Error()
 			return result, err
@@ -792,15 +793,46 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Then stop broker
 	if err := c.dockerClient.StopContainer(ctx, brokerName); err != nil {
 		if _, ok := err.(*docker.ContainerNotFoundError); !ok {
-			// After the record, so the ledger has to be brought back to what the
-			// broker is actually on. Reassigned before result.Error because the
-			// handler surfaces that, and a failed restore is the half an operator
-			// has to act on.
-			err = c.abortImageChange(ctx, err)
 			result.Success = false
 			result.Error = "failed to stop broker container: " + err.Error()
 			return result, err
 		}
+	}
+
+	// Recorded here: after both containers are stopped, immediately before the only
+	// step that changes which image the broker runs.
+	//
+	// The placement is the security property, not a detail. A reader believes the
+	// last image record, so the ledger has to be true at every instant a quote can be
+	// taken — and a quote can be taken by whatever image is *currently running*,
+	// which is the image under suspicion: the broker mounts /var/run/dstack.sock (it
+	// needs it for GetQuote), and report_data carries no nonce, so any quote it
+	// collects can be replayed forever. Locking the start/stop/restart routes does
+	// not help against that, because the adversary is the live process itself.
+	//
+	// So the record must not exist while a broker is alive that is not on ref. Here,
+	// none is: both containers were just stopped, docker's restart policy does not
+	// fire on a deliberate stop, and the routes that could start one are behind the
+	// lock this call holds. The next broker to exist is the one created on ref below.
+	//
+	// Earlier placements all failed that test. At the top of the function, or after
+	// the pull, the still-running old image could collect a quote naming an image it
+	// was not running — with the pull being unbounded and failable on demand, that
+	// was a window a caller could hold open.
+	//
+	// Still before the change, so a change cannot happen unrecorded: stopping a
+	// container does not alter its image, and the create below is the first thing
+	// that does.
+	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
+		// The broker is stopped and nothing was recorded, so the ledger is still
+		// truthful — but leaving it down would turn a dstack hiccup into an outage.
+		// Best effort: on failure the caller gets an error either way.
+		if startErr := c.dockerClient.StartContainer(ctx, brokerName); startErr != nil {
+			c.logger.Errorf("[UpdateImages] Could not restart the broker after failing to record the change: %v", startErr)
+		}
+		result.Success = false
+		result.Error = "failed to record the image change in RTMR3: " + err.Error()
+		return result, fmt.Errorf("recording the image change to %s in RTMR3: %w", ref, err)
 	}
 
 	// Step 3: Recreate containers in dependency order (broker -> event)

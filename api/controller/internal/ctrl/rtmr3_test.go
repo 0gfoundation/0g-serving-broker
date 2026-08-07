@@ -294,7 +294,7 @@ func TestConfigChangeAbortsWhenItCannotBeRecorded(t *testing.T) {
 // state that can start: it has just been stopped, docker's restart policy does not
 // fire on a deliberate stop, and the start/stop/restart routes are behind the same
 // lock this call holds.
-func TestImageChangeIsRecordedAfterThePullAndBeforeAnyContainerWork(t *testing.T) {
+func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 	l := &opLog{}
 	c := newChangeCtrl(t, l, nil, "", false, okPull)
 
@@ -304,22 +304,55 @@ func TestImageChangeIsRecordedAfterThePullAndBeforeAnyContainerWork(t *testing.T
 		t.Fatal("UpdateImages() = nil, want the event container to be unresolvable")
 	}
 
+	ops := l.all()
 	emit := l.indexOf("emit " + eventImageUpdate + " " + imageRepo + "@" + testDigest)
 	if emit < 0 {
-		t.Fatalf("ops = %v, want the image change recorded", l.all())
+		t.Fatalf("ops = %v, want the image change recorded", ops)
 	}
-	// Before every container write: a change must not happen unrecorded.
-	for _, after := range []string{"stop broker", "remove", "create broker"} {
-		if i := l.indexOf(after); i < 0 || i < emit {
-			t.Errorf("ops = %v, want %q after the record at %d", l.all(), after, emit)
+
+	// The record must not exist while a broker is alive that is not on the new image.
+	// A quote can be taken by whatever is currently running — the broker holds
+	// dstack.sock and report_data carries no nonce, so a quote it collects can be
+	// replayed forever — and that process is the one under suspicion. So the pull and
+	// the stop, which leave the old image running, both precede the record.
+	for _, before := range []string{"pull", "stop broker"} {
+		if i := l.indexOf(before); i < 0 || i > emit {
+			t.Errorf("ops = %v, want %q before the record at %d", ops, before, emit)
 		}
 	}
-	// After the pull, which is what closed the window an attacker could steer: the
-	// pull is unbounded and can be made to fail on demand with any well-formed digest
-	// the registry cannot serve, and a record written before it left the running
-	// broker restartable while the ledger already named the new image.
-	if i := l.indexOf("pull"); i < 0 || i > emit {
-		t.Errorf("ops = %v, want the pull before the record at %d", l.all(), emit)
+	// And the create, which is the first step that changes the image, follows it: a
+	// change must not happen unrecorded.
+	for _, after := range []string{"remove", "create broker"} {
+		if i := l.indexOf(after); i < 0 || i < emit {
+			t.Errorf("ops = %v, want %q after the record at %d", ops, after, emit)
+		}
+	}
+}
+
+// A record that cannot be written leaves the broker running, not stopped: nothing was
+// recorded, so the ledger is still truthful, and a dstack hiccup must not become an
+// outage.
+func TestFailedRecordRestartsTheBroker(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, errors.New("dstack.sock: connection refused"), "", false, okPull)
+
+	result, err := c.UpdateImages(context.Background(), testDigest)
+	if err == nil {
+		t.Fatal("UpdateImages() = nil, want an error when the change cannot be recorded")
+	}
+	if result == nil || result.Success {
+		t.Errorf("UpdateImages() = %+v, want a failed result", result)
+	}
+
+	ops := l.all()
+	if l.indexOf("start") < 0 {
+		t.Errorf("ops = %v, want the broker started again after the failed record", ops)
+	}
+	// Nothing was created, so no image changed.
+	for _, write := range []string{"remove", "create"} {
+		if l.indexOf(write) >= 0 {
+			t.Errorf("ops = %v, want no container recreated", ops)
+		}
 	}
 }
 

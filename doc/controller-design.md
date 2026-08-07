@@ -318,17 +318,37 @@ Three things hold it up, and each one is load-bearing.
 impossible — the silent-upgrade failure. A failure to record aborts with every
 container untouched.
 
-**2. The record comes as late as it can.** For the image path that means *after the
-pull*, not at the top of the call. The pull changes no container, so recording after
-it still precedes the change; but a record written before it leaves the whole pull —
-unbounded, and the one step a caller can make fail on demand with any well-formed
-digest the registry cannot serve — as a window in which the still-running broker
-could be restarted and seal a quote naming an image that was never even fetched.
-From the record onward the broker is being stopped: docker's restart policy does not
-fire on a deliberate stop, and `POST /v1/containers/:name/{start,stop,restart}` are
-behind the **same lock** the upgrade holds, so they cannot slip a broker start into
-the middle of one. (That lock is the only reason those routes have one; they record
-nothing themselves.)
+**2. The record comes as late as it can — once no broker is running.** For the image
+path that means *after both containers are stopped*, immediately before the create.
+
+This is the security property, not a detail. A reader believes the last image record,
+so the ledger has to be true at every instant a quote can be taken — and a quote can
+be taken by whatever image is **currently running**, which is the image under
+suspicion. The broker mounts `/var/run/dstack.sock` because it needs `GetQuote`, and
+`report_data` carries no nonce, so any quote it collects can be replayed forever.
+Locking the start/stop/restart routes does not help against that: the adversary is the
+live process itself, not a second API call.
+
+So the record must not exist while a broker is alive that is not on the new reference.
+At the point it is written, none is: both containers were just stopped, docker's
+restart policy does not fire on a deliberate stop, and the routes that could start one
+are behind the **same lock** the upgrade holds. The next broker to exist is the one
+created on the new reference. (That lock is the only reason those routes have one; they
+record nothing themselves. A caller arriving mid-change gets **409**, nothing touched.)
+
+Earlier placements all failed that test — at the top of the call, or after the pull,
+the still-running old image could collect a quote naming an image it was not running,
+and with the pull unbounded and failable on demand that was a window a caller could
+hold open. A record that cannot be written restarts the broker rather than leaving it
+stopped: nothing was recorded, so the ledger is still truthful, and a dstack hiccup
+must not become an outage.
+
+Both recorded paths also run on a **detached, bounded** context. Detached so a client
+disconnect cannot abort a change half way, or make the record and the restore fail
+selectively — that would be the caller choosing which half of the accounting happens.
+Bounded because this lock now gates start/stop/restart too, and `PullImage` has no
+timeout of its own; without a ceiling a registry that never answers would leave an
+operator unable to so much as restart the broker to recover.
 
 **3. A record must not outlive the change it describes.** RTMR3 cannot be rewound, so
 the abort paths *append the truth*: the two stops and the recreate re-read the
@@ -349,6 +369,11 @@ name that resolved to a neighbouring container — the payload deliberately name
 digest or no hash, which `attest.ResolveRunningState` refuses. Refusing beats
 believing the record being replaced. Only the emit itself failing can leave the ledger
 overstating, and then the API error says so; an operator has to resolve it.
+
+Such a record is fatal to the reader only when it is the **last** one of its kind. An
+earlier one is history that a later correct record supersedes — otherwise a single
+transient docker error would make a CVM unverifiable for the rest of its boot, since
+RTMR3 only resets on a reboot.
 
 Boundary: once the broker has been recreated on the new image the record is already
 correct, so the remaining failures (health wait, ingress reload, event container,
