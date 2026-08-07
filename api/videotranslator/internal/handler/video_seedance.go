@@ -1,7 +1,7 @@
 package handler
 
 // SeedanceVideoHandler mirrors MiniMaxVideoHandler (see its doc) for
-// ByteDance Seedance 2.0's async video API. It reuses this package's shared
+// ByteDance Seedance 2.5's async video API. It reuses this package's shared
 // create-request parsing (parseCreateVideoRequest, maxCreateVideoBodyBytes)
 // and the translate package's OpenAI-shaped types; only the vendor client,
 // the vendor mapping functions, the pre-flight validation, and the vendor
@@ -21,7 +21,7 @@ import (
 )
 
 // SeedanceVideoHandler serves the OpenAI Video API surface the broker
-// expects, translating each call 1:1 to/from ByteDance Seedance 2.0. It
+// expects, translating each call 1:1 to/from ByteDance Seedance 2.5. It
 // holds no cross-request state: polling to completion is the broker's job,
 // not this sidecar's.
 type SeedanceVideoHandler struct {

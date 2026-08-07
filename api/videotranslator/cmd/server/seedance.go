@@ -17,7 +17,7 @@ import (
 // comfortably larger than the content download budget, not equal to it.
 const seedanceWriteTimeout = seedance.ContentFetchTimeout + writeTimeoutMargin
 
-// SeedanceMain starts the ByteDance Seedance 2.0 video translator HTTP
+// SeedanceMain starts the ByteDance Seedance 2.5 video translator HTTP
 // server, the sidecar that exposes the OpenAI Video API shape to the broker
 // and speaks Seedance's native async job protocol (BytePlus Ark). It blocks
 // until the server exits.

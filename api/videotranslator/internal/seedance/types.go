@@ -1,11 +1,11 @@
 // Package seedance holds the wire types and client for ByteDance Seedance
-// 2.0's async video-generation API (BytePlus Ark / ModelArk, region
+// 2.5's async video-generation API (BytePlus Ark / ModelArk, region
 // ap-southeast-1): POST /api/v3/contents/generations/tasks, GET
 // /api/v3/contents/generations/tasks/{id}. Field names/enums are confirmed
 // against the real BytePlus/ModelArk documentation (see the design doc's §3
 // for per-field citations).
 //
-// Seedance 2.0 uses the "new method": create-task parameters are passed
+// Seedance 2.5 uses the "new method": create-task parameters are passed
 // directly in the request body (not a legacy --flag text-command style),
 // and that new method applies STRICT validation — an unsupported value is
 // rejected with a 400, not silently defaulted. Every JSON tag below is
@@ -47,6 +47,11 @@ type CreateRequest struct {
 	// CameraFixed: whether the camera stays static during generation. Omitted
 	// (nil) lets the vendor apply its own default.
 	CameraFixed *bool `json:"camera_fixed,omitempty"`
+	// OutputFormat: the desired output video container/format (e.g. "mp4",
+	// the vendor's default). Omitted (nil) lets the vendor apply its own
+	// default. Optional passthrough string — no validation on our side beyond
+	// presence/type; the vendor 400s on an invalid value if one is ever sent.
+	OutputFormat *string `json:"output_format,omitempty"`
 }
 
 // ContentItem is one element of a create request's content array. Type is a
@@ -107,6 +112,7 @@ type GetTaskResponse struct {
 	CreatedAt       int64        `json:"created_at"`
 	UpdatedAt       int64        `json:"updated_at"`
 	GenerateAudio   *bool        `json:"generate_audio"`
+	OutputFormat    *string      `json:"output_format,omitempty"`
 	Error           *TaskError   `json:"error"`
 }
 

@@ -69,6 +69,10 @@ type jsonCreateVideoRequest struct {
 	// CameraFixed: Seedance's top-level "camera_fixed" boolean. A *bool so an
 	// absent field (nil) is distinguishable from an explicit false.
 	CameraFixed *bool `json:"camera_fixed"`
+	// OutputFormat: Seedance's top-level "output_format" string (e.g. "mp4").
+	// A *string so an absent field (nil) is distinguishable from an explicit
+	// empty string.
+	OutputFormat *string `json:"output_format"`
 }
 
 // maxCreateVideoBodyBytes bounds the total POST /videos request body.
@@ -296,6 +300,11 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 				req.CameraFixed = &b
 			}
 		}
+		// output_format: a plain form value, passed through as-is (no
+		// validation on our side — the vendor 400s on an invalid value).
+		if v := r.FormValue("output_format"); v != "" {
+			req.OutputFormat = &v
+		}
 		return req, nil
 	}
 
@@ -321,6 +330,7 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 	req.ReferenceVideoURLs = jr.ReferenceVideos
 	req.ReferenceAudioURLs = jr.ReferenceAudio
 	req.CameraFixed = jr.CameraFixed
+	req.OutputFormat = jr.OutputFormat
 	return req, nil
 }
 

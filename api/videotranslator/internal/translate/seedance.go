@@ -1,5 +1,5 @@
 // seedance.go maps between the OpenAI Video API shape the broker speaks and
-// ByteDance Seedance 2.0's async job shape. Pure functions only — no I/O —
+// ByteDance Seedance 2.5's async job shape. Pure functions only — no I/O —
 // mirroring the DashScope/MiniMax siblings in this package.
 package translate
 
@@ -50,16 +50,16 @@ func StatusFromSeedance(status string) string {
 	}
 }
 
-// seedanceCanonicalModelID is the 0G router catalog id (bytedance/seedance-2.0).
+// seedanceCanonicalModelID is the 0G router catalog id (bytedance/seedance-2.5).
 // seedanceDefaultWireModel is ByteDance's own wire model id for the
-// "standard" Seedance 2.0 model. A provider MUST register the wire id
+// "standard" Seedance 2.5 model. A provider MUST register the wire id
 // on-chain (Seedance's strict validation 400s on anything else) — but if a
 // provider is ever mis-registered under the canonical id instead, this
 // remap makes that a passthrough instead of a guaranteed-400 on every
 // request. See the design doc's §5.9.
 const (
-	seedanceCanonicalModelID = "bytedance/seedance-2.0"
-	seedanceDefaultWireModel = "dreamina-seedance-2-0-260128"
+	seedanceCanonicalModelID = "bytedance/seedance-2.5"
+	seedanceDefaultWireModel = "dreamina-seedance-2-5-260628"
 )
 
 // seedanceWireModel maps the canonical/on-chain-catalog model id to
@@ -154,27 +154,41 @@ func resolveSeedanceReferenceMedia(raw []string) []string {
 }
 
 // Cardinality caps for multimodal reference-based generation, straight from
-// the vendor's own documentation (design doc §12.2): at most 9 reference
-// images, 3 reference videos, 3 reference audio tracks.
+// the vendor's own documentation (design doc §12.2): at most 30 reference
+// images, 10 reference videos, 10 reference audio tracks.
 const (
-	maxSeedanceReferenceImages = 9
-	maxSeedanceReferenceVideos = 3
-	maxSeedanceReferenceAudio  = 3
+	maxSeedanceReferenceImages = 30
+	maxSeedanceReferenceVideos = 10
+	maxSeedanceReferenceAudio  = 10
 )
 
 // seedanceResolutionTokens are Seedance's exact resolution wire tokens
-// (lowercase — the vendor echoes "4k" lowercase). A client "size" that is
-// already one of these (case-insensitively) is passed straight through.
+// (lowercase). A client "size" that is already one of these
+// (case-insensitively) is passed straight through. 2.5 only supports
+// 480p/720p (live-confirmed: 1080p/4k are rejected with InvalidParameter) —
+// no 1080p/4k entries here.
 var seedanceResolutionTokens = map[string]string{
-	"480p":  "480p",
-	"720p":  "720p",
-	"1080p": "1080p",
-	"4k":    "4k",
+	"480p": "480p",
+	"720p": "720p",
 }
 
 // defaultSeedanceResolution is sent when the client's "size" is neither a
 // recognized resolution token nor parsable pixel dimensions.
 const defaultSeedanceResolution = "720p"
+
+// seedanceResolutionMaxSides are the documented pixel-dimension pairs for
+// each resolution tier this integration can emit (see DefaultVideoSizeRatios
+// in api/inference/config/model_pricing.go: 832x480/480x832 for 480p,
+// 1280x720/720x1280 for 720p), keyed by the longer side, for nearest-match
+// snapping — mirroring how sizeToSeedanceRatio nearest-matches an aspect
+// ratio rather than using a single hardcoded cutover.
+var seedanceResolutionMaxSides = []struct {
+	token   string
+	maxSide float64
+}{
+	{"480p", 832},
+	{"720p", 1280},
+}
 
 // normalizeSeedanceResolution derives Seedance's "resolution" enum token
 // from the client's OpenAI-shaped "size" field. Strict validation (the
@@ -182,6 +196,12 @@ const defaultSeedanceResolution = "720p"
 // free-form pixel string — so an unparsable/empty size still yields a valid
 // token (the documented default 720p) rather than omitting the field
 // entirely and risking an inconsistent vendor default across resolutions.
+//
+// A pixel-dimension size snaps to the NEAREST tier by longer side, not a
+// fixed cutover — a naive "<=640 is 480p, else 720p" threshold would
+// misclassify this codebase's own documented standard 480p size
+// (832x480/480x832, longer side 832) as 720p, silently billing a client
+// requesting the cheap tier at the more expensive one.
 func normalizeSeedanceResolution(size string) string {
 	if tok, ok := seedanceResolutionTokens[strings.ToLower(strings.TrimSpace(size))]; ok {
 		return tok
@@ -190,20 +210,19 @@ func normalizeSeedanceResolution(size string) string {
 	if !ok {
 		return defaultSeedanceResolution
 	}
-	maxSide := width
-	if height > maxSide {
-		maxSide = height
+	maxSide := float64(width)
+	if float64(height) > maxSide {
+		maxSide = float64(height)
 	}
-	switch {
-	case maxSide <= 640:
-		return "480p"
-	case maxSide <= 1280:
-		return "720p"
-	case maxSide <= 1920:
-		return "1080p"
-	default:
-		return "4k"
+	best := defaultSeedanceResolution
+	bestDiff := math.MaxFloat64
+	for _, r := range seedanceResolutionMaxSides {
+		if diff := math.Abs(r.maxSide - maxSide); diff < bestDiff {
+			bestDiff = diff
+			best = r.token
+		}
 	}
+	return best
 }
 
 // seedanceRatios are Seedance's documented aspect-ratio values (excluding
@@ -242,22 +261,24 @@ func sizeToSeedanceRatio(size string) string {
 	return best
 }
 
-// Seedance 2.0's documented duration range: any integer in [4,15] (or -1,
-// intelligent duration — not exposed by this integration).
+// Seedance 2.5's documented duration range: any integer in [4,30] (or -1,
+// intelligent duration — not exposed by this integration). The upper bound
+// is live-confirmed exactly (31 rejected, 30 accepted); the lower bound is
+// carried over unchanged from 2.0 (no evidence it changed).
 const (
 	minSeedanceDuration = 4
-	maxSeedanceDuration = 15
+	maxSeedanceDuration = 30
 )
 
 // parseSeedanceDuration parses a client-supplied "seconds" string into
 // Seedance's accepted range, CLAMPING rather than rejecting: an absent,
 // non-positive, or unparsable value returns 0 (omitted from the request,
 // letting the vendor apply its own default, 5s); an in-range value is
-// ceil'd to a whole second; an out-of-range value is clamped into [4,15].
-// Billing is always on the vendor's ECHOED actual duration (or, from v13
-// onward, its echoed completion-token count), never the request, so
-// clamping instead of rejecting cannot under- or over-bill — it only
-// affects what gets generated.
+// ceil'd to a whole second; an out-of-range value is clamped into [4,30].
+// Billing is always on the vendor's ECHOED actual duration (or, for the
+// per-video-token billing engine, its echoed completion-token count), never
+// the request, so clamping instead of rejecting cannot under- or over-bill
+// — it only affects what gets generated.
 func parseSeedanceDuration(seconds string) int64 {
 	s, err := strconv.ParseFloat(strings.TrimSpace(seconds), 64)
 	if err != nil || !(s > 0) || math.IsInf(s, 0) {
@@ -365,14 +386,15 @@ func ToSeedanceCreateRequest(req CreateVideoRequest) seedance.CreateRequest {
 	watermark := false
 
 	return seedance.CreateRequest{
-		Model:       seedanceWireModel(req.Model),
-		Content:     content,
-		Resolution:  normalizeSeedanceResolution(req.Size),
-		Ratio:       ratio,
-		Duration:    parseSeedanceDuration(req.Seconds),
-		Watermark:   &watermark,
-		Seed:        parseSeedanceSeed(req.Seed),
-		CameraFixed: req.CameraFixed,
+		Model:        seedanceWireModel(req.Model),
+		Content:      content,
+		Resolution:   normalizeSeedanceResolution(req.Size),
+		Ratio:        ratio,
+		Duration:     parseSeedanceDuration(req.Seconds),
+		Watermark:    &watermark,
+		Seed:         parseSeedanceSeed(req.Seed),
+		CameraFixed:  req.CameraFixed,
+		OutputFormat: req.OutputFormat,
 	}
 }
 
@@ -491,9 +513,11 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 //   - frame-control (first_frame/last_frame) and multimodal reference arrays
 //     (reference_image/reference_video/reference_audio) are mutually
 //     exclusive within one request.
-//   - reference_image/_video/_audio cardinality caps (9/3/3).
-//   - reference_audio alone, with no reference_image or reference_video, is
-//     rejected (the vendor documents audio-alone as invalid).
+//   - reference_image/_video/_audio cardinality caps (30/10/10).
+//
+// Audio-alone reference input (no reference_image or reference_video) is
+// supported by 2.5 (the vendor's own docs flipped from "not supported" to
+// "supported"), so no cardinality-independent check rejects it here.
 func ValidateSeedanceCreateRequest(req CreateVideoRequest) error {
 	if isSeedanceAssetScheme(req.InputReferenceImageURL) {
 		return fmt.Errorf("input_reference asset:// scheme is not supported")
@@ -531,9 +555,6 @@ func ValidateSeedanceCreateRequest(req CreateVideoRequest) error {
 	}
 	if len(audio) > maxSeedanceReferenceAudio {
 		return fmt.Errorf("reference_audio: at most %d allowed", maxSeedanceReferenceAudio)
-	}
-	if len(audio) > 0 && len(images) == 0 && len(videos) == 0 {
-		return fmt.Errorf("reference_audio requires at least one reference_image or reference_video")
 	}
 	return nil
 }

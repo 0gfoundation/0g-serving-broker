@@ -58,11 +58,26 @@ func TestNormalizeSeedanceResolution(t *testing.T) {
 	}{
 		{"480p", "480p"},
 		{"720P", "720p"}, // case-insensitive token match
-		{"1080p", "1080p"},
-		{"4K", "4k"},
+		// 1080p/4k are no longer exact-match tokens (2.5 only supports
+		// 480p/720p, live-confirmed: 1080p/4k are rejected with
+		// InvalidParameter) -- these fall through to the unparsable-size
+		// default (which happens to also be 720p).
+		{"1080p", defaultSeedanceResolution},
+		{"4K", defaultSeedanceResolution},
 		{"1280x720", "720p"},
-		{"1920x1080", "1080p"},
-		{"3840x2160", "4k"},
+		// This codebase's own documented standard 480p pixel size (see
+		// DefaultVideoSizeRatios in api/inference/config/model_pricing.go)
+		// must snap to 480p, not 720p -- a client asking for the cheap tier
+		// via pixel dimensions must not be silently billed at the pricier
+		// one. A fixed "<=640" cutover misclassified this; nearest-match by
+		// longer side (832 vs. 1280) gets it right.
+		{"832x480", "480p"},
+		{"480x832", "480p"},
+		// Pixel sizes that used to snap to 1080p/4K now collapse to 720p —
+		// the nearest tier the model actually supports (§5.2: a conscious
+		// silent-downgrade, not a 400).
+		{"1920x1080", "720p"},
+		{"3840x2160", "720p"},
 		{"", defaultSeedanceResolution},
 		{"garbage", defaultSeedanceResolution},
 	}
@@ -102,10 +117,11 @@ func TestParseSeedanceDuration(t *testing.T) {
 		{"0", 0},     // non-positive -> omit
 		{"5", 5},     // in range, passthrough
 		{"4", 4},     // floor of range
-		{"15", 15},   // ceiling of range
+		{"30", 30},   // ceiling of range
 		{"1", 4},     // clamped UP into range
 		{"3.2", 4},   // ceil(3.2)=4, already at floor
-		{"20", 15},   // clamped DOWN into range
+		{"40", 30},   // clamped DOWN into range
+		{"31", 30},   // clamped DOWN into range, at the live-confirmed boundary (31 rejected, 30 accepted)
 		{"7.1", 8},   // ceil, in range
 		{"1e400", 0}, // overflow -> Inf -> omit, not garbage
 	}
@@ -141,7 +157,7 @@ func TestSeedanceWireModel(t *testing.T) {
 	if got := seedanceWireModel(seedanceCanonicalModelID); got != seedanceDefaultWireModel {
 		t.Errorf("canonical id should remap to the wire id, got %q", got)
 	}
-	if got := seedanceWireModel("dreamina-seedance-2-0-fast-260128"); got != "dreamina-seedance-2-0-fast-260128" {
+	if got := seedanceWireModel("dreamina-seedance-2-5-fast-260628"); got != "dreamina-seedance-2-5-fast-260628" {
 		t.Errorf("an already-correct wire id must pass through unchanged, got %q", got)
 	}
 }
@@ -266,23 +282,38 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 	})
 
 	t.Run("model remap: canonical id -> ByteDance wire id", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{Model: "bytedance/seedance-2.0", Prompt: "p"})
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Model: "bytedance/seedance-2.5", Prompt: "p"})
 		if got.Model != seedanceDefaultWireModel {
 			t.Errorf("Model = %q, want %q", got.Model, seedanceDefaultWireModel)
 		}
 	})
 
 	t.Run("model passthrough: already-wire id unchanged", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{Model: "dreamina-seedance-2-0-fast-260128", Prompt: "p"})
-		if got.Model != "dreamina-seedance-2-0-fast-260128" {
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Model: "dreamina-seedance-2-5-fast-260628", Prompt: "p"})
+		if got.Model != "dreamina-seedance-2-5-fast-260628" {
 			t.Errorf("Model = %q, want passthrough", got.Model)
 		}
 	})
 
-	t.Run("duration clamped into [4,15]", func(t *testing.T) {
+	t.Run("duration clamped into [4,30]", func(t *testing.T) {
 		got := ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "100"})
 		if got.Duration != maxSeedanceDuration {
 			t.Errorf("Duration = %d, want clamped to %d", got.Duration, maxSeedanceDuration)
+		}
+	})
+
+	t.Run("output_format is omitted (nil) when the client didn't specify it", func(t *testing.T) {
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5"})
+		if got.OutputFormat != nil {
+			t.Errorf("output_format must be omitted (nil) when the client didn't specify it, got %+v", got.OutputFormat)
+		}
+	})
+
+	t.Run("output_format is passed through unchanged", func(t *testing.T) {
+		mp4 := "mp4"
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5", OutputFormat: &mp4})
+		if got.OutputFormat == nil || *got.OutputFormat != "mp4" {
+			t.Fatalf("output_format not passed through, got %+v", got.OutputFormat)
 		}
 	})
 
@@ -343,7 +374,7 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 }
 
 func TestFromSeedanceCreateResponse(t *testing.T) {
-	req := CreateVideoRequest{Model: "bytedance/seedance-2.0", Prompt: "p", Seconds: "5", Size: "1080p"}
+	req := CreateVideoRequest{Model: "bytedance/seedance-2.5", Prompt: "p", Seconds: "5", Size: "720p"}
 	resp := seedance.CreateResponse{ID: "cgt-20260606160057-6bbjd"}
 
 	out, err := FromSeedanceCreateResponse(req, resp)
@@ -353,7 +384,7 @@ func TestFromSeedanceCreateResponse(t *testing.T) {
 	if out.Status != StatusQueued {
 		t.Errorf("Status = %q, want queued", out.Status)
 	}
-	if out.Seconds != "5" || out.Size != "1080p" || out.Model != "bytedance/seedance-2.0" {
+	if out.Seconds != "5" || out.Size != "720p" || out.Model != "bytedance/seedance-2.5" {
 		t.Errorf("echoed fields wrong: %+v", out)
 	}
 	if !strings.HasPrefix(out.ID, "v0_") {
@@ -370,7 +401,7 @@ func TestFromSeedanceCreateResponse_EmptyIDIsError(t *testing.T) {
 func TestFromSeedanceGetTaskResponse_SucceededBillsOnCompletionTokens(t *testing.T) {
 	resp := seedance.GetTaskResponse{
 		Status:     seedance.TaskStatusSucceeded,
-		Resolution: "1080p",
+		Resolution: "720p",
 		Duration:   json.Number("5"),
 		Usage:      &seedance.TaskUsage{CompletionTokens: json.Number("246840"), TotalTokens: json.Number("246840")},
 	}
@@ -378,8 +409,8 @@ func TestFromSeedanceGetTaskResponse_SucceededBillsOnCompletionTokens(t *testing
 	if out.Status != StatusCompleted {
 		t.Errorf("Status = %q, want completed", out.Status)
 	}
-	if out.Size != "1080p" {
-		t.Errorf("Size = %q, want 1080p", out.Size)
+	if out.Size != "720p" {
+		t.Errorf("Size = %q, want 720p", out.Size)
 	}
 	if out.Seconds != "5" {
 		t.Errorf("Seconds = %q, want the plain informational/fallback echo '5'", out.Seconds)
@@ -449,14 +480,14 @@ func TestValidateSeedanceCreateRequest(t *testing.T) {
 		{"last_frame with UNUSABLE first_frame is rejected (resolved-value check, not raw)", CreateVideoRequest{InputReferenceImageURL: "ftp://cdn/a.png", LastFrameReferenceImageURL: "https://cdn/b.png"}, true},
 		{"reference_image alone is valid", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/a.png"}}, false},
 		{"reference_video alone is valid", CreateVideoRequest{ReferenceVideoURLs: []string{"https://cdn/a.mp4"}}, false},
-		{"reference_audio ALONE is rejected", CreateVideoRequest{ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, true},
+		{"reference_audio ALONE is now supported (2.5 dropped the audio-alone-rejected rule)", CreateVideoRequest{ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, false},
 		{"reference_audio with reference_image is valid", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/a.png"}, ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, false},
 		{"reference_audio with reference_video is valid", CreateVideoRequest{ReferenceVideoURLs: []string{"https://cdn/a.mp4"}, ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, false},
-		{"10 reference images exceeds the cap of 9", CreateVideoRequest{ReferenceImageURLs: repeatURL("https://cdn/i.png", 10)}, true},
-		{"9 reference images is exactly at the cap", CreateVideoRequest{ReferenceImageURLs: repeatURL("https://cdn/i.png", 9)}, false},
-		{"4 reference videos exceeds the cap of 3", CreateVideoRequest{ReferenceVideoURLs: repeatURL("https://cdn/v.mp4", 4)}, true},
-		{"4 reference audio exceeds the cap of 3", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/i.png"}, ReferenceAudioURLs: repeatURL("https://cdn/a.mp3", 4)}, true},
-		{"cardinality caps count RESOLVED urls, not raw: unusable entries don't count against the cap", CreateVideoRequest{ReferenceImageURLs: append(repeatURL("https://cdn/i.png", 9), "asset://dropped")}, false},
+		{"31 reference images exceeds the cap of 30", CreateVideoRequest{ReferenceImageURLs: repeatURL("https://cdn/i.png", 31)}, true},
+		{"30 reference images is exactly at the cap", CreateVideoRequest{ReferenceImageURLs: repeatURL("https://cdn/i.png", 30)}, false},
+		{"11 reference videos exceeds the cap of 10", CreateVideoRequest{ReferenceVideoURLs: repeatURL("https://cdn/v.mp4", 11)}, true},
+		{"11 reference audio exceeds the cap of 10", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/i.png"}, ReferenceAudioURLs: repeatURL("https://cdn/a.mp3", 11)}, true},
+		{"cardinality caps count RESOLVED urls, not raw: unusable entries don't count against the cap", CreateVideoRequest{ReferenceImageURLs: append(repeatURL("https://cdn/i.png", 30), "asset://dropped")}, false},
 		{"mutual exclusivity: first_frame + reference_image together is rejected", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", ReferenceImageURLs: []string{"https://cdn/b.png"}}, true},
 		{"mutual exclusivity uses RESOLVED values: an UNUSABLE input_reference scheme alongside a reference array is valid (no real frame-control content)", CreateVideoRequest{InputReferenceImageURL: "ftp://cdn/a.png", ReferenceImageURLs: []string{"https://cdn/b.png"}}, false},
 		{"mutual exclusivity uses RESOLVED values: an UNUSABLE last_frame_reference scheme alongside a reference array is valid", CreateVideoRequest{LastFrameReferenceImageURL: "ftp://cdn/b.png", ReferenceVideoURLs: []string{"https://cdn/v.mp4"}}, false},

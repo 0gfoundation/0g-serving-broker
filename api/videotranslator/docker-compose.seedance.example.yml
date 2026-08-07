@@ -1,4 +1,4 @@
-# Example deployment for the ByteDance Seedance 2.0 video translator.
+# Example deployment for the ByteDance Seedance 2.5 video translator.
 #
 # Same standalone-snippet caveat as docker-compose.example.yml (the DashScope
 # variant): merge this service into your own provider compose only when
@@ -13,8 +13,8 @@
 #   1. Register the provider's on-chain Service.Url as this container's
 #      address (e.g. http://0g-seedance-video-translator:8090) instead of
 #      ark.ap-southeast.bytepluses.com. ALSO: the on-chain Service's MODEL
-#      NAME must be ByteDance's exact wire id, "dreamina-seedance-2-0-260128"
-#      — NOT the router catalog's canonical "bytedance/seedance-2.0". The
+#      NAME must be ByteDance's exact wire id, "dreamina-seedance-2-5-260628"
+#      — NOT the router catalog's canonical "bytedance/seedance-2.5". The
 #      router rewrites the outbound "model" field to whatever the provider
 #      registered, and Seedance's strict validation 400s on anything else.
 #   2. Set additionalSecret in the broker's config.yaml so it injects the
@@ -53,11 +53,11 @@
 #   - image-to-video with first+last frame control: input_reference +
 #     last_frame_reference (last_frame_reference alone, with no
 #     input_reference, is rejected — 400).
-#   - multimodal reference-based generation: reference_images (≤9),
-#     reference_videos (≤3), reference_audio (≤3) — mutually exclusive with
+#   - multimodal reference-based generation: reference_images (≤30),
+#     reference_videos (≤10), reference_audio (≤10) — mutually exclusive with
 #     input_reference/last_frame_reference in the same request.
 #     reference_audio alone (no reference_images/reference_videos) is
-#     rejected — the vendor documents audio-alone as invalid.
+#     supported (2.5 dropped the audio-alone-rejected rule 2.0 had).
 #   - video editing / video extension are explicitly OUT OF SCOPE for this
 #     integration (a separate non-goal from multimodal reference generation —
 #     see the design doc's non-goals section) and are not implemented as a
@@ -70,17 +70,19 @@
 # on every call. Its host must equal service.upstreamDomain above, or the
 # broker refuses to sign the routing proof (reason: domain_mismatch).
 #
-# Duration: Seedance 2.0 accepts any integer in [4,15] seconds and the
-# translator clamps a client's "seconds" into that range (never rejects) —
-# billing is always on the vendor's echoed actuals, never the request, so
-# clamping cannot mis-bill, only affect what gets generated.
+# Duration: Seedance 2.5 accepts any integer in [4,30] seconds (raised from
+# 2.0's [4,15], live-confirmed: 31 rejected, 30 accepted) and the translator
+# clamps a client's "seconds" into that range (never rejects) — billing is
+# always on the vendor's echoed actuals, never the request, so clamping
+# cannot mis-bill, only affect what gets generated.
 #
-# Resolution: 480p/720p/1080p/4k (the standard model, "dreamina-
-# seedance-2-0-260128", supports all four; fast/mini variants support only
-# 480p/720p — not registered by this example). 4K has much stricter vendor
-# rate limits (15 RPM / 1 concurrent) than 480p-1080p (180/600 RPM, 3/10
-# concurrent) — size your video in-flight cap and poll backoff accordingly
-# if you enable it.
+# Resolution: 480p/720p ONLY (narrower than 2.0's 480p/720p/1080p/4k —
+# live-confirmed: 1080p/4k are rejected outright for "dreamina-
+# seedance-2-5-260628" with InvalidParameter). A client requesting a
+# 1080p/4K-equivalent size silently gets a 720p video instead of a 400 (the
+# translator's existing snap-not-reject resolution handling). There is no
+# 4K tier for this model at all, so 2.0's 4K-specific vendor rate limit
+# (15 RPM / 1 concurrent) does not apply here.
 services:
   0g-seedance-video-translator:
     image: ghcr.io/0gfoundation/0g-serving-broker:latest

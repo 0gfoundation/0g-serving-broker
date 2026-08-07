@@ -192,6 +192,65 @@ func TestParseCreateVideoRequest_CameraFixed_MultipartUnparsable_YieldsNil(t *te
 	}
 }
 
+func TestParseCreateVideoRequest_OutputFormat_JSON(t *testing.T) {
+	const body = `{"prompt":"p","output_format":"mp4"}`
+	req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.OutputFormat == nil || *got.OutputFormat != "mp4" {
+		t.Errorf("output_format=mp4: got %+v", got.OutputFormat)
+	}
+}
+
+func TestParseCreateVideoRequest_OutputFormat_Absent_YieldsNil(t *testing.T) {
+	const body = `{"prompt":"p"}`
+	req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.OutputFormat != nil {
+		t.Errorf("output_format absent must parse to nil (not an empty-string default), got %+v", got.OutputFormat)
+	}
+}
+
+func TestParseCreateVideoRequest_OutputFormat_Multipart(t *testing.T) {
+	body, contentType := newMultipartBody(t, map[string]string{
+		"prompt":        "p",
+		"output_format": "mp4",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/videos", body)
+	req.Header.Set("Content-Type", contentType)
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.OutputFormat == nil || *got.OutputFormat != "mp4" {
+		t.Errorf("output_format = %+v, want mp4", got.OutputFormat)
+	}
+}
+
+func TestParseCreateVideoRequest_OutputFormat_MultipartAbsent_YieldsNil(t *testing.T) {
+	body, contentType := newMultipartBody(t, map[string]string{"prompt": "p"})
+	req := httptest.NewRequest(http.MethodPost, "/videos", body)
+	req.Header.Set("Content-Type", contentType)
+
+	got, err := parseCreateVideoRequest(req)
+	if err != nil {
+		t.Fatalf("parseCreateVideoRequest: %v", err)
+	}
+	if got.OutputFormat != nil {
+		t.Errorf("output_format absent must fall back to nil (vendor default), got %+v", got.OutputFormat)
+	}
+}
+
 func TestParseCreateVideoRequest_NoReferenceArrays_YieldsNilNotPanic(t *testing.T) {
 	body, contentType := newMultipartBody(t, map[string]string{"prompt": "p"})
 	req := httptest.NewRequest(http.MethodPost, "/videos", body)

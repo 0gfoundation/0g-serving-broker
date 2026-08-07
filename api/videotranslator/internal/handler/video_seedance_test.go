@@ -33,10 +33,13 @@ func TestSeedanceCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	engine.POST("/videos", h.CreateVideo)
 
 	body, contentType := newMultipartBody(t, map[string]string{
-		"model":   "dreamina-seedance-2-0-260128",
+		"model":   "dreamina-seedance-2-5-260628",
 		"prompt":  "a cat playing piano",
 		"seconds": "5",
-		"size":    "1080p",
+		// 2.5 only supports 480p/720p (1080p/4k are rejected by the vendor);
+		// a "1080p" client request now silently snaps DOWN to 720p — the
+		// nearest supported tier — rather than passing through unchanged.
+		"size": "1080p",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/videos", body)
 	req.Header.Set("Content-Type", contentType)
@@ -51,11 +54,11 @@ func TestSeedanceCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	if gotAuth != "Bearer seedance-secret-key" {
 		t.Errorf("seedance saw Authorization = %q, want passthrough", gotAuth)
 	}
-	if gotReq.Model != "dreamina-seedance-2-0-260128" || len(gotReq.Content) != 1 || gotReq.Content[0].Text != "a cat playing piano" {
+	if gotReq.Model != "dreamina-seedance-2-5-260628" || len(gotReq.Content) != 1 || gotReq.Content[0].Text != "a cat playing piano" {
 		t.Errorf("seedance create request = %+v", gotReq)
 	}
-	if gotReq.Resolution != "1080p" {
-		t.Errorf("resolution = %q, want 1080p", gotReq.Resolution)
+	if gotReq.Resolution != "720p" {
+		t.Errorf("resolution = %q, want 720p (2.5 snaps a 1080p-equivalent request down to the nearest supported tier)", gotReq.Resolution)
 	}
 
 	var resp map[string]interface{}
@@ -98,7 +101,7 @@ func TestSeedanceCreateVideo_ValidationRejectsLastFrameWithoutFirstFrame(t *test
 func TestSeedanceGetVideo_SucceededBillsOnCompletionTokens(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"t1","status":"succeeded","resolution":"1080p","duration":5,"usage":{"completion_tokens":246840,"total_tokens":246840}}`))
+		w.Write([]byte(`{"id":"t1","status":"succeeded","resolution":"720p","duration":5,"usage":{"completion_tokens":246840,"total_tokens":246840}}`))
 	}))
 	defer upstream.Close()
 

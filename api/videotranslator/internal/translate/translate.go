@@ -76,6 +76,12 @@ type CreateVideoRequest struct {
 	// specify it, in which case the field is omitted and the vendor default
 	// applies. Currently read by the Seedance mapping only.
 	CameraFixed *bool
+	// OutputFormat is Seedance's top-level "output_format" string (e.g.
+	// "mp4"). Nil means the client did not specify it, in which case the
+	// field is omitted and the vendor default applies. Nil-safe, ignored by
+	// the DashScope/MiniMax mappings. Currently read by the Seedance mapping
+	// only.
+	OutputFormat *string
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for

@@ -46,7 +46,7 @@ func TestCreateTask_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := NewClient(srv.URL, srv.Client()).CreateTask(context.Background(), "Bearer k", CreateRequest{Model: "dreamina-seedance-2-0-260128"})
+	resp, err := NewClient(srv.URL, srv.Client()).CreateTask(context.Background(), "Bearer k", CreateRequest{Model: "dreamina-seedance-2-5-260628"})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestCreateTask_EmptyIDIsError(t *testing.T) {
 func TestCreateTask_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, `{"error":{"code":"InvalidParameter","message":"resolution must be one of 480p,720p,1080p,4k"},"request_id":"req-123"}`)
+		io.WriteString(w, `{"error":{"code":"InvalidParameter","message":"resolution must be one of 480p,720p"},"request_id":"req-123"}`)
 	}))
 	defer srv.Close()
 
@@ -139,11 +139,11 @@ func TestGetTask_ParsesUsageAndContent(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, `{
 			"id": "cgt-20260606160057-6bbjd",
-			"model": "dreamina-seedance-2-0-260128",
+			"model": "dreamina-seedance-2-5-260628",
 			"status": "succeeded",
 			"content": {"video_url": "https://cdn.example/x.mp4"},
 			"usage": {"completion_tokens": 246840, "total_tokens": 246840},
-			"resolution": "1080p",
+			"resolution": "720p",
 			"ratio": "16:9",
 			"duration": 5,
 			"framespersecond": 24
