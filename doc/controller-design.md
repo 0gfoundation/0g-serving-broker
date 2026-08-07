@@ -322,14 +322,32 @@ bytes, and `report_data` carries no nonce, so such a quote replays forever. **No
 placement of the controller's record changes that**, and neither does locking the
 container routes: the writer and the adversary are the same process.
 
+The quote it produces is genuine — the replay matches, the compose hash matches, the
+signature verifies. Nothing on the reader side can tell it from a real upgrade, because
+the payloads are unauthenticated bytes and any container on the socket can derive the
+same keys, so there is no signature to check.
+
+**A challenge nonce does not fix this.** Freshness binding defeats *replay* of a quote
+captured earlier; it does nothing against *forgery*, because the modified image can
+forge the record and then take a fresh quote carrying the verifier's nonce. Only two
+things close it, and both are decisions outside this repository:
+
+- **Take the socket away from the broker** — it asks the controller for quotes and
+  derived keys instead of holding `/var/run/dstack.sock`. Coherent with the rest of the
+  design, since the controller's image is pinned by `compose_hash` and cannot upgrade
+  itself, but it makes the broker depend on the controller at startup.
+- **Sign the record payloads** with a key the broker cannot obtain. `GetKey` derives from
+  the app key by path and any container can ask for any path, so the key has to reach the
+  controller out of band, with the public half in the compose file (which `compose_hash`
+  authenticates).
+
+(A third possibility is upstream: dstack restricting `EmitEvent` by caller or namespace.)
+
 Read the accounting below accordingly. Against a provider who has replaced the broker
-image, RTMR3 proves nothing on its own — that case needs either a capability split (the
-broker asking the controller for quotes instead of holding the socket) or freshness
-binding on the verifier side (a challenge nonce in `report_data`), and both are
-decisions outside this repository. What the accounting does give you today is a
-truthful account of what the *controller* did: it makes an in-TEE upgrade impossible to
-perform silently or to misreport by accident, which is what closes the gap that
-motivated it — an upgrade leaving no trace at all.
+image, RTMR3 proves nothing on its own. What it does give you today is a truthful account
+of what the *controller* did: an in-TEE upgrade can no longer be performed silently or
+misreport itself by accident, which is what closes the gap that motivated the work — an
+upgrade leaving no trace at all.
 
 #### The invariant, stated properly
 
