@@ -327,27 +327,33 @@ signature verifies. Nothing on the reader side can tell it from a real upgrade, 
 the payloads are unauthenticated bytes and any container on the socket can derive the
 same keys, so there is no signature to check.
 
-**A challenge nonce does not fix this.** Freshness binding defeats *replay* of a quote
-captured earlier; it does nothing against *forgery*, because the modified image can
-forge the record and then take a fresh quote carrying the verifier's nonce. Only two
-things close it, and both are decisions outside this repository:
+Neither a signature on the record nor a challenge nonce fixes that. There is no key to
+sign with that the broker cannot also derive (`GetKey` derives by path and any container
+may ask for any path), and freshness binding defeats *replay* of an old quote, not forgery
+of a new one — the modified image forges the record and then takes a fresh quote carrying
+the verifier's own nonce.
 
-- **Take the socket away from the broker** — it asks the controller for quotes and
-  derived keys instead of holding `/var/run/dstack.sock`. Coherent with the rest of the
-  design, since the controller's image is pinned by `compose_hash` and cannot upgrade
-  itself, but it makes the broker depend on the controller at startup.
-- **Sign the record payloads** with a key the broker cannot obtain. `GetKey` derives from
-  the app key by path and any container can ask for any path, so the key has to reach the
-  controller out of band, with the public half in the compose file (which `compose_hash`
-  authenticates).
+**So the reader does not assume it; it checks it.** Which services hold that socket is
+written in the compose file, and `compose_hash` binds that file to the quote — an
+authenticated input, not a claim. `attest.ResolveRunningState` reads the mounts out of
+`app_compose` and **refuses an event-sourced digest when the broker, or anything sharing
+the broker's image, can write the ledger** (the event container shares it, so the upgrade
+path replaces it too and it forges just as well). The full set is returned as
+`RunningState.LedgerWriters` for a caller wanting a stricter policy.
 
-(A third possibility is upstream: dstack restricting `EmitEvent` by caller or namespace.)
+What survives is therefore either a digest bound by `compose_hash`, or a ledger that no
+upgradeable service can write.
 
-Read the accounting below accordingly. Against a provider who has replaced the broker
-image, RTMR3 proves nothing on its own. What it does give you today is a truthful account
-of what the *controller* did: an in-TEE upgrade can no longer be performed silently or
-misreport itself by accident, which is what closes the gap that motivated the work — an
-upgrade leaving no trace at all.
+**This means deployments as they stand today have their event-sourced records refused**,
+because they mount the socket into the broker — that is how it gets `GetQuote` and
+`DeriveKey`. The refusal is correct: those records are forgeable. To make them readable,
+give the broker its quotes some other way. The controller is the obvious candidate: its
+image is pinned by `compose_hash` and it cannot upgrade itself (§4.4), so a ledger only it
+can write is worth reading. That change spans this repo and `deploy`, and it makes the
+broker depend on the controller at startup — a decision, not a detail. Until then, the
+accounting still buys the thing that motivated it: an in-TEE upgrade can no longer be
+performed silently or misreport itself by accident, and a forgeable claim is now visibly
+refused instead of quietly believed.
 
 #### The invariant, stated properly
 
