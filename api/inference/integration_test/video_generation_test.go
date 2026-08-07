@@ -1124,7 +1124,9 @@ func TestVideoGeneration_WaitParam(t *testing.T) {
 // gate. `/videos` is an exact-match TargetRoute with no method gate behind `serviceGroup.Any("*any")`, so
 // before the gate the OpenAI list endpoint reached the billing switch and was charged a create-sized
 // reserve — a bodyless request prices the full fallback duration at the dearest tier, which on a
-// 4K-tiered config is a ~160 0G lock to list videos. Nothing but a create renders a clip.
+// 4K-tiered config is a ~160 0G lock to list videos. (POST /videos/{id}/remix does render a clip, but it
+// matches AuthRequiredPrefixes and never reaches the billing switch — unreserved and unbilled on main as
+// much as here, and out of scope.)
 //
 // This lives at the integration level because that is the only one that can exercise the gate: the gate
 // is in the proxy arm, and a unit test of VideoCreateReserveFee is method-agnostic by construction.

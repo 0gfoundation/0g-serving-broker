@@ -276,10 +276,19 @@ func TestVideoReserveClampsToTheVendorFloor(t *testing.T) {
 		Mode:                  config.BillingModePerVideoSecond,
 		ResolutionMultipliers: map[string]float64{"2K": 1.0},
 	})
+	// Asserted against the VENDOR's minimum, not against videoReserveFloorSeconds — comparing the
+	// constant to itself passes for any value, so an earlier version of this test survived changing the
+	// floor to 1, which restores the under-reserve it is named for. minMiniMaxDuration lives in the
+	// videotranslator module and is not importable here, so it is restated with its source.
+	const minMiniMaxDuration = 4 // videotranslator/internal/translate/minimax.go
+	if videoReserveFloorSeconds != minMiniMaxDuration {
+		t.Fatalf("videoReserveFloorSeconds = %d, but the highest vendor floor this broker fronts is %d",
+			videoReserveFloorSeconds, minMiniMaxDuration)
+	}
 	for _, body := range []string{`{"seconds":1}`, `{"seconds":2}`, `{"seconds":3}`, `{"seconds":0.5}`} {
-		if got := videoReserve(t, c, body, "application/json", ""); got < videoReserveFloorSeconds {
+		if got := videoReserve(t, c, body, "application/json", ""); got < minMiniMaxDuration {
 			t.Errorf("%s: reserve = %d, want >= %d (the vendor renders and bills its own minimum)",
-				body, got, videoReserveFloorSeconds)
+				body, got, minMiniMaxDuration)
 		}
 	}
 	// At or above the floor the request is taken at its word.
@@ -643,6 +652,63 @@ func TestVideoReserveOversizedAndTruncatedSecondsFallBack(t *testing.T) {
 		mp3, ct3 := multipartSeconds(t, "11")
 		if got := videoReserve(t, c, mp3, ct3, ""); got != 11 {
 			t.Errorf("reserve = %d for a fully-read parseable value, want 11", got)
+		}
+	})
+}
+
+// TestVideoReserveJSONReadMatchesTheTranslator pins the fourth variant of this file's recurring defect:
+// two readers of the same field with different strictness, resolving to the cheaper side.
+//
+// The request-side read used json.Unmarshal over videoResponseFields, which declares response-only
+// members (`id`, `status`, `usage`). Unmarshal validates the WHOLE input and every declared field, while
+// the translator reads the same body with json.NewDecoder into a struct declaring only the request
+// fields — so a body the vendor reads fine was unreadable here:
+//
+//	{"seconds":20,"id":1}    -> broker read nothing, vendor read 20
+//	{"seconds":600,...} x    -> broker read nothing, vendor read 600, DashScope forwards it unclamped
+//
+// The reserve then fell to its 15s unknown-duration fallback against a bill of up to 600 units. Worse,
+// the same function is settlement's request fallback, so such a body billed nothing at all — a free clip.
+func TestVideoReserveJSONReadMatchesTheTranslator(t *testing.T) {
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
+
+	t.Run("a response-only field must not blind the request read", func(t *testing.T) {
+		for _, body := range []string{
+			`{"seconds":20,"model":"vid","id":1}`,
+			`{"seconds":20,"model":"vid","status":5}`,
+			`{"seconds":20,"model":"vid","usage":7}`,
+		} {
+			if got := videoReserve(t, c, body, "application/json", ""); got != 20 {
+				t.Errorf("%s: reserve = %d, want 20 — the vendor's decoder reads this body fine", body, got)
+			}
+		}
+	})
+
+	t.Run("trailing data must not blind it either", func(t *testing.T) {
+		// json.Decoder stops at the end of the first value, which is what the translator does.
+		for _, body := range []string{`{"seconds":600,"model":"vid"} x`, `{"seconds":600,"model":"vid"}{"a":1}`} {
+			if got := videoReserve(t, c, body, "application/json", ""); got != 600 {
+				t.Errorf("%s: reserve = %d, want 600 — DashScope forwards this duration unclamped", body, got)
+			}
+		}
+	})
+
+	t.Run("settlement reads the same body the same way", func(t *testing.T) {
+		// The shared reader is resolveVideoBilling's request fallback too; a body it cannot read bills
+		// nothing at all.
+		if seconds, _ := videoSecondsSizeFromRequest([]byte(`{"seconds":20,"id":1}`), "application/json"); seconds != 20 {
+			t.Errorf("settlement's request fallback read %d seconds, want 20 — an unreadable body is a free clip", seconds)
+		}
+	})
+
+	t.Run("genuinely unreadable bodies still fall back", func(t *testing.T) {
+		for _, body := range []string{`{"prompt":"a cat"}`, `{"seconds":"abc"}`, `null`, `not json`, ``} {
+			if got := videoReserve(t, c, body, "application/json", ""); got != videoReserveFallbackSeconds {
+				t.Errorf("%s: reserve = %d, want %d", body, got, videoReserveFallbackSeconds)
+			}
 		}
 	})
 }

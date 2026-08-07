@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -62,6 +63,15 @@ func parseMultipartField(bodyStr, fieldName string) string {
 // vendor (e.g. Alibaba Wan2.7 → usage.output_video_duration) surfaces it. The
 // same seconds/size shape is also the broker's request edge contract, so the
 // struct doubles as the request-fallback parse — see resolveVideoBilling.
+// videoRequestFields is the REQUEST-side read of the two billable fields. Declared narrowly on purpose:
+// it must accept exactly what the translator's own request struct accepts, so any body the vendor can
+// read is a body this side can price. Adding a field here re-creates the divergence described in
+// videoSecondsSizeFromRequest.
+type videoRequestFields struct {
+	Seconds json.Number `json:"seconds"`
+	Size    string      `json:"size"`
+}
+
 type videoResponseFields struct {
 	ID      string      `json:"id"`
 	Status  string      `json:"status"`
@@ -215,8 +225,17 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 		return 0, ""
 	}
 	// JSON shape (float-tolerant: a client may send "seconds": 5.0).
-	var qf videoResponseFields
-	if json.Unmarshal(reqBody, &qf) == nil {
+	//
+	// Decoder over a NARROW struct, not Unmarshal over videoResponseFields, because the translator reads
+	// this same body with json.NewDecoder into a struct declaring only the request fields. Unmarshal
+	// validates the WHOLE input and every field it declares, so `videoResponseFields`' response-only
+	// members turned a body the upstream reads fine into one this side could not read at all:
+	// `{"seconds":20,"id":1}` failed on `id`, and `{"seconds":600} x` failed on the trailing byte, while
+	// the vendor read 20 and 600. That made the reserve fall to its unknown-duration fallback of 15s
+	// against a bill of up to 600 units on DashScope, which forwards the duration unclamped — and it
+	// made SETTLEMENT read no duration either, which is a free clip.
+	var qf videoRequestFields
+	if json.NewDecoder(bytes.NewReader(reqBody)).Decode(&qf) == nil {
 		if s, ok := ceilSeconds(qf.Seconds); ok {
 			return s, qf.Size
 		}
@@ -470,39 +489,42 @@ func videoUpstreamSeconds(reqBody []byte, contentType, rawQuery string, bodySeco
 }
 
 // vendorParsesSeconds mirrors the translators' own duration read: strconv.ParseFloat on the verbatim
-// value, positive and finite. Deliberately NOT trimmed — see videoUpstreamNamedDuration.
+// value, positive and finite. Deliberately NOT trimmed — see videoUpstreamSeconds.
 //
 // It deliberately does NOT reproduce every bound either side applies. MiniMax has no upper bound (it
 // clamps to 15 and bills 15); DashScope adds `s <= maxDashScopeSeconds`; the broker's SIZING readers
 // reject `> maxVideoOutputUnits`. So this predicate is broader than what any one reader accepts, and
-// callers must not treat "named" as implying "sized" — videoReserveSeconds requires a positive size
-// independently, which is what keeps a mismatch from dropping the reserve to the vendor floor.
+// so "readable" never implies "sizeable". That is why videoUpstreamSeconds returns BOTH values for the
+// same source instead of leaving a caller to pair one with the other — an earlier revision applied the
+// positive-size check to the maximum over sources while taking readability from the upstream's source,
+// and the two then disagreed about which source they meant. Do not reintroduce an independent size
+// check; the pairing is the invariant.
 func vendorParsesSeconds(raw string) bool {
 	f, err := strconv.ParseFloat(raw, 64)
 	return err == nil && f > 0 && !math.IsInf(f, 0)
 }
 
-// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does, for SIZING only
-// — whether the upstream can read it is videoUpstreamNamedDuration's question.
+// videoReserveQuerySeconds reads `seconds` from the URL query the way r.FormValue does. It answers the
+// SIZE question; videoUpstreamSeconds pairs that size with the readability verdict for the same source.
 func videoReserveQuerySeconds(rawQuery string) int64 {
 	if rawQuery != "" {
-		// ParseQuery's error is IGNORED, matching r.FormValue: r.ParseForm returns the same error and
-		// FormValue ignores it, so `?seconds=15&junk=%zz` still resolves to 15 upstream. Guarding on
-		// err == nil discarded a readable value and priced the body's cheaper one.
+		// ParseQuery's error is IGNORED, matching r.ParseForm, whose error r.FormValue also ignores — it
+		// still returns the pairs it managed to parse. Guarding on err == nil discarded a value the
+		// upstream reads: `?seconds=15&junk=%zz` resolves to 15 there. (The in-repo translator happens
+		// to propagate ParseMultipartForm's error and 400 such a request, so today that particular shape
+		// is never billed; the guard is for the OpenAI-compatible shims the contract also admits.)
 		q, _ := url.ParseQuery(rawQuery)
-		// PRESENCE, not non-emptiness. `?seconds=` puts an empty string in r.Form, and FormValue
-		// returns it — the body is never consulted — so the vendor applies its own default. Testing
-		// `!= ""` fell through to the body instead: one character priced 1s for a 4s clip.
-		if vs, present := q["seconds"]; present {
-			if len(vs) > 0 {
-				// First value, which is what FormValue takes for a repeated key.
-				if f, err := strconv.ParseFloat(strings.TrimSpace(vs[0]), 64); err == nil &&
-					f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
-					return int64(math.Ceil(f))
-				}
+		// Presence vs non-emptiness no longer differ HERE — both return 0, since this function has no
+		// body fallback of its own. The distinction lives in videoUpstreamSeconds, which pairs this size
+		// with a readability verdict and treats a present-but-unusable key as "the vendor will choose".
+		// Stated because the historical reason ("`!= ""` fell through to the body") described a shape
+		// this function no longer owns, and reading it as load-bearing here is misleading.
+		if vs := q["seconds"]; len(vs) > 0 {
+			// First value, which is what FormValue takes for a repeated key.
+			if f, err := strconv.ParseFloat(strings.TrimSpace(vs[0]), 64); err == nil &&
+				f > 0 && !math.IsInf(f, 0) && f <= float64(maxVideoOutputUnits) {
+				return int64(math.Ceil(f))
 			}
-			// Present but unreadable or empty: nothing to size from.
-			return 0
 		}
 	}
 	return 0
