@@ -328,32 +328,40 @@ the payloads are unauthenticated bytes and any container on the socket can deriv
 same keys, so there is no signature to check.
 
 Neither a signature on the record nor a challenge nonce fixes that. There is no key to
-sign with that the broker cannot also derive (`GetKey` derives by path and any container
-may ask for any path), and freshness binding defeats *replay* of an old quote, not forgery
-of a new one — the modified image forges the record and then takes a fresh quote carrying
-the verifier's own nonce.
+sign with that the broker cannot also derive (`GetKey` derives by path and any container may
+ask for any path), and freshness binding defeats *replay* of an old quote, not forgery of a
+new one — the modified image forges the record and then takes a fresh quote carrying the
+verifier's own nonce.
 
-**So the reader does not assume it; it checks it.** Which services hold that socket is
-written in the compose file, and `compose_hash` binds that file to the quote — an
-authenticated input, not a claim. `attest.ResolveRunningState` reads the mounts out of
-`app_compose` and **refuses an event-sourced digest when the broker, or anything sharing
-the broker's image, can write the ledger** (the event container shares it, so the upgrade
-path replaces it too and it forges just as well). The full set is returned as
-`RunningState.LedgerWriters` for a caller wanting a stricter policy.
+**Whether the ledger is confined is a property of the compose file, and the caller is the
+one who can settle it.** `attest.ResolveRunningState` returns `ComposeHash`, the hash of the
+compose the CVM actually booted, bound to the quote by hardware. Compare it against the hash
+of a compose you published and reviewed, and you know — by reading a document you control —
+whether anything upgradeable can reach that socket. Same discipline as the expected-digest
+set (§D3): the answer comes from software the user installed, never from the party being
+checked.
 
-What survives is therefore either a digest bound by `compose_hash`, or a ledger that no
-upgradeable service can write.
+> **Tried and reverted: having `attest` derive this from `app_compose`.** It looks like it
+> should work, since `compose_hash` authenticates the compose text. It does not. The mount
+> shapes that reach a socket are an open set — a whole-directory bind (`/var/run:/var/run`),
+> a named volume with a bind `driver_opts`, a YAML alias, `extends:`, or an interpolation
+> that splits the path, since `app_compose` stores the compose text *uninterpolated*. And the
+> fields that would identify the broker are the wrong ones: the controller locates containers
+> by `container_name`, while a compose `services:` key is free to differ, and in this
+> project's own compose the controller shares the broker's **image string** and differs only
+> by `command:` — so the naive sibling test refuses the very shape it was meant to bless. A
+> parser that answers "probably not" here is worse than none, because it reads as a
+> guarantee. Do not re-add it.
 
-**This means deployments as they stand today have their event-sourced records refused**,
-because they mount the socket into the broker — that is how it gets `GetQuote` and
-`DeriveKey`. The refusal is correct: those records are forgeable. To make them readable,
-give the broker its quotes some other way. The controller is the obvious candidate: its
-image is pinned by `compose_hash` and it cannot upgrade itself (§4.4), so a ledger only it
-can write is worth reading. That change spans this repo and `deploy`, and it makes the
-broker depend on the controller at startup — a decision, not a detail. Until then, the
-accounting still buys the thing that motivated it: an in-TEE upgrade can no longer be
-performed silently or misreport itself by accident, and a forgeable claim is now visibly
-refused instead of quietly believed.
+So: **until a deployment keeps that socket away from the broker, treat an event-sourced
+digest as an audit record of what the controller did, not as proof of what is running.** The
+way to make it proof is to route the broker's quotes through the controller — its image is
+pinned by `compose_hash` and it cannot upgrade itself (§4.4), so a ledger only it can write
+is worth reading. That spans this repo and `deploy` and makes the broker depend on the
+controller at startup, so it is a decision rather than a detail.
+
+What the accounting below buys in the meantime is not nothing, and it is what motivated the
+work: an in-TEE upgrade can no longer be performed silently, or misreport itself by accident.
 
 #### The invariant, stated properly
 
