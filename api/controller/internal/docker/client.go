@@ -511,8 +511,32 @@ func (c *Client) GetImageInfo(ctx context.Context, imageName string) (*ImageInfo
 	}, nil
 }
 
+// imageEnvUpdates splits a pinned reference into the two variables the broker
+// reads to know which image it is running.
+//
+// A recreated container inherits the old one's environment, so without this the
+// broker would come up on the new image still announcing the previous digest.
+// The contract would see no image change and keep the TEE signer
+// acknowledgement that an image change is supposed to drop — the upgrade would
+// be invisible in exactly the place it is meant to be visible.
+//
+// An unpinned reference yields nothing rather than a guess: writing a digest the
+// reference does not carry would be inventing the very fact these variables
+// exist to state.
+func imageEnvUpdates(imageRef string) map[string]string {
+	repo, digest, pinned := strings.Cut(imageRef, "@")
+	if !pinned {
+		return nil
+	}
+	return map[string]string{
+		"IMAGE_REPO":   repo,
+		"IMAGE_DIGEST": digest,
+	}
+}
+
 // RecreateContainer stops, removes, and recreates a container with a new image
-// It preserves the original container's configuration
+// It preserves the original container's configuration, plus the IMAGE_REPO /
+// IMAGE_DIGEST pair naming the image it is now on.
 func (c *Client) RecreateContainer(ctx context.Context, containerName string, newImage string) (*ContainerUpdateResult, error) {
 	result := &ContainerUpdateResult{
 		Name: containerName,
@@ -557,7 +581,7 @@ func (c *Client) RecreateContainer(ctx context.Context, containerName string, ne
 	newConfig := &container.Config{
 		Image:        newImage,
 		Cmd:          inspect.Config.Cmd,
-		Env:          inspect.Config.Env,
+		Env:          mergeEnv(inspect.Config.Env, imageEnvUpdates(newImage)),
 		ExposedPorts: inspect.Config.ExposedPorts,
 		Labels:       inspect.Config.Labels,
 		WorkingDir:   inspect.Config.WorkingDir,

@@ -111,12 +111,6 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 	if err := validateImageRepo(cfg.ImageRepo); err != nil {
 		return nil, err
 	}
-	// Not [CONFIG-REMOVED] like controller.containers: the broker still reports
-	// controller.image on-chain, so this warns that the controller stopped
-	// reading it without telling an operator to delete it yet.
-	if cfg.Image != "" {
-		logger.Warnf("controller.image no longer selects what the controller runs — upgrades run %s@<digest from the request>. It is still read by the broker for on-chain ImageName, so leave it set until that moves to IMAGE_REPO / IMAGE_DIGEST.", cfg.ImageRepo)
-	}
 
 	dockerClient, err := docker.NewClient(cfg)
 	if err != nil {
@@ -604,16 +598,14 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// This is done AFTER containers are successfully recreated to ensure
 	// the contract always reflects the actual running state
 	//
-	// ImageName stays controller.image, deliberately, even though ref is the
-	// truer description of what now runs. additionalInfo has a second writer:
-	// the broker rewrites both image fields from controller.image every time it
-	// starts. Writing a different value here would not correct that one, it
-	// would just make the two disagree — and the contract treats each flip as
-	// an image change and un-acknowledges the provider for it. Both writers
-	// move together when the broker takes IMAGE_REPO / IMAGE_DIGEST from its
-	// environment; until then the field is only as precise as the older one.
+	// ImageName is the repository, not ref, because additionalInfo has a second
+	// writer: the broker rewrites both image fields on every start, now from the
+	// IMAGE_REPO / IMAGE_DIGEST pair this upgrade just wrote into its container.
+	// The two have to agree — the contract treats each flip of these fields as
+	// an image change and un-acknowledges the provider for it — so this writes
+	// the same halves the broker will read back, not a joined reference.
 	c.logger.Info("[UpdateImages] Syncing service with new image digest...")
-	if err := c.SyncService(ctx, c.config.Image, imageInfo.Digest); err != nil {
+	if err := c.SyncService(ctx, c.config.ImageRepo, imageInfo.Digest); err != nil {
 		result.Success = false
 		result.Error = "failed to sync service: " + err.Error()
 		return result, err

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 )
 
@@ -378,6 +379,123 @@ func TestSelfIdentification(t *testing.T) {
 	})
 }
 
+// fakeRecreateDaemon serves the whole stop/remove/create/start sequence and hands
+// back the config RecreateContainer asked it to create, so what the new container
+// is actually given can be asserted rather than inferred from a helper.
+func fakeRecreateDaemon(t *testing.T, oldEnv []string) (*Client, *container.Config) {
+	t.Helper()
+
+	var created container.Config
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("Api-Version", "1.47")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": otherID, "Names": []string{"/" + brokerName}},
+				{"Id": selfID, "Names": []string{"/0g-controller"}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/containers/create"):
+			if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+				t.Errorf("decoding container create body: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "beef" + strings.Repeat("0", 60)})
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id":     otherID,
+				"Name":   "/" + brokerName,
+				"Config": map[string]any{"Image": "old:tag", "Env": oldEnv},
+				// Carried over as-is; present because RecreateContainer walks the
+				// network map unguarded, as a real daemon always sends one.
+				"NetworkSettings": map[string]any{
+					"Networks": map[string]any{"default": map[string]any{"Aliases": []string{"broker"}}},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/stop"), strings.HasSuffix(r.URL.Path, "/start"),
+			r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.NewClientWithOpts(client.WithHost(srv.URL), client.WithVersion("1.47"))
+	if err != nil {
+		t.Fatalf("building docker client: %v", err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	return &Client{cli: cli}, &created
+}
+
+// The recreated broker has to come up announcing the image it is now on. It
+// inherits the old container's environment, so an upgrade that did not overwrite
+// these two would leave the broker reporting the previous digest on-chain — the
+// contract would see no image change and keep the TEE signer acknowledgement that
+// an image change exists to drop.
+func TestRecreateContainerWritesImageEnv(t *testing.T) {
+	stubHostname(t, selfHost)
+	const repo = "ghcr.io/0gfoundation/0g-serving-broker"
+
+	t.Run("a pinned reference overwrites the inherited pair", func(t *testing.T) {
+		c, created := fakeRecreateDaemon(t, []string{
+			"IMAGE_REPO=" + repo,
+			"IMAGE_DIGEST=" + digestOther,
+			"CONFIG_FILE=/etc/config/config.yaml",
+		})
+
+		if _, err := c.RecreateContainer(context.Background(), brokerName, repo+"@"+digestWanted); err != nil {
+			t.Fatalf("RecreateContainer() = %v, want nil", err)
+		}
+
+		env := envMap(created.Env)
+		if env["IMAGE_REPO"] != repo {
+			t.Errorf("IMAGE_REPO = %q, want %q", env["IMAGE_REPO"], repo)
+		}
+		if env["IMAGE_DIGEST"] != digestWanted {
+			t.Errorf("IMAGE_DIGEST = %q, want %q", env["IMAGE_DIGEST"], digestWanted)
+		}
+		// Unrelated variables are the container's whole configuration in a
+		// compose deployment; losing one is how a broker comes back up unable
+		// to find its config file.
+		if env["CONFIG_FILE"] != "/etc/config/config.yaml" {
+			t.Errorf("CONFIG_FILE = %q, want it preserved", env["CONFIG_FILE"])
+		}
+	})
+
+	// UpdateImages only ever builds a pinned reference, but RecreateContainer is
+	// exported and takes whatever it is handed. Deriving a digest from a
+	// reference that does not carry one would invent the fact these variables
+	// exist to state, so it writes neither.
+	t.Run("an unpinned reference leaves the pair alone", func(t *testing.T) {
+		c, created := fakeRecreateDaemon(t, []string{"IMAGE_DIGEST=" + digestOther})
+
+		if _, err := c.RecreateContainer(context.Background(), brokerName, repo+":latest"); err != nil {
+			t.Fatalf("RecreateContainer() = %v, want nil", err)
+		}
+
+		env := envMap(created.Env)
+		if env["IMAGE_DIGEST"] != digestOther {
+			t.Errorf("IMAGE_DIGEST = %q, want the inherited %q", env["IMAGE_DIGEST"], digestOther)
+		}
+		if _, ok := env["IMAGE_REPO"]; ok {
+			t.Errorf("IMAGE_REPO = %q, want it absent", env["IMAGE_REPO"])
+		}
+	})
+}
+
+func envMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
 func TestPullImage(t *testing.T) {
 	const repo = "ghcr.io/0gfoundation/0g-serving-broker"
 
@@ -400,15 +518,12 @@ func TestPullImage(t *testing.T) {
 		}
 	})
 
-	// Pins a KNOWN LIMITATION rather than endorsing the behaviour. A tag has no
-	// digest to prefer, so the answer still comes from RepoDigests[0] — here the
-	// mirror's, not the repo that was asked for. Fixing it means changing
-	// api/common/docker.GetImageInfo, which inference also calls, and spec
-	// invariant 1 forbids altering inference behaviour in this slice; it is
-	// deferred to S5, which removes that caller. Asserting the wrong-looking
-	// value keeps the gap visible until then, and this test flips to
-	// digestWanted the moment it is closed.
-	t.Run("tag inherits the daemon's first repo digest, mirror included", func(t *testing.T) {
+	// A tag has no digest for PullImage to prefer, so the answer comes from
+	// RepoDigests — and it has to come from the entry for the repository that was
+	// asked about, not from whichever one sorts first. This asserted the mirror's
+	// digest until the caller that spec invariant 1 protected (inference's, now on
+	// IMAGE_REPO / IMAGE_DIGEST) stopped sharing api/common/docker.GetImageInfo.
+	t.Run("tag takes the digest of the repository asked about, not the mirror's", func(t *testing.T) {
 		c := fakeDaemon(t, okStream, []string{
 			"0gfoundation/mirror@" + digestOther,
 			repo + "@" + digestWanted,
@@ -418,8 +533,23 @@ func TestPullImage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PullImage() = %v, want nil", err)
 		}
+		if info.Digest != digestWanted {
+			t.Errorf("Digest = %q, want %q", info.Digest, digestWanted)
+		}
+	})
+
+	// Falls back to the first entry rather than reporting nothing: an image the
+	// daemon lists under some other name still has a digest worth reporting, and
+	// GET /v1/images/info answering "" would read as "no digest at all".
+	t.Run("a repository with no entry falls back to the first", func(t *testing.T) {
+		c := fakeDaemon(t, okStream, []string{"0gfoundation/mirror@" + digestOther})
+
+		info, err := c.PullImage(context.Background(), repo+":latest")
+		if err != nil {
+			t.Fatalf("PullImage() = %v, want nil", err)
+		}
 		if info.Digest != digestOther {
-			t.Errorf("Digest = %q, want %q (the mirror's — see comment)", info.Digest, digestOther)
+			t.Errorf("Digest = %q, want %q", info.Digest, digestOther)
 		}
 	})
 

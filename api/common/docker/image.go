@@ -34,24 +34,52 @@ func GetImageInfo(ctx context.Context, cli *client.Client, imageName string) (*I
 
 	created, _ := time.Parse(time.RFC3339Nano, inspect.Created)
 
-	// Get digest from RepoDigests (format: "image@sha256:...")
-	var digest string
-	if len(inspect.RepoDigests) > 0 {
-		// RepoDigests format: ["ghcr.io/0gfoundation/0g-serving-broker@sha256:abc123..."]
-		// Extract the digest part after @
-		repoDigest := inspect.RepoDigests[0]
-		if idx := strings.Index(repoDigest, "@"); idx != -1 {
-			digest = repoDigest[idx+1:]
-		}
-	}
-
 	return &ImageInfo{
 		Image:   imageName,
 		ImageID: inspect.ID,
-		Digest:  digest,
+		Digest:  digestFor(imageName, inspect.RepoDigests),
 		Created: created,
 		Size:    inspect.Size,
 	}, nil
+}
+
+// digestFor picks the digest RepoDigests records for imageName's repository.
+//
+// The daemon carries one entry per repository the image is known under
+// (["ghcr.io/0gfoundation/0g-serving-broker@sha256:abc…", …]) ordered by the
+// normalized reference, so the first entry belongs to whichever repository sorts
+// first. For an image pulled from a mirror as well, that is not the repository
+// the caller asked about, and the digest reported would name an image under a
+// name the caller never mentioned.
+func digestFor(imageName string, repoDigests []string) string {
+	for _, entry := range repoDigests {
+		if repo, digest, ok := strings.Cut(entry, "@"); ok && repo == repoOf(imageName) {
+			return digest
+		}
+	}
+
+	// No entry for that repository: an image addressed by ID, or a name the
+	// daemon normalized to something else. Answering with the first entry keeps
+	// the previous behaviour rather than reporting nothing at all.
+	if len(repoDigests) > 0 {
+		if _, digest, ok := strings.Cut(repoDigests[0], "@"); ok {
+			return digest
+		}
+	}
+	return ""
+}
+
+// repoOf strips any tag or digest from a reference.
+//
+// Only a colon in the last path segment is a tag separator; an earlier one is a
+// port on the registry host, as in "localhost:5000/broker".
+func repoOf(imageName string) string {
+	repo, _, _ := strings.Cut(imageName, "@")
+	lastSegment := repo[strings.LastIndex(repo, "/")+1:]
+	if tag := strings.Index(lastSegment, ":"); tag != -1 {
+		repo = repo[:len(repo)-len(lastSegment)+tag]
+	}
+	return repo
 }
 
 func ImageExists(ctx context.Context, cli *client.Client, imageName string) (bool, error) {
