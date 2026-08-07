@@ -57,12 +57,6 @@ func parseMultipartField(bodyStr, fieldName string) string {
 	return strings.TrimSpace(bodyStr[valueStart:end])
 }
 
-// videoResponseFields holds the billing-relevant fields from a video generation
-// response. seconds/size is the OpenAI-shaped top level; usage carries the
-// actual output duration the way an OpenAI-compatible shim in front of an async
-// vendor (e.g. Alibaba Wan2.7 → usage.output_video_duration) surfaces it. The
-// same seconds/size shape is also the broker's request edge contract, so the
-// struct doubles as the request-fallback parse — see resolveVideoBilling.
 // videoRequestFields is the REQUEST-side read of the two billable fields. Declared narrowly on purpose:
 // it must accept exactly what the translator's own request struct accepts, so any body the vendor can
 // read is a body this side can price. Adding a field here re-creates the divergence described in
@@ -72,6 +66,14 @@ type videoRequestFields struct {
 	Size    string      `json:"size"`
 }
 
+// videoResponseFields holds the billing-relevant fields from a video generation
+// response. seconds/size is the OpenAI-shaped top level; usage carries the
+// actual output duration the way an OpenAI-compatible shim in front of an async
+// vendor (e.g. Alibaba Wan2.7 → usage.output_video_duration) surfaces it.
+//
+// It is a RESPONSE struct only. It used to double as the request-side parse too, and that is precisely
+// what produced the fourth under-reserve in this file: strict json.Unmarshal over these response-only
+// members made a body the vendor reads fine unreadable here. Read requests with videoRequestFields.
 type videoResponseFields struct {
 	ID      string      `json:"id"`
 	Status  string      `json:"status"`

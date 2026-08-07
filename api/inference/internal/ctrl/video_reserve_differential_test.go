@@ -30,13 +30,19 @@ import (
 // a differential sweep against the MECHANISMS the upstream actually uses, which are standard library:
 // `r.FormValue` after `ParseMultipartForm` for multipart, and `json.Decoder` for JSON
 // (videotranslator/internal/handler/video.go: parseCreateVideoRequest). The vendor's own clamping is NOT
-// modelled here — that module is not importable — so the assertion is the weaker, transport-level one
+// modelled here — videotranslator/internal is not importable from here (one module, but `internal/` is
+// only visible under videotranslator/) — so the assertion is the weaker, transport-level one
 // that is nonetheless where all four variants lived:
 //
 //	whatever duration the upstream's reader yields, the reserve must have priced at least that many
 //	seconds, or have priced the unknown-duration fallback.
 //
-// A new reader added to this path without a row here is the fifth variant waiting to happen.
+// A new reader added to this path without a row here is the next variant waiting to happen.
+//
+// This sweep is NOT sufficient on its own, and running it in isolation as a gate would be a mistake: it
+// only ever asks "is the reserve too LOW", so an over-refusing gate passes it. Measured — narrowing the
+// refusal to `len(raw) >= 1` leaves this file green (69 shapes merely counted as refused) while four other
+// tests in the package go red. The package suite is the gate; this file is one axis of it.
 
 // upstreamSecondsMultipart reproduces the upstream's read for a multipart create, using the same
 // net/http machinery it uses: ParseMultipartForm seeds r.Form from the query, then appends body values,
@@ -87,7 +93,8 @@ func upstreamSecondsJSON(body string) (raw string, decoded bool) {
 
 // vendorFloorSeconds is what a vendor renders for a duration it cannot read or that sits below its
 // minimum. Restated from videotranslator/internal/translate/minimax.go (minMiniMaxDuration), which is in
-// a module this test cannot import; TestVideoReserveClampsToTheVendorFloor pins the same number.
+// not importable from here (`internal/` visibility, not a module boundary);
+// TestVideoReserveClampsToTheVendorFloor pins the same number.
 const vendorFloorSeconds = 4
 
 // TestVideoReserveDifferentialAgainstUpstreamReaders sweeps every value shape that has ever produced a
@@ -196,22 +203,6 @@ func TestVideoReserveDifferentialAgainstUpstreamReaders(t *testing.T) {
 			}
 		}
 
-		// What the reserve OWES for that reading, by its own documented rules:
-		//
-		//   the upstream read nothing usable    -> the unknown-duration fallback (the vendor will choose)
-		//   the upstream read something the
-		//     broker cannot size (past its cap) -> the fallback again: it cannot price what it read
-		// What the reserve OWES for that reading, by its own documented rules:
-		//
-		//   the upstream read nothing usable    -> the unknown-duration fallback (the vendor will choose)
-		//   the upstream read something the
-		//     broker cannot size (past its cap) -> the fallback again: it cannot price what it read
-		//   otherwise                           -> that duration, floored at the vendor minimum
-		//
-		// Deliberately NOT capped at maxVideoOutputUnits: the VENDOR has no such cap (MiniMax clamps to
-		// its 15s ceiling, DashScope forwards the value unclamped), and an earlier version of this
-		// expectation collapsed to the vendor floor exactly where the four variants bite — which made the
-		// whole sweep vacuous. Verified against each variant: see the mutation list in the file header.
 		// What the reserve OWES for that reading, by its own documented rules:
 		//
 		//   the upstream read nothing usable    -> the unknown-duration fallback (the vendor will choose)
