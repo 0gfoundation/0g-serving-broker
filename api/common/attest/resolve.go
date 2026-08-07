@@ -136,30 +136,47 @@ func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService 
 		return nil, err
 	}
 
+	// Only the last record of each kind decides, so an earlier one that named nothing
+	// readable is history rather than a verdict. The writer emits exactly that when it
+	// cannot establish the truth — a container it could not inspect, a file it could
+	// not re-read — and treating any such record as fatal would let one transient
+	// docker error make a CVM permanently unverifiable for the rest of its boot, with
+	// no way for a later correct record to recover it.
+	//
+	// The last one being unreadable is still fatal. That is the whole point of the
+	// writer emitting it: refusing beats believing the record it replaced.
 	state := &RunningState{ComposeHash: composeHash, Events: events}
+	var imageErr, configErr error
 	for _, event := range ledger {
 		if !strings.HasPrefix(event.Event, EventNamespace) {
 			continue
 		}
 		switch event.Event {
 		case EventImageUpdate:
-			// The last one wins: each records the reference an upgrade ran on, so
-			// the most recent is what is running.
 			digest, err := digestOfImageRef(string(event.Payload))
-			if err != nil {
-				return nil, err
-			}
-			state.BrokerDigest = digest
-			state.DigestSource = DigestSourceEvent
+			state.BrokerDigest, state.DigestSource, imageErr = digest, DigestSourceEvent, err
 		case EventConfigUpdate:
 			sum := string(event.Payload)
-			if !hexSHA256Pattern.MatchString(sum) {
-				return nil, fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
+			if configErr = nil; !hexSHA256Pattern.MatchString(sum) {
+				configErr = fmt.Errorf("%s payload %q is not a hex sha256", EventConfigUpdate, sum)
 			}
 			state.ConfigSHA256 = sum
 		default:
 			return nil, fmt.Errorf("unrecognised %s event %q: this reader is older than the CVM that wrote the log, so it cannot say what is running", EventNamespace, event.Event)
 		}
+	}
+	if imageErr != nil {
+		return nil, fmt.Errorf("the last %s record says nothing readable, so what the broker runs is unknown: %w", EventImageUpdate, imageErr)
+	}
+	if configErr != nil {
+		return nil, configErr
+	}
+
+	// Not the compose fallback: an image record exists, it just did not resolve, and
+	// falling back would answer with the digest the deployment booted on while the
+	// ledger says it was changed to something the writer could not name.
+	if state.DigestSource == DigestSourceEvent {
+		return state, nil
 	}
 
 	if state.BrokerDigest == "" {

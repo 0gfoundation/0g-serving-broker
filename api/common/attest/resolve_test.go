@@ -276,6 +276,57 @@ func TestResolveNeedsTheSystemReadyBoundary(t *testing.T) {
 	})
 }
 
+// An unreadable record is fatal only if it is the LAST one of its kind.
+//
+// The writer emits exactly such a record when it cannot establish the truth, so that
+// a reader refuses rather than believing the record it replaced. But records
+// accumulate for a whole TD boot, so treating any of them as fatal would let one
+// transient docker error make a CVM permanently unverifiable with no way for a later
+// correct upgrade to recover it.
+func TestResolveRecoversFromAnEarlierUnreadableRecord(t *testing.T) {
+	compose := pinnedCompose(t)
+
+	events := append(bootEvents(),
+		// What restoreImageRecord writes when it cannot read the broker: a bare
+		// repository, naming no digest.
+		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker")},
+		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte("unknown")},
+		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)},
+		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte(configSum)},
+	)
+
+	state, err := resolve(t, compose, events)
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v, want the later records to supersede", err)
+	}
+	if state.BrokerDigest != upgradeDigest {
+		t.Errorf("BrokerDigest = %q, want %q", state.BrokerDigest, upgradeDigest)
+	}
+	if state.ConfigSHA256 != configSum {
+		t.Errorf("ConfigSHA256 = %q, want %q", state.ConfigSHA256, configSum)
+	}
+}
+
+// The other half: an unreadable record with nothing after it must NOT fall back to the
+// compose pin. An image record exists — it just did not resolve — and answering with
+// the digest the deployment booted on would be believing exactly what the writer
+// emitted that record to stop.
+func TestResolveDoesNotFallBackAfterAnUnreadableRecord(t *testing.T) {
+	compose := pinnedCompose(t)
+
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker")},
+	)
+
+	state, err := resolve(t, compose, events)
+	if err == nil {
+		t.Fatalf("ResolveRunningState() = %+v, want a refusal", state)
+	}
+	if strings.Contains(err.Error(), bootDigest) {
+		t.Errorf("ResolveRunningState() = %v, want it not to answer with the compose pin", err)
+	}
+}
+
 // A payload that does not parse is refused rather than shrugged at: a caller
 // comparing a half-read digest against its expected list would see a mismatch and
 // blame the wrong thing.
