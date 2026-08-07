@@ -91,9 +91,18 @@ image it is running. It reads two environment variables:
 ```
 
 Their values become `additionalInfo.ImageName` / `ImageDigest` on-chain. Either
-one empty reports both as empty, which is what the removed daemon lookup did
-when no socket was configured — so a deployment that has not set them yet keeps
-working, it just says nothing about its image.
+one empty reports both as empty — the same answer the removed daemon lookup gave
+when no socket was configured.
+
+**Empty is not inert.** `buildAdditionalInfo` has no "unknown" branch: it writes
+the empty pair on-chain, and if the previous value was not empty that counts as an
+image change, which clears `teeSignerAcknowledged` and needs
+`acknowledgeTEESignerByOwner` to restore. The controller's upgrade path cannot
+cause this (`RecreateContainer` writes both variables itself), and a
+controller-disabled deployment cannot either (it already reports empty). The way to
+cause it is a hand-rolled `docker compose up` onto this version with a compose file
+that has not added the two variables — so **add them in the same change that moves
+the image**.
 
 **The compose file must set them, and must keep them equal to the pinned
 `image:`.** Nothing checks the two agree, and nothing can: the broker has no way

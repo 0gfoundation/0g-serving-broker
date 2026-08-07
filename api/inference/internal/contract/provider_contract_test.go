@@ -7,9 +7,13 @@ import (
 
 // GetImageInfo is the broker's only statement about which image it runs, and the
 // contract un-acknowledges the provider's TEE signer whenever the pair changes.
-// A half-populated environment must therefore read as "unknown" and not as a
-// change: buildAdditionalInfo leaves the on-chain fields alone for ("", ""), and
-// leaving them alone is what a deployment mid-rollout needs.
+//
+// So a half-populated environment must answer ("", ""), never a repo with an empty
+// digest: that would be a partly-true statement assembled out of a missing
+// variable. ("", "") is not inert either — buildAdditionalInfo writes it on-chain
+// as two empty strings — but it is at least the same answer this method gave
+// before it read the environment, so it flips nothing on the deployments that
+// already report empty. See the note on GetImageInfo.
 //
 // The method reads no field of ProviderContract, so a zero value is the whole
 // fixture.

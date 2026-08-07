@@ -71,10 +71,22 @@ func (u *ProviderContract) Close() {
 // GetImageInfo returns the repository and digest of the image the broker runs,
 // as the environment states them.
 //
-// Either variable being empty answers ("", ""), which buildAdditionalInfo reads
-// as "unknown" and leaves the on-chain image fields untouched. That is the same
-// answer the docker lookup this replaces gave when no socket was configured, so
-// a deployment that has not been given the variables yet is unaffected.
+// Either variable being empty answers ("", ""), the same answer the docker lookup
+// this replaces gave when no socket was configured.
+//
+// Be careful what that means downstream: buildAdditionalInfo has no "unknown"
+// branch. It embeds whatever it is handed, so an empty pair is written on-chain as
+// empty strings — and if the previous on-chain value was not empty, that is a
+// change to the image fields, which the contract reads as an image change and
+// un-acknowledges the provider's TEE signer for.
+//
+// Reaching that needs the broker to start on this image with the variables unset,
+// which the controller's own upgrade path cannot do: RecreateContainer writes both
+// from the reference it recreates on. It is a hand-rolled `docker compose up`
+// onto this version with a compose file that has not added them yet — see
+// doc/controller-design.md §3.1a. A controller-disabled deployment is unaffected
+// for a different reason: it answered ("", "") before this change too, so both
+// on-chain fields are already empty and nothing flips.
 //
 // No cross-check against the running container is possible any more, and none is
 // wanted here: what proves the pair is the RTMR3 record the controller writes
