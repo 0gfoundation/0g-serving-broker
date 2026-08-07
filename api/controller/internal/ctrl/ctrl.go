@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"gopkg.in/yaml.v3"
 
+	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -46,25 +47,6 @@ import (
 type EventEmitter interface {
 	EmitEvent(ctx context.Context, event string, payload []byte) error
 }
-
-// The two events the controller records, and their payloads.
-//
-// This is a wire contract with every verifier that reads RTMR3, and the payload
-// bytes go into the event's digest — so a change to a name or an encoding is a
-// change to the measurement, and old readers stop being able to explain new logs.
-// Payloads are bare bytes rather than JSON for that reason: a verifier has to
-// reproduce them exactly, and JSON leaves key order, spacing and escaping free.
-//
-// The zg- prefix is a namespace. dstack already writes app-id, compose-hash and
-// system-ready into RTMR3, and other components may add their own.
-const (
-	// Payload: "<repo>@sha256:<64hex>", the reference the upgrade runs on.
-	eventImageUpdate = "zg-image-update"
-	// Payload: hex(sha256(config file content)). Records behaviour, not just
-	// code: pricing, verifiability and targetUrl all live in that file, and an
-	// image digest alone would leave them changeable without a trace.
-	eventConfigUpdate = "zg-config-update"
-)
 
 // Ceilings on how long a recorded change may hold the controller.
 //
@@ -450,7 +432,7 @@ func (c *Ctrl) ApplyCoreConfig(ctx context.Context, configContent string) error 
 	defer cancel()
 
 	sum := sha256.Sum256([]byte(configContent))
-	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventConfigUpdate, []byte(hex.EncodeToString(sum[:]))); err != nil {
 		return fmt.Errorf("recording the config change in RTMR3: %w", err)
 	}
 
@@ -571,7 +553,7 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 		payload = status.Image
 	}
 
-	return c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(payload))
+	return c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(payload))
 }
 
 // abortConfigChange restores the config record and returns the error to report.
@@ -599,7 +581,7 @@ func (c *Ctrl) abortConfigChange(ctx context.Context, cause error) error {
 		payload = hex.EncodeToString(sum[:])
 	}
 
-	if err := c.emitter.EmitEvent(ctx, eventConfigUpdate, []byte(payload)); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventConfigUpdate, []byte(payload)); err != nil {
 		c.logger.Errorf("[ApplyCoreConfig] RTMR3 names config content that was not applied and the record could not be restored: %v", err)
 		return errors.Join(cause, fmt.Errorf("RTMR3 still names the config this change did not apply, and restoring it failed: %w", err))
 	}
@@ -888,7 +870,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Still before the change, so a change cannot happen unrecorded: stopping a
 	// container does not alter its image, and the create below is the first thing
 	// that does.
-	if err := c.emitter.EmitEvent(ctx, eventImageUpdate, []byte(ref)); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(ref)); err != nil {
 		// The broker is stopped and nothing was recorded, so the ledger is still
 		// truthful — but leaving it down would turn a dstack hiccup into an outage.
 		// Best effort: on failure the caller gets an error either way.

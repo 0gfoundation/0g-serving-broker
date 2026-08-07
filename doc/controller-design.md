@@ -448,6 +448,15 @@ This requires `/var/run/dstack.sock` mounted into the controller. It is not
 dialled at startup, so the read-only endpoints keep working without it; an upgrade
 attempted without it fails at the record, before anything is touched.
 
+The reader for this ledger is `api/common/attest`, in this repository so that the
+format and the reader cannot drift apart —
+`attest.ResolveRunningState(quote, event_log, tcb_info, brokerService)` replays
+RTMR3, anchors the event log and the compose file back to the signed quote, and
+answers which image and config are running. Both sides take the event names from
+`attest`. It stops short of verifying the quote's DCAP signature and of judging
+whether the answer is acceptable; the digest list for the latter has to come from
+software the *user* installed, never from the provider being checked.
+
 ### 5.2 Image Update Workflow
 
 Step 1 below is preceded by the `zg-image-update` record described in §5.1a.
