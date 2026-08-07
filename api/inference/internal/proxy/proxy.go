@@ -840,6 +840,17 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			break
 		}
 		fee, err := p.ctrl.VideoCreateReserveFee(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), ctx.Request.URL.RawQuery)
+		if errors.Is(err, ctrl.ErrVideoSecondsTooLong) {
+			// Client-caused, unlike every other failure from this call: the caller sent a `seconds` the
+			// broker cannot read to its end while the upstream can. Flagged so resolveFailureSource puts
+			// it in the client bucket instead of firing the broker-fault alert — with no rejection reason
+			// set, `code` is empty, which is not RejectionUpstreamError, so a flagged 4xx still resolves
+			// to client. No new reason constant is added for it: none of the existing ones fits and
+			// introducing a metric label value is a wider change than this refusal warrants.
+			ctx.Set("ignoreError", true)
+			p.handleBrokerError(ctx, err, "")
+			return
+		}
 		if err != nil {
 			// Broker-side: an unreadable configured price, a contract read that could not reach the
 			// RPC endpoint, or a stale/unpopulated USD rate snapshot — GetBillingPrices reaches all

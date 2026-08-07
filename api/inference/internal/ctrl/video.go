@@ -258,9 +258,14 @@ func videoSecondsSizeFromRequest(reqBody []byte, contentType string) (int64, str
 // It is 15 because of the vendor the broker CANNOT see into, not because of the one it can. The MiniMax
 // path is broker-side and its default for an absent duration is minMiniMaxDuration = 4 (the same
 // constant videoReserveFloorSeconds is taken from, and deliberately OpenAI's documented default). The
-// DashScope path omits `duration` entirely and lets the vendor decide, and nothing in this repo pins
-// that default or any model ceiling — so the constant has to cover an unknown, and 15 is MiniMax's
-// ceiling, i.e. the largest duration any model here is known to render.
+// DashScope path omits `duration` entirely and lets the vendor decide, and nothing in this repo pins that
+// DEFAULT — so the constant has to cover an unknown, and 15 is MiniMax's ceiling, i.e. the largest
+// duration any model here is known to render.
+//
+// Its request CEILING is pinned, though, and saying otherwise was wrong: maxDashScopeSeconds equals the
+// broker's own maxVideoOutputUnits, so beyond that bound the translator omits `duration` and the vendor
+// takes its default — exactly the case this constant covers. The two sides agree there; the unknown is
+// the default, not the ceiling.
 //
 // The cost is real and is the accepted direction: an OpenAI-conforming client that omits `seconds` gets
 // a 4s clip and a 15s reserve. Tightening it needs the per-model published default the reserve does not
@@ -292,7 +297,8 @@ const videoReserveFloorSeconds = 4
 //     then raised to videoReserveFloorSeconds, because vendors clamp up as well as down and bill what
 //     they rendered. Only when NEITHER source names a usable duration does videoReserveFallbackSeconds
 //     apply. A vendor ceiling is deliberately not applied: MiniMax clamps a 60s request down to 15 and
-//     bills 15, but DashScope has no ceiling this repo can read, so clamping would under-reserve there.
+//     bills 15, but DashScope forwards any duration up to maxDashScopeSeconds verbatim, so clamping to
+//     MiniMax's ceiling would under-reserve every DashScope-backed model between 16s and that bound.
 //
 // Residual, not bounded here: settlement prefers usage.output_video_duration, which one vendor reports
 // as input + output seconds (see actualSeconds). A create carrying a long reference video can therefore
@@ -302,8 +308,34 @@ const videoReserveFloorSeconds = 4
 // Everything else over-reserves relative to a typical request, which is the intended direction: a
 // reserve is not a charge (settlement computes the real fee from the response), and the failure it
 // replaces was admitting a create the balance could not cover.
+// ErrVideoSecondsTooLong is returned when a multipart `seconds` field is longer than the broker's scalar
+// read cap. The gate refuses rather than prices it, because there is no honest number to price:
+//
+//   - the broker stops reading at maxMultipartScalarBytes, so it sees a PREFIX. Worse than seeing
+//     nothing: `1022 zeros + "600"` truncates to a parseable 60, and the reserve took 60.
+//   - the upstream's r.FormValue has no cap and reads the whole thing, so it renders 600 — or 5000 for
+//     `1022 zeros + "5e3"`, where the prefix parses to nothing and the reserve fell to the 15s
+//     unknown-duration fallback. Measured 20 0G reserved against a 6698 0G bill at the mainnet unit
+//     price, from a field a legitimate caller has no reason to send.
+//
+// The fallback cannot cover this: it stands for "the vendor will choose a duration we cannot see", and
+// this is "the vendor read MORE DIGITS than we did" — a different unknown with no ceiling. Refusing is
+// the only answer that is neither a guess nor a discount. Client-caused, so the proxy arm attributes it
+// to the caller.
+var ErrVideoSecondsTooLong = errors.NewBadRequest(
+	"`seconds` is too long to read; send a plain duration")
+
 func (c *Ctrl) VideoCreateReserveFee(ctx *gin.Context, reqBody []byte, contentType, rawQuery string) (string, error) {
 	seconds := videoReserveSeconds(reqBody, contentType, rawQuery)
+
+	// Refused BEFORE anything is priced: see ErrVideoSecondsTooLong. Only multipart has a read cap; the
+	// JSON path decodes the whole body or none of it.
+	if isMultipartRequest(contentType) {
+		if raw, present := multipartFormFieldRaw(reqBody, contentType, "seconds"); present &&
+			len(raw) >= maxMultipartScalarBytes {
+			return "", ErrVideoSecondsTooLong
+		}
+	}
 
 	// Resolve the requested model HERE rather than reading CtxKeyResolvedModel. The gate runs before
 	// PrepareHTTPRequest, which is the only thing that stamps that key — so reading it meant
@@ -477,8 +509,12 @@ func videoUpstreamSeconds(reqBody []byte, contentType, rawQuery string, bodySeco
 				return querySeconds, vendorParsesSeconds(vs[0])
 			}
 		}
+		// No length check here: VideoCreateReserveFee refuses a `seconds` that reached the read cap before
+		// anything is priced, so a truncated value never arrives. One rule, one place — this function had
+		// its own copy of that check, and two places deciding the same thing is how this path produced
+		// five under-reserves.
 		raw, present := multipartFormFieldRaw(reqBody, contentType, "seconds")
-		if !present || len(raw) >= maxMultipartScalarBytes {
+		if !present {
 			return 0, false
 		}
 		return bodySeconds, vendorParsesSeconds(raw)

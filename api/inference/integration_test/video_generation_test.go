@@ -1148,8 +1148,12 @@ func TestVideoGenerationListIsNotGated(t *testing.T) {
 	//
 	// Observable as a NON-200, not as a 402: any refusal reaches validateBalanceAdequacy's re-check,
 	// which SIGSEGVs on this harness's nil contract binding (see the note below), so the failure mode is
-	// a recovered panic. The 402 assertion is kept as the statement of intent and is currently
-	// unreachable here.
+	// an UNRECOVERED SIGSEGV that aborts the whole test binary — this engine has no gin.Recovery, so the
+	// panic escapes to testing.tRunner and every test after this one stops running. (An earlier note here
+	// said "recovered into a 500"; measured, it is not recovered. The same commit body that introduced
+	// that wording had already described the abort correctly two commits earlier.) The 402 assertion is
+	// kept as the statement of intent and is currently unreachable; the load-bearing assertion is the
+	// != 200 below.
 	userAddr := crypto.PubkeyToAddress(env.privateKey.PublicKey)
 	env.ctrl.SeedContractAccountCache(userAddr.Hex(), &contract.Account{
 		User:          userAddr,

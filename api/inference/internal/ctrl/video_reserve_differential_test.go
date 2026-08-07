@@ -3,6 +3,7 @@ package ctrl
 import (
 	"bytes"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/0glabs/0g-serving-broker/inference/config"
 )
 
 // This file exists because four separate under-reserves in this package were ONE defect wearing four
@@ -90,9 +93,14 @@ const vendorFloorSeconds = 4
 // TestVideoReserveDifferentialAgainstUpstreamReaders sweeps every value shape that has ever produced a
 // divergence, plus the neighbourhood of each, on both transports and both sources.
 func TestVideoReserveDifferentialAgainstUpstreamReaders(t *testing.T) {
-	// Asserted on videoReserveSeconds directly: it is the function all four variants lived in, and its
-	// answer is in seconds, so the assertion needs no pricing round-trip. The units math on top of it is
-	// covered by the other tests in this package.
+	// Driven through the real entry point, not through videoReserveSeconds: the gate REFUSES some shapes
+	// before pricing them (ErrVideoSecondsTooLong), and a sweep that skipped that check would either miss
+	// the refusal path or report a violation for a request the gate never priced. One multiplier at 1.0
+	// and a 1-wei price, so the returned fee reads as a duration in seconds.
+	c := videoReserveCtrl(t, &config.BillingConfig{
+		Mode:                  config.BillingModePerVideoSecond,
+		ResolutionMultipliers: map[string]float64{"2K": 1.0},
+	})
 
 	// Value shapes: the four variants' triggers, their boundaries, and the ordinary cases around them.
 	values := []string{
@@ -102,11 +110,15 @@ func TestVideoReserveDifferentialAgainstUpstreamReaders(t *testing.T) {
 		" 1", "1 ", "\t2", "\r\n3", " 15 ",
 		"1099511627775", "1099511627776", "1099511627777", "2e12", "1e30", "1e308", "1e400",
 		"Inf", "-Inf", "NaN", strings.Repeat("9", 40),
-		// At and around the multipart read cap: the broker stops reading there, the upstream's FormValue
-		// does not, so the two see different numbers unless a truncated read counts as no read.
-		"5." + strings.Repeat("0", maxMultipartScalarBytes-2) + "e3",
-		strings.Repeat("9", maxMultipartScalarBytes-1),
-		"1" + strings.Repeat("0", maxMultipartScalarBytes),
+		// At and around the multipart read cap. These must stay IN RANGE once parsed — an earlier version
+		// used 1023 nines and `1` followed by 1024 zeros, which all overflow ParseFloat to +Inf, so the
+		// whole axis could never reach the dangerous (fallback, 2^40] window and was fake coverage.
+		"5." + strings.Repeat("0", maxMultipartScalarBytes-2) + "e3", // 5000, 1025 bytes
+		strings.Repeat("0", maxMultipartScalarBytes-2) + "5e3",       // 5000, leading zeros
+		strings.Repeat("0", maxMultipartScalarBytes-2) + "600",       // 600, truncates to a usable 60
+		strings.Repeat("0", maxMultipartScalarBytes+500) + "600",     // 600, far past the cap
+		strings.Repeat("0", maxMultipartScalarBytes-4) + "600",       // 600, one byte UNDER the cap
+		strings.Repeat("9", maxMultipartScalarBytes-1),               // +Inf, kept as the overflow case
 	}
 
 	type row struct{ transport, source, value string }
@@ -138,7 +150,7 @@ func TestVideoReserveDifferentialAgainstUpstreamReaders(t *testing.T) {
 		}
 	}
 
-	violations, skipped := 0, 0
+	violations, skipped, refused := 0, 0, 0
 	for _, r := range rows {
 		var body, contentType, rawQuery string
 		switch {
@@ -189,25 +201,34 @@ func TestVideoReserveDifferentialAgainstUpstreamReaders(t *testing.T) {
 		//   the upstream read nothing usable    -> the unknown-duration fallback (the vendor will choose)
 		//   the upstream read something the
 		//     broker cannot size (past its cap) -> the fallback again: it cannot price what it read
+		// What the reserve OWES for that reading, by its own documented rules:
+		//
+		//   the upstream read nothing usable    -> the unknown-duration fallback (the vendor will choose)
+		//   the upstream read something the
+		//     broker cannot size (past its cap) -> the fallback again: it cannot price what it read
 		//   otherwise                           -> that duration, floored at the vendor minimum
 		//
 		// Deliberately NOT capped at maxVideoOutputUnits: the VENDOR has no such cap (MiniMax clamps to
 		// its 15s ceiling, DashScope forwards the value unclamped), and an earlier version of this
 		// expectation collapsed to the vendor floor exactly where the four variants bite — which made the
 		// whole sweep vacuous. Verified against each variant: see the mutation list in the file header.
-		//   the upstream read a value the broker's own reader cannot
-		//     take in (longer than maxMultipartScalarBytes)      -> the fallback, same reasoning
+		// What the reserve OWES for that reading, by its own documented rules:
 		//
-		// That last cap encodes an ASSUMPTION this repo cannot verify: that no model here renders longer
-		// than videoReserveFallbackSeconds. MiniMax clamps to exactly that, so it holds there; DashScope
-		// forwards a duration unclamped and its ceiling is pinned nowhere, so a 5000s value it accepted
-		// would bill 5000 against a 15s reserve. That is the documented residual, not a finding this
-		// sweep can settle — but it is stated here rather than hidden by a blanket cap, because capping
-		// every oversized value at the fallback would also blind this sweep to variant 4, whose triggers
-		// are ordinary 20s and 600s durations.
+		//   the upstream read nothing usable    -> the unknown-duration fallback (the vendor will choose)
+		//   the upstream read a value the broker
+		//     cannot SIZE (past maxVideoOutputUnits) -> the fallback again, and the two sides agree there:
+		//     the translator's own maxDashScopeSeconds equals that bound, so beyond it the vendor omits
+		//     the duration and picks its default, which is exactly what the fallback stands for
+		//   otherwise                           -> that duration, floored at the vendor minimum
+		//
+		// There is deliberately NO escape hatch for a value the broker's READ could not take in. An
+		// earlier version had one — `len(upstreamRaw) < maxMultipartScalarBytes` — and it collapsed
+		// `owed` to the fallback for any long value, which is precisely how this sweep reported 0
+		// violations against a 335x under-reserve on a 1025-byte `seconds`. The reserve now REFUSES that
+		// request (ErrVideoSecondsTooLong), so the shape never reaches this comparison; if it ever prices
+		// one again, this sweep must fail rather than excuse it.
 		owed := int64(videoReserveFallbackSeconds)
-		brokerCanRead := len(upstreamRaw) < maxMultipartScalarBytes
-		if f, err := strconv.ParseFloat(upstreamRaw, 64); brokerCanRead && err == nil && f > 0 && !math.IsInf(f, 0) &&
+		if f, err := strconv.ParseFloat(upstreamRaw, 64); err == nil && f > 0 && !math.IsInf(f, 0) &&
 			f <= float64(maxVideoOutputUnits) {
 			if ceil := int64(math.Ceil(f)); ceil > vendorFloorSeconds {
 				owed = ceil
@@ -216,15 +237,30 @@ func TestVideoReserveDifferentialAgainstUpstreamReaders(t *testing.T) {
 			}
 		}
 
-		reserved := videoReserveSeconds([]byte(body), contentType, rawQuery)
+		fee, err := c.VideoCreateReserveFee(gateCtx(), []byte(body), contentType, rawQuery)
+		if stderrors.Is(err, ErrVideoSecondsTooLong) {
+			// The gate refused to price it, so no clip is created and nothing is owed. That is the only
+			// honest answer for a value the broker cannot read to its end — see ErrVideoSecondsTooLong.
+			refused++
+			continue
+		}
+		if err != nil {
+			t.Errorf("transport=%s source=%s value=%q: VideoCreateReserveFee: %v", r.transport, r.source, r.value, err)
+			continue
+		}
+		reserved, convErr := strconv.ParseInt(fee, 10, 64)
+		if convErr != nil {
+			t.Errorf("fee %q is not an integer: %v", fee, convErr)
+			continue
+		}
 		if reserved < owed {
 			violations++
 			t.Errorf("UNDER-RESERVE  transport=%s source=%s value=%q: reserve=%ds, upstream reads %q -> owed >=%ds",
 				r.transport, r.source, r.value, reserved, upstreamRaw, owed)
 		}
 	}
-	t.Logf("swept %d (transport x source x value) shapes against the upstream's own readers: %d violations, %d skipped (the upstream itself refuses the body, so no clip is billed)",
-		len(rows), violations, skipped)
+	t.Logf("swept %d (transport x source x value) shapes against the upstream's own readers: %d violations, %d skipped (the upstream itself refuses the body), %d refused by the gate before pricing",
+		len(rows), violations, skipped, refused)
 }
 
 // quoteIfNotJSONNumber makes a value embeddable in a JSON body: bare where it is a valid JSON token,

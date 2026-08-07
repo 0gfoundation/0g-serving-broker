@@ -2,6 +2,7 @@ package ctrl
 
 import (
 	"bytes"
+	stderrors "errors"
 	"math"
 	"mime/multipart"
 	"net/http/httptest"
@@ -279,7 +280,8 @@ func TestVideoReserveClampsToTheVendorFloor(t *testing.T) {
 	// Asserted against the VENDOR's minimum, not against videoReserveFloorSeconds — comparing the
 	// constant to itself passes for any value, so an earlier version of this test survived changing the
 	// floor to 1, which restores the under-reserve it is named for. minMiniMaxDuration lives in the
-	// videotranslator module and is not importable here, so it is restated with its source.
+	// videotranslator/internal, which is not importable from here — one module, but `internal/` is only
+	// visible under videotranslator/ — so it is restated with its source.
 	const minMiniMaxDuration = 4 // videotranslator/internal/translate/minimax.go
 	if videoReserveFloorSeconds != minMiniMaxDuration {
 		t.Fatalf("videoReserveFloorSeconds = %d, but the highest vendor floor this broker fronts is %d",
@@ -628,29 +630,39 @@ func TestVideoReserveOversizedAndTruncatedSecondsFallBack(t *testing.T) {
 		}
 	})
 
-	t.Run("a value that filled the read cap is not a read", func(t *testing.T) {
-		// The broker stops at maxMultipartScalarBytes; the vendor's r.FormValue has no cap. This value
-		// reads as 5 here and 5000 there.
-		padded := "5." + strings.Repeat("0", maxMultipartScalarBytes-2) + "e3"
-		mp, ct := multipartSeconds(t, padded)
-		if got := videoReserve(t, c, mp, ct, ""); got < videoReserveFallbackSeconds {
-			t.Errorf("reserve = %d for a %d-byte value, want >= %d — the broker never saw its end",
-				got, len(padded), videoReserveFallbackSeconds)
+	t.Run("a value that filled the read cap is REFUSED, not priced", func(t *testing.T) {
+		// The broker stops at maxMultipartScalarBytes; the upstream's r.FormValue has no cap. Falling
+		// back to the unknown-duration sentinel was not enough: the sentinel stands for "the vendor will
+		// choose a duration we cannot see", while this is "the vendor read more digits than we did",
+		// which has no ceiling. `1022 zeros + "5e3"` reserved 15s against a 5000s render, and
+		// `1022 zeros + "600"` was worse — the truncated PREFIX parsed to 60 and the reserve took it.
+		for _, padded := range []string{
+			"5." + strings.Repeat("0", maxMultipartScalarBytes-2) + "e3",
+			strings.Repeat("0", maxMultipartScalarBytes-2) + "5e3",
+			strings.Repeat("0", maxMultipartScalarBytes-2) + "600",
+			strings.Repeat("0", maxMultipartScalarBytes+500) + "600",
+		} {
+			mp, ct := multipartSeconds(t, padded)
+			_, err := c.VideoCreateReserveFee(gateCtx(), []byte(mp), ct, "")
+			if !stderrors.Is(err, ErrVideoSecondsTooLong) {
+				t.Errorf("%d-byte seconds: err = %v, want ErrVideoSecondsTooLong — the broker cannot price a value it did not read to the end",
+					len(padded), err)
+			}
 		}
-		// One byte under the cap IS fully read — but 1023 nines overflow ParseFloat to +Inf, so this
-		// still resolves to the fallback, by the size check rather than by the truncation guard. Both
-		// routes must land >= the fallback; the assertion does not care which, and the reason is spelled
-		// out here because an earlier version of this comment claimed the value was "trusted", which it
-		// is not.
+	})
+
+	t.Run("a value the broker reads in full is still priced", func(t *testing.T) {
+		// One byte under the cap is fully read. 1023 nines overflow ParseFloat to +Inf, so this resolves
+		// through the size check to the fallback rather than being trusted — both routes are >= the
+		// fallback, and the point here is only that it is not REFUSED.
 		short := strings.Repeat("9", maxMultipartScalarBytes-1)
-		mp2, ct2 := multipartSeconds(t, short)
-		if got := videoReserve(t, c, mp2, ct2, ""); got < videoReserveFallbackSeconds {
+		mp, ct := multipartSeconds(t, short)
+		if got := videoReserve(t, c, mp, ct, ""); got < videoReserveFallbackSeconds {
 			t.Errorf("reserve = %d for a %d-byte value, want >= %d", got, len(short), videoReserveFallbackSeconds)
 		}
-		// A short value that IS fully read and parses is trusted, which is the property the line above
-		// was reaching for.
-		mp3, ct3 := multipartSeconds(t, "11")
-		if got := videoReserve(t, c, mp3, ct3, ""); got != 11 {
+		// And a short parseable value is taken at its word.
+		mp2, ct2 := multipartSeconds(t, "11")
+		if got := videoReserve(t, c, mp2, ct2, ""); got != 11 {
 			t.Errorf("reserve = %d for a fully-read parseable value, want 11", got)
 		}
 	})
