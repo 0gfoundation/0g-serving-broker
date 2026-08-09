@@ -33,6 +33,17 @@ jobs:
       working-directory: api
       run: go test -cover ./...
 
+  gate-script-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    # Unit tests for the LLM benchmark gate (.github/scripts/aiperf_gate.py).
+    # Pure stdlib — the runner's system python3 is sufficient.
+    - name: Gate script tests
+      run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
   integration-test:
     runs-on: ubuntu-latest
     steps:

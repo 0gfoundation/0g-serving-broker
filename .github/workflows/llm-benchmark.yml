@@ -1,0 +1,249 @@
+name: LLM Benchmark
+
+# Benchmarks a broker-exposed OpenAI-compatible LLM endpoint with aiperf
+# (https://github.com/ai-dynamo/aiperf) and reports a READY / NOT READY verdict.
+#
+# Triggers:
+#   • Add the `run-llm-benchmark` label to a PR.
+#   • Run manually from the Actions tab (workflow_dispatch) with optional inputs.
+#
+# Configuration precedence per parameter: dispatch input → repo variable → default.
+# The auth token comes from secrets.LLM_BENCHMARK_API_KEY (optional).
+#
+# Report-only: a NOT READY verdict never fails the job or blocks the PR. The
+# verdict is written to the run's Step Summary and (for PR runs) an upserted
+# sticky PR comment.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      endpoint_url:
+        description: "Broker OpenAI-compatible base URL (overrides vars.LLM_BENCHMARK_ENDPOINT_URL)"
+        required: false
+        type: string
+      model:
+        description: "Model name (overrides vars.LLM_BENCHMARK_MODEL)"
+        required: false
+        type: string
+      tokenizer:
+        description: "HuggingFace tokenizer id for accurate token metrics (optional)"
+        required: false
+        type: string
+      concurrency:
+        description: "Concurrent requests (default 5)"
+        required: false
+        type: string
+      request_count:
+        description: "Total requests (default 20)"
+        required: false
+        type: string
+      streaming:
+        description: "Stream responses: true/false; empty uses vars.LLM_BENCHMARK_STREAMING or true. (A boolean input would always render true/false and shadow the repo variable.)"
+        required: false
+        type: string
+      max_ttft_ms:
+        description: "Threshold: p99 time-to-first-token in ms (default 2000)"
+        required: false
+        type: string
+      max_latency_ms:
+        description: "Threshold: p99 request latency in ms (default 10000)"
+        required: false
+        type: string
+      min_output_tps:
+        description: "Threshold: min avg output token throughput, tok/s (default 10)"
+        required: false
+        type: string
+      max_error_rate:
+        description: "Threshold: max error rate 0-1 (default 0)"
+        required: false
+        type: string
+      ref:
+        description: "Git ref to check out (dispatch only, default main)"
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# One run per PR (or per dispatch) at a time: prevents two overlapping runs
+# from racing the sticky-comment upsert into duplicate comments, and a stale
+# run from overwriting a newer verdict.
+concurrency:
+  group: llm-benchmark-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    # Label-triggered runs only fire for the intended label; dispatch always runs.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'run-llm-benchmark'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && (inputs.ref || 'main')
+                || github.event.pull_request.head.sha }}
+
+      - name: Resolve config
+        id: cfg
+        env:
+          IN_ENDPOINT: ${{ inputs.endpoint_url }}
+          IN_MODEL: ${{ inputs.model }}
+          IN_TOKENIZER: ${{ inputs.tokenizer }}
+          IN_CONCURRENCY: ${{ inputs.concurrency }}
+          IN_REQUEST_COUNT: ${{ inputs.request_count }}
+          IN_STREAMING: ${{ inputs.streaming }}
+          IN_MAX_TTFT_MS: ${{ inputs.max_ttft_ms }}
+          IN_MAX_LATENCY_MS: ${{ inputs.max_latency_ms }}
+          IN_MIN_OUTPUT_TPS: ${{ inputs.min_output_tps }}
+          IN_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
+          VAR_ENDPOINT: ${{ vars.LLM_BENCHMARK_ENDPOINT_URL }}
+          VAR_MODEL: ${{ vars.LLM_BENCHMARK_MODEL }}
+          VAR_TOKENIZER: ${{ vars.LLM_BENCHMARK_TOKENIZER }}
+          VAR_CONCURRENCY: ${{ vars.LLM_BENCHMARK_CONCURRENCY }}
+          VAR_REQUEST_COUNT: ${{ vars.LLM_BENCHMARK_REQUEST_COUNT }}
+          VAR_STREAMING: ${{ vars.LLM_BENCHMARK_STREAMING }}
+          VAR_MAX_TTFT_MS: ${{ vars.LLM_BENCHMARK_MAX_TTFT_MS }}
+          VAR_MAX_LATENCY_MS: ${{ vars.LLM_BENCHMARK_MAX_LATENCY_MS }}
+          VAR_MIN_OUTPUT_TPS: ${{ vars.LLM_BENCHMARK_MIN_OUTPUT_TPS }}
+          VAR_MAX_ERROR_RATE: ${{ vars.LLM_BENCHMARK_MAX_ERROR_RATE }}
+        run: |
+          set -euo pipefail
+          endpoint_url="${IN_ENDPOINT:-${VAR_ENDPOINT:-}}"
+          model="${IN_MODEL:-${VAR_MODEL:-}}"
+          tokenizer="${IN_TOKENIZER:-${VAR_TOKENIZER:-}}"
+          concurrency="${IN_CONCURRENCY:-${VAR_CONCURRENCY:-5}}"
+          request_count="${IN_REQUEST_COUNT:-${VAR_REQUEST_COUNT:-20}}"
+          # Normalize the streaming flag: the repo variable is free-form text,
+          # so accept common truthy/falsy spellings instead of silently
+          # disabling streaming on e.g. "True" or "1".
+          streaming_error=""
+          streaming_raw="${IN_STREAMING:-${VAR_STREAMING:-true}}"
+          case "$(echo "$streaming_raw" | tr '[:upper:]' '[:lower:]')" in
+            true|1|yes|on)   streaming="true" ;;
+            false|0|no|off)  streaming="false" ;;
+            *)               streaming="true"
+                             streaming_error="streaming has unrecognized value '$streaming_raw' — expected true or false." ;;
+          esac
+          max_ttft_ms="${IN_MAX_TTFT_MS:-${VAR_MAX_TTFT_MS:-2000}}"
+          max_latency_ms="${IN_MAX_LATENCY_MS:-${VAR_MAX_LATENCY_MS:-10000}}"
+          min_output_tps="${IN_MIN_OUTPUT_TPS:-${VAR_MIN_OUTPUT_TPS:-10}}"
+          max_error_rate="${IN_MAX_ERROR_RATE:-${VAR_MAX_ERROR_RATE:-0}}"
+
+          config_error=""
+          if [ -z "$endpoint_url" ] || [ -z "$model" ]; then
+            config_error="Benchmark not configured: set endpoint_url and model as workflow inputs, or repo variables vars.LLM_BENCHMARK_ENDPOINT_URL / vars.LLM_BENCHMARK_MODEL."
+          elif [ -n "$streaming_error" ]; then
+            config_error="$streaming_error"
+          fi
+
+          {
+            echo "endpoint_url=$endpoint_url"
+            echo "model=$model"
+            echo "tokenizer=$tokenizer"
+            echo "concurrency=$concurrency"
+            echo "request_count=$request_count"
+            echo "streaming=$streaming"
+            echo "max_ttft_ms=$max_ttft_ms"
+            echo "max_latency_ms=$max_latency_ms"
+            echo "min_output_tps=$min_output_tps"
+            echo "max_error_rate=$max_error_rate"
+            echo "config_error=$config_error"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.cfg.outputs.config_error == ''
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install aiperf
+        if: steps.cfg.outputs.config_error == ''
+        # Pinned: aiperf_gate.py and the test fixtures are written against the
+        # aiperf 0.10.0 export schema (profile_export_aiperf.json, flat metric
+        # keys). Bump this together with the gate script and fixtures.
+        run: pip install aiperf==0.10.0
+
+      - name: Run aiperf
+        id: bench
+        if: steps.cfg.outputs.config_error == ''
+        continue-on-error: true
+        env:
+          ENDPOINT_URL: ${{ steps.cfg.outputs.endpoint_url }}
+          MODEL: ${{ steps.cfg.outputs.model }}
+          TOKENIZER: ${{ steps.cfg.outputs.tokenizer }}
+          CONCURRENCY: ${{ steps.cfg.outputs.concurrency }}
+          REQUEST_COUNT: ${{ steps.cfg.outputs.request_count }}
+          STREAMING: ${{ steps.cfg.outputs.streaming }}
+          API_KEY: ${{ secrets.LLM_BENCHMARK_API_KEY }}
+        run: |
+          set -euo pipefail
+          args=(profile
+            --url "$ENDPOINT_URL"
+            --model "$MODEL"
+            --endpoint-type chat
+            --concurrency "$CONCURRENCY"
+            --request-count "$REQUEST_COUNT"
+            --output-artifact-dir ./aiperf-out)
+          if [ "$STREAMING" = "true" ]; then args+=(--streaming); fi
+          if [ -n "$TOKENIZER" ]; then args+=(--tokenizer "$TOKENIZER"); fi
+          if [ -n "$API_KEY" ]; then args+=(-H "Authorization: Bearer $API_KEY"); fi
+          aiperf "${args[@]}"
+
+      - name: Evaluate & report
+        id: gate
+        if: always()
+        env:
+          AIPERF_ARTIFACT_DIR: ./aiperf-out
+          VERDICT_FILE: verdict.md
+          GATE_CONFIG_ERROR: ${{ steps.cfg.outputs.config_error }}
+          ENDPOINT_URL: ${{ steps.cfg.outputs.endpoint_url }}
+          MODEL: ${{ steps.cfg.outputs.model }}
+          CONCURRENCY: ${{ steps.cfg.outputs.concurrency }}
+          REQUEST_COUNT: ${{ steps.cfg.outputs.request_count }}
+          STREAMING: ${{ steps.cfg.outputs.streaming }}
+          MAX_TTFT_MS: ${{ steps.cfg.outputs.max_ttft_ms }}
+          MAX_LATENCY_MS: ${{ steps.cfg.outputs.max_latency_ms }}
+          MIN_OUTPUT_TPS: ${{ steps.cfg.outputs.min_output_tps }}
+          MAX_ERROR_RATE: ${{ steps.cfg.outputs.max_error_rate }}
+        run: python3 .github/scripts/aiperf_gate.py
+
+      - name: Upsert PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- llm-benchmark-verdict -->';
+            let body;
+            try {
+              body = fs.readFileSync('verdict.md', 'utf8');
+            } catch (e) {
+              body = `${marker}\n## LLM Service Benchmark — ❌ NOT READY\n\n> ⚠️ The benchmark job did not produce a verdict.`;
+            }
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            // Fork PRs get a read-only GITHUB_TOKEN regardless of the
+            // permissions block; the report is still in the Step Summary, so a
+            // failed upsert must not fail the (report-only) job.
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number,
+              });
+              const existing = comments.find(c => c.body && c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              }
+            } catch (e) {
+              core.warning(`Could not post PR comment (read-only token on fork PRs?): ${e.message}. The verdict is available in the Step Summary.`);
+            }
