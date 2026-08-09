@@ -392,21 +392,14 @@ if lines:
         text_format = True
 
 if messages_format:
-    for line in lines:
+    # Preserve full messages array; trainer applies the model's chat template
+    data = {"messages": []}
+    for line_num, line in enumerate(lines, start=1):
         item = json.loads(line)
-        messages = item.get("messages", [])
-        instruction = ""
-        output = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "user":
-                instruction = content
-            elif role == "assistant":
-                output = content
-        data["instruction"].append(instruction)
-        data["input"].append("")
-        data["output"].append(output)
+        messages = item.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError(f"line {line_num}: messages must be a list")
+        data["messages"].append(messages)
 elif text_format:
     data = {"text": []}
     for line in lines:
