@@ -457,3 +457,34 @@ func TestFromGetTaskResponse(t *testing.T) {
 		})
 	}
 }
+
+// TestToDashScopeCreateRequest_AuthoredResolution is the DashScope half of
+// TestToMiniMaxCreateRequest_AuthoredResolution — see there for why the caller's
+// authored tier must win.
+func TestToDashScopeCreateRequest_AuthoredResolution(t *testing.T) {
+	t.Run("overrides the tier derived from pixel size, ratio survives", func(t *testing.T) {
+		got := ToDashScopeCreateRequest(CreateVideoRequest{
+			Prompt: "a cat", Seconds: "5", Size: "1792x1024", Resolution: "720P",
+		})
+		if got.Parameters.Resolution != "720P" {
+			t.Errorf("Resolution = %q, want 720P", got.Parameters.Resolution)
+		}
+		if got.Parameters.Ratio != "16:9" {
+			t.Errorf("Ratio = %q, want 16:9 (from the pixel size)", got.Parameters.Ratio)
+		}
+	})
+
+	t.Run("uppercased and trimmed", func(t *testing.T) {
+		got := ToDashScopeCreateRequest(CreateVideoRequest{Prompt: "a cat", Resolution: " 1080p "})
+		if got.Parameters.Resolution != "1080P" {
+			t.Errorf("Resolution = %q, want 1080P", got.Parameters.Resolution)
+		}
+	})
+
+	t.Run("absent leaves the existing behaviour unchanged", func(t *testing.T) {
+		got := ToDashScopeCreateRequest(CreateVideoRequest{Prompt: "a cat", Size: "1792x1024"})
+		if got.Parameters.Resolution != "1080P" {
+			t.Errorf("Resolution = %q, want 1080P (derived from size)", got.Parameters.Resolution)
+		}
+	})
+}

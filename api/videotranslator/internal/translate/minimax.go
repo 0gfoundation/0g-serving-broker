@@ -207,16 +207,25 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 		}
 	}
 
+	// A pixel-dimension "size" only informs the aspect ratio; a resolution token
+	// yields "" here (parseSize fails on it), so this is safe to compute either way.
 	resolution := defaultResolution
-	ratio := ""
-	if tok := normalizeMiniMaxResolution(req.Size); tok != "" {
+	ratio := sizeToMiniMaxRatio(req.Size)
+	switch {
+	case req.Resolution != "":
+		// An explicitly authored tier wins over everything: the caller has already
+		// priced this tier and must not be surprised by another one. Canonicalised
+		// when it is a token this package knows, forwarded verbatim otherwise so an
+		// unknown value is rejected by the vendor rather than silently reinterpreted.
+		// See CreateVideoRequest.Resolution.
+		if tok := normalizeMiniMaxResolution(req.Resolution); tok != "" {
+			resolution = tok
+		} else {
+			resolution = strings.TrimSpace(req.Resolution)
+		}
+	case normalizeMiniMaxResolution(req.Size) != "":
 		// The client addressed a resolution tier directly via "size".
-		resolution = tok
-	} else {
-		// A pixel-dimension "size" only informs the aspect ratio; resolution
-		// stays the deployment default (H3 accepts only "2K", so deriving a
-		// tier from pixels would produce a value H3 rejects).
-		ratio = sizeToMiniMaxRatio(req.Size)
+		resolution = normalizeMiniMaxResolution(req.Size)
 	}
 
 	content := []minimax.ContentItem{{Type: "text", Text: req.Prompt}}

@@ -577,3 +577,65 @@ func TestGetVideo_DashScope4xxPropagatesVendorError(t *testing.T) {
 		t.Errorf("error.code = %v, want Throttling", errObj["code"])
 	}
 }
+
+// TestCreateVideo_ForwardsAuthoredResolution proves the broker-written
+// "resolution" field actually reaches the vendor on both transports. It is the
+// field that makes the tier the vendor renders equal the tier the broker priced
+// (0gfoundation/0g-serving-broker#628), so a wiring gap here silently restores
+// the mis-billing it exists to close.
+func TestCreateVideo_ForwardsAuthoredResolution(t *testing.T) {
+	newHandler := func(t *testing.T, got *dashscope.CreateRequest) *gin.Engine {
+		t.Helper()
+		mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(got); err != nil {
+				t.Errorf("decode dashscope request: %v", err)
+			}
+			json.NewEncoder(w).Encode(dashscope.CreateResponse{
+				Output: dashscope.CreateOutput{TaskID: "task-abc", TaskStatus: dashscope.TaskStatusPending},
+			})
+		}))
+		t.Cleanup(mockDashScope.Close)
+		h := NewVideoHandler(dashscope.NewClient(mockDashScope.URL, mockDashScope.Client()), newTestLogger(t))
+		gin.SetMode(gin.TestMode)
+		engine := gin.New()
+		engine.POST("/videos", h.CreateVideo)
+		return engine
+	}
+
+	t.Run("multipart", func(t *testing.T) {
+		var got dashscope.CreateRequest
+		engine := newHandler(t, &got)
+		// size names the 1080P tier by pixel count; the authored resolution must
+		// still win.
+		body, contentType := newMultipartBody(t, map[string]string{
+			"model": "happyhorse", "prompt": "a cat", "seconds": "5",
+			"size": "1792x1024", "resolution": "720P",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/videos", body)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if got.Parameters.Resolution != "720P" {
+			t.Errorf("dashscope resolution = %q, want 720P", got.Parameters.Resolution)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		var got dashscope.CreateRequest
+		engine := newHandler(t, &got)
+		req := httptest.NewRequest(http.MethodPost, "/videos",
+			strings.NewReader(`{"model":"happyhorse","prompt":"a cat","seconds":5,"size":"1792x1024","resolution":"720P"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if got.Parameters.Resolution != "720P" {
+			t.Errorf("dashscope resolution = %q, want 720P", got.Parameters.Resolution)
+		}
+	})
+}

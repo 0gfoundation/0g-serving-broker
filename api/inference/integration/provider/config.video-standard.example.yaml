@@ -78,6 +78,30 @@ service:
         resolutionMultipliers:
           "720p": 1.0
           "1080p": 1.5
+        # The billing INPUTS the broker writes into the forwarded create request,
+        # so the fee it holds against the caller's balance before forwarding is
+        # the fee for what the vendor actually renders (issue #628). Without
+        # these the broker can only predict how the vendor will read the client's
+        # body, and every divergence under-reserves.
+        #
+        # defaultSeconds: written when the client names no duration (default 4 —
+        #   OpenAI's own Video API default).
+        # minSeconds: MUST be the vendor's own floor. A vendor that clamps a
+        #   shorter request UP renders more than was reserved. Defaults to
+        #   defaultSeconds.
+        # maxSeconds: the vendor's ceiling; omit for none (clamping down can only
+        #   over-reserve).
+        # defaultResolution: the resolution token written whenever the client's
+        #   "size" is not itself a token. Pixel dimensions ("1280x720") are an
+        #   ASPECT RATIO to every supported vendor, never a tier — so without this
+        #   the rendered tier is the vendor's own default and is unknowable here.
+        #   It must be a token this vendor accepts: if it is not, the vendor
+        #   rejects the create with a 4xx (loud, unbilled) rather than silently
+        #   rendering a tier that was never priced.
+        defaultSeconds: 5
+        minSeconds: 3
+        maxSeconds: 10
+        defaultResolution: "720P"
       modelInfo:
         name: "HappyHorse 1.1"
         description: "Alibaba DashScope HappyHorse video-generation model, v1.1"
@@ -99,6 +123,11 @@ service:
         resolutionMultipliers:
           "720p": 1.0
           "1080p": 1.5
+        # See the 1.1 entry above for what these four fields do.
+        defaultSeconds: 5
+        minSeconds: 3
+        maxSeconds: 10
+        defaultResolution: "720P"
       modelInfo:
         name: "HappyHorse 1.0"
         description: "Alibaba DashScope HappyHorse video-generation model, v1.0"

@@ -860,9 +860,39 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
 	case "video-generation":
-		// Video billing is deferred to response time — the provider returns
-		// actual seconds/size in the JSON response, so we don't guess here.
-		expectedInputFee = "0"
+		// The final fee still comes from the provider's reported output at
+		// settlement time (it is async — nothing is rendered yet). What is NOT
+		// deferred is the reserve: the broker WRITES the duration and resolution
+		// into the forwarded request, so the fee it holds against the balance here
+		// is the fee for what the vendor will actually render, not a prediction of
+		// how the vendor would have read the client's body (issue #628).
+		//
+		// The authoring range and the price are both per-model, so the model must
+		// be resolved first — PrepareHTTPRequest does this too (idempotently), but
+		// it runs after the gate.
+		if p.ctrl.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+			if err := p.ctrl.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddress); err != nil {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, err, "resolve model for video billing")
+				return
+			}
+		}
+		authoredBody, reserveFee, err := p.ctrl.AuthorVideoRequest(ctx, reqBody)
+		if err != nil {
+			// Only the refusal is client-caused. A pricing/config failure on the
+			// same call is a broker fault and must stay visible to the broker alert
+			// (see the RPC-fault convention in request.go).
+			if ctrl.IsClientVideoRequestError(err) {
+				ctx.Set("ignoreError", true)
+			}
+			p.handleBrokerError(ctx, err, "author video request")
+			return
+		}
+		reqBody = authoredBody
+		expectedInputFee = reserveFee
+		// Stash for deferVideoBillingToPoll, which stamps it onto the requests row
+		// once the poll job exists so concurrent creates from one wallet see it.
+		ctx.Set(ctrl.CtxKeyVideoReserveFee, reserveFee)
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

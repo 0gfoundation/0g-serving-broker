@@ -373,3 +373,54 @@ func TestDurationIsNeverClampedUpwards(t *testing.T) {
 		}
 	}
 }
+
+// TestToMiniMaxCreateRequest_AuthoredResolution covers the field the broker
+// writes to make the rendered tier knowable before the request is forwarded
+// (0gfoundation/0g-serving-broker#628). Whatever it names must win over both the
+// deployment default and anything derivable from "size" — otherwise the broker
+// reserves one tier's fee and the vendor renders (and bills) another's.
+func TestToMiniMaxCreateRequest_AuthoredResolution(t *testing.T) {
+	t.Run("overrides the deployment default, ratio still comes from size", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "a cat", Seconds: "5", Size: "720x1280", Resolution: "1080P",
+		}, "2K")
+		if got.Resolution != "1080P" {
+			t.Errorf("Resolution = %q, want 1080P", got.Resolution)
+		}
+		if got.Ratio != "9:16" {
+			t.Errorf("Ratio = %q, want 9:16 (from the pixel size)", got.Ratio)
+		}
+	})
+
+	t.Run("overrides a resolution token in size", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{
+			Prompt: "a cat", Seconds: "5", Size: "768P", Resolution: "2K",
+		}, "4K")
+		if got.Resolution != "2K" {
+			t.Errorf("Resolution = %q, want 2K", got.Resolution)
+		}
+	})
+
+	t.Run("canonicalised when it is a known token", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "a cat", Resolution: " 1080p "}, "2K")
+		if got.Resolution != "1080P" {
+			t.Errorf("Resolution = %q, want 1080P", got.Resolution)
+		}
+	})
+
+	t.Run("an unknown token is forwarded verbatim so the vendor rejects it", func(t *testing.T) {
+		// Silently substituting the default here would render a tier the broker
+		// did not price; a vendor 4xx is loud and costs nothing.
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "a cat", Resolution: "8K"}, "2K")
+		if got.Resolution != "8K" {
+			t.Errorf("Resolution = %q, want 8K forwarded verbatim", got.Resolution)
+		}
+	})
+
+	t.Run("absent leaves the existing behaviour unchanged", func(t *testing.T) {
+		got := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "a cat", Size: "768P"}, "2K")
+		if got.Resolution != "768P" {
+			t.Errorf("Resolution = %q, want 768P (from size)", got.Resolution)
+		}
+	})
+}

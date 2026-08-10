@@ -716,7 +716,48 @@ func (c *Ctrl) deferVideoBillingToPoll(ctx *gin.Context, providerJobID, chatKey,
 		}
 		return errors.Wrap(err, "create video poll job")
 	}
+	c.reserveInFlightVideoFee(ctx, reqModel)
 	return nil
+}
+
+// reserveInFlightVideoFee stamps the pre-flight reserve (computed and written
+// into the forwarded request by AuthorVideoRequest) onto this request's row, so
+// the job counts against the wallet's balance for as long as it is in flight.
+//
+// Without it the row carries fee="0" until the poller settles it minutes later,
+// and CalculateUnsettledFee sums exactly that column — so N concurrent creates
+// from one wallet all read the same balance and all pass. The gate then only
+// guarantees "this wallet can afford ONE clip", not what it has in flight.
+//
+// ONE write site, deliberately, and it is here: after CreateVideoPollJob
+// succeeded. That makes the reserve's lifetime identical to the poll job's, which
+// is the invariant that keeps it releasable —
+//
+//	a non-zero reserve exists on a requests row IFF an unresolved poll job exists
+//
+// — and it is why no other path that skips billing needs a release call: a path
+// that never created a poll job never wrote a reserve. The four ways a job leaves
+// the unresolved state all clear it (CompleteVideoPollJobWithBilling overwrites it
+// with the real fee; FailVideoPollJob and TimeOutVideoPollJob reset it to "0";
+// a whitelisted job has no requests row to hold one in the first place).
+//
+// Best-effort: a failure here only loses the in-flight reserve for this one job —
+// the pre-flight gate already ran and the poller still bills the real fee — so it
+// must not fail a request whose upstream work is already underway.
+func (c *Ctrl) reserveInFlightVideoFee(ctx *gin.Context, reqModel model.Request) {
+	// A whitelisted request has no Request row at all (see proxy.go), so there is
+	// nothing to reserve against and nothing that could be stranded.
+	if reqModel.IsWhitelisted {
+		return
+	}
+	fee := ctx.GetString(CtxKeyVideoReserveFee)
+	if fee == "" || fee == "0" {
+		return
+	}
+	if err := c.db.ReserveRequestFee(reqModel.RequestHash, fee); err != nil {
+		c.logger.Errorf("video generation: failed to record the in-flight reserve %s for request %s; concurrent creates from this wallet will not see it: %v",
+			fee, reqModel.RequestHash, err)
+	}
 }
 
 // escapeVendorJobID renders an upstream-supplied job id safe to splice into the

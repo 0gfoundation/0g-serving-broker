@@ -35,6 +35,16 @@ type CreateVideoRequest struct {
 	Seconds string
 	Size    string
 	Seed    string
+	// Resolution is the tier the CALLER (the broker) has already decided on and
+	// written into the request. When set it overrides everything this package
+	// would otherwise derive: a pixel-dimension Size only informs the aspect
+	// ratio, and each vendor's own default tier differs, so the rendered tier was
+	// previously unknowable to the broker at balance-check time — which is how a
+	// 1 0G wallet came to be billed 6.698 0G (0gfoundation/0g-serving-broker#628).
+	// Passed to the vendor verbatim (canonicalised where the vendor's token set is
+	// known), so a value the vendor does not accept is a loud 4xx on the create,
+	// never a silently different tier than the one that was priced.
+	Resolution string
 	// InputReferenceImageURL / InputReferenceFileID are the OpenAI Video API's
 	// input_reference (image-to-video / first frame): "provide exactly one of
 	// image_url or file_id". image_url is a public URL or a data: URI; file_id
@@ -271,6 +281,12 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 		duration = int64(math.Ceil(s))
 	}
 	resolution, ratio := sizeToDashScopeParams(req.Size)
+	// An explicitly authored tier wins over anything derived from Size — see
+	// CreateVideoRequest.Resolution. Ratio is untouched: it comes from Size, which
+	// stays the client's own aspect-ratio hint.
+	if tok := strings.ToUpper(strings.TrimSpace(req.Resolution)); tok != "" {
+		resolution = tok
+	}
 	return dashscope.CreateRequest{
 		Model: req.Model,
 		Input: dashscope.CreateInput{Prompt: req.Prompt},

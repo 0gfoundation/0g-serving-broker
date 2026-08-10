@@ -194,6 +194,64 @@ type BillingConfig struct {
 
 	// Table is the (resolution, duration) → units lookup for per_unit_table.
 	Table []BillingUnitTier `yaml:"table"`
+
+	// The four fields below are not prices — they are the billing INPUTS the
+	// broker writes into the forwarded video create request, so the duration and
+	// resolution it prices are the ones the vendor renders BY CONSTRUCTION rather
+	// than by two parsers agreeing (see #628 and docs/design/video-request-authoring.md).
+	//
+	// DefaultSeconds is the duration written when the client named none. Defaults
+	// to DefaultVideoSeconds at config load.
+	DefaultSeconds int64 `yaml:"defaultSeconds"`
+	// MinSeconds / MaxSeconds bound the duration written upstream. MinSeconds
+	// must be the VENDOR's floor: a vendor that clamps a shorter request up to its
+	// own minimum would otherwise render (and bill) more than the broker reserved.
+	// MinSeconds defaults to DefaultSeconds; MaxSeconds 0 means "no ceiling"
+	// (the vendor clamps down, which can only over-reserve).
+	MinSeconds int64 `yaml:"minSeconds"`
+	MaxSeconds int64 `yaml:"maxSeconds"`
+	// DefaultResolution is the resolution token written upstream when the client's
+	// "size" is not itself a token (absent, or pixel dimensions — which every
+	// supported vendor reads as an aspect ratio, not a tier). It must be a token
+	// the vendor accepts; if it is not, the vendor rejects the create with a 4xx —
+	// loud and unbilled — rather than silently rendering a tier the broker did not
+	// price. Empty disables resolution authoring: the broker then prices whatever
+	// "size" says and the rendered tier is once again the vendor's own default,
+	// which is the gap this field closes.
+	DefaultResolution string `yaml:"defaultResolution"`
+}
+
+// DefaultVideoSeconds is the clip duration the broker writes into a create
+// request that names none. It is OpenAI's own Video API default (its seconds
+// enum is {4,8,12}) and MiniMax H3's floor, so it is both the most common call
+// shape and the cheapest one no vendor clamps upward.
+const DefaultVideoSeconds = 4
+
+// NormalizeVideoSeconds clamps a duration into the range this model's forwarded
+// request may carry. requested <= 0 means the client named none, so the
+// configured default is written. Nil-safe: a single-model video service has no
+// per-model billing block and gets the package defaults.
+func (b *BillingConfig) NormalizeVideoSeconds(requested int64) int64 {
+	var d, min, max int64
+	if b != nil {
+		d, min, max = b.DefaultSeconds, b.MinSeconds, b.MaxSeconds
+	}
+	if d <= 0 {
+		d = DefaultVideoSeconds
+	}
+	if min <= 0 {
+		min = d
+	}
+	if requested <= 0 {
+		return d
+	}
+	if requested < min {
+		return min
+	}
+	if max > 0 && requested > max {
+		return max
+	}
+	return requested
 }
 
 // BillingObservables are the resolved per-request inputs to the unit math.
@@ -412,6 +470,44 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 		}
 	} else if len(b.Table) > 0 {
 		return fmt.Errorf("invalid config: %s.table is only valid for mode %q", prefix, BillingModePerUnitTable)
+	}
+	if b.Mode == BillingModePerVideoSecond || b.Mode == BillingModePerUnitTable {
+		if err := validateVideoRequestAuthoring(prefix, b); err != nil {
+			return err
+		}
+	} else if b.DefaultSeconds != 0 || b.MinSeconds != 0 || b.MaxSeconds != 0 || b.DefaultResolution != "" {
+		return fmt.Errorf("invalid config: %s.defaultSeconds/minSeconds/maxSeconds/defaultResolution are only valid for the video billing modes", prefix)
+	}
+	return nil
+}
+
+// validateVideoRequestAuthoring checks (and fills in the defaults for) the
+// billing inputs the broker writes into a forwarded video create request. It
+// mutates b: the resolved DefaultSeconds/MinSeconds are what the request path
+// reads, so defaulting once at load keeps one source of truth.
+func validateVideoRequestAuthoring(prefix string, b *BillingConfig) error {
+	if b.DefaultSeconds < 0 || b.MinSeconds < 0 || b.MaxSeconds < 0 {
+		return fmt.Errorf("invalid config: %s.defaultSeconds/minSeconds/maxSeconds must not be negative", prefix)
+	}
+	if b.DefaultSeconds == 0 {
+		b.DefaultSeconds = DefaultVideoSeconds
+	}
+	if b.MinSeconds == 0 {
+		b.MinSeconds = b.DefaultSeconds
+	}
+	if b.MaxSeconds > 0 && b.MinSeconds > b.MaxSeconds {
+		return fmt.Errorf("invalid config: %s.minSeconds (%d) must not exceed maxSeconds (%d)", prefix, b.MinSeconds, b.MaxSeconds)
+	}
+	if b.DefaultSeconds < b.MinSeconds || (b.MaxSeconds > 0 && b.DefaultSeconds > b.MaxSeconds) {
+		return fmt.Errorf("invalid config: %s.defaultSeconds (%d) must be within [minSeconds, maxSeconds] = [%d, %d]", prefix, b.DefaultSeconds, b.MinSeconds, b.MaxSeconds)
+	}
+	// Not an error: a deployment whose vendor has a single fixed tier needs no
+	// token, and requiring one would break every already-shipped video config on
+	// upgrade. But without it the RENDERED tier is the vendor's own default while
+	// the broker prices whatever "size" said — the reserve is a guess again — so
+	// say so once, loudly, at load. (stdlib log: the structured logger isn't up yet.)
+	if b.DefaultResolution == "" {
+		log.Printf("[CONFIG] %s.defaultResolution is unset: the broker will not author a resolution, so the tier the vendor renders is its own default and the pre-flight reserve cannot price it exactly. Set it to a resolution token this vendor accepts.", prefix)
 	}
 	return nil
 }

@@ -45,6 +45,9 @@ type jsonCreateVideoRequest struct {
 	Seconds json.Number `json:"seconds"`
 	Size    string      `json:"size"`
 	Seed    json.Number `json:"seed"`
+	// Resolution is written by the broker, not by end clients — see
+	// translate.CreateVideoRequest.Resolution.
+	Resolution string `json:"resolution"`
 	// InputReference is the OpenAI Video API image-to-video reference (first
 	// frame): exactly one of image_url (public URL or data: URI) or file_id.
 	InputReference *struct {
@@ -231,11 +234,12 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 			return translate.CreateVideoRequest{}, err
 		}
 		req := translate.CreateVideoRequest{
-			Model:   r.FormValue("model"),
-			Prompt:  r.FormValue("prompt"),
-			Seconds: r.FormValue("seconds"),
-			Size:    r.FormValue("size"),
-			Seed:    r.FormValue("seed"),
+			Model:      r.FormValue("model"),
+			Prompt:     r.FormValue("prompt"),
+			Seconds:    r.FormValue("seconds"),
+			Size:       r.FormValue("size"),
+			Seed:       r.FormValue("seed"),
+			Resolution: r.FormValue("resolution"),
 		}
 		// input_reference (image-to-video): a plain form value carries a URL;
 		// a file part carries the image bytes → encode as a data: URI so the
@@ -254,11 +258,12 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		return translate.CreateVideoRequest{}, err
 	}
 	req := translate.CreateVideoRequest{
-		Model:   jr.Model,
-		Prompt:  jr.Prompt,
-		Seconds: jr.Seconds.String(),
-		Size:    jr.Size,
-		Seed:    jr.Seed.String(),
+		Model:      jr.Model,
+		Prompt:     jr.Prompt,
+		Seconds:    jr.Seconds.String(),
+		Size:       jr.Size,
+		Seed:       jr.Seed.String(),
+		Resolution: jr.Resolution,
 	}
 	if jr.InputReference != nil {
 		req.InputReferenceImageURL = jr.InputReference.ImageURL
