@@ -10,11 +10,13 @@ import (
 
 // last_frame_reference and the reference_images/videos/audio arrays are not
 // OpenAI Video API fields (see translate.ToSeedanceCreateRequest's doc for
-// the compatibility principle: the client may only use fields that already
-// exist in the OpenAI Video API), so parseCreateVideoRequest has no field to
-// populate them into — a client that sends them anyway gets a request that
-// silently ignores those keys and proceeds on whatever OpenAI-real fields
-// were also present (prompt/input_reference/etc.), not a 400.
+// the compatibility principle, and its "disclosed exception" note for why
+// seed/camera_fixed/output_format — also not OpenAI-real — are a separate,
+// deliberately-unaffected category from these two), so parseCreateVideoRequest
+// has no field to populate last_frame_reference/reference_images/videos/audio
+// into — a client that sends them anyway gets a request that silently
+// ignores those keys and proceeds on whatever OpenAI-real fields (and the
+// disclosed-exception scalars) were also present, not a 400.
 func TestParseCreateVideoRequest_NonOpenAIFields_SilentlyIgnored_JSON(t *testing.T) {
 	const body = `{"prompt":"p","input_reference":{"image_url":"https://cdn/a.png"},"last_frame_reference":{"image_url":"https://cdn/b.png"},"reference_images":["https://cdn/i1.png"],"reference_videos":["https://cdn/v1.mp4"],"reference_audio":["https://cdn/a1.mp3"]}`
 	req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))

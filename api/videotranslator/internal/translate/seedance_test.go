@@ -243,6 +243,25 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 		}
 	})
 
+	// ftp:// (or any scheme that's neither a usable image_url scheme, nor
+	// asset://, nor a file_id) silently degrades to text-to-video — a
+	// DELIBERATE design (see seedanceReferenceImage's doc, mirroring
+	// MiniMax's identical precedent), NOT a bug, but previously untested: an
+	// independent review's mutation campaign found that broadening the
+	// allowlist to also accept ftp:// survived the full suite with this case
+	// absent. This pins the named example the doc comment itself calls out.
+	t.Run("ftp:// first_frame silently degrades to text-to-video, by design (not asset:// or file_id, so not a 400)", func(t *testing.T) {
+		got := ToSeedanceCreateRequest(CreateVideoRequest{
+			Prompt: "p", Seconds: "5", InputReferenceImageURL: "ftp://cdn/a.png",
+		})
+		if len(got.Content) != 1 || got.Content[0].Type != "text" {
+			t.Fatalf("unusable-but-not-asset://-or-file_id scheme must silently degrade to text-only, got %+v", got.Content)
+		}
+		if err := ValidateSeedanceCreateRequest(CreateVideoRequest{InputReferenceImageURL: "ftp://cdn/a.png"}); err != nil {
+			t.Errorf("ftp:// must NOT be rejected by ValidateSeedanceCreateRequest (silent degrade, not a 400, is the documented behavior for this case) — got %v", err)
+		}
+	})
+
 	t.Run("model remap: canonical id -> ByteDance wire id", func(t *testing.T) {
 		got := ToSeedanceCreateRequest(CreateVideoRequest{Model: "bytedance/seedance-2.5", Prompt: "p"})
 		if got.Model != seedanceDefaultWireModel {

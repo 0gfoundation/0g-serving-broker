@@ -123,6 +123,49 @@ func TestSeedanceCreateVideo_LastFrameReferenceIgnored_NotRejected(t *testing.T)
 // independent review caught exactly this gap; this test proves the real
 // HTTP handler actually rejects it end to end, not just the unit-level
 // ValidateSeedanceCreateRequest call.
+// A dedicated full-HTTP-handler e2e test for a valid input_reference.image_url
+// request — TestSeedanceCreateVideo_TranslatesAndForwardsAuth covers
+// text-to-video, and the first_frame wiring itself is unit-tested in
+// TestToSeedanceCreateRequest, but until this test, nothing exercised the
+// actual /videos endpoint end to end with a real image_url present.
+func TestSeedanceCreateVideo_FirstFrameImageURL_TranslatesCorrectly(t *testing.T) {
+	var gotReq seedance.CreateRequest
+	mockSeedance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode seedance request: %v", err)
+		}
+		json.NewEncoder(w).Encode(seedance.CreateResponse{ID: "cgt-20260606160057-6bbjd"})
+	}))
+	defer mockSeedance.Close()
+
+	client := seedance.NewClient(mockSeedance.URL, mockSeedance.Client())
+	h := NewSeedanceVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/videos", h.CreateVideo)
+
+	const body = `{"prompt":"animate this","input_reference":{"image_url":"https://cdn.example.com/a.png"}}`
+	req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(gotReq.Content) != 2 {
+		t.Fatalf("want [text, first_frame], got %+v", gotReq.Content)
+	}
+	if gotReq.Content[1].Role != "first_frame" || gotReq.Content[1].ImageURL == nil || gotReq.Content[1].ImageURL.URL != "https://cdn.example.com/a.png" {
+		t.Errorf("content[1] wrong: %+v", gotReq.Content[1])
+	}
+	if gotReq.Ratio != "adaptive" {
+		t.Errorf("ratio = %q, want adaptive", gotReq.Ratio)
+	}
+}
+
 func TestSeedanceCreateVideo_InputReferenceFileIDRejected(t *testing.T) {
 	// The upstream must never be called for a request the pre-flight validator
 	// rejects — asserted implicitly by not standing up a mock server at all.

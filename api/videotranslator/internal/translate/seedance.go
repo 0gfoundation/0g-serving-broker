@@ -289,14 +289,23 @@ func parseSeedanceSeed(raw string) *int64 {
 
 // ToSeedanceCreateRequest builds the Seedance create-task body from an
 // OpenAI-shaped create request. Only text-to-video and single-first-frame
-// image-to-video are built here — the two Seedance capabilities that map
-// onto a real OpenAI Video API field (prompt, input_reference). Seedance
-// also supports last-frame control and multimodal reference-composition
-// (multiple reference images/videos/audio), but OpenAI's API has no field to
-// express either one, so per this integration's compatibility principle —
-// the client may only use fields that already exist in the OpenAI Video API,
-// translated 1:1 into each vendor's native shape — this integration
-// deliberately does not add a client-facing input for them.
+// image-to-video are built here for STRUCTURAL capabilities — the two
+// Seedance capabilities that map onto a real OpenAI Video API field
+// (prompt, input_reference). Seedance also supports last-frame control and
+// multimodal reference-composition (multiple reference images/videos/audio),
+// but OpenAI's API has no field to express either one, so per this
+// integration's compatibility principle — the client may only use fields
+// that already exist in the OpenAI Video API, translated 1:1 into each
+// vendor's native shape — this integration deliberately does not add a
+// client-facing input for them.
+//
+// Disclosed exception (see the router's public changelog, `cmd/server/
+// main.go`, "Seedance 2.5"): Seed/CameraFixed/OutputFormat below are NOT
+// OpenAI-real fields either, but they stay accepted — the principle's
+// actual target is capabilities that need a NEW STRUCTURE to express (a
+// second frame slot, a reference-media array), not any non-OpenAI field
+// whatsoever. A single scalar riding through unchanged needs no new shape,
+// so it's a different category from last-frame/multimodal-reference.
 func ToSeedanceCreateRequest(req CreateVideoRequest) seedance.CreateRequest {
 	content := []seedance.ContentItem{{Type: "text", Text: req.Prompt}}
 	ratio := sizeToSeedanceRatio(req.Size)
