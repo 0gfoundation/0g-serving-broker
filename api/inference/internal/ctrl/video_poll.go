@@ -314,6 +314,11 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	outputCount := c.videoOutputUnits(pollCtx, seconds, tier)
 	rateClass := resolutionRateClass(tier)
 
+	// Same reserve check as the synchronous path (video.go). This is the one that
+	// matters most: an async create is where the reserve is load-bearing, since
+	// the fee lands minutes after the gate let the request through.
+	c.reconcileVideoSpec(pollCtx, job.RequestBody, job.RequestContentType, seconds, tier)
+
 	if job.IsWhitelisted {
 		// Commit the completion write BEFORE signing/recording usage, for the same reason as
 		// the paying-user path below: only the worker that actually wins the attempts-fenced

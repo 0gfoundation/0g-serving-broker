@@ -615,6 +615,12 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
 	outputCount := c.videoOutputUnits(ctx, seconds, tier)
 
+	// Check the pre-flight reserve against what actually happened. Nothing else
+	// verifies it, and a deployment whose configured tier disagrees with the one
+	// its translator renders would otherwise hold the wrong amount on every
+	// request with every log line looking healthy. Does not change the fee.
+	c.reconcileVideoSpec(ctx, reqBody, contentType, seconds, tier)
+
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee for video generation")

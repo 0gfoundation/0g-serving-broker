@@ -85,6 +85,22 @@ var (
 	// by recording that vendor's rules in common/videospec, not by tuning here.
 	VideoReserveSkippedTotal *prometheus.CounterVec
 
+	// VideoSpecDriftTotal counts video-generation requests where what
+	// common/videospec said the vendor would render disagrees with what the vendor
+	// then reported, labeled by which field drifted.
+	//
+	// The pre-flight reserve is computed from that spec, so every increment is a
+	// request whose held amount described a different clip than the one billed.
+	// Two causes, both operator-fixable: a deployment whose configured
+	// defaultResolution does not match the tier its translator actually renders at
+	// (the tier a request cannot reveal — see the spec package), or recorded rules
+	// that have fallen behind a vendor changing its behaviour.
+	//
+	// It cannot fire before the money is spent — the vendor only reports what it
+	// rendered once it has. It exists so the disagreement is visible at all: the
+	// reserve is otherwise a number nothing ever checks.
+	VideoSpecDriftTotal *prometheus.CounterVec
+
 	// VideoPollTimedOutTotal counts video-generation poll jobs (see
 	// docs/design/video-generation-async-billing.md) that hit their
 	// MaxPollDuration ceiling without the provider ever reaching a terminal
@@ -423,6 +439,15 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
+	VideoSpecDriftTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_video_spec_drift_total",
+			Help:        "Video-generation requests where the vendor rendered something other than common/videospec predicted, labeled by field (seconds or tier). The pre-flight reserve is computed from that prediction, so non-zero means requests are being held at an amount that describes a different clip than the one billed — check billing.defaultResolution against the translator's own resolution setting, and the recorded vendor rules against the vendor.",
+			ConstLabels: constLabels,
+		},
+		[]string{"field"},
+	)
+
 	VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
@@ -467,6 +492,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(VideoTableMissTotal)
 	prometheus.MustRegister(VideoReserveSkippedTotal)
+	prometheus.MustRegister(VideoSpecDriftTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -837,6 +863,20 @@ func RecordVideoReserveSkipped(reason string) {
 		return
 	}
 	VideoReserveSkippedTotal.WithLabelValues(reason).Inc()
+}
+
+// Fields that can drift between the spec's prediction and the vendor's report.
+const (
+	VideoSpecDriftSeconds = "seconds"
+	VideoSpecDriftTier    = "tier"
+)
+
+// RecordVideoSpecDrift increments the spec-drift counter.
+func RecordVideoSpecDrift(field string) {
+	if VideoSpecDriftTotal == nil {
+		return
+	}
+	VideoSpecDriftTotal.WithLabelValues(field).Inc()
 }
 
 // RecordVideoTableMiss increments the per_unit_table miss counter.
