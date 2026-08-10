@@ -56,13 +56,17 @@ type CreateRequest struct {
 
 // ContentItem is one element of a create request's content array. Type is a
 // free string ("text" / "image_url" / "video_url" / "audio_url"); Role
-// carries the content's purpose ("first_frame" / "last_frame" /
-// "reference_image" / "reference_video" / "reference_audio"). VideoURL and
-// AudioURL exist alongside ImageURL so a single ContentItem shape covers
-// every input mode this integration supports — plain image-to-video,
-// first+last-frame control, and multimodal reference-based generation (see
-// the design doc's §12.2) — without a vendor-side shape change; only one of
-// ImageURL/VideoURL/AudioURL is ever populated per item, selected by Type.
+// carries the content's purpose — the vendor documents "first_frame" /
+// "last_frame" / "reference_image" / "reference_video" / "reference_audio",
+// the full set ByteDance's own API supports. This integration's translation
+// layer (translate.ToSeedanceCreateRequest) only ever populates "text" and
+// "first_frame": text-to-video and single-first-frame image-to-video are the
+// only two Seedance capabilities that map onto a real OpenAI Video API field
+// (prompt, input_reference) — last-frame control and multimodal
+// reference-composition have no such field, so this integration never builds
+// a client-facing input for them. VideoURL/AudioURL and the other Role values
+// are modeled here for completeness/fidelity to the vendor's real wire shape,
+// even though nothing in this integration currently constructs them.
 type ContentItem struct {
 	Type     string  `json:"type"`
 	Text     string  `json:"text,omitempty"`

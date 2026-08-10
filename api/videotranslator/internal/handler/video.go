@@ -48,24 +48,15 @@ type jsonCreateVideoRequest struct {
 	Seed    json.Number `json:"seed"`
 	// InputReference is the OpenAI Video API image-to-video reference (first
 	// frame): exactly one of image_url (public URL or data: URI) or file_id.
+	// This is the only reference-media field this integration exposes: any
+	// vendor capability with no matching OpenAI Video API field (Seedance's
+	// last-frame control, multimodal reference-composition) deliberately has
+	// no client-facing field here — see translate.ToSeedanceCreateRequest's
+	// doc for the compatibility principle this follows.
 	InputReference *struct {
 		ImageURL string `json:"image_url"`
 		FileID   string `json:"file_id"`
 	} `json:"input_reference"`
-	// LastFrameReference: last-frame counterpart to InputReference. image_url
-	// only (no file_id — no vendor-native handle scheme is used for it).
-	LastFrameReference *struct {
-		ImageURL string `json:"image_url"`
-	} `json:"last_frame_reference"`
-	// ReferenceImages/ReferenceVideos/ReferenceAudio carry Seedance's
-	// multimodal reference-composition arrays (see translate.CreateVideoRequest's
-	// ReferenceImageURLs/ReferenceVideoURLs/ReferenceAudioURLs doc). This
-	// wire shape (top-level JSON arrays sibling to input_reference /
-	// last_frame_reference) is this integration's own design choice, not
-	// vendor-mandated.
-	ReferenceImages []string `json:"reference_images"`
-	ReferenceVideos []string `json:"reference_videos"`
-	ReferenceAudio  []string `json:"reference_audio"`
 	// CameraFixed: Seedance's top-level "camera_fixed" boolean. A *bool so an
 	// absent field (nil) is distinguishable from an explicit false.
 	CameraFixed *bool `json:"camera_fixed"`
@@ -270,28 +261,14 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		// a file part carries the image bytes → encode as a data: URI so the
 		// downstream mapping is transport-agnostic. (For large frames a public
 		// URL / file_id is preferable — data: URIs inflate the body ~1/3.)
+		// This is the only reference-media field parsed here — see the
+		// jsonCreateVideoRequest.InputReference doc for why last_frame_reference
+		// and the reference_images/videos/audio arrays are deliberately absent.
 		if v := r.FormValue("input_reference"); v != "" {
 			req.InputReferenceImageURL = v
 		} else if dataURI, ok := multipartFileDataURI(r, "input_reference"); ok {
 			req.InputReferenceImageURL = dataURI
 		}
-		// last_frame_reference: same plain-value-or-file-part handling as
-		// input_reference (a form value carries a URL; a file part is encoded
-		// as a data: URI via multipartFileDataURI). No file_id counterpart.
-		if v := r.FormValue("last_frame_reference"); v != "" {
-			req.LastFrameReferenceImageURL = v
-		} else if dataURI, ok := multipartFileDataURI(r, "last_frame_reference"); ok {
-			req.LastFrameReferenceImageURL = dataURI
-		}
-		// reference_images/reference_videos/reference_audio: repeated form
-		// keys of the same name (net/http's native multi-value support),
-		// rather than a delimiter-joined string — consistent with treating
-		// multipart as a plain-value-or-file-part source per field, just
-		// repeated. r.PostForm is populated by ParseMultipartForm above from
-		// the body's non-file form values.
-		req.ReferenceImageURLs = append([]string(nil), r.PostForm["reference_images"]...)
-		req.ReferenceVideoURLs = append([]string(nil), r.PostForm["reference_videos"]...)
-		req.ReferenceAudioURLs = append([]string(nil), r.PostForm["reference_audio"]...)
 		// camera_fixed: a plain form value, parsed as a bool. Absent or
 		// unparsable (not "true"/"false"/"1"/"0"/etc.) leaves it nil, matching
 		// every other optional field's "absent means vendor default" handling.
@@ -323,12 +300,6 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		req.InputReferenceImageURL = jr.InputReference.ImageURL
 		req.InputReferenceFileID = jr.InputReference.FileID
 	}
-	if jr.LastFrameReference != nil {
-		req.LastFrameReferenceImageURL = jr.LastFrameReference.ImageURL
-	}
-	req.ReferenceImageURLs = jr.ReferenceImages
-	req.ReferenceVideoURLs = jr.ReferenceVideos
-	req.ReferenceAudioURLs = jr.ReferenceAudio
 	req.CameraFixed = jr.CameraFixed
 	req.OutputFormat = jr.OutputFormat
 	return req, nil

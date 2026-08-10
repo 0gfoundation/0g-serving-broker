@@ -85,10 +85,14 @@ func isSeedanceAssetScheme(raw string) bool {
 // allowlist to one raw client value: public http(s) URLs and data:image
 // Base64 URIs are accepted (both confirmed accepted by the vendor);
 // everything else — including asset:// (ByteDance's asset-library handle,
-// which 0G does not use) — yields "". Used identically for the first frame,
-// the last frame, and each reference_image item, so the presence gate
+// which 0G does not use) — yields "". Used for the first frame (the only
+// image-reference mode this integration exposes — see design doc's decision
+// to only build the OpenAI-expressible subset of Seedance's capabilities:
+// last-frame control and multimodal reference-composition have no OpenAI
+// Video API equivalent field, so this integration never builds a
+// client-facing input for them), so the presence gate
 // (ValidateSeedanceCreateRequest) and the wire-construction step
-// (ToSeedanceCreateRequest) can never disagree about whether a given image
+// (ToSeedanceCreateRequest) can never disagree about whether the first-frame
 // reference is usable.
 func seedanceReferenceImage(raw string) string {
 	u := strings.TrimSpace(raw)
@@ -102,65 +106,9 @@ func seedanceReferenceImage(raw string) string {
 	return ""
 }
 
-// seedanceReferenceMediaURL applies Seedance's reference VIDEO/AUDIO scheme
-// allowlist to one raw client value: https(s):// URLs only, no data: URIs —
-// video/audio files are typically too large for a practical inline Base64
-// request body, unlike a reference image, and the vendor documents URL/asset
-// only for these (no Base64) — asset:// is still excluded, same reasoning as
-// seedanceReferenceImage.
-func seedanceReferenceMediaURL(raw string) string {
-	u := strings.TrimSpace(raw)
-	if u == "" {
-		return ""
-	}
-	lower := strings.ToLower(u)
-	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") {
-		return u
-	}
-	return ""
-}
-
 func seedanceFirstFrame(req CreateVideoRequest) string {
 	return seedanceReferenceImage(req.InputReferenceImageURL)
 }
-
-func seedanceLastFrame(req CreateVideoRequest) string {
-	return seedanceReferenceImage(req.LastFrameReferenceImageURL)
-}
-
-// resolveSeedanceReferenceImages filters raw reference_image URLs through
-// the image scheme allowlist, dropping unusable ones (order-preserving).
-func resolveSeedanceReferenceImages(raw []string) []string {
-	out := make([]string, 0, len(raw))
-	for _, u := range raw {
-		if ref := seedanceReferenceImage(u); ref != "" {
-			out = append(out, ref)
-		}
-	}
-	return out
-}
-
-// resolveSeedanceReferenceMedia filters raw reference_video/reference_audio
-// URLs through the media scheme allowlist, dropping unusable ones
-// (order-preserving).
-func resolveSeedanceReferenceMedia(raw []string) []string {
-	out := make([]string, 0, len(raw))
-	for _, u := range raw {
-		if ref := seedanceReferenceMediaURL(u); ref != "" {
-			out = append(out, ref)
-		}
-	}
-	return out
-}
-
-// Cardinality caps for multimodal reference-based generation, straight from
-// the vendor's own documentation (design doc §12.2): at most 30 reference
-// images, 10 reference videos, 10 reference audio tracks.
-const (
-	maxSeedanceReferenceImages = 30
-	maxSeedanceReferenceVideos = 10
-	maxSeedanceReferenceAudio  = 10
-)
 
 // seedanceResolutionTokens are Seedance's exact resolution wire tokens
 // (lowercase). A client "size" that is already one of these
@@ -318,7 +266,15 @@ func parseSeedanceSeed(raw string) *int64 {
 }
 
 // ToSeedanceCreateRequest builds the Seedance create-task body from an
-// OpenAI-shaped create request.
+// OpenAI-shaped create request. Only text-to-video and single-first-frame
+// image-to-video are built here — the two Seedance capabilities that map
+// onto a real OpenAI Video API field (prompt, input_reference). Seedance
+// also supports last-frame control and multimodal reference-composition
+// (multiple reference images/videos/audio), but OpenAI's API has no field to
+// express either one, so per this integration's compatibility principle —
+// the client may only use fields that already exist in the OpenAI Video API,
+// translated 1:1 into each vendor's native shape — this integration
+// deliberately does not add a client-facing input for them.
 func ToSeedanceCreateRequest(req CreateVideoRequest) seedance.CreateRequest {
 	content := []seedance.ContentItem{{Type: "text", Text: req.Prompt}}
 	ratio := sizeToSeedanceRatio(req.Size)
@@ -333,49 +289,6 @@ func ToSeedanceCreateRequest(req CreateVideoRequest) seedance.CreateRequest {
 		// "adaptive" is set, avoiding frame-jump crop artifacts — recommended
 		// for i2v regardless of what sizeToSeedanceRatio guessed from "size".
 		ratio = "adaptive"
-		// A last frame is only meaningful ALONGSIDE a first frame. Appending it
-		// inside this branch means a request can never carry a bare last_frame
-		// on the wire, even if a caller somehow bypassed
-		// ValidateSeedanceCreateRequest.
-		if last := seedanceLastFrame(req); last != "" {
-			content = append(content, seedance.ContentItem{
-				Type:     "image_url",
-				ImageURL: &seedance.URLRef{URL: last},
-				Role:     "last_frame",
-			})
-		}
-	}
-
-	// Multimodal reference arrays (design doc §12.2): mutually exclusive with
-	// first/last-frame at the validation layer (ValidateSeedanceCreateRequest
-	// rejects a request carrying both), so in practice these only ever
-	// populate content when the first-frame branch above did not fire.
-	// Resolved independently here (not gated on the first-frame branch not
-	// having fired) so a hypothetical validation bypass degrades to "both
-	// sets of content items present" rather than one being silently dropped —
-	// this function and ValidateSeedanceCreateRequest must each reach their
-	// own conclusion from the same resolved values, never lean on the other's
-	// gating to stay correct.
-	for _, u := range resolveSeedanceReferenceImages(req.ReferenceImageURLs) {
-		content = append(content, seedance.ContentItem{
-			Type:     "image_url",
-			ImageURL: &seedance.URLRef{URL: u},
-			Role:     "reference_image",
-		})
-	}
-	for _, u := range resolveSeedanceReferenceMedia(req.ReferenceVideoURLs) {
-		content = append(content, seedance.ContentItem{
-			Type:     "video_url",
-			VideoURL: &seedance.URLRef{URL: u},
-			Role:     "reference_video",
-		})
-	}
-	for _, u := range resolveSeedanceReferenceMedia(req.ReferenceAudioURLs) {
-		content = append(content, seedance.ContentItem{
-			Type:     "audio_url",
-			AudioURL: &seedance.URLRef{URL: u},
-			Role:     "reference_audio",
-		})
 	}
 
 	// Watermark is always off: no paying customer of this integration wants
@@ -463,9 +376,11 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 
 	// Billing (design doc §13.1.1): Seedance's billed quantity is the
 	// vendor-reported usage.completion_tokens token count — already
-	// inclusive of any billable input-reference-media duration (e.g. a
-	// reference_video) on top of output duration — so it is forwarded
-	// verbatim rather than computing an OutputVideoDuration the way
+	// inclusive of any billable input-reference-media duration on top of
+	// output duration (a vendor-side concept this integration's own
+	// client-facing surface no longer has an input for, but the vendor's
+	// pricing/token formula still accounts for it generically) — so it is
+	// forwarded verbatim rather than computing an OutputVideoDuration the way
 	// DashScope/MiniMax do. content.video_url is surfaced separately via
 	// GetVideoContentURL, not put in VideoResponse; content.last_frame_url is
 	// ignored (this integration never sets return_last_frame).
@@ -499,62 +414,19 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 }
 
 // ValidateSeedanceCreateRequest is the create-time pre-flight, surfaced by
-// the handler as a 400. It enforces (all counts/checks below are on
-// RESOLVED, scheme-filtered values — never raw field length or presence —
-// so the presence gate here and the wire-construction in
-// ToSeedanceCreateRequest can never disagree about what is "usable"):
+// the handler as a 400. It enforces the one rule left once this integration
+// is scoped to only the OpenAI-expressible subset of Seedance (text-to-video,
+// single-first-frame image-to-video — see ToSeedanceCreateRequest's doc):
 //
-//   - asset:// is rejected on either first_frame or last_frame (0G does not
-//     use ByteDance's asset library).
-//   - a usable last_frame with no usable first_frame is rejected (a
-//     last-frame-only request is nonsensical for Seedance) — but,
-//     deliberately UNLIKE Vidu's both-frames-mandatory rule, a first_frame
-//     alone (image-to-video) or zero frames (text-to-video) are both valid.
-//   - frame-control (first_frame/last_frame) and multimodal reference arrays
-//     (reference_image/reference_video/reference_audio) are mutually
-//     exclusive within one request.
-//   - reference_image/_video/_audio cardinality caps (30/10/10).
+//   - asset:// is rejected on input_reference (0G does not use ByteDance's
+//     asset library).
 //
-// Audio-alone reference input (no reference_image or reference_video) is
-// supported by 2.5 (the vendor's own docs flipped from "not supported" to
-// "supported"), so no cardinality-independent check rejects it here.
+// text-to-video (zero frames) and image-to-video (a first_frame alone) are
+// both valid; there is no last_frame or reference-array field left to
+// mutually-exclude or cap.
 func ValidateSeedanceCreateRequest(req CreateVideoRequest) error {
 	if isSeedanceAssetScheme(req.InputReferenceImageURL) {
 		return fmt.Errorf("input_reference asset:// scheme is not supported")
-	}
-	if isSeedanceAssetScheme(req.LastFrameReferenceImageURL) {
-		return fmt.Errorf("last_frame_reference asset:// scheme is not supported")
-	}
-	if seedanceLastFrame(req) != "" && seedanceFirstFrame(req) == "" {
-		return fmt.Errorf("last_frame_reference requires a usable input_reference (first frame)")
-	}
-
-	images := resolveSeedanceReferenceImages(req.ReferenceImageURLs)
-	videos := resolveSeedanceReferenceMedia(req.ReferenceVideoURLs)
-	audio := resolveSeedanceReferenceMedia(req.ReferenceAudioURLs)
-
-	// Resolved-value check, like every other check in this function (and like
-	// the last-frame-requires-first-frame check above): a raw-presence check
-	// here would disagree with ToSeedanceCreateRequest, which builds the wire
-	// request from these same resolved values. A first_frame/last_frame field
-	// carrying an unusable, non-asset:// scheme (e.g. "ftp://...", which
-	// seedanceFirstFrame/seedanceLastFrame drop to "") resolves to no frame
-	// control at all, and a request whose ONLY real content is a reference
-	// array must not be rejected over that leftover, inert value.
-	hasFrameControl := seedanceFirstFrame(req) != "" || seedanceLastFrame(req) != ""
-	hasReferenceArray := len(images) > 0 || len(videos) > 0 || len(audio) > 0
-	if hasFrameControl && hasReferenceArray {
-		return fmt.Errorf("cannot combine first_frame/last_frame with reference_image/reference_video/reference_audio in one request")
-	}
-
-	if len(images) > maxSeedanceReferenceImages {
-		return fmt.Errorf("reference_images: at most %d allowed", maxSeedanceReferenceImages)
-	}
-	if len(videos) > maxSeedanceReferenceVideos {
-		return fmt.Errorf("reference_videos: at most %d allowed", maxSeedanceReferenceVideos)
-	}
-	if len(audio) > maxSeedanceReferenceAudio {
-		return fmt.Errorf("reference_audio: at most %d allowed", maxSeedanceReferenceAudio)
 	}
 	return nil
 }

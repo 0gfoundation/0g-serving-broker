@@ -50,18 +50,21 @@
 # request shape:
 #   - text-to-video: prompt only.
 #   - image-to-video (single first frame): input_reference.
-#   - image-to-video with first+last frame control: input_reference +
-#     last_frame_reference (last_frame_reference alone, with no
-#     input_reference, is rejected — 400).
-#   - multimodal reference-based generation: reference_images (≤30),
-#     reference_videos (≤10), reference_audio (≤10) — mutually exclusive with
-#     input_reference/last_frame_reference in the same request.
-#     reference_audio alone (no reference_images/reference_videos) is
-#     supported (2.5 dropped the audio-alone-rejected rule 2.0 had).
+# These are the only two Seedance capabilities that map onto a real OpenAI
+# Video API field (prompt, input_reference). Seedance ALSO supports
+# first+last-frame control (input_reference + last_frame_reference) and
+# multimodal reference-based generation (reference_images ≤30, reference_videos
+# ≤10, reference_audio ≤10, including audio-only input), but OpenAI's Video API
+# has no field to express either one — per this integration's compatibility
+# principle (the client may only use fields that already exist in the OpenAI
+# Video API, translated 1:1 into each vendor's native shape), this integration
+# deliberately does not add a client-facing input for them. A request naming
+# last_frame_reference or any reference_images/videos/audio key has those keys
+# silently ignored (not a 400) and proceeds on whatever OpenAI-real fields were
+# also present.
 #   - video editing / video extension are explicitly OUT OF SCOPE for this
-#     integration (a separate non-goal from multimodal reference generation —
-#     see the design doc's non-goals section) and are not implemented as a
-#     distinct feature or endpoint here.
+#     integration and are not implemented as a distinct feature or endpoint
+#     here.
 #
 # SEEDANCE_BASE_URL, if set, MUST be scheme+host only (e.g.
 # https://ark.ap-southeast.bytepluses.com) — NOT

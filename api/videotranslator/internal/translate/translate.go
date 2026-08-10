@@ -50,27 +50,6 @@ type CreateVideoRequest struct {
 	// (e.g. MiniMax first_frame + mm_file://) lives in the translate.To* funcs.
 	InputReferenceImageURL string
 	InputReferenceFileID   string
-	// LastFrameReferenceImageURL is the last-frame counterpart to
-	// InputReferenceImageURL's first frame, used for first+last-frame i2v
-	// control (currently read by the Seedance mapping only). Named
-	// byte-for-byte identically to the Vidu integration's field of the same
-	// name (feat/kling-vidu-integration) so the two vendors share one field
-	// rather than reconciling two. No file_id counterpart: the OpenAI
-	// last_frame_reference carries only image_url, and no vendor-native
-	// handle scheme is used for it here.
-	LastFrameReferenceImageURL string
-	// ReferenceImageURLs / ReferenceVideoURLs / ReferenceAudioURLs carry
-	// loose multimodal reference-composition inputs (role:"reference_image"/
-	// "reference_video"/"reference_audio", referenced from the prompt text
-	// via bracket notation like "[Image 1]") — DISTINCT from
-	// InputReferenceImageURL/LastFrameReferenceImageURL, which are
-	// positional frame control (first/last frame of an i2v generation). The
-	// two families are mutually exclusive per request; see
-	// ValidateSeedanceCreateRequest. Currently read by the Seedance mapping
-	// only.
-	ReferenceImageURLs []string
-	ReferenceVideoURLs []string
-	ReferenceAudioURLs []string
 	// CameraFixed is Seedance's top-level "camera_fixed" boolean (whether the
 	// camera stays static during generation). Nil means the client did not
 	// specify it, in which case the field is omitted and the vendor default

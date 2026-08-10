@@ -73,10 +73,24 @@ func TestSeedanceCreateVideo_TranslatesAndForwardsAuth(t *testing.T) {
 	}
 }
 
-func TestSeedanceCreateVideo_ValidationRejectsLastFrameWithoutFirstFrame(t *testing.T) {
-	// The upstream must never be called for a request the pre-flight validator
-	// rejects — asserted implicitly by not standing up a mock server at all.
-	client := seedance.NewClient("http://unused.invalid", http.DefaultClient)
+func TestSeedanceCreateVideo_LastFrameReferenceIgnored_NotRejected(t *testing.T) {
+	// last_frame_reference is not an OpenAI Video API field (see
+	// translate.ToSeedanceCreateRequest's doc), so this integration has no
+	// field to parse it into — a client sending it gets a plain first_frame
+	// image-to-video request, not a 400. This replaces the old
+	// TestSeedanceCreateVideo_ValidationRejectsLastFrameWithoutFirstFrame,
+	// which asserted the opposite behavior for a field that no longer exists
+	// on this integration's client-facing surface.
+	var gotReq seedance.CreateRequest
+	mockSeedance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode seedance request: %v", err)
+		}
+		json.NewEncoder(w).Encode(seedance.CreateResponse{ID: "cgt-20260606160057-6bbjd"})
+	}))
+	defer mockSeedance.Close()
+
+	client := seedance.NewClient(mockSeedance.URL, mockSeedance.Client())
 	h := NewSeedanceVideoHandler(client, newTestLogger(t))
 
 	gin.SetMode(gin.TestMode)
@@ -93,8 +107,11 @@ func TestSeedanceCreateVideo_ValidationRejectsLastFrameWithoutFirstFrame(t *test
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (last_frame_reference is silently ignored, not rejected): %s", rec.Code, rec.Body.String())
+	}
+	if len(gotReq.Content) != 1 || gotReq.Content[0].Type != "text" {
+		t.Errorf("seedance create request should be text-only (last_frame_reference has no field to land in), got %+v", gotReq.Content)
 	}
 }
 

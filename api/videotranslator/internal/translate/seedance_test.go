@@ -211,67 +211,6 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("first_frame + last_frame -> both items, correct roles + order", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt: "p", Seconds: "5",
-			InputReferenceImageURL:     "https://cdn/a.png",
-			LastFrameReferenceImageURL: "https://cdn/b.png",
-		})
-		if len(got.Content) != 3 {
-			t.Fatalf("want [text, first_frame, last_frame], got %+v", got.Content)
-		}
-		if got.Content[0].Type != "text" {
-			t.Errorf("content[0] must be text, got %+v", got.Content[0])
-		}
-		ff := hasRole(got.Content, "first_frame")
-		lf := hasRole(got.Content, "last_frame")
-		if ff == nil || ff.ImageURL.URL != "https://cdn/a.png" {
-			t.Fatalf("first_frame wrong: %+v", ff)
-		}
-		if lf == nil || lf.ImageURL.URL != "https://cdn/b.png" {
-			t.Fatalf("last_frame wrong: %+v", lf)
-		}
-		if got.Ratio != "adaptive" {
-			t.Errorf("ratio = %q, want adaptive", got.Ratio)
-		}
-	})
-
-	t.Run("data:image last frame accepted (not Vidu's http-only rule)", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt: "p", Seconds: "5",
-			InputReferenceImageURL:     "https://cdn/a.png",
-			LastFrameReferenceImageURL: "data:image/png;base64,AAA=",
-		})
-		lf := hasRole(got.Content, "last_frame")
-		if lf == nil || lf.ImageURL.URL != "data:image/png;base64,AAA=" {
-			t.Fatalf("data:image last frame should be accepted, got %+v", got.Content)
-		}
-	})
-
-	t.Run("last_frame with unsupported non-asset scheme is ignored, first_frame preserved", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt: "p", Seconds: "5",
-			InputReferenceImageURL:     "https://cdn/a.png",
-			LastFrameReferenceImageURL: "ftp://x/b.png",
-		})
-		if len(got.Content) != 2 {
-			t.Fatalf("want [text, first_frame] only, got %+v", got.Content)
-		}
-		if hasRole(got.Content, "last_frame") != nil {
-			t.Error("ftp:// last_frame must be dropped")
-		}
-	})
-
-	t.Run("last_frame alone (no first_frame) never emits a bare last item", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt: "p", Seconds: "5",
-			LastFrameReferenceImageURL: "https://cdn/b.png",
-		})
-		if len(got.Content) != 1 || got.Content[0].Type != "text" {
-			t.Fatalf("want text-only (defense in case validation is bypassed), got %+v", got.Content)
-		}
-	})
-
 	t.Run("asset:// first_frame is dropped (not sent to the vendor)", func(t *testing.T) {
 		got := ToSeedanceCreateRequest(CreateVideoRequest{
 			Prompt: "p", Seconds: "5", InputReferenceImageURL: "asset://abc123",
@@ -317,60 +256,6 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("reference arrays: image/video/audio items appended with correct roles, order, and resolved URLs", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt:             "p",
-			Seconds:            "10",
-			ReferenceImageURLs: []string{"https://cdn/i1.png", "data:image/png;base64,AAA="},
-			ReferenceVideoURLs: []string{"https://cdn/v1.mp4"},
-			ReferenceAudioURLs: []string{"https://cdn/a1.mp3"},
-		})
-		// [text, reference_image, reference_image, reference_video, reference_audio]
-		if len(got.Content) != 5 {
-			t.Fatalf("want 5 content items, got %+v", got.Content)
-		}
-		if got.Content[1].Role != "reference_image" || got.Content[1].ImageURL.URL != "https://cdn/i1.png" {
-			t.Errorf("content[1] wrong: %+v", got.Content[1])
-		}
-		if got.Content[2].Role != "reference_image" || got.Content[2].Type != "image_url" || got.Content[2].ImageURL.URL != "data:image/png;base64,AAA=" {
-			t.Errorf("content[2] wrong: %+v", got.Content[2])
-		}
-		if got.Content[3].Role != "reference_video" || got.Content[3].Type != "video_url" || got.Content[3].VideoURL.URL != "https://cdn/v1.mp4" {
-			t.Errorf("content[3] wrong: %+v", got.Content[3])
-		}
-		if got.Content[4].Role != "reference_audio" || got.Content[4].Type != "audio_url" || got.Content[4].AudioURL.URL != "https://cdn/a1.mp3" {
-			t.Errorf("content[4] wrong: %+v", got.Content[4])
-		}
-		if got.Ratio != "" {
-			t.Errorf("ratio should not be forced adaptive for reference-array requests (no first_frame), got %q", got.Ratio)
-		}
-	})
-
-	t.Run("reference_video: data:image URI rejected (narrower allowlist than reference_image)", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt:             "p",
-			ReferenceVideoURLs: []string{"data:video/mp4;base64,AAA="},
-		})
-		if hasRole(got.Content, "reference_video") != nil {
-			t.Fatalf("data: URI must be rejected for reference_video, got %+v", got.Content)
-		}
-	})
-
-	t.Run("reference_audio: http (not just https) still accepted, ftp rejected", func(t *testing.T) {
-		got := ToSeedanceCreateRequest(CreateVideoRequest{
-			Prompt:             "p",
-			ReferenceAudioURLs: []string{"http://cdn/a.mp3", "ftp://cdn/b.mp3"},
-		})
-		var count int
-		for _, c := range got.Content {
-			if c.Role == "reference_audio" {
-				count++
-			}
-		}
-		if count != 1 {
-			t.Fatalf("want exactly 1 resolved reference_audio item, got %d in %+v", count, got.Content)
-		}
-	})
 }
 
 func TestFromSeedanceCreateResponse(t *testing.T) {
@@ -473,25 +358,7 @@ func TestValidateSeedanceCreateRequest(t *testing.T) {
 	}{
 		{"text-only is valid", CreateVideoRequest{Prompt: "p"}, false},
 		{"first_frame-only is valid", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png"}, false},
-		{"first_frame + last_frame is valid", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", LastFrameReferenceImageURL: "https://cdn/b.png"}, false},
 		{"first_frame asset:// is rejected", CreateVideoRequest{InputReferenceImageURL: "asset://x"}, true},
-		{"last_frame asset:// is rejected", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", LastFrameReferenceImageURL: "asset://x"}, true},
-		{"last_frame without first_frame is rejected", CreateVideoRequest{LastFrameReferenceImageURL: "https://cdn/b.png"}, true},
-		{"last_frame with UNUSABLE first_frame is rejected (resolved-value check, not raw)", CreateVideoRequest{InputReferenceImageURL: "ftp://cdn/a.png", LastFrameReferenceImageURL: "https://cdn/b.png"}, true},
-		{"reference_image alone is valid", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/a.png"}}, false},
-		{"reference_video alone is valid", CreateVideoRequest{ReferenceVideoURLs: []string{"https://cdn/a.mp4"}}, false},
-		{"reference_audio ALONE is now supported (2.5 dropped the audio-alone-rejected rule)", CreateVideoRequest{ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, false},
-		{"reference_audio with reference_image is valid", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/a.png"}, ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, false},
-		{"reference_audio with reference_video is valid", CreateVideoRequest{ReferenceVideoURLs: []string{"https://cdn/a.mp4"}, ReferenceAudioURLs: []string{"https://cdn/a.mp3"}}, false},
-		{"31 reference images exceeds the cap of 30", CreateVideoRequest{ReferenceImageURLs: repeatURL("https://cdn/i.png", 31)}, true},
-		{"30 reference images is exactly at the cap", CreateVideoRequest{ReferenceImageURLs: repeatURL("https://cdn/i.png", 30)}, false},
-		{"11 reference videos exceeds the cap of 10", CreateVideoRequest{ReferenceVideoURLs: repeatURL("https://cdn/v.mp4", 11)}, true},
-		{"11 reference audio exceeds the cap of 10", CreateVideoRequest{ReferenceImageURLs: []string{"https://cdn/i.png"}, ReferenceAudioURLs: repeatURL("https://cdn/a.mp3", 11)}, true},
-		{"cardinality caps count RESOLVED urls, not raw: unusable entries don't count against the cap", CreateVideoRequest{ReferenceImageURLs: append(repeatURL("https://cdn/i.png", 30), "asset://dropped")}, false},
-		{"mutual exclusivity: first_frame + reference_image together is rejected", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", ReferenceImageURLs: []string{"https://cdn/b.png"}}, true},
-		{"mutual exclusivity uses RESOLVED values: an UNUSABLE input_reference scheme alongside a reference array is valid (no real frame-control content)", CreateVideoRequest{InputReferenceImageURL: "ftp://cdn/a.png", ReferenceImageURLs: []string{"https://cdn/b.png"}}, false},
-		{"mutual exclusivity uses RESOLVED values: an UNUSABLE last_frame_reference scheme alongside a reference array is valid", CreateVideoRequest{LastFrameReferenceImageURL: "ftp://cdn/b.png", ReferenceVideoURLs: []string{"https://cdn/v.mp4"}}, false},
-		{"mutual exclusivity: last_frame + reference_video together is rejected", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", LastFrameReferenceImageURL: "https://cdn/b.png", ReferenceVideoURLs: []string{"https://cdn/v.mp4"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -501,13 +368,4 @@ func TestValidateSeedanceCreateRequest(t *testing.T) {
 			}
 		})
 	}
-}
-
-// repeatURL returns n copies of u — a convenience for the cardinality-cap tests.
-func repeatURL(u string, n int) []string {
-	out := make([]string, n)
-	for i := range out {
-		out[i] = u
-	}
-	return out
 }
