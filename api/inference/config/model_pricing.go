@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
@@ -194,6 +195,31 @@ type BillingConfig struct {
 
 	// Table is the (resolution, duration) → units lookup for per_unit_table.
 	Table []BillingUnitTier `yaml:"table"`
+
+	// Vendor names the upstream behind this model, so the broker can resolve what
+	// that vendor will ACTUALLY render for a request — the clip length and the
+	// resolution tier — before forwarding it, and hold the right amount against
+	// the caller's balance. The rules themselves live in common/videospec; this is
+	// only which set to use. A video create is billed asynchronously, minutes
+	// later, so a gate with no answer here can only fall back to the
+	// minimum-locked-balance floor (see #628).
+	//
+	// It is a statement about deployment, not a tunable: it must name the vendor
+	// the configured targetUrl actually reaches. Unset, or a vendor videospec has
+	// no rules for, means creates are forwarded unreserved and counted under
+	// broker_video_reserve_skipped_total.
+	Vendor string `yaml:"vendor"`
+
+	// DefaultResolution is the tier this deployment renders at when the request
+	// does not name one. It is required only by vendors that do not derive a tier
+	// from the request at all — MiniMax reads pixel dimensions as an aspect ratio
+	// and takes its tier from its own MINIMAX_RESOLUTION setting, so this must
+	// MATCH that setting or the broker prices a tier the vendor does not render.
+	// Vendors that derive their own tier (DashScope) ignore it.
+	//
+	// A mismatch is not silent: the reconciliation pass compares what the vendor
+	// reports back against what was priced.
+	DefaultResolution string `yaml:"defaultResolution"`
 }
 
 // BillingObservables are the resolved per-request inputs to the unit math.
@@ -413,7 +439,36 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	} else if len(b.Table) > 0 {
 		return fmt.Errorf("invalid config: %s.table is only valid for mode %q", prefix, BillingModePerUnitTable)
 	}
+	if b.Mode == BillingModePerVideoSecond || b.Mode == BillingModePerUnitTable {
+		validateVideoVendor(prefix, b)
+	} else if b.Vendor != "" || b.DefaultResolution != "" {
+		return fmt.Errorf("invalid config: %s.vendor/defaultResolution are only valid for the video billing modes", prefix)
+	}
 	return nil
+}
+
+// validateVideoVendor reports, at load, whether this model can be reserved for
+// before its creates are forwarded. It does not FAIL on a gap: a deployment that
+// works today must keep working after upgrading, and an unreserved create is the
+// behaviour it already has. It says so loudly instead, once, with the fix.
+// (stdlib log: the structured logger isn't up at config-load time.)
+func validateVideoVendor(prefix string, b *BillingConfig) {
+	if b.Vendor == "" {
+		log.Printf("[CONFIG] %s.vendor is unset: the broker cannot tell what this upstream will render, so every create is forwarded WITHOUT a pre-flight reserve and is gated only by the minimum locked balance. Set it to the vendor behind targetUrl (see common/videospec for the recorded ones).", prefix)
+		return
+	}
+	spec, ok := videospec.Get(videospec.Vendor(b.Vendor))
+	if !ok {
+		log.Printf("[CONFIG] %s.vendor %q has no rules recorded in common/videospec, so every create is forwarded WITHOUT a pre-flight reserve. Record that vendor's duration/tier rules there.", prefix, b.Vendor)
+		return
+	}
+	// Only a vendor that takes its tier from deployment configuration needs this,
+	// and for those it is not optional: with it empty the broker prices the
+	// baseline multiplier while the vendor renders (and charges for) its own
+	// configured tier.
+	if b.DefaultResolution == "" && spec.Tier("", "sentinel") == "sentinel" {
+		log.Printf("[CONFIG] %s.defaultResolution is unset for vendor %q, which takes its rendered tier from deployment configuration rather than from the request. The reserve will price the baseline tier while the vendor renders its own — set this to match that vendor's configured resolution.", prefix, b.Vendor)
+	}
 }
 
 // HasMultiModelPricing returns true if this service has per-model pricing configured.
