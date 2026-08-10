@@ -49,7 +49,13 @@
 # Input modes this translator supports, all through the SAME /videos
 # request shape:
 #   - text-to-video: prompt only.
-#   - image-to-video (single first frame): input_reference.
+#   - image-to-video (single first frame): input_reference.image_url only.
+#     input_reference.file_id is a real OpenAI Video API field too, but gets
+#     a hard 400 here instead: Seedance has no client-usable file-handle
+#     namespace this integration can resolve a file_id against (unlike
+#     MiniMax, which maps one onto its own vendor handle), so silently
+#     falling back to text-to-video would bill a client for a different
+#     video than they asked for — this is a reject, not a silent drop.
 # These are the only two Seedance capabilities that map onto a real OpenAI
 # Video API field (prompt, input_reference). Seedance ALSO supports
 # first+last-frame control (input_reference + last_frame_reference) and
@@ -61,7 +67,9 @@
 # deliberately does not add a client-facing input for them. A request naming
 # last_frame_reference or any reference_images/videos/audio key has those keys
 # silently ignored (not a 400) and proceeds on whatever OpenAI-real fields were
-# also present.
+# also present — unlike file_id above, these have no real vendor mapping to
+# reject a client into using instead, so silent-ignore (not 400) is the right
+# call for them specifically.
 #   - video editing / video extension are explicitly OUT OF SCOPE for this
 #     integration and are not implemented as a distinct feature or endpoint
 #     here.
