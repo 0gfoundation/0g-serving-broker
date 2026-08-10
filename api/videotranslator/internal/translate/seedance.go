@@ -83,17 +83,31 @@ func isSeedanceAssetScheme(raw string) bool {
 
 // seedanceReferenceImage applies Seedance's reference-IMAGE scheme
 // allowlist to one raw client value: public http(s) URLs and data:image
-// Base64 URIs are accepted (both confirmed accepted by the vendor);
-// everything else — including asset:// (ByteDance's asset-library handle,
-// which 0G does not use) — yields "". Used for the first frame (the only
-// image-reference mode this integration exposes — see design doc's decision
-// to only build the OpenAI-expressible subset of Seedance's capabilities:
-// last-frame control and multimodal reference-composition have no OpenAI
-// Video API equivalent field, so this integration never builds a
-// client-facing input for them), so the presence gate
-// (ValidateSeedanceCreateRequest) and the wire-construction step
-// (ToSeedanceCreateRequest) can never disagree about whether the first-frame
-// reference is usable.
+// Base64 URIs are accepted (both confirmed accepted by the vendor); anything
+// else yields "" — the request degrades to text-to-video rather than
+// forwarding an unvetted value, mirroring MiniMax's identical, deliberately
+// documented policy for the same situation (translate/minimax.go's
+// firstFrameReference: "drop the reference rather than forward it"). This
+// is used for the first frame — the only image-reference mode this
+// integration exposes (last-frame control and multimodal
+// reference-composition have no OpenAI Video API equivalent field, so this
+// integration never builds a client-facing input for them).
+//
+// This silent-degrade behavior is deliberately NOT the same treatment given
+// to asset:// or a non-empty file_id (both explicitly REJECTED with a 400 by
+// ValidateSeedanceCreateRequest, checked separately from this function): the
+// distinction is a malformed/unusable VALUE in a field this integration
+// does support (silently drop, same as MiniMax) versus a well-formed value
+// this vendor structurally has no way to honor at all (asset:// addresses a
+// library 0G doesn't use; file_id has no vendor-side handle namespace this
+// integration can resolve against) — the latter gets an explicit error so a
+// client doesn't get silently billed for a different video than they asked
+// for; the former is genuinely unusable either way, so silently degrading
+// is the same tradeoff MiniMax already makes. Because of that split,
+// ValidateSeedanceCreateRequest and this function's caller
+// (ToSeedanceCreateRequest, via seedanceFirstFrame) CAN still disagree for
+// an unusable-but-not-asset://-or-file_id scheme (e.g. ftp://) — that
+// specific case is a silent degrade, not a 400, by design.
 func seedanceReferenceImage(raw string) string {
 	u := strings.TrimSpace(raw)
 	if u == "" {
