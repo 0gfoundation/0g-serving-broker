@@ -211,6 +211,29 @@ func TestToSeedanceCreateRequest(t *testing.T) {
 		}
 	})
 
+	t.Run("seed is passed through to the wire request", func(t *testing.T) {
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5", Seed: "11"})
+		if got.Seed == nil || *got.Seed != 11 {
+			t.Fatalf("Seed not wired through, got %+v", got.Seed)
+		}
+	})
+
+	t.Run("seed omitted (nil) when the client didn't specify it", func(t *testing.T) {
+		got := ToSeedanceCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5"})
+		if got.Seed != nil {
+			t.Errorf("Seed must be omitted (nil) when absent, got %+v", got.Seed)
+		}
+	})
+
+	t.Run("input_reference.file_id alone -> text-only (ValidateSeedanceCreateRequest rejects it before this runs in the real handler, but this function itself has no case for it)", func(t *testing.T) {
+		got := ToSeedanceCreateRequest(CreateVideoRequest{
+			Prompt: "p", Seconds: "5", InputReferenceFileID: "file-abc123",
+		})
+		if len(got.Content) != 1 || got.Content[0].Type != "text" {
+			t.Fatalf("file_id has no Seedance mapping, want text-only, got %+v", got.Content)
+		}
+	})
+
 	t.Run("asset:// first_frame is dropped (not sent to the vendor)", func(t *testing.T) {
 		got := ToSeedanceCreateRequest(CreateVideoRequest{
 			Prompt: "p", Seconds: "5", InputReferenceImageURL: "asset://abc123",
@@ -359,6 +382,14 @@ func TestValidateSeedanceCreateRequest(t *testing.T) {
 		{"text-only is valid", CreateVideoRequest{Prompt: "p"}, false},
 		{"first_frame-only is valid", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png"}, false},
 		{"first_frame asset:// is rejected", CreateVideoRequest{InputReferenceImageURL: "asset://x"}, true},
+		// input_reference.file_id is a real OpenAI Video API field, but Seedance
+		// has no client-usable file-handle namespace this integration can
+		// resolve it against (unlike MiniMax's mm_file:// mapping) — reject
+		// explicitly rather than let it silently degrade to a still-billed
+		// text-to-video request (the gap an independent review caught: see
+		// seedanceFirstFrame's doc).
+		{"input_reference.file_id alone is rejected", CreateVideoRequest{InputReferenceFileID: "file-abc123"}, true},
+		{"input_reference.file_id alongside image_url is still rejected (file_id must never silently win or lose)", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", InputReferenceFileID: "file-abc123"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

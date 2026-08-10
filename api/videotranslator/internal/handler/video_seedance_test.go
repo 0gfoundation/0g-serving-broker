@@ -115,6 +115,36 @@ func TestSeedanceCreateVideo_LastFrameReferenceIgnored_NotRejected(t *testing.T)
 	}
 }
 
+// input_reference.file_id IS a real OpenAI Video API field (the JSON path
+// only — multipart has no file_id form field), but Seedance has no
+// client-usable file-handle namespace to resolve it against. Without this
+// rejection, a client using file_id would silently get a still-billed
+// text-to-video request instead of the image-to-video they asked for — an
+// independent review caught exactly this gap; this test proves the real
+// HTTP handler actually rejects it end to end, not just the unit-level
+// ValidateSeedanceCreateRequest call.
+func TestSeedanceCreateVideo_InputReferenceFileIDRejected(t *testing.T) {
+	// The upstream must never be called for a request the pre-flight validator
+	// rejects — asserted implicitly by not standing up a mock server at all.
+	client := seedance.NewClient("http://unused.invalid", http.DefaultClient)
+	h := NewSeedanceVideoHandler(client, newTestLogger(t))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/videos", h.CreateVideo)
+
+	const body = `{"prompt":"p","input_reference":{"file_id":"file-abc123"}}`
+	req := httptest.NewRequest(http.MethodPost, "/videos", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (file_id has no Seedance mapping, must not silently degrade to a billed text-to-video request): %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSeedanceGetVideo_SucceededBillsOnCompletionTokens(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

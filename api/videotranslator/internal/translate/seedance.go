@@ -106,6 +106,14 @@ func seedanceReferenceImage(raw string) string {
 	return ""
 }
 
+// seedanceFirstFrame reads ONLY req.InputReferenceImageURL — the OpenAI
+// input_reference's file_id sibling is deliberately not read here at all.
+// Unlike MiniMax (which maps a client file_id onto its own mm_file://{id}
+// handle), Seedance has no client-usable file-handle namespace this
+// integration can resolve a file_id against, so
+// ValidateSeedanceCreateRequest rejects a request carrying one with a 400
+// BEFORE this function ever runs — this function itself has no case to
+// handle it, by design, not by omission.
 func seedanceFirstFrame(req CreateVideoRequest) string {
 	return seedanceReferenceImage(req.InputReferenceImageURL)
 }
@@ -414,12 +422,23 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 }
 
 // ValidateSeedanceCreateRequest is the create-time pre-flight, surfaced by
-// the handler as a 400. It enforces the one rule left once this integration
+// the handler as a 400. It enforces the two rules left once this integration
 // is scoped to only the OpenAI-expressible subset of Seedance (text-to-video,
 // single-first-frame image-to-video — see ToSeedanceCreateRequest's doc):
 //
-//   - asset:// is rejected on input_reference (0G does not use ByteDance's
-//     asset library).
+//   - asset:// is rejected on input_reference.image_url (0G does not use
+//     ByteDance's asset library).
+//   - input_reference.file_id is rejected outright, for the same underlying
+//     reason: unlike MiniMax (which maps a client file_id onto its own
+//     mm_file://{id} vendor handle — see translate.ToMiniMaxCreateRequest),
+//     Seedance has no client-usable file-handle namespace this integration
+//     can resolve a file_id against. seedanceFirstFrame only ever reads
+//     InputReferenceImageURL, so a file_id-only request would otherwise
+//     silently degrade to text-to-video (still billed) rather than
+//     delivering the image-to-video the client asked for — an explicit 400
+//     here is the same "reject an unvetted handle rather than forward it
+//     silently" call already made for asset://, extended to cover the other
+//     way a client can supply a first frame this vendor cannot use.
 //
 // text-to-video (zero frames) and image-to-video (a first_frame alone) are
 // both valid; there is no last_frame or reference-array field left to
@@ -427,6 +446,9 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 func ValidateSeedanceCreateRequest(req CreateVideoRequest) error {
 	if isSeedanceAssetScheme(req.InputReferenceImageURL) {
 		return fmt.Errorf("input_reference asset:// scheme is not supported")
+	}
+	if strings.TrimSpace(req.InputReferenceFileID) != "" {
+		return fmt.Errorf("input_reference.file_id is not supported for this model; use image_url instead")
 	}
 	return nil
 }
