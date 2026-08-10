@@ -38,6 +38,13 @@ type mockVideoPollDB struct {
 	errOnReschedule          error
 	rescheduleCalled         int
 
+	// releasedReserves records the requestHash each terminal-without-billing write
+	// was asked to release the in-flight reserve for. The real DB does that release
+	// inside the same transaction as the status write, so a mock that ignored the
+	// argument would let a caller drop it silently — which is precisely the failure
+	// that strands a wallet's balance forever (see db.FailVideoPollJob).
+	releasedReserves []string
+
 	// lastCompleteSeconds/lastCompleteFee/lastCompleteUnit/lastCompleteRateClass capture the
 	// most recent CompleteVideoPollJobWithBilling call's arguments for assertions.
 	// lastCompleteSeconds is the RAW seconds argument (the Request.OutputCount value under the
@@ -156,7 +163,7 @@ func (m *mockVideoPollDB) CompleteVideoPollJobWithBilling(id uint64, claimAttemp
 // above, and db.FailVideoPollJob's doc comment) — a plain nil return on a lost race would give
 // false confidence that a whitelisted-job caller can tell "I won this write" from "someone else
 // already resolved it."
-func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
+func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
 	if m.errOnFail != nil {
 		return m.errOnFail
 	}
@@ -171,12 +178,13 @@ func (m *mockVideoPollDB) FailVideoPollJob(id uint64, claimAttempts int, errMsg 
 	}
 	j.Status = model.VideoPollStatusFailed
 	j.ErrorMessage = errMsg
+	m.releasedReserves = append(m.releasedReserves, requestHash)
 	return nil
 }
 
 // TimeOutVideoPollJob replicates the real db.DB's guard AND lost-race sentinel — see
 // FailVideoPollJob's comment above.
-func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
+func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
 	if m.errOnTimeout != nil {
 		return m.errOnTimeout
 	}
@@ -191,6 +199,7 @@ func (m *mockVideoPollDB) TimeOutVideoPollJob(id uint64, claimAttempts int, errM
 	}
 	j.Status = model.VideoPollStatusTimedOut
 	j.ErrorMessage = errMsg
+	m.releasedReserves = append(m.releasedReserves, requestHash)
 	return nil
 }
 
@@ -1044,5 +1053,76 @@ func TestSanitizeForwarderPollResponseBody_UndecodableGzipFailsOpen(t *testing.T
 	out := c.sanitizeForwarderPollResponseBody(raw, "gzip")
 	if string(out) != string(raw) {
 		t.Errorf("undecodable body must be returned unchanged, got %s", out)
+	}
+}
+
+// ==========================================================================
+// In-flight reserve release (#628 A4)
+// ==========================================================================
+
+// TestPollVideoJob_TerminalWithoutBilling_ReleasesReserve pins the invariant the
+// in-flight reserve depends on:
+//
+//	a non-zero reserve exists on a requests row IFF an unresolved poll job exists
+//
+// Every way a job leaves the unresolved state WITHOUT a real fee landing must
+// hand the request hash to the DB layer, which clears the reserve in the same
+// transaction. Drop the argument at any one of these call sites and the wallet
+// keeps paying for a clip it never got, forever — there is no other path that
+// resets that column. (The billing path needs no release: it overwrites the
+// reserve with the real fee. The whitelisted path has no requests row at all.)
+func TestPollVideoJob_TerminalWithoutBilling_ReleasesReserve(t *testing.T) {
+	tests := []struct {
+		name     string
+		respBody string
+		expire   bool
+		want     model.VideoPollStatus
+	}{
+		{
+			name:     "provider reported failed",
+			respBody: `{"id":"job-1","status":"failed"}`,
+			want:     model.VideoPollStatusFailed,
+		},
+		{
+			name:     "completed with no resolvable duration",
+			respBody: `{"id":"job-1","status":"completed"}`,
+			want:     model.VideoPollStatusFailed,
+		},
+		{
+			// The case that motivated the invariant: nothing else ever clears a
+			// timed-out job's reserve.
+			name:     "timed out before any terminal state",
+			respBody: `{"id":"job-1","status":"queued"}`,
+			expire:   true,
+			want:     model.VideoPollStatusTimedOut,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tt.respBody))
+			}))
+			defer server.Close()
+
+			store := newMockVideoPollDB()
+			c := newTestVideoPollCtrl(store, "")
+			job := newPendingJob(1, server.URL)
+			// The request body carries no duration, so the "completed" case has
+			// nothing to bill on and falls to the unresolvable branch.
+			job.RequestBody = []byte(`{}`)
+			if tt.expire {
+				job.ExpiresAt = time.Now().Add(-time.Minute)
+			}
+			store.jobs[1] = &job
+
+			c.pollVideoJob(job)
+
+			if got := store.get(1).Status; got != tt.want {
+				t.Fatalf("Status = %q, want %q", got, tt.want)
+			}
+			if len(store.releasedReserves) != 1 || store.releasedReserves[0] != job.RequestHash {
+				t.Errorf("released reserves = %v, want [%s]", store.releasedReserves, job.RequestHash)
+			}
+		})
 	}
 }

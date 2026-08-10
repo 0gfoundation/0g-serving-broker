@@ -891,6 +891,9 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 			return
 		}
 		expectedInputFee = reserveFee
+		// Staged for deferVideoBillingToPoll, which stamps it onto the requests row
+		// once the poll job exists — see ctrl.reserveInFlightVideoFee.
+		ctx.Set(ctrl.CtxKeyVideoReserveFee, reserveFee)
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

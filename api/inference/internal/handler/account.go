@@ -51,6 +51,9 @@ import (
 // The caller must provide a valid session token (Authorization header).
 // The user address in the URL path must match the authenticated user.
 //
+// The amount covers work still in flight as well as work already priced, and can
+// therefore fall without anything having settled — see ctrl.GetUnsettledFee.
+//
 //	@Description  Get the total unsettled fee for a specific user
 //	@ID           getUnsettledFee
 //	@Tags         user

@@ -65,9 +65,11 @@ type videoPollDB interface {
 	// FailVideoPollJob/TimeOutVideoPollJob return ErrVideoPollJobAlreadyResolved (not nil) on a
 	// lost fencing race, distinguishing "I actually won this write" from "someone else already
 	// resolved it" — needed so a whitelisted-job caller knows when it is safe to record usage
-	// without double-counting. See db.FailVideoPollJob's doc comment.
-	FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
-	TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error
+	// without double-counting. See db.FailVideoPollJob's doc comment. Both also release the
+	// in-flight reserve on requestHash's row in the same transaction — these are two of the
+	// four ways a poll job leaves the unresolved state, and a reserve must not outlive one.
+	FailVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
+	TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error
 	DeleteExpiredVideoPollJobs(retention time.Duration) error
 }
 

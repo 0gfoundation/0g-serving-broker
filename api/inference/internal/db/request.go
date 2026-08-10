@@ -143,6 +143,25 @@ func (d *DB) UpdateRequestVideoBilling(requestHash, outputFee, fee string, secon
 		}).Error
 }
 
+// ReserveRequestFee writes an IN-FLIGHT reserve onto a request row: the fee the
+// broker expects this request to cost, recorded before the amount is known so
+// CalculateUnsettledFee (which sums fee over unprocessed rows) counts it against
+// the wallet's balance while the work is outstanding.
+//
+// Only output_count stays 0, which keeps the row out of on-chain settlement
+// (ListRequest's ExcludeZeroOutput) — a reserve is a hold on the balance, never
+// something to settle. The settling path overwrites both when the real amount
+// lands; the release paths reset the fee to "0".
+//
+// Uses Update(column, value) rather than a struct Updates, so a "0" release is
+// actually written — GORM's struct Updates skips zero values, and "0" is the
+// string zero value.
+func (d *DB) ReserveRequestFee(requestHash, fee string) error {
+	return d.db.Model(&model.Request{}).
+		Where("request_hash = ?", requestHash).
+		Update("fee", fee).Error
+}
+
 // UpdateRequestWithAccurateTokens updates the request with accurate token counts from LLM response
 // This replaces the estimated values with actual values provided by the LLM.
 // unit is the authoritative billing unit for the counts ("tokens"/"seconds"); cachedInputTokens

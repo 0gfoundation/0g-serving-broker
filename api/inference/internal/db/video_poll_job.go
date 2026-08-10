@@ -155,6 +155,10 @@ func (d *DB) RescheduleVideoPollJob(id uint64, claimAttempts int, nextPollAt tim
 // VideoPollJob completed-status write, so the job is left in its prior claimed state rather than
 // falsely marked completed.
 //
+// This is also how the in-flight reserve is released on the happy path: the fee UPDATE below
+// OVERWRITES the reserve with the real amount, so no separate release is needed (or wanted — two
+// statements deciding one column is how a reserve gets cleared twice, or not at all).
+//
 // Retries up to 3 times with backoff for transient DB errors, since by this point the
 // expensive provider work is already done. Both ErrVideoPollJobAlreadyResolved and
 // ErrVideoPollJobRequestMissing are deterministic — once hit, a retry of the identical guarded
@@ -210,20 +214,41 @@ func (d *DB) CompleteVideoPollJobWithBilling(id uint64, claimAttempts int, reque
 // from "someone else already resolved this, recording usage here would double-count" — an
 // unconditional nil return (this function's behavior before whitelisted jobs existed) can't
 // distinguish the two.
-func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
-	res := d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
-		Updates(map[string]interface{}{
-			"status":        model.VideoPollStatusFailed,
-			"error_message": errMsg,
-		})
-	if res.Error != nil {
-		return res.Error
+//
+// It is also one of the two release sites for the in-flight reserve (see
+// ctrl.reserveInFlightVideoFee): the reserve exists only while a poll job is unresolved, so
+// resolving one to "failed" must clear it in the SAME transaction. Without that, a failed job
+// leaves fee=<reserve> with processed=false forever and permanently removes that amount from the
+// wallet's available balance, with no path that ever puts it back.
+func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.VideoPollJob{}).
+			Where("id = ? AND status = ? AND attempts = ?", id, model.VideoPollStatusPolling, claimAttempts).
+			Updates(map[string]interface{}{
+				"status":        model.VideoPollStatusFailed,
+				"error_message": errMsg,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrVideoPollJobAlreadyResolved
+		}
+		return releaseRequestReserve(tx, requestHash)
+	})
+}
+
+// releaseRequestReserve clears an in-flight video reserve from a request row. A whitelisted job
+// has no such row, and a row pruned/settled while the job was in flight is already gone — both
+// match zero rows, which is not an error: the invariant this upholds is "no reserve outlives its
+// poll job", and a row that does not exist holds none.
+func releaseRequestReserve(tx *gorm.DB, requestHash string) error {
+	if requestHash == "" {
+		return nil
 	}
-	if res.RowsAffected == 0 {
-		return ErrVideoPollJobAlreadyResolved
-	}
-	return nil
+	return tx.Model(&model.Request{}).
+		Where("request_hash = ?", requestHash).
+		Update("fee", "0").Error
 }
 
 // TimeOutVideoPollJob marks a job timed_out: ExpiresAt passed before a terminal state was
@@ -235,23 +260,29 @@ func (d *DB) FailVideoPollJob(id uint64, claimAttempts int, errMsg string) error
 // OR reclaimed by a newer worker, by a concurrent poll must not be overwritten with a spurious
 // timeout from a superseded claim. Returns ErrVideoPollJobAlreadyResolved on a lost race — see
 // FailVideoPollJob's doc comment for why this distinction matters now.
-func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) error {
-	res := d.db.Model(&model.VideoPollJob{}).
-		Where("id = ? AND status IN ? AND attempts = ?", id, []model.VideoPollStatus{
-			model.VideoPollStatusPending,
-			model.VideoPollStatusPolling,
-		}, claimAttempts).
-		Updates(map[string]interface{}{
-			"status":        model.VideoPollStatusTimedOut,
-			"error_message": errMsg,
-		})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrVideoPollJobAlreadyResolved
-	}
-	return nil
+//
+// The second release site for the in-flight reserve, and the one that motivated the invariant:
+// a timed-out job is precisely the case that would otherwise strand 20–40 0G of a wallet's
+// balance forever. See FailVideoPollJob.
+func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, requestHash, errMsg string) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.VideoPollJob{}).
+			Where("id = ? AND status IN ? AND attempts = ?", id, []model.VideoPollStatus{
+				model.VideoPollStatusPending,
+				model.VideoPollStatusPolling,
+			}, claimAttempts).
+			Updates(map[string]interface{}{
+				"status":        model.VideoPollStatusTimedOut,
+				"error_message": errMsg,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrVideoPollJobAlreadyResolved
+		}
+		return releaseRequestReserve(tx, requestHash)
+	})
 }
 
 // CompleteVideoPollJobWhitelisted marks a whitelisted job completed WITHOUT touching any
@@ -260,6 +291,10 @@ func (d *DB) TimeOutVideoPollJob(id uint64, claimAttempts int, errMsg string) er
 // resolved usage into the hourly_usage_stat reconciliation rollup, and must do so only AFTER
 // this call succeeds — same rationale as CompleteVideoPollJobWithBilling's sign-after-commit
 // ordering: two workers racing on the same reclaimed job must not both record usage.
+//
+// No in-flight reserve is released here, and that is not an omission: a reserve is written only
+// onto a Request row, whitelisted traffic has none, and ctrl.reserveInFlightVideoFee skips the
+// whitelisted case for exactly that reason. There is nothing this path could strand.
 //
 // Guarded on status='polling' AND attempts=claimAttempts, identical fencing to
 // CompleteVideoPollJobWithBilling. Retries transient DB errors since the expensive provider

@@ -179,7 +179,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			"the provider may have delivered a video the broker never billed for — this is a reconciliation gap, not routine",
 			job.ID, job.RequestHash, job.Attempts)
 		monitor.RecordVideoPollTimedOut()
-		if err := c.videoPollDB.TimeOutVideoPollJob(job.ID, job.Attempts, "exceeded MaxPollDuration without reaching a terminal state"); err != nil {
+		if err := c.videoPollDB.TimeOutVideoPollJob(job.ID, job.Attempts, job.RequestHash, "exceeded MaxPollDuration without reaching a terminal state"); err != nil {
 			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
 				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate timeout handling", job.ID)
 			} else {
@@ -212,7 +212,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	if fields.Status == videoStatusFailed {
 		c.logger.Infof("video poll job %d (request %s): provider reported failed", job.ID, job.RequestHash)
 		monitor.RecordVideoGenerationFailed()
-		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "provider reported status=failed"); err != nil {
+		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, job.RequestHash, "provider reported status=failed"); err != nil {
 			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
 				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate failure handling", job.ID)
 			} else {
@@ -273,7 +273,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 		c.logger.Errorf("video poll job %d (request %s): provider reported completed but no usable seconds in response or original request; NOT billing (free output)",
 			job.ID, job.RequestHash)
 		monitor.RecordVideoBillingSkipped()
-		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "completed with no resolvable duration"); err != nil {
+		if err := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, job.RequestHash, "completed with no resolvable duration"); err != nil {
 			if errors.Is(err, db.ErrVideoPollJobAlreadyResolved) {
 				c.logger.Infof("video poll job %d: already resolved by another worker, skipping duplicate failure handling", job.ID)
 			} else {
@@ -383,7 +383,7 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 			c.logger.Errorf("video poll job %d (request %s): linked request row no longer exists; fee %s was computed but NOT recorded — reconciliation gap",
 				job.ID, job.RequestHash, outputFee.String())
 			monitor.RecordVideoBillingSkipped()
-			if failErr := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, "linked request row no longer exists"); failErr != nil && !errors.Is(failErr, db.ErrVideoPollJobAlreadyResolved) {
+			if failErr := c.videoPollDB.FailVideoPollJob(job.ID, job.Attempts, job.RequestHash, "linked request row no longer exists"); failErr != nil && !errors.Is(failErr, db.ErrVideoPollJobAlreadyResolved) {
 				c.logger.Errorf("video poll job %d: mark failed: %v", job.ID, failErr)
 			} else if failErr == nil {
 				// The worst instance of the never-re-signed class: the provider DID
