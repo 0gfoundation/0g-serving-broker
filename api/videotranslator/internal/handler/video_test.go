@@ -577,3 +577,35 @@ func TestGetVideo_DashScope4xxPropagatesVendorError(t *testing.T) {
 		t.Errorf("error.code = %v, want Throttling", errObj["code"])
 	}
 }
+
+// TestCreateVideo_OutOfRangeSecondsIs400 proves the refusal actually reaches the
+// client as a client error, and — the part that matters — that the vendor is
+// never called for it. A request whose duration nothing can render must cost
+// nobody anything.
+func TestCreateVideo_OutOfRangeSecondsIs400(t *testing.T) {
+	called := false
+	mockDashScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer mockDashScope.Close()
+
+	h := NewVideoHandler(dashscope.NewClient(mockDashScope.URL, mockDashScope.Client()), newTestLogger(t))
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/videos", h.CreateVideo)
+
+	body, contentType := newMultipartBody(t, map[string]string{
+		"model": "happyhorse", "prompt": "a cat", "seconds": "1e30",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/videos", body)
+	req.Header.Set("Content-Type", contentType)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Error("the vendor was called for a request whose duration cannot be rendered")
+	}
+}

@@ -52,7 +52,13 @@ func (h *MiniMaxVideoHandler) CreateVideo(c *gin.Context) {
 	}
 
 	authHeader := c.GetHeader("Authorization")
-	mmReq := translate.ToMiniMaxCreateRequest(req, h.defaultResolution)
+	mmReq, err := translate.ToMiniMaxCreateRequest(req, h.defaultResolution)
+	if err != nil {
+		// See the DashScope sibling: a duration nothing can render is refused, not
+		// clamped to the vendor's longest clip.
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
 	mmResp, err := h.client.CreateTask(c.Request.Context(), authHeader, mmReq)
 	if err != nil {
 		h.writeMiniMaxError(c, "minimax create task failed", "failed to create video generation task", err)
