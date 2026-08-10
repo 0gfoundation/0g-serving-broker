@@ -101,17 +101,30 @@ func (miniMax) ResolutionToken(size string) string {
 	return ""
 }
 
-// Tier: a pixel-dimension "size" does NOT select a tier for MiniMax. It only sets
-// the aspect ratio, and the rendered tier comes from the deployment's own
-// configured resolution (the translator's MINIMAX_RESOLUTION). Only a token
-// addresses a tier directly.
+// MiniMaxDefaultTier is what H3 renders when the request names no tier.
 //
-// Deriving one from pixels would produce a value H3 rejects — it serves a single
-// tier — and that is also what makes the tier unknowable from the request alone:
-// a caller pricing a request has to be told the deployment's tier separately.
-func (m miniMax) Tier(size, deploymentDefault string) string {
+// It is a constant rather than a deployment setting because H3 serves exactly one
+// resolution — confirmed live: it rejects 768P while naming 2K as its whole
+// supported set. There was never a choice to configure.
+//
+// It used to be one anyway: the translator read MINIMAX_RESOLUTION (defaulting to
+// this same value, and commented out in the shipped compose file) while the
+// broker was told the tier again through its own config. Two copies of one fact,
+// in different files in different containers, with nothing keeping them equal —
+// and a mismatch prices every request at a tier the vendor never renders, in
+// silence, forever. Stating the fact once removes the failure instead of watching
+// for it.
+//
+// A MiniMax model that serves several tiers would need this per model rather than
+// per vendor; it would not need it back as an operator setting.
+const MiniMaxDefaultTier = "2K"
+
+// Tier: a pixel-dimension "size" does NOT select a tier for MiniMax. It only sets
+// the aspect ratio. Only a token addresses a tier directly — and deriving one
+// from pixels would produce a value H3 rejects, since it serves a single tier.
+func (m miniMax) Tier(size string) string {
 	if tok := m.ResolutionToken(size); tok != "" {
 		return tok
 	}
-	return deploymentDefault
+	return MiniMaxDefaultTier
 }

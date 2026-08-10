@@ -29,16 +29,15 @@ import (
 // translating each call 1:1 to/from MiniMax. It holds no cross-request state:
 // polling to completion is the broker's job, not this sidecar's.
 type MiniMaxVideoHandler struct {
-	client            *minimax.Client
-	defaultResolution string
-	logger            log.Logger
+	client *minimax.Client
+	logger log.Logger
 }
 
-// NewMiniMaxVideoHandler builds a MiniMaxVideoHandler. defaultResolution is the
-// resolution sent when the client's "size" isn't itself a MiniMax resolution
-// token (e.g. "2K" for an H3 deployment).
-func NewMiniMaxVideoHandler(client *minimax.Client, defaultResolution string, logger log.Logger) *MiniMaxVideoHandler {
-	return &MiniMaxVideoHandler{client: client, defaultResolution: defaultResolution, logger: logger}
+// NewMiniMaxVideoHandler builds a MiniMaxVideoHandler. The rendered resolution is
+// not a parameter: H3 serves one tier and the shared spec states it — see
+// videospec.MiniMaxDefaultTier.
+func NewMiniMaxVideoHandler(client *minimax.Client, logger log.Logger) *MiniMaxVideoHandler {
+	return &MiniMaxVideoHandler{client: client, logger: logger}
 }
 
 // CreateVideo handles POST /videos.
@@ -52,7 +51,7 @@ func (h *MiniMaxVideoHandler) CreateVideo(c *gin.Context) {
 	}
 
 	authHeader := c.GetHeader("Authorization")
-	mmReq, err := translate.ToMiniMaxCreateRequest(req, h.defaultResolution)
+	mmReq, err := translate.ToMiniMaxCreateRequest(req)
 	if err != nil {
 		// See the DashScope sibling: a duration nothing can render is refused, not
 		// clamped to the vendor's longest clip.

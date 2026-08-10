@@ -23,10 +23,6 @@ type Config struct {
 	// overseas endpoint when empty) — for a domestic-site account or a test
 	// double.
 	MiniMaxBaseURL string
-	// MiniMaxResolution is the resolution sent to MiniMax when the client's
-	// "size" isn't itself a resolution token. Defaults to "2K" (MiniMax-H3's
-	// only supported value).
-	MiniMaxResolution string
 	// RequestTimeout bounds each outbound API call to the vendor.
 	RequestTimeout time.Duration
 	// Logger configures the translator's own logger.
@@ -34,9 +30,8 @@ type Config struct {
 }
 
 const (
-	defaultPort              = "8090"
-	defaultRequestTimeout    = 30 * time.Second
-	defaultMiniMaxResolution = "2K"
+	defaultPort           = "8090"
+	defaultRequestTimeout = 30 * time.Second
 )
 
 // GetConfig reads configuration from environment variables, applying
@@ -59,11 +54,6 @@ func GetConfig() *Config {
 		}
 	}
 
-	miniMaxResolution := os.Getenv("MINIMAX_RESOLUTION")
-	if miniMaxResolution == "" {
-		miniMaxResolution = defaultMiniMaxResolution
-	}
-
 	level := os.Getenv("LOG_LEVEL")
 	if level == "" {
 		level = "info"
@@ -74,11 +64,10 @@ func GetConfig() *Config {
 	}
 
 	return &Config{
-		Port:              port,
-		DashScopeBaseURL:  os.Getenv("DASHSCOPE_BASE_URL"),
-		MiniMaxBaseURL:    os.Getenv("MINIMAX_BASE_URL"),
-		MiniMaxResolution: miniMaxResolution,
-		RequestTimeout:    timeout,
+		Port:             port,
+		DashScopeBaseURL: os.Getenv("DASHSCOPE_BASE_URL"),
+		MiniMaxBaseURL:   os.Getenv("MINIMAX_BASE_URL"),
+		RequestTimeout:   timeout,
 		Logger: &commonconfig.LoggerConfig{
 			Level:  level,
 			Format: commonconfig.LogFormat(format),

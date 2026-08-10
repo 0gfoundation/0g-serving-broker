@@ -44,7 +44,7 @@
 # table that stops at 5) falls to the table maximum across every resolution, which
 # can charge a short 2K clip at a long 4K rate. A resolution with NO rows at all
 # lands there too, however short the clip — so tabulate the resolutions a client
-# can reach (see MINIMAX_RESOLUTION below), not only the one you default to.
+# can reach (a client can name one through "size"), not only H3's own 2K.
 #
 # Watch broker_video_table_miss_total{reason} to find out: "next_bucket" means a
 # row is missing but a covering one absorbed it, "uncovered" means the table
@@ -58,12 +58,15 @@
 # "seconds" costs what an OpenAI client expects. If you set modelInfo
 # defaultParameters on the broker side, use seconds: 4 to match.
 #
-# MINIMAX_RESOLUTION defaults to "2K" (MiniMax-H3's only supported value —
-# confirmed live: H3 rejects 768P naming 2K as its whole supported set). A client
-# can still target another model's resolution tier by sending "size" as a
-# resolution token (e.g. "1080P"), which on H3 will simply be rejected upstream;
-# a pixel-dimension "size" (e.g. "1280x720") only sets the aspect ratio and leaves
-# resolution at this default.
+# H3 renders a single resolution, 2K — confirmed live: it rejects 768P while
+# naming 2K as its whole supported set. That is stated once, in
+# common/videospec, and both the broker and this translator read it there; it is
+# deliberately NOT an environment variable. It was one, and having the broker
+# hold its own copy of the same claim meant a mismatch could price every request
+# at a tier the vendor never renders, silently. A client can still target another
+# model's tier by sending "size" as a resolution token (e.g. "1080P"), which on
+# H3 is simply rejected upstream; a pixel-dimension "size" (e.g. "1280x720") only
+# sets the aspect ratio.
 #
 # ⚠️ ASPECT RATIO: H3 REQUIRES one for text-to-video and rejects "adaptive", so a
 # "size" that carries no aspect ratio — which includes the resolution tokens above
@@ -84,7 +87,6 @@ services:
       # to sign a routing proof when they differ (reason: domain_mismatch), so a
       # domestic-site account must change BOTH this and upstreamDomain.
       # - MINIMAX_BASE_URL=https://api.minimaxi.com   # domestic site; then upstreamDomain: api.minimaxi.com
-      # - MINIMAX_RESOLUTION=2K
     networks:
       - localhost
 

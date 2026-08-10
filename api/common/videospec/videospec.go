@@ -70,14 +70,16 @@ type Spec interface {
 	// would resolve a duration they would not.
 	NormalizeSeconds(raw string) (int64, SecondsOutcome)
 
-	// Tier reports the resolution tier this vendor will render at, or "" when the
-	// request does not determine one and the vendor will fall back to its own
-	// default.
+	// Tier reports the resolution tier this vendor will render at, or "" when
+	// nothing determines one and the vendor will fall back to its own default.
 	//
-	// deploymentDefault is the tier a deployment configures for vendors that do
-	// not derive one from the request at all. Vendors that do derive their own
-	// ignore it.
-	Tier(size, deploymentDefault string) string
+	// It takes no deployment parameter. A vendor that serves a single tier states
+	// it here as the fact it is; one that derives a tier from the request derives
+	// it. Neither is an operator's choice, and making it one meant the broker and
+	// the translator each holding a copy of the same claim, in different files, in
+	// different containers — with nothing keeping them equal and a mismatch
+	// mispricing every request in silence.
+	Tier(size string) string
 }
 
 // specs is the registry, filled by each vendor's own file at init. Nothing

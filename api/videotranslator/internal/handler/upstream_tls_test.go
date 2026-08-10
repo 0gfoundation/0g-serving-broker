@@ -23,7 +23,7 @@ func TestUpstreamTLSReport_ReportsVendorCert(t *testing.T) {
 	defer upstream.Close()
 
 	client := minimax.NewClient(upstream.URL, upstream.Client())
-	h := NewMiniMaxVideoHandler(client, "2K", newTestLogger(t))
+	h := NewMiniMaxVideoHandler(client, newTestLogger(t))
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
@@ -60,7 +60,7 @@ func TestUpstreamTLSReport_NoHeaderWithoutTLS(t *testing.T) {
 	defer upstream.Close()
 
 	client := minimax.NewClient(upstream.URL, upstream.Client())
-	h := NewMiniMaxVideoHandler(client, "2K", newTestLogger(t))
+	h := NewMiniMaxVideoHandler(client, newTestLogger(t))
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()

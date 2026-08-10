@@ -209,17 +209,6 @@ type BillingConfig struct {
 	// no rules for, means creates are forwarded unreserved and counted under
 	// broker_video_reserve_skipped_total.
 	Vendor string `yaml:"vendor"`
-
-	// DefaultResolution is the tier this deployment renders at when the request
-	// does not name one. It is required only by vendors that do not derive a tier
-	// from the request at all — MiniMax reads pixel dimensions as an aspect ratio
-	// and takes its tier from its own MINIMAX_RESOLUTION setting, so this must
-	// MATCH that setting or the broker prices a tier the vendor does not render.
-	// Vendors that derive their own tier (DashScope) ignore it.
-	//
-	// A mismatch is not silent: the reconciliation pass compares what the vendor
-	// reports back against what was priced.
-	DefaultResolution string `yaml:"defaultResolution"`
 }
 
 // BillingObservables are the resolved per-request inputs to the unit math.
@@ -441,8 +430,8 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	}
 	if b.Mode == BillingModePerVideoSecond || b.Mode == BillingModePerUnitTable {
 		validateVideoVendor(prefix, b)
-	} else if b.Vendor != "" || b.DefaultResolution != "" {
-		return fmt.Errorf("invalid config: %s.vendor/defaultResolution are only valid for the video billing modes", prefix)
+	} else if b.Vendor != "" {
+		return fmt.Errorf("invalid config: %s.vendor is only valid for the video billing modes", prefix)
 	}
 	return nil
 }
@@ -457,17 +446,8 @@ func validateVideoVendor(prefix string, b *BillingConfig) {
 		log.Printf("[CONFIG] %s.vendor is unset: the broker cannot tell what this upstream will render, so every create is forwarded WITHOUT a pre-flight reserve and is gated only by the minimum locked balance. Set it to the vendor behind targetUrl (see common/videospec for the recorded ones).", prefix)
 		return
 	}
-	spec, ok := videospec.Get(videospec.Vendor(b.Vendor))
-	if !ok {
+	if _, ok := videospec.Get(videospec.Vendor(b.Vendor)); !ok {
 		log.Printf("[CONFIG] %s.vendor %q has no rules recorded in common/videospec, so every create is forwarded WITHOUT a pre-flight reserve. Record that vendor's duration/tier rules there.", prefix, b.Vendor)
-		return
-	}
-	// Only a vendor that takes its tier from deployment configuration needs this,
-	// and for those it is not optional: with it empty the broker prices the
-	// baseline multiplier while the vendor renders (and charges for) its own
-	// configured tier.
-	if b.DefaultResolution == "" && spec.Tier("", "sentinel") == "sentinel" {
-		log.Printf("[CONFIG] %s.defaultResolution is unset for vendor %q, which takes its rendered tier from deployment configuration rather than from the request. The reserve will price the baseline tier while the vendor renders its own — set this to match that vendor's configured resolution.", prefix, b.Vendor)
 	}
 }
 
