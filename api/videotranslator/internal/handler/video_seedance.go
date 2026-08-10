@@ -44,8 +44,11 @@ func (h *SeedanceVideoHandler) CreateVideo(c *gin.Context) {
 		return
 	}
 	// Pre-flight validation BEFORE any vendor call: rejects an asset://
-	// scheme on input_reference. See translate.ValidateSeedanceCreateRequest
-	// — this integration only exposes text-to-video and single-first-frame
+	// scheme on input_reference.image_url, and rejects a non-empty
+	// input_reference.file_id outright (no client-usable file-handle
+	// namespace on this vendor to resolve it against — see
+	// translate.ValidateSeedanceCreateRequest's doc for the full reasoning).
+	// This integration only exposes text-to-video and single-first-frame
 	// image-to-video (the two Seedance capabilities with a real OpenAI Video
 	// API field), so there is no last-frame/reference-array rule left to
 	// enforce here.
