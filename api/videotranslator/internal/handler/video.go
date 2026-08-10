@@ -92,7 +92,14 @@ func (h *VideoHandler) CreateVideo(c *gin.Context) {
 	}
 
 	authHeader := c.GetHeader("Authorization")
-	dsReq := translate.ToDashScopeCreateRequest(req)
+	dsReq, err := translate.ToDashScopeCreateRequest(req)
+	if err != nil {
+		// The request names a duration no vendor can render. Refusing costs the
+		// caller nothing; every fallback would bill them for a clip they did not
+		// ask for.
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
 	dsResp, err := h.client.CreateTask(c.Request.Context(), authHeader, dsReq)
 	if err != nil {
 		h.writeDashScopeError(c, "dashscope create task failed", "failed to create video generation task", err)

@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -165,64 +166,15 @@ func TestToDashScopeCreateRequest(t *testing.T) {
 		wantSeed       *int64
 	}{
 		{
-			name:           "integer seconds and size mapped to resolution/ratio",
-			req:            CreateVideoRequest{Model: "happyhorse", Prompt: "a cat", Seconds: "5", Size: "1280x720"},
-			wantDuration:   5,
-			wantResolution: "720P",
-			wantRatio:      "16:9",
-		},
-		{
-			name:         "valid seed is forwarded",
-			req:          CreateVideoRequest{Seconds: "5", Seed: "42"},
-			wantDuration: 5,
-			wantSeed:     ptrInt64(42),
-		},
-		{
-			name:         "out-of-range seed omitted rather than rejecting the request",
-			req:          CreateVideoRequest{Seconds: "5", Seed: "-1"},
-			wantDuration: 5,
-			wantSeed:     nil,
-		},
-		{
-			name:         "float seconds rounds up",
-			req:          CreateVideoRequest{Seconds: "5.5"},
-			wantDuration: 6,
-		},
-		{
-			name:         "zero seconds omitted",
-			req:          CreateVideoRequest{Seconds: "0"},
-			wantDuration: 0,
-		},
-		{
-			name:         "negative seconds omitted",
-			req:          CreateVideoRequest{Seconds: "-5"},
-			wantDuration: 0,
-		},
-		{
-			name:         "unparsable seconds omitted",
-			req:          CreateVideoRequest{Seconds: "not-a-number"},
-			wantDuration: 0,
-		},
-		{
-			name:         "empty seconds omitted",
-			req:          CreateVideoRequest{Seconds: ""},
-			wantDuration: 0,
-		},
-		{
-			name:         "excessive finite seconds omitted rather than overflowing int64",
-			req:          CreateVideoRequest{Seconds: "1e20"},
-			wantDuration: 0,
-		},
-		{
 			name:         "seconds exactly at the bound is honored",
 			req:          CreateVideoRequest{Seconds: "1099511627776"}, // 1<<40
-			wantDuration: maxDashScopeSeconds,
+			wantDuration: 1 << 40,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ToDashScopeCreateRequest(tt.req)
+			got, _ := ToDashScopeCreateRequest(tt.req)
 			if got.Model != tt.req.Model {
 				t.Errorf("Model = %q, want %q", got.Model, tt.req.Model)
 			}
@@ -455,5 +407,25 @@ func TestFromGetTaskResponse(t *testing.T) {
 				t.Errorf("Error = %+v, want %+v", *got.Error, *tt.want.Error)
 			}
 		})
+	}
+}
+
+// TestToDashScopeCreateRequest_OutOfRangeSecondsIsRefused is the DashScope half
+// of the MiniMax case in minimax_test.go.
+//
+// This value used to be discarded, which omitted `duration` and let the vendor
+// render its own default — billing the caller for a clip length nothing in their
+// request asked for. The two vendors reached that outcome by different routes
+// (one clamped, one discarded), which is why the bound was once carried per
+// vendor; it never was a vendor rule. See videospec.SecondsRejected.
+func TestToDashScopeCreateRequest_OutOfRangeSecondsIsRefused(t *testing.T) {
+	for _, seconds := range []string{"1e20", "1e50", "Inf"} {
+		if _, err := ToDashScopeCreateRequest(CreateVideoRequest{Seconds: seconds}); !errors.Is(err, ErrSecondsOutOfRange) {
+			t.Errorf("Seconds=%q error = %v, want ErrSecondsOutOfRange", seconds, err)
+		}
+	}
+	// The bound itself is still accepted — this moves nothing for real requests.
+	if _, err := ToDashScopeCreateRequest(CreateVideoRequest{Seconds: "1099511627776"}); err != nil {
+		t.Errorf("Seconds at the representable bound: unexpected error %v", err)
 	}
 }

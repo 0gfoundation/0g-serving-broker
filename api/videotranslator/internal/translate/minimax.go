@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/minimax"
 )
 
@@ -109,7 +110,7 @@ const defaultMiniMaxRatio = "16:9"
 // for a text-only request — see there for why "" cannot be sent. Reuses
 // parseSize (shared with the DashScope mapping).
 func sizeToMiniMaxRatio(size string) string {
-	width, height, ok := parseSize(size)
+	width, height, ok := videospec.ParsePixelSize(size)
 	if !ok {
 		return ""
 	}
@@ -125,25 +126,18 @@ func sizeToMiniMaxRatio(size string) string {
 	return ratio
 }
 
-// miniMaxResolutionTokens maps a client-supplied "size" that is already a
-// MiniMax resolution token (rather than pixel dimensions) to its canonical
-// form. This lets a caller target a non-H3 MiniMax model's resolution (e.g.
-// 768P/1080P) explicitly through the OpenAI "size" field, while pixel-dimension
-// sizes fall through to the deployment default resolution.
-var miniMaxResolutionTokens = map[string]string{
-	"512p":  "512P",
-	"720p":  "720P",
-	"768p":  "768P",
-	"1080p": "1080P",
-	"2k":    "2K",
-	"4k":    "4K",
-}
+// miniMaxSpec is MiniMax's duration/tier behaviour, held in videospec so the
+// broker resolves the same (duration, tier) this mapper does — see that
+// package's doc comment for why a second, independent reading is not an option.
+// The concrete type, not the Spec interface: this file IS MiniMax's mapper, so it
+// is entitled to its own vendor's whole surface.
+var miniMaxSpec = videospec.MiniMax
 
 // normalizeMiniMaxResolution returns the canonical MiniMax resolution token for
 // a "size" value that is one, or "" when size is empty or a pixel-dimension
 // string (handled by sizeToMiniMaxRatio instead).
 func normalizeMiniMaxResolution(size string) string {
-	return miniMaxResolutionTokens[strings.ToLower(strings.TrimSpace(size))]
+	return miniMaxSpec.ResolutionToken(size)
 }
 
 // ToMiniMaxCreateRequest builds the MiniMax create body from an OpenAI-shaped
@@ -181,30 +175,25 @@ func normalizeMiniMaxResolution(size string) string {
 //     and named here rather than silently assumed away.
 //   - Fractional values (seconds=4.1): H3 takes an integer, so ceil is forced. The
 //     caller pays 5 for a 4.1 request. Unavoidable without rejecting fractions.
+//
+// The bounds themselves now live in videospec (the broker reads the same ones);
+// these aliases keep this file's prose and tests referring to them by name.
 const (
-	minMiniMaxDuration = 4
-	maxMiniMaxDuration = 15
+	minMiniMaxDuration = videospec.MiniMaxMinSeconds
+	maxMiniMaxDuration = videospec.MiniMaxMaxSeconds
 )
 
-func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) minimax.CreateRequest {
-	// Default when seconds is absent or unparseable: H3 requires a duration, and the
-	// floor is also OpenAI's documented default, so an omitted seconds bills what an
-	// OpenAI client would expect rather than one second more.
-	duration := int64(minMiniMaxDuration)
-	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) {
-		// Clamp the FLOAT before converting: an out-of-range value converts
-		// implementation-defined (MinInt64 on amd64), which would land below the floor
-		// and be clamped UP to the minimum — silently turning an absurd request into
-		// the shortest clip instead of the longest one it can have. The DashScope
-		// sibling guards the same conversion but IGNORES an out-of-range value and
-		// omits duration entirely, letting the vendor default (translate.go,
-		// maxDashScopeSeconds); both fail safe, they are not mirrors.
-		if s > float64(maxMiniMaxDuration) {
-			s = float64(maxMiniMaxDuration)
-		}
-		if d := int64(math.Ceil(s)); d > minMiniMaxDuration {
-			duration = d
-		}
+func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) (minimax.CreateRequest, error) {
+	// Duration comes from the shared spec. H3 requires one, so an absent or
+	// unreadable "seconds" resolves to its 4s floor (also OpenAI's documented
+	// default) and SecondsVendorDecides never happens for this vendor. The
+	// clamping and the ceil live there now — see videospec.Spec.NormalizeSeconds.
+	duration, outcome := miniMaxSpec.NormalizeSeconds(req.Seconds)
+	if outcome == videospec.SecondsRejected {
+		// Refuse rather than render the ceiling. Clamping a value this far out of
+		// range would hand the caller H3's LONGEST clip — the most expensive one —
+		// for a request that plainly asked for no such thing.
+		return minimax.CreateRequest{}, ErrSecondsOutOfRange
 	}
 
 	resolution := defaultResolution
@@ -245,7 +234,7 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) mi
 		Resolution: resolution,
 		Duration:   duration,
 		Ratio:      ratio,
-	}
+	}, nil
 }
 
 // firstFrameReference resolves the OpenAI input_reference into an H3 image URL:

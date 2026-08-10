@@ -7,14 +7,22 @@ package translate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	"github.com/0glabs/0g-serving-broker/videotranslator/internal/dashscope"
 )
+
+// ErrSecondsOutOfRange is returned when a create request's "seconds" is so large
+// that no vendor's duration can be resolved from it (see
+// videospec.SecondsRejected). Callers should surface it as a client error: every
+// fallback available would bill for a clip the caller did not ask for — the
+// vendor's longest, or its own default.
+var ErrSecondsOutOfRange = errors.New("invalid video request: 'seconds' is out of range")
 
 // OpenAI Video API status values.
 const (
@@ -115,13 +123,10 @@ func StatusFromDashScope(status string) string {
 	}
 }
 
-// maxDashScopeSeconds bounds the parsed "seconds" value, mirroring the
-// overflow guard inference/internal/ctrl/video.go's ceilSeconds already
-// applies to the same class of client-supplied duration string — without it,
-// an absurd-but-finite value (e.g. "1e20") overflows the float-to-int64
-// conversion below into an implementation-defined (in practice, garbage
-// negative) result that would be sent to DashScope as-is.
-const maxDashScopeSeconds = 1 << 40
+// dashScopeSpec is DashScope's duration/tier behaviour, held in videospec so the
+// broker resolves the same (duration, tier) this mapper does — see that
+// package's doc comment for why a second, independent reading is not an option.
+var dashScopeSpec = videospec.DashScope
 
 // maxDashScopeSeed is HappyHorse's documented upper bound for "seed": an
 // integer in [0, 2147483647].
@@ -164,14 +169,6 @@ var dashScopeRatios = []struct {
 	{"21:9", 21.0 / 9.0},
 }
 
-// dashScopeResolutionThreshold is the larger-side pixel count at or below
-// which sizeToDashScopeParams snaps to "720P" (above it, "1080P"). HappyHorse
-// only accepts this coarse two-tier enum, never exact pixel dimensions.
-// Chosen so OpenAI's own documented Video sizes split cleanly along it: the
-// 720x1280/1280x720 pair (max side 1280) snaps to 720P, and the
-// 1024x1792/1792x1024 pair (max side 1792) snaps to 1080P.
-const dashScopeResolutionThreshold = 1280
-
 // sizeToDashScopeParams derives HappyHorse's "resolution" ("720P"/"1080P")
 // and "ratio" (e.g. "16:9") parameters from the client's pixel-dimension
 // "size" field (e.g. "1280x720") — there is no direct equivalent on the
@@ -182,26 +179,19 @@ const dashScopeResolutionThreshold = 1280
 // strings for both (omitted from the request, so DashScope applies its own
 // defaults: 1080P, 16:9).
 func sizeToDashScopeParams(size string) (resolution, ratio string) {
-	// DashScope's own two-tier token, passed straight through. Without this a
-	// client sending size="720P" fails parseSize, we omit resolution, the vendor
-	// renders at ITS default (1080P) — and the broker still bills the "720p" table
-	// row it echoed back from the request. That is the one direction that
-	// UNDERBILLS the provider, so the token form is honoured rather than dropped.
-	// Ratio stays empty; DashScope defaults it, exactly as before.
-	switch strings.ToUpper(strings.TrimSpace(size)) {
-	case "720P", "1080P":
-		return strings.ToUpper(strings.TrimSpace(size)), ""
-	}
+	// The tier — token passed straight through, else snapped from the pixel
+	// dimensions — comes from the shared spec. Honouring the token form matters
+	// for billing: without it a client sending size="720P" would have resolution
+	// omitted, the vendor would render at ITS default (1080P), and the caller
+	// would still be charged the 720p row. That is the one direction that
+	// underbills the provider.
+	resolution = dashScopeSpec.Tier(size, "")
 
-	width, height, ok := parseSize(size)
+	// Ratio is NOT a billing input, so it stays here with the vendor's own
+	// mapping. A token-form size yields no ratio; DashScope defaults it.
+	width, height, ok := videospec.ParsePixelSize(size)
 	if !ok {
-		return "", ""
-	}
-
-	if width > dashScopeResolutionThreshold || height > dashScopeResolutionThreshold {
-		resolution = "1080P"
-	} else {
-		resolution = "720P"
+		return resolution, ""
 	}
 
 	target := float64(width) / float64(height)
@@ -245,30 +235,20 @@ func parseDashScopeTime(raw string) (int64, bool) {
 	return t.Unix(), true
 }
 
-// parseSize parses a "WIDTHxHEIGHT" string (case-insensitive on the
-// separator) into strictly-positive pixel dimensions.
-func parseSize(size string) (width, height int, ok bool) {
-	parts := strings.SplitN(strings.ToLower(size), "x", 2)
-	if len(parts) != 2 {
-		return 0, 0, false
-	}
-	w, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
-	h, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if errW != nil || errH != nil || w <= 0 || h <= 0 {
-		return 0, 0, false
-	}
-	return w, h, true
-}
-
 // ToDashScopeCreateRequest builds the DashScope create-task body from an
 // OpenAI-shaped create request. A non-positive, unparsable, or excessive
 // Seconds yields a zero Duration (omitted from the request) rather than an
 // error — DashScope treats duration as optional, so it's left for the
 // vendor's own default.
-func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
-	var duration int64
-	if s, err := strconv.ParseFloat(req.Seconds, 64); err == nil && s > 0 && !math.IsInf(s, 0) && s <= float64(maxDashScopeSeconds) {
-		duration = int64(math.Ceil(s))
+func ToDashScopeCreateRequest(req CreateVideoRequest) (dashscope.CreateRequest, error) {
+	// Duration comes from the shared spec. SecondsVendorDecides is the ordinary
+	// case for this vendor — an unreadable duration means OMIT the field and let
+	// DashScope apply its own default, and the zero value is exactly what to send.
+	duration, outcome := dashScopeSpec.NormalizeSeconds(req.Seconds)
+	if outcome == videospec.SecondsRejected {
+		// Refuse rather than silently fall back to the vendor's default: the caller
+		// would be billed for a clip length nothing in their request asked for.
+		return dashscope.CreateRequest{}, ErrSecondsOutOfRange
 	}
 	resolution, ratio := sizeToDashScopeParams(req.Size)
 	return dashscope.CreateRequest{
@@ -285,7 +265,7 @@ func ToDashScopeCreateRequest(req CreateVideoRequest) dashscope.CreateRequest {
 			Watermark: false,
 			Seed:      parseDashScopeSeed(req.Seed),
 		},
-	}
+	}, nil
 }
 
 // FromCreateResponse translates a DashScope create-task response into the
