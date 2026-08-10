@@ -43,10 +43,12 @@ func (h *SeedanceVideoHandler) CreateVideo(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
 		return
 	}
-	// Pre-flight validation BEFORE any vendor call: asset:// scheme rejection,
-	// the last-frame-requires-first-frame asymmetry, frame-control/reference-
-	// array mutual exclusivity, and reference-array cardinality/audio-alone
-	// rules. See translate.ValidateSeedanceCreateRequest.
+	// Pre-flight validation BEFORE any vendor call: rejects an asset://
+	// scheme on input_reference. See translate.ValidateSeedanceCreateRequest
+	// — this integration only exposes text-to-video and single-first-frame
+	// image-to-video (the two Seedance capabilities with a real OpenAI Video
+	// API field), so there is no last-frame/reference-array rule left to
+	// enforce here.
 	if err := translate.ValidateSeedanceCreateRequest(req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
 		return
