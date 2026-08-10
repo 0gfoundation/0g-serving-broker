@@ -78,6 +78,12 @@ func TestNormalizeSeedanceResolution(t *testing.T) {
 		// silent-downgrade, not a 400).
 		{"1920x1080", "720p"},
 		{"3840x2160", "720p"},
+		// Exact tie: 1056 is equidistant from 480p's 832 and 720p's 720 —
+		// diff(224) == diff(224). Pins the current tie-break (first entry in
+		// seedanceResolutionMaxSides wins a tie, i.e. 480p) so a future
+		// reordering of that slice is a deliberate, reviewed change, not a
+		// silent flip nobody notices.
+		{"1056x594", "480p"},
 		{"", defaultSeedanceResolution},
 		{"garbage", defaultSeedanceResolution},
 	}
@@ -150,6 +156,16 @@ func TestParseSeedanceSeed(t *testing.T) {
 	}
 	if parseSeedanceSeed("99999999999999999999") != nil {
 		t.Error("absurdly large seed should be nil, not overflow")
+	}
+	// Exact ceiling boundary: maxSeedanceSeed (2^31-1) itself must pass, and
+	// exactly one more than it must fail — pins both edges of the `f >
+	// float64(maxSeedanceSeed)` comparator so a future `>=`-for-`>` typo
+	// (which would silently reject the ceiling value itself) gets caught.
+	if got := parseSeedanceSeed("2147483647"); got == nil || *got != maxSeedanceSeed {
+		t.Errorf("parseSeedanceSeed(maxSeedanceSeed) = %v, want %d (the ceiling itself must be accepted)", got, maxSeedanceSeed)
+	}
+	if parseSeedanceSeed("2147483648") != nil {
+		t.Error("one past the ceiling should be nil")
 	}
 }
 
@@ -378,6 +394,13 @@ func TestFromSeedanceGetTaskResponse_ErrorMapping(t *testing.T) {
 		{"cancelled synthesizes a code", seedance.GetTaskResponse{Status: seedance.TaskStatusCancelled}, "seedance_task_cancelled"},
 		{"failed with no body synthesizes a code", seedance.GetTaskResponse{Status: seedance.TaskStatusFailed}, "seedance_task_failed"},
 		{"unrecognized status synthesizes a code", seedance.GetTaskResponse{Status: "something_new"}, "unrecognized_seedance_status"},
+		// The "vendor error object wins" case above only exercises
+		// status=failed. Pin the same priority for expired/cancelled too — a
+		// vendor sending a populated Error alongside either status must still
+		// surface it, not the synthesized generic code, matching the switch's
+		// documented statement-order (Error-object check listed first).
+		{"vendor error object wins over expired's synthesized code too", seedance.GetTaskResponse{Status: seedance.TaskStatusExpired, Error: &seedance.TaskError{Code: "ContentModeration", Message: "blocked"}}, "ContentModeration"},
+		{"vendor error object wins over cancelled's synthesized code too", seedance.GetTaskResponse{Status: seedance.TaskStatusCancelled, Error: &seedance.TaskError{Code: "ContentModeration", Message: "blocked"}}, "ContentModeration"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
