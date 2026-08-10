@@ -539,8 +539,11 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		var rateClass string
 		if sec, size, source := resolveVideoBilling(body, reqBody, contentType); source != "" {
 			seconds = sec
-			rateClass = resolutionRateClass(size)
-			outputCount := c.videoOutputUnits(ctx, sec, size)
+			// Same tier resolution as the paying path below, so whitelisted traffic
+			// reconciles against the same price class it would have been billed at.
+			tier := c.VideoBillingTier(ctx, size)
+			rateClass = resolutionRateClass(tier)
+			outputCount := c.videoOutputUnits(ctx, sec, tier)
 			metricModel := c.metricModel(ctx)
 			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
@@ -604,8 +607,13 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 		c.logger.Warnf("video billed on REQUESTED duration (upstream did not report actual output) for request %s; configure the upstream/shim to echo seconds or usage.output_video_duration", reqModel.RequestHash)
 	}
 
+	// Resolve the tier the vendor's own rules say this is, rather than passing the
+	// raw "size" into the price table — see VideoBillingTier. This is what makes
+	// the amount charged agree with the amount the gate held.
+	tier := c.VideoBillingTier(ctx, size)
+
 	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
-	outputCount := c.videoOutputUnits(ctx, seconds, size)
+	outputCount := c.videoOutputUnits(ctx, seconds, tier)
 
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
@@ -617,7 +625,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// resolution against a video vendor's tiered statement. The weighted units live only in
 	// the fee above and the metric below.
 	if err := c.db.UpdateRequestVideoBilling(reqModel.RequestHash, outputFee.String(), outputFee.String(),
-		seconds, constant.BillingUnitSeconds, resolutionRateClass(size)); err != nil {
+		seconds, constant.BillingUnitSeconds, resolutionRateClass(tier)); err != nil {
 		return errors.Wrap(err, "update request video billing in database")
 	}
 

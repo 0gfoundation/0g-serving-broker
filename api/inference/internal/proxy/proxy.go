@@ -860,9 +860,37 @@ func (p *Proxy) proxyHTTPRequest(ctx *gin.Context) {
 		req.OutputCount = imageNum
 		expectedInputFee = inputFee // Can be 0 or based on input image size
 	case "video-generation":
-		// Video billing is deferred to response time — the provider returns
-		// actual seconds/size in the JSON response, so we don't guess here.
-		expectedInputFee = "0"
+		// The final fee still comes from what the provider reports at settlement
+		// time — a video create is asynchronous and nothing is rendered yet. What
+		// is NOT deferred any more is the reserve: common/videospec says what the
+		// configured vendor will actually render for this request, so the amount
+		// held here is the fee for that, not a guess (issue #628).
+		//
+		// Both the vendor rules and the price are per-model, so the model has to be
+		// resolved first. PrepareHTTPRequest does this too, idempotently, but it
+		// runs after the gate.
+		if p.ctrl.Service.HasMultiModelPricing() && len(reqBody) > 0 {
+			if err := p.ctrl.ResolveModelForBilling(ctx, reqBody, ctx.Request.Header.Get("Content-Type"), userAddress); err != nil {
+				ctx.Set("ignoreError", true)
+				p.handleBrokerError(ctx, err, "resolve model for video billing")
+				return
+			}
+		}
+		reserveFee, err := p.ctrl.VideoCreateReserve(ctx, reqBody)
+		if err != nil {
+			// A duration no vendor can resolve is the caller's fault and is refused
+			// here, before the request is forwarded. Everything else reaching this
+			// point is broker-side (pricing feed, broken per-model config) and must
+			// stay visible to the broker-fault alert. An UNREADABLE duration is
+			// neither: the vendor's own rules define what it renders for one, so it
+			// is priced rather than rejected.
+			if errors.Is(err, ctrl.ErrVideoSecondsOutOfRange) {
+				ctx.Set("ignoreError", true)
+			}
+			p.handleBrokerError(ctx, err, "compute video reserve")
+			return
+		}
+		expectedInputFee = reserveFee
 	default:
 		p.handleBrokerError(ctx, errors.New("unknown service type"), "prepare request extractor")
 		return

@@ -306,8 +306,13 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	if job.ResolvedModel != "" {
 		pollCtx.Set(CtxKeyResolvedModel, job.ResolvedModel)
 	}
-	outputCount := c.videoOutputUnits(pollCtx, seconds, size)
-	rateClass := resolutionRateClass(size)
+	// The tier the vendor's own rules say this is, not the raw "size" — see
+	// ctrl.VideoBillingTier. This path is where it matters most: a vendor that
+	// reports no resolution back leaves settlement holding the size the CLIENT
+	// sent, which for pixel dimensions is not a price-table key at all.
+	tier := c.VideoBillingTier(pollCtx, size)
+	outputCount := c.videoOutputUnits(pollCtx, seconds, tier)
+	rateClass := resolutionRateClass(tier)
 
 	if job.IsWhitelisted {
 		// Commit the completion write BEFORE signing/recording usage, for the same reason as

@@ -75,6 +75,16 @@ var (
 	// different urgency, different fix (add the row), so it gets its own series.
 	VideoTableMissTotal *prometheus.CounterVec
 
+	// VideoReserveSkippedTotal counts video-generation creates forwarded WITHOUT a
+	// pre-flight reserve, labeled by why the fee could not be determined before
+	// forwarding. Every increment is a request that passed the balance gate on the
+	// minimum-locked-balance floor alone — the state that let a 1 0G wallet be
+	// billed 6.698 0G for one clip. It is the signal that a deployment is missing
+	// vendor rules (reason=unknown_vendor) or that a vendor genuinely leaves the
+	// rendered length up to itself (reason=undetermined_duration); both are fixed
+	// by recording that vendor's rules in common/videospec, not by tuning here.
+	VideoReserveSkippedTotal *prometheus.CounterVec
+
 	// VideoPollTimedOutTotal counts video-generation poll jobs (see
 	// docs/design/video-generation-async-billing.md) that hit their
 	// MaxPollDuration ceiling without the provider ever reaching a terminal
@@ -404,6 +414,15 @@ func PrometheusInit(serverName, providerAddress string) {
 		[]string{"reason"},
 	)
 
+	VideoReserveSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "broker_video_reserve_skipped_total",
+			Help:        "Video-generation creates forwarded without a pre-flight reserve, labeled by reason (unknown_vendor = no rules recorded for the configured vendor; undetermined_duration = the vendor decides the clip length itself). Non-zero means those requests are gated only by the minimum locked balance, so a wallet can owe far more than it holds.",
+			ConstLabels: constLabels,
+		},
+		[]string{"reason"},
+	)
+
 	VideoGenerationFailedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name:        "broker_video_generation_failed_total",
@@ -447,6 +466,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	prometheus.MustRegister(VideoPollTimedOutTotal)
 	prometheus.MustRegister(VideoGenerationFailedTotal)
 	prometheus.MustRegister(VideoTableMissTotal)
+	prometheus.MustRegister(VideoReserveSkippedTotal)
 	prometheus.MustRegister(RoutingProofSkippedTotal)
 	prometheus.MustRegister(RequestRejectedTotal)
 	prometheus.MustRegister(FailureCount)
@@ -797,6 +817,27 @@ const (
 	// resolution, so the table maximum across every resolution was charged.
 	VideoTableMissUncovered = "uncovered"
 )
+
+// Reasons a video create could not be reserved for before forwarding.
+const (
+	// VideoReserveSkipUnknownVendor: the deployment names a vendor common/videospec
+	// has no rules for, so nothing here can say what it will render. Fixed by
+	// recording that vendor.
+	VideoReserveSkipUnknownVendor = "unknown_vendor"
+	// VideoReserveSkipUndeterminedDuration: the vendor's rules ARE recorded and say
+	// this request does not determine the clip length — the vendor picks for itself
+	// (DashScope omits an unreadable duration). Not a misconfiguration on its own,
+	// but the fee is unknowable until the vendor reports it.
+	VideoReserveSkipUndeterminedDuration = "undetermined_duration"
+)
+
+// RecordVideoReserveSkipped increments the un-reserved-create counter.
+func RecordVideoReserveSkipped(reason string) {
+	if VideoReserveSkippedTotal == nil {
+		return
+	}
+	VideoReserveSkippedTotal.WithLabelValues(reason).Inc()
+}
 
 // RecordVideoTableMiss increments the per_unit_table miss counter.
 func RecordVideoTableMiss(reason string) {
