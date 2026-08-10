@@ -107,37 +107,35 @@ func TestTier(t *testing.T) {
 	dashscope, _ := Get(VendorDashScope)
 
 	tests := []struct {
-		name              string
-		spec              Spec
-		size              string
-		deploymentDefault string
-		want              string
+		name string
+		spec Spec
+		size string
+		want string
 	}{
-		// MiniMax reads pixel dimensions as an ASPECT RATIO only; its tier comes
-		// from deployment configuration. This is the case that makes a tier
-		// unknowable to anyone who only looks at the request.
-		{"minimax: pixel dimensions are not a tier", minimax, "1280x720", "2K", "2K"},
-		{"minimax: portrait pixels are not a tier either", minimax, "720x1280", "2K", "2K"},
-		{"minimax: absent size falls to the deployment tier", minimax, "", "2K", "2K"},
-		{"minimax: its own token is honoured", minimax, "1080P", "2K", "1080P"},
-		{"minimax: token matching is case/space insensitive", minimax, " 4k ", "2K", "4K"},
-		{"minimax: an unknown token is not a tier", minimax, "8K", "2K", "2K"},
+		// MiniMax reads pixel dimensions as an ASPECT RATIO only. Anything that
+		// does not name a tier renders H3's single one — a fact, not a setting.
+		{"minimax: pixel dimensions are not a tier", minimax, "1280x720", MiniMaxDefaultTier},
+		{"minimax: portrait pixels are not a tier either", minimax, "720x1280", MiniMaxDefaultTier},
+		{"minimax: absent size renders the vendor's one tier", minimax, "", MiniMaxDefaultTier},
+		{"minimax: its own token is honoured", minimax, "1080P", "1080P"},
+		{"minimax: token matching is case/space insensitive", minimax, " 4k ", "4K"},
+		{"minimax: an unknown token is not a tier", minimax, "8K", MiniMaxDefaultTier},
 
-		// DashScope DOES snap pixel dimensions onto its two-tier enum, so the
-		// deployment default is irrelevant to it.
-		{"dashscope: its own token passes through", dashscope, "720p", "ignored", "720P"},
-		{"dashscope: pixels at the threshold snap down", dashscope, "1280x720", "ignored", "720P"},
-		{"dashscope: pixels above the threshold snap up", dashscope, "1792x1024", "ignored", "1080P"},
-		{"dashscope: portrait above the threshold snaps up too", dashscope, "1024x1792", "ignored", "1080P"},
+		// DashScope DERIVES its tier from the request, so it never needed a
+		// configured one either.
+		{"dashscope: its own token passes through", dashscope, "720p", "720P"},
+		{"dashscope: pixels at the threshold snap down", dashscope, "1280x720", "720P"},
+		{"dashscope: pixels above the threshold snap up", dashscope, "1792x1024", "1080P"},
+		{"dashscope: portrait above the threshold snaps up too", dashscope, "1024x1792", "1080P"},
 		// Nothing recognisable: the vendor applies its own default, which the
 		// request does not determine.
-		{"dashscope: unparsable size leaves the tier undetermined", dashscope, "garbage", "ignored", ""},
-		{"dashscope: absent size leaves the tier undetermined", dashscope, "", "ignored", ""},
+		{"dashscope: unparsable size leaves the tier undetermined", dashscope, "garbage", ""},
+		{"dashscope: absent size leaves the tier undetermined", dashscope, "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.spec.Tier(tt.size, tt.deploymentDefault); got != tt.want {
-				t.Errorf("Tier(%q, %q) = %q, want %q", tt.size, tt.deploymentDefault, got, tt.want)
+			if got := tt.spec.Tier(tt.size); got != tt.want {
+				t.Errorf("Tier(%q) = %q, want %q", tt.size, got, tt.want)
 			}
 		})
 	}
@@ -233,11 +231,11 @@ func TestVendorsShareNoStructure(t *testing.T) {
 		t.Errorf("dashscope NormalizeSeconds(1) = %d, want 1 (it has no floor)", got)
 	}
 	// Pixel dimensions: one reads them as a tier, the other as an aspect ratio.
-	if got := minimax.Tier("1792x1024", "2K"); got != "2K" {
-		t.Errorf("minimax Tier(pixels) = %q, want the deployment tier", got)
+	if got := minimax.Tier("1792x1024"); got != "2K" {
+		t.Errorf("minimax Tier(pixels) = %q, want H3's single tier", got)
 	}
-	if got := dashscope.Tier("1792x1024", "2K"); got != "1080P" {
-		t.Errorf("dashscope Tier(pixels) = %q, want 1080P (derived, deployment tier ignored)", got)
+	if got := dashscope.Tier("1792x1024"); got != "1080P" {
+		t.Errorf("dashscope Tier(pixels) = %q, want 1080P (derived from the request)", got)
 	}
 }
 

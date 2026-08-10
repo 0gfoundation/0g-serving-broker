@@ -21,7 +21,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 	}
 
 	t.Run("no reference → text-only content (plain T2V)", func(t *testing.T) {
-		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "a cat", Seconds: "5"}, "2K")
+		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "a cat", Seconds: "5"})
 		if len(got.Content) != 1 || got.Content[0].Type != "text" {
 			t.Fatalf("want single text item, got %+v", got.Content)
 		}
@@ -30,7 +30,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 	t.Run("image_url → first_frame image item (used verbatim)", func(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Prompt: "animate", Seconds: "5", InputReferenceImageURL: "https://cdn/x.png",
-		}, "2K")
+		})
 		ff := firstFrame(got)
 		if ff == nil || ff.Type != "image_url" || ff.ImageURL == nil || ff.ImageURL.URL != "https://cdn/x.png" {
 			t.Fatalf("want first_frame image_url https://cdn/x.png, got %+v", got.Content)
@@ -40,7 +40,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 	t.Run("file_id → mm_file:// first_frame handle", func(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Prompt: "animate", Seconds: "5", InputReferenceFileID: "abc123",
-		}, "2K")
+		})
 		ff := firstFrame(got)
 		if ff == nil || ff.ImageURL == nil || ff.ImageURL.URL != "mm_file://abc123" {
 			t.Fatalf("want first_frame mm_file://abc123, got %+v", got.Content)
@@ -50,7 +50,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 	t.Run("mm_file:// in image_url is rejected (shared vendor file namespace)", func(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Prompt: "animate", Seconds: "5", InputReferenceImageURL: "mm_file://someone-elses-file",
-		}, "2K")
+		})
 		if ff := firstFrame(got); ff != nil {
 			t.Fatalf("mm_file:// image_url must be dropped, got %+v", ff)
 		}
@@ -58,7 +58,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 
 	t.Run("non-image scheme rejected, degrades to T2V", func(t *testing.T) {
 		for _, u := range []string{"file:///etc/passwd", "data:text/html;base64,PHNjcmlwdD4=", "/local/path.png"} {
-			req, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5", InputReferenceImageURL: u}, "2K")
+			req, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Prompt: "p", Seconds: "5", InputReferenceImageURL: u})
 			if ff := firstFrame(req); ff != nil {
 				t.Errorf("%q must be dropped, got %+v", u, ff)
 			}
@@ -68,7 +68,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 	t.Run("data:image URI accepted (multipart upload path)", func(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Prompt: "p", Seconds: "5", InputReferenceImageURL: "data:image/png;base64,iVBORw0KGgo=",
-		}, "2K")
+		})
 		if ff := firstFrame(got); ff == nil || !strings.HasPrefix(ff.ImageURL.URL, "data:image/png") {
 			t.Fatalf("data:image URI should be kept, got %+v", ff)
 		}
@@ -77,7 +77,7 @@ func TestToMiniMaxCreateRequest_InputReference(t *testing.T) {
 	t.Run("image_url wins over file_id", func(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Prompt: "animate", Seconds: "5", InputReferenceImageURL: "https://cdn/x.png", InputReferenceFileID: "abc123",
-		}, "2K")
+		})
 		ff := firstFrame(got)
 		if ff == nil || ff.ImageURL.URL != "https://cdn/x.png" {
 			t.Fatalf("image_url should win, got %+v", ff)
@@ -172,7 +172,7 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 	t.Run("pixel size sets ratio, resolution stays the default", func(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Model: "MiniMax-H3", Prompt: "a cat", Seconds: "5", Size: "1280x720",
-		}, "2K")
+		})
 		if got.Model != "MiniMax-H3" || got.Resolution != "2K" || got.Ratio != "16:9" || got.Duration != 5 {
 			t.Fatalf("unexpected request: %+v", got)
 		}
@@ -182,7 +182,7 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 	})
 
 	t.Run("resolution token in size overrides the default, ratio falls to the t2v default", func(t *testing.T) {
-		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Model: "m", Seconds: "6", Size: "1080p"}, "2K")
+		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Model: "m", Seconds: "6", Size: "1080p"})
 		if got.Resolution != "1080P" || got.Ratio != defaultMiniMaxRatio {
 			t.Fatalf("unexpected resolution/ratio: %+v", got)
 		}
@@ -196,7 +196,7 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 	// shape must leave here with one.
 	t.Run("every text-only request carries a ratio", func(t *testing.T) {
 		for _, size := range []string{"", "2K", "1080p", "768P", "not-a-size", "0x720"} {
-			got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Model: "MiniMax-H3", Prompt: "a cat", Seconds: "4", Size: size}, "2K")
+			got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Model: "MiniMax-H3", Prompt: "a cat", Seconds: "4", Size: size})
 			if got.Ratio == "" {
 				t.Errorf("size=%q produced no ratio — H3 rejects a t2v request without one", size)
 			}
@@ -210,21 +210,21 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{
 			Model: "MiniMax-H3", Prompt: "a cat", Seconds: "4", Size: "2K",
 			InputReferenceImageURL: "https://example.com/frame.png",
-		}, "2K")
+		})
 		if got.Ratio != "" {
 			t.Errorf("Ratio = %q, want none — the first frame defines it", got.Ratio)
 		}
 	})
 
 	t.Run("fractional seconds round up", func(t *testing.T) {
-		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "7.2"}, "2K"); got.Duration != 8 {
+		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "7.2"}); got.Duration != 8 {
 			t.Errorf("Duration = %d, want 8", got.Duration)
 		}
 	})
 
 	t.Run("invalid/absent seconds defaults to H3 minimum (5)", func(t *testing.T) {
 		for _, s := range []string{"", "0", "-3", "abc"} {
-			if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: s}, "2K"); got.Duration != minMiniMaxDuration {
+			if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: s}); got.Duration != minMiniMaxDuration {
 				t.Errorf("Seconds=%q: Duration = %d, want %d", s, got.Duration, minMiniMaxDuration)
 			}
 		}
@@ -234,13 +234,13 @@ func TestToMiniMaxCreateRequest(t *testing.T) {
 		// 4 is OpenAI's default and inside H3's range, so it must NOT be rounded up:
 		// billing is on generated seconds, so clamping up would over-bill the most
 		// common request shape.
-		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}, "2K"); got.Duration != 4 {
+		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "4"}); got.Duration != 4 {
 			t.Errorf("seconds=4 → Duration %d, want 4 (H3 floor)", got.Duration)
 		}
-		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); got.Duration != 15 {
+		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}); got.Duration != 15 {
 			t.Errorf("seconds=20 → Duration %d, want 15 (H3 ceil)", got.Duration)
 		}
-		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "12"}, "2K"); got.Duration != 12 {
+		if got, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "12"}); got.Duration != 12 {
 			t.Errorf("seconds=12 → Duration %d, want 12 (in range)", got.Duration)
 		}
 	})
@@ -344,7 +344,7 @@ func TestFromMiniMaxGetTaskResponse(t *testing.T) {
 // clamping DOWN is safe in that respect, and it is bounded by what they requested.
 func TestDurationIsNeverClampedUpwards(t *testing.T) {
 	for _, seconds := range []string{"4", "5", "8", "12", "15"} {
-		req, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: seconds}, "2K")
+		req, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: seconds})
 		want, _ := strconv.ParseInt(seconds, 10, 64)
 		if req.Duration != want {
 			t.Errorf("Seconds=%q sent Duration=%d — a value inside H3's range must go through untouched, or the caller is billed for seconds they did not ask for", seconds, req.Duration)
@@ -353,7 +353,7 @@ func TestDurationIsNeverClampedUpwards(t *testing.T) {
 
 	// Above the ceiling is the one case that changes the value, and it can only
 	// lower it.
-	if req, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}, "2K"); req.Duration != maxMiniMaxDuration {
+	if req, _ := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: "20"}); req.Duration != maxMiniMaxDuration {
 		t.Errorf("Seconds=20 sent Duration=%d, want %d", req.Duration, maxMiniMaxDuration)
 	}
 
@@ -369,7 +369,7 @@ func TestDurationIsNeverClampedUpwards(t *testing.T) {
 		{"0.5", 4, "ditto"},
 		{"4.1", 5, "H3 takes an integer, so ceil is forced"},
 	} {
-		req, err := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: tc.seconds}, "2K")
+		req, err := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: tc.seconds})
 		if err != nil {
 			t.Errorf("Seconds=%q: unexpected error %v", tc.seconds, err)
 			continue
@@ -384,7 +384,7 @@ func TestDurationIsNeverClampedUpwards(t *testing.T) {
 	// request that asked for no such thing. It is refused now; see
 	// videospec.SecondsRejected.
 	for _, seconds := range []string{"1e30", "1e50", "Inf"} {
-		if _, err := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: seconds}, "2K"); !errors.Is(err, ErrSecondsOutOfRange) {
+		if _, err := ToMiniMaxCreateRequest(CreateVideoRequest{Seconds: seconds}); !errors.Is(err, ErrSecondsOutOfRange) {
 			t.Errorf("Seconds=%q error = %v, want ErrSecondsOutOfRange", seconds, err)
 		}
 	}

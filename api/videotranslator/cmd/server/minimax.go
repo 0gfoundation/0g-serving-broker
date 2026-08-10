@@ -34,7 +34,7 @@ func MiniMaxMain() {
 		IdleConnTimeout:     90 * time.Second,
 	}
 	client := minimax.NewClient(cfg.MiniMaxBaseURL, &http.Client{Timeout: cfg.RequestTimeout, Transport: transport})
-	videoHandler := handler.NewMiniMaxVideoHandler(client, cfg.MiniMaxResolution, logger)
+	videoHandler := handler.NewMiniMaxVideoHandler(client, logger)
 
 	engine := handler.NewEngine()
 	engine.POST("/videos", videoHandler.CreateVideo)

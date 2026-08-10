@@ -141,9 +141,9 @@ func normalizeMiniMaxResolution(size string) string {
 }
 
 // ToMiniMaxCreateRequest builds the MiniMax create body from an OpenAI-shaped
-// create request. defaultResolution is the deployment-configured resolution
-// (e.g. "2K", H3's only supported value) used unless the client's "size" is
-// itself a recognized MiniMax resolution token. A non-positive, unparsable, or
+// create request. The rendered resolution comes from the shared spec — H3 serves
+// a single tier, so there is nothing for a deployment to choose and nothing for
+// the broker to be told separately (see videospec.MiniMaxDefaultTier). A non-positive, unparsable, or
 // absent Seconds falls to the floor below — H3 requires a duration, so there is no
 // "omit it and let the vendor decide" option.
 // MiniMax-H3 accepts an integer duration in [4,15], per the model's public
@@ -183,7 +183,7 @@ const (
 	maxMiniMaxDuration = videospec.MiniMaxMaxSeconds
 )
 
-func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) (minimax.CreateRequest, error) {
+func ToMiniMaxCreateRequest(req CreateVideoRequest) (minimax.CreateRequest, error) {
 	// Duration comes from the shared spec. H3 requires one, so an absent or
 	// unreadable "seconds" resolves to its 4s floor (also OpenAI's documented
 	// default) and SecondsVendorDecides never happens for this vendor. The
@@ -196,17 +196,13 @@ func ToMiniMaxCreateRequest(req CreateVideoRequest, defaultResolution string) (m
 		return minimax.CreateRequest{}, ErrSecondsOutOfRange
 	}
 
-	resolution := defaultResolution
-	ratio := ""
-	if tok := normalizeMiniMaxResolution(req.Size); tok != "" {
-		// The client addressed a resolution tier directly via "size".
-		resolution = tok
-	} else {
-		// A pixel-dimension "size" only informs the aspect ratio; resolution
-		// stays the deployment default (H3 accepts only "2K", so deriving a
-		// tier from pixels would produce a value H3 rejects).
-		ratio = sizeToMiniMaxRatio(req.Size)
-	}
+	// The tier comes from the shared spec, which is also what the broker prices
+	// against: a token in "size" addresses one directly, anything else renders
+	// H3's single tier. A pixel-dimension "size" only informs the aspect ratio,
+	// and yields "" from the token lookup, so both are safe to compute
+	// unconditionally.
+	resolution := miniMaxSpec.Tier(req.Size)
+	ratio := sizeToMiniMaxRatio(req.Size)
 
 	content := []minimax.ContentItem{{Type: "text", Text: req.Prompt}}
 	// Image-to-video: the OpenAI input_reference maps to an H3 first_frame image

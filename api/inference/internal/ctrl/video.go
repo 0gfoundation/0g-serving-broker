@@ -615,6 +615,10 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
 	outputCount := c.videoOutputUnits(ctx, seconds, tier)
 
+	// The gate reserved for a length the recorded rules predicted; say so if the
+	// vendor rendered another. Does not change the fee.
+	c.WarnVideoDurationDrift(ctx, reqBody, contentType, seconds)
+
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee for video generation")

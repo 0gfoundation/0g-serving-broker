@@ -15,8 +15,8 @@ import (
 )
 
 // newReserveTestCtrl builds a multi-model video Ctrl whose single model names the
-// given vendor and deployment tier, priced natively so no rate feed is involved.
-func newReserveTestCtrl(t *testing.T, vendor videospec.Vendor, deploymentTier string) (*Ctrl, *gin.Context) {
+// given vendor, priced natively so no rate feed is involved.
+func newReserveTestCtrl(t *testing.T, vendor videospec.Vendor) (*Ctrl, *gin.Context) {
 	t.Helper()
 	c := &Ctrl{logger: testLogger()}
 	c.Service.Type = "video-generation"
@@ -25,9 +25,8 @@ func newReserveTestCtrl(t *testing.T, vendor videospec.Vendor, deploymentTier st
 		Model:       "vid-1",
 		OutputPrice: "1000",
 		Billing: &config.BillingConfig{
-			Mode:              config.BillingModePerVideoSecond,
-			Vendor:            string(vendor),
-			DefaultResolution: deploymentTier,
+			Mode:   config.BillingModePerVideoSecond,
+			Vendor: string(vendor),
 		},
 	}}
 	if err := c.Service.BuildModelPricingMap(); err != nil {
@@ -216,7 +215,7 @@ func TestRawVideoRequestFields_LargeJSONSeedSurvives(t *testing.T) {
 // rather than at the translator saves the round trip.
 func TestVideoCreateReserve_OutOfRangeSecondsIsRefused(t *testing.T) {
 	for _, vendor := range []videospec.Vendor{videospec.VendorMiniMax, videospec.VendorDashScope} {
-		c, ctx := newReserveTestCtrl(t, vendor, "2K")
+		c, ctx := newReserveTestCtrl(t, vendor)
 		_, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":1e30}`))
 		if !errors.Is(err, ErrVideoSecondsOutOfRange) {
 			t.Errorf("%s: err = %v, want ErrVideoSecondsOutOfRange", vendor, err)
@@ -235,11 +234,10 @@ func TestVideoCreateReserve_OutOfRangeSecondsIsRefused(t *testing.T) {
 // simply lost the difference.
 func TestVideoBillingTier_SettlementAgreesWithTheGate(t *testing.T) {
 	tests := []struct {
-		name           string
-		vendor         videospec.Vendor
-		deploymentTier string
-		settledSize    string
-		want           string
+		name        string
+		vendor      videospec.Vendor
+		settledSize string
+		want        string
 	}{
 		{
 			name:   "dashscope: pixel dimensions become the tier the vendor rendered",
@@ -253,11 +251,11 @@ func TestVideoBillingTier_SettlementAgreesWithTheGate(t *testing.T) {
 			// MiniMax reports its real tier back, so this is already right — but it
 			// must go through the same resolution, not a second code path.
 			name:   "minimax: the reported tier is honoured",
-			vendor: videospec.VendorMiniMax, deploymentTier: "2K", settledSize: "1080P", want: "1080P",
+			vendor: videospec.VendorMiniMax, settledSize: "1080P", want: "1080P",
 		},
 		{
-			name:   "minimax: pixel dimensions fall to the deployment tier, as the vendor does",
-			vendor: videospec.VendorMiniMax, deploymentTier: "2K", settledSize: "1280x720", want: "2K",
+			name:   "minimax: pixel dimensions fall to its single tier, as the vendor does",
+			vendor: videospec.VendorMiniMax, settledSize: "1280x720", want: "2K",
 		},
 		{
 			// Nothing determined a tier. "" is billed at the baseline either way, but
@@ -268,7 +266,7 @@ func TestVideoBillingTier_SettlementAgreesWithTheGate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, ctx := newReserveTestCtrl(t, tt.vendor, tt.deploymentTier)
+			c, ctx := newReserveTestCtrl(t, tt.vendor)
 			if got := c.VideoBillingTier(ctx, tt.settledSize); got != tt.want {
 				t.Errorf("VideoBillingTier(%q) = %q, want %q", tt.settledSize, got, tt.want)
 			}
@@ -280,7 +278,7 @@ func TestVideoBillingTier_SettlementAgreesWithTheGate(t *testing.T) {
 // vendor has no rules recorded must settle exactly as it does now. Changing what
 // it bills would make this a pricing change for vendors nobody has looked at yet.
 func TestVideoBillingTier_UnrecordedVendorKeepsTodaysBehaviour(t *testing.T) {
-	c, ctx := newReserveTestCtrl(t, "seedance", "720P")
+	c, ctx := newReserveTestCtrl(t, "seedance")
 	if got := c.VideoBillingTier(ctx, "1792x1024"); got != "1792x1024" {
 		t.Errorf("VideoBillingTier = %q, want the size unchanged", got)
 	}
@@ -291,4 +289,71 @@ func TestVideoBillingTier_UnrecordedVendorKeepsTodaysBehaviour(t *testing.T) {
 	if got := single.VideoBillingTier(&gin.Context{}, "1792x1024"); got != "1792x1024" {
 		t.Errorf("single-model VideoBillingTier = %q, want the size unchanged", got)
 	}
+}
+
+// TestWarnVideoDurationDrift covers the one thing that can still go wrong once
+// the tier stopped being configurable: the recorded rules falling behind the
+// vendor. MiniMax H3's floor moved from 5s to 4s once already, and nothing
+// announces such a change.
+//
+// The negative cases matter more than the positive one. This fires on a gap
+// nobody can close from configuration, so an alert that also fires when
+// everything is fine would be worse than none at all.
+func TestWarnVideoDurationDrift(t *testing.T) {
+	count := func(t *testing.T, c *Ctrl, ctx *gin.Context, body string, billedSeconds int64) int {
+		t.Helper()
+		rec := &countingLogger{Logger: c.logger}
+		c.logger = rec
+		c.WarnVideoDurationDrift(ctx, []byte(body), "application/json", billedSeconds)
+		return rec.errors
+	}
+
+	t.Run("the vendor rendered a length the rules did not predict", func(t *testing.T) {
+		c, ctx := newReserveTestCtrl(t, videospec.VendorMiniMax)
+		// Rules say 5; the vendor reports it rendered 8.
+		if got := count(t, c, ctx, `{"seconds":5}`, 8); got != 1 {
+			t.Errorf("logged %d lines for a duration mismatch, want 1", got)
+		}
+	})
+
+	t.Run("agreement is silent", func(t *testing.T) {
+		c, ctx := newReserveTestCtrl(t, videospec.VendorMiniMax)
+		if got := count(t, c, ctx, `{"seconds":5}`, 5); got != 0 {
+			t.Errorf("logged %d lines for a matching request, want 0", got)
+		}
+	})
+
+	t.Run("a clamp the rules themselves applied is not drift", func(t *testing.T) {
+		// Asking for 1 and being billed 4 is MiniMax's floor working exactly as
+		// recorded — the gate reserved 4 too.
+		c, ctx := newReserveTestCtrl(t, videospec.VendorMiniMax)
+		if got := count(t, c, ctx, `{"seconds":1}`, 4); got != 0 {
+			t.Errorf("logged %d lines for a correctly-predicted floor, want 0", got)
+		}
+	})
+
+	t.Run("nothing was predicted, so nothing can have drifted", func(t *testing.T) {
+		// DashScope omits an unreadable duration and picks the length itself, so
+		// the gate never predicted one. Reporting here would put a permanent
+		// baseline under an alert that means "the recorded rules are stale".
+		c, ctx := newReserveTestCtrl(t, videospec.VendorDashScope)
+		if got := count(t, c, ctx, `{"size":"720P"}`, 9); got != 0 {
+			t.Errorf("logged %d lines when the vendor chose the length, want 0", got)
+		}
+	})
+
+	t.Run("an unrecorded vendor has no rules to fall behind", func(t *testing.T) {
+		c, ctx := newReserveTestCtrl(t, "seedance")
+		if got := count(t, c, ctx, `{"seconds":5}`, 99); got != 0 {
+			t.Errorf("logged %d lines for an unrecorded vendor, want 0", got)
+		}
+	})
+
+	t.Run("a single-model service has no per-model rules at all", func(t *testing.T) {
+		c := &Ctrl{logger: testLogger()}
+		c.Service.Type = "video-generation"
+		if got := count(t, c, &gin.Context{}, `{"seconds":5}`, 99); got != 0 {
+			t.Errorf("logged %d lines for a single-model service, want 0", got)
+		}
+	})
 }

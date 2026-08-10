@@ -67,10 +67,10 @@ func (dashScope) ResolutionToken(size string) string {
 	return ""
 }
 
-// Tier: unlike MiniMax, this vendor DOES derive a tier from pixel dimensions, so
-// deploymentDefault is irrelevant to it. Nothing recognisable yields "" — the
+// Tier: unlike MiniMax, this vendor DERIVES a tier from pixel dimensions, so it
+// never needed a configured one either. Nothing recognisable yields "" — the
 // vendor then applies its own default, which the request did not determine.
-func (d dashScope) Tier(size, deploymentDefault string) string {
+func (d dashScope) Tier(size string) string {
 	if tok := d.ResolutionToken(size); tok != "" {
 		return tok
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -72,9 +73,9 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 			billing = e.Billing
 		}
 	}
-	var vendorName, deploymentTier string
+	var vendorName string
 	if billing != nil {
-		vendorName, deploymentTier = billing.Vendor, billing.DefaultResolution
+		vendorName = billing.Vendor
 	}
 
 	spec, ok := videospec.Get(videospec.Vendor(vendorName))
@@ -105,7 +106,7 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 			vendorName)
 		return "0", nil
 	}
-	tier := spec.Tier(rawSize, deploymentTier)
+	tier := spec.Tier(rawSize)
 
 	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {
@@ -271,5 +272,51 @@ func (c *Ctrl) VideoBillingTier(ctx context.Context, size string) string {
 	// table lookup, which silently resolves to the baseline multiplier; "" lands
 	// there too, but says so — the rate_class it produces is empty rather than a
 	// pixel dimension masquerading as a price class.
-	return spec.Tier(size, entry.Billing.DefaultResolution)
+	return spec.Tier(size)
+}
+
+// WarnVideoDurationDrift reports a vendor rendering a clip length the recorded
+// rules did not predict.
+//
+// Only the DURATION. The tier cannot drift any more: a vendor either derives it
+// from the request or serves exactly one, and both are stated in
+// common/videospec, so there is no second copy to disagree with. That was the
+// larger half of what a reconciliation pass would have watched for, and it was
+// removed rather than monitored.
+//
+// What is left is a real but rarer risk: the recorded rules falling behind the
+// vendor. MiniMax H3's floor moved from 5s to 4s once already, and nothing
+// announces such a change — the gate would keep reserving for the old length
+// while the vendor rendered and charged for the new one. Settlement is unharmed
+// (it bills what the vendor reports); the reserve is what quietly goes wrong.
+//
+// It runs after the money is spent and cannot do otherwise: a vendor only reports
+// what it rendered once it has. The point is to make the NEXT request right.
+// Throttled per (predicted -> billed) pair, so a persistent drift costs a handful
+// of lines an hour, and silent whenever nothing was predicted to begin with.
+func (c *Ctrl) WarnVideoDurationDrift(ctx context.Context, reqBody []byte, contentType string, billedSeconds int64) {
+	if billedSeconds <= 0 || !c.Service.HasMultiModelPricing() {
+		return
+	}
+	entry := c.resolveModelPricing(ctx)
+	if entry == nil || entry.Billing == nil {
+		return
+	}
+	spec, ok := videospec.Get(videospec.Vendor(entry.Billing.Vendor))
+	if !ok {
+		return
+	}
+	rawSeconds, _ := rawVideoRequestFields(reqBody, contentType)
+	predicted, outcome := spec.NormalizeSeconds(rawSeconds)
+	if outcome != videospec.SecondsResolved || predicted == billedSeconds {
+		return
+	}
+	// Keyed on the two DURATIONS: they come from the recorded rules and from the
+	// vendor, so the key space is bounded. Anything caller-chosen would let one
+	// client mint a fresh key per request and flush the memo this shares with
+	// every other throttled reason.
+	c.logProofSkip("video_duration_drift",
+		strconv.FormatInt(predicted, 10)+"->"+strconv.FormatInt(billedSeconds, 10),
+		"video duration drift: vendor %q rendered %ds where common/videospec predicted %ds, so this request was gated on the wrong amount. The recorded rules for that vendor no longer match its behaviour",
+		entry.Billing.Vendor, billedSeconds, predicted)
 }

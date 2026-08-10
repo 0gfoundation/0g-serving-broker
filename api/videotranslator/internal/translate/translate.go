@@ -185,7 +185,7 @@ func sizeToDashScopeParams(size string) (resolution, ratio string) {
 	// omitted, the vendor would render at ITS default (1080P), and the caller
 	// would still be charged the 720p row. That is the one direction that
 	// underbills the provider.
-	resolution = dashScopeSpec.Tier(size, "")
+	resolution = dashScopeSpec.Tier(size)
 
 	// Ratio is NOT a billing input, so it stays here with the vendor's own
 	// mapping. A token-form size yields no ratio; DashScope defaults it.
