@@ -616,16 +616,6 @@ func (e *InvalidContainerError) Error() string {
 	return "invalid container alias: " + e.Alias
 }
 
-// ForbiddenEnvKeyError is returned when trying to modify an env key not in the whitelist
-type ForbiddenEnvKeyError struct {
-	Key     string
-	Allowed []string
-}
-
-func (e *ForbiddenEnvKeyError) Error() string {
-	return fmt.Sprintf("environment variable '%s' is not allowed, allowed keys: %v", e.Key, e.Allowed)
-}
-
 // InvalidConfigError is returned when the config content is not valid YAML
 type InvalidConfigError struct {
 	Err error
@@ -1009,35 +999,14 @@ func (c *Ctrl) UpdatePrometheusConfig(ctx context.Context, base64Config string) 
 	return nil
 }
 
-// UpdateIngressConfig updates the ingress container environment variables
-// Validates env keys against the IngressAllowedEnvKeys whitelist
-func (c *Ctrl) UpdateIngressConfig(ctx context.Context, envUpdates map[string]string) error {
-	// Validate env keys against whitelist
-	for key := range envUpdates {
-		allowed := false
-		for _, allowedKey := range config.IngressAllowedEnvKeys {
-			if key == allowedKey {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return &ForbiddenEnvKeyError{Key: key, Allowed: config.IngressAllowedEnvKeys}
-		}
-	}
-
-	ingressName := containerIngress
-	c.logger.Infof("[UpdateIngressConfig] Updating ingress container %s with env keys: %v", ingressName, mapKeys(envUpdates))
-
-	if err := c.dockerClient.UpdateContainerEnv(ctx, ingressName, envUpdates); err != nil {
-		return fmt.Errorf("failed to update ingress container: %w", err)
-	}
-
-	c.logger.Info("[UpdateIngressConfig] Ingress config updated successfully")
-	return nil
-}
-
-// GetIngressEnv returns the current environment variables of the ingress container
+// GetIngressEnv returns the ingress container's environment, narrowed to the keys
+// worth reporting.
+//
+// Reporting only. Nothing writes these any more: what the ingress routes traffic to is
+// fixed by the compose file, so it is covered by compose_hash and cannot be changed
+// through this API at all. config.IngressAllowedEnvKeys is therefore a display filter
+// here — it keeps a token or a certificate out of the response, not a caller out of the
+// container.
 func (c *Ctrl) GetIngressEnv(ctx context.Context) (map[string]string, error) {
 	ingressName := containerIngress
 	return c.dockerClient.GetContainerEnv(ctx, ingressName, config.IngressAllowedEnvKeys)
@@ -1051,13 +1020,4 @@ func (c *Ctrl) GetPrometheusConfig(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return env["PROMETHEUS_CONFIG"], nil
-}
-
-// mapKeys returns the keys of a map as a slice
-func mapKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }

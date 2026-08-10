@@ -234,8 +234,7 @@ func selfAndOther() []map[string]any {
 }
 
 // One entry per getContainerID call site, so none of them can be repointed at
-// unguardedContainerID with the suite still green. RecreateContainerWithEnv is
-// covered through UpdateContainerEnv, which is one of its two wrappers.
+// unguardedContainerID with the suite still green.
 func TestWritePathsRefuseSelf(t *testing.T) {
 	stubHostname(t, selfHost)
 
@@ -248,8 +247,8 @@ func TestWritePathsRefuseSelf(t *testing.T) {
 			return err
 		},
 		"ReloadNginx": func(c *Client) error { return c.ReloadNginx(context.Background(), brokerName) },
-		"UpdateContainerEnv": func(c *Client) error {
-			return c.UpdateContainerEnv(context.Background(), brokerName, map[string]string{"A": "B"})
+		"RerunContainerWithEnv": func(c *Client) error {
+			return c.RerunContainerWithEnv(context.Background(), brokerName, map[string]string{"A": "B"})
 		},
 	}
 

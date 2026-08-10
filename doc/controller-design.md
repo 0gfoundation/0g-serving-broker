@@ -173,9 +173,28 @@ Set these in the compose file. §4.4 covers what that does and does not close.
 
 | Method | Path                      | Description                    |
 | ------ | ------------------------- | ------------------------------ |
-| GET    | `/v1/configs/:name`       | Get current config of specific container |
-| PUT    | `/v1/configs/:name`       | Update config of specific container |
-| POST   | `/v1/configs/:name/apply` | Update config and restart container |
+| GET    | `/v1/config/core`         | Get the config file shared by broker and event |
+| PUT    | `/v1/config/core`         | Write that file and restart broker + event |
+| GET    | `/v1/config/ingress`      | Report the ingress container's environment |
+| GET    | `/v1/config/prometheus`   | Get the Prometheus config (base64) |
+| PUT    | `/v1/config/prometheus`   | Rerun prometheus-init with a new config |
+
+**Breaking change**: `PUT /v1/config/ingress` has been **removed** and now returns
+**404**, indistinguishable from an unknown path.
+
+What the ingress routes traffic to is not something a running deployment should be able
+to change. It was editable through this API, against a whitelist that included
+`TARGET_ENDPOINT`, `DOMAIN` and `GATEWAY_DOMAIN` — so an admin wallet could repoint the
+front end at a different upstream — and it left no record anywhere. Those values now come from the compose file only, which means
+`compose_hash` covers them: a reader can see what they are, and they cannot change without
+the deployment's identity changing.
+
+`GET /v1/config/ingress` stays. `config.IngressAllowedEnvKeys` still narrows what it
+reports, but it is a display filter now — it keeps a token or a certificate out of the
+response, not a caller out of the container.
+
+Changing an ingress value means editing the compose file and redeploying, exactly as with
+the container names (§3.1) and the two whitelists (§4.4).
 
 ### 4.3 Image Management API
 
@@ -227,7 +246,8 @@ if the environment variable is set, editing the config file alone will not do it
 and nothing else, and it writes the same file the controller loads. A caller
 holding one admin wallet can write `controller.adminAddresses`,
 `controller.allowedIPs`, `controller.imageRepo` or `controller.docker.host` there,
-and the controller reads them at its next start. `ADMIN_ADDRESS` / `ALLOWED_IPS`
+and the controller reads them at its next start. (`PUT /v1/config/ingress` used to be a
+second such route, reaching the ingress upstream; it is gone — see §4.2.) `ADMIN_ADDRESS` / `ALLOWED_IPS`
 override the first two (§3.2); nothing overrides the other two. **Set those env
 vars in the compose file** — and note that no code path enforces a floor on the
 number of remaining admins.
