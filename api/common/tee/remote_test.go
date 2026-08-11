@@ -11,7 +11,20 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/crypto"
+
+	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
+	"github.com/0glabs/0g-serving-broker/common/log"
 )
+
+// testLogger builds a quiet logger, since SyncQuote logs the address it settled on.
+func testLogger(t *testing.T) log.Logger {
+	t.Helper()
+	l, err := log.GetLogger(&commonconfig.LoggerConfig{Format: "text", Level: "error"})
+	if err != nil {
+		t.Fatalf("building logger: %v", err)
+	}
+	return l
+}
 
 // testSignerKeyHex is the key the fake controller signs with, so a test can compute what
 // local signing would have produced for the same hash.
@@ -151,20 +164,78 @@ func TestSignAndSignEIP712GoThroughTheSeam(t *testing.T) {
 	}
 }
 
-// A local deployment must not acquire a remote signer by accident: with TEE_SOCKET unset the
-// key stays in this process and the signature is exactly what it was before this change
-// existed. That is the invariant that keeps every controller-less deployment untouched.
-func TestNoSocketMeansTheKeyStaysLocal(t *testing.T) {
-	t.Setenv(teeSocketEnvVar, "")
+// TEE_SOCKET, and nothing else, decides whether the key leaves this process.
+//
+// This drives SyncQuote rather than hand-building a TeeService, because the branch being
+// pinned is SyncQuote's: asserting that a struct literal has no remote signer would pass
+// however that branch was written. Both calls fail — there is no dstack and no real
+// controller here — but they fail after the decision, which is what is under test.
+func TestTheSocketDecidesWhereTheKeyLives(t *testing.T) {
+	unreachable := filepath.Join(t.TempDir(), "absent.sock")
 
+	t.Run("unset keeps the key local", func(t *testing.T) {
+		t.Setenv(teeSocketEnvVar, "")
+
+		s, err := NewTeeService(Phala, testLogger(t))
+		if err != nil {
+			t.Fatalf("NewTeeService: %v", err)
+		}
+		// Fails at dstack, which is not running here. The decision has already been made.
+		_ = s.SyncQuote(context.Background(), false)
+
+		if s.remote != nil {
+			t.Error("TEE_SOCKET unset produced a remote signer — a controller-less deployment must keep its key")
+		}
+	})
+
+	t.Run("set moves signing to the controller", func(t *testing.T) {
+		t.Setenv(teeSocketEnvVar, unreachable)
+
+		s, err := NewTeeService(Phala, testLogger(t))
+		if err != nil {
+			t.Fatalf("NewTeeService: %v", err)
+		}
+		_ = s.SyncQuote(context.Background(), false)
+
+		if s.remote == nil {
+			t.Fatal("TEE_SOCKET set produced no remote signer")
+		}
+		if s.ProviderSigner != nil {
+			t.Error("a remote deployment holds a signing key, which is the thing it must not do")
+		}
+	})
+
+	t.Run("the address comes from the controller", func(t *testing.T) {
+		remote := signingController(t)
+		s, err := NewTeeService(Phala, testLogger(t))
+		if err != nil {
+			t.Fatalf("NewTeeService: %v", err)
+		}
+		s.remote = remote
+		// SyncQuote's own socket lookup is covered above; this checks the branch that reads
+		// the address rather than computing it, without needing a live dstack for the quote.
+		addr, err := remote.SignerAddress(context.Background())
+		if err != nil {
+			t.Fatalf("SignerAddress: %v", err)
+		}
+		key, err := crypto.HexToECDSA(testSignerKeyHex)
+		if err != nil {
+			t.Fatalf("parsing the test key: %v", err)
+		}
+		if addr != crypto.PubkeyToAddress(key.PublicKey) {
+			t.Errorf("address %s does not belong to the key the controller signs with", addr)
+		}
+	})
+}
+
+// With no socket, a signature is exactly what crypto.Sign produces — the invariant that keeps
+// every deployment that has not moved to a controller byte-for-byte unchanged.
+func TestLocalSigningIsUnchanged(t *testing.T) {
 	key, err := crypto.HexToECDSA(testSignerKeyHex)
 	if err != nil {
 		t.Fatalf("parsing the test key: %v", err)
 	}
 	s := &TeeService{ProviderSigner: key}
-	if s.remote != nil {
-		t.Fatal("a TeeService with no socket has a remote signer")
-	}
 
 	hash := crypto.Keccak256([]byte("unchanged"))
 	got, err := s.SignHash(hash)

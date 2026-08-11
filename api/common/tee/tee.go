@@ -105,7 +105,12 @@ func NewTeeService(clientType ClientType, logger log.Logger) (*TeeService, error
 func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	var client TappdClient
 	// Recomputed on every call rather than remembered, so a re-sync can never keep signing
-	// through a socket the current environment no longer names.
+	// through a socket the current environment no longer names. Closing the old one's idle
+	// connections is what keeps that cheap: a dropped Transport keeps its read and write
+	// loops reachable forever.
+	if s.remote != nil {
+		s.remote.client.CloseIdleConnections()
+	}
 	s.remote = nil
 	switch s.clientType {
 	case Mock:
