@@ -132,33 +132,16 @@ func seedanceFirstFrame(req CreateVideoRequest) string {
 	return seedanceReferenceImage(req.InputReferenceImageURL)
 }
 
-// seedanceResolutionTokens are Seedance's exact resolution wire tokens
-// (lowercase). A client "size" that is already one of these
-// (case-insensitively) is passed straight through. 2.5 only supports
-// 480p/720p (live-confirmed: 1080p/4k are rejected with InvalidParameter) —
-// no 1080p/4k entries here.
-var seedanceResolutionTokens = map[string]string{
-	"480p": "480p",
-	"720p": "720p",
-}
+// seedanceSpec is Seedance's duration/tier behaviour, held in videospec so the
+// broker resolves the same (duration, tier) this mapper does — see that
+// package's doc comment for why a second, independent reading is not an option.
+// The concrete type, not the Spec interface: this file IS Seedance's mapper, so
+// it is entitled to its own vendor's whole surface.
+var seedanceSpec = videospec.Seedance
 
 // defaultSeedanceResolution is sent when the client's "size" is neither a
 // recognized resolution token nor parsable pixel dimensions.
-const defaultSeedanceResolution = "720p"
-
-// seedanceResolutionMaxSides are the documented pixel-dimension pairs for
-// each resolution tier this integration can emit (see DefaultVideoSizeRatios
-// in api/inference/config/model_pricing.go: 832x480/480x832 for 480p,
-// 1280x720/720x1280 for 720p), keyed by the longer side, for nearest-match
-// snapping — mirroring how sizeToSeedanceRatio nearest-matches an aspect
-// ratio rather than using a single hardcoded cutover.
-var seedanceResolutionMaxSides = []struct {
-	token   string
-	maxSide float64
-}{
-	{"480p", 832},
-	{"720p", 1280},
-}
+const defaultSeedanceResolution = videospec.SeedanceDefaultTier
 
 // normalizeSeedanceResolution derives Seedance's "resolution" enum token
 // from the client's OpenAI-shaped "size" field. Strict validation (the
@@ -167,32 +150,12 @@ var seedanceResolutionMaxSides = []struct {
 // token (the documented default 720p) rather than omitting the field
 // entirely and risking an inconsistent vendor default across resolutions.
 //
-// A pixel-dimension size snaps to the NEAREST tier by longer side, not a
-// fixed cutover — a naive "<=640 is 480p, else 720p" threshold would
-// misclassify this codebase's own documented standard 480p size
-// (832x480/480x832, longer side 832) as 720p, silently billing a client
-// requesting the cheap tier at the more expensive one.
+// The tier rules (the token set, the nearest-match snapping over pixel
+// dimensions, and why it is nearest-match rather than a fixed cutover) live in
+// videospec.Seedance.Tier, which is what the broker prices and records
+// rate_class against.
 func normalizeSeedanceResolution(size string) string {
-	if tok, ok := seedanceResolutionTokens[strings.ToLower(strings.TrimSpace(size))]; ok {
-		return tok
-	}
-	width, height, ok := videospec.ParsePixelSize(size)
-	if !ok {
-		return defaultSeedanceResolution
-	}
-	maxSide := float64(width)
-	if float64(height) > maxSide {
-		maxSide = float64(height)
-	}
-	best := defaultSeedanceResolution
-	bestDiff := math.MaxFloat64
-	for _, r := range seedanceResolutionMaxSides {
-		if diff := math.Abs(r.maxSide - maxSide); diff < bestDiff {
-			bestDiff = diff
-			best = r.token
-		}
-	}
-	return best
+	return seedanceSpec.Tier(size)
 }
 
 // seedanceRatios are Seedance's documented aspect-ratio values (excluding
@@ -235,31 +198,32 @@ func sizeToSeedanceRatio(size string) string {
 // intelligent duration — not exposed by this integration). The upper bound
 // is live-confirmed exactly (31 rejected, 30 accepted); the lower bound is
 // carried over unchanged from 2.0 (no evidence it changed).
+//
+// The bounds themselves now live in videospec (the broker reads the same ones);
+// these aliases keep this file's prose and tests referring to them by name.
 const (
-	minSeedanceDuration = 4
-	maxSeedanceDuration = 30
+	minSeedanceDuration = videospec.SeedanceMinSeconds
+	maxSeedanceDuration = videospec.SeedanceMaxSeconds
 )
 
-// parseSeedanceDuration parses a client-supplied "seconds" string into
-// Seedance's accepted range, CLAMPING rather than rejecting: an absent,
-// non-positive, or unparsable value returns 0 (omitted from the request,
-// letting the vendor apply its own default, 5s); an in-range value is
-// ceil'd to a whole second; an out-of-range value is clamped into [4,30].
-// Billing is always on the vendor's ECHOED actual duration (or, for the
-// per-video-token billing engine, its echoed completion-token count), never
-// the request, so clamping instead of rejecting cannot under- or over-bill
+// parseSeedanceDuration resolves a client-supplied "seconds" string into the
+// duration to send, CLAMPING rather than rejecting: an absent, non-positive, or
+// unparsable value returns 0 (omitted from the request, letting the vendor apply
+// its own default, 5s); anything else is ceil'd to a whole second and clamped
+// into [4,30]. Billing is always on the vendor's ECHOED completion-token count,
+// never the request, so clamping instead of rejecting cannot under- or over-bill
 // — it only affects what gets generated.
+//
+// The rules live in videospec.Seedance so the broker's pre-flight gate resolves
+// the same duration this does. The one value it will NOT resolve —
+// videospec.SecondsRejected, a magnitude no clamp can honestly represent — is
+// refused up front by ValidateSeedanceCreateRequest rather than silently
+// clamped to the 30s ceiling here, so it cannot reach this function: 0 is
+// returned for it defensively (omit the field), not as a policy.
 func parseSeedanceDuration(seconds string) int64 {
-	s, err := strconv.ParseFloat(strings.TrimSpace(seconds), 64)
-	if err != nil || !(s > 0) || math.IsInf(s, 0) {
+	d, outcome := seedanceSpec.NormalizeSeconds(seconds)
+	if outcome != videospec.SecondsResolved {
 		return 0
-	}
-	d := int64(math.Ceil(s))
-	switch {
-	case d < minSeedanceDuration:
-		d = minSeedanceDuration
-	case d > maxSeedanceDuration:
-		d = maxSeedanceDuration
 	}
 	return d
 }
@@ -445,10 +409,19 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 }
 
 // ValidateSeedanceCreateRequest is the create-time pre-flight, surfaced by
-// the handler as a 400. It enforces the two rules left once this integration
+// the handler as a 400. It enforces the rules left once this integration
 // is scoped to only the OpenAI-expressible subset of Seedance (text-to-video,
 // single-first-frame image-to-video — see ToSeedanceCreateRequest's doc):
 //
+//   - "seconds" of a magnitude no duration can be resolved from (see
+//     videospec.SecondsRejected) is rejected rather than clamped. Every other
+//     out-of-range duration IS clamped, and safely so — billing is on the
+//     vendor's echoed token count, so a clamp cannot move the bill away from
+//     what was rendered. This one is different in kind, not degree: clamping it
+//     would hand the caller this model's LONGEST clip — the most expensive one —
+//     for a request that plainly asked for no such thing. The broker's own gate
+//     refuses the same value from the same rules (ctrl.ErrVideoSecondsOutOfRange),
+//     so this is the translator half of one decision, not a second opinion.
 //   - asset:// is rejected on input_reference.image_url (0G does not use
 //     ByteDance's asset library).
 //   - input_reference.file_id is rejected outright, for the same underlying
@@ -467,6 +440,9 @@ func FromSeedanceGetTaskResponse(publicID string, resp seedance.GetTaskResponse)
 // both valid; there is no last_frame or reference-array field left to
 // mutually-exclude or cap.
 func ValidateSeedanceCreateRequest(req CreateVideoRequest) error {
+	if _, outcome := seedanceSpec.NormalizeSeconds(req.Seconds); outcome == videospec.SecondsRejected {
+		return ErrSecondsOutOfRange
+	}
 	if isSeedanceAssetScheme(req.InputReferenceImageURL) {
 		return fmt.Errorf("input_reference asset:// scheme is not supported")
 	}

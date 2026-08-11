@@ -33,6 +33,17 @@
 #      per_unit_table config still receives a best-effort actual-seconds
 #      echo as a fallback signal, but per_video_token is the accurate mode
 #      for this vendor.)
+#      Also set `vendor: seedance` on that model's billing config. It does NOT
+#      produce a pre-flight balance reserve — a per_video_token fee is a token
+#      count the vendor computes and only reports once it has rendered, so no
+#      reading of the request can predict it, and those creates are gated on
+#      the minimum locked balance alone (metered as
+#      broker_video_reserve_skipped_total{reason="unpredictable_units"}; size
+#      that floor with this vendor's per-clip cost in mind). What naming the
+#      vendor DOES buy is the recorded rules in common/videospec: settlement
+#      records the resolved tier (480p/720p) as rate_class instead of whatever
+#      "size" the client sent, so a reconciliation can group by tier, and an
+#      unpriceable "seconds" is refused before the vendor is ever called.
 #   4. Keep TEE verification: this sidecar reports the vendor's TLS
 #      certificate back to the broker (Zg-Upstream-Cert-Fingerprint), so the
 #      provider can stay providerType: centralized instead of falling back to
@@ -83,9 +94,14 @@
 #
 # Duration: Seedance 2.5 accepts any integer in [4,30] seconds (raised from
 # 2.0's [4,15], live-confirmed: 31 rejected, 30 accepted) and the translator
-# clamps a client's "seconds" into that range (never rejects) — billing is
-# always on the vendor's echoed actuals, never the request, so clamping
-# cannot mis-bill, only affect what gets generated.
+# clamps a client's "seconds" into that range — billing is always on the
+# vendor's echoed actuals, never the request, so clamping cannot mis-bill,
+# only affect what gets generated. The one exception is a magnitude no
+# duration can be resolved from at all (e.g. 1e30), which is refused with a
+# 400 rather than clamped: clamping THAT would hand the caller this model's
+# longest, most expensive clip for a request that asked for no such thing.
+# The rules are recorded once, in common/videospec, and both the broker's
+# balance gate and this translator read them — see that package's doc.
 #
 # Resolution: 480p/720p ONLY (narrower than 2.0's 480p/720p/1080p/4k —
 # live-confirmed: 1080p/4k are rejected outright for "dreamina-

@@ -278,7 +278,7 @@ func TestVideoBillingTier_SettlementAgreesWithTheGate(t *testing.T) {
 // vendor has no rules recorded must settle exactly as it does now. Changing what
 // it bills would make this a pricing change for vendors nobody has looked at yet.
 func TestVideoBillingTier_UnrecordedVendorKeepsTodaysBehaviour(t *testing.T) {
-	c, ctx := newReserveTestCtrl(t, "seedance")
+	c, ctx := newReserveTestCtrl(t, "no-such-vendor")
 	if got := c.VideoBillingTier(ctx, "1792x1024"); got != "1792x1024" {
 		t.Errorf("VideoBillingTier = %q, want the size unchanged", got)
 	}
@@ -343,7 +343,7 @@ func TestWarnVideoDurationDrift(t *testing.T) {
 	})
 
 	t.Run("an unrecorded vendor has no rules to fall behind", func(t *testing.T) {
-		c, ctx := newReserveTestCtrl(t, "seedance")
+		c, ctx := newReserveTestCtrl(t, "no-such-vendor")
 		if got := count(t, c, ctx, `{"seconds":5}`, 99); got != 0 {
 			t.Errorf("logged %d lines for an unrecorded vendor, want 0", got)
 		}
@@ -356,4 +356,95 @@ func TestWarnVideoDurationDrift(t *testing.T) {
 			t.Errorf("logged %d lines for a single-model service, want 0", got)
 		}
 	})
+}
+
+// newTokenBilledReserveTestCtrl builds a Ctrl whose model bills per_video_token —
+// the mode whose fee is a vendor-computed token count, so no reading of the
+// request determines it.
+func newTokenBilledReserveTestCtrl(t *testing.T) (*Ctrl, *gin.Context) {
+	t.Helper()
+	c := &Ctrl{logger: testLogger()}
+	c.Service.Type = "video-generation"
+	c.Service.ModelType = "vid-1"
+	c.Service.ModelPricing = []config.ModelPricingEntry{{
+		Model:       "vid-1",
+		OutputPrice: "1000",
+		Billing: &config.BillingConfig{
+			Mode:   config.BillingModePerVideoToken,
+			Vendor: string(videospec.VendorSeedance),
+		},
+	}}
+	if err := c.Service.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	ctx := &gin.Context{}
+	ctx.Set(CtxKeyResolvedModel, "vid-1")
+	ctx.Request = httptest.NewRequest("POST", "/videos", strings.NewReader(""))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	return c, ctx
+}
+
+// TestVideoCreateReserve_PerVideoTokenIsUnpredictable: recording a vendor's rules
+// does not make a token-billed model reservable. The duration and tier both
+// resolve here, and the fee still does not follow from them.
+//
+// The point of the test is the LOUDNESS, not the zero. A "0" fee is
+// indistinguishable from a genuinely free request, so returning one silently
+// would be strictly worse than the unknown-vendor state recording the rules
+// removed: the exposure would stop being counted.
+func TestVideoCreateReserve_PerVideoTokenIsUnpredictable(t *testing.T) {
+	c, ctx := newTokenBilledReserveTestCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	fee, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":8,"size":"1280x720"}`))
+	if err != nil {
+		t.Fatalf("VideoCreateReserve: %v", err)
+	}
+	if fee != "0" {
+		t.Errorf("fee = %q, want %q — a token count cannot be predicted from the request", fee, "0")
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d lines for an unreservable create, want 1", rec.errors)
+	}
+}
+
+// TestVideoCreateReserve_PerVideoTokenStillRefusesUnpriceableSeconds: the early
+// return for token billing must not swallow the one duration that is refused
+// outright. A magnitude no clamp can honestly represent is still a client error —
+// the vendor is never called and nobody pays for a clip nothing asked for.
+func TestVideoCreateReserve_PerVideoTokenStillRefusesUnpriceableSeconds(t *testing.T) {
+	c, ctx := newTokenBilledReserveTestCtrl(t)
+	if _, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":1e30}`)); !errors.Is(err, ErrVideoSecondsOutOfRange) {
+		t.Errorf("err = %v, want ErrVideoSecondsOutOfRange", err)
+	}
+}
+
+// TestVideoOutputUnits_ReservePathDoesNotReportServedFree: videoOutputUnits logs a
+// free-serve error when a per_video_token request observed no tokens. The
+// pre-flight gate calls the same function with no observation at all, where zero
+// tokens is the normal state of the world — it must not be reported as a response
+// that failed to report them, or every priced create emits a false alarm and
+// meters a billing skip.
+func TestVideoOutputUnits_ReservePathDoesNotReportServedFree(t *testing.T) {
+	c, ctx := newTokenBilledReserveTestCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	// No variadic token count: the shape of every non-settlement caller.
+	if units := c.videoOutputUnits(ctx, 8, "720p"); units != 0 {
+		t.Errorf("units = %d, want 0", units)
+	}
+	if rec.errors != 0 {
+		t.Errorf("logged %d lines with no observation to report on, want 0", rec.errors)
+	}
+
+	// A settlement caller that DID observe a response, and saw no tokens in it,
+	// must still be reported — that is a real free serve.
+	if units := c.videoOutputUnits(ctx, 8, "720p", 0); units != 0 {
+		t.Errorf("units = %d, want 0", units)
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d lines for an observed zero-token response, want 1", rec.errors)
+	}
 }

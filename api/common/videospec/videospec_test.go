@@ -145,8 +145,11 @@ func TestTier(t *testing.T) {
 // itself as unknown. Returning a zero Spec silently would make every caller
 // treat it as "no floor, no ceiling, tier undetermined" — a plausible-looking
 // answer that describes no real vendor.
+// The placeholder is deliberately a name no vendor will ever have, not a real
+// upstream that merely has no file yet: this test used to name "seedance", and
+// silently became a test of nothing the day Seedance was recorded.
 func TestGet_UnknownVendor(t *testing.T) {
-	if _, ok := Get("seedance"); ok {
+	if _, ok := Get("no-such-vendor"); ok {
 		t.Error("Get reported rules for a vendor that has none recorded")
 	}
 	if _, ok := Get(""); ok {

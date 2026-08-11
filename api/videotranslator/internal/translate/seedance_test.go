@@ -432,6 +432,14 @@ func TestValidateSeedanceCreateRequest(t *testing.T) {
 		// seedanceFirstFrame's doc).
 		{"input_reference.file_id alone is rejected", CreateVideoRequest{InputReferenceFileID: "file-abc123"}, true},
 		{"input_reference.file_id alongside image_url is still rejected (file_id must never silently win or lose)", CreateVideoRequest{InputReferenceImageURL: "https://cdn/a.png", InputReferenceFileID: "file-abc123"}, true},
+		// Every in-range-ish duration is CLAMPED, safely: billing is on the
+		// vendor's echoed token count, so a clamp cannot move the bill away from
+		// what was rendered. A magnitude no duration can be resolved from is
+		// different in kind — clamping it would hand the caller this model's
+		// longest, most expensive clip for a request that asked for no such thing.
+		{"an absurd seconds magnitude is rejected, not clamped to the ceiling", CreateVideoRequest{Prompt: "p", Seconds: "1e30"}, true},
+		{"clamped out-of-range seconds are still accepted", CreateVideoRequest{Prompt: "p", Seconds: "31"}, false},
+		{"an unreadable seconds is accepted (the vendor picks the length)", CreateVideoRequest{Prompt: "p", Seconds: "abc"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

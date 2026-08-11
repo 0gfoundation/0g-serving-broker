@@ -341,7 +341,17 @@ func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string,
 			// nothing downstream would otherwise notice this request was served
 			// for free. Log it loudly here, at the one call site that already
 			// knows both the resolved billing mode and the observed token count.
-			if e.Billing.Mode == config.BillingModePerVideoToken && tokens <= 0 {
+			//
+			// Gated on a token count having actually been PASSED, not merely on it
+			// being <= 0. The variadic form means "this caller observed a vendor
+			// response"; the pre-flight gate (VideoCreateReserve) calls with no
+			// observation at all, where 0 tokens is the normal state of the world
+			// rather than a response that failed to report them. Without this the
+			// gate would log a free-serve error, and meter one, for every create it
+			// priced. (It also returns early for this mode — see there — so this is
+			// the same conclusion reached locally, rather than a second file's
+			// behaviour being load-bearing for whether a log line is a lie.)
+			if len(completionTokens) > 0 && e.Billing.Mode == config.BillingModePerVideoToken && tokens <= 0 {
 				c.logger.Errorf("video per_video_token billing: no positive completion_tokens observed for a billable request; billing 0 units (served free) — the vendor response's usage.completion_tokens was missing, zero, or malformed")
 				monitor.RecordVideoBillingSkipped()
 			}

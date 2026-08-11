@@ -45,8 +45,9 @@ const CtxKeyVideoReserveFee = "videoReserveFee"
 // two. See that package's doc comment for why two cannot be kept in agreement.
 //
 // A zero fee is returned when the answer is genuinely unavailable rather than
-// zero: no rules recorded for the vendor, or a vendor that leaves the clip
-// length up to itself. Those creates go out gated only by the minimum locked
+// zero: no rules recorded for the vendor, a vendor that leaves the clip length up
+// to itself, or a model billing in units the request does not determine at all
+// (per_video_token). Those creates go out gated only by the minimum locked
 // balance, exactly as they are today — but each one is counted and named, so the
 // gap is visible instead of being the silent default.
 //
@@ -113,6 +114,24 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 		return "0", nil
 	}
 	tier := spec.Tier(rawSize)
+
+	// A mode whose billable quantity is not derivable from the request cannot be
+	// reserved for, even with the vendor's rules fully recorded: per_video_token
+	// bills a token count the VENDOR computes and reports back, so seconds and
+	// tier — both resolved by now — determine nothing about the fee.
+	//
+	// Returning early is what keeps this honest. videoOutputUnits below would
+	// answer 0 units for this mode (BillingConfig.OutputUnits passes the observed
+	// token count straight through, and there is none yet), and a "0" fee is
+	// indistinguishable from a genuinely free request — so the create would go out
+	// unreserved with no counter and no line, which is strictly worse than the
+	// unknown_vendor state recording the rules just removed.
+	if billing != nil && billing.Mode == config.BillingModePerVideoToken {
+		c.skipVideoReserve(monitor.VideoReserveSkipUnpredictableUnits, vendorName,
+			"video create forwarded WITHOUT a reserve: model bills per_video_token, so the fee is a token count vendor %q computes and only reports once it has rendered — no reading of the request can predict it. This request is gated only by the minimum locked balance, and recording vendor rules cannot change that",
+			vendorName)
+		return "0", nil
+	}
 
 	prices, err := c.GetBillingPrices(ctx)
 	if err != nil {

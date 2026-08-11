@@ -83,6 +83,8 @@ var (
 	// vendor rules (reason=unknown_vendor) or that a vendor genuinely leaves the
 	// rendered length up to itself (reason=undetermined_duration); both are fixed
 	// by recording that vendor's rules in common/videospec, not by tuning here.
+	// reason=unpredictable_units is the exception that is not fixable at all — see
+	// VideoReserveSkipUnpredictableUnits.
 	VideoReserveSkippedTotal *prometheus.CounterVec
 
 	// VideoPollTimedOutTotal counts video-generation poll jobs (see
@@ -417,7 +419,7 @@ func PrometheusInit(serverName, providerAddress string) {
 	VideoReserveSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "broker_video_reserve_skipped_total",
-			Help:        "Video-generation creates forwarded without a pre-flight reserve, labeled by reason (unknown_vendor = no rules recorded for the configured vendor; undetermined_duration = the vendor decides the clip length itself). Non-zero means those requests are gated only by the minimum locked balance, so a wallet can owe far more than it holds.",
+			Help:        "Video-generation creates forwarded without a pre-flight reserve, labeled by reason (unknown_vendor = no rules recorded for the configured vendor; undetermined_duration = the vendor decides the clip length itself; unpredictable_units = the model bills in vendor-computed tokens no reading of the request can predict, which recording vendor rules does not fix). Non-zero means those requests are gated only by the minimum locked balance, so a wallet can owe far more than it holds.",
 			ConstLabels: constLabels,
 		},
 		[]string{"reason"},
@@ -829,6 +831,15 @@ const (
 	// (DashScope omits an unreadable duration). Not a misconfiguration on its own,
 	// but the fee is unknowable until the vendor reports it.
 	VideoReserveSkipUndeterminedDuration = "undetermined_duration"
+	// VideoReserveSkipUnpredictableUnits: the model bills in units no reading of
+	// the request can predict — per_video_token, where the billable quantity is a
+	// token count the vendor computes and reports back (Seedance). Unlike the two
+	// above, recording vendor rules does NOT fix this one: the duration and tier
+	// are both known here, and still nothing determines the fee. It is a permanent
+	// property of that billing mode, so a steady rate is expected rather than
+	// alarming — what it measures is how much exposure rides on the minimum locked
+	// balance for those models.
+	VideoReserveSkipUnpredictableUnits = "unpredictable_units"
 )
 
 // RecordVideoReserveSkipped increments the un-reserved-create counter.
