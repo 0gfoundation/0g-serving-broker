@@ -58,8 +58,14 @@ var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // Proxy forwards the allowlisted dstack methods from one unix socket to another, and answers
 // the signing operations itself.
 type Proxy struct {
-	listenPath     string
-	dstackPath     string
+	listenPath string
+	dstackPath string
+	// keyClient dials dstack for the key derivations this proxy answers itself. One client,
+	// built once: a per-call http.Client keeps its idle connection alive in a Transport that
+	// is then dropped without CloseIdleConnections, so its read and write loops stay
+	// reachable forever — three goroutines and a descriptor per call, and /Sign runs once
+	// per response.
+	keyClient      *http.Client
 	currentImageFn CurrentImageFunc
 	server         *http.Server
 	listener       net.Listener
@@ -85,7 +91,17 @@ func New(listenPath, dstackPath string, currentImage CurrentImageFunc, logger lo
 		w.WriteHeader(http.StatusBadGateway)
 	}
 
-	p := &Proxy{listenPath: listenPath, dstackPath: dstackPath, currentImageFn: currentImage, logger: logger}
+	p := &Proxy{
+		listenPath:     listenPath,
+		dstackPath:     dstackPath,
+		currentImageFn: currentImage,
+		logger:         logger,
+		keyClient: &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", dstackPath)
+			},
+		}},
+	}
 	p.server = &http.Server{
 		Handler:           p.guard(reverse),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -152,16 +168,16 @@ func (p *Proxy) Serve(ctx context.Context) error {
 	return nil
 }
 
-// Close stops serving and removes the socket file.
+// Close removes the socket file. Cancelling Serve's context is what stops the server.
+//
+// It deliberately does not touch the listener. That field is written by the Serve goroutine
+// and read here, and closing it out from under a server that has not been told to shut down
+// turns a clean stop into an accept error — which the caller then reports as a fatal.
 func (p *Proxy) Close() error {
-	if p.listener == nil {
-		return nil
+	if err := os.Remove(p.listenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	err := p.listener.Close()
-	if rmErr := os.Remove(p.listenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) && err == nil {
-		err = rmErr
-	}
-	return err
+	return nil
 }
 
 func forwardedPaths() []string {

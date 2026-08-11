@@ -72,13 +72,17 @@ func Main() {
 	// broker, and a deployment that still mounts it needs nothing here. See attestproxy for
 	// why the mount is what matters and this is only what makes removing it possible.
 	if socket := os.Getenv(attestSocketEnvVar); socket != "" {
+		// Registered before stopProxy, so LIFO runs the shutdown first and the socket
+		// removal second. The other order closes the listener under a server that has not
+		// been told to stop, which surfaces as an accept error and a fatal exit on every
+		// ordinary SIGTERM.
 		proxyCtx, stopProxy := context.WithCancel(context.Background())
-		defer stopProxy()
 
 		// The digest source is the controller's own view of the broker container, so a
 		// key is only ever derived for the image that is actually running.
 		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, controller.RunningBrokerDigest, logger)
 		defer func() { _ = proxy.Close() }()
+		defer stopProxy()
 
 		go func() {
 			// Fatal rather than a warning: the broker cannot start without it, so a
