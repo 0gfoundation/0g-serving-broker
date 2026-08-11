@@ -308,7 +308,7 @@ func TestFailVideoPollJob_StaleClaimRejectedEvenWhenStatusStillPolling(t *testin
 	// ErrVideoPollJobAlreadyResolved (not nil): the RowsAffected check added so a
 	// whitelisted-job caller can tell "I won this write" from "someone else already resolved
 	// it" applies to every caller, not just whitelisted ones.
-	if err := d.FailVideoPollJob(created.ID, staleAttempts, "worker A: provider reported status=failed"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+	if err := d.FailVideoPollJob(created.ID, staleAttempts, created.RequestHash, "worker A: provider reported status=failed"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
 		t.Fatalf("FailVideoPollJob (stale worker A) error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
 
@@ -426,10 +426,10 @@ func TestFailAndTimeOutVideoPollJob(t *testing.T) {
 	d.db.Where("request_hash = ?", "fail-1").First(&f)
 	d.db.Where("request_hash = ?", "timeout-1").First(&to)
 
-	if err := d.FailVideoPollJob(f.ID, 0, "provider reported status=failed"); err != nil {
+	if err := d.FailVideoPollJob(f.ID, 0, f.RequestHash, "provider reported status=failed"); err != nil {
 		t.Fatalf("FailVideoPollJob: %v", err)
 	}
-	if err := d.TimeOutVideoPollJob(to.ID, 0, "exceeded MaxPollDuration"); err != nil {
+	if err := d.TimeOutVideoPollJob(to.ID, 0, to.RequestHash, "exceeded MaxPollDuration"); err != nil {
 		t.Fatalf("TimeOutVideoPollJob: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestTimeOutVideoPollJob_StaleClaimRejected(t *testing.T) {
 		t.Fatalf("expected the reclaim to bump attempts to 2, got claimed=%+v", claimed)
 	}
 
-	if err := d.TimeOutVideoPollJob(created.ID, staleAttempts, "stale worker: exceeded MaxPollDuration"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+	if err := d.TimeOutVideoPollJob(created.ID, staleAttempts, created.RequestHash, "stale worker: exceeded MaxPollDuration"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
 		t.Fatalf("TimeOutVideoPollJob (stale claim) error = %v, want ErrVideoPollJobAlreadyResolved", err)
 	}
 
@@ -675,4 +675,131 @@ func TestTimeOutVideoPollJob_StaleClaimRejected(t *testing.T) {
 	if got.Status != model.VideoPollStatusPolling {
 		t.Errorf("Status = %q, want unchanged polling — the stale timeout must not have won", got.Status)
 	}
+}
+
+// TestVideoPollJob_InFlightReserveLifecycle pins the one invariant the in-flight
+// video reserve rests on:
+//
+//	a non-zero reserve exists on a requests row IFF an unresolved poll job exists
+//
+// The reserve is written once, after the poll job exists (ctrl.deferVideoBillingToPoll),
+// and every terminal write clears it. Delete the releaseRequestReserve call from
+// either FailVideoPollJob or TimeOutVideoPollJob and one of these subtests fails:
+// without it the row keeps fee=<reserve> with processed=false forever, and
+// CalculateUnsettledFee — which is exactly this SUM — permanently removes that
+// amount from the wallet's available balance, with nothing to put it back.
+func TestVideoPollJob_InFlightReserveLifecycle(t *testing.T) {
+	feeOf := func(t *testing.T, d *DB, requestHash string) string {
+		t.Helper()
+		req, err := d.GetRequest(requestHash)
+		if err != nil {
+			t.Fatalf("GetRequest %s: %v", requestHash, err)
+		}
+		return req.Fee
+	}
+
+	t.Run("reserve counts toward the unsettled total while in flight", func(t *testing.T) {
+		d := setupTestDB(t)
+		migrateVideoPollTables(t, d)
+		seedVideoRequest(t, d, "reserve-1")
+
+		if err := d.ReserveRequestFee("reserve-1", "6698000000000000000"); err != nil {
+			t.Fatalf("ReserveRequestFee: %v", err)
+		}
+		unsettled, err := d.CalculateUnsettledFee("0xUser")
+		if err != nil {
+			t.Fatalf("CalculateUnsettledFee: %v", err)
+		}
+		if unsettled.String() != "6698000000000000000" {
+			t.Errorf("unsettled = %s, want the reserve — a reserve nobody counts gates nothing", unsettled)
+		}
+		// output_count stays 0, so the reserve is never mistaken for something to
+		// settle on-chain.
+		list, _, err := d.ListRequest(model.RequestListOptions{Processed: false, ExcludeZeroOutput: true})
+		if err != nil {
+			t.Fatalf("ListRequest: %v", err)
+		}
+		if len(list) != 0 {
+			t.Errorf("a reserved-but-unresolved request is settleable: %+v", list)
+		}
+	})
+
+	t.Run("FailVideoPollJob releases it", func(t *testing.T) {
+		d := setupTestDB(t)
+		migrateVideoPollTables(t, d)
+		seedVideoRequest(t, d, "reserve-fail")
+		now := time.Now()
+		job := newVideoPollJob("reserve-fail", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))
+		if err := d.CreateVideoPollJob(job); err != nil {
+			t.Fatalf("CreateVideoPollJob: %v", err)
+		}
+		created, err := d.GetVideoPollJobByRequestHash("reserve-fail")
+		if err != nil {
+			t.Fatalf("GetVideoPollJobByRequestHash: %v", err)
+		}
+		if err := d.ReserveRequestFee("reserve-fail", "20000000000000000000"); err != nil {
+			t.Fatalf("ReserveRequestFee: %v", err)
+		}
+
+		if err := d.FailVideoPollJob(created.ID, created.Attempts, "reserve-fail", "provider reported status=failed"); err != nil {
+			t.Fatalf("FailVideoPollJob: %v", err)
+		}
+		if got := feeOf(t, d, "reserve-fail"); got != "0" {
+			t.Errorf("fee after failure = %q, want \"0\" — the reserve outlived its poll job", got)
+		}
+	})
+
+	t.Run("TimeOutVideoPollJob releases it", func(t *testing.T) {
+		d := setupTestDB(t)
+		migrateVideoPollTables(t, d)
+		seedVideoRequest(t, d, "reserve-timeout")
+		now := time.Now()
+		job := newVideoPollJob("reserve-timeout", model.VideoPollStatusPolling, now, now.Add(-time.Minute))
+		if err := d.CreateVideoPollJob(job); err != nil {
+			t.Fatalf("CreateVideoPollJob: %v", err)
+		}
+		created, err := d.GetVideoPollJobByRequestHash("reserve-timeout")
+		if err != nil {
+			t.Fatalf("GetVideoPollJobByRequestHash: %v", err)
+		}
+		if err := d.ReserveRequestFee("reserve-timeout", "20000000000000000000"); err != nil {
+			t.Fatalf("ReserveRequestFee: %v", err)
+		}
+
+		if err := d.TimeOutVideoPollJob(created.ID, created.Attempts, "reserve-timeout", "exceeded MaxPollDuration"); err != nil {
+			t.Fatalf("TimeOutVideoPollJob: %v", err)
+		}
+		if got := feeOf(t, d, "reserve-timeout"); got != "0" {
+			t.Errorf("fee after timeout = %q, want \"0\" — this is the case that strands a balance forever", got)
+		}
+	})
+
+	t.Run("a lost fencing race releases nothing", func(t *testing.T) {
+		// The stale worker must not clear a reserve that now belongs to whoever
+		// reclaimed the job — the release is inside the guarded transaction
+		// precisely so it cannot happen independently of the status write.
+		d := setupTestDB(t)
+		migrateVideoPollTables(t, d)
+		seedVideoRequest(t, d, "reserve-race")
+		now := time.Now()
+		job := newVideoPollJob("reserve-race", model.VideoPollStatusPolling, now, now.Add(20*time.Minute))
+		if err := d.CreateVideoPollJob(job); err != nil {
+			t.Fatalf("CreateVideoPollJob: %v", err)
+		}
+		created, err := d.GetVideoPollJobByRequestHash("reserve-race")
+		if err != nil {
+			t.Fatalf("GetVideoPollJobByRequestHash: %v", err)
+		}
+		if err := d.ReserveRequestFee("reserve-race", "20000000000000000000"); err != nil {
+			t.Fatalf("ReserveRequestFee: %v", err)
+		}
+
+		staleAttempts := created.Attempts - 1
+		if err := d.FailVideoPollJob(created.ID, staleAttempts, "reserve-race", "stale worker"); !errors.Is(err, ErrVideoPollJobAlreadyResolved) {
+			t.Fatalf("FailVideoPollJob (stale) error = %v, want ErrVideoPollJobAlreadyResolved", err)
+		}
+		if got := feeOf(t, d, "reserve-race"); got != "20000000000000000000" {
+			t.Errorf("fee after a lost race = %q, want the reserve intact", got)
+		}
+	})
 }

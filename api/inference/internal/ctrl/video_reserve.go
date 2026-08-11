@@ -24,6 +24,12 @@ import (
 // nobody pays for a clip nothing asked for.
 var ErrVideoSecondsOutOfRange = errors.New("invalid video request: 'seconds' is out of range")
 
+// CtxKeyVideoReserveFee carries the reserve VideoCreateReserve computed, from
+// the gate to deferVideoBillingToPoll — which stamps it onto the requests row
+// once the poll job exists, so concurrent creates from one wallet see it. That is
+// the only legitimate reader.
+const CtxKeyVideoReserveFee = "videoReserveFee"
+
 // VideoCreateReserve computes what to hold against a caller's balance for a
 // video create, BEFORE it is forwarded.
 //

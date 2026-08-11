@@ -458,6 +458,16 @@ func (c *Ctrl) validateBalanceAdequacy(ctx *gin.Context, account model.User, fee
 // GetUnsettledFee returns the total unsettled fee for a given user address.
 // This is used by clients to determine how much balance the provider requires
 // beyond the minimum locked balance.
+//
+// It includes work that is still IN FLIGHT, not only work already priced: a
+// video create holds its reserve here from the moment its poll job exists until
+// that job resolves (see reserveInFlightVideoFee). That is what a client asking
+// "how much must I keep funded" needs — the alternative was a wallet reading zero
+// while several clips were being rendered against it.
+//
+// So this number can go DOWN as well as up, without anything having settled: a
+// video job that times out or fails releases its reserve. A client must not treat
+// it as monotonic.
 func (c *Ctrl) GetUnsettledFee(userAddress string) (*big.Int, error) {
 	return c.db.CalculateUnsettledFee(userAddress)
 }
