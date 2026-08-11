@@ -113,9 +113,18 @@ func classifyVideoStatus(status string) videoBillingAction {
 // videoUsage is the optional usage block of a video response. output_video_duration
 // is the canonical actual-output field (Wan2.7 / DashScope-style); duration is a
 // common alias. Both are the ACTUAL generated length, which is what we bill on.
+// completion_tokens is a DIFFERENT vendor's billing signal entirely (ByteDance
+// Seedance): a vendor-computed billable TOKEN count, not a duration — see
+// completionTokens()/BillingModePerVideoToken. It coexists with, rather than
+// replaces, the duration fields: a model still configured in the legacy
+// per_video_second/per_unit_table shape keeps billing off the duration fields
+// (which the Seedance translator ALSO echoes, defensively, at the top-level
+// "seconds" field — see actualSeconds()'s fallback), while a model configured
+// per_video_token bills off this field instead.
 type videoUsage struct {
 	OutputVideoDuration json.Number `json:"output_video_duration"`
 	Duration            json.Number `json:"duration"`
+	CompletionTokens    json.Number `json:"completion_tokens"`
 }
 
 // actualSeconds returns the upstream-reported ACTUAL output duration from the
@@ -143,6 +152,24 @@ func (f videoResponseFields) actualSeconds() int64 {
 		return s
 	}
 	return 0
+}
+
+// completionTokens returns the vendor-reported billable token count from
+// usage.completion_tokens (ByteDance Seedance's per_video_token billing
+// signal — see config.BillingModePerVideoToken), or 0 when absent/
+// non-positive. Unlike actualSeconds, this is NOT a duration and must never
+// be treated as one; it is read independently and passed straight into
+// BillingObservables.CompletionTokens, never combined with actualSeconds's
+// result.
+func (f videoResponseFields) completionTokens() int64 {
+	if f.Usage == nil || f.Usage.CompletionTokens == "" {
+		return 0
+	}
+	v, ok := ceilSeconds(f.Usage.CompletionTokens)
+	if !ok {
+		return 0
+	}
+	return v
 }
 
 // ceilSeconds parses a duration json.Number that may be integer- OR float-encoded
@@ -289,10 +316,25 @@ func resolutionRateClass(size string) string {
 // seconds×serviceRatio formula, which uses an unrelated resolution vocabulary and
 // would underbill the bucket (a client could force this by requesting an unlisted
 // combo). Either way the miss is metered and logged so the operator adds the row.
-func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string) int64 {
+//
+// completionTokens is optional (variadic, not a required 4th positional arg)
+// so every pre-existing call site — none of which know about token-based
+// billing — keeps compiling unchanged; only a caller that has a vendor-reported
+// token count passes one. It is used exclusively by BillingModePerVideoToken
+// (see BillingConfig.OutputUnits); every other mode ignores it.
+//
+// This computes; it does not judge. A token-billed request that observed NO token
+// count is a free serve worth reporting, but only when the request was billable
+// at all — see warnIfTokenBillingObservedNothing, which the paying settlement
+// paths call and the whitelist path deliberately does not.
+func (c *Ctrl) videoOutputUnits(ctx context.Context, seconds int64, size string, completionTokens ...int64) int64 {
+	var tokens int64
+	if len(completionTokens) > 0 {
+		tokens = completionTokens[0]
+	}
 	if c.Service.HasMultiModelPricing() {
 		if e := c.resolveModelPricing(ctx); e != nil && e.Billing != nil {
-			units, err := e.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size})
+			units, err := e.Billing.OutputUnits(config.BillingObservables{Seconds: seconds, Resolution: size, CompletionTokens: tokens})
 			if err == nil {
 				return units
 			}
@@ -374,6 +416,35 @@ func isContractJobID(id string) bool {
 		}
 	}
 	return true
+}
+
+// warnIfTokenBillingObservedNothing reports a BILLABLE per_video_token request
+// whose vendor response carried no token count.
+//
+// BillingConfig.OutputUnits returns (0, nil) for CompletionTokens==0 rather than
+// an error, because 0 is a valid input shape to that function. But a real
+// completed task never reports 0 — the vendor documents a minimum-token floor —
+// so observing it means the response's usage block was missing or malformed, and
+// the request was served for FREE. Nothing downstream would notice: the fee is
+// simply 0. This is the token-billing analogue of resolveVideoBilling's
+// source=="" path, which fails loud for the seconds-based modes.
+//
+// Called from the paying settlement paths only, and NOT from the whitelist path,
+// which is the whole reason it is a separate function rather than a check inside
+// videoOutputUnits. A whitelisted request is unbilled BY DESIGN, so "served free"
+// is not a finding about it — and RecordVideoBillingSkipped counts requests that
+// should have been billed and were not, so incrementing it for whitelist traffic
+// would put a permanent floor under a metric operators alert on.
+func (c *Ctrl) warnIfTokenBillingObservedNothing(ctx context.Context, tokens int64) {
+	if tokens > 0 || !c.Service.HasMultiModelPricing() {
+		return
+	}
+	e := c.resolveModelPricing(ctx)
+	if e == nil || e.Billing == nil || e.Billing.Mode != config.BillingModePerVideoToken {
+		return
+	}
+	c.logger.Errorf("video per_video_token billing: no positive completion_tokens observed for a billable request; billing 0 units (served free) — the vendor response's usage.completion_tokens was missing, zero, or malformed")
+	monitor.RecordVideoBillingSkipped()
 }
 
 // signVideoResponse signs a video response under chatKey with whichever proof this
@@ -543,7 +614,7 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 			// reconciles against the same price class it would have been billed at.
 			tier := c.VideoBillingTier(ctx, size)
 			rateClass = resolutionRateClass(tier)
-			outputCount := c.videoOutputUnits(ctx, sec, tier)
+			outputCount := c.videoOutputUnits(ctx, sec, tier, respFields.completionTokens())
 			metricModel := c.metricModel(ctx)
 			monitor.RecordTokens("video-generation", metricModel, 0, outputCount)
 			monitor.RecordWhitelistTokens("video-generation", metricModel, 0, outputCount)
@@ -612,8 +683,12 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// the amount charged agree with the amount the gate held.
 	tier := c.VideoBillingTier(ctx, size)
 
-	// Fee stays the resolution-weighted amount (units × price); billing is unchanged.
-	outputCount := c.videoOutputUnits(ctx, seconds, tier)
+	// Fee stays the resolution-weighted amount (units × price); billing is unchanged
+	// for every mode except per_video_token, which ignores seconds/size entirely and
+	// bills on respFields.completionTokens() instead (harmlessly 0 for every other
+	// vendor, which never populates usage.completion_tokens).
+	outputCount := c.videoOutputUnits(ctx, seconds, tier, respFields.completionTokens())
+	c.warnIfTokenBillingObservedNothing(ctx, respFields.completionTokens())
 
 	// The gate reserved for a length the recorded rules predicted; say so if the
 	// vendor rendered another. Does not change the fee.

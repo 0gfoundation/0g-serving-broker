@@ -357,3 +357,98 @@ func TestWarnVideoDurationDrift(t *testing.T) {
 		}
 	})
 }
+
+// newTokenBilledReserveTestCtrl builds a Ctrl whose model bills per_video_token —
+// the mode whose fee is a vendor-computed token count, so no reading of the
+// request determines it.
+//
+// The vendor is one WITH rules recorded, deliberately: that is what makes this a
+// test of the MODE rather than of a missing vendor. A vendor videospec knows
+// nothing about would take VideoCreateReserve's unknown_vendor early return and
+// never reach the token-billing branch at all, so it would pass whether or not
+// that branch exists.
+//
+// This helper builds the lookup map directly (the real validator is
+// package-private to config); that this config also LOADS is pinned separately by
+// TestValidateModelPricing_TokenBilledModelLoads over in that package.
+func newTokenBilledReserveTestCtrl(t *testing.T) (*Ctrl, *gin.Context) {
+	t.Helper()
+	c := &Ctrl{logger: testLogger()}
+	c.Service.Type = "video-generation"
+	c.Service.ModelType = "vid-1"
+	c.Service.ModelPricing = []config.ModelPricingEntry{{
+		Model:       "vid-1",
+		OutputPrice: "1000",
+		Billing: &config.BillingConfig{
+			Mode:   config.BillingModePerVideoToken,
+			Vendor: string(videospec.VendorMiniMax),
+		},
+	}}
+	if err := c.Service.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	ctx := &gin.Context{}
+	ctx.Set(CtxKeyResolvedModel, "vid-1")
+	ctx.Request = httptest.NewRequest("POST", "/videos", strings.NewReader(""))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	return c, ctx
+}
+
+// TestVideoCreateReserve_PerVideoTokenIsUnpredictable: recording a vendor's rules
+// does not make a token-billed model reservable. The duration and tier both
+// resolve here, and the fee still does not follow from them.
+//
+// The point of the test is the LOUDNESS, not the zero. A "0" fee is
+// indistinguishable from a genuinely free request, so returning one silently
+// would be strictly worse than the unknown-vendor state recording the rules
+// removed: the exposure would stop being counted.
+func TestVideoCreateReserve_PerVideoTokenIsUnpredictable(t *testing.T) {
+	c, ctx := newTokenBilledReserveTestCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	fee, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":8,"size":"1280x720"}`))
+	if err != nil {
+		t.Fatalf("VideoCreateReserve: %v", err)
+	}
+	if fee != "0" {
+		t.Errorf("fee = %q, want %q — a token count cannot be predicted from the request", fee, "0")
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d lines for an unreservable create, want 1", rec.errors)
+	}
+}
+
+// TestVideoCreateReserve_PerVideoTokenStillRefusesUnpriceableSeconds: the early
+// return for token billing must not swallow the one duration that is refused
+// outright. A magnitude no clamp can honestly represent is still a client error —
+// the vendor is never called and nobody pays for a clip nothing asked for.
+func TestVideoCreateReserve_PerVideoTokenStillRefusesUnpriceableSeconds(t *testing.T) {
+	c, ctx := newTokenBilledReserveTestCtrl(t)
+	if _, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":1e30}`)); !errors.Is(err, ErrVideoSecondsOutOfRange) {
+		t.Errorf("err = %v, want ErrVideoSecondsOutOfRange", err)
+	}
+}
+
+// TestVideoOutputUnits_ReservePathReportsNothing: the pre-flight gate calls the
+// same unit math as settlement, with no vendor observation at all. It must produce
+// no free-serve line — zero tokens is the normal state of the world there, not a
+// response that failed to report them.
+//
+// The warning lives in warnIfTokenBillingObservedNothing, which only the paying
+// settlement paths call. This test is what keeps it from drifting back in here.
+func TestVideoOutputUnits_ReservePathReportsNothing(t *testing.T) {
+	c, ctx := newTokenBilledReserveTestCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	if units := c.videoOutputUnits(ctx, 8, "720p"); units != 0 {
+		t.Errorf("units = %d, want 0", units)
+	}
+	if units := c.videoOutputUnits(ctx, 8, "720p", 0); units != 0 {
+		t.Errorf("units = %d, want 0", units)
+	}
+	if rec.errors != 0 {
+		t.Errorf("logged %d lines; the unit math must not report on its own", rec.errors)
+	}
+}

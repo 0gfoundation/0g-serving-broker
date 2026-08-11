@@ -338,6 +338,15 @@ func videoPriceVariantsNative(billing *config.BillingConfig, basePriceWei string
 			})
 		}
 		return variants
+	case config.BillingModePerVideoToken:
+		// No per-model resolution/dimension variance to project here: a
+		// per_video_token model's per-{resolution,has_video_input} price table
+		// (see design doc §13.1.1/§13.1.2) is published as router-side
+		// on-chain provider price data, not derived from this operator config
+		// block. Explicit nil, not the fallthrough default, so a reader can
+		// tell this is a decision — there is nothing for THIS function to
+		// project — not a forgotten case.
+		return nil
 	default:
 		return nil
 	}
@@ -393,6 +402,12 @@ func videoPriceVariantsUSD(billing *config.BillingConfig, baseUSD string) []Mode
 			})
 		}
 		return variants
+	case config.BillingModePerVideoToken:
+		// Same rationale as videoPriceVariantsNative's identical case: no
+		// per-model variance to project from this config block for a
+		// per_video_token model — explicit nil so this reads as a decision,
+		// not a forgotten case.
+		return nil
 	default:
 		return nil
 	}
