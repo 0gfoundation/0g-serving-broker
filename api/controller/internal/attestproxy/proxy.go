@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
@@ -50,18 +51,25 @@ var forwarded = map[string]bool{
 	"/GetKey":   true, // the signer and enclave encryption keys
 }
 
-// Proxy forwards the allowlisted dstack methods from one unix socket to another.
+// imageDigestPattern is what counts as a running-image digest. Lowercase hex only, the same
+// shape the upgrade entry point accepts.
+var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// Proxy forwards the allowlisted dstack methods from one unix socket to another, and answers
+// the signing operations itself.
 type Proxy struct {
-	listenPath string
-	server     *http.Server
-	listener   net.Listener
-	logger     log.Logger
+	listenPath     string
+	dstackPath     string
+	currentImageFn CurrentImageFunc
+	server         *http.Server
+	listener       net.Listener
+	logger         log.Logger
 }
 
 // New prepares a proxy that listens on listenPath and forwards to dstackPath.
 //
 // Nothing is dialled or created yet; Serve does that.
-func New(listenPath, dstackPath string, logger log.Logger) *Proxy {
+func New(listenPath, dstackPath string, currentImage CurrentImageFunc, logger log.Logger) *Proxy {
 	// A fixed host: the transport below ignores it and dials the socket, but net/http
 	// still needs a syntactically valid URL to build requests against.
 	target, _ := url.Parse("http://dstack")
@@ -77,7 +85,7 @@ func New(listenPath, dstackPath string, logger log.Logger) *Proxy {
 		w.WriteHeader(http.StatusBadGateway)
 	}
 
-	p := &Proxy{listenPath: listenPath, logger: logger}
+	p := &Proxy{listenPath: listenPath, dstackPath: dstackPath, currentImageFn: currentImage, logger: logger}
 	p.server = &http.Server{
 		Handler:           p.guard(reverse),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -89,6 +97,9 @@ func New(listenPath, dstackPath string, logger log.Logger) *Proxy {
 func (p *Proxy) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// dstack's RPC is POST-only, so anything else is not a call this proxy is for.
+		if r.Method == http.MethodPost && p.handleLocal(w, r) {
+			return
+		}
 		if r.Method != http.MethodPost || !forwarded[r.URL.Path] {
 			// Logged at warning: on a correctly deployed CVM nothing should ever ask.
 			// A request for /EmitEvent in particular means something is trying to write

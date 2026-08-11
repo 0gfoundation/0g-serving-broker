@@ -75,7 +75,9 @@ func Main() {
 		proxyCtx, stopProxy := context.WithCancel(context.Background())
 		defer stopProxy()
 
-		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, logger)
+		// The digest source is the controller's own view of the broker container, so a
+		// key is only ever derived for the image that is actually running.
+		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, controller.RunningBrokerDigest, logger)
 		defer func() { _ = proxy.Close() }()
 
 		go func() {

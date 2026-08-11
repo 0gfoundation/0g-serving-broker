@@ -2,6 +2,7 @@ package attestproxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
 )
+
+// testDigest is what the fake digest source reports, so a per-image key can be derived.
+const testDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
 
 func testLogger(t *testing.T) log.Logger {
 	t.Helper()
@@ -50,7 +54,7 @@ func start(t *testing.T, reached *[]string) *http.Client {
 	dstackPath := fakeDstack(t, dir, reached)
 	listenPath := filepath.Join(dir, "tee.sock")
 
-	p := New(listenPath, dstackPath, testLogger(t))
+	p := New(listenPath, dstackPath, func(context.Context) (string, error) { return testDigest, nil }, testLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- p.Serve(ctx) }()
@@ -185,7 +189,7 @@ func TestServeReplacesAStaleSocket(t *testing.T) {
 	}
 	_ = stale.Close() // closing leaves the file behind
 
-	p := New(listenPath, dstackPath, testLogger(t))
+	p := New(listenPath, dstackPath, func(context.Context) (string, error) { return testDigest, nil }, testLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan error, 1)
@@ -210,5 +214,79 @@ func TestServeReplacesAStaleSocket(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Serve did not return")
+	}
+}
+
+// The signing operations answer from the controller and never reach dstack's /GetKey — the
+// broker must not be handed a key-derivation primitive, because a key it can derive is a key
+// it can keep across an upgrade.
+func TestSigningOperationsAreAnsweredLocally(t *testing.T) {
+	var reached []string
+	c := start(t, &reached)
+
+	// The fake dstack answers every path with {"served": path}, so a derivation that got
+	// forwarded would come back without a "key" field and the operation would fail. It
+	// reaching dstack at all is the thing being ruled out.
+	for _, path := range []string{"/Sign", "/SignerAddress", "/GetEncKey"} {
+		code, _ := post(t, c, http.MethodPost, path)
+		if code == http.StatusNotFound {
+			t.Errorf("POST %s = 404, want the controller to answer it itself", path)
+		}
+		for _, seen := range reached {
+			if seen == path {
+				t.Errorf("POST %s was forwarded to dstack, want it answered locally", path)
+			}
+		}
+	}
+}
+
+// A signature under a key derived from a guess would still verify, so an unresolvable image
+// must refuse rather than fall back to anything.
+func TestSigningRefusesWhenTheImageIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	var reached []string
+	dstackPath := fakeDstack(t, dir, &reached)
+	listenPath := filepath.Join(dir, "tee.sock")
+
+	for name, digest := range map[string]func(context.Context) (string, error){
+		"error":     func(context.Context) (string, error) { return "", errors.New("no broker container") },
+		"empty":     func(context.Context) (string, error) { return "", nil },
+		"tag only":  func(context.Context) (string, error) { return "ghcr.io/x:latest", nil },
+		"truncated": func(context.Context) (string, error) { return "sha256:abc", nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			sock := listenPath + "-" + strings.ReplaceAll(name, " ", "")
+			p := New(sock, dstackPath, digest, testLogger(t))
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- p.Serve(ctx) }()
+			t.Cleanup(func() { cancel(); <-done; _ = p.Close() })
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if conn, err := net.Dial("unix", sock); err == nil {
+					_ = conn.Close()
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("socket never appeared")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			cl := &http.Client{Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+				},
+			}}
+			// The two body-less operations. /Sign validates its hash first, so a bodyless
+			// call to it answers 400 before the image is ever consulted — a separate
+			// concern, and not the one under test here.
+			for _, path := range []string{"/SignerAddress", "/GetEncKey"} {
+				if code, _ := post(t, cl, http.MethodPost, path); code != http.StatusServiceUnavailable {
+					t.Errorf("POST %s = %d, want 503 when the image is %s", path, code, name)
+				}
+			}
+		})
 	}
 }
