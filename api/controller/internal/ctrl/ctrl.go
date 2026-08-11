@@ -960,8 +960,14 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		// would be left stopped for exactly the reason this branch exists to avoid.
 		startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancelStart()
-		if startErr := c.dockerClient.StartContainer(startCtx, brokerName); startErr != nil {
-			c.logger.Errorf("[UpdateImages] Could not restart the broker after failing to record the change: %v", startErr)
+		// Both, not just the broker. This branch runs after both were stopped, so starting
+		// one leaves settlement and event processing down while the broker answers
+		// requests — an outage in the half nobody is watching, reported as an error that
+		// mentions only RTMR3.
+		for _, name := range []string{brokerName, eventName} {
+			if startErr := c.dockerClient.StartContainer(startCtx, name); startErr != nil {
+				c.logger.Errorf("[UpdateImages] Could not restart %s after failing to record the change: %v", name, startErr)
+			}
 		}
 		result.Success = false
 		result.Error = "failed to record the image change in RTMR3: " + err.Error()
