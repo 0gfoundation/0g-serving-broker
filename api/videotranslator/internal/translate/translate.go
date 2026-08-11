@@ -50,6 +50,17 @@ type CreateVideoRequest struct {
 	// (e.g. MiniMax first_frame + mm_file://) lives in the translate.To* funcs.
 	InputReferenceImageURL string
 	InputReferenceFileID   string
+	// CameraFixed is Seedance's top-level "camera_fixed" boolean (whether the
+	// camera stays static during generation). Nil means the client did not
+	// specify it, in which case the field is omitted and the vendor default
+	// applies. Currently read by the Seedance mapping only.
+	CameraFixed *bool
+	// OutputFormat is Seedance's top-level "output_format" string (e.g.
+	// "mp4"). Nil means the client did not specify it, in which case the
+	// field is omitted and the vendor default applies. Nil-safe, ignored by
+	// the DashScope/MiniMax mappings. Currently read by the Seedance mapping
+	// only.
+	OutputFormat *string
 }
 
 // VideoResponse is the OpenAI-shaped response returned to the broker for
@@ -70,10 +81,17 @@ type VideoResponse struct {
 	Error     *Error `json:"error,omitempty"`
 }
 
-// Usage carries the actual output duration DashScope reported, renamed to
-// the field the broker's resolveVideoBilling recognizes.
+// Usage carries the billing-relevant actuals a vendor reported. DashScope and
+// MiniMax report an actual OUTPUT DURATION (renamed to the field the
+// broker's resolveVideoBilling recognizes); ByteDance Seedance instead
+// reports a vendor-computed BILLABLE TOKEN COUNT (usage.completion_tokens),
+// which already bakes in any billable input-reference-media duration on top
+// of output duration — see the design doc's §13.1. Only Seedance populates
+// CompletionTokens; DashScope/MiniMax/Vidu leave it unset and keep using
+// OutputVideoDuration, so this is purely additive.
 type Usage struct {
 	OutputVideoDuration json.Number `json:"output_video_duration,omitempty"`
+	CompletionTokens    json.Number `json:"completion_tokens,omitempty"`
 }
 
 // Error is populated when the underlying DashScope task failed.
