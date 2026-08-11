@@ -209,7 +209,39 @@ func testLogger(t *testing.T) log.Logger {
 	return l
 }
 
+// testSigner is what fakeDeriver answers, so a test can assert on the whole record.
+const testSigner = "0x1111111111111111111111111111111111111111"
+
+// fakeDeriver stands in for the guest agent's key derivation. err makes a derivation that
+// cannot answer testable, which has to abort the upgrade rather than record a digest with
+// nothing bound to it.
+type fakeDeriver struct {
+	log  *opLog
+	err  error
+	seen []string
+}
+
+func (d *fakeDeriver) SignerAddress(ctx context.Context, digest string) (string, error) {
+	d.seen = append(d.seen, digest)
+	if d.log != nil {
+		d.log.add("derive " + digest)
+	}
+	if d.err != nil {
+		return "", d.err
+	}
+	return testSigner, nil
+}
+
+// imageRecord is the payload the recorder writes: the reference, then the address of the key
+// derived from that image.
+func imageRecord(ref string) string { return ref + " " + testSigner }
+
 func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string) *Ctrl {
+	t.Helper()
+	return newChangeCtrlWithDeriver(t, l, emitErr, configFile, pullBody, &fakeDeriver{log: l})
+}
+
+func newChangeCtrlWithDeriver(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string, deriver SignerDeriver) *Ctrl {
 	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
 	return &Ctrl{
@@ -219,6 +251,7 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pul
 		},
 		dockerClient: fakeChangeDaemon(t, l, pullBody),
 		emitter:      &fakeEmitter{log: l, err: emitErr},
+		deriver:      deriver,
 		logger:       testLogger(t),
 	}
 }
@@ -318,7 +351,7 @@ func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 	}
 
 	ops := l.all()
-	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRepo + "@" + testDigest)
+	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+testDigest))
 	if emit < 0 {
 		t.Fatalf("ops = %v, want the image change recorded", ops)
 	}
@@ -384,8 +417,39 @@ func TestFailedPullRecordsNothing(t *testing.T) {
 		t.Fatal("UpdateImages() = nil, want the pull to fail")
 	}
 
-	if ops := l.all(); len(ops) != 1 || ops[0] != "pull" {
-		t.Errorf("ops = %v, want the pull and nothing else", ops)
+	// The derivation runs first — deliberately, so an unreachable guest agent costs an
+	// untouched deployment rather than a pull — but it writes nothing. What matters is that
+	// no record and no container operation happened.
+	for _, op := range l.all() {
+		if op != "pull" && !strings.HasPrefix(op, "derive ") {
+			t.Errorf("ops = %v, want only the derivation and the pull", l.all())
+			break
+		}
+	}
+	if l.indexOf("pull") < 0 {
+		t.Errorf("ops = %v, want the pull to have been attempted", l.all())
+	}
+}
+
+// The record must bind a signer, so a derivation that cannot answer has to abort the
+// upgrade — before anything is pulled, stopped or recreated.
+//
+// Recording the digest without an address would not be the lenient option. A reader refuses
+// such a record, so the deployment would go down just the same, except after the upgrade
+// instead of before it and with the ledger permanently carrying a claim nothing can check.
+func TestUpgradeRefusesWhenTheSignerCannotBeDerived(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, &fakeDeriver{log: l, err: errors.New("dstack.sock: connection refused")})
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want a refusal when the signer cannot be derived")
+	}
+
+	for _, op := range l.all() {
+		if !strings.HasPrefix(op, "derive ") {
+			t.Errorf("ops = %v, want nothing but the failed derivation — no pull, no stop, no record", l.all())
+			break
+		}
 	}
 }
 

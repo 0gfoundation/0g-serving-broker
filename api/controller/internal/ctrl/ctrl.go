@@ -17,10 +17,12 @@ import (
 	"github.com/Dstack-TEE/dstack/sdk/go/dstack"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"gopkg.in/yaml.v3"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
@@ -46,6 +48,47 @@ import (
 // client over /var/run/dstack.sock.
 type EventEmitter interface {
 	EmitEvent(ctx context.Context, event string, payload []byte) error
+}
+
+// SignerDeriver reports the address of the response-signing key derived from an image.
+//
+// The record has to carry this, not just the digest. A reader can replay the ledger and can
+// verify responses against the address in the quote's report_data, but it cannot check that
+// those describe the same thing: report_data is whatever the enclave asked the hardware to
+// sign over, and the per-image key is derivable only inside the CVM. So the ledger would
+// name an image while the signatures came from somewhere unrelated, and nothing would
+// notice — a broker running unreviewed code could publish an address of its own, and a
+// record left standing after a change that did not complete would be believed.
+//
+// Deriving it here closes that, because this side of the socket can do what a reader
+// cannot. The controller derives the address the image WILL have, writes it into the
+// append-only record, and a reader then requires the quote to name the same one.
+//
+// An interface for the same reason EventEmitter is one: so the ordering can be tested.
+type SignerDeriver interface {
+	SignerAddress(ctx context.Context, digest string) (string, error)
+}
+
+// dstackSignerDeriver derives through the guest agent, which is the only thing holding the
+// app key the derivation starts from.
+type dstackSignerDeriver struct {
+	client *dstack.DstackClient
+}
+
+func (d dstackSignerDeriver) SignerAddress(ctx context.Context, digest string) (string, error) {
+	if !imageDigestPattern.MatchString(digest) {
+		return "", fmt.Errorf("cannot derive a signer for %q, which is not a digest", digest)
+	}
+	resp, err := d.client.GetKey(ctx, attestproxy.SignerKeyPath(digest), "")
+	if err != nil {
+		return "", fmt.Errorf("deriving the signing key for %s: %w", digest, err)
+	}
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(resp.Key, "0x"))
+	if err != nil {
+		return "", fmt.Errorf("parsing the derived signing key for %s: %w", digest, err)
+	}
+	// Lowercased so the record and a reader's comparison agree on one spelling.
+	return strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex()), nil
 }
 
 // Ceilings on how long a recorded change may hold the controller.
@@ -136,6 +179,7 @@ type Ctrl struct {
 	fullConfig   *config.Config // Full config for accessing Service configuration
 	dockerClient *docker.Client
 	emitter      EventEmitter
+	deriver      SignerDeriver
 
 	// Serializes the two paths that record into RTMR3 and then act.
 	//
@@ -187,6 +231,10 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		allowedIPs[ip] = true
 	}
 
+	// One client for both jobs it does over that socket: appending to RTMR3, and deriving
+	// the per-image key whose address goes into the record.
+	dstackClient := dstack.NewDstackClient()
+
 	ctrl := &Ctrl{
 		config:       cfg,
 		fullConfig:   fullConfig,
@@ -196,7 +244,8 @@ func NewCtrl(fullConfig *config.Config, logger log.Logger) (*Ctrl, error) {
 		// refused to start without it would take the read-only endpoints down too.
 		// An upgrade attempted without the socket fails at the emit, before
 		// anything is touched, which is the outcome that matters.
-		emitter:        dstack.NewDstackClient(),
+		emitter:        dstackClient,
+		deriver:        dstackSignerDeriver{client: dstackClient},
 		adminAddresses: adminAddresses,
 		allowedIPs:     allowedIPs,
 		logger:         logger,
@@ -550,7 +599,21 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 		// the attested image.
 		c.logger.Warnf("[UpdateImages] %q resolved to container %q, recording the running image as unknown", containerBroker, status.Name)
 	default:
-		payload = status.Image
+		// The record must bind the address too, or a reader refuses it — which is the
+		// right outcome when the truth cannot be established, and the wrong one here,
+		// where it can. Derived from the digest this container actually runs, so the
+		// record describes the process that will answer the next quote.
+		digest, digestErr := c.RunningBrokerDigest(ctx)
+		if digestErr != nil {
+			c.logger.Warnf("[UpdateImages] Could not resolve the broker's digest to restore the RTMR3 record, recording it as unknown: %v", digestErr)
+			break
+		}
+		signer, signerErr := c.deriver.SignerAddress(ctx, digest)
+		if signerErr != nil {
+			c.logger.Warnf("[UpdateImages] Could not derive the signer for %s to restore the RTMR3 record, recording it as unknown: %v", digest, signerErr)
+			break
+		}
+		payload = c.config.ImageRepo + "@" + digest + " " + signer
 	}
 
 	return c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(payload))
@@ -814,6 +877,24 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return nil, err
 	}
 
+	// The address the broker's signing key will have once it runs ref, derived before
+	// anything is touched.
+	//
+	// It goes into the record, because a digest alone says nothing about the process that
+	// ends up holding the key — see SignerDeriver. Derived here rather than beside the emit
+	// so that a guest agent that cannot answer costs nothing: the containers are still up,
+	// nothing has been pulled, and the caller gets an error against an untouched deployment.
+	//
+	// Failing rather than recording the digest without an address is the fail-closed
+	// direction, and the only one available. A record naming an image with nothing bound to
+	// it is exactly as plausible as a correct one and exactly as unverifiable, so a reader
+	// refuses it — which would take the deployment down as surely as this does, but after
+	// the upgrade rather than before, and with the ledger permanently carrying the claim.
+	signer, err := c.deriver.SignerAddress(ctx, digest)
+	if err != nil {
+		return nil, fmt.Errorf("deriving the signer address for %s, which the RTMR3 record must bind: %w", ref, err)
+	}
+
 	// Step 1: Pull the latest image
 	c.logger.Info("[UpdateImages] Pulling latest image...")
 	imageInfo, err := c.dockerClient.PullImage(ctx, ref)
@@ -870,7 +951,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Still before the change, so a change cannot happen unrecorded: stopping a
 	// container does not alter its image, and the create below is the first thing
 	// that does.
-	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(ref)); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(ref+" "+signer)); err != nil {
 		// The broker is stopped and nothing was recorded, so the ledger is still
 		// truthful — but leaving it down would turn a dstack hiccup into an outage.
 		// Best effort: on failure the caller gets an error either way.

@@ -51,7 +51,13 @@ type CurrentImageFunc func(ctx context.Context) (string, error)
 // A sibling of encKeyPath rather than its parent: dstack derivation is hierarchical, so
 // deriving the signing key at "/<digest>" would make it an ancestor of everything else under
 // that digest, and holding it would be holding the subtree.
-func signerKeyPath(digest string) string { return "/" + digest + signerDerivePathSuffix }
+func signerKeyPath(digest string) string { return SignerKeyPath(digest) }
+
+// SignerKeyPath is signerKeyPath, exported because the RTMR3 recorder derives the same
+// address before it writes a record naming that image. One string, two callers: if they
+// disagreed, the address in the ledger would not be the one signing responses and every
+// verification would fail — the wrong direction, but for the wrong reason.
+func SignerKeyPath(digest string) string { return "/" + digest + signerDerivePathSuffix }
 
 // encKeyPath is the derivation path for the enclave encryption key, per image for the same
 // reason. tee.EncKeyDerivePathSuffix keeps the two sides agreeing on one string.

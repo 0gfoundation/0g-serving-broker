@@ -2,6 +2,7 @@ package attest
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -56,8 +57,25 @@ func pinnedCompose(t *testing.T) string {
 // signature, and the offsets it reads are pinned against a real quote elsewhere.
 func syntheticQuote(t *testing.T, appCompose string, events []RuntimeEvent) []byte {
 	t.Helper()
+	return syntheticQuoteSigning(t, appCompose, events, testSigner)
+}
 
-	quote := make([]byte, offsetRTMR0+rtmrCount*rtmrStride)
+// testSigner is the address the fixtures' records bind and their quotes name, so the two
+// agree unless a test sets out to make them disagree.
+const testSigner = "0x1111111111111111111111111111111111111111"
+
+// imageRecordPayload is what the controller writes: the reference, then the address of the
+// key derived from that image.
+func imageRecordPayload(ref string) []byte {
+	return []byte(ref + " " + testSigner)
+}
+
+// syntheticQuoteSigning is syntheticQuote with control over the address report_data names,
+// so a test can make the quote and the ledger disagree about who holds the signing key.
+func syntheticQuoteSigning(t *testing.T, appCompose string, events []RuntimeEvent, signer string) []byte {
+	t.Helper()
+
+	quote := make([]byte, offsetReportData+reportDataLen)
 
 	sum := sha256.Sum256([]byte(appCompose))
 	quote[offsetMRConfigID] = mrConfigVersionV1
@@ -65,6 +83,14 @@ func syntheticQuote(t *testing.T, appCompose string, events []RuntimeEvent) []by
 
 	rtmr3 := ReplayRTMR3(events)
 	copy(quote[offsetRTMR0+3*rtmrStride:], rtmr3[:])
+
+	// The §4.2 layout, which is what a current broker publishes.
+	raw, err := hex.DecodeString(strings.TrimPrefix(signer, "0x"))
+	if err != nil {
+		t.Fatalf("decoding the test signer: %v", err)
+	}
+	copy(quote[offsetReportData+reportDataSignerOffset:], raw)
+	binary.BigEndian.PutUint32(quote[offsetReportData+reportDataVersionOffset:], reportDataLayoutVersion)
 
 	return quote
 }
@@ -144,9 +170,9 @@ func TestResolveTakesTheLastRecordedUpgrade(t *testing.T) {
 	superseded := "sha256:" + strings.Repeat("7", 64)
 
 	events := append(bootEvents(),
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker@" + superseded)},
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + superseded)},
 		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte(configSum)},
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
 	)
 
 	state, err := resolve(t, compose, events)
@@ -172,7 +198,7 @@ func TestResolveTakesTheLastRecordedUpgrade(t *testing.T) {
 func TestResolveRejectsUnanchoredInputs(t *testing.T) {
 	compose := pinnedCompose(t)
 	goodEvents := append(bootEvents(),
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)})
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
 	goodLog, err := json.Marshal(tdxEventsOf(goodEvents))
 	if err != nil {
 		t.Fatalf("building the event log: %v", err)
@@ -183,7 +209,7 @@ func TestResolveRejectsUnanchoredInputs(t *testing.T) {
 		// The upgrade event edited to claim a different image, which is the whole
 		// attack: say you are running something you are not.
 		lied := append(bootEvents(),
-			RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@sha256:" + strings.Repeat("f", 64))})
+			RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@sha256:" + strings.Repeat("f", 64))})
 		lie, err := json.Marshal(tdxEventsOf(lied))
 		if err != nil {
 			t.Fatalf("building the event log: %v", err)
@@ -268,7 +294,7 @@ func TestResolveNeedsTheSystemReadyBoundary(t *testing.T) {
 		// would be believed.
 		forged := append([]RuntimeEvent{
 			{Event: "system-preparing"},
-			{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)},
+			{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)},
 		}, RuntimeEvent{Event: eventSystemReady})
 		if _, err := resolve(t, compose, forged); err == nil {
 			t.Error("ResolveRunningState() = nil, want a zg- event in the boot prefix to be refused")
@@ -291,7 +317,7 @@ func TestResolveRecoversFromAnEarlierUnreadableRecord(t *testing.T) {
 		// repository, naming no digest.
 		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker")},
 		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte("unknown")},
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)},
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)},
 		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte(configSum)},
 	)
 
@@ -463,5 +489,148 @@ func TestPinnedImages(t *testing.T) {
 				t.Errorf("PinnedImages(%s) = nil, want an error", name)
 			}
 		})
+	}
+}
+
+// The check the whole per-image scheme rests on: a record naming an image also names the
+// address of the key derived from that image, and the quote must name the same one.
+//
+// Without it a client can learn which image the ledger names and can verify signatures
+// against report_data, but not that those are the same thing — and every way the two can
+// come apart would be accepted. report_data is chosen by the enclave, so a broker running
+// unreviewed code can put an address of its own there; a controller killed between recording
+// and recreating leaves a record describing an installation that never happened; a digest
+// resolved from the wrong repository names an image nobody meant.
+func TestResolveRefusesWhenTheQuoteNamesAnotherSigner(t *testing.T) {
+	compose := pinnedCompose(t)
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+
+	log, err := json.Marshal(tdxEventsOf(events))
+	if err != nil {
+		t.Fatalf("building the event log: %v", err)
+	}
+
+	// The ledger binds testSigner; the quote names someone else.
+	impostor := "0x2222222222222222222222222222222222222222"
+	quote := syntheticQuoteSigning(t, compose, events, impostor)
+
+	state, err := ResolveRunningState(quote, log, tcbInfoFor(t, compose), brokerService)
+	if err == nil {
+		t.Fatalf("ResolveRunningState() = %+v, want a refusal when the quote's signer is not the one bound to the image", state)
+	}
+	if !strings.Contains(err.Error(), impostor) || !strings.Contains(err.Error(), testSigner) {
+		t.Errorf("error %q should name both addresses so the mismatch is diagnosable", err)
+	}
+
+	// The same log against a quote that names the bound signer resolves, so the refusal
+	// above is the binding and not something else in the fixture.
+	if _, err := ResolveRunningState(syntheticQuote(t, compose, events), log, tcbInfoFor(t, compose), brokerService); err != nil {
+		t.Errorf("the matching quote also failed: %v", err)
+	}
+}
+
+// The event path must expose the address it checked, because a client verifying responses
+// needs to know which key the ledger vouched for rather than trusting whatever report_data
+// happens to say.
+func TestResolveReportsTheBoundSigner(t *testing.T) {
+	compose := pinnedCompose(t)
+
+	state, err := resolve(t, compose, append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)}))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.BrokerSigner != testSigner {
+		t.Errorf("BrokerSigner = %q, want %q", state.BrokerSigner, testSigner)
+	}
+
+	// The compose fallback binds nothing, and does not need to: no record means no change
+	// was made, and the image the compose file pins is covered by the compose hash in the
+	// signed report body. The image is hardware-attested there, so the address needs no
+	// separate vouching — a broker able to publish an address of its own would first have
+	// had to become a different image, which cannot happen unrecorded.
+	boot, err := resolve(t, compose, bootEvents())
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if boot.BrokerSigner != "" {
+		t.Errorf("BrokerSigner = %q on the compose path, want empty", boot.BrokerSigner)
+	}
+}
+
+// A record that names an image but nothing else is refused rather than tolerated as an
+// older format. It is exactly as plausible as a correct record and exactly as unverifiable,
+// and it is the shape an attacker would pick: the digest a reviewer is looking for, with
+// nothing tying it to whoever holds the key.
+func TestResolveRefusesRecordsThatBindNoSigner(t *testing.T) {
+	compose := pinnedCompose(t)
+	ref := "ghcr.io/x@" + upgradeDigest
+
+	for name, payload := range map[string]string{
+		"no signer":           ref,
+		"empty":               "",
+		"signer but no image": testSigner,
+		"malformed signer":    ref + " 0xnope",
+		"truncated signer":    ref + " 0x1111",
+		"an extra field":      ref + " " + testSigner + " extra",
+		"signer before image": testSigner + " " + ref,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state, err := resolve(t, compose, append(bootEvents(),
+				RuntimeEvent{Event: EventImageUpdate, Payload: []byte(payload)}))
+			if err == nil {
+				t.Errorf("payload %q resolved to %+v, want a refusal", payload, state)
+			}
+		})
+	}
+}
+
+// A signer written in the older report_data layout must be read too: the broker still
+// publishes that quote for clients that predate the §4.2 one, and a client fetching it must
+// get the same verdict rather than an unexplained failure.
+func TestResolveReadsTheLegacyReportDataLayout(t *testing.T) {
+	compose := pinnedCompose(t)
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+
+	log, err := json.Marshal(tdxEventsOf(events))
+	if err != nil {
+		t.Fatalf("building the event log: %v", err)
+	}
+
+	// The legacy layout is the ASCII address, zero-padded by the hardware.
+	quote := syntheticQuote(t, compose, events)
+	for i := offsetReportData; i < offsetReportData+reportDataLen; i++ {
+		quote[i] = 0
+	}
+	copy(quote[offsetReportData:], []byte(testSigner))
+
+	state, err := ResolveRunningState(quote, log, tcbInfoFor(t, compose), brokerService)
+	if err != nil {
+		t.Fatalf("ResolveRunningState() with a legacy report_data = %v", err)
+	}
+	if state.BrokerSigner != testSigner {
+		t.Errorf("BrokerSigner = %q, want %q", state.BrokerSigner, testSigner)
+	}
+}
+
+// The offsets are pinned against a real quote elsewhere; this pins the extraction, which is
+// what turns those bytes into the address a client compares against.
+func TestSignerFromReportDataRejectsWhatItCannotRead(t *testing.T) {
+	if _, err := SignerFromReportData(make([]byte, 100)); err == nil {
+		t.Error("a quote too short to hold report_data was accepted")
+	}
+	// All zeroes: version 0 sends it down the legacy path, where an empty string is not
+	// an address. Answering with the zero address would hand a client something to
+	// compare against that any forged record could match.
+	if _, err := SignerFromReportData(make([]byte, offsetReportData+reportDataLen)); err == nil {
+		t.Error("an all-zero report_data was accepted")
+	}
+	// The §4.2 layout with a zero address is refused for the same reason.
+	quote := make([]byte, offsetReportData+reportDataLen)
+	binary.BigEndian.PutUint32(quote[offsetReportData+reportDataVersionOffset:], reportDataLayoutVersion)
+	if _, err := SignerFromReportData(quote); err == nil {
+		t.Error("the zero address was accepted")
 	}
 }

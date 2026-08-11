@@ -2,9 +2,15 @@ package attest
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strings"
 )
+
+// addressPattern is a lowercase 20-byte hex address.
+var addressPattern = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
 
 // Byte offsets of the measurements inside a raw TDX v4 quote, into the TD report
 // body that follows the quote header.
@@ -15,8 +21,11 @@ import (
 // own offsets, and would fail the tcb_info comparison rather than mis-read
 // quietly, since nothing else lands on these boundaries.
 const (
-	offsetMRTD        = 184
-	offsetMRConfigID  = 232
+	offsetMRTD       = 184
+	offsetMRConfigID = 232
+	// report_data is the 64 bytes the enclave chooses and the hardware signs over. It
+	// sits at 520 in the TD report body, after rtmr3, which is 568 in the quote.
+	offsetReportData  = 568
 	offsetRTMR0       = 376
 	measurementLen    = 48 // SHA-384, the digest size TDX measurement registers hold
 	rtmrStride        = 48 // rtmr0..rtmr3 are adjacent
@@ -102,4 +111,59 @@ func allZero(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// reportDataLen is the fixed size of report_data. A hardware limit, not a buffer.
+const reportDataLen = 64
+
+// report_data field offsets in the layout the broker writes (0g-pc SPEC §4.2):
+//
+//	0   32  enc_pub
+//	32  20  signer_addr, raw bytes
+//	52   4  version, uint32 big-endian
+//	56   8  reserved, zero
+const (
+	reportDataSignerOffset  = 32
+	reportDataVersionOffset = 52
+	reportDataLayoutVersion = 1
+)
+
+// ReportData returns the 64 bytes the enclave asked the hardware to sign over.
+func ReportData(quote []byte) ([]byte, error) {
+	if len(quote) < offsetReportData+reportDataLen {
+		return nil, fmt.Errorf("quote is %d bytes, too short to hold report_data at offset %d", len(quote), offsetReportData)
+	}
+	return bytes.Clone(quote[offsetReportData : offsetReportData+reportDataLen]), nil
+}
+
+// SignerFromReportData returns the signer address the quote binds, lowercase "0x…".
+//
+// This is the address a client verifies response signatures against, and the hardware
+// signed over it — but the enclave chose what to put there, so on its own it says only
+// "this TD asked for this address", not "this address belongs to the code that is
+// running". Binding it to an image is what ResolveRunningState does with it.
+//
+// Two layouts exist because the broker publishes two quotes. The §4.2 layout is
+// recognised by its version field; anything else is read as the older form, where
+// report_data is the ASCII address zero-padded to 64 bytes.
+func SignerFromReportData(quote []byte) (string, error) {
+	rd, err := ReportData(quote)
+	if err != nil {
+		return "", err
+	}
+
+	if binary.BigEndian.Uint32(rd[reportDataVersionOffset:reportDataVersionOffset+4]) == reportDataLayoutVersion {
+		addr := rd[reportDataSignerOffset : reportDataSignerOffset+20]
+		if bytes.Equal(addr, make([]byte, 20)) {
+			return "", fmt.Errorf("report_data names the zero address")
+		}
+		return "0x" + hex.EncodeToString(addr), nil
+	}
+
+	// Legacy: the ASCII hex address, which the hardware zero-pads.
+	ascii := strings.ToLower(string(bytes.TrimRight(rd, "\x00")))
+	if !addressPattern.MatchString(ascii) {
+		return "", fmt.Errorf("report_data %q is neither the §4.2 layout nor an ASCII address", ascii)
+	}
+	return ascii, nil
 }

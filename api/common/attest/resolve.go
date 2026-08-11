@@ -73,6 +73,16 @@ type RunningState struct {
 	BrokerDigest string
 	// DigestSource is DigestSourceCompose or DigestSourceEvent.
 	DigestSource string
+	// BrokerSigner is the response-signing address the ledger binds to BrokerDigest,
+	// lowercase "0x…". Set only on the event path, where the record carries it and it
+	// has been checked against the quote's report_data.
+	//
+	// It is what turns a digest into a statement about the running process. Without it a
+	// client can learn which image the ledger names and can verify signatures against
+	// report_data, but not that those are the same thing — report_data is chosen by the
+	// enclave, and the per-image key is derivable only inside the CVM, so any divergence
+	// between the two would be accepted rather than refused.
+	BrokerSigner string
 	// ConfigSHA256 is the hex SHA-256 of the config file content, from the last
 	// recorded config change. Empty means none was recorded, so the file is still
 	// whatever the deployment started with.
@@ -167,8 +177,8 @@ func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService 
 		}
 		switch event.Event {
 		case EventImageUpdate:
-			digest, err := digestOfImageRef(string(event.Payload))
-			state.BrokerDigest, state.DigestSource, imageErr = digest, DigestSourceEvent, err
+			digest, signer, err := imageRecord(string(event.Payload))
+			state.BrokerDigest, state.BrokerSigner, state.DigestSource, imageErr = digest, signer, DigestSourceEvent, err
 		case EventConfigUpdate:
 			sum := string(event.Payload)
 			if configErr = nil; !hexSHA256Pattern.MatchString(sum) {
@@ -190,6 +200,28 @@ func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService 
 	// falling back would answer with the digest the deployment booted on while the
 	// ledger says it was changed to something the writer could not name.
 	if state.DigestSource == DigestSourceEvent {
+		// The record names an image AND the address the key derived from that image has.
+		// Require the quote to name the same one.
+		//
+		// This is the step that makes the ledger a statement about the running process
+		// rather than about an installation that may since have been undone. Everything
+		// that could make the two disagree ends here instead of being believed: a broker
+		// publishing an address of its own choosing, a controller killed between
+		// recording and recreating so a later start ran the old image under the new
+		// record, a digest resolved from a repository the record did not mean.
+		//
+		// It cannot be checked the other way round — deriving the address from the digest
+		// needs the app key, which never leaves the CVM — so the controller does that
+		// derivation and writes the answer into the record, where the hardware's
+		// append-only ledger keeps it.
+		quoteSigner, err := SignerFromReportData(quote)
+		if err != nil {
+			return nil, fmt.Errorf("the ledger binds a signer, so the quote must name one: %w", err)
+		}
+		if !strings.EqualFold(state.BrokerSigner, quoteSigner) {
+			return nil, fmt.Errorf("the last %s record binds signer %s to %s, but the quote names %s: the process holding the signing key is not the one the ledger describes",
+				EventImageUpdate, state.BrokerSigner, state.BrokerDigest, quoteSigner)
+		}
 		return state, nil
 	}
 
@@ -315,4 +347,40 @@ func appComposeOf(tcbInfoJSON []byte) (string, error) {
 		return "", fmt.Errorf("tcb_info carries no app_compose, so the deployment's compose file is unavailable")
 	}
 	return tcbInfo.AppCompose, nil
+}
+
+// imageRecord reads a zg-image-update payload: an image reference, then the address of
+// the signing key derived from that image.
+//
+//	ghcr.io/0gfoundation/0g-serving-broker@sha256:<64hex> 0x<40hex>
+//
+// A payload naming no digest is how the writer says it could not establish the truth,
+// and is refused — the point of it emitting one at all is that refusing beats believing
+// the record it replaced.
+//
+// A payload with a digest but no address is refused for the same reason rather than
+// treated as an older format to tolerate. Such a record would be exactly as plausible
+// as a correct one and exactly as unverifiable, and it is the shape an attacker would
+// choose: the digest a reviewer is looking for, with nothing tying it to whoever holds
+// the key. No released controller writes that form, so nothing is being broken.
+func imageRecord(payload string) (digest, signer string, err error) {
+	fields := strings.Fields(payload)
+	if len(fields) == 0 {
+		return "", "", fmt.Errorf("%s payload is empty", EventImageUpdate)
+	}
+	digest, err = digestOfImageRef(fields[0])
+	if err != nil {
+		return "", "", err
+	}
+	if len(fields) < 2 {
+		return "", "", fmt.Errorf("%s record %q names an image but no signer address, so nothing ties that image to the key signing responses", EventImageUpdate, payload)
+	}
+	if len(fields) > 2 {
+		return "", "", fmt.Errorf("%s payload %q has %d fields, want an image reference and a signer address", EventImageUpdate, payload, len(fields))
+	}
+	signer = strings.ToLower(fields[1])
+	if !addressPattern.MatchString(signer) {
+		return "", "", fmt.Errorf("%s record %q does not carry an address", EventImageUpdate, payload)
+	}
+	return digest, signer, nil
 }
