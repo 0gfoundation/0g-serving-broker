@@ -408,6 +408,28 @@ func validBillingModeForType(mode BillingMode, serviceType string) bool {
 	}
 }
 
+// isVideoBillingMode reports whether a mode prices video-generation output.
+//
+// One predicate rather than the same three-way enumeration written out at every
+// site that needs it. It WAS written out three times, and the third fell behind:
+// adding per_video_token updated validBillingModeForType and
+// validateVideoModelEntry but not the vendor check below, which then rejected
+// `vendor:` for exactly the mode whose vendor rules the pre-flight reserve reads
+// — so a Seedance model naming its vendor failed config load outright, and one
+// omitting it silently had no rules to reserve or record a tier from. Neither
+// path reached common/videospec at all.
+//
+// A mode added here reaches every site at once. That is the whole point; the
+// modes themselves are not otherwise interchangeable.
+func isVideoBillingMode(mode BillingMode) bool {
+	switch mode {
+	case BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken:
+		return true
+	default:
+		return false
+	}
+}
+
 // validateBillingConfig validates a per-model billing block against its service
 // type. prefix labels errors (e.g. "service.modelPricing[0].billing").
 func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) error {
@@ -431,6 +453,19 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 			return fmt.Errorf("invalid config: %s.resolutionMultipliers has keys %q and %q that collide case/whitespace-insensitively", prefix, prev, res)
 		}
 		seenRes[norm] = res
+	}
+	// per_video_token's unit count is whatever the vendor reports
+	// (usage.completion_tokens — see BillingConfig.OutputUnits, which does not
+	// look at Resolution at all), so a multiplier here would be read, validated,
+	// and then silently ignored while the operator believed they had priced 720p
+	// below 480p. Refused for the same reason `table` is refused outside
+	// per_unit_table, one block down: a knob that appears to work is worse than
+	// one that is absent.
+	//
+	// Per-model price variance for a token-billed model lives in the price table
+	// the caller resolves OutputPrice from, not here.
+	if b.Mode == BillingModePerVideoToken && len(b.ResolutionMultipliers) > 0 {
+		return fmt.Errorf("invalid config: %s.resolutionMultipliers is ignored by mode %q (the vendor reports the billable token count, so resolution does not scale it) — set per-resolution pricing in the price table instead", prefix, BillingModePerVideoToken)
 	}
 	if b.Mode == BillingModePerUnitTable {
 		if len(b.Table) == 0 {
@@ -456,7 +491,7 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	} else if len(b.Table) > 0 {
 		return fmt.Errorf("invalid config: %s.table is only valid for mode %q", prefix, BillingModePerUnitTable)
 	}
-	if b.Mode == BillingModePerVideoSecond || b.Mode == BillingModePerUnitTable {
+	if isVideoBillingMode(b.Mode) {
 		validateVideoVendor(prefix, b)
 	} else if b.Vendor != "" {
 		return fmt.Errorf("invalid config: %s.vendor is only valid for the video billing modes", prefix)
@@ -1080,12 +1115,15 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 			}
 		}
 	}
-	if entry.Billing == nil || (entry.Billing.Mode != BillingModePerVideoSecond && entry.Billing.Mode != BillingModePerUnitTable && entry.Billing.Mode != BillingModePerVideoToken) {
+	if entry.Billing == nil || !isVideoBillingMode(entry.Billing.Mode) {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].billing.mode must be '%s', '%s', or '%s' for video model '%s'", i, BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken, entry.Model)
 	}
-	// Video uses billing.resolutionMultipliers, not token-length tiers.
+	// Video prices output per its own billing mode, never by token-length tiers.
+	// The replacement is per mode — resolutionMultipliers for per_video_second,
+	// table rows for per_unit_table, and neither for per_video_token, whose unit
+	// count comes from the vendor — so this does not name one.
 	if len(entry.Tiers) > 0 {
-		return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for video-generation (use billing.resolutionMultipliers) for model '%s'", i, entry.Model)
+		return fmt.Errorf("invalid config: service.modelPricing[%d].tiers is not supported for video-generation (price it through billing.mode %q instead) for model '%s'", i, entry.Billing.Mode, entry.Model)
 	}
 	return nil
 }

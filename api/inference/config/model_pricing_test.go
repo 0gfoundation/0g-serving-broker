@@ -3,6 +3,7 @@ package config
 import (
 	"testing"
 
+	"github.com/0glabs/0g-serving-broker/common/videospec"
 	constant "github.com/0glabs/0g-serving-broker/inference/const"
 )
 
@@ -102,5 +103,106 @@ func TestValidateBillingConfig_PerVideoToken(t *testing.T) {
 	}
 	if err := validateBillingConfig("service.modelPricing[0].billing", b, constant.ServiceTypeTextToImage); err == nil {
 		t.Error("per_video_token must be rejected for a non-video service type")
+	}
+}
+
+// TestValidateBillingConfig_PerVideoTokenAcceptsVendor: naming the vendor must
+// LOAD for this mode. It did not — the vendor check enumerated the video modes by
+// hand and omitted per_video_token, so a Seedance model configured the documented
+// way failed with "vendor is only valid for the video billing modes" and the
+// broker refused to start. The test above missed it by not setting Vendor at all.
+//
+// Both halves of the gap are pinned here, because either one alone leaves
+// common/videospec unreachable for this vendor: naming it must load, and the name
+// must be one videospec actually has rules for — otherwise VideoCreateReserve
+// takes its unknown_vendor early return and the recorded rules price nothing.
+func TestValidateBillingConfig_PerVideoTokenAcceptsVendor(t *testing.T) {
+	b := &BillingConfig{Mode: BillingModePerVideoToken, Vendor: string(videospec.VendorSeedance)}
+	if err := validateBillingConfig("service.modelPricing[0].billing", b, constant.ServiceTypeVideoGeneration); err != nil {
+		t.Fatalf("per_video_token naming its vendor must load, got %v", err)
+	}
+	if _, ok := videospec.Get(videospec.Vendor(b.Vendor)); !ok {
+		t.Errorf("vendor %q loads but has no rules recorded, so the reserve path cannot use it", b.Vendor)
+	}
+}
+
+// TestValidateBillingConfig_PerVideoTokenRejectsResolutionMultipliers:
+// per_video_token bills the vendor's reported token count and never scales it by
+// resolution (OutputUnits does not read Resolution), so a multiplier here would be
+// validated and then silently ignored — an operator would believe they had priced
+// 480p below 720p. Refused at load, exactly as `table` is outside per_unit_table.
+func TestValidateBillingConfig_PerVideoTokenRejectsResolutionMultipliers(t *testing.T) {
+	b := &BillingConfig{
+		Mode:                  BillingModePerVideoToken,
+		Vendor:                string(videospec.VendorSeedance),
+		ResolutionMultipliers: map[string]float64{"480p": 0.5},
+	}
+	if err := validateBillingConfig("service.modelPricing[0].billing", b, constant.ServiceTypeVideoGeneration); err == nil {
+		t.Error("per_video_token with resolutionMultipliers must be rejected, not silently ignored")
+	}
+
+	// The sibling modes DO scale by resolution, so the same block must stay valid
+	// for them — the check is about this mode, not about the field.
+	perSecond := &BillingConfig{
+		Mode:                  BillingModePerVideoSecond,
+		Vendor:                string(videospec.VendorMiniMax),
+		ResolutionMultipliers: map[string]float64{"2K": 1.5},
+	}
+	if err := validateBillingConfig("service.modelPricing[0].billing", perSecond, constant.ServiceTypeVideoGeneration); err != nil {
+		t.Errorf("per_video_second must still accept resolutionMultipliers, got %v", err)
+	}
+}
+
+// TestIsVideoBillingMode: the predicate that replaced three hand-written
+// enumerations of the video modes, the third of which fell behind and produced
+// the load failure above. A new video mode must be added here, not re-enumerated.
+func TestIsVideoBillingMode(t *testing.T) {
+	for _, m := range []BillingMode{BillingModePerVideoSecond, BillingModePerUnitTable, BillingModePerVideoToken} {
+		if !isVideoBillingMode(m) {
+			t.Errorf("isVideoBillingMode(%q) = false, want true", m)
+		}
+	}
+	for _, m := range []BillingMode{"", BillingModePerToken, BillingModePerImage, "nonsense"} {
+		if isVideoBillingMode(m) {
+			t.Errorf("isVideoBillingMode(%q) = true, want false", m)
+		}
+	}
+}
+
+// TestValidateModelPricing_SeedanceTokenBilledModelLoads walks the WHOLE
+// config-load path for the documented Seedance shape — the one the compose
+// example tells an operator to write — rather than a single billing block.
+//
+// This is the test whose absence let a dead-code bug ship. Every narrower test
+// passed: the mode was accepted, OutputUnits was correct, the vendor's rules were
+// registered and unit-tested. The config an operator would actually write still
+// failed to load, because the vendor check enumerated the video modes by hand and
+// this mode was not among them. Nothing exercised the two together.
+func TestValidateModelPricing_SeedanceTokenBilledModelLoads(t *testing.T) {
+	cfg := &Config{}
+	cfg.Service.ProviderType = constant.ProviderTypeCentralized
+	cfg.Service.Type = constant.ServiceTypeVideoGeneration
+	cfg.Service.ModelType = "bytedance/seedance-2.5"
+	cfg.Service.ModelPricing = []ModelPricingEntry{{
+		Model:       "bytedance/seedance-2.5",
+		OutputPrice: "1000",
+		Billing: &BillingConfig{
+			Mode:   BillingModePerVideoToken,
+			Vendor: string(videospec.VendorSeedance),
+		},
+	}}
+
+	if err := validateModelPricing(cfg); err != nil {
+		t.Fatalf("the documented Seedance config must load, got %v", err)
+	}
+
+	// And the rules it names must be the ones the reserve path resolves, or the
+	// config loads into a broker that still cannot tell what this vendor renders.
+	spec, ok := videospec.Get(videospec.Vendor(cfg.Service.ModelPricing[0].Billing.Vendor))
+	if !ok {
+		t.Fatal("the loaded vendor has no rules recorded")
+	}
+	if got := spec.Tier("832x480"); got != "480p" {
+		t.Errorf("loaded vendor's Tier(832x480) = %q, want 480p", got)
 	}
 }

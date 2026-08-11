@@ -361,6 +361,15 @@ func TestWarnVideoDurationDrift(t *testing.T) {
 // newTokenBilledReserveTestCtrl builds a Ctrl whose model bills per_video_token —
 // the mode whose fee is a vendor-computed token count, so no reading of the
 // request determines it.
+//
+// This config is only reachable in production because config validation ACCEPTS
+// a per_video_token model naming its vendor — which it did not, until the vendor
+// check was fixed to include the mode: it failed load with "vendor is only valid
+// for the video billing modes" and the broker would not start, while a test
+// building only the lookup map (as this one does — the real validator is
+// package-private to config) priced away happily. The load half is pinned by
+// TestValidateBillingConfig_PerVideoTokenAcceptsVendor over in that package; both
+// halves name videospec.VendorSeedance, so a rename cannot leave one behind.
 func newTokenBilledReserveTestCtrl(t *testing.T) (*Ctrl, *gin.Context) {
 	t.Helper()
 	c := &Ctrl{logger: testLogger()}
