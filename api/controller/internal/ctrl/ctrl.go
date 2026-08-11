@@ -1024,24 +1024,41 @@ func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
 	if status.Name != containerBroker {
 		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
 	}
-	_, digest, pinned := strings.Cut(status.Image, "@")
-	if !pinned {
-		// status.Image is the reference the container was created with, and a shipping
-		// compose file names the image by tag. Refusing here would mean a CVM that has
-		// never been upgraded through this controller could never sign at all, so resolve
-		// the tag against the daemon — the same RepoDigests lookup that produces the digest
-		// this controller reports on-chain, so the key and the on-chain claim name one image.
-		info, err := c.dockerClient.GetImageInfo(ctx, status.Image)
-		if err != nil {
-			return "", fmt.Errorf("resolving %q to a digest: %w", status.Image, err)
+	// A reference that pins a digest already names the image the container was created on,
+	// and no lookup can improve on it.
+	if _, digest, pinned := strings.Cut(status.Image, "@"); pinned {
+		if !imageDigestPattern.MatchString(digest) {
+			return "", fmt.Errorf("the broker runs %q, whose digest is malformed", status.Image)
 		}
-		digest = info.Digest
+		return digest, nil
 	}
-	if !imageDigestPattern.MatchString(digest) {
-		// Fail closed. An image built locally and never pushed has no digest at all, and a
-		// signature under a key derived from a guess is worse than no signature, because it
-		// would verify.
-		return "", fmt.Errorf("the broker runs %q, which resolves to no digest", status.Image)
+
+	// Otherwise resolve the image the container is RUNNING, by ID.
+	//
+	// Not by the reference string: a shipping compose file names the image by tag, and
+	// asking the daemon what that tag points at answers "what would start now", which
+	// `docker pull repo:tag` changes underneath a live container. The key would then be
+	// derived from an image that is not the one serving requests — and it would be derived
+	// from the image a reviewer approved while the unreviewed one answered, which is the
+	// exact substitution this whole arrangement exists to prevent.
+	if status.ImageID == "" {
+		return "", fmt.Errorf("the broker runs %q, which pins no digest, and the daemon reported no image ID", status.Image)
 	}
-	return digest, nil
+	info, err := c.dockerClient.GetImageInfo(ctx, status.ImageID)
+	if err != nil {
+		return "", fmt.Errorf("resolving the running image %s to a digest: %w", status.ImageID, err)
+	}
+	if !imageDigestPattern.MatchString(info.Digest) {
+		// Fail closed. An image built locally and never pushed carries no digest at all, and
+		// a signature under a key derived from a guess is worse than no signature, because
+		// it would verify.
+		return "", fmt.Errorf("the running image %s resolves to no digest", status.ImageID)
+	}
+	// An image known under several repositories (a mirror as well as the origin) can carry
+	// more than one manifest digest, and inspecting by ID gives no repository to prefer. If
+	// the entry picked here is not the one the RTMR3 record names, the signer address a
+	// client derives will not match the one in report_data and the client rejects — wrong,
+	// but wrong in the direction that refuses service rather than the one that accepts an
+	// unreviewed image.
+	return info.Digest, nil
 }
