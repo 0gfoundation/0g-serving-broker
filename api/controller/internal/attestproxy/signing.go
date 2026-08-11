@@ -1,12 +1,12 @@
 package attestproxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 
@@ -74,7 +74,9 @@ func (p *Proxy) serveSign(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Hash string `json:"hash"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Bounded: the other end of this socket is the component the whole arrangement declines
+	// to trust, and a hash is 32 bytes.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil {
 		p.fail(w, http.StatusBadRequest, "decoding the request: %v", err)
 		return
 	}
@@ -188,18 +190,13 @@ func (p *Proxy) deriveKey(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://dstack/GetKey", strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://dstack/GetKey", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", p.dstackPath)
-		},
-	}}
-	resp, err := client.Do(req)
+	resp, err := p.keyClient.Do(req)
 	if err != nil {
 		return "", err
 	}
