@@ -390,9 +390,13 @@ func validBillingModeForType(mode BillingMode, serviceType string) bool {
 //
 //   - missing from validBillingModeForType, a mode is rejected for every service
 //     type: loud, found at once.
-//   - missing from the vendor check, `vendor:` becomes ILLEGAL for that mode, so a
-//     model configured with one fails config load — while omitting it loads and
-//     silently forwards every create with no pre-flight reserve.
+//   - missing from the vendor check, `vendor:` becomes ILLEGAL for that mode: a
+//     model naming one fails config load and the broker does not start, while a
+//     model omitting it loads with validateVideoVendor's warning never printed —
+//     that warning sits behind this very branch, and it is the only thing that
+//     says at STARTUP that creates will go out unreserved. The runtime
+//     reason=unknown_vendor counter still fires, so the loss is the early notice,
+//     not the visibility.
 //   - missing from validateVideoModelEntry, the mode is rejected for video models
 //     specifically, i.e. exactly where it was meant to be used.
 //
