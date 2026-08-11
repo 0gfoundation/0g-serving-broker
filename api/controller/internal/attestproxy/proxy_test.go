@@ -103,30 +103,34 @@ func post(t *testing.T, c *http.Client, method, path string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
-// The whole point of the package: the three read-only methods reach dstack and nothing
-// else does.
+// The whole point of the package: the attestation methods reach dstack and nothing else does.
 //
 // /EmitEvent is the one that matters. It sits on the same dstack socket as GetQuote and
 // extends RTMR3, so a broker that could reach it could append any record it liked about
 // itself — which is exactly what giving the broker this socket instead of dstack's is meant
 // to prevent. A proxy that forwarded it would be worse than no proxy, because the
 // deployment would have taken the mount away believing the problem was solved.
+//
+// /GetKey is refused for a second, distinct reason: it derives keys, so with it the broker
+// could derive the previous image's signing key and keep signing across an upgrade. See
+// TestGetKeyIsNotForwarded.
 func TestOnlyReadOnlyMethodsReachDstack(t *testing.T) {
 	var reached []string
 	c := start(t, &reached)
 
-	for _, path := range []string{"/GetQuote", "/Info", "/GetKey"} {
+	for _, path := range []string{"/GetQuote", "/Info"} {
 		if code, body := post(t, c, http.MethodPost, path); code != http.StatusOK {
 			t.Errorf("POST %s = %d %q, want 200", path, code, body)
 		}
 	}
-	if len(reached) != 3 {
-		t.Errorf("dstack saw %v, want all three forwarded", reached)
+	if len(reached) != 2 {
+		t.Errorf("dstack saw %v, want both forwarded", reached)
 	}
 
 	before := len(reached)
 	refused := []string{
 		"/EmitEvent", // writes RTMR3 — the reason this package exists
+		"/GetKey",    // derives keys, which is what /Sign exists to avoid handing over
 		"/GetTlsKey", // read-only, but the broker does not use it; the set is a fixed
 		"/emitevent", // allowlist, not a denylist, so case tricks gain nothing
 		"/GetQuote/", // and neither does a trailing slash
