@@ -87,6 +87,55 @@ func TestVideoResponseFieldsParsing(t *testing.T) {
 	}
 }
 
+// TestVideoResponseFields_CompletionTokens pins the ByteDance Seedance billing
+// signal: usage.completion_tokens is read independently of the duration
+// fields (output_video_duration/duration/top-level seconds) and never
+// confused with them.
+func TestVideoResponseFields_CompletionTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		respJSON string
+		want     int64
+	}{
+		{
+			name:     "usage.completion_tokens present",
+			respJSON: `{"status":"completed","usage":{"completion_tokens":246840,"total_tokens":246840}}`,
+			want:     246840,
+		},
+		{
+			name:     "usage present but no completion_tokens (DashScope/MiniMax shape)",
+			respJSON: `{"status":"completed","usage":{"output_video_duration":5}}`,
+			want:     0,
+		},
+		{
+			name:     "no usage block at all",
+			respJSON: `{"status":"completed","seconds":5}`,
+			want:     0,
+		},
+		{
+			name:     "zero completion_tokens is not billed as a positive count",
+			respJSON: `{"status":"completed","usage":{"completion_tokens":0}}`,
+			want:     0,
+		},
+		{
+			name:     "float-encoded completion_tokens tolerated",
+			respJSON: `{"status":"completed","usage":{"completion_tokens":246840.0}}`,
+			want:     246840,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var fields videoResponseFields
+			if err := json.Unmarshal([]byte(tt.respJSON), &fields); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := fields.completionTokens(); got != tt.want {
+				t.Errorf("completionTokens() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 // ==========================================================================
 // parseVideoGenerationModel
 // ==========================================================================
@@ -382,6 +431,120 @@ func TestVideoOutputUnits_PerModelAndFallback(t *testing.T) {
 	cs := &Ctrl{logger: testLogger(), Service: config.Service{}}
 	if got := cs.videoOutputUnits(ginCtxWithResolvedModel(""), 5, "1024x1792"); got != 10 {
 		t.Errorf("single-model fallback units = %d, want 10", got)
+	}
+}
+
+// TestVideoOutputUnits_PerVideoToken pins the ByteDance Seedance billing path:
+// the vendor-reported completion-token count is billed directly, ignoring
+// seconds/size entirely, and the variadic completionTokens argument is a pure
+// backward-compatible addition (every pre-existing 3-arg call site above
+// keeps compiling and behaving unchanged).
+func TestVideoOutputUnits_PerVideoToken(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bytedance-seedance",
+		OutputPrice: "1",
+		Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoToken},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bytedance-seedance")}
+
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p", 246840); got != 246840 {
+		t.Errorf("per_video_token units = %d, want the vendor's completion_tokens (246840) passed straight through", got)
+	}
+	// Omitting the variadic arg entirely (as every DashScope/MiniMax call site
+	// does) must not panic and must resolve to 0 tokens, not some seconds-based
+	// guess — the mode's whole point is that seconds/size are irrelevant to it.
+	if got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p"); got != 0 {
+		t.Errorf("per_video_token units with no completionTokens arg = %d, want 0", got)
+	}
+}
+
+// TestWarnIfTokenBillingObservedNothing: a per_video_token request whose vendor
+// response carried NO token count was served for free, and nothing else would
+// notice — OutputUnits returns (0, nil) and the fee is simply 0.
+//
+// The whitelist case is the reason this is a separate function rather than a check
+// inside videoOutputUnits: a whitelisted request is unbilled BY DESIGN, so
+// "served free" is not a finding about it, and RecordVideoBillingSkipped counts
+// requests that SHOULD have been billed. Incrementing it for whitelist traffic
+// would put a permanent floor under a metric operators alert on.
+func TestWarnIfTokenBillingObservedNothing(t *testing.T) {
+	newTokenCtrl := func(t *testing.T) (*Ctrl, *countingLogger) {
+		t.Helper()
+		entry := config.ModelPricingEntry{
+			Model:       "bytedance-seedance",
+			OutputPrice: "1",
+			Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoToken},
+		}
+		c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bytedance-seedance")}
+		rec := &countingLogger{Logger: c.logger}
+		c.logger = rec
+		return c, rec
+	}
+
+	t.Run("a billable request observing no tokens is reported", func(t *testing.T) {
+		c, rec := newTokenCtrl(t)
+		c.warnIfTokenBillingObservedNothing(ginCtxWithResolvedModel("bytedance-seedance"), 0)
+		if rec.errors != 1 {
+			t.Errorf("logged %d errors, want 1 — a silent free bill must not go unnoticed", rec.errors)
+		}
+	})
+
+	t.Run("a positive token count is silent", func(t *testing.T) {
+		c, rec := newTokenCtrl(t)
+		c.warnIfTokenBillingObservedNothing(ginCtxWithResolvedModel("bytedance-seedance"), 246840)
+		if rec.errors != 0 {
+			t.Errorf("logged %d errors for a normal request, want 0", rec.errors)
+		}
+	})
+
+	t.Run("a seconds-billed model is not this check's business", func(t *testing.T) {
+		entry := config.ModelPricingEntry{
+			Model:       "vid-seconds",
+			OutputPrice: "1",
+			Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoSecond},
+		}
+		c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "vid-seconds")}
+		rec := &countingLogger{Logger: c.logger}
+		c.logger = rec
+		c.warnIfTokenBillingObservedNothing(ginCtxWithResolvedModel("vid-seconds"), 0)
+		if rec.errors != 0 {
+			t.Errorf("logged %d errors for a per_video_second model, want 0", rec.errors)
+		}
+	})
+}
+
+// TestVideoOutputUnits_PerVideoTokenComputesWithoutJudging: the unit math must not
+// report anything on its own. Both the whitelist path and the pre-flight balance
+// gate call it with a zero (or absent) token count for entirely legitimate
+// reasons, and a warning wired in here would fire on both.
+func TestVideoOutputUnits_PerVideoTokenComputesWithoutJudging(t *testing.T) {
+	entry := config.ModelPricingEntry{
+		Model:       "bytedance-seedance",
+		OutputPrice: "1",
+		Billing:     &config.BillingConfig{Mode: config.BillingModePerVideoToken},
+	}
+	c := &Ctrl{logger: testLogger(), Service: newMultiModelService(t, "NATIVE", []config.ModelPricingEntry{entry}, "bytedance-seedance")}
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	for _, tt := range []struct {
+		name   string
+		tokens []int64
+		want   int64
+	}{
+		{"zero observed tokens", []int64{0}, 0},
+		{"no token count at all", nil, 0},
+		{"a real token count passes through", []int64{246840}, 246840},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := c.videoOutputUnits(ginCtxWithResolvedModel("bytedance-seedance"), 5, "1080p", tt.tokens...)
+			if got != tt.want {
+				t.Errorf("units = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	if rec.errors != 0 {
+		t.Errorf("videoOutputUnits logged %d errors; it must compute, not judge", rec.errors)
 	}
 }
 
