@@ -13,11 +13,21 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/tee"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/ctrl"
 	"github.com/0glabs/0g-serving-broker/controller/internal/handler"
 	"github.com/0glabs/0g-serving-broker/controller/internal/middleware"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
+
+// attestSocketEnvVar is where the controller serves quotes and derived keys to the broker.
+//
+// Empty, the default, means it serves nothing: the deployment still gives the broker dstack's
+// own socket, and behaviour is unchanged. Set it, mount the same path into the broker, and
+// take dstack's socket away from the broker — the last of those three is the one that buys
+// anything, and this exists so it can be done without the broker losing its quotes.
+const attestSocketEnvVar = "ATTEST_PROXY_SOCKET"
 
 func Main() {
 	cfg := config.GetConfig()
@@ -55,6 +65,28 @@ func Main() {
 		logger.Fatalf("Failed to create controller: %v", err)
 	}
 	defer controller.Close()
+
+	// Serve quotes and derived keys to the broker, when a deployment has asked for it.
+	//
+	// Only when asked: this is how a deployment stops mounting dstack's socket into the
+	// broker, and a deployment that still mounts it needs nothing here. See attestproxy for
+	// why the mount is what matters and this is only what makes removing it possible.
+	if socket := os.Getenv(attestSocketEnvVar); socket != "" {
+		proxyCtx, stopProxy := context.WithCancel(context.Background())
+		defer stopProxy()
+
+		proxy := attestproxy.New(socket, tee.DefaultDstackSocket, logger)
+		defer func() { _ = proxy.Close() }()
+
+		go func() {
+			// Fatal rather than a warning: the broker cannot start without it, so a
+			// controller that silently carried on would look healthy while the deployment
+			// was down.
+			if err := proxy.Serve(proxyCtx); err != nil {
+				logger.Fatalf("Attestation proxy on %s failed: %v", socket, err)
+			}
+		}()
+	}
 
 	// Create handler
 	h := handler.NewHandler(controller)
