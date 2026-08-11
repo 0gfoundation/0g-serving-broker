@@ -322,6 +322,9 @@ func (c *Ctrl) pollVideoJob(job model.VideoPollJob) {
 	// an async create is where the reserve is load-bearing, since the fee lands
 	// minutes after the gate let the request through.
 	c.WarnVideoDurationDrift(pollCtx, job.RequestBody, job.RequestContentType, seconds)
+	// The path that matters for a token-billed vendor: it always creates "queued"
+	// and resolves here, so this is where a stale per-second rate surfaces.
+	c.WarnVideoTokenEstimateDrift(pollCtx, job.RequestBody, job.RequestContentType, fields.completionTokens())
 
 	if job.IsWhitelisted {
 		// Commit the completion write BEFORE signing/recording usage, for the same reason as
