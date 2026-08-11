@@ -30,6 +30,12 @@ const (
 	// (§4.1).
 	encKeyDerivePath = "/e2ee-enc"
 
+	// EncKeyDerivePathSuffix is encKeyDerivePath, exported so the controller's
+	// attestation proxy derives the enclave encryption key on the same path this
+	// package does. One string, two callers: if they disagree the broker gets a key
+	// nothing sealed to.
+	EncKeyDerivePathSuffix = encKeyDerivePath
+
 	// encKeyHKDFInfo domain-separates the HKDF expansion that turns the raw
 	// TEE-derived material into the KEM seed, so this key stream can never collide
 	// with another use of the same material.

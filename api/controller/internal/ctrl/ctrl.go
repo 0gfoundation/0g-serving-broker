@@ -1043,3 +1043,30 @@ func mapKeys(m map[string]string) []string {
 	}
 	return keys
 }
+
+// RunningBrokerDigest reports the digest of the image the broker container runs.
+//
+// The attestation proxy derives per-image keys from it, so it refuses anything it cannot pin
+// down exactly: a name that only matched by substring, a reference carrying no digest, or no
+// container at all. A key derived from a guess would still produce signatures that verify,
+// which is the one outcome worse than refusing to sign.
+func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
+	status, err := c.dockerClient.GetContainerStatus(ctx, containerBroker)
+	if err != nil {
+		return "", fmt.Errorf("reading the broker's image: %w", err)
+	}
+	if status == nil {
+		return "", fmt.Errorf("no %s container", containerBroker)
+	}
+	// Container lookup falls back to a shortest-substring match, which is fine for a status
+	// endpoint and not for this: a neighbour's digest would key a signature the client
+	// attributes to the broker.
+	if status.Name != containerBroker {
+		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
+	}
+	_, digest, pinned := strings.Cut(status.Image, "@")
+	if !pinned || !imageDigestPattern.MatchString(digest) {
+		return "", fmt.Errorf("the broker runs %q, which pins no digest", status.Image)
+	}
+	return digest, nil
+}
