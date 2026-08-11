@@ -278,7 +278,7 @@ func TestVideoBillingTier_SettlementAgreesWithTheGate(t *testing.T) {
 // vendor has no rules recorded must settle exactly as it does now. Changing what
 // it bills would make this a pricing change for vendors nobody has looked at yet.
 func TestVideoBillingTier_UnrecordedVendorKeepsTodaysBehaviour(t *testing.T) {
-	c, ctx := newReserveTestCtrl(t, "seedance")
+	c, ctx := newReserveTestCtrl(t, "no-such-vendor")
 	if got := c.VideoBillingTier(ctx, "1792x1024"); got != "1792x1024" {
 		t.Errorf("VideoBillingTier = %q, want the size unchanged", got)
 	}
@@ -343,7 +343,7 @@ func TestWarnVideoDurationDrift(t *testing.T) {
 	})
 
 	t.Run("an unrecorded vendor has no rules to fall behind", func(t *testing.T) {
-		c, ctx := newReserveTestCtrl(t, "seedance")
+		c, ctx := newReserveTestCtrl(t, "no-such-vendor")
 		if got := count(t, c, ctx, `{"seconds":5}`, 99); got != 0 {
 			t.Errorf("logged %d lines for an unrecorded vendor, want 0", got)
 		}
