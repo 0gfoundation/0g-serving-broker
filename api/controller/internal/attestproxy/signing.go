@@ -27,6 +27,10 @@ const (
 	pathSign          = "/Sign"
 	pathSignerAddress = "/SignerAddress"
 	pathGetEncKey     = "/GetEncKey"
+
+	// signerDerivePathSuffix keeps the signing key a leaf, beside the enclave encryption
+	// key, rather than the root of the running image's whole derivation subtree.
+	signerDerivePathSuffix = "/sign"
 )
 
 // CurrentImageFunc reports the digest of the image the broker is running, as
@@ -43,7 +47,11 @@ type CurrentImageFunc func(ctx context.Context) (string, error)
 // changing the image changes the address and a client still holding the old attestation
 // stops being able to verify. That is what stops an attestation taken before an upgrade
 // from authorising an unbounded future.
-func signerKeyPath(digest string) string { return "/" + digest }
+//
+// A sibling of encKeyPath rather than its parent: dstack derivation is hierarchical, so
+// deriving the signing key at "/<digest>" would make it an ancestor of everything else under
+// that digest, and holding it would be holding the subtree.
+func signerKeyPath(digest string) string { return "/" + digest + signerDerivePathSuffix }
 
 // encKeyPath is the derivation path for the enclave encryption key, per image for the same
 // reason. tee.EncKeyDerivePathSuffix keeps the two sides agreeing on one string.

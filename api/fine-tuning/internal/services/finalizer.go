@@ -355,7 +355,7 @@ func (f *Finalizer) encryptModelLocal(sourceDir string, task *db.Task) (*Settlem
 		return nil, err
 	}
 
-	tagSig, err := crypto.Sign(crypto.Keccak256(tag[:]), f.teeService.ProviderSigner)
+	tagSig, err := f.teeService.SignHash(crypto.Keccak256(tag[:]))
 	if err != nil {
 		return nil, errors.Wrap(err, "sign tag failed")
 	}

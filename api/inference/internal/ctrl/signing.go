@@ -9,7 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gowebpki/jcs"
 
 	teeutil "github.com/0glabs/0g-serving-broker/common/tee"
@@ -76,7 +75,7 @@ func jcsSha256Hex(b []byte) (string, error) {
 // the broker's signed bytes and the client's recomputed bytes byte-for-byte
 // identical; this function is a thin signer over the finished text.
 func (c *Ctrl) signChatE2EE(text, chatKey string) error {
-	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		return err
 	}
@@ -105,7 +104,7 @@ func (c *Ctrl) signChatWithKey(reqBody, respData []byte, chatKey string) error {
 
 	c.logger.Debugf("requestSha256: %s, responseSha256: %s, signer address %s", requestSha256, responseSha256, c.teeService.Address.Hex())
 	text := fmt.Sprintf("%s:%s", requestSha256, responseSha256)
-	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		return err
 	}
@@ -153,7 +152,7 @@ func (c *Ctrl) signImageResponse(reqBody []byte, images [][]byte, chatKey string
 	}
 	text := sha256Hex(reqBody) + ":" + strings.Join(imgHashes, ",")
 
-	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		return err
 	}
@@ -216,7 +215,7 @@ func (c *Ctrl) signCentralizedRoutingProof(reqBody, respData []byte, chatKey, tl
 
 	c.logger.Debugf("Routing proof text: %s, signer address: %s", text, c.teeService.Address.Hex())
 
-	sig, err := crypto.Sign(accounts.TextHash([]byte(text)), c.teeService.ProviderSigner)
+	sig, err := c.teeService.SignHash(accounts.TextHash([]byte(text)))
 	if err != nil {
 		monitor.RecordRoutingProofSkipped(monitor.RoutingProofSkipSignError)
 		return fmt.Errorf("failed to sign routing proof: %w", err)

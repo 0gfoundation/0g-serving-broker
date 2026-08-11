@@ -48,7 +48,12 @@ import (
 var forwarded = map[string]bool{
 	"/GetQuote": true, // the attestation itself
 	"/Info":     true, // tcb_info, which TdxQuote assembles into its response
-	"/GetKey":   true, // the signer and enclave encryption keys
+
+	// GetKey is deliberately absent. It is a key-derivation primitive, so forwarding it
+	// would let the broker derive any path — including the path belonging to a previous
+	// image — and a signing key it can derive is one it can keep across an upgrade, which
+	// leaves a pre-upgrade attestation verifying forever. /Sign, /SignerAddress and
+	// /GetEncKey (signing.go) give it what it needs without ever handing over the key.
 }
 
 // imageDigestPattern is what counts as a running-image digest. Lowercase hex only, the same

@@ -1065,8 +1065,23 @@ func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%q resolved to container %q, not the broker", containerBroker, status.Name)
 	}
 	_, digest, pinned := strings.Cut(status.Image, "@")
-	if !pinned || !imageDigestPattern.MatchString(digest) {
-		return "", fmt.Errorf("the broker runs %q, which pins no digest", status.Image)
+	if !pinned {
+		// status.Image is the reference the container was created with, and a shipping
+		// compose file names the image by tag. Refusing here would mean a CVM that has
+		// never been upgraded through this controller could never sign at all, so resolve
+		// the tag against the daemon — the same RepoDigests lookup that produces the digest
+		// this controller reports on-chain, so the key and the on-chain claim name one image.
+		info, err := c.dockerClient.GetImageInfo(ctx, status.Image)
+		if err != nil {
+			return "", fmt.Errorf("resolving %q to a digest: %w", status.Image, err)
+		}
+		digest = info.Digest
+	}
+	if !imageDigestPattern.MatchString(digest) {
+		// Fail closed. An image built locally and never pushed has no digest at all, and a
+		// signature under a key derived from a guess is worse than no signature, because it
+		// would verify.
+		return "", fmt.Errorf("the broker runs %q, which resolves to no digest", status.Image)
 	}
 	return digest, nil
 }
