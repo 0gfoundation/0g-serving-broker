@@ -43,3 +43,20 @@ func TestNextBucketUnits_SelectsByDurationNotPrice(t *testing.T) {
 		t.Error("an unconfigured resolution must report no covering bucket, not borrow another's")
 	}
 }
+
+// TestIsVideoBillingMode pins the predicate that replaced three hand-written
+// enumerations of the video billing modes. A new video mode must be added HERE,
+// not re-enumerated at each site — see the predicate's doc for how differently
+// the three sites fail when one of them is missed.
+func TestIsVideoBillingMode(t *testing.T) {
+	for _, m := range []BillingMode{BillingModePerVideoSecond, BillingModePerUnitTable} {
+		if !isVideoBillingMode(m) {
+			t.Errorf("isVideoBillingMode(%q) = false, want true", m)
+		}
+	}
+	for _, m := range []BillingMode{"", BillingModePerToken, BillingModePerImage, "nonsense"} {
+		if isVideoBillingMode(m) {
+			t.Errorf("isVideoBillingMode(%q) = true, want false", m)
+		}
+	}
+}

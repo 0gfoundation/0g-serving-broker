@@ -368,13 +368,48 @@ func (b *BillingConfig) MaxTableUnits() int64 {
 // service type. per_token is valid everywhere (the default); the non-token modes
 // are restricted to the modality whose output they price.
 func validBillingModeForType(mode BillingMode, serviceType string) bool {
+	if isVideoBillingMode(mode) {
+		return serviceType == constant.ServiceTypeVideoGeneration
+	}
 	switch mode {
 	case "", BillingModePerToken:
 		return true
 	case BillingModePerImage:
 		return serviceType == constant.ServiceTypeTextToImage || serviceType == constant.ServiceTypeImageEditing
+	default:
+		return false
+	}
+}
+
+// isVideoBillingMode reports whether a mode prices video-generation output.
+//
+// Called from three sites — validBillingModeForType above, the vendor check in
+// validateBillingConfig, and validateVideoModelEntry — which each enumerated this
+// set by hand until now. A mode present in some of those enumerations but not all
+// looks fine in review, because the three do not fail the same way:
+//
+//   - missing from validBillingModeForType, a mode is rejected for every service
+//     type: loud, found at once.
+//   - missing from the vendor check, `vendor:` becomes ILLEGAL for that mode: a
+//     model naming one fails config load and the broker does not start, while a
+//     model omitting it loads with validateVideoVendor's warning never printed —
+//     that warning sits behind this very branch, and it is the only thing that
+//     says at STARTUP that creates will go out unreserved. The runtime
+//     reason=unknown_vendor counter still fires, so the loss is the early notice,
+//     not the visibility.
+//   - missing from validateVideoModelEntry, the mode is rejected for video models
+//     specifically, i.e. exactly where it was meant to be used.
+//
+// Adding a video mode HERE reaches all three at once. It must still be added to
+// the BillingMode const block and to validateBillingConfig's known-mode switch,
+// which lists every mode of every modality and so is not this set — but omitting
+// it there fails loudly ("not a known billing mode"), which is the whole
+// difference. The modes are not otherwise interchangeable; this predicate answers
+// one question about them.
+func isVideoBillingMode(mode BillingMode) bool {
+	switch mode {
 	case BillingModePerVideoSecond, BillingModePerUnitTable:
-		return serviceType == constant.ServiceTypeVideoGeneration
+		return true
 	default:
 		return false
 	}
@@ -428,7 +463,7 @@ func validateBillingConfig(prefix string, b *BillingConfig, serviceType string) 
 	} else if len(b.Table) > 0 {
 		return fmt.Errorf("invalid config: %s.table is only valid for mode %q", prefix, BillingModePerUnitTable)
 	}
-	if b.Mode == BillingModePerVideoSecond || b.Mode == BillingModePerUnitTable {
+	if isVideoBillingMode(b.Mode) {
 		validateVideoVendor(prefix, b)
 	} else if b.Vendor != "" {
 		return fmt.Errorf("invalid config: %s.vendor is only valid for the video billing modes", prefix)
@@ -1048,7 +1083,7 @@ func validateVideoModelEntry(i int, entry *ModelPricingEntry, isUSD bool) error 
 			}
 		}
 	}
-	if entry.Billing == nil || (entry.Billing.Mode != BillingModePerVideoSecond && entry.Billing.Mode != BillingModePerUnitTable) {
+	if entry.Billing == nil || !isVideoBillingMode(entry.Billing.Mode) {
 		return fmt.Errorf("invalid config: service.modelPricing[%d].billing.mode must be '%s' or '%s' for video model '%s'", i, BillingModePerVideoSecond, BillingModePerUnitTable, entry.Model)
 	}
 	// Video uses billing.resolutionMultipliers, not token-length tiers.
