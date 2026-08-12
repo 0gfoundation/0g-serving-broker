@@ -311,3 +311,22 @@ func TestOnlyTheControllerCanWriteTheConfig(t *testing.T) {
 		}
 	}
 }
+
+// Every service the controller acts on must pin its container name.
+//
+// The controller finds containers by exact name and refuses anything else, because its lookup
+// otherwise falls back to a shortest-substring match — which after a failed recreate resolves
+// "0g-serving-provider-broker" to "0g-serving-provider-broker-db", this project's own database.
+// Without container_name, compose names the container <project>-<service>-1 and EVERY upgrade
+// is refused. A test rather than a comment, so adding a service the controller manages cannot
+// silently reintroduce it.
+func TestTheControllersContainersPinTheirNames(t *testing.T) {
+	compose := renderCompose(t, phalaData(true))
+
+	for _, service := range []string{"0g-serving-provider-broker", "0g-serving-provider-event", "0g-controller"} {
+		block := serviceBlock(t, compose, service)
+		if !strings.Contains(block, "container_name: "+service) {
+			t.Errorf("%s does not pin container_name, so the controller would refuse to act on it:\n%s", service, block)
+		}
+	}
+}

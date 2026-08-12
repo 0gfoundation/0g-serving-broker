@@ -485,6 +485,11 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
+    # Pinned because the controller finds this container by exact name, and its own guard
+    # refuses to act on anything else. Without it compose names the container
+    # <project>-0g-serving-provider-broker-1 and every upgrade is refused — see
+    # verifyExactContainer, and the neighbour it exists to avoid recreating.
+    container_name: 0g-serving-provider-broker
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
 {{- if not .UseNginx}}
     ports:
@@ -596,6 +601,7 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
+    container_name: 0g-serving-provider-event
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
     environment:
       - CONFIG_FILE=/etc/config.yaml
@@ -664,6 +670,7 @@ const dockerComposeTemplate = `services:
 
 {{- if .UseController}}
   0g-controller:
+    container_name: 0g-controller
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
 {{- if .ControllerExposePort}}
     ports:
