@@ -280,3 +280,34 @@ func TestNonPhalaNodesGetNoHalfHardenedDeployment(t *testing.T) {
 		}
 	}
 }
+
+// Only the controller may write the config file, and that is what makes zg-config-update a
+// complete account of it rather than an audit trail of one route among several.
+//
+// The file lives inside the CVM, so the provider's host cannot reach it — but a read-write
+// mount lets the container holding it rewrite its own pricing, targetUrl or verifiability with
+// no record at all, which would leave "no config record" meaning nothing. Nothing in the
+// broker or the event service writes it: the only writer in the tree is ApplyCoreConfig.
+func TestOnlyTheControllerCanWriteTheConfig(t *testing.T) {
+	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+		for _, controller := range []bool{false, true} {
+			compose := renderCompose(t, dataFor(node, controller))
+
+			for _, service := range []string{"0g-serving-provider-broker", "0g-serving-provider-event"} {
+				block := serviceBlock(t, compose, service)
+				if !strings.Contains(block, "/etc/config.yaml:ro") {
+					t.Errorf("%s (%s, controller=%v) mounts the config writable, so it could rewrite its own pricing with no record", service, node, controller)
+				}
+			}
+
+			if !controller {
+				continue
+			}
+			// The controller's own mount must stay writable — it is the writer.
+			ctl := serviceBlock(t, compose, "0g-controller")
+			if !strings.Contains(ctl, "/etc/config.yaml") || strings.Contains(ctl, "/etc/config.yaml:ro") {
+				t.Errorf("the controller cannot write the config, so ApplyCoreConfig would fail:\n%s", ctl)
+			}
+		}
+	}
+}

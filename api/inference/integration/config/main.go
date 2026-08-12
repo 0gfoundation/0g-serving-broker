@@ -517,7 +517,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- end}}
     volumes:
-      - {{.ConfigPath}}:/etc/config.yaml
+      # Read-only, so the only writer of this file is the controller — which is what
+      # makes zg-config-update a complete account of it. Nothing in the broker or the
+      # event service writes it (the sole writer in the tree is ApplyCoreConfig), so
+      # this takes no capability either of them uses; it removes one they should not
+      # have. Without it a broker image could rewrite its own pricing, targetUrl or
+      # verifiability and no record would exist, so "no config record" would mean
+      # nothing at all.
+      - {{.ConfigPath}}:/etc/config.yaml:ro
 {{- if eq .TeeNode "alicloud"}}
       - tee-key-data:/data
 {{- end}}
@@ -609,7 +616,14 @@ const dockerComposeTemplate = `services:
 {{- end}}
 {{- end}}
     volumes:
-      - {{.ConfigPath}}:/etc/config.yaml
+      # Read-only, so the only writer of this file is the controller — which is what
+      # makes zg-config-update a complete account of it. Nothing in the broker or the
+      # event service writes it (the sole writer in the tree is ApplyCoreConfig), so
+      # this takes no capability either of them uses; it removes one they should not
+      # have. Without it a broker image could rewrite its own pricing, targetUrl or
+      # verifiability and no record would exist, so "no config record" would mean
+      # nothing at all.
+      - {{.ConfigPath}}:/etc/config.yaml:ro
 {{- if eq .TeeNode "alicloud"}}
       - tee-key-data:/data
 {{- end}}

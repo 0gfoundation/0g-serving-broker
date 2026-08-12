@@ -86,10 +86,16 @@ type RunningState struct {
 	// ConfigSHA256 is the hex SHA-256 of the config file content, from the last
 	// recorded config change.
 	//
-	// Empty means no config change was recorded through the controller — NOT that the
-	// file is unchanged. The compose file pins the config's host path, not its content,
-	// so no boot measurement covers it and there is nothing for a caller to compare an
-	// empty value against.
+	// Empty means no config change was recorded. In a deployment that mounts the config
+	// read-only everywhere but the controller, that does mean the file is unchanged since
+	// boot, because the controller is then its only writer and every write it makes is
+	// recorded first. Where the mount is writable it means only "no change went through
+	// the controller", and the container holding it could have rewritten it unrecorded.
+	//
+	// Either way there is nothing to compare a non-empty value against: the compose file
+	// pins the config's path, not its content, so no boot measurement covers it. A reader
+	// learns that the file changed and when, relative to the image records — not what it
+	// changed to.
 	ConfigSHA256 string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent

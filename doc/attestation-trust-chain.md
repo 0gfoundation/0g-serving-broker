@@ -107,6 +107,10 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
      and holds the docker socket, so an unreviewed controller can run any broker image and
      write a record that is internally consistent with it. Nothing measures the controller's
      own image — the compose file is what pins it;
+   - the config file is mounted **read-only** everywhere except the controller. It is the
+     only writer, and `ApplyCoreConfig` records a change before making it — so read-only
+     is what makes "no config record" mean "unchanged", rather than "unchanged by that one
+     route". Pricing, `targetUrl` and `verifiability` all live in that file;
    - **no service other than the broker and the event service mounts the volume carrying the
      controller's attestation socket** (`zg-tee`). That socket signs any 32-byte hash under
      the broker image's key, so a fourth container mounting it can mint response proofs
@@ -352,6 +356,12 @@ ledger and step 6 has an address to compare.
 - **Confidentiality is forward-looking.** A malicious image running *now* can retain the
   keys it currently holds. What the per-image derivation guarantees is that it cannot use
   them *after* an upgrade, and cannot obtain the keys of any other version.
+- **A config record says that the file changed, not what it changed to.** A user never sees
+  the config file, so there is no expected hash to compare against — unlike an image digest,
+  which the user obtained for themselves. What the record gives is that a change happened,
+  when it happened relative to the image records, and that it is now impossible to make one
+  unrecorded. Making the *content* checkable would mean either publishing it, or moving the
+  fields that matter into the compose file, where `compose_hash` pins them.
 - **The controller sits in the response path.** It signs every response over a local
   socket. Availability of the controller becomes availability of the service.
 - **With no record at all, the answer rests on the compose pin alone.** RTMR3 resets on
