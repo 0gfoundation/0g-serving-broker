@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -47,10 +48,22 @@ type jsonCreateVideoRequest struct {
 	Seed    json.Number `json:"seed"`
 	// InputReference is the OpenAI Video API image-to-video reference (first
 	// frame): exactly one of image_url (public URL or data: URI) or file_id.
+	// This is the only reference-media field this integration exposes: any
+	// vendor capability with no matching OpenAI Video API field (Seedance's
+	// last-frame control, multimodal reference-composition) deliberately has
+	// no client-facing field here — see translate.ToSeedanceCreateRequest's
+	// doc for the compatibility principle this follows.
 	InputReference *struct {
 		ImageURL string `json:"image_url"`
 		FileID   string `json:"file_id"`
 	} `json:"input_reference"`
+	// CameraFixed: Seedance's top-level "camera_fixed" boolean. A *bool so an
+	// absent field (nil) is distinguishable from an explicit false.
+	CameraFixed *bool `json:"camera_fixed"`
+	// OutputFormat: Seedance's top-level "output_format" string (e.g. "mp4").
+	// A *string so an absent field (nil) is distinguishable from an explicit
+	// empty string.
+	OutputFormat *string `json:"output_format"`
 }
 
 // maxCreateVideoBodyBytes bounds the total POST /videos request body.
@@ -248,10 +261,26 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		// a file part carries the image bytes → encode as a data: URI so the
 		// downstream mapping is transport-agnostic. (For large frames a public
 		// URL / file_id is preferable — data: URIs inflate the body ~1/3.)
+		// This is the only reference-media field parsed here — see the
+		// jsonCreateVideoRequest.InputReference doc for why last_frame_reference
+		// and the reference_images/videos/audio arrays are deliberately absent.
 		if v := r.FormValue("input_reference"); v != "" {
 			req.InputReferenceImageURL = v
 		} else if dataURI, ok := multipartFileDataURI(r, "input_reference"); ok {
 			req.InputReferenceImageURL = dataURI
+		}
+		// camera_fixed: a plain form value, parsed as a bool. Absent or
+		// unparsable (not "true"/"false"/"1"/"0"/etc.) leaves it nil, matching
+		// every other optional field's "absent means vendor default" handling.
+		if v := r.FormValue("camera_fixed"); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				req.CameraFixed = &b
+			}
+		}
+		// output_format: a plain form value, passed through as-is (no
+		// validation on our side — the vendor 400s on an invalid value).
+		if v := r.FormValue("output_format"); v != "" {
+			req.OutputFormat = &v
 		}
 		return req, nil
 	}
@@ -271,6 +300,8 @@ func parseCreateVideoRequest(r *http.Request) (translate.CreateVideoRequest, err
 		req.InputReferenceImageURL = jr.InputReference.ImageURL
 		req.InputReferenceFileID = jr.InputReference.FileID
 	}
+	req.CameraFixed = jr.CameraFixed
+	req.OutputFormat = jr.OutputFormat
 	return req, nil
 }
 
