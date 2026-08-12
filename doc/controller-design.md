@@ -61,7 +61,6 @@ controller:
     - "127.0.0.1"
     - "192.168.1.0/24"           # CIDR format supported
   imageRepo: "ghcr.io/0gfoundation/0g-serving-broker"   # repository only: no tag, no digest
-  image: "ghcr.io/0gfoundation/0g-serving-broker:latest" # deprecated, see below — still needed by the broker
   docker:
     host: "unix:///var/run/docker.sock"
     apiVersion: "1.41"
@@ -74,20 +73,50 @@ decided by the digest in the request, never by a tag the registry can re-point
 between two pulls. A port on the registry host is fine (`localhost:5000/broker`);
 only the last path segment is checked for a tag.
 
-`controller.image` is **deprecated and no longer read by the controller**, but
-must stay set: the broker still reads it (`provider_contract.go`) to report
-`additionalInfo.ImageName` on-chain and to resolve that name's digest against
-the local daemon. Deleting it empties both image fields, and the contract reads
-an image change as grounds to un-acknowledge the provider.
+`controller.image` is **gone**. Nothing reads it. Like `controller.containers`
+below, the key is still accepted so a config carrying it boots, and a
+`[CONFIG-REMOVED]` line names it at startup — delete it.
 
-It also means **this change must be released together with the broker's move to
-`IMAGE_REPO` / `IMAGE_DIGEST`**, not before it. Pulling `repo@digest` does not
-move the local `:latest` tag, which pulling `repo:latest` did. So after a digest
-upgrade the broker's next start resolves `controller.image` to the image from
-before the upgrade, finds it does not match the container it is running in, and
-reports an empty digest on-chain — un-acknowledging the provider on exactly the
-path that was supposed to prove what it runs. Taking the repository and digest
-from the environment removes the daemon lookup, and this key with it.
+### 3.1a `IMAGE_REPO` / `IMAGE_DIGEST`
+
+The broker no longer holds a docker socket, and no longer asks a daemon which
+image it is running. It reads two environment variables:
+
+```yaml
+  0g-serving-provider-broker:
+    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:<digest>
+    environment:
+      - IMAGE_REPO=ghcr.io/0gfoundation/0g-serving-broker
+      - IMAGE_DIGEST=sha256:<the same digest>
+```
+
+Their values become `additionalInfo.ImageName` / `ImageDigest` on-chain. Either
+one empty reports both as empty — the same answer the removed daemon lookup gave
+when no socket was configured.
+
+**Empty is not inert.** `buildAdditionalInfo` has no "unknown" branch: it writes
+the empty pair on-chain, and if the previous value was not empty that counts as an
+image change, which clears `teeSignerAcknowledged` and needs
+`acknowledgeTEESignerByOwner` to restore. The controller's upgrade path cannot
+cause this (`RecreateContainer` writes both variables itself), and a
+controller-disabled deployment cannot either (it already reports empty). The way to
+cause it is a hand-rolled `docker compose up` onto this version with a compose file
+that has not added the two variables — so **add them in the same change that moves
+the image**.
+
+**The compose file must set them, and must keep them equal to the pinned
+`image:`.** Nothing checks the two agree, and nothing can: the broker has no way
+left to look at its own container. What makes the pair trustworthy is not the
+broker asserting it but the RTMR3 record the controller writes before it
+recreates the container — a reader replays that out of a signed quote
+(`api/common/attest`). The on-chain fields were never evidence; the provider
+writes them.
+
+`RecreateContainer` overwrites both variables on every upgrade, from the
+reference it is recreating on. Without that the broker would inherit the old
+container's environment and come back up announcing the previous digest — the
+contract would see no image change and keep the TEE signer acknowledgement that
+an image change exists to drop.
 
 The names of the managed containers are **not** configurable. They are constants
 in `api/controller/internal/ctrl` (`0g-serving-provider-broker`,
@@ -205,13 +234,12 @@ Revocation is offline. Nothing invalidates a leaked admin session token while th
 controller runs, and `SessionToken` treats `ExpiresAt: 0` as never expiring.
 Bounding token lifetime is tracked separately.
 
-Read the container guard as a safety interlock, not containment. `controller.image`
-and `controller.docker.host` are read by the **broker** too
-(`inference/internal/contract/provider_contract.go`), and `PUT /v1/config/core`
-restarts the broker in the same call — so a write to either lands there within
-seconds, and `controller.image` is what the broker reports on-chain as
-`ImageName`, with the digest read from whatever daemon `controller.docker.host`
-names. The controller's own copy of `controller.imageRepo` waits for the
+Read the container guard as a safety interlock, not containment. What a
+`PUT /v1/config/core` write reaches is now narrower than it was: the broker reads
+neither `controller.imageRepo` nor `controller.docker.host` any more — its image
+identity comes from `IMAGE_REPO` / `IMAGE_DIGEST`, which only the compose file and
+the controller's own recreate path set, and neither is reachable through this
+config file. The controller's copy of `controller.imageRepo` waits for the
 controller to restart, which no route here triggers.
 
 Writing `controller.imageRepo` does not by itself choose an image: the digest
@@ -464,5 +492,8 @@ services:
 **Notes**:
 
 - Controller uses the same configuration file as broker/event
-- Controller requires Docker socket mount to manage other containers
+- Controller requires Docker socket mount to manage other containers. **The broker
+  and event services must not have one** — see §3.1a; a broker holding a socket can
+  change any container in the CVM, which is the premise the deployment's
+  `compose_hash` has to pin for an upgrade to be provable at all
 - During image update, Controller pulls `imageRepo@<digest>`, rebuilds containers in dependency order, then syncs service info to contract

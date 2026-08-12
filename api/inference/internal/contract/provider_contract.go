@@ -2,23 +2,30 @@ package providercontract
 
 import (
 	"context"
-	"fmt"
 	"math/big"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	dockerimage "github.com/0glabs/0g-serving-broker/common/docker"
 	"github.com/0glabs/0g-serving-broker/common/log"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 	"github.com/0glabs/0g-serving-broker/inference/contract"
+)
+
+// Environment variables carrying the identity of the image the broker runs.
+//
+// The controller writes both into the broker's container whenever it recreates
+// it on a new digest, so the pair moves with the image. Reading them instead of
+// asking a daemon is what lets the broker run without a docker socket — and a
+// broker without one cannot change any container in the CVM, which is the
+// premise the deployment's compose_hash has to pin for an upgrade to be provable.
+const (
+	envImageRepo   = "IMAGE_REPO"
+	envImageDigest = "IMAGE_DIGEST"
 )
 
 type ProviderContract struct {
@@ -28,10 +35,6 @@ type ProviderContract struct {
 	LockTime         time.Duration
 	TeeSignerAddress common.Address
 	logger           log.Logger
-
-	// Docker client for image info (optional)
-	dockerClient *client.Client
-	imageName    string
 }
 
 func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, logger log.Logger) (*ProviderContract, error) {
@@ -51,107 +54,54 @@ func NewProviderContract(conf *config.Config, teeSignerAddress common.Address, l
 		return nil, err
 	}
 
-	pc := &ProviderContract{
+	return &ProviderContract{
 		Contract:         contract,
 		ProviderAddress:  wallets.Default().Address(),
 		ContractAddress:  conf.ContractAddress,
 		LockTime:         time.Duration(lockTime.Int64()) * time.Second,
 		TeeSignerAddress: teeSignerAddress,
 		logger:           logger,
-	}
-
-	// Initialize Docker client if controller is enabled and Docker is configured
-	if conf.Controller.Enable && conf.Controller.Docker.Host != "" {
-		opts := []client.Opt{
-			client.WithHost(conf.Controller.Docker.Host),
-			client.WithAPIVersionNegotiation(),
-		}
-		if conf.Controller.Docker.APIVersion != "" {
-			opts = append(opts, client.WithVersion(conf.Controller.Docker.APIVersion))
-		}
-		dockerCli, err := client.NewClientWithOpts(opts...)
-		if err != nil {
-			logger.Warnf("Failed to create Docker client: %v", err)
-		} else {
-			pc.dockerClient = dockerCli
-			// Still controller.image, not controller.imageRepo: this resolves the
-			// name against the local daemon, and a bare repo resolves to :latest —
-			// a tag a digest-pinned deployment need not have. The whole reader is
-			// being replaced by the IMAGE_REPO / IMAGE_DIGEST environment
-			// variables, which is what removes the daemon from this path.
-			pc.imageName = conf.Controller.Image
-		}
-	}
-
-	return pc, nil
+	}, nil
 }
 
 func (u *ProviderContract) Close() {
 	u.Contract.Close()
-	if u.dockerClient != nil {
-		u.dockerClient.Close()
-	}
 }
 
-// GetImageInfo returns the name and digest of the actual running container image.
-// It verifies that the running container's image matches the configured image.
-// Returns empty strings if Docker is not configured or on error.
+// GetImageInfo returns the repository and digest of the image the broker runs,
+// as the environment states them.
+//
+// Either variable being empty answers ("", ""), the same answer the docker lookup
+// this replaces gave when no socket was configured.
+//
+// Be careful what that means downstream: buildAdditionalInfo has no "unknown"
+// branch. It embeds whatever it is handed, so an empty pair is written on-chain as
+// empty strings — and if the previous on-chain value was not empty, that is a
+// change to the image fields, which the contract reads as an image change and
+// un-acknowledges the provider's TEE signer for.
+//
+// Reaching that needs the broker to start on this image with the variables unset,
+// which the controller's own upgrade path cannot do: RecreateContainer writes both
+// from the reference it recreates on. It is a hand-rolled `docker compose up`
+// onto this version with a compose file that has not added them yet — see
+// doc/controller-design.md §3.1a. A controller-disabled deployment is unaffected
+// for a different reason: it answered ("", "") before this change too, so both
+// on-chain fields are already empty and nothing flips.
+//
+// No cross-check against the running container is possible any more, and none is
+// wanted here: what proves the pair is the RTMR3 record the controller writes
+// before it recreates this container, which a reader can replay out of a signed
+// quote. The on-chain fields were never that evidence — the provider writes them.
+//
+// ctx is unused now that nothing is asked of a daemon. It stays in the signature
+// because both callers in service.go pass theirs, and churning them is not what
+// this change is about.
 func (u *ProviderContract) GetImageInfo(ctx context.Context) (imageName, imageDigest string) {
-	if u.dockerClient == nil || u.imageName == "" {
+	repo, digest := os.Getenv(envImageRepo), os.Getenv(envImageDigest)
+	if repo == "" || digest == "" {
 		return "", ""
 	}
-
-	// Get the current container ID from hostname (Docker sets hostname to container ID by default)
-	hostname, err := os.Hostname()
-	if err != nil {
-		u.logger.Warnf("Failed to get hostname: %v", err)
-		return u.imageName, ""
-	}
-
-	// Find the current container by matching hostname (container ID prefix)
-	actualImageID, err := u.getContainerImageID(ctx, hostname)
-	if err != nil {
-		u.logger.Warnf("Failed to get container image ID: %v", err)
-		return u.imageName, ""
-	}
-
-	// Get info about the configured image
-	configuredImageInfo, err := dockerimage.GetImageInfo(ctx, u.dockerClient, u.imageName)
-	if err != nil {
-		u.logger.Warnf("Failed to get configured image info for %s: %v", u.imageName, err)
-		return u.imageName, ""
-	}
-
-	// Verify that the actual running image matches the configured image
-	// Compare by Image ID (sha256:...)
-	if actualImageID != configuredImageInfo.ImageID {
-		u.logger.Errorf("Image mismatch detected! Configured image %s (ID=%s) does not match actual running image (ID=%s)",
-			u.imageName, configuredImageInfo.ImageID, actualImageID)
-		// Return empty digest to indicate mismatch - this will trigger a contract update
-		// with empty digest, signaling to users that something is wrong
-		return u.imageName, ""
-	}
-
-	u.logger.Infof("Image verification passed: configured=%s, imageID=%s, digest=%s",
-		u.imageName, configuredImageInfo.ImageID, configuredImageInfo.Digest)
-	return u.imageName, configuredImageInfo.Digest
-}
-
-// getContainerImageID finds a container by hostname prefix and returns its image ID
-func (u *ProviderContract) getContainerImageID(ctx context.Context, hostnamePrefix string) (string, error) {
-	containers, err := u.dockerClient.ContainerList(ctx, container.ListOptions{All: false})
-	if err != nil {
-		return "", fmt.Errorf("failed to list containers: %w", err)
-	}
-
-	for _, c := range containers {
-		// Container ID starts with the hostname (first 12 chars)
-		if strings.HasPrefix(c.ID, hostnamePrefix) {
-			return c.ImageID, nil
-		}
-	}
-
-	return "", fmt.Errorf("container with hostname prefix %s not found", hostnamePrefix)
+	return repo, digest
 }
 
 // GetBalance returns the native token balance of the provider address

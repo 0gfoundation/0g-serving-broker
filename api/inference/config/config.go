@@ -1202,20 +1202,16 @@ type ControllerConfig struct {
 	// anything under the key, which no longer steers anything either way.
 	Containers map[string]interface{} `yaml:"containers"`
 
-	// Deprecated: superseded by ImageRepo for everything the controller does.
-	// What gets run is now imageRepo@<digest from the request>, so a reference
-	// carrying its own tag has nothing left to select, and no controller path
-	// reads this field any more.
+	// Removed: nothing reads this field. The controller runs
+	// imageRepo@<digest from the request>, and the broker takes the same pair
+	// from its IMAGE_REPO / IMAGE_DIGEST environment variables, which the
+	// controller writes into its container on every upgrade.
 	//
-	// The broker still does: provider_contract.go reports it on-chain as
-	// additionalInfo.ImageName and resolves its digest against the local daemon.
-	// Keep the key set until that reader moves to the IMAGE_REPO / IMAGE_DIGEST
-	// environment variables — dropping it early empties both image fields, which
-	// the contract reads as an image change and un-acknowledges the provider.
-	//
-	// Pointing this at ImageRepo instead would be worse, not a fix: a bare repo
-	// resolves to :latest, a tag a digest-pinned deployment need not have, so
-	// the broker would compare the running image against the wrong one.
+	// Still declared for the reason Containers above is: config parsing is
+	// strict and this struct is shared with the broker and event binaries, so
+	// removing the field would turn every deployment still carrying the key into
+	// a boot failure of all three. migrateDeprecated logs a [CONFIG-REMOVED]
+	// line naming it.
 	Image string `yaml:"image"`
 }
 
@@ -1719,6 +1715,17 @@ func migrateDeprecated(cfg *Config, raw map[string]interface{}) error {
 	// replacement and a removal date that do not exist.
 	if config.RawHasKey(raw, "controller", "containers") {
 		log.Printf("[CONFIG-REMOVED] %q is ignored: the controller's container names are fixed in code; delete the key", "controller.containers")
+	}
+
+	// Removed: controller.image. Upgrades run controller.imageRepo@<digest from
+	// the request>, and the broker reads the same pair from IMAGE_REPO /
+	// IMAGE_DIGEST. Accepted-and-ignored for the same reason as above.
+	//
+	// Not WarnDeprecated either: imageRepo is not where this value goes. A repo
+	// with the tag stripped off is, and the deployment has to set the two
+	// environment variables besides, which no config migration can do for it.
+	if config.RawHasKey(raw, "controller", "image") {
+		log.Printf("[CONFIG-REMOVED] %q is ignored: upgrades run %q@<digest from the request>, and the broker reads IMAGE_REPO / IMAGE_DIGEST from its environment; delete the key", "controller.image", "controller.imageRepo")
 	}
 
 	// Rename: database.provider → database.dsn
@@ -2290,12 +2297,6 @@ func GetConfig() *Config {
 				AdminAddresses: []string{},
 				AllowedIPs:     []string{},
 				ImageRepo:      "ghcr.io/0gfoundation/0g-serving-broker",
-				// Deprecated, and defaulted anyway: no repo config sets it, so
-				// this default is what every deployment actually runs on, and
-				// the broker reports it on-chain. Dropping the default empties
-				// additionalInfo.ImageName / ImageDigest, which the contract
-				// reads as an image change and un-acknowledges the provider for.
-				Image: "ghcr.io/0gfoundation/0g-serving-broker:latest",
 				Docker: DockerConfig{
 					Host:       "unix:///var/run/docker.sock",
 					APIVersion: "1.41",

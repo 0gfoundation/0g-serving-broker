@@ -427,6 +427,32 @@ controller:
 	}
 }
 
+// controller.image is the key every deployment carries, since it used to select
+// what an upgrade ran. Rejecting it would stop the broker and event binaries too
+// — they share this struct — so it has to parse, be ignored, and be named.
+func TestLoadConfig_ControllerImage_AcceptedAndAnnounced(t *testing.T) {
+	logged := captureLog(t)
+
+	cfg, err := loadFromYAML(t, `
+controller:
+  enable: false
+  image: "ghcr.io/0gfoundation/0g-serving-broker:latest"
+`)
+	if err != nil {
+		t.Fatalf("loadConfig with controller.image: %v", err)
+	}
+	if got := logged.String(); !strings.Contains(got, "[CONFIG-REMOVED]") ||
+		!strings.Contains(got, "controller.image") {
+		t.Errorf("startup log = %q, want it to name controller.image as removed", got)
+	}
+	// Not migrated into imageRepo, unlike the renames above. The value carries a
+	// tag, which validateImageRepo rejects at controller startup, so copying it
+	// across would turn an ignorable leftover key into a boot failure.
+	if cfg.Controller.ImageRepo != "" {
+		t.Errorf("ImageRepo = %q, want controller.image not copied into it", cfg.Controller.ImageRepo)
+	}
+}
+
 // A config without the key must stay quiet, or the notice means nothing.
 func TestLoadConfig_NoControllerContainers_NoNotice(t *testing.T) {
 	logged := captureLog(t)
