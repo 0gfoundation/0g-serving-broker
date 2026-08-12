@@ -125,6 +125,187 @@ accept the new digest — which is the intended behaviour, not an error.
 
 ---
 
+## Verifying by hand
+
+Written out because the first users reach inference through the router and have no verifier
+of their own. Nothing below needs a library: one `curl`, one Python file, and Intel's own
+quote-verification tool. Anything that automates this later has to compute the same values
+from the same three inputs, so this doubles as the specification for it.
+
+Read `api/common/attest` if you want the same logic as maintained code — `ResolveRunningState`
+does steps 3 to 6 — but do not treat it as a dependency. The point of this section is that a
+user can settle every mechanical link with tools they already trust.
+
+### Once, per release
+
+Two values, and both must come from software you installed rather than from the provider:
+
+1. **`compose_hash` of the deployment you reviewed.** `sha256` of the `app_compose` manifest.
+   Reviewing it means checking the four things in step 1 above — the sockets the broker does
+   not mount, the controller being the only holder of `dstack.sock`, the controller's own
+   image digest, and the exact set of services mounting the attestation-socket volume.
+2. **The broker image digests you accept.** Built from source you read, or taken from a
+   release you have a reason to trust. Never read out of the quote you are about to check.
+
+### Per session
+
+```bash
+# 1. Fetch the attestation. Three values arrive together; only the first is trustworthy on
+#    its own, and steps 3 and 4 are what earn the other two.
+curl -s "$PROVIDER/v1/quote?legacy=true" > q.json     # {quote, event_log, tcb_info}
+```
+
+`$PROVIDER` is the broker's own base URL. Through the router, use whichever path the router
+maps to that provider — the router carries the quote and cannot alter it (link 1), so where
+you fetch it from does not matter to the result.
+
+```bash
+# 2. Verify the DCAP signature. Use Intel's tooling or dcap-qvl; do not reimplement it.
+#    Everything after this treats the quote's bytes as hardware-attested.
+jq -r .quote q.json | xxd -r -p > quote.bin
+dcap-qvl verify quote.bin        # or Intel's QVL / a service you trust
+```
+
+```python
+# 3-6. verify.py — the four checks that need the quote's own bytes.
+import hashlib, json, sys
+
+Q, EVENT_TYPE = json.load(open("q.json")), 0x08000001
+quote = bytes.fromhex(Q["quote"].removeprefix("0x"))
+
+# Byte offsets into a TDX v4 quote. Fixed by the format; a v5 quote fails step 3 rather
+# than being misread, because nothing else lands on these boundaries.
+MR_CONFIG_ID, RTMR0, RTMR_STRIDE, REPORT_DATA = 232, 376, 48, 568
+
+# --- 3. Which deployment is this, and is it the one you reviewed? ---
+# mr_config_id is 0x01 followed by the compose hash, so the quote carries its own
+# authenticated compose file once the next line checks the manifest against it.
+compose_hash = quote[MR_CONFIG_ID + 1 : MR_CONFIG_ID + 33].hex()
+app_compose = json.loads(Q["tcb_info"])["app_compose"]
+assert hashlib.sha256(app_compose.encode()).hexdigest() == compose_hash, "tcb_info is not this quote's"
+assert compose_hash == REVIEWED_COMPOSE_HASH, f"unreviewed deployment: {compose_hash}"
+
+# --- 4. Replay RTMR3 and require the quote's value. ---
+# This is what makes the event log believable: it arrives over plain HTTP from the party
+# being described, and only a replay that lands on a hardware register redeems it.
+mr = bytes(48)
+events = [e for e in json.loads(Q["event_log"]) if e["event_type"] == EVENT_TYPE]
+for e in events:
+    payload = bytes.fromhex(e["event_payload"])
+    digest = hashlib.sha384(
+        EVENT_TYPE.to_bytes(4, "little") + b":" + e["event"].encode() + b":" + payload
+    ).digest()
+    mr = hashlib.sha384(mr + digest).digest()
+assert mr == quote[RTMR0 + 3 * RTMR_STRIDE : RTMR0 + 4 * RTMR_STRIDE], "the event log is not this quote's"
+
+# --- 5. Which image, and is it one you accept? ---
+# Only entries after system-ready can have been written by a container; reading the whole
+# log would let a record placed among the boot events be taken for ours.
+ledger = events[next(i for i, e in enumerate(events) if e["event"] == "system-ready") + 1 :]
+records = [e for e in ledger if e["event"] == "zg-image-update"]
+
+if records:
+    ref, bound_signer = bytes.fromhex(records[-1]["event_payload"]).decode().split()
+    source = "ledger"
+else:
+    # Nothing recorded since boot, so the broker is on the image compose pins — and that file
+    # is trustworthy now, because step 3 anchored it to the quote. RTMR3 resets on every boot,
+    # so this is the normal state and not an anomaly.
+    import yaml
+    compose = yaml.safe_load(json.loads(app_compose)["docker_compose_file"])
+    ref = compose["services"]["0g-serving-provider-broker"]["image"]
+    bound_signer, source = None, "compose"
+
+# A reference naming a tag says which name was asked for, not which image answers. Refuse
+# rather than resolve it: a tag is resolved by the provider's daemon, which is the party being
+# checked. A deployment whose compose pins `:latest` or `:dev1` therefore cannot be verified
+# at all until it either pins a digest or records an upgrade — and that is the state of
+# today's production deployments, so expect to stop here on one.
+assert "@" in ref, f"the {source} names {ref!r}, which pins no digest — refuse"
+digest = ref.split("@", 1)[1]
+
+assert digest in ACCEPTED_DIGESTS, f"unreviewed image: {digest}"
+
+# --- 6. Does the key signing responses belong to that image? ---
+rd = quote[REPORT_DATA : REPORT_DATA + 64]
+if int.from_bytes(rd[52:56], "big") == 1:          # the enc_pub-binding layout
+    signer = "0x" + rd[32:52].hex()
+else:                                              # the older layout: the ASCII address
+    signer = rd.rstrip(b"\x00").decode().lower()
+
+if bound_signer:
+    assert signer == bound_signer.lower(), f"the ledger binds {bound_signer}, the quote names {signer}"
+print(f"image {digest} (from the {source}), responses signed by {signer}")
+```
+
+Step 6 is the one that makes the digest a statement about the running process rather than
+about an installation. Skipping it leaves `report_data` and the ledger unconnected, and a
+divergence between them — a broker publishing an address of its own, or a record left over
+from a change that never finished — accepted rather than refused.
+
+When there is no record, there is no bound address to compare, and the property is weaker by
+exactly that much: the image is pinned by hardware through `compose_hash`, but nothing vouches
+separately for the key. That is sound because becoming a different image requires a change,
+and a change cannot happen unrecorded — see the residual assumption about the compose pin.
+
+### Per response
+
+```bash
+# 7. Make the request and keep the handle the broker returns.
+KEY=$(curl -si "$PROVIDER/v1/proxy/$PROVIDER_ADDR/chat/completions" \
+        -H 'Content-Type: application/json' -d @req.json \
+        -D >(grep -i '^ZG-Res-Key:' | cut -d' ' -f2 | tr -d '\r' >&2) -o resp.json 2>&1 >/dev/null)
+
+# 8. Fetch the TEE signature over that exchange.
+curl -s "$PROVIDER/v1/proxy/signature/$KEY" > sig.json   # {text, signature, signing_address}
+```
+
+```python
+# 9. Two checks, and both matter.
+from eth_account.messages import encode_defunct
+from eth_account import Account
+import hashlib, json
+
+sig = json.load(open("sig.json"))
+
+# a. The signature is by the key step 6 established — not by whatever address the response
+#    happens to carry. Reading signing_address and verifying against it proves nothing.
+assert Account.recover_message(encode_defunct(text=sig["text"]), signature=sig["signature"]).lower() == signer
+
+# b. The signed text is over the bytes you actually exchanged, so the signature cannot be
+#    moved to another request. For a plain chat completion it is
+#    sha256(request):sha256(response); an E2EE response signs the sealed bytes instead, and
+#    the client that decrypted them already holds exactly those.
+expected = hashlib.sha256(open("req.json","rb").read()).hexdigest() + ":" + \
+           hashlib.sha256(open("resp.json","rb").read()).hexdigest()
+assert sig["text"] == expected, f"signed {sig['text']}, exchanged {expected}"
+```
+
+### What this produces on a deployment today
+
+Run against a current production CVM's attestation, the script above gets through steps 3 and
+4 — `sha256(app_compose)` matches the compose hash in the signed report body, and replaying the
+event log reproduces the quote's RTMR3 exactly — and then **refuses at step 5**, because that
+deployment's compose names `ghcr.io/0gfoundation/0g-serving-broker:dev1` and a tag is resolved
+by the provider's own daemon.
+
+That is the correct outcome, and it is the shortest description of what this whole series
+changes. The mechanical parts already work today; what is missing is a deployment that pins
+what it runs. After it regenerates its compose with a controller, step 5 answers from the
+ledger and step 6 has an address to compare.
+
+### Two things a manual verifier must not do
+
+- **Do not carry a signer address between sessions.** The address changing is the signal that
+  the image changed, and step 8 is where you are supposed to see it. Caching it turns the one
+  mechanism that makes a stale attestation self-invalidating back into a stale attestation
+  that verifies.
+- **Do not read the digest, the signer address, or the compose hash from anywhere but the
+  quote.** The on-chain `additionalInfo.ImageDigest` and `teeSignerAddress` are written by the
+  provider. They are useful for discovery, and they are not evidence.
+
+---
+
 ## Residual assumptions, stated plainly
 
 - **Step 1 cannot be automated away.** Whether the deployment confines RTMR3 writers is a
