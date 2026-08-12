@@ -603,7 +603,7 @@ func (c *Client) RecreateContainer(ctx context.Context, containerName string, ne
 		Cmd:          inspect.Config.Cmd,
 		Env:          mergeEnv(inspect.Config.Env, imageEnvUpdates(newImage)),
 		ExposedPorts: inspect.Config.ExposedPorts,
-		Labels:       inspect.Config.Labels,
+		Labels:       invalidateComposeConfigHash(inspect.Config.Labels),
 		WorkingDir:   inspect.Config.WorkingDir,
 		Entrypoint:   inspect.Config.Entrypoint,
 		Healthcheck:  inspect.Config.Healthcheck,
@@ -641,6 +641,53 @@ func (c *Client) RecreateContainer(ctx context.Context, containerName string, ne
 
 	result.Status = "running"
 	return result, nil
+}
+
+// composeConfigHashLabel is what `docker compose up` compares against the hash it
+// computes from the compose file, to decide whether a container still matches its
+// service definition.
+const composeConfigHashLabel = "com.docker.compose.config-hash"
+
+// composeConfigHashInvalidated is the value written in its place. Never a real hash,
+// which are 64 hex characters, so it cannot collide with one.
+const composeConfigHashInvalidated = "invalidated-by-in-band-image-upgrade"
+
+// invalidateComposeConfigHash copies labels with the compose config hash replaced, so
+// the next `docker compose up` recreates the container instead of leaving it alone.
+//
+// Everything else about a recreated container is copied faithfully, and this label was
+// too — which quietly broke attestation. A container upgraded in-band runs a different
+// image while still claiming, through this label, to match the compose definition it no
+// longer matches. RTMR3 resets when the CVM reboots, and dstack runs `compose up` on the
+// way back: with the label intact compose leaves the upgraded container in place, so the
+// ledger is empty while the upgraded image runs. A reader then falls back to the
+// compose-pinned digest and reports an image that is not running — and reports it as one
+// of the digests it was willing to accept.
+//
+// Measured, not assumed: with the label copied, `compose up` leaves the swapped image
+// running; deleting the label is not enough (compose does not recreate on a missing one);
+// replacing it with a value that cannot match does recreate, restoring the pinned image.
+//
+// The consequence is deliberate: an in-band upgrade does not survive a CVM reboot. To make
+// one persist, change the compose file — which changes compose_hash, which is the point.
+// The alternative is a reader that lies, and a stale claim in the direction of a digest
+// the reader was looking for is the worst direction to lie in.
+//
+// Only rewritten when present, so a deployment that is not compose-managed is untouched.
+// RerunContainerWithEnv deliberately does not do this: it carries a Prometheus config,
+// which no reader attests, so reverting it on reboot would cost an operator their change
+// and buy nothing.
+func invalidateComposeConfigHash(labels map[string]string) map[string]string {
+	if _, ok := labels[composeConfigHashLabel]; !ok {
+		return labels
+	}
+
+	next := make(map[string]string, len(labels))
+	for k, v := range labels {
+		next[k] = v
+	}
+	next[composeConfigHashLabel] = composeConfigHashInvalidated
+	return next
 }
 
 // WaitForHealthy waits for a container to become healthy

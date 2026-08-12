@@ -84,8 +84,12 @@ type RunningState struct {
 	// between the two would be accepted rather than refused.
 	BrokerSigner string
 	// ConfigSHA256 is the hex SHA-256 of the config file content, from the last
-	// recorded config change. Empty means none was recorded, so the file is still
-	// whatever the deployment started with.
+	// recorded config change.
+	//
+	// Empty means no config change was recorded through the controller — NOT that the
+	// file is unchanged. The compose file pins the config's host path, not its content,
+	// so no boot measurement covers it and there is nothing for a caller to compare an
+	// empty value against.
 	ConfigSHA256 string
 	// Events is the full runtime event sequence whose replay matched the quote.
 	Events []RuntimeEvent
@@ -229,6 +233,16 @@ func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService 
 		// No upgrade recorded, so the broker is still on the image the compose
 		// pinned — and that file is now a trusted input, because it hashed to the
 		// compose hash in the signed report body.
+		//
+		// This path binds no signer address, because there is no record to carry one, so
+		// unlike the event path it cannot check that the key signing responses belongs to
+		// the digest it reports. It is sound only while "no record" really does mean "still
+		// on the pinned image", and that is not free: RTMR3 resets on every boot, so a
+		// container left in place by `docker compose up` after an in-band upgrade would be
+		// reported as the pinned image while running something else. What prevents it is the
+		// controller invalidating the recreated container's compose config-hash label, so
+		// compose recreates it on the pinned image at the next boot. Remove that and this
+		// fallback starts lying.
 		images, err := PinnedImages(tcbInfoJSON)
 		if err != nil {
 			return nil, err
