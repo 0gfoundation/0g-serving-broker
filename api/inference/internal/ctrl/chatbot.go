@@ -319,8 +319,10 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	var silentReadBytes int64 = 0
 	const maxSilentReadBytes int64 = 10 * 1024 * 1024 // 10MB limit to prevent abuse
 
-	// Measured from before the first read so ttft covers the wait for the
-	// upstream's first byte, not just the gaps between the bytes that follow.
+	// Started before the first read so the wait for the upstream's first line is
+	// measured, not just the gaps between the lines that follow. The clock
+	// begins HERE, which is after the upstream's response headers are in hand —
+	// see streamTiming for why the field is not called ttft.
 	timing := newStreamTiming()
 
 	ctx.Stream(func(w io.Writer) bool {
@@ -418,17 +420,30 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// record of how it went, and it is the case a "why did it stall" report
 	// arrives about.
 	//
-	// chat_key is the correlation handle, and the only one worth printing here.
-	// This logger has no per-request fields, so concurrent streams would
-	// otherwise be indistinguishable from each other — and it is the value the
-	// router records as chatID (it reaches the client as ZG-Res-Key /
+	// chat_key is the correlation handle: this logger has no per-request fields,
+	// so concurrent streams would otherwise be indistinguishable, and it is the
+	// value the router records as chatID (it reaches the client as ZG-Res-Key /
 	// "chatcmpl-"+chatKey), which is what makes the two hops comparable at all.
-	// request_hash joins to the request row for everything else, model included:
-	// printing more here is how the first version of this line came to render a
-	// whole model.Request — user address, signature, fees — into an INFO log.
+	//
+	// model_name is printed rather than left to a join, because for the traffic
+	// this instrument exists for the join does not exist: a whitelisted request's
+	// model.Request lives only in memory and never becomes a row, which is the
+	// same reason a successful whitelisted stream left just one log line to begin
+	// with. Without it a `max_gap_ms=141000` here names no model.
+	//
+	// Everything else stays out. Printing more is how the first version of this
+	// line came to render a whole model.Request — user address, signature, fees —
+	// into an INFO log; request_hash is the join key for the rest.
+	//
+	// disconnected is only observable from a failed write, so it reads false for
+	// a client that left BEFORE the first write: gin's Stream checks CloseNotify
+	// up front and skips the step entirely, which prints as lines=0
+	// max_gap_ms≈0. Checking the request context here separates that from "the
+	// upstream sent nothing", which is the opposite party's fault.
 	timing.finish()
-	c.logger.Infof("stream timing: %s chat_key=%s request_hash=%s disconnected=%t",
-		timing, chatKey, reqModel.RequestHash, clientDisconnected)
+	c.logger.Infof("stream timing: %s chat_key=%s model_name=%s request_hash=%s disconnected=%t",
+		timing, chatKey, reqModel.ModelName, reqModel.RequestHash,
+		clientDisconnected || ctx.Request.Context().Err() != nil)
 
 	// Process billing regardless of stream error
 	// If client disconnected but we continued reading, we have complete data for accurate billing

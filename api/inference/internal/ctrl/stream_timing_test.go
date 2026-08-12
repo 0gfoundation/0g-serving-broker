@@ -11,13 +11,18 @@ import (
 )
 
 // fakeClock returns a now() that advances by the given deltas, one per call.
+//
+// Panics rather than repeating base once they run out: a clock that silently
+// jumps backwards makes every `gap > maxGap` comparison false, so a test missing
+// one delta (forgetting that finish() consumes one, say) would still pass while
+// exercising a timeline nobody wrote.
 func fakeClock(base time.Time, deltas ...time.Duration) func() time.Time {
 	i := 0
 	return func() time.Time {
-		d := time.Duration(0)
-		if i < len(deltas) {
-			d = deltas[i]
+		if i >= len(deltas) {
+			panic("fakeClock: ran out of deltas — the test's timeline is shorter than the calls it makes")
 		}
+		d := deltas[i]
 		i++
 		return base.Add(d)
 	}
@@ -53,7 +58,7 @@ func TestStreamTimingMeasuresLongestSilence(t *testing.T) {
 	assert.Equal(t, int64(wantBytes), timing.bytes)
 
 	assert.Equal(t,
-		fmt.Sprintf("first_line_after_headers_ms=2000 max_gap_ms=167000 tail_gap_ms=1000 frames=2 lines=4 upstream_bytes=%d", wantBytes),
+		fmt.Sprintf("first_line_after_headers_ms=2000 max_gap_ms=167000 tail_gap_ms=1000 frames=2 lines=4 decompressed_bytes=%d", wantBytes),
 		timing.String())
 }
 
@@ -68,13 +73,38 @@ func TestStreamTimingCountsTheTrailingSilence(t *testing.T) {
 	}
 	timing.mark("data: a\n")
 	timing.mark("data: b\n")
-	assert.Equal(t, 300*time.Millisecond, timing.maxGap, "before finish, only inter-line gaps are known")
+	assert.Equal(t, 1*time.Second, timing.maxGap,
+		"before finish, the widest known stretch is the wait for the first line")
 
 	timing.finish()
 
 	assert.Equal(t, 166700*time.Millisecond, timing.tailGap)
 	assert.Equal(t, 166700*time.Millisecond, timing.maxGap,
 		"the trailing silence must dominate maxGap, not be invisible to it")
+}
+
+// The third place silence can hide, and the one this copy was missing while the
+// router had already fixed it: an upstream that flushes response headers at once
+// and only then starts thinking puts the whole wait BEFORE the first line. Per-
+// line gaps cannot see it, so this hop would report ~0 while the router reported
+// the full wait — and the cross-hop rule would read that as "the router
+// introduced it".
+func TestStreamTimingCountsTheSilenceBeforeTheFirstLine(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{
+		start: base,
+		now: fakeClock(base,
+			150*time.Second, 150050*time.Millisecond, 150100*time.Millisecond, 150150*time.Millisecond),
+	}
+	timing.mark("data: a\n") // first token, 150s after the headers
+	timing.mark("data: b\n") // then a healthy 50ms cadence
+	timing.mark("data: c\n")
+	timing.finish()
+
+	assert.Equal(t, 150*time.Second, timing.maxGap,
+		"the pre-first-line wait must dominate, not be excluded because no line preceded it")
+	assert.Contains(t, timing.String(), "first_line_after_headers_ms=150000",
+		"and the separate field still says WHICH stretch it was")
 }
 
 // A stream that produced nothing is the most alarming outcome, so it must not
@@ -85,7 +115,7 @@ func TestStreamTimingEmptyStreamIsNotReportedAsHealthy(t *testing.T) {
 	timing.finish()
 
 	assert.Equal(t,
-		"first_line_after_headers_ms=-1 max_gap_ms=90000 tail_gap_ms=90000 frames=0 lines=0 upstream_bytes=0",
+		"first_line_after_headers_ms=-1 max_gap_ms=90000 tail_gap_ms=90000 frames=0 lines=0 decompressed_bytes=0",
 		timing.String(),
 		"-1 marks 'no line ever arrived', and the whole stream is the silence")
 }

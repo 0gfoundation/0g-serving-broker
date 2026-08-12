@@ -20,10 +20,26 @@ import (
 // equally consistent with few large frames and with tokens billed but never
 // emitted, and those have different owners.
 //
-// The router logs the same fields on its own hop (0g-router #723), under the
-// same names and with the same start point, so the two can be compared directly:
+// max_gap_ms spans the whole response: the wait for the first line, every
+// stretch between lines, and the trailing silence. Any of the three can be the
+// one the client's watchdog fires on, so excluding one would make the field
+// quietly wrong rather than merely incomplete.
+//
+// The router measures the same quantities on its own hop (0g-router #723), from
+// the same start point and with the same arithmetic, so the two are comparable:
 // if the broker already saw the gap it came from upstream, if only the router
-// did it was introduced between here and there.
+// did it was introduced between here and there. The NAMES differ by logger
+// convention — this one writes printf text, so `first_line_after_headers_ms`
+// here is `firstLineAfterHeadersMs` there, and both byte counters are named for
+// being post-decompression. A query has to spell each side's own field name.
+//
+// What it does NOT measure, so the numbers are not over-read: it samples the
+// interval between ReadString RETURNS, and the loop between them sanitizes,
+// seals and writes. A client reading slowly backpressures the write, which
+// delays the next read, and that wait is attributed to the following gap. So a
+// slow client inflates the gap at BOTH hops at once and can look like an
+// upstream stall under the rule above; a stream whose gaps are all small is
+// definitely healthy, one with a large gap needs more than the subtraction.
 //
 // Cost is two time.Now() calls and a prefix test per line, on a path that
 // already sanitizes and JSON-parses each line.
@@ -62,9 +78,20 @@ func (t *streamTiming) mark(line string) {
 		return
 	}
 	now := t.now()
+	from := t.last
 	if t.lines == 0 {
 		t.first = now
-	} else if gap := now.Sub(t.last); gap > t.maxGap {
+		// The wait for the FIRST line is silence too. Excluding it while
+		// finish() includes the trailing silence would leave the head as the one
+		// blind spot — and a head stall is one of the commonest shapes a "the
+		// stream froze" report takes: an upstream that flushes response headers
+		// at once and only then starts thinking. Worse than merely missing it,
+		// this hop would report max_gap_ms≈0 while the router reported the full
+		// wait, and the cross-hop rule ("broker small, router large ⇒ introduced
+		// between them") would blame the router for the upstream's stall.
+		from = t.start
+	}
+	if gap := now.Sub(from); gap > t.maxGap {
 		t.maxGap = gap
 	}
 	t.last = now
@@ -103,12 +130,19 @@ func (t *streamTiming) String() string {
 	if !t.first.IsZero() {
 		firstLineMs = t.first.Sub(t.start).Milliseconds()
 	}
-	// Named for where the clock starts: this runs only after the upstream's
-	// response headers are in hand, so the wait for those headers — queueing at
-	// the vendor, a gateway that withholds them until the first token — is NOT
-	// included. Calling it "ttft" would have quietly claimed otherwise, and the
-	// router's matching field carries the same name for the same reason.
+	// Two field names carry their own caveat, which is why they are spelled the
+	// long way:
+	//
+	//   - first_line_after_headers_ms names where the clock starts. This runs
+	//     only once the upstream's response headers are in hand, so the wait for
+	//     THOSE — queueing at the vendor, a gateway that withholds headers until
+	//     the first token — is not included. "ttft" would have quietly claimed
+	//     otherwise; the router's matching field is named the same way.
+	//   - decompressed_bytes is counted after decompression, so a gzipped
+	//     upstream puts far fewer bytes on the wire than this reports.
+	//     Subtracting it from an edge log's compressed response size does not
+	//     give zero.
 	return fmt.Sprintf(
-		"first_line_after_headers_ms=%d max_gap_ms=%d tail_gap_ms=%d frames=%d lines=%d upstream_bytes=%d",
+		"first_line_after_headers_ms=%d max_gap_ms=%d tail_gap_ms=%d frames=%d lines=%d decompressed_bytes=%d",
 		firstLineMs, t.maxGap.Milliseconds(), t.tailGap.Milliseconds(), t.frames, t.lines, t.bytes)
 }
