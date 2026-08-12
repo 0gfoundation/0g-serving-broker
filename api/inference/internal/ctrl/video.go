@@ -694,6 +694,11 @@ func (c *Ctrl) handleVideoGenerationResponse(ctx *gin.Context, resp *http.Respon
 	// vendor rendered another. Does not change the fee.
 	c.WarnVideoDurationDrift(ctx, reqBody, contentType, seconds)
 
+	// The token-billed counterpart: the gate held an ESTIMATE from the vendor's
+	// published per-second rate, and a vendor changing something it does not
+	// announce would silently invalidate every estimate since.
+	c.WarnVideoTokenEstimateDrift(ctx, reqBody, contentType, respFields.completionTokens())
+
 	outputFee, err := util.Multiply(outputPrice, outputCount)
 	if err != nil {
 		return errors.Wrap(err, "calculate output fee for video generation")

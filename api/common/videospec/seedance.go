@@ -17,15 +17,16 @@ func init() { register(VendorSeedance, Seedance) }
 // seedance carries no state: its rules are the code below.
 //
 // This is the vendor the package doc names as the reason there is no shared
-// "shape of a vendor's rules" struct — it bills in TOKENS, not seconds. That
-// changes what registering it buys, and it is worth being precise about, because
-// the obvious expectation is wrong: it does NOT produce a pre-flight reserve. A
-// per_video_token model's fee is a vendor-computed token count that no reading of
-// the request can predict, so the broker still forwards those creates unreserved
-// (metered as reason=unpredictable_units — see monitor.VideoReserveSkipUnpredictableUnits).
+// "shape of a vendor's rules" struct — it bills in TOKENS, not seconds.
 //
-// What it does buy is the other two things the recorded rules are used for:
+// What the recorded rules are used for:
 //
+//   - Bounding the fee BEFORE the request is forwarded. The vendor publishes how
+//     its token count follows from the request, so EstimateBillableTokens — the
+//     optional TokenEstimator half — turns duration and tier into an upper bound
+//     the balance gate can hold. Without one, a token-billed create passes the gate
+//     on the minimum locked balance alone, and concurrent creates from one wallet
+//     cannot see each other at all.
 //   - The TIER settlement records as rate_class. Without rules, settlement keeps
 //     whatever "size" the client sent, so a client sending pixel dimensions puts
 //     "1280x720" in the rate_class column of a table whose other rows say "720p" —
@@ -168,4 +169,83 @@ func (s seedance) Tier(size string) string {
 		}
 	}
 	return best
+}
+
+// The vendor publishes both halves of what this needs: a formula,
+//
+//	tokens = (input video duration + output video duration) × width × height × fps / 1024
+//
+// and a per-second price for each resolution tier, which is the formula already
+// evaluated for us. Dividing the published rate by the published per-token rate
+// gives the only numbers this file actually wants:
+//
+//	Dreamina Seedance 2.5, input without video, 16:9:
+//	  480p  $0.103/s ÷ $10.7037 per 1M  =  9,626 tokens/s
+//	  720p  $0.231/s ÷ $10.7037 per 1M  = 21,590 tokens/s
+//
+// Taking them from the price table rather than from the formula is deliberate: the
+// formula needs each tier's rendered pixel count, which the vendor does NOT
+// publish and which changed between 2.0 and 2.5. Reconstructing it means picking a
+// frame size from third-party measurements that disagree — a guess this file would
+// then carry as if it were a fact. The price table needs no such guess.
+//
+// (For the record, the two routes agree: 1280×720×24/1024 = 21,600, within 0.05%
+// of the 21,590 above. The residual is the price table's three decimals.)
+//
+// This integration exposes no video-reference input, so the formula's input term
+// is 0 and both numbers are pure output-duration rates. IF THAT CHANGES — if a
+// video-reference input is ever exposed — these become severe UNDER-estimates,
+// silently, because the term they drop is the one that would grow. Whoever exposes
+// it must update this together with the mapping.
+const (
+	// seedance480pTokensPerSecond and seedance720pTokensPerSecond: see above.
+	seedance480pTokensPerSecond = 9626
+	seedance720pTokensPerSecond = 21590
+)
+
+// seedanceTokensPerSecond is the billable token rate for each tier.
+//
+// An ESTIMATE, not a bound, and the difference matters for what consumes it. The
+// balance gate does not need a number that can never be exceeded — it needs one
+// close enough that concurrent creates from one wallet see each other, with the
+// minimum locked balance absorbing the rest. Being 4% out costs nothing there.
+//
+// What DOES depend on the number being roughly right is the drift check
+// (ctrl.WarnVideoTokenEstimateDrift), and it compares with a tolerance for exactly
+// this reason: a check that fired on every 0.1% of rounding would report nothing
+// anyone could act on.
+//
+// Keyed on the tier alone. The vendor's own table supports that — it prices per
+// RESOLUTION, not per (resolution, ratio), and a vendor whose 21:9 clips cost 31%
+// more per second could not price that way. Weak support, since the table states
+// 16:9 in its aspect-ratio column and may just be showing one shape; if it turns
+// out a tier's rate varies by ratio, the fix is a different key rather than a
+// bigger number, and the drift check is what would say so. An image-to-video
+// request is the case no key could fix anyway: ratio="adaptive" hands the shape to
+// the reference image, so nothing in the request determines it.
+var seedanceTokensPerSecond = map[string]int64{
+	"480p": seedance480pTokensPerSecond,
+	"720p": seedance720pTokensPerSecond,
+}
+
+// EstimateBillableTokens implements TokenEstimator: the tier's per-second rate
+// times the duration this vendor will actually render.
+//
+// ok=false when the request determines no duration (an unreadable one is omitted
+// and the vendor picks, so nothing here can estimate it) or when the tier is one
+// this table does not cover — never a zero estimate, which would read as "free"
+// and disable the gate it feeds.
+func (s seedance) EstimateBillableTokens(rawSeconds, rawSize string) (int64, bool) {
+	seconds, outcome := s.NormalizeSeconds(rawSeconds)
+	if outcome != SecondsResolved || seconds <= 0 {
+		return 0, false
+	}
+	perSecond, ok := seedanceTokensPerSecond[s.Tier(rawSize)]
+	if !ok {
+		return 0, false
+	}
+	// No overflow guard, and that is not an omission: seconds is bounded by
+	// SeedanceMaxSeconds (30) and the rate by the table above, so the product is at
+	// most 30 × 21,590 ≈ 6.5e5 — far inside int64.
+	return seconds * perSecond, true
 }

@@ -394,15 +394,16 @@ func newTokenBilledReserveTestCtrl(t *testing.T) (*Ctrl, *gin.Context) {
 	return c, ctx
 }
 
-// TestVideoCreateReserve_PerVideoTokenIsUnpredictable: recording a vendor's rules
-// does not make a token-billed model reservable. The duration and tier both
-// resolve here, and the fee still does not follow from them.
+// TestVideoCreateReserve_PerVideoTokenWithoutEstimatorIsUnreservable: a
+// token-billed model whose vendor publishes no rule for how the token count
+// follows from the request cannot be bounded, so it keeps the metered skip.
 //
-// The point of the test is the LOUDNESS, not the zero. A "0" fee is
-// indistinguishable from a genuinely free request, so returning one silently
-// would be strictly worse than the unknown-vendor state recording the rules
-// removed: the exposure would stop being counted.
-func TestVideoCreateReserve_PerVideoTokenIsUnpredictable(t *testing.T) {
+// The helper's vendor is MiniMax deliberately: its rules are recorded (so the
+// unknown_vendor path is not what fires) but it satisfies no TokenEstimator, which
+// is exactly this case. The point of the test is the LOUDNESS, not the zero — a
+// "0" fee is indistinguishable from a genuinely free request, so returning one
+// silently would stop counting the exposure.
+func TestVideoCreateReserve_PerVideoTokenWithoutEstimatorIsUnreservable(t *testing.T) {
 	c, ctx := newTokenBilledReserveTestCtrl(t)
 	rec := &countingLogger{Logger: c.logger}
 	c.logger = rec
@@ -412,7 +413,7 @@ func TestVideoCreateReserve_PerVideoTokenIsUnpredictable(t *testing.T) {
 		t.Fatalf("VideoCreateReserve: %v", err)
 	}
 	if fee != "0" {
-		t.Errorf("fee = %q, want %q — a token count cannot be predicted from the request", fee, "0")
+		t.Errorf("fee = %q, want %q — this vendor publishes no rule to bound its token count", fee, "0")
 	}
 	if rec.errors != 1 {
 		t.Errorf("logged %d lines for an unreservable create, want 1", rec.errors)
@@ -451,4 +452,180 @@ func TestVideoOutputUnits_ReservePathReportsNothing(t *testing.T) {
 	if rec.errors != 0 {
 		t.Errorf("logged %d lines; the unit math must not report on its own", rec.errors)
 	}
+}
+
+// newEstimatedTokenReserveTestCtrl builds a token-billed model whose vendor DOES
+// publish how its token count follows from the request (Seedance satisfies
+// videospec.TokenEstimator), priced at 1 wei per token so a fee reads as a token
+// count.
+func newEstimatedTokenReserveTestCtrl(t *testing.T) (*Ctrl, *gin.Context) {
+	t.Helper()
+	c := &Ctrl{logger: testLogger()}
+	c.Service.Type = "video-generation"
+	c.Service.ModelType = "vid-1"
+	c.Service.ModelPricing = []config.ModelPricingEntry{{
+		Model:       "vid-1",
+		OutputPrice: "1",
+		Billing: &config.BillingConfig{
+			Mode:   config.BillingModePerVideoToken,
+			Vendor: string(videospec.VendorSeedance),
+		},
+	}}
+	if err := c.Service.BuildModelPricingMap(); err != nil {
+		t.Fatalf("BuildModelPricingMap: %v", err)
+	}
+	ctx := &gin.Context{}
+	ctx.Set(CtxKeyResolvedModel, "vid-1")
+	ctx.Request = httptest.NewRequest("POST", "/videos", strings.NewReader(""))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	return c, ctx
+}
+
+// TestVideoCreateReserve_EstimatedTokenBilling: the whole point of the change. A
+// token-billed create must now hold a NON-ZERO amount, quietly.
+//
+// Zero is the failure this closes, and it is not a rounding problem: the gate's
+// other input (CalculateUnsettledFee) sums the fee stamped on in-flight rows, so a
+// zero reserve means N simultaneous creates from one wallet each read 0 and every
+// one of them passes on the same balance — the wallet ends up owing N clips it
+// could never pay for. See 0gfoundation/0g-serving-broker#628.
+func TestVideoCreateReserve_EstimatedTokenBilling(t *testing.T) {
+	c, ctx := newEstimatedTokenReserveTestCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	// The published 720p rate (21,590 tokens/s) × 8s × 1 wei per token.
+	fee, err := c.VideoCreateReserve(ctx, []byte(`{"seconds":8,"size":"1280x720"}`))
+	if err != nil {
+		t.Fatalf("VideoCreateReserve: %v", err)
+	}
+	if fee != "172720" {
+		t.Errorf("fee = %q, want %q (8s × 21590 tokens/s × 1 wei)", fee, "172720")
+	}
+	// A bounded create is an ordinary priced create: no un-reserved-create line.
+	if rec.errors != 0 {
+		t.Errorf("logged %d lines for a create it could price, want 0", rec.errors)
+	}
+}
+
+// TestVideoCreateReserve_EstimatedTokenBillingScalesWithTheRequest: the reserve must
+// track what the request will actually cost, or a cheap 480p clip is gated as
+// harshly as a 30-second 720p one and callers get refused for balance they do
+// have.
+func TestVideoCreateReserve_EstimatedTokenBillingScalesWithTheRequest(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"480p is cheaper than 720p", `{"seconds":8,"size":"480p"}`, "77008"},             // 8 × 9626
+		{"the ceiling clamps the estimate too", `{"seconds":99,"size":"720p"}`, "647700"}, // 30 × 21590
+		{"below the floor estimates the floor", `{"seconds":1,"size":"720p"}`, "86360"},   // 4 × 21590
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, ctx := newEstimatedTokenReserveTestCtrl(t)
+			fee, err := c.VideoCreateReserve(ctx, []byte(tt.body))
+			if err != nil {
+				t.Fatalf("VideoCreateReserve: %v", err)
+			}
+			if fee != tt.want {
+				t.Errorf("fee = %q, want %q", fee, tt.want)
+			}
+		})
+	}
+}
+
+// TestVideoCreateReserve_EstimatedTokenBillingSkipsWhenUnestimable: a vendor WITH
+// an estimator still has requests it cannot estimate (an unreadable duration is
+// omitted and the vendor picks its own). That must fall back to the metered skip
+// rather than to a zero fee that reads as free.
+func TestVideoCreateReserve_EstimatedTokenBillingSkipsWhenUnestimable(t *testing.T) {
+	c, ctx := newEstimatedTokenReserveTestCtrl(t)
+	rec := &countingLogger{Logger: c.logger}
+	c.logger = rec
+
+	fee, err := c.VideoCreateReserve(ctx, []byte(`{"size":"720p"}`))
+	if err != nil {
+		t.Fatalf("VideoCreateReserve: %v", err)
+	}
+	if fee != "0" {
+		t.Errorf("fee = %q, want %q", fee, "0")
+	}
+	if rec.errors != 1 {
+		t.Errorf("logged %d lines for an unestimable create, want 1", rec.errors)
+	}
+}
+
+// TestWarnVideoTokenEstimateDrift: the estimate comes from the vendor's published
+// per-second rate, and what invalidates it is the vendor changing something it does
+// not announce. That has no visible symptom — the gate just starts holding too
+// little on every request — so this is the only thing that says so.
+//
+// The tolerance is the point of most of these cases. Comparing exactly would report
+// the vendor's own rounding on every request and tell an operator nothing.
+func TestWarnVideoTokenEstimateDrift(t *testing.T) {
+	count := func(t *testing.T, body string, billedTokens int64) int {
+		t.Helper()
+		c, ctx := newEstimatedTokenReserveTestCtrl(t)
+		rec := &countingLogger{Logger: c.logger}
+		c.logger = rec
+		c.WarnVideoTokenEstimateDrift(ctx, []byte(body), "application/json", billedTokens)
+		return rec.errors
+	}
+
+	// 8s at 720p estimates 8 × 21,590 = 172,720.
+	const estimate = 8 * 21590
+	const body = `{"seconds":8,"size":"720p"}`
+
+	t.Run("within the tolerance is silent", func(t *testing.T) {
+		for _, tt := range []struct {
+			name   string
+			billed int64
+		}{
+			{"exactly the estimate", estimate},
+			{"under the estimate", estimate / 2},
+			// The vendor's price table rounds to three decimals, so a real bill can sit
+			// a fraction of a percent above the estimate. Reporting that would be
+			// reporting arithmetic.
+			{"a fraction of a percent over", estimate + estimate/500},
+			{"just inside the 15% tolerance", estimate + estimate*14/100},
+		} {
+			if got := count(t, body, tt.billed); got != 0 {
+				t.Errorf("%s (billed %d vs estimate %d): logged %d lines, want 0", tt.name, tt.billed, estimate, got)
+			}
+		}
+	})
+
+	t.Run("past the tolerance is reported", func(t *testing.T) {
+		for _, tt := range []struct {
+			name   string
+			billed int64
+		}{
+			// The things the check exists for: a frame-rate change is +25%, a tier whose
+			// pixel count varies by aspect ratio is +31% to +78%.
+			{"a frame-rate change (+25%)", estimate * 125 / 100},
+			{"an aspect-ratio dependent tier (+31%)", estimate * 131 / 100},
+			{"the worst case (+78%)", estimate * 178 / 100},
+		} {
+			if got := count(t, body, tt.billed); got != 1 {
+				t.Errorf("%s (billed %d vs estimate %d): logged %d lines, want 1", tt.name, tt.billed, estimate, got)
+			}
+		}
+	})
+
+	t.Run("no estimate means nothing to drift from", func(t *testing.T) {
+		if got := count(t, `{"size":"720p"}`, 999999); got != 0 {
+			t.Errorf("logged %d lines when nothing was estimated, want 0", got)
+		}
+	})
+
+	t.Run("a seconds-billed model is not this check's business", func(t *testing.T) {
+		c, ctx := newReserveTestCtrl(t, videospec.VendorMiniMax)
+		rec := &countingLogger{Logger: c.logger}
+		c.logger = rec
+		c.WarnVideoTokenEstimateDrift(ctx, []byte(`{"seconds":8,"size":"720P"}`), "application/json", 999999)
+		if rec.errors != 0 {
+			t.Errorf("logged %d lines for a per_video_second model, want 0", rec.errors)
+		}
+	})
 }

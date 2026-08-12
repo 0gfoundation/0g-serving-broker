@@ -82,6 +82,39 @@ type Spec interface {
 	Tier(size string) string
 }
 
+// TokenEstimator is an OPTIONAL interface a vendor may satisfy alongside Spec,
+// for a vendor that bills in TOKENS rather than seconds — a quantity Spec's
+// (duration, tier) pair does not express.
+//
+// It is optional, and separate, because a vendor that bills per second has no
+// tokens to estimate and would have to return a lie. The package doc anticipates
+// exactly this: a vendor "may satisfy further optional interfaces without any of
+// this changing." Callers type-assert; a vendor that does not implement it is a
+// vendor whose token fee cannot be predicted, which is a state the broker already
+// handles explicitly.
+type TokenEstimator interface {
+	// EstimateBillableTokens reports roughly how many tokens this vendor will bill
+	// for a create request, or ok=false when the request determines nothing to
+	// estimate from.
+	//
+	// An ESTIMATE, not a bound. The consumer is the pre-flight balance gate, which
+	// does not need a number that can never be exceeded: it needs one close enough
+	// that concurrent creates from one wallet see each other, and the minimum locked
+	// balance absorbs the remainder. An implementation should say what it believes
+	// the vendor will charge rather than inflating it — over-holding is a real cost
+	// to callers, and the check that watches for the estimate going wrong
+	// (ctrl.WarnVideoTokenEstimateDrift) allows a tolerance precisely so this can be
+	// honest instead of padded.
+	//
+	// ok=false means "nothing to estimate from" and must NOT be reported as zero — a
+	// zero estimate says the request is free, which is the one answer that silently
+	// disables the gate.
+	//
+	// Takes the same raw request fields as Spec, for the same reason: the vendor's
+	// own reading of them is what decides what gets rendered and therefore billed.
+	EstimateBillableTokens(rawSeconds, rawSize string) (int64, bool)
+}
+
 // specs is the registry, filled by each vendor's own file at init. Nothing
 // enumerates vendors here.
 //

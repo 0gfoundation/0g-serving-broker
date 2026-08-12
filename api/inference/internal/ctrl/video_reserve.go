@@ -115,22 +115,51 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 	}
 	tier := spec.Tier(rawSize)
 
-	// A mode whose billable quantity is not derivable from the request cannot be
-	// reserved for, even with the vendor's rules fully recorded: per_video_token
-	// bills a token count the VENDOR computes and reports back, so seconds and
-	// tier — both resolved by now — determine nothing about the fee.
+	// A token-billed model has no unit count in the request: OutputUnits passes
+	// through whatever the vendor reported, and it has reported nothing yet. Left
+	// alone, videoOutputUnits would answer 0 units and produce a "0" fee —
+	// indistinguishable from a genuinely free request, so the create would go out
+	// unreserved with no counter and no line.
 	//
-	// Returning early is what keeps this honest. videoOutputUnits below would
-	// answer 0 units for this mode (BillingConfig.OutputUnits passes the observed
-	// token count straight through, and there is none yet), and a "0" fee is
-	// indistinguishable from a genuinely free request — so the create would go out
-	// unreserved with no counter and no line, which is strictly worse than the
-	// unknown_vendor state recording the rules just removed.
+	// A vendor that publishes what it charges per second can be ESTIMATED instead.
+	// That is an OPTIONAL half of the recorded rules (videospec.TokenEstimator), so
+	// this asks rather than assumes: a vendor without it keeps the honest, metered
+	// skip.
+	//
+	// An estimate is enough, and that is worth being explicit about because the
+	// instinct is to inflate it. What the gate needs is a number close enough that
+	// concurrent creates from one wallet see each other — its other input,
+	// CalculateUnsettledFee, sums the fee already stamped on in-flight rows, so a
+	// ZERO reserve means N simultaneous creates each read 0 and every one of them
+	// passes against the same balance. Against that failure the difference between
+	// an exact figure and one a few percent out is nothing, and the minimum locked
+	// balance covers it.
+	var estimatedTokens int64
 	if billing != nil && billing.Mode == config.BillingModePerVideoToken {
-		c.skipVideoReserve(monitor.VideoReserveSkipUnpredictableUnits, vendorName,
-			"video create forwarded WITHOUT a reserve: model bills per_video_token, so the fee is a token count vendor %q reports only once it has rendered, and this broker does not predict it (the vendor offers no quote endpoint either). This request is gated only by the minimum locked balance",
-			vendorName)
-		return "0", nil
+		est, hasEstimator := spec.(videospec.TokenEstimator)
+		if !hasEstimator {
+			c.skipVideoReserve(monitor.VideoReserveSkipUnpredictableUnits, vendorName,
+				"video create forwarded WITHOUT a reserve: model bills per_video_token and vendor %q publishes no rate this broker can estimate that token count from (it offers no quote endpoint either). This request is gated only by the minimum locked balance",
+				vendorName)
+			return "0", nil
+		}
+		estimate, ok := est.EstimateBillableTokens(rawSeconds, rawSize)
+		// estimate <= 0 is folded in rather than checked separately: a non-positive
+		// estimate and no estimate are the same fact, and TokenEstimator's contract
+		// already says a zero must be reported as ok=false precisely because a zero
+		// fee reads as "free" and disables the gate. Treating one as the other means
+		// an implementation that breaks that contract still fails safe — and, below,
+		// that what reaches videoOutputUnits is always positive.
+		if !ok || estimate <= 0 {
+			// The vendor CAN be bounded in general, just not for this request. Same
+			// exposure as above, so the same reason — a separate one would split the
+			// series without telling an operator anything they can act on differently.
+			c.skipVideoReserve(monitor.VideoReserveSkipUnpredictableUnits, vendorName,
+				"video create forwarded WITHOUT a reserve: vendor %q bills per_video_token and this request determines nothing to estimate that count from. This request is gated only by the minimum locked balance",
+				vendorName)
+			return "0", nil
+		}
+		estimatedTokens = estimate
 	}
 
 	prices, err := c.GetBillingPrices(ctx)
@@ -139,8 +168,9 @@ func (c *Ctrl) VideoCreateReserve(ctx *gin.Context, reqBody []byte) (string, err
 	}
 	// The same unit math the settlement path runs, so the amount held and the
 	// amount eventually charged are computed the same way rather than merely
-	// intended to agree.
-	units := c.videoOutputUnits(ctx, seconds, tier)
+	// intended to agree. estimatedTokens is 0 for every seconds-billed mode, which
+	// ignores it.
+	units := c.videoOutputUnits(ctx, seconds, tier, estimatedTokens)
 	fee, err := util.Multiply(prices.OutputPrice, units)
 	if err != nil {
 		return "", errors.Wrap(err, "calculate video reserve fee")
@@ -344,4 +374,74 @@ func (c *Ctrl) WarnVideoDurationDrift(ctx context.Context, reqBody []byte, conte
 		strconv.FormatInt(predicted, 10)+"->"+strconv.FormatInt(billedSeconds, 10),
 		"video duration drift: vendor %q rendered %ds where common/videospec predicted %ds, so this request was gated on the wrong amount. The recorded rules for that vendor no longer match its behaviour",
 		entry.Billing.Vendor, billedSeconds, predicted)
+}
+
+// videoTokenEstimateDriftTolerance is how far a vendor may bill above the estimate
+// before WarnVideoTokenEstimateDrift reports it, in percent.
+//
+// It exists because the estimate is an estimate. Comparing exactly would report the
+// vendor's own price-table rounding (0.1%) and any small imprecision in a tier's
+// recorded rate (~4%) on every request, forever, telling an operator nothing they
+// can act on.
+//
+// 15 sits in the gap between those and the things worth knowing about, which are
+// not small: a frame-rate change (24 -> 30 fps) is +25%, and a tier whose pixel
+// count turns out to vary by aspect ratio is +31% to +78%. Nothing real is expected
+// to land between 4% and 25%.
+const videoTokenEstimateDriftTolerance = 15
+
+// WarnVideoTokenEstimateDrift reports a token-billed vendor charging materially
+// more than videospec estimated for the request.
+//
+// The estimate comes from the vendor's published per-second rate for the tier
+// (videospec.TokenEstimator). What invalidates it is the vendor changing something
+// it does not announce — a higher frame rate, a bigger frame for a tier, or a rate
+// that turns out to depend on the aspect ratio. None of those has a visible
+// symptom: the gate simply starts holding too little on every request, while
+// settlement keeps working because it bills what the vendor reports.
+//
+// It runs after the money is spent and cannot do otherwise — a vendor only reports
+// what it billed once it has. The point is to make the NEXT request right, exactly
+// as with WarnVideoDurationDrift.
+//
+// Only billing ABOVE the tolerance is reported. Below it is either normal rounding
+// or a deliberately conservative rate, and reporting either would bury the one
+// direction that costs money.
+func (c *Ctrl) WarnVideoTokenEstimateDrift(ctx context.Context, reqBody []byte, contentType string, billedTokens int64) {
+	if billedTokens <= 0 || !c.Service.HasMultiModelPricing() {
+		return
+	}
+	entry := c.resolveModelPricing(ctx)
+	if entry == nil || entry.Billing == nil || entry.Billing.Mode != config.BillingModePerVideoToken {
+		return
+	}
+	spec, ok := videospec.Get(videospec.Vendor(entry.Billing.Vendor))
+	if !ok {
+		return
+	}
+	est, ok := spec.(videospec.TokenEstimator)
+	if !ok {
+		// Nothing was estimated, so there is nothing to have drifted from — that
+		// create was already counted as unreserved by skipVideoReserve.
+		return
+	}
+	rawSeconds, rawSize := rawVideoRequestFields(reqBody, contentType)
+	estimate, ok := est.EstimateBillableTokens(rawSeconds, rawSize)
+	if !ok || estimate <= 0 {
+		return
+	}
+	// Integer arithmetic on purpose: no float, and no rounding mode to reason about
+	// right at the threshold. Both operands are token counts bounded by
+	// EstimateBillableTokens, so the multiplication cannot overflow.
+	if excess := (billedTokens - estimate) * 100 / estimate; excess <= videoTokenEstimateDriftTolerance {
+		return
+	}
+	// Keyed on the two token counts, not on anything caller-chosen: both come from
+	// the recorded rules and from the vendor, so the key space is bounded. A
+	// caller-chosen key would let one client mint a fresh one per request and flush
+	// the memo this shares with every other throttled reason.
+	c.logProofSkip("video_token_estimate_drift",
+		strconv.FormatInt(estimate, 10)+"->"+strconv.FormatInt(billedTokens, 10),
+		"video token estimate drift: vendor %q billed %d tokens where common/videospec estimated %d, over the %d%% tolerance — so this request, and every one like it since the vendor changed, was gated on too little. That vendor's recorded per-second token rate no longer matches its behaviour",
+		entry.Billing.Vendor, billedTokens, estimate, videoTokenEstimateDriftTolerance)
 }
