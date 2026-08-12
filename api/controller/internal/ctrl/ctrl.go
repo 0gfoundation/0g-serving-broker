@@ -909,7 +909,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// no later record can name the right address either. Unlike an unreadable record, that is
 	// unrecoverable, so it must not be reachable by asking for an upgrade.
 	if os.Getenv(attestproxy.SocketEnvVar) == "" {
-		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match; regenerate the deployment with the attestation proxy enabled", attestproxy.SocketEnvVar)
+		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match. On a TEE node, regenerate the deployment so the controller serves the attestation proxy. Elsewhere there is no dstack guest agent to record a change against, and in-place upgrade is not available at all", attestproxy.SocketEnvVar)
 	}
 
 	signer, err := c.deriver.SignerAddress(ctx, digest)

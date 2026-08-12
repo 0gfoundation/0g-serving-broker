@@ -12,16 +12,21 @@
 //
 // RTMR3 says what was written, not who wrote it. dstack serves EmitEvent on
 // /var/run/dstack.sock from the same unauthenticated handler as GetQuote, binds that
-// socket 0777, and restricts neither the event name nor the payload. Any container that
-// can reach it can append any record — and deployments today mount it into the broker,
-// because that is how the broker gets GetQuote and DeriveKey.
+// socket 0777, and restricts neither the event name nor the payload. Any container that can
+// reach it can append any record.
 //
-// So a provider running a modified broker image can append its own zg-image-update naming
-// any digest and take a quote over it. That quote is genuine: the replay matches, the
-// compose hash matches, the signature verifies. No signature on the record could help,
-// since GetKey derives by path and any container may ask for any path, so there is no key
-// the broker cannot also derive. A challenge nonce does not help either — it defeats
-// replay of an old quote, not forgery of a new one.
+// So in a deployment that mounts that socket into the broker, a provider running a modified
+// broker image can append its own zg-image-update naming any digest and take a quote over
+// it. That quote is genuine: the replay matches, the compose hash matches, the signature
+// verifies. A challenge nonce does not help — it defeats replay of an old quote, not forgery
+// of a new one.
+//
+// A deployment that keeps the socket with the controller alone does not have that problem,
+// and there the record carries a signature of a kind: the address of the signing key derived
+// from the image it names, which ResolveRunningState requires the quote's report_data to
+// match. That works only because the broker cannot derive keys itself — the controller
+// withholds GetKey — so it is the confinement that makes the binding meaningful, not the
+// other way round.
 //
 // **A DigestSourceEvent answer is therefore only as good as the deployment's confinement
 // of RTMR3 writers, and this package cannot check that.** It is a property of the compose
@@ -41,10 +46,12 @@
 // differs only by command:). A parser that answers "probably not" here is worse than no
 // parser, because it reads as a guarantee.
 //
-// Until a deployment keeps that socket away from the broker — routing its quotes through
-// the controller, whose image compose_hash pins and which cannot upgrade itself — treat an
-// event-sourced digest as an audit record of what the controller did, not as proof of what
-// is running. doc/controller-design.md §5.1a carries the current state.
+// So: a deployment that keeps that socket away from the broker — routing its quotes through
+// the controller, whose image compose_hash pins and which cannot upgrade itself — gets a
+// DigestSourceEvent answer that is proof of what is running. One that does not gets an audit
+// record of what the controller did. Which of the two a caller is holding is decided by the
+// compose file behind RunningState.ComposeHash, and by nothing this package can see.
+// doc/attestation-trust-chain.md lists what that review must cover.
 //
 // # Scope
 //

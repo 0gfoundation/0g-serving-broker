@@ -31,7 +31,7 @@ POST /GetKey          REMOVED
 POST /EmitEvent       never forwarded
 ```
 
-`S_current` is derived as `dstack GetKey(path = "/" + <current broker image digest>)`, and
+`S_current` is derived as `dstack GetKey(path = "/" + <current broker image digest> + "/sign")` — a sibling of the enclave encryption key rather than its parent, since dstack derivation is by full path and making the signer a prefix of anything else would be gratuitous, and
 the current digest is read the way `restoreImageRecord` reads it: `GetContainerStatus` on
 `containerBroker`, requiring an exact name match, taking the part after `@`. Refuse when the
 digest cannot be established — a signature under an unknown key is worse than no signature.
@@ -46,7 +46,7 @@ so an upgraded image cannot decrypt what was sealed to its predecessor.
 directly. Replace the field with a method:
 
 ```go
-func (s *TeeService) Sign(hash []byte) ([]byte, error)
+func (s *TeeService) SignHash(hash []byte) ([]byte, error)
 ```
 
 Two implementations behind it:
@@ -115,6 +115,17 @@ Attack angles a review must cover, because each of them silently voids the slice
 
 ## Status
 
-Not started. `#644` currently forwards `/GetKey`; narrowing it is part of this slice, not a
-separate change, because the broker has no other way to obtain keys until `/Sign` and
-`/GetEncKey` exist.
+Done. #644 serves the operations, #648 moves the broker onto them and stops forwarding
+`/GetKey`, #649 binds the derived address into the RTMR3 record so a reader can require the
+quote to name it, and #650 generates a compose that actually withholds both sockets from the
+broker.
+
+Two things this design assumed and the review of it corrected:
+
+- **Per-image derivation alone buys freshness, not identity.** A stale quote names a key that
+  no longer signs, which is what this document was for — but nothing tied the address in
+  `report_data` to the digest in the ledger, because `report_data` is chosen by the enclave and
+  `S` is derivable only inside the CVM. Any divergence was therefore accepted rather than
+  refused. #649 closes it by putting the address in the record.
+- **The derivation path is a leaf, not a root.** `"/" + digest + "/sign"`, beside the enclave
+  encryption key rather than above it.
