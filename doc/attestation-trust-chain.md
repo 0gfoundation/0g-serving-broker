@@ -32,15 +32,16 @@ hardware or cryptography; a link marked 👤 is a one-time human check the user 
 | 3 | That deployment is the one the user reviewed | 👤 The user compares `compose_hash` against the hash of a compose file they read. |
 | 4 | **Only the controller can write the ledger** | 👤 read from that reviewed compose: the broker mounts no `/var/run/dstack.sock`; only the controller does. ⚙ Changing that changes `compose_hash`, which link 3 catches. |
 | 5 | Which **image** the broker runs | ⚙ RTMR3 is append-only and covered by the signature. Replay the runtime events; the last `zg-image-update` names it, as `<repo>@<digest> <0xsigner>`. Link 4 is why that record can be believed. |
-| 6 | That image is one the user recognises | 👤 The digest is compared against a set that ships with **the user's own software**, never fetched from the provider. |
+| 6 | That image is one the user recognises | 👤 The digest is compared against a set the user obtained **for themselves** — built from source they read, or taken from a release they have a reason to trust — never fetched from the provider being checked. |
 | 7 | The key signing responses **belongs to that image** | ⚙ The record binds the address of `S = KDF(appKey, "/<digest>/sign")`, derived by the controller before it makes the change. The reader requires the quote's `report_data` to name the same address. Without this the two are unconnected: `report_data` is whatever the enclave asked the hardware to sign over, and `S` is derivable only inside the CVM, so a broker could publish an address of its own and a record left over from a change that never completed would be believed. |
 | 8 | The attestation describes **now**, not the past | ⚙ Because `S` follows the image, an upgrade changes it, so the key an old quote names stops working. A stale quote is self-invalidating — no nonce and no freshness protocol. |
 | 9 | This **response** came from that image | ⚙ Every response carries a signature by `S` over the exact bytes delivered. The controller holds `S` and signs on request; the private key never leaves the controller, so no broker image can retain it across an upgrade. |
 | 10 | The router changed nothing and replayed nothing | ⚙ It does not hold `S`. The signature binds this response's bytes, so it cannot be moved to another request. |
 
 Links 1–2, 5, 7–10 are mechanical. Links 3, 4 and 6 are the user's, and they are the same
-discipline throughout: **the trust root travels with software the user installed, never
-with the party being verified.**
+discipline throughout: **the trust root comes from somewhere the user chose, never from the
+party being verified.** Where it is kept does not matter — an SDK constant, a config file, two
+hex strings in a notes file. Only its provenance does.
 
 ---
 
@@ -88,7 +89,7 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
 | **Broker image** | **No** ← the objective |
 | **Router** | **No** |
 | Provider's host, network, DNS | **No** |
-| The user's own SDK and digest allowlist | **Yes** — by construction; this is where the trust root lives |
+| Whatever the user compares against — an SDK's allowlist, a file, a written-down pair of hashes | **Yes** — by construction; this is where the trust root lives |
 
 ---
 
@@ -111,7 +112,10 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
      the broker image's key, so a fourth container mounting it can mint response proofs
      attributed to a reviewed image, and nothing in RTMR3 records that container's existence.
 
-   Then record `compose_hash` and the acceptable broker digests into the user's own software.
+   Then keep two values: that compose file's `compose_hash`, and the broker digests you accept.
+   Keep them however you like — this is a person with two hex strings, not necessarily a program
+   with a config. What matters is only that you got them yourself and that you compare against
+   them, rather than reading them out of the attestation you are about to check.
 2. Per session: fetch the quote, verify the DCAP signature, check `compose_hash` against
    the recorded one, replay RTMR3, read the last `zg-image-update`, check its digest against
    the recorded set, and check that the signer address it binds equals the one in
@@ -138,7 +142,8 @@ user can settle every mechanical link with tools they already trust.
 
 ### Once, per release
 
-Two values, and both must come from software you installed rather than from the provider:
+Two values. Neither has to live in code — a notes file is fine — but both must come from you
+rather than from the provider:
 
 1. **`compose_hash` of the deployment you reviewed.** `sha256` of the `app_compose` manifest.
    Reviewing it means checking the four things in step 1 above — the sockets the broker does
