@@ -212,7 +212,10 @@ func testLogger(t *testing.T) log.Logger {
 }
 
 // testSigner is what fakeDeriver answers, so a test can assert on the whole record.
-const testSigner = "0x1111111111111111111111111111111111111111"
+const (
+	testSigner = "0x1111111111111111111111111111111111111111"
+	testEncPub = "beef000000000000000000000000000000000000000000000000000000000123"
+)
 
 // fakeDeriver stands in for the guest agent's key derivation. err makes a derivation that
 // cannot answer testable, which has to abort the upgrade rather than record a digest with
@@ -227,24 +230,24 @@ type fakeDeriver struct {
 	seen  []string
 }
 
-func (d *fakeDeriver) SignerAddress(ctx context.Context, digest string) (string, error) {
+func (d *fakeDeriver) ImageKeys(ctx context.Context, digest string) (string, string, error) {
 	d.seen = append(d.seen, digest)
 	if d.log != nil {
 		d.log.add("derive " + digest)
 	}
 	if d.block {
 		<-ctx.Done()
-		return "", ctx.Err()
+		return "", "", ctx.Err()
 	}
 	if d.err != nil {
-		return "", d.err
+		return "", "", d.err
 	}
-	return testSigner, nil
+	return testSigner, testEncPub, nil
 }
 
 // imageRecord is the payload the recorder writes: the reference, then the address of the key
 // derived from that image.
-func imageRecord(ref string) string { return ref + " " + testSigner }
+func imageRecord(ref string) string { return ref + " " + testSigner + " " + testEncPub }
 
 func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string) *Ctrl {
 	t.Helper()

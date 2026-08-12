@@ -136,6 +136,28 @@ func ReportData(quote []byte) ([]byte, error) {
 	return bytes.Clone(quote[offsetReportData : offsetReportData+reportDataLen]), nil
 }
 
+// EncPubFromReportData returns the enclave encryption public key the quote binds, hex.
+//
+// Only the §4.2 layout carries one; the older layout is the ASCII signer address and nothing
+// else, so it answers "". A caller that intends to SEAL a request must have a non-empty value
+// here and must have checked it against the ledger — sealing to a key the ledger does not
+// vouch for hands the plaintext to whatever chose report_data, and no later signature check
+// can undo that.
+func EncPubFromReportData(quote []byte) (string, error) {
+	rd, err := ReportData(quote)
+	if err != nil {
+		return "", err
+	}
+	if binary.BigEndian.Uint32(rd[reportDataVersionOffset:reportDataVersionOffset+4]) != reportDataLayoutVersion {
+		return "", nil
+	}
+	pub := rd[:reportDataSignerOffset]
+	if bytes.Equal(pub, make([]byte, len(pub))) {
+		return "", fmt.Errorf("report_data names an all-zero enc_pub")
+	}
+	return hex.EncodeToString(pub), nil
+}
+
 // SignerFromReportData returns the signer address the quote binds, lowercase "0x…".
 //
 // This is the address a client verifies response signatures against, and the hardware

@@ -22,6 +22,7 @@ import (
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/common/tee"
 	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
@@ -66,7 +67,15 @@ type EventEmitter interface {
 //
 // An interface for the same reason EventEmitter is one: so the ordering can be tested.
 type SignerDeriver interface {
-	SignerAddress(ctx context.Context, digest string) (string, error)
+	// ImageKeys returns the response-signing address and the enclave encryption public key
+	// (hex, no 0x) that an image's derivation path yields.
+	//
+	// Both, not just the address, because report_data carries both. A reader that checked
+	// only the address would still let an image that is not the recorded one publish an
+	// enc_pub of its own — and a client seals its request to that key BEFORE any response
+	// signature exists to contradict it. The prompt would reach unreviewed code and the
+	// signature check would come too late to matter.
+	ImageKeys(ctx context.Context, digest string) (signer, encPub string, err error)
 }
 
 // dstackSignerDeriver derives through the guest agent, which is the only thing holding the
@@ -75,20 +84,33 @@ type dstackSignerDeriver struct {
 	client *dstack.DstackClient
 }
 
-func (d dstackSignerDeriver) SignerAddress(ctx context.Context, digest string) (string, error) {
+func (d dstackSignerDeriver) ImageKeys(ctx context.Context, digest string) (string, string, error) {
 	if !imageDigestPattern.MatchString(digest) {
-		return "", fmt.Errorf("cannot derive a signer for %q, which is not a digest", digest)
+		return "", "", fmt.Errorf("cannot derive keys for %q, which is not a digest", digest)
 	}
-	resp, err := d.client.GetKey(ctx, attestproxy.SignerKeyPath(digest), "")
+
+	signerKey, err := d.client.GetKey(ctx, attestproxy.SignerKeyPath(digest), "")
 	if err != nil {
-		return "", fmt.Errorf("deriving the signing key for %s: %w", digest, err)
+		return "", "", fmt.Errorf("deriving the signing key for %s: %w", digest, err)
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(resp.Key, "0x"))
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(signerKey.Key, "0x"))
 	if err != nil {
-		return "", fmt.Errorf("parsing the derived signing key for %s: %w", digest, err)
+		return "", "", fmt.Errorf("parsing the derived signing key for %s: %w", digest, err)
 	}
+
+	// The same path and the same pass-through the broker uses, or the two derive different
+	// keys and every sealed request fails to open.
+	encMaterial, err := d.client.GetKey(ctx, attestproxy.EncKeyPath(digest), "")
+	if err != nil {
+		return "", "", fmt.Errorf("deriving the enc key for %s: %w", digest, err)
+	}
+	encPub, err := tee.EncPublicKeyFromMaterial(encMaterial.Key)
+	if err != nil {
+		return "", "", fmt.Errorf("deriving the enc public key for %s: %w", digest, err)
+	}
+
 	// Lowercased so the record and a reader's comparison agree on one spelling.
-	return strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex()), nil
+	return strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex()), hex.EncodeToString(encPub), nil
 }
 
 // Ceilings on how long a recorded change may hold the controller.
@@ -618,12 +640,12 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 			c.logger.Warnf("[UpdateImages] Could not resolve the broker's digest to restore the RTMR3 record, recording it as unknown: %v", digestErr)
 			break
 		}
-		signer, signerErr := c.deriver.SignerAddress(lookupCtx, digest)
-		if signerErr != nil {
-			c.logger.Warnf("[UpdateImages] Could not derive the signer for %s to restore the RTMR3 record, recording it as unknown: %v", digest, signerErr)
+		signer, encPub, keyErr := c.deriver.ImageKeys(lookupCtx, digest)
+		if keyErr != nil {
+			c.logger.Warnf("[UpdateImages] Could not derive the keys for %s to restore the RTMR3 record, recording it as unknown: %v", digest, keyErr)
 			break
 		}
-		payload = c.config.ImageRepo + "@" + digest + " " + signer
+		payload = c.config.ImageRepo + "@" + digest + " " + signer + " " + encPub
 	}
 
 	return c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(payload))
@@ -912,9 +934,9 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match. On a TEE node, regenerate the deployment so the controller serves the attestation proxy. Elsewhere there is no dstack guest agent to record a change against, and in-place upgrade is not available at all", attestproxy.SocketEnvVar)
 	}
 
-	signer, err := c.deriver.SignerAddress(ctx, digest)
+	signer, encPub, err := c.deriver.ImageKeys(ctx, digest)
 	if err != nil {
-		return nil, fmt.Errorf("deriving the signer address for %s, which the RTMR3 record must bind: %w", ref, err)
+		return nil, fmt.Errorf("deriving the keys for %s, which the RTMR3 record must bind: %w", ref, err)
 	}
 
 	// Step 1: Pull the latest image
@@ -973,7 +995,7 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// Still before the change, so a change cannot happen unrecorded: stopping a
 	// container does not alter its image, and the create below is the first thing
 	// that does.
-	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(ref+" "+signer)); err != nil {
+	if err := c.emitter.EmitEvent(ctx, attest.EventImageUpdate, []byte(ref+" "+signer+" "+encPub)); err != nil {
 		// The broker is stopped and nothing was recorded, so the ledger is still
 		// truthful — but leaving it down would turn a dstack hiccup into an outage.
 		// Best effort: on failure the caller gets an error either way.

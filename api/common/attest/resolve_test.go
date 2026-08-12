@@ -66,10 +66,14 @@ func syntheticQuote(t *testing.T, appCompose string, events []RuntimeEvent) []by
 // exercises the case normalisation instead of comparing a string to itself.
 const testSigner = "0xabcdef1111111111111111111111111111111111"
 
-// imageRecordPayload is what the controller writes: the reference, then the address of the
-// key derived from that image.
+// testEncPub is the enclave encryption public key the fixtures' records bind and their quotes
+// name — 32 bytes in hex, like a real X25519 public key.
+const testEncPub = "beef000000000000000000000000000000000000000000000000000000000123"
+
+// imageRecordPayload is what the controller writes: the reference, then BOTH keys derived from
+// that image — the response signer and the enclave encryption public key.
 func imageRecordPayload(ref string) []byte {
-	return []byte(ref + " " + testSigner)
+	return []byte(ref + " " + testSigner + " " + testEncPub)
 }
 
 // syntheticQuoteSigning is syntheticQuote with control over the address report_data names,
@@ -92,6 +96,11 @@ func syntheticQuoteSigning(t *testing.T, appCompose string, events []RuntimeEven
 		t.Fatalf("decoding the test signer: %v", err)
 	}
 	copy(quote[offsetReportData+reportDataSignerOffset:], raw)
+	encRaw, err := hex.DecodeString(testEncPub)
+	if err != nil {
+		t.Fatalf("decoding the test enc_pub: %v", err)
+	}
+	copy(quote[offsetReportData:], encRaw)
 	binary.BigEndian.PutUint32(quote[offsetReportData+reportDataVersionOffset:], reportDataLayoutVersion)
 
 	return quote
@@ -638,5 +647,66 @@ func TestSignerFromReportDataRejectsWhatItCannotRead(t *testing.T) {
 	binary.BigEndian.PutUint32(quote[offsetReportData+reportDataVersionOffset:], reportDataLayoutVersion)
 	if _, err := SignerFromReportData(quote); err == nil {
 		t.Error("the zero address was accepted")
+	}
+}
+
+// The enc_pub must be bound too, and this is the case that shows why checking only the address
+// is not enough.
+//
+// The address the ledger binds is PUBLIC — it is in the very event log the client just read. So
+// an image that is not the recorded one can put that address in report_data beside an enc_pub
+// of its own. It can never sign a response under that address, so the response check would
+// eventually refuse it — but a client seals its REQUEST to report_data's enc_pub first, and by
+// then the plaintext has already reached code the ledger does not describe.
+func TestResolveRefusesWhenTheQuoteNamesAnotherEncPub(t *testing.T) {
+	compose := pinnedCompose(t)
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+
+	log, err := json.Marshal(tdxEventsOf(events))
+	if err != nil {
+		t.Fatalf("building the event log: %v", err)
+	}
+
+	// The recorded signer, kept honestly — and someone else's enc_pub.
+	quote := syntheticQuote(t, compose, events)
+	impostor := strings.Repeat("ab", 32)
+	raw, err := hex.DecodeString(impostor)
+	if err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	copy(quote[offsetReportData:], raw)
+
+	state, err := ResolveRunningState(quote, log, tcbInfoFor(t, compose), brokerService)
+	if err == nil {
+		t.Fatalf("ResolveRunningState() = %+v, want a refusal when the quote's enc_pub is not the one bound to the image", state)
+	}
+	if !strings.Contains(err.Error(), impostor) {
+		t.Errorf("error %q should name the enc_pub it refused", err)
+	}
+}
+
+// The event path must expose the bound enc_pub, because a client that seals a request needs the
+// key the ledger vouched for rather than whatever report_data happens to carry.
+func TestResolveReportsTheBoundEncPub(t *testing.T) {
+	compose := pinnedCompose(t)
+
+	state, err := resolve(t, compose, append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)}))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.BrokerEncPub != testEncPub {
+		t.Errorf("BrokerEncPub = %q, want %q", state.BrokerEncPub, testEncPub)
+	}
+
+	// The legacy report_data layout carries no enc_pub, so there is nothing to compare and the
+	// check must not invent a mismatch — but a client sealing a request needs the §4.2 quote.
+	boot, err := resolve(t, compose, bootEvents())
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if boot.BrokerEncPub != "" {
+		t.Errorf("BrokerEncPub = %q on the compose path, want empty", boot.BrokerEncPub)
 	}
 }

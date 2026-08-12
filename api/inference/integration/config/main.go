@@ -485,11 +485,18 @@ const dockerComposeTemplate = `services:
 
   # Main broker service
   0g-serving-provider-broker:
-    # Pinned because the controller finds this container by exact name, and its own guard
-    # refuses to act on anything else. Without it compose names the container
-    # <project>-0g-serving-provider-broker-1 and every upgrade is refused — see
-    # verifyExactContainer, and the neighbour it exists to avoid recreating.
+{{- if .UseController}}
+    # Pinned only with a controller, which finds this container by exact name and refuses to
+    # act on anything else — without it compose names the container
+    # <project>-0g-serving-provider-broker-1 and every upgrade is refused.
+    #
+    # Gated because a pinned name is global to the docker daemon, and the wizard supports
+    # several deployments per host through COMPOSE_PROJECT_NAME and a per-project network.
+    # Pinning unconditionally would make a second deployment on the same host fail on a
+    # name conflict — trading an isolation property every deployment has for a guard only a
+    # controller deployment needs.
     container_name: 0g-serving-provider-broker
+{{- end}}
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
 {{- if not .UseNginx}}
     ports:
@@ -601,7 +608,9 @@ const dockerComposeTemplate = `services:
 
   # Event service starts after broker is ready
   0g-serving-provider-event:
+{{- if .UseController}}
     container_name: 0g-serving-provider-event
+{{- end}}
     image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
     environment:
       - CONFIG_FILE=/etc/config.yaml

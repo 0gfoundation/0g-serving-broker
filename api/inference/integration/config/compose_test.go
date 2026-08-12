@@ -329,4 +329,13 @@ func TestTheControllersContainersPinTheirNames(t *testing.T) {
 			t.Errorf("%s does not pin container_name, so the controller would refuse to act on it:\n%s", service, block)
 		}
 	}
+
+	// And NOT without one. A pinned name is global to the docker daemon, while the wizard
+	// supports several deployments per host through COMPOSE_PROJECT_NAME and a per-project
+	// network — so pinning unconditionally would make the second one fail on a name conflict,
+	// trading an isolation property every deployment has for a guard only a controller needs.
+	plain := renderCompose(t, phalaData(false))
+	if strings.Contains(plain, "container_name: 0g-serving-provider-broker") {
+		t.Error("a controller-less deployment pins container names, which breaks running two deployments on one host")
+	}
 }

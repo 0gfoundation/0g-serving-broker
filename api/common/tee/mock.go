@@ -12,10 +12,10 @@ type MockTappdClient struct{}
 func (c *MockTappdClient) TdxQuote(ctx context.Context, reportData []byte, nvQuote bool) (string, error) {
 	encodedReportData := base64.StdEncoding.EncodeToString(reportData)
 	mockResp := map[string]interface{}{
-		"report_data": encodedReportData,
-		"intel_quote":     "mock_intel_quote",
-		"nvidia_payload":  "mock_nvidia_payload",
-		"event_log":       []interface{}{},
+		"report_data":    encodedReportData,
+		"intel_quote":    "mock_intel_quote",
+		"nvidia_payload": "mock_nvidia_payload",
+		"event_log":      []interface{}{},
 		"info": map[string]interface{}{
 			"app_id":   "mock_app_id",
 			"tcb_info": `{"mock": "tcb_info"}`,
