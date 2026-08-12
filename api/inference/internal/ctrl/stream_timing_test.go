@@ -2,6 +2,8 @@ package ctrl
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,11 +25,13 @@ func fakeClock(base time.Time, deltas ...time.Duration) func() time.Time {
 
 func TestStreamTimingMeasuresLongestSilence(t *testing.T) {
 	base := time.Unix(0, 0)
-	// Lines land at +2s, +3s, +170s, +171s. The 167s stretch is the one a
-	// client's idle watchdog would fire on, and the one the log has to name.
+	// Lines land at +2s, +3s, +170s, +171s, finish at +172s. The 167s stretch is
+	// the one a client's idle watchdog would fire on, and the one the log has to
+	// name.
 	timing := &streamTiming{
 		start: base,
-		now:   fakeClock(base, 2*time.Second, 3*time.Second, 170*time.Second, 171*time.Second),
+		now: fakeClock(base,
+			2*time.Second, 3*time.Second, 170*time.Second, 171*time.Second, 172*time.Second),
 	}
 	lines := []string{
 		"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
@@ -40,22 +44,93 @@ func TestStreamTimingMeasuresLongestSilence(t *testing.T) {
 		wantBytes += len(line)
 		timing.mark(line)
 	}
+	timing.finish()
 
-	assert.Equal(t, 2*time.Second, timing.first.Sub(timing.start), "ttft is start→first line")
-	assert.Equal(t, 167*time.Second, timing.maxGap, "maxGap is the longest stretch between lines")
+	assert.Equal(t, 2*time.Second, timing.first.Sub(timing.start))
+	assert.Equal(t, 167*time.Second, timing.maxGap)
 	assert.Equal(t, 2, timing.frames, "only data: lines count as frames")
 	assert.Equal(t, 4, timing.lines)
 	assert.Equal(t, int64(wantBytes), timing.bytes)
 
 	assert.Equal(t,
-		fmt.Sprintf("ttft_ms=2000 max_gap_ms=167000 frames=2 lines=4 upstream_bytes=%d", wantBytes),
+		fmt.Sprintf("first_line_after_headers_ms=2000 max_gap_ms=167000 tail_gap_ms=1000 frames=2 lines=4 upstream_bytes=%d", wantBytes),
 		timing.String())
 }
 
-func TestStreamTimingEmptyStreamReportsZeroTTFT(t *testing.T) {
-	// A stream that produced nothing must not report the time since the zero
-	// Time as its ttft — that would be ~55 years and would poison any alerting
-	// built on the field.
-	timing := &streamTiming{start: time.Unix(0, 0), now: time.Now}
-	assert.Equal(t, "ttft_ms=0 max_gap_ms=0 frames=0 lines=0 upstream_bytes=0", timing.String())
+// The case the instrument exists for: a few frames, then the upstream hangs.
+// Measuring only BETWEEN lines reports the spacing from before the hang and
+// clears this hop, which is the exact wrong answer for a stalled stream.
+func TestStreamTimingCountsTheTrailingSilence(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{
+		start: base,
+		now:   fakeClock(base, time.Second, time.Second+300*time.Millisecond, 168*time.Second),
+	}
+	timing.mark("data: a\n")
+	timing.mark("data: b\n")
+	assert.Equal(t, 300*time.Millisecond, timing.maxGap, "before finish, only inter-line gaps are known")
+
+	timing.finish()
+
+	assert.Equal(t, 166700*time.Millisecond, timing.tailGap)
+	assert.Equal(t, 166700*time.Millisecond, timing.maxGap,
+		"the trailing silence must dominate maxGap, not be invisible to it")
+}
+
+// A stream that produced nothing is the most alarming outcome, so it must not
+// render as the healthiest-looking one.
+func TestStreamTimingEmptyStreamIsNotReportedAsHealthy(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{start: base, now: fakeClock(base, 90*time.Second)}
+	timing.finish()
+
+	assert.Equal(t,
+		"first_line_after_headers_ms=-1 max_gap_ms=90000 tail_gap_ms=90000 frames=0 lines=0 upstream_bytes=0",
+		timing.String(),
+		"-1 marks 'no line ever arrived', and the whole stream is the silence")
+}
+
+// ReadString hands back the data it read alongside the error, so a final line
+// with no trailing newline arrives on the error path. rawBody (via TeeReader)
+// captures it, so the counters must too or the two disagree.
+func TestStreamTimingCountsAFinalLineWithoutNewline(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{start: base, now: fakeClock(base, time.Second, 2*time.Second)}
+	timing.mark("data: {\"choices\":[]}") // no trailing \n, as delivered with io.EOF
+	timing.finish()
+
+	assert.Equal(t, 1, timing.lines)
+	assert.Equal(t, 1, timing.frames)
+	assert.Equal(t, int64(20), timing.bytes)
+}
+
+// The error path calls mark unconditionally, and a clean EOF carries an empty
+// string — which must not be recorded as a line arriving.
+func TestStreamTimingIgnoresEmptyMarks(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{start: base, now: fakeClock(base, time.Second)}
+	timing.mark("")
+
+	assert.Equal(t, 0, timing.lines)
+	assert.True(t, timing.first.IsZero(), "an empty read must not count as the first line")
+}
+
+// The line is parsed by splitting on spaces, so no rendered value may contain
+// one. The first version of this log interpolated a whole model.Request, which
+// broke that AND wrote user addresses, signatures and fees into an INFO log.
+func TestStreamTimingRendersOnlyBareNumbers(t *testing.T) {
+	base := time.Unix(0, 0)
+	timing := &streamTiming{start: base, now: fakeClock(base, time.Second, 2*time.Second)}
+	timing.mark("data: x\n")
+	timing.finish()
+
+	rendered := timing.String()
+	fields := strings.Fields(rendered)
+	assert.Len(t, fields, 6, "space-splitting must yield exactly the six fields: %q", rendered)
+	for _, pair := range fields {
+		parts := strings.SplitN(pair, "=", 2)
+		assert.Len(t, parts, 2, "every field must be key=value: %q", pair)
+		_, err := strconv.ParseInt(parts[1], 10, 64)
+		assert.NoError(t, err, "every value must be a bare number: %q", pair)
+	}
 }

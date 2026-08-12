@@ -329,6 +329,13 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
+				// ReadString returns what it read alongside the error, so an
+				// upstream whose last line carries no trailing newline delivers
+				// it here. Account for it before the error handling returns, or
+				// that line is missing from every counter while rawBody still
+				// has it — breaking the bytes-vs-billed-tokens cross-check this
+				// instrument exists to support.
+				timing.mark(line)
 				if err == io.EOF {
 					// E2EE (§7): if the upstream closed without a [DONE] sentinel, the
 					// synthetic final frame was never emitted. Emit it now so the client
@@ -410,7 +417,18 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// Unconditional: a stream that succeeded is exactly the case with no other
 	// record of how it went, and it is the case a "why did it stall" report
 	// arrives about.
-	c.logger.Infof("stream timing: %s model=%s disconnected=%t", timing, reqModel, clientDisconnected)
+	//
+	// chat_key is the correlation handle, and the only one worth printing here.
+	// This logger has no per-request fields, so concurrent streams would
+	// otherwise be indistinguishable from each other — and it is the value the
+	// router records as chatID (it reaches the client as ZG-Res-Key /
+	// "chatcmpl-"+chatKey), which is what makes the two hops comparable at all.
+	// request_hash joins to the request row for everything else, model included:
+	// printing more here is how the first version of this line came to render a
+	// whole model.Request — user address, signature, fees — into an INFO log.
+	timing.finish()
+	c.logger.Infof("stream timing: %s chat_key=%s request_hash=%s disconnected=%t",
+		timing, chatKey, reqModel.RequestHash, clientDisconnected)
 
 	// Process billing regardless of stream error
 	// If client disconnected but we continued reading, we have complete data for accurate billing
