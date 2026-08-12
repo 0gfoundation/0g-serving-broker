@@ -435,15 +435,26 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	// line came to render a whole model.Request — user address, signature, fees —
 	// into an INFO log; request_hash is the join key for the rest.
 	//
-	// disconnected is only observable from a failed write, so it reads false for
-	// a client that left BEFORE the first write: gin's Stream checks CloseNotify
-	// up front and skips the step entirely, which prints as lines=0
-	// max_gap_ms≈0. Checking the request context here separates that from "the
-	// upstream sent nothing", which is the opposite party's fault.
+	// model_name is quoted, not bare. It is the client's own string, forwarded
+	// verbatim on the whitelist path (ExtractModelName returns the request body's
+	// `model` as-is, and unlike the billed path it is not length-clamped), so a
+	// newline in it would forge whole lines in the one log an incident is
+	// reconstructed from. %q escapes that and keeps the line splittable on
+	// spaces, which this file's own test asserts.
+	//
+	// disconnected is only observable from a failed write, so it would read false
+	// for a client that left BEFORE the first write: gin's Stream checks
+	// CloseNotify up front and skips the step entirely, printing lines=0 and
+	// max_gap_ms≈0 — indistinguishable from "the upstream sent nothing", which is
+	// the opposite party's fault. The context check covers that, but only when
+	// nothing arrived: SDKs close the body the moment they parse `data: [DONE]`
+	// while this loop is still reading the upstream's trailing bytes, so a
+	// cancelled context on a stream that DID deliver is a normal finish, and
+	// flagging it would invert the very distinction the field exists to draw.
 	timing.finish()
-	c.logger.Infof("stream timing: %s chat_key=%s model_name=%s request_hash=%s disconnected=%t",
+	c.logger.Infof("stream timing: %s chat_key=%s model_name=%q request_hash=%s disconnected=%t",
 		timing, chatKey, reqModel.ModelName, reqModel.RequestHash,
-		clientDisconnected || ctx.Request.Context().Err() != nil)
+		clientDisconnected || (timing.lines == 0 && ctx.Request.Context().Err() != nil))
 
 	// Process billing regardless of stream error
 	// If client disconnected but we continued reading, we have complete data for accurate billing
