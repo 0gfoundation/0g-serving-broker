@@ -319,6 +319,10 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 	var silentReadBytes int64 = 0
 	const maxSilentReadBytes int64 = 10 * 1024 * 1024 // 10MB limit to prevent abuse
 
+	// Measured from before the first read so ttft covers the wait for the
+	// upstream's first byte, not just the gaps between the bytes that follow.
+	timing := newStreamTiming()
+
 	ctx.Stream(func(w io.Writer) bool {
 		reader := bufio.NewReader(io.TeeReader(resp.Body, &rawBody))
 
@@ -343,6 +347,8 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 				streamErr = err
 				return false
 			}
+
+			timing.mark(line)
 
 			// Sanitize before forwarding: drop SSE keepalive/comment lines and strip
 			// upstream identity/cost leak fields (#184). The raw line is captured in
@@ -400,6 +406,11 @@ func (c *Ctrl) handleChargingStreamResponse(ctx *gin.Context, resp *http.Respons
 			}
 		}
 	})
+
+	// Unconditional: a stream that succeeded is exactly the case with no other
+	// record of how it went, and it is the case a "why did it stall" report
+	// arrives about.
+	c.logger.Infof("stream timing: %s model=%s disconnected=%t", timing, reqModel, clientDisconnected)
 
 	// Process billing regardless of stream error
 	// If client disconnected but we continued reading, we have complete data for accurate billing
