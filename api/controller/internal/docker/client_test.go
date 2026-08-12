@@ -578,3 +578,68 @@ func TestPullImage(t *testing.T) {
 		}
 	})
 }
+
+// A recreated container must stop claiming to match the compose definition it no longer
+// matches.
+//
+// Everything else about it is copied faithfully, and the compose config hash was too. That
+// quietly broke attestation: RTMR3 resets when the CVM reboots and dstack runs
+// `compose up` on the way back, so with the label intact compose leaves the upgraded
+// container alone — the ledger is empty while the upgraded image runs, and a reader falls
+// back to the compose-pinned digest and reports an image that is not running.
+//
+// Verified against a real `docker compose`: with the label copied, `up` leaves the swapped
+// image running; deleting the label is not enough, because compose does not recreate on a
+// missing one; replacing it with a value that cannot match does recreate.
+func TestRecreateContainerInvalidatesTheComposeConfigHash(t *testing.T) {
+	const realHash = "82c4aee88832d186592104b816d46ded3ae262e578e46cb34cbcc763d32a3460"
+
+	t.Run("the hash is replaced and everything else survives", func(t *testing.T) {
+		labels := map[string]string{
+			composeConfigHashLabel:            realHash,
+			"com.docker.compose.project":      "provider",
+			"com.docker.compose.service":      "0g-serving-provider-broker",
+			"com.docker.compose.oneoff":       "False",
+			"org.opencontainers.image.source": "https://example.invalid",
+		}
+
+		got := invalidateComposeConfigHash(labels)
+
+		if got[composeConfigHashLabel] == realHash {
+			t.Error("config hash was carried over, so compose would leave the upgraded container in place")
+		}
+		// Never a real hash, which is 64 hex characters, so it cannot collide with one.
+		if len(got[composeConfigHashLabel]) == 64 {
+			t.Errorf("replacement %q is hash-shaped, want one that cannot collide", got[composeConfigHashLabel])
+		}
+		// The project and service labels are how compose recognises the container at all.
+		// Dropping them would orphan it rather than have it recreated.
+		for _, k := range []string{"com.docker.compose.project", "com.docker.compose.service",
+			"com.docker.compose.oneoff", "org.opencontainers.image.source"} {
+			if got[k] != labels[k] {
+				t.Errorf("label %s = %q, want it preserved as %q", k, got[k], labels[k])
+			}
+		}
+		// The caller's map is the inspect result; rewriting it in place would edit a value
+		// the rest of the recreate still reads.
+		if labels[composeConfigHashLabel] != realHash {
+			t.Error("the input map was mutated")
+		}
+	})
+
+	// A deployment that is not compose-managed has no such label, and inventing one could
+	// confuse whatever else is reading them.
+	t.Run("nothing is added when the label is absent", func(t *testing.T) {
+		labels := map[string]string{"unrelated": "1"}
+		got := invalidateComposeConfigHash(labels)
+		if _, ok := got[composeConfigHashLabel]; ok {
+			t.Errorf("got %v, want no compose label invented", got)
+		}
+	})
+
+	t.Run("nil labels are left alone", func(t *testing.T) {
+		if got := invalidateComposeConfigHash(nil); len(got) != 0 {
+			t.Errorf("got %v, want nothing", got)
+		}
+	})
+}
