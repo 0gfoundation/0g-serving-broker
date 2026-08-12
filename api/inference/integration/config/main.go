@@ -160,7 +160,6 @@ func networkConfigOrEmpty(c *Config) *NetworkConfig {
 type ControllerConfig struct {
 	Enable         bool     `yaml:"enable,omitempty"`
 	AdminAddresses []string `yaml:"adminAddresses,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
 }
 
 // durationYAML carries a Go duration value as a string. UnmarshalYAML accepts
@@ -325,6 +324,7 @@ type DeploymentConfig struct {
 	// The image this deployment pins, split the way the broker reports it on-chain.
 	ImageRepo            string
 	ImageDigest          string
+	BrokerImage          string
 	ControllerPort       string // Host port for controller (if exposed)
 	ControllerExposePort bool   // Whether to expose controller port
 }
@@ -497,7 +497,7 @@ const dockerComposeTemplate = `services:
     # controller deployment needs.
     container_name: 0g-serving-provider-broker
 {{- end}}
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+    image: {{.BrokerImage}}
 {{- if not .UseNginx}}
     ports:
       - "{{.Ports.Nginx80}}:3080"
@@ -591,6 +591,15 @@ const dockerComposeTemplate = `services:
 {{- end}}
     restart: unless-stopped
     depends_on:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      # With TEE_SOCKET set this container cannot finish starting until the controller answers
+      # /SignerAddress, and it panics rather than falling back to a local key. service_started
+      # (not service_healthy) and only in this direction — the controller has no reverse
+      # dependency here, so there is no cycle. Without it the broker crash-loops until it
+      # happens to win the race, which converges by luck rather than by construction.
+      0g-controller:
+        condition: service_started
+{{- end}}
       mysql:
         condition: service_healthy
 {{- if .DeployLLM}}
@@ -611,7 +620,7 @@ const dockerComposeTemplate = `services:
 {{- if .UseController}}
     container_name: 0g-serving-provider-event
 {{- end}}
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+    image: {{.BrokerImage}}
     environment:
       - CONFIG_FILE=/etc/config.yaml
 {{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
@@ -670,6 +679,10 @@ const dockerComposeTemplate = `services:
         max-file: "5"
     restart: unless-stopped
     depends_on:
+{{- if and .UseController (ne .TeeNode "hardhat") (ne .TeeNode "alicloud")}}
+      0g-controller:
+        condition: service_started
+{{- end}}
       0g-serving-provider-broker:
         condition: service_healthy
 {{- if .UseNginx}}
@@ -680,7 +693,7 @@ const dockerComposeTemplate = `services:
 {{- if .UseController}}
   0g-controller:
     container_name: 0g-controller
-    image: ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd
+    image: {{.BrokerImage}}
 {{- if .ControllerExposePort}}
     ports:
       - "{{.ControllerPort}}:3090"
@@ -853,6 +866,7 @@ type TemplateData struct {
 	AttestSocketPath     string
 	ImageRepo            string
 	ImageDigest          string
+	BrokerImage          string
 	ControllerPort       string
 	ControllerExposePort bool
 }
@@ -1494,6 +1508,7 @@ func main() {
 	// on-chain and the image compose actually starts cannot drift apart. Release CI
 	// rewrites brokerImage on every build, and this follows it.
 	deployConfig.ImageRepo, deployConfig.ImageDigest = splitPinnedImage(brokerImage)
+	deployConfig.BrokerImage = brokerImage
 	deployConfig.AttestSocketDir = attestSocketDir
 	deployConfig.AttestSocketPath = attestSocketDir + "/tee.sock"
 	deployConfig.ControllerExposePort = controllerConfig.ExposePort
@@ -1696,7 +1711,6 @@ func generateYAMLConfig(originalDir string, deployLLM bool, targetTeeAddress str
 		config.Controller = ControllerConfig{
 			Enable:         true,
 			AdminAddresses: []string{controllerAdminAddress},
-			Image:          "ghcr.io/0gfoundation/0g-serving-broker@sha256:02f86cec7e827c16888e667fbcfa889aea7532a188df36ee06bd57375c9a89dd",
 		}
 	}
 
@@ -1931,6 +1945,7 @@ func generateDeploymentFiles(config *DeploymentConfig) error {
 		UseController:        config.UseController,
 		AttestSocketDir:      config.AttestSocketDir,
 		AttestSocketPath:     config.AttestSocketPath,
+		BrokerImage:          config.BrokerImage,
 		ImageRepo:            config.ImageRepo,
 		ImageDigest:          config.ImageDigest,
 		ControllerPort:       config.ControllerPort,

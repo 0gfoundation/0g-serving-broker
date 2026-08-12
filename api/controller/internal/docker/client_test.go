@@ -538,10 +538,10 @@ func TestPullImage(t *testing.T) {
 		}
 	})
 
-	// Falls back to the first entry rather than reporting nothing: an image the
-	// daemon lists under some other name still has a digest worth reporting, and
-	// GET /v1/images/info answering "" would read as "no digest at all".
-	t.Run("a repository with no entry falls back to the first", func(t *testing.T) {
+	// One entry is unambiguous even when it names another repository: that is the image's
+	// only known name, so its digest is the answer, and answering "" would read as "no digest
+	// at all" on GET /v1/images/info.
+	t.Run("a single entry under another repository is still the answer", func(t *testing.T) {
 		c := fakeDaemon(t, okStream, []string{"0gfoundation/mirror@" + digestOther})
 
 		info, err := c.PullImage(context.Background(), repo+":latest")
@@ -550,6 +550,27 @@ func TestPullImage(t *testing.T) {
 		}
 		if info.Digest != digestOther {
 			t.Errorf("Digest = %q, want %q", info.Digest, digestOther)
+		}
+	})
+
+	// Two entries and no match is ambiguous, and answering with either would reinstate what
+	// the repository match exists to remove: for an image known under both an origin and a
+	// mirror, the entry that sorts first can be the mirror's, with a different manifest
+	// digest. That digest decides which key signs responses, so a wrong answer makes the
+	// derived signer disagree with the RTMR3 record — a failure that surfaces at a client
+	// instead of here. Refuse.
+	t.Run("several entries and no match reports nothing", func(t *testing.T) {
+		c := fakeDaemon(t, okStream, []string{
+			"0gfoundation/mirror@" + digestOther,
+			"0gfoundation/other@" + digestWanted,
+		})
+
+		info, err := c.PullImage(context.Background(), repo+":latest")
+		if err != nil {
+			t.Fatalf("PullImage() = %v, want nil", err)
+		}
+		if info.Digest != "" {
+			t.Errorf("Digest = %q, want empty when the repository is ambiguous", info.Digest)
 		}
 	})
 

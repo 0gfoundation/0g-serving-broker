@@ -78,6 +78,9 @@ import (
 // the TCG entries the firmware wrote into RTMR0-2.
 const RuntimeEventType uint32 = 0x08000001
 
+// rtmr3Index is the register an application extends. RTMR0-2 are the firmware's.
+const rtmr3Index uint32 = 3
+
 // TdxEvent is one entry of the event_log a dstack GetQuote response carries.
 type TdxEvent struct {
 	IMR          uint32 `json:"imr"`
@@ -158,7 +161,11 @@ func RuntimeEvents(eventLogJSON []byte) ([]RuntimeEvent, error) {
 
 	events := make([]RuntimeEvent, 0, len(entries))
 	for i, entry := range entries {
-		if entry.EventType != RuntimeEventType {
+		// Both, because dstack's own reader partitions by register: an entry carrying the
+		// runtime type on another IMR belongs to another register's replay, and folding it
+		// into this one turns a legitimate log into a bare "the replay does not match" with
+		// nothing saying why.
+		if entry.EventType != RuntimeEventType || entry.IMR != rtmr3Index {
 			continue
 		}
 		payload, err := hex.DecodeString(entry.EventPayload)

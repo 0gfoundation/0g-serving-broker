@@ -41,6 +41,7 @@ func dataFor(node TeeNode, useController bool) TemplateData {
 		AttestSocketPath: attestSocketDir + "/tee.sock",
 		ImageRepo:        repo,
 		ImageDigest:      digest,
+		BrokerImage:      brokerImage,
 	}
 }
 
