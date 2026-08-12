@@ -340,3 +340,41 @@ func TestTheControllersContainersPinTheirNames(t *testing.T) {
 		t.Error("a controller-less deployment pins container names, which breaks running two deployments on one host")
 	}
 }
+
+// Anything a service waits on for health must actually define a healthcheck, or compose refuses
+// the whole file at startup rather than at parse — which no YAML check catches.
+func TestEveryHealthDependencyHasAHealthcheck(t *testing.T) {
+	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+		for _, controller := range []bool{false, true} {
+			data := dataFor(node, controller)
+			data.DeployLLM = true
+			data.UseNginx = true
+			data.UseMonitoring = true
+
+			var parsed struct {
+				Services map[string]struct {
+					Healthcheck any                       `yaml:"healthcheck"`
+					DependsOn   map[string]map[string]any `yaml:"depends_on"`
+				} `yaml:"services"`
+			}
+			if err := yaml.Unmarshal([]byte(renderCompose(t, data)), &parsed); err != nil {
+				t.Fatalf("%s: %v", node, err)
+			}
+			for name, svc := range parsed.Services {
+				for dep, cond := range svc.DependsOn {
+					if cond["condition"] != "service_healthy" {
+						continue
+					}
+					target, ok := parsed.Services[dep]
+					if !ok {
+						t.Errorf("%s: %s waits on %s, which this render does not define", node, name, dep)
+						continue
+					}
+					if target.Healthcheck == nil {
+						t.Errorf("%s: %s waits for %s to be healthy, but %s defines no healthcheck — compose refuses to start", node, name, dep, dep)
+					}
+				}
+			}
+		}
+	}
+}

@@ -349,6 +349,16 @@ const dockerComposeTemplate = `services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_ENDPOINT=https://hf-mirror.com
+    # Present because the broker declares depends_on: vllm: condition: service_healthy whenever
+    # an LLM is deployed, and compose refuses to start at all against a target that has none.
+    # The non-alicloud vllm below has always had one; this block did not, so alicloud with an
+    # LLM rendered a file docker rejects.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
     restart: always
     logging:
       driver: "json-file"

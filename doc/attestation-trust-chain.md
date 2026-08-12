@@ -236,7 +236,9 @@ ledger = events[next(i for i, e in enumerate(events) if e["event"] == "system-re
 records = [e for e in ledger if e["event"] == "zg-image-update"]
 
 if records:
-    ref, bound_signer = bytes.fromhex(records[-1]["event_payload"]).decode().split()
+    # Three fields: the reference, the response-signing address, and the enclave encryption
+    # public key. Both keys, because report_data carries both — see step 6.
+    ref, bound_signer, bound_enc_pub = bytes.fromhex(records[-1]["event_payload"]).decode().split()
     source = "ledger"
 else:
     # Nothing recorded since boot, so the broker is on the image compose pins — and that file
@@ -245,7 +247,7 @@ else:
     import yaml
     compose = yaml.safe_load(json.loads(app_compose)["docker_compose_file"])
     ref = compose["services"]["0g-serving-provider-broker"]["image"]
-    bound_signer, source = None, "compose"
+    bound_signer, bound_enc_pub, source = None, None, "compose"
 
 # A reference naming a tag says which name was asked for, not which image answers. Refuse
 # rather than resolve it: a tag is resolved by the provider's daemon, which is the party being
@@ -266,7 +268,23 @@ else:                                              # the older layout: the ASCII
 
 if bound_signer:
     assert signer == bound_signer.lower(), f"the ledger binds {bound_signer}, the quote names {signer}"
-print(f"image {digest} (from the {source}), responses signed by {signer}")
+
+    # And the enc_pub, which is the half a signature check cannot rescue. The address the
+    # ledger binds is public — it is in the event log you just read — so an image that is not
+    # the recorded one can publish that address beside an enc_pub of its own. It could never
+    # sign a response, but you would already have sealed your request to its key.
+    if int.from_bytes(rd[52:56], "big") == 1:
+        assert rd[:32].hex() == bound_enc_pub.lower(), \
+            f"the ledger binds enc_pub {bound_enc_pub}, the quote names {rd[:32].hex()}"
+        seal_to = rd[:32].hex()
+    else:
+        # The older layout carries no enc_pub, so there is nothing to check. Do not seal
+        # anything using it: fetch /v1/quote?legacy=false instead.
+        seal_to = None
+else:
+    seal_to = None
+
+print(f"image {digest} (from the {source}), responses signed by {signer}, seal to {seal_to}")
 ```
 
 Step 6 is the one that makes the digest a statement about the running process rather than

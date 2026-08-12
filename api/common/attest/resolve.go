@@ -87,8 +87,11 @@ type RunningState struct {
 	// between the two would be accepted rather than refused.
 	BrokerSigner string
 	// BrokerEncPub is the enclave encryption public key the ledger binds to BrokerDigest,
-	// hex. Set only on the event path, and only when the quote carries the §4.2 report_data
-	// layout, where it has been checked against it.
+	// hex, and it is non-empty ONLY when it was checked against the quote's report_data.
+	//
+	// So empty means "do not seal anything to this deployment with what you have" — either no
+	// record bound a key (the compose path) or the quote was the older layout that carries
+	// none. It never means "unchecked but probably fine".
 	//
 	// A client that seals a request MUST use this rather than report_data's copy on its own.
 	// report_data is chosen by the attesting process, and the address the ledger binds is
@@ -251,7 +254,15 @@ func ResolveRunningState(quote, eventLogJSON, tcbInfoJSON []byte, brokerService 
 		if err != nil {
 			return nil, fmt.Errorf("reading the quote's enc_pub: %w", err)
 		}
-		if quoteEncPub != "" && !strings.EqualFold(state.BrokerEncPub, quoteEncPub) {
+		if quoteEncPub == "" {
+			// The older report_data layout carries no enc_pub, so there is nothing to compare
+			// the record's against. The digest and the signer still stand — but the key is
+			// blanked rather than passed through unchecked, because a caller cannot tell
+			// "vouched for" from "we never looked", and the one that matters is sealing a
+			// request, where using the wrong key cannot be undone by a later signature check.
+			// A client that intends to seal must fetch the §4.2 quote.
+			state.BrokerEncPub = ""
+		} else if !strings.EqualFold(state.BrokerEncPub, quoteEncPub) {
 			return nil, fmt.Errorf("the last %s record binds enc_pub %s to %s, but the quote names %s: a request sealed to the quote's key would reach code the ledger does not describe",
 				EventImageUpdate, state.BrokerEncPub, state.BrokerDigest, quoteEncPub)
 		}

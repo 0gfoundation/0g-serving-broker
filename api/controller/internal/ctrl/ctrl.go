@@ -1225,11 +1225,9 @@ func (c *Ctrl) RunningBrokerDigest(ctx context.Context) (string, error) {
 		// it would verify.
 		return "", fmt.Errorf("the running image %s resolves to no digest", status.ImageID)
 	}
-	// An image known under several repositories (a mirror as well as the origin) can carry
-	// more than one manifest digest, and inspecting by ID gives no repository to prefer. If
-	// the entry picked here is not the one the RTMR3 record names, the signer address a
-	// client derives will not match the one in report_data and the client rejects — wrong,
-	// but wrong in the direction that refuses service rather than the one that accepts an
-	// unreviewed image.
+	// An image known under several repositories carries several manifest digests, and
+	// inspecting by ID gives no repository to prefer — so digestFor answers nothing for that
+	// set and the guard above refuses. Picking one would put a digest a client cannot
+	// reproduce into the key derivation, and the failure would surface at the client.
 	return info.Digest, nil
 }
