@@ -152,17 +152,25 @@ the description.
 
 The broker mounts it today only because that is where `GetQuote` and `DeriveKey` live.
 
-The controller can serve those instead, on a second socket, forwarding exactly three
-read-only dstack methods and nothing else:
+The controller can serve those instead, on a second socket, forwarding two read-only dstack
+methods and answering three more itself:
 
 ```
-POST /GetQuote   the attestation itself
-POST /Info       tcb_info, which TdxQuote assembles into its response
-POST /GetKey     the signer and enclave encryption keys
+POST /GetQuote       forwarded — the attestation itself
+POST /Info           forwarded — tcb_info, which TdxQuote assembles into its response
+POST /Sign           answered here — {hash} → 65 raw signature bytes under the running image's key
+POST /SignerAddress  answered here — the address of that key
+POST /GetEncKey      answered here — the running image's enclave encryption key
+POST /GetKey         NOT forwarded
 ```
 
 `/EmitEvent` is never forwarded, and the set is a fixed allowlist rather than a denylist — a
 denylist is wrong by default the moment dstack adds a method.
+
+`/GetKey` is withheld for a second, independent reason: it derives keys by path, so a broker
+holding it could derive the *previous* image's signing key and keep signing with it after an
+upgrade — which would leave a pre-upgrade attestation verifying forever. The three operations
+that replace it hand over no signing key at all. See doc/design/per-image-signing.md.
 
 ```yaml
   0g-controller:
@@ -195,13 +203,17 @@ does is make the removal *possible*, by giving an honest broker somewhere else t
 compose, so reviewing it is how you learn the answer. Deriving it inside the verifier was
 tried and reverted; see §5.1a.
 
-**This does not make the running digest provable on its own.** With the ledger confined to
-the controller, a provider can no longer *forge* a record — but it can still serve a **stale
-genuine quote** taken while it ran a different image, because `report_data` carries no nonce
-and the signer key does not change across an in-band upgrade. Closing that needs freshness
-binding on the verifier side, which is a protocol change outside this repository. The two are
-each other's prerequisites: without this, a nonce-bound quote can still carry a forged
-ledger; without a nonce, a true ledger can still be replayed.
+**On its own this does not make the running digest provable** — and what closes the gap turned
+out not to be a nonce. With the ledger confined to the controller a provider can no longer
+*forge* a record, but it could still serve a **stale genuine quote** taken while it ran a
+different image, because `report_data` carries no nonce.
+
+Freshness binding was the obvious answer and is not the one taken, because it defeats replay
+of an old quote and not forgery of a new one. What closes it instead is making the signing key
+follow the image: `S = KDF(appKey, "/<digest>/sign")`, held by the controller and never handed
+out, with the record binding `S`'s address so a reader can require the quote to name the same
+one. A stale quote then names a key that no longer signs anything, so it invalidates itself
+with no protocol change on the verifier side. See doc/design/per-image-signing.md.
 
 Reachability is the volume mount, not an authentication check. That is deliberate: the broker
 cannot sign with an admin wallet, and who mounts a volume is declared per service in the
@@ -393,11 +405,16 @@ signature verifies. Nothing on the reader side can tell it from a real upgrade, 
 the payloads are unauthenticated bytes and any container on the socket can derive the
 same keys, so there is no signature to check.
 
-Neither a signature on the record nor a challenge nonce fixes that. There is no key to
-sign with that the broker cannot also derive (`GetKey` derives by path and any container may
-ask for any path), and freshness binding defeats *replay* of an old quote, not forgery of a
-new one — the modified image forges the record and then takes a fresh quote carrying the
-verifier's own nonce.
+Neither a signature on the record nor a challenge nonce fixes that *while the broker can
+reach the socket*. There is no key to sign with that the broker cannot also derive (`GetKey`
+derives by path and any container may ask for any path), and freshness binding defeats
+*replay* of an old quote, not forgery of a new one — the modified image forges the record and
+then takes a fresh quote carrying the verifier's own nonce.
+
+Which is why the fix is the mount, not a signature: take that socket away and the broker can
+neither append nor derive. Once that holds, a signature on the record does become worth
+something, and the record does carry one — the address of the key derived from the image it
+names (§3.1b).
 
 **Whether the ledger is confined is a property of the compose file, and the caller is the
 one who can settle it.** `attest.ResolveRunningState` returns `ComposeHash`, the hash of the
@@ -419,12 +436,17 @@ checked.
 > parser that answers "probably not" here is worse than none, because it reads as a
 > guarantee. Do not re-add it.
 
-So: **until a deployment keeps that socket away from the broker, treat an event-sourced
-digest as an audit record of what the controller did, not as proof of what is running.** The
-way to make it proof is to route the broker's quotes through the controller — its image is
-pinned by `compose_hash` and it cannot upgrade itself (§4.4), so a ledger only it can write
-is worth reading. That spans this repo and `deploy` and makes the broker depend on the
-controller at startup, so it is a decision rather than a detail.
+So: **while a deployment leaves that socket with the broker, an event-sourced digest is an
+audit record of what the controller did, not proof of what is running.** The way to make it
+proof is to route the broker's quotes through the controller — its image is pinned by
+`compose_hash` and it cannot upgrade itself (§4.4), so a ledger only it can write is worth
+reading.
+
+That is now done rather than deferred: the controller serves the attestation socket (§3.1b),
+the generated compose withholds both dstack's and docker's socket from the broker, and the
+broker signs through the controller with a key derived from the image it runs. The condition
+in the paragraph above is therefore the switch: a deployment that regenerates its compose with
+a controller gets the strong reading, and one that does not keeps the audit-record reading.
 
 What the accounting below buys in the meantime is not nothing, and it is what motivated the
 work: an in-TEE upgrade can no longer be performed silently, or misreport itself by accident.

@@ -31,13 +31,14 @@ hardware or cryptography; a link marked 👤 is a one-time human check the user 
 | 2 | Which **deployment** this is | ⚙ `compose_hash` is in the signed report body at `mr_config_id[1:33]`, and `sha256(tcb_info.app_compose) == compose_hash`, so the quote carries its own authenticated compose file. |
 | 3 | That deployment is the one the user reviewed | 👤 The user compares `compose_hash` against the hash of a compose file they read. |
 | 4 | **Only the controller can write the ledger** | 👤 read from that reviewed compose: the broker mounts no `/var/run/dstack.sock`; only the controller does. ⚙ Changing that changes `compose_hash`, which link 3 catches. |
-| 5 | Which **image** the broker runs | ⚙ RTMR3 is append-only and covered by the signature. Replay the runtime events; the last `zg-image-update` is the reference. Link 4 is why that record can be believed. |
+| 5 | Which **image** the broker runs | ⚙ RTMR3 is append-only and covered by the signature. Replay the runtime events; the last `zg-image-update` names it, as `<repo>@<digest> <0xsigner>`. Link 4 is why that record can be believed. |
 | 6 | That image is one the user recognises | 👤 The digest is compared against a set that ships with **the user's own software**, never fetched from the provider. |
-| 7 | The attestation describes **now**, not the past | ⚙ The signer key is derived per-image: `S = KDF(appKey, running image digest)`. An upgrade changes `S`, so the key an old quote names stops working. A stale quote is self-invalidating. |
-| 8 | This **response** came from that image | ⚙ Every response carries a signature by `S` over the exact bytes delivered. The controller holds `S` and signs on request; the private key never leaves the controller, so no broker image can retain it across an upgrade. |
-| 9 | The router changed nothing and replayed nothing | ⚙ It does not hold `S`. The signature binds this response's bytes, so it cannot be moved to another request. |
+| 7 | The key signing responses **belongs to that image** | ⚙ The record binds the address of `S = KDF(appKey, "/<digest>/sign")`, derived by the controller before it makes the change. The reader requires the quote's `report_data` to name the same address. Without this the two are unconnected: `report_data` is whatever the enclave asked the hardware to sign over, and `S` is derivable only inside the CVM, so a broker could publish an address of its own and a record left over from a change that never completed would be believed. |
+| 8 | The attestation describes **now**, not the past | ⚙ Because `S` follows the image, an upgrade changes it, so the key an old quote names stops working. A stale quote is self-invalidating — no nonce and no freshness protocol. |
+| 9 | This **response** came from that image | ⚙ Every response carries a signature by `S` over the exact bytes delivered. The controller holds `S` and signs on request; the private key never leaves the controller, so no broker image can retain it across an upgrade. |
+| 10 | The router changed nothing and replayed nothing | ⚙ It does not hold `S`. The signature binds this response's bytes, so it cannot be moved to another request. |
 
-Links 1–2, 5, 7–9 are mechanical. Links 3, 4 and 6 are the user's, and they are the same
+Links 1–2, 5, 7–10 are mechanical. Links 3, 4 and 6 are the user's, and they are the same
 discipline throughout: **the trust root travels with software the user installed, never
 with the party being verified.**
 
@@ -93,12 +94,30 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
 
 ## What the user actually does
 
-1. Once, per release: read the compose file, confirm the broker has no dstack socket,
-   record `compose_hash` and the acceptable broker digests. Both go into the user's own
-   software.
+1. **Once, per release: read the compose file.** Four things in it are load-bearing, and
+   missing any one of them voids a different link:
+
+   - the **broker** and **event** services mount neither `/var/run/dstack.sock` (link 4 —
+     that socket also serves `GetKey`, so holding it means being able to derive any image's
+     signing key) nor `/var/run/docker.sock` (without which nothing in the file can say who
+     may change what);
+   - the **controller** is the only service that mounts `dstack.sock`;
+   - the controller's `image:` is a digest the user has also reviewed. It derives the keys
+     and holds the docker socket, so an unreviewed controller can run any broker image and
+     write a record that is internally consistent with it. Nothing measures the controller's
+     own image — the compose file is what pins it;
+   - **no service other than the broker and the event service mounts the volume carrying the
+     controller's attestation socket** (`zg-tee`). That socket signs any 32-byte hash under
+     the broker image's key, so a fourth container mounting it can mint response proofs
+     attributed to a reviewed image, and nothing in RTMR3 records that container's existence.
+
+   Then record `compose_hash` and the acceptable broker digests into the user's own software.
 2. Per session: fetch the quote, verify the DCAP signature, check `compose_hash` against
-   the recorded one, replay RTMR3, read the last `zg-image-update`, check it against the
-   recorded digests, and take the signer address from `report_data`.
+   the recorded one, replay RTMR3, read the last `zg-image-update`, check its digest against
+   the recorded set, and check that the signer address it binds equals the one in
+   `report_data`. `api/common/attest.ResolveRunningState` does the replay and that
+   comparison; the DCAP verification and the digest allowlist are the caller's, because both
+   need inputs only the caller has.
 3. Per response: verify the signature against that signer address.
 
 Step 3 failing means the image changed. The user returns to step 2 and decides whether to
@@ -118,6 +137,21 @@ accept the new digest — which is the intended behaviour, not an error.
   them *after* an upgrade, and cannot obtain the keys of any other version.
 - **The controller sits in the response path.** It signs every response over a local
   socket. Availability of the controller becomes availability of the service.
+- **With no record at all, the answer rests on the compose pin alone.** RTMR3 resets on
+  every CVM boot, so a deployment that has not been upgraded since it booted has an empty
+  ledger, and the reader answers with the digest the compose file pins. That path binds no
+  signer address — there is none recorded — so it is only sound if the pinned image really
+  is the running one. What makes that true is the controller invalidating the recreated
+  container's `com.docker.compose.config-hash` label: without it, `docker compose up` after
+  a reboot would leave an in-band upgrade in place while the ledger was empty, and the
+  reader would report the reviewed digest while unreviewed code answered. That is why the
+  label invalidation is part of this chain and not a tidiness fix.
+- **A reboot reverts an in-place upgrade.** It follows from the point above: after a reboot
+  the container comes back on the image the compose file pins. So an in-place upgrade is a
+  way to change what runs *until the next boot*, not a way to change the deployment. Making
+  one persist means a new compose file, which changes `compose_hash` and is therefore a
+  change the user sees at link 3. The revert also changes the signer address back, which
+  resets the acknowledgement a second time.
 - **An upgrade is not transparent to users.** `Service.teeSignerAcknowledged` resets when
   `teeSignerAddress` or `additionalInfo` changes, and recovery is `onlyOwner`. Every
   in-place upgrade therefore needs the contract owner to re-acknowledge. This is the
@@ -137,10 +171,18 @@ accept the new digest — which is the intended behaviour, not an error.
 | No unrecorded controller action that changes behaviour | `controller/internal/{ctrl,handler}` | #635 |
 | An upgraded container stops claiming to match the compose file | `controller/internal/docker` | #643 |
 | Controller serves quotes so the broker can drop the dstack socket | `controller/internal/attestproxy` | #644 |
-| **Per-image key derivation and controller-side signing (links 7–8)** | `common/tee`, `controller/internal/attestproxy` | **not started** |
+| Per-image key derivation and controller-side signing (links 8–9) | `common/tee`, `controller/internal/attestproxy` | #648 |
+| The record binds the signer address; the reader requires the quote to match (link 7) | `common/attest`, `controller/internal/ctrl` | #649 |
+| The generated deployment actually withholds both sockets from the broker | `inference/integration/config` | #650 |
 
-Until the last row lands, links 7 and 8 are not in place: the signer key is derived from
-`compose_hash` rather than from the running image, so it survives an in-place upgrade and
-an attestation taken before that upgrade continues to verify. Everything above it holds,
-which means the ledger is truthful — but a user cannot yet tell whether the copy of it
-they are reading is current.
+Every link now has code. Two things the code cannot supply:
+
+- **Nothing in this repository calls `ResolveRunningState`.** It is a library; the chain
+  terminates in the client, and a client that skips step 2 gets none of links 5–8. Whatever
+  ships as the verifier has to run the replay and the binding comparison, and must not cache
+  a signer address across sessions — caching one is exactly how a stale attestation stops
+  self-invalidating.
+- **The KMS's `compose_hash` authorization policy is outside this repository.** The app key
+  follows a persisted `app_id`, not `compose_hash`, so redeploying with a different compose
+  file re-derives the same app key. Only the KMS's check at CVM registration gates that;
+  `S` alone cannot detect it.
