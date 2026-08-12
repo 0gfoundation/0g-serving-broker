@@ -147,11 +147,29 @@ Two values, and both must come from software you installed rather than from the 
 2. **The broker image digests you accept.** Built from source you read, or taken from a
    release you have a reason to trust. Never read out of the quote you are about to check.
 
-### Per session
+### Establishing the signer — once, not per request
 
-Once per episode of trusting this provider — not once per request. The broker builds its quote
-at startup and serves that one for its lifetime, so nothing here changes while it runs. Steps
-1–6 produce a signer address; the per-response section below is the only part that repeats.
+"Once" is bounded by a signal rather than by time: steps 1–6 produce a signer address, and it
+stays good until a response signature fails to verify against it. There is no session object to
+hold and no interval to pick, which matters because the first callers are plain API clients
+with neither.
+
+Reusing the address is not a cost/safety trade — it is safe, and for a reason worth stating
+because everything above exists to produce it. Suppose the provider upgrades an hour after you
+verified. The controller derives from the image that is now running, so it signs with a
+different key; the upgrade restarted the broker, so its quote names that key too. Your very
+next response therefore fails to verify. **The window in which you are unaware the image
+changed is zero responses**, so re-fetching a quote per request buys nothing but a DCAP
+verification you did not need.
+
+That holds only because the key follows the image. If one key served every version — which is
+what a deployment without per-image derivation has — a reused address would keep verifying
+across an upgrade indefinitely, and re-fetching the quote would not help either, since the
+address in it would not have changed.
+
+What this is NOT sensitive to: a config change. `zg-config-update` does not move the signer
+address, so a change recorded while you are reusing one goes unnoticed. Re-reading the quote is
+the only way to see it, and that is the one thing per-request verification would actually buy.
 
 ```bash
 # 1. Fetch the attestation. Three values arrive together; only the first is trustworthy on
@@ -254,7 +272,12 @@ and a change cannot happen unrecorded — see the residual assumption about the 
 
 ### Per response
 
-One signature recovery against the address step 6 established. No quote, no replay.
+One signature recovery against the address step 6 established. No quote, no replay, no DCAP.
+
+A failure here is not an error to retry through. It is the notification that the image changed,
+and the only thing to do with it is go back and establish the signer again — which puts the
+question link 6 exists for, *is this a digest I accept*, in front of a person at the moment it
+becomes live.
 
 ```bash
 # 7. Make the request and keep the handle the broker returns.
@@ -302,15 +325,12 @@ ledger and step 6 has an address to compare.
 
 ### Two things a manual verifier must not do
 
-- **Do not persist a signer address past the session that established it.** Steps 1–6 run
-  once and produce one address; every response after that costs a single signature recovery
-  against it, not another quote. What must not happen is the address outliving that — written
-  into configuration, or kept across restarts — because then nothing ever fetches a quote
-  again and the one mechanism that makes a stale attestation self-invalidating is gone.
-
-  The trigger for re-running steps 1–6 is a response signature that does not verify. That is
-  not an error to retry through: it means the image changed, and the decision it asks for —
-  do I accept the new digest — is the one link 6 exists to put in front of a person.
+- **Do not write a signer address into configuration.** Holding one in memory and reusing it
+  is correct and expected. Baking it into a config file, a constant or a deploy artefact is
+  not, because then a verification failure gets "fixed" by updating the constant — and at that
+  point nothing ever fetches a quote again, the address stops being something a quote
+  established, and the one mechanism that makes a stale attestation self-invalidating is gone.
+  The address is a cached derivation, not a setting.
 - **Do not read the digest, the signer address, or the compose hash from anywhere but the
   quote.** The on-chain `additionalInfo.ImageDigest` and `teeSignerAddress` are written by the
   provider. They are useful for discovery, and they are not evidence.
