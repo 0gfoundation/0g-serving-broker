@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"text/template"
+
+	"gopkg.in/yaml.v3"
 )
 
 // renderCompose renders the compose template the way generateDockerCompose does, without
@@ -26,9 +28,13 @@ func renderCompose(t *testing.T, data TemplateData) string {
 // phalaData is a deployment on a real TEE node, which is the only configuration where any of
 // the sockets exist.
 func phalaData(useController bool) TemplateData {
+	return dataFor("phala", useController)
+}
+
+func dataFor(node TeeNode, useController bool) TemplateData {
 	repo, digest := splitPinnedImage(brokerImage)
 	return TemplateData{
-		TeeNode:          "phala",
+		TeeNode:          node,
 		UseController:    useController,
 		ConfigPath:       "./config.yml",
 		AttestSocketDir:  attestSocketDir,
@@ -179,5 +185,98 @@ func TestSplitPinnedImageRefusesToGuess(t *testing.T) {
 	}
 	if repo, digest := splitPinnedImage("ghcr.io/x@sha256:abc"); repo != "ghcr.io/x" || digest != "sha256:abc" {
 		t.Errorf("splitPinnedImage() = (%q, %q)", repo, digest)
+	}
+}
+
+// Every reachable combination must render to YAML docker compose can parse.
+//
+// This is the check that was missing, and the gap a real defect went through: deleting one
+// service's depends_on header left another's conditional entry parentless, which only shows up
+// with UseNginx on — a flag no other test here sets. The fixtures below vary every flag the
+// template branches on, and the assertion is a parse rather than a substring, because a
+// template can emit something that contains all the right strings and still not be a
+// compose file.
+func TestEveryCombinationRendersParseableYAML(t *testing.T) {
+	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+		for _, controller := range []bool{false, true} {
+			for _, nginx := range []bool{false, true} {
+				for _, monitoring := range []bool{false, true} {
+					for _, fileLog := range []bool{false, true} {
+						data := dataFor(node, controller)
+						data.UseNginx = nginx
+						data.UseMonitoring = monitoring
+						data.EnableFileLog = fileLog
+
+						name := string(node)
+						for flag, on := range map[string]bool{"nginx": nginx, "monitoring": monitoring, "filelog": fileLog, "controller": controller} {
+							if on {
+								name += "+" + flag
+							}
+						}
+						t.Run(name, func(t *testing.T) {
+							rendered := renderCompose(t, data)
+							var parsed struct {
+								Services map[string]any `yaml:"services"`
+								Volumes  map[string]any `yaml:"volumes"`
+							}
+							if err := yaml.Unmarshal([]byte(rendered), &parsed); err != nil {
+								t.Fatalf("the generated compose is not parseable YAML: %v", err)
+							}
+							if len(parsed.Services) == 0 {
+								t.Fatal("the generated compose defines no services")
+							}
+							// Every volume a service mounts by name must be declared, or compose
+							// refuses the file at startup rather than at parse.
+							if strings.Contains(rendered, "zg-tee:"+attestSocketDir) {
+								if _, ok := parsed.Volumes["zg-tee"]; !ok {
+									t.Error("services mount zg-tee but it is not declared")
+								}
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// A deployment without a controller must render exactly what it rendered before this change,
+// for every combination — not merely contain the same few substrings in the broker block.
+//
+// Checked as a property rather than against a golden file: nothing outside the hardened
+// branches may mention any of the names this change introduced.
+func TestWithoutAControllerNothingNewAppears(t *testing.T) {
+	introduced := []string{"TEE_SOCKET", "ATTEST_PROXY_SOCKET", "IMAGE_REPO", "IMAGE_DIGEST", "zg-tee", attestSocketDir}
+
+	for _, node := range []TeeNode{"phala", "hardhat", "alicloud"} {
+		for _, nginx := range []bool{false, true} {
+			for _, monitoring := range []bool{false, true} {
+				data := dataFor(node, false)
+				data.UseNginx = nginx
+				data.UseMonitoring = monitoring
+
+				rendered := renderCompose(t, data)
+				for _, name := range introduced {
+					if strings.Contains(rendered, name) {
+						t.Errorf("%s: a controller-less deployment carries %q", node, name)
+					}
+				}
+			}
+		}
+	}
+}
+
+// hardhat and alicloud have no attestation proxy — the mounts and ATTEST_PROXY_SOCKET are
+// gated on the TEE node — so they must not be told to use one either. A broker pointed at a
+// socket nothing serves, or announcing an image pair no controller there can change, is worse
+// than plain.
+func TestNonPhalaNodesGetNoHalfHardenedDeployment(t *testing.T) {
+	for _, node := range []TeeNode{"hardhat", "alicloud"} {
+		rendered := renderCompose(t, dataFor(node, true))
+		for _, name := range []string{"TEE_SOCKET", "ATTEST_PROXY_SOCKET", "IMAGE_REPO", "zg-tee"} {
+			if strings.Contains(rendered, name) {
+				t.Errorf("%s with a controller carries %q, but has no proxy to serve it", node, name)
+			}
+		}
 	}
 }

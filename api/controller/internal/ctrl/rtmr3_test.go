@@ -13,10 +13,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -216,15 +218,23 @@ const testSigner = "0x1111111111111111111111111111111111111111"
 // cannot answer testable, which has to abort the upgrade rather than record a digest with
 // nothing bound to it.
 type fakeDeriver struct {
-	log  *opLog
-	err  error
-	seen []string
+	log *opLog
+	err error
+	// block makes the derivation hang until its context is done, which is how the socket
+	// behaves when the guest agent is wedged — the same failure that most plausibly caused
+	// the upgrade to need restoring in the first place.
+	block bool
+	seen  []string
 }
 
 func (d *fakeDeriver) SignerAddress(ctx context.Context, digest string) (string, error) {
 	d.seen = append(d.seen, digest)
 	if d.log != nil {
 		d.log.add("derive " + digest)
+	}
+	if d.block {
+		<-ctx.Done()
+		return "", ctx.Err()
 	}
 	if d.err != nil {
 		return "", d.err
@@ -244,6 +254,9 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pul
 func newChangeCtrlWithDeriver(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string, deriver SignerDeriver) *Ctrl {
 	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
+	// An upgrade requires this controller to be serving the attestation proxy — see the
+	// refusal in UpdateImages and TestUpgradeRefusesWithoutTheAttestationProxy.
+	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
 	return &Ctrl{
 		config: config.ControllerConfig{
 			ImageRepo:  imageRepo,
@@ -689,5 +702,112 @@ func TestRestoreRunsOnItsOwnContext(t *testing.T) {
 	want := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	if ops := l.all(); len(ops) != 1 || ops[0] != want {
 		t.Errorf("ops = %v, want %q — the restore must run even on a dead context", ops, want)
+	}
+}
+
+// The restore record must bind a signer, exactly like the record it replaces.
+//
+// This is the record that decides whether a stale overstatement survives a failed upgrade —
+// the ledger is append-only, so appending the truth is the only correction available. A
+// payload that named the image but nothing else would be refused by a reader, which is right
+// when the truth cannot be established and wrong here, where it can.
+func TestRestoreBindsTheSignerOfTheRunningImage(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+
+	if err := c.restoreImageRecord(context.Background()); err != nil {
+		t.Fatalf("restoreImageRecord() = %v", err)
+	}
+
+	// prevDigest, not testDigest: the restore must name the image the broker is RUNNING, not
+	// the one the failed upgrade asked for. Naming the requested one is precisely the stale
+	// overstatement this exists to correct.
+	want := "emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+prevDigest)
+	if ops := l.all(); len(ops) == 0 || ops[len(ops)-1] != want {
+		t.Errorf("ops = %v, want the last to be %q", ops, want)
+	}
+}
+
+// And when the signer cannot be derived, the record must name no digest at all rather than
+// one with nothing bound to it — a reader refuses the first and believes the second.
+func TestRestoreNamesNothingWhenTheSignerCannotBeDerived(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, &fakeDeriver{log: l, err: errors.New("dstack.sock: connection refused")})
+
+	if err := c.restoreImageRecord(context.Background()); err != nil {
+		t.Fatalf("restoreImageRecord() = %v, want it to record something", err)
+	}
+
+	var emitted string
+	for _, op := range l.all() {
+		if strings.HasPrefix(op, "emit "+attest.EventImageUpdate+" ") {
+			emitted = strings.TrimPrefix(op, "emit "+attest.EventImageUpdate+" ")
+		}
+	}
+	if emitted == "" {
+		t.Fatalf("ops = %v, want a record", l.all())
+	}
+	if strings.Contains(emitted, "@") || strings.Contains(emitted, " ") {
+		t.Errorf("recorded %q, want a payload that pins no digest and binds nobody", emitted)
+	}
+}
+
+// The derivation and the emit talk to the same socket, so a derivation that hangs must not be
+// able to consume the whole restore budget and leave the corrective emit with none. If it
+// could, the stale record naming an image the upgrade never reached would stand as the
+// ledger's last word — the exact failure this function exists to prevent.
+func TestRestoreKeepsBudgetForTheEmitWhenTheDerivationHangs(t *testing.T) {
+	l := &opLog{}
+	hanging := &fakeDeriver{log: l, block: true}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, hanging)
+
+	// The same deadline abortImageChange gives it.
+	ctx, cancel := context.WithTimeout(context.Background(), restoreTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.restoreImageRecord(ctx) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("restoreImageRecord() = %v, want it to record something despite the hang", err)
+		}
+	case <-time.After(restoreTimeout):
+		t.Fatal("restoreImageRecord did not return within the restore budget")
+	}
+
+	// It emitted, and the payload names no digest because the derivation never answered.
+	var emitted string
+	for _, op := range l.all() {
+		if strings.HasPrefix(op, "emit "+attest.EventImageUpdate+" ") {
+			emitted = strings.TrimPrefix(op, "emit "+attest.EventImageUpdate+" ")
+		}
+	}
+	if emitted == "" {
+		t.Fatalf("ops = %v, want the corrective record to have been emitted", l.all())
+	}
+	if strings.Contains(emitted, "@") {
+		t.Errorf("recorded %q, want a payload that pins no digest", emitted)
+	}
+}
+
+// A controller that does not serve the attestation proxy must refuse to upgrade at all.
+//
+// Without it the broker derives its signing key at a fixed path rather than per image, so
+// every quote it serves after a recorded upgrade would name an address the record does not —
+// and no later record can name the right one, because this controller only knows the
+// per-image derivation. A reader would refuse the CVM permanently. Unlike an unreadable
+// record, that is unrecoverable, so it must not be reachable by asking for an upgrade.
+func TestUpgradeRefusesWithoutTheAttestationProxy(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	t.Setenv(attestproxy.SocketEnvVar, "")
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want a refusal when the attestation proxy is not served")
+	}
+	if ops := l.all(); len(ops) != 0 {
+		t.Errorf("ops = %v, want nothing touched", ops)
 	}
 }

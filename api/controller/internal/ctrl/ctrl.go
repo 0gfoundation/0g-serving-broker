@@ -603,12 +603,22 @@ func (c *Ctrl) restoreImageRecord(ctx context.Context) error {
 		// right outcome when the truth cannot be established, and the wrong one here,
 		// where it can. Derived from the digest this container actually runs, so the
 		// record describes the process that will answer the next quote.
-		digest, digestErr := c.RunningBrokerDigest(ctx)
+		// On its own budget, a fraction of the restore's, because the emit below still has
+		// to happen. The derivation and the emit talk to the SAME dstack socket, so the
+		// failure that most plausibly requires a restore is also the one that hangs the
+		// derivation — and letting it consume the whole deadline would leave the emit
+		// failing instantly on an expired context, with the stale record standing as the
+		// ledger's last word. That is the fail-open this function exists to prevent,
+		// reintroduced one line further in.
+		lookupCtx, cancelLookup := context.WithTimeout(ctx, restoreTimeout/3)
+		defer cancelLookup()
+
+		digest, digestErr := c.RunningBrokerDigest(lookupCtx)
 		if digestErr != nil {
 			c.logger.Warnf("[UpdateImages] Could not resolve the broker's digest to restore the RTMR3 record, recording it as unknown: %v", digestErr)
 			break
 		}
-		signer, signerErr := c.deriver.SignerAddress(ctx, digest)
+		signer, signerErr := c.deriver.SignerAddress(lookupCtx, digest)
 		if signerErr != nil {
 			c.logger.Warnf("[UpdateImages] Could not derive the signer for %s to restore the RTMR3 record, recording it as unknown: %v", digest, signerErr)
 			break
@@ -890,6 +900,18 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// it is exactly as plausible as a correct one and exactly as unverifiable, so a reader
 	// refuses it — which would take the deployment down as surely as this does, but after
 	// the upgrade rather than before, and with the ledger permanently carrying the claim.
+	// Refuse outright if this controller is not serving the attestation proxy.
+	//
+	// The record binds an address derived per image, and that is only the address the broker
+	// publishes when the broker signs through this controller. Without the proxy the broker
+	// derives its key at a fixed path instead, so every quote it serves after this would name
+	// an address the record does not — and a reader would refuse the CVM permanently, because
+	// no later record can name the right address either. Unlike an unreadable record, that is
+	// unrecoverable, so it must not be reachable by asking for an upgrade.
+	if os.Getenv(attestproxy.SocketEnvVar) == "" {
+		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match; regenerate the deployment with the attestation proxy enabled", attestproxy.SocketEnvVar)
+	}
+
 	signer, err := c.deriver.SignerAddress(ctx, digest)
 	if err != nil {
 		return nil, fmt.Errorf("deriving the signer address for %s, which the RTMR3 record must bind: %w", ref, err)

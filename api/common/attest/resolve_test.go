@@ -62,7 +62,9 @@ func syntheticQuote(t *testing.T, appCompose string, events []RuntimeEvent) []by
 
 // testSigner is the address the fixtures' records bind and their quotes name, so the two
 // agree unless a test sets out to make them disagree.
-const testSigner = "0x1111111111111111111111111111111111111111"
+// Deliberately carries hex letters, so a test that spells it in EIP-55 mixed case
+// exercises the case normalisation instead of comparing a string to itself.
+const testSigner = "0xabcdef1111111111111111111111111111111111"
 
 // imageRecordPayload is what the controller writes: the reference, then the address of the
 // key derived from that image.
@@ -599,12 +601,16 @@ func TestResolveReadsTheLegacyReportDataLayout(t *testing.T) {
 		t.Fatalf("building the event log: %v", err)
 	}
 
-	// The legacy layout is the ASCII address, zero-padded by the hardware.
+	// The legacy layout is the ASCII address, zero-padded by the hardware — and production
+	// writes common.Address.Hex(), which is EIP-55 mixed case. Spelled in mixed case here
+	// deliberately: an all-lowercase fixture would make the normalisation a no-op and leave
+	// the one thing this branch does untested, while every real legacy quote was rejected.
+	mixedCase := "0x" + strings.ToUpper(strings.TrimPrefix(testSigner, "0x"))
 	quote := syntheticQuote(t, compose, events)
 	for i := offsetReportData; i < offsetReportData+reportDataLen; i++ {
 		quote[i] = 0
 	}
-	copy(quote[offsetReportData:], []byte(testSigner))
+	copy(quote[offsetReportData:], []byte(mixedCase))
 
 	state, err := ResolveRunningState(quote, log, tcbInfoFor(t, compose), brokerService)
 	if err != nil {
