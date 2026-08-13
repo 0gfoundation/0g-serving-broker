@@ -18,6 +18,7 @@ import (
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
 	"github.com/0glabs/0g-serving-broker/common/log"
+	"github.com/0glabs/0g-serving-broker/controller/internal/attestproxy"
 	"github.com/0glabs/0g-serving-broker/controller/internal/docker"
 	"github.com/0glabs/0g-serving-broker/inference/config"
 )
@@ -252,6 +253,7 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pul
 func newChangeCtrlWithDeriver(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string, deriver SignerDeriver) *Ctrl {
 	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
+	t.Setenv(attestproxy.SocketEnvVar, "/var/run/zg-tee/tee.sock")
 	return &Ctrl{
 		config: config.ControllerConfig{
 			ImageRepo:  imageRepo,
@@ -747,5 +749,23 @@ func TestRestoreRunsOnItsOwnContext(t *testing.T) {
 	want := "emit " + attest.EventConfigUpdate + " " + hex.EncodeToString(sum[:])
 	if ops := l.all(); len(ops) != 1 || ops[0] != want {
 		t.Errorf("ops = %v, want %q — the restore must run even on a dead context", ops, want)
+	}
+}
+
+// A deployment with a controller but no attestation proxy is the one case where recording the
+// truth is worse than refusing: the broker derives at a fixed path, so no record this controller
+// writes can ever match a quote, and no later record can repair it either.
+func TestUpgradeRefusesWithoutTheAttestationProxy(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+	t.Setenv(attestproxy.SocketEnvVar, "")
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want a refusal when the attestation proxy is not served")
+	}
+
+	// Before anything is touched: no derivation, no pull, no emit, no container stopped.
+	if ops := l.all(); len(ops) != 0 {
+		t.Fatalf("refused after acting: %v", ops)
 	}
 }

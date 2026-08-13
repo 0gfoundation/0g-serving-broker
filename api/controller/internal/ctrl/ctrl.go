@@ -890,6 +890,18 @@ func (c *Ctrl) UpdateImages(ctx context.Context, digest string) (*docker.ImageUp
 	// plausible as a correct one and exactly as unverifiable, so a reader refuses it — which
 	// would take the deployment down as surely as this does, but after the upgrade rather than
 	// before, and with the ledger permanently carrying the claim.
+	//
+	// Refuse outright if this controller is not serving the attestation proxy. The record binds an
+	// address derived per image, and that is only the address the broker publishes when the broker
+	// signs through this controller. Without the proxy the broker derives its key at a fixed path
+	// instead, so every quote it serves after this would name an address the record does not — and
+	// a reader would refuse the CVM permanently, because no later record can name the right address
+	// either. Unlike an unreadable record, that is unrecoverable, so it must not be reachable by
+	// asking for an upgrade.
+	if os.Getenv(attestproxy.SocketEnvVar) == "" {
+		return nil, fmt.Errorf("refusing to upgrade: %s is unset, so the broker does not sign through this controller and any record written here would name an address no quote can match. On a TEE node, regenerate the deployment so the controller serves the attestation proxy. Elsewhere there is no dstack guest agent to record a change against, and in-place upgrade is not available at all", attestproxy.SocketEnvVar)
+	}
+
 	signer, err := c.deriver.SignerAddress(ctx, digest)
 	if err != nil {
 		return nil, fmt.Errorf("deriving the signer address for %s, which the RTMR3 record must bind: %w", ref, err)
