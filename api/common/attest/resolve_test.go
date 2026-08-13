@@ -68,14 +68,10 @@ func syntheticVerified(t *testing.T, appCompose string, events []RuntimeEvent) V
 // case normalisation instead of comparing a string to itself.
 const testSigner = "0xabcdef1111111111111111111111111111111111"
 
-// testEncPub is the enclave encryption public key the fixtures' records bind and their
-// report_data names — 32 bytes in hex, like a real X25519 public key.
-const testEncPub = "beef000000000000000000000000000000000000000000000000000000000123"
-
 // imageRecordPayload is what the controller writes: the reference, then BOTH keys derived from
 // that image — the response signer and the enclave encryption public key.
 func imageRecordPayload(ref string) []byte {
-	return []byte(ref + " " + testSigner + " " + testEncPub)
+	return []byte(ref + " " + testSigner)
 }
 
 // syntheticVerifiedSigning is syntheticVerified with control over the address report_data names,
@@ -91,11 +87,6 @@ func syntheticVerifiedSigning(t *testing.T, appCompose string, events []RuntimeE
 		t.Fatalf("decoding the test signer: %v", err)
 	}
 	copy(rd[reportDataSignerOffset:], raw)
-	encRaw, err := hex.DecodeString(testEncPub)
-	if err != nil {
-		t.Fatalf("decoding the test enc_pub: %v", err)
-	}
-	copy(rd, encRaw)
 	binary.BigEndian.PutUint32(rd[reportDataVersionOffset:], reportDataLayoutVersion)
 
 	log, err := json.Marshal(tdxEventsOf(events))
@@ -181,9 +172,9 @@ func TestResolveTakesTheLastRecordedUpgrade(t *testing.T) {
 	superseded := "sha256:" + strings.Repeat("7", 64)
 
 	events := append(bootEvents(),
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker@" + superseded)},
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + superseded)},
 		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte(configSum)},
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/0gfoundation/0g-serving-broker@" + upgradeDigest)},
 	)
 
 	state, err := resolve(t, compose, events)
@@ -300,7 +291,7 @@ func TestResolveNeedsTheSystemReadyBoundary(t *testing.T) {
 		// would be believed.
 		forged := append([]RuntimeEvent{
 			{Event: "system-preparing"},
-			{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)},
+			{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)},
 		}, RuntimeEvent{Event: eventSystemReady})
 		if _, err := resolve(t, compose, forged); err == nil {
 			t.Error("ResolveRunningState() = nil, want a zg- event in the boot prefix to be refused")
@@ -323,7 +314,7 @@ func TestResolveRecoversFromAnEarlierUnreadableRecord(t *testing.T) {
 		// repository, naming no digest.
 		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/0gfoundation/0g-serving-broker")},
 		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte("unknown")},
-		RuntimeEvent{Event: EventImageUpdate, Payload: []byte("ghcr.io/x@" + upgradeDigest)},
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)},
 		RuntimeEvent{Event: EventConfigUpdate, Payload: []byte(configSum)},
 	)
 
@@ -493,6 +484,93 @@ func TestPinnedImages(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := PinnedImages(tcbInfoJSON); err == nil {
 				t.Errorf("PinnedImages(%s) = nil, want an error", name)
+			}
+		})
+	}
+}
+
+// The check the whole per-image scheme rests on: a record naming an image also names the address
+// of the key derived from that image, and the quote must name the same one.
+//
+// Without it a client can learn which image the ledger names and can verify signatures against
+// report_data, but not that those are the same thing — and every way the two can come apart
+// would be accepted. report_data is chosen by the enclave, so a broker running unreviewed code
+// can put an address of its own there; a controller killed between recording and recreating
+// leaves a record describing an installation that never happened.
+func TestResolveRefusesWhenTheQuoteNamesAnotherSigner(t *testing.T) {
+	compose := pinnedCompose(t)
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+
+	// The ledger binds testSigner; the quote names someone else.
+	impostor := "0x2222222222222222222222222222222222222222"
+	v := syntheticVerifiedSigning(t, compose, events, impostor)
+
+	state, err := ResolveRunningState(v, tcbInfoFor(t, compose), brokerService)
+	if err == nil {
+		t.Fatalf("ResolveRunningState() = %+v, want a refusal when the quote's signer is not the one bound to the image", state)
+	}
+	if !strings.Contains(err.Error(), impostor) || !strings.Contains(err.Error(), testSigner) {
+		t.Errorf("error %q should name both addresses so the mismatch is diagnosable", err)
+	}
+
+	// The same log against a quote that names the bound signer resolves, so the refusal above is
+	// the binding and not something else in the fixture.
+	if _, err := ResolveRunningState(syntheticVerified(t, compose, events), tcbInfoFor(t, compose), brokerService); err != nil {
+		t.Errorf("the matching quote also failed: %v", err)
+	}
+}
+
+// The event path must expose the address it checked, because a client verifying responses needs
+// to know which key the ledger vouched for rather than trusting whatever report_data says.
+func TestResolveReportsTheBoundSigner(t *testing.T) {
+	compose := pinnedCompose(t)
+
+	state, err := resolve(t, compose, append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)}))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.BrokerSigner != testSigner {
+		t.Errorf("BrokerSigner = %q, want %q", state.BrokerSigner, testSigner)
+	}
+
+	// The compose fallback binds nothing, and does not need to: no record means no change was
+	// made, and the image the compose file pins is covered by the compose hash in the signed
+	// report body. The image is hardware-attested there, so the address needs no separate
+	// vouching — a broker able to publish an address of its own would first have had to become a
+	// different image, which cannot happen unrecorded.
+	boot, err := resolve(t, compose, bootEvents())
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if boot.BrokerSigner != "" {
+		t.Errorf("BrokerSigner = %q on the compose path, want empty", boot.BrokerSigner)
+	}
+}
+
+// A record that names an image but nothing else is refused rather than tolerated as an older
+// format. It is exactly as plausible as a correct record and exactly as unverifiable, and it is
+// the shape an attacker would pick: the digest a reviewer is looking for, with nothing tying it
+// to whoever holds the key.
+func TestResolveRefusesRecordsThatBindNoSigner(t *testing.T) {
+	compose := pinnedCompose(t)
+	ref := "ghcr.io/x@" + upgradeDigest
+
+	for name, payload := range map[string]string{
+		"no signer":           ref,
+		"empty":               "",
+		"signer but no image": testSigner,
+		"malformed signer":    ref + " 0xnope",
+		"truncated signer":    ref + " 0x1111",
+		"an extra field":      ref + " " + testSigner + " extra",
+		"signer before image": testSigner + " " + ref,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state, err := resolve(t, compose, append(bootEvents(),
+				RuntimeEvent{Event: EventImageUpdate, Payload: []byte(payload)}))
+			if err == nil {
+				t.Errorf("payload %q resolved to %+v, want a refusal", payload, state)
 			}
 		})
 	}

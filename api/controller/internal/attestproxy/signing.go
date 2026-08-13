@@ -51,7 +51,39 @@ type CurrentImageFunc func(ctx context.Context) (string, error)
 // A sibling of encKeyPath rather than its parent: dstack derivation is hierarchical, so
 // deriving the signing key at "/<digest>" would make it an ancestor of everything else under
 // that digest, and holding it would be holding the subtree.
-func signerKeyPath(digest string) string { return "/" + digest + signerDerivePathSuffix }
+func signerKeyPath(digest string) string { return SignerKeyPath(digest) }
+
+// SignerKeyPath is signerKeyPath, exported because the RTMR3 recorder derives the same address
+// before it writes a record naming that image. One string, two callers: if they disagreed, the
+// address in the ledger would not be the one signing responses and every verification would
+// fail — the wrong direction, but for the wrong reason.
+func SignerKeyPath(digest string) string { return "/" + digest + signerDerivePathSuffix }
+
+// SignerKeyFromMaterial turns what the derivation service returned into the signing key.
+//
+// Exported alongside SignerKeyPath for the same reason, and it is the more dangerous half. Two
+// callers derive this key — this proxy, to sign with it, and the RTMR3 recorder, to write its
+// address into the record — and they MUST agree byte for byte. Sharing only the path left three
+// steps (parse, derive the address, normalise its spelling) written out twice in two packages, so
+// a fallback or a case change added to one would silently make the recorded address stop being
+// the signing address. Every verification would then fail, which is the safe direction and an
+// almost undiagnosable one: both copies look correct in isolation.
+func SignerKeyFromMaterial(material string) (*ecdsa.PrivateKey, error) {
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(material, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("parsing the derived signing key: %w", err)
+	}
+	return key, nil
+}
+
+// SignerAddressOf is the one spelling of a signer address these two sides exchange.
+//
+// Lowercase, not EIP-55: the record carries it as text and a reader compares strings, so one
+// canonical form removes a class of mismatch rather than relying on every comparison to be
+// case-insensitive.
+func SignerAddressOf(key *ecdsa.PrivateKey) string {
+	return strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex())
+}
 
 // encKeyPath is the derivation path for the enclave encryption key, per image for the same
 // reason. tee.EncKeyDerivePathSuffix keeps the two sides agreeing on one string.
@@ -120,7 +152,7 @@ func (p *Proxy) serveSignerAddress(w http.ResponseWriter, r *http.Request) {
 		p.fail(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
-	p.respond(w, map[string]string{"address": crypto.PubkeyToAddress(key.PublicKey).Hex()})
+	p.respond(w, map[string]string{"address": SignerAddressOf(key)})
 }
 
 // serveEncKey returns the current image's encryption key material.
@@ -154,11 +186,7 @@ func (p *Proxy) signerKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
 	}
 	// dstack returns hex; the broker's local path parses it the same way, so the two agree
 	// on the key for a given path.
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(material, "0x"))
-	if err != nil {
-		return nil, fmt.Errorf("parsing the derived signing key: %w", err)
-	}
-	return key, nil
+	return SignerKeyFromMaterial(material)
 }
 
 // currentImage resolves the running broker image, refusing anything it cannot pin down.

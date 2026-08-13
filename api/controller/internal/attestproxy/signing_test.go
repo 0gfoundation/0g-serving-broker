@@ -213,7 +213,9 @@ func TestSignMatchesWhatLocalSigningWouldProduce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recovering the public key: %v", err)
 	}
-	if recovered := crypto.PubkeyToAddress(*pub).Hex(); recovered != field(t, addrBody, "address") {
+	// SignerAddressOf, not .Hex(): one canonical lowercase spelling is what the record and a
+	// reader compare, so the test compares the same way rather than case-insensitively.
+	if recovered := strings.ToLower(crypto.PubkeyToAddress(*pub).Hex()); recovered != field(t, addrBody, "address") {
 		t.Errorf("the signature recovers to %s, but /SignerAddress reports %s", recovered, field(t, addrBody, "address"))
 	}
 }
@@ -276,5 +278,42 @@ func TestGetKeyIsNotForwarded(t *testing.T) {
 	}
 	if len(askedFor) != 0 {
 		t.Errorf("a rewritten path reached dstack's GetKey: %v", askedFor)
+	}
+}
+
+// The address /SignerAddress serves and the address the RTMR3 recorder writes must be the same
+// value, because a reader compares them and refuses on a mismatch.
+//
+// They are computed by two callers in two packages, from the same derivation path. Sharing only
+// the path left "parse the material, take the address, pick a spelling" written out twice, so a
+// fallback or a case change added to one side would make the recorded address stop being the
+// signing address — every verification failing, in the safe direction, and almost undiagnosable
+// because both copies look correct on their own. This pins the two exported steps both sides now
+// go through.
+func TestTheServedAddressIsTheRecordedAddress(t *testing.T) {
+	digest := testDigest
+	var askedFor []string
+	c := startWithDigest(t, &digest, &askedFor)
+
+	// What the proxy serves to the broker.
+	code, body := postJSON(t, c, pathSignerAddress, `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST %s = %d: %s", pathSignerAddress, code, body)
+	}
+	served := field(t, body, "address")
+
+	// What a recorder computes from the same material, through the exported steps.
+	key, err := SignerKeyFromMaterial(keyForPath(SignerKeyPath(digest)))
+	if err != nil {
+		t.Fatalf("SignerKeyFromMaterial: %v", err)
+	}
+	recorded := SignerAddressOf(key)
+
+	if served != recorded {
+		t.Errorf("the proxy serves %s but a recorder would write %s", served, recorded)
+	}
+	// One canonical spelling, so a reader comparing strings needs no case rules.
+	if served != strings.ToLower(served) {
+		t.Errorf("address %s is not lowercase; the record and the quote would disagree on spelling", served)
 	}
 }

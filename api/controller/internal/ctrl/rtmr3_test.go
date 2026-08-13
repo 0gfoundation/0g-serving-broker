@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/0glabs/0g-serving-broker/common/attest"
 	commonconfig "github.com/0glabs/0g-serving-broker/common/config"
@@ -209,7 +210,46 @@ func testLogger(t *testing.T) log.Logger {
 	return l
 }
 
+// testSigner is what fakeDeriver answers, so a test can assert on the whole record.
+const testSigner = "0x1111111111111111111111111111111111111111"
+
+// fakeDeriver stands in for the guest agent's key derivation. err makes a derivation that cannot
+// answer testable, which has to abort the upgrade rather than record a digest with nothing bound
+// to it; block makes it hang until its context is done, which is how the socket behaves when the
+// guest agent is wedged — the same failure that most plausibly caused the upgrade to need
+// restoring in the first place.
+type fakeDeriver struct {
+	log   *opLog
+	err   error
+	block bool
+	seen  []string
+}
+
+func (d *fakeDeriver) SignerAddress(ctx context.Context, digest string) (string, error) {
+	d.seen = append(d.seen, digest)
+	if d.log != nil {
+		d.log.add("derive " + digest)
+	}
+	if d.block {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	if d.err != nil {
+		return "", d.err
+	}
+	return testSigner, nil
+}
+
+// imageRecord is the payload the recorder writes: the reference, then the address of the key
+// derived from that image.
+func imageRecord(ref string) string { return ref + " " + testSigner }
+
 func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string) *Ctrl {
+	t.Helper()
+	return newChangeCtrlWithDeriver(t, l, emitErr, configFile, pullBody, &fakeDeriver{log: l})
+}
+
+func newChangeCtrlWithDeriver(t *testing.T, l *opLog, emitErr error, configFile string, pullBody string, deriver SignerDeriver) *Ctrl {
 	t.Helper()
 	t.Cleanup(docker.SetHostnameForTests(selfHost))
 	return &Ctrl{
@@ -219,6 +259,7 @@ func newChangeCtrl(t *testing.T, l *opLog, emitErr error, configFile string, pul
 		},
 		dockerClient: fakeChangeDaemon(t, l, pullBody),
 		emitter:      &fakeEmitter{log: l, err: emitErr},
+		deriver:      deriver,
 		logger:       testLogger(t),
 	}
 }
@@ -318,7 +359,7 @@ func TestImageChangeIsRecordedOnceNoBrokerIsRunning(t *testing.T) {
 	}
 
 	ops := l.all()
-	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRepo + "@" + testDigest)
+	emit := l.indexOf("emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+testDigest))
 	if emit < 0 {
 		t.Fatalf("ops = %v, want the image change recorded", ops)
 	}
@@ -384,8 +425,89 @@ func TestFailedPullRecordsNothing(t *testing.T) {
 		t.Fatal("UpdateImages() = nil, want the pull to fail")
 	}
 
-	if ops := l.all(); len(ops) != 1 || ops[0] != "pull" {
-		t.Errorf("ops = %v, want the pull and nothing else", ops)
+	// The derivation runs first — deliberately, so an unreachable guest agent costs an untouched
+	// deployment rather than a pull — but it writes nothing. What matters is that no record and no
+	// container operation happened.
+	for _, op := range l.all() {
+		if op != "pull" && !strings.HasPrefix(op, "derive ") {
+			t.Errorf("ops = %v, want only the derivation and the pull", l.all())
+			break
+		}
+	}
+	if l.indexOf("pull") < 0 {
+		t.Errorf("ops = %v, want the pull to have been attempted", l.all())
+	}
+}
+
+// The record must bind a signer, so a derivation that cannot answer has to abort the upgrade —
+// before anything is pulled, stopped or recreated.
+//
+// Recording the digest without an address would not be the lenient option. A reader refuses such
+// a record, so the deployment would go down just the same, except after the upgrade instead of
+// before it and with the ledger permanently carrying a claim nothing can check.
+func TestUpgradeRefusesWhenTheSignerCannotBeDerived(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, &fakeDeriver{log: l, err: errors.New("dstack.sock: connection refused")})
+
+	if _, err := c.UpdateImages(context.Background(), testDigest); err == nil {
+		t.Fatal("UpdateImages() = nil, want a refusal when the signer cannot be derived")
+	}
+	for _, op := range l.all() {
+		if !strings.HasPrefix(op, "derive ") {
+			t.Errorf("ops = %v, want nothing but the failed derivation — no pull, no stop, no record", l.all())
+			break
+		}
+	}
+}
+
+// The restore record must bind a signer too, derived from the image the broker is RUNNING rather
+// than the one the failed upgrade asked for — naming the requested one is precisely the stale
+// overstatement this exists to correct.
+func TestRestoreBindsTheSignerOfTheRunningImage(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrl(t, l, nil, "", okPull)
+
+	if err := c.restoreImageRecord(context.Background()); err != nil {
+		t.Fatalf("restoreImageRecord() = %v", err)
+	}
+	want := "emit " + attest.EventImageUpdate + " " + imageRecord(imageRepo+"@"+prevDigest)
+	if ops := l.all(); len(ops) == 0 || ops[len(ops)-1] != want {
+		t.Errorf("ops = %v, want the last to be %q", ops, want)
+	}
+}
+
+// The derivation and the emit talk to the same socket, so a derivation that hangs must not eat
+// the whole restore budget and leave the corrective emit with none — the stale record would then
+// stand as the ledger's last word, which is the failure this function exists to prevent.
+func TestRestoreKeepsBudgetForTheEmitWhenTheDerivationHangs(t *testing.T) {
+	l := &opLog{}
+	c := newChangeCtrlWithDeriver(t, l, nil, "", okPull, &fakeDeriver{log: l, block: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), restoreTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.restoreImageRecord(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("restoreImageRecord() = %v, want it to record something despite the hang", err)
+		}
+	case <-time.After(restoreTimeout):
+		t.Fatal("restoreImageRecord did not return within the restore budget")
+	}
+
+	var emitted string
+	for _, op := range l.all() {
+		if strings.HasPrefix(op, "emit "+attest.EventImageUpdate+" ") {
+			emitted = strings.TrimPrefix(op, "emit "+attest.EventImageUpdate+" ")
+		}
+	}
+	if emitted == "" {
+		t.Fatalf("ops = %v, want the corrective record to have been emitted", l.all())
+	}
+	if strings.Contains(emitted, "@") {
+		t.Errorf("recorded %q, want a payload that pins no digest", emitted)
 	}
 }
 
