@@ -142,6 +142,72 @@ operations listed above are refused and the error names the hostname; reads are
 unaffected. `PUT /v1/config/core` writes the config file before it restarts
 anything, so in that state it returns 500 with the file already rewritten.
 
+### 3.1b Attestation proxy — keeping the ledger out of the broker's reach
+
+dstack serves `EmitEvent` on `/var/run/dstack.sock` from the **same unauthenticated handler**
+as `GetQuote`, and binds that socket `0777`. So every container that mounts it can append to
+RTMR3 — including a record about the image it is itself running. That is why a record cannot
+describe a container which mounts that socket: the thing being described could have written
+the description.
+
+The broker mounts it today only because that is where `GetQuote` and `DeriveKey` live.
+
+The controller can serve those instead, on a second socket, forwarding exactly three
+read-only dstack methods and nothing else:
+
+```
+POST /GetQuote   the attestation itself
+POST /Info       tcb_info, which TdxQuote assembles into its response
+POST /GetKey     the signer and enclave encryption keys
+```
+
+`/EmitEvent` is never forwarded, and the set is a fixed allowlist rather than a denylist — a
+denylist is wrong by default the moment dstack adds a method.
+
+```yaml
+  0g-controller:
+    environment:
+      - ATTEST_PROXY_SOCKET=/var/run/zg-tee/tee.sock
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock     # only the controller keeps this
+      - zg-tee:/var/run/zg-tee
+
+  0g-serving-provider-broker:            # and the event container, identically
+    environment:
+      - TEE_SOCKET=/var/run/zg-tee/tee.sock
+    volumes:
+      - zg-tee:/var/run/zg-tee
+      # - /var/run/dstack.sock:/var/run/dstack.sock   ← removed; this is the line that matters
+```
+
+Both variables default to empty, which is exactly today's behaviour: the controller serves
+nothing and the broker uses dstack's socket. So this changes nothing until a deployment opts
+in, and invariant 1 holds — a controller-disabled deployment is untouched.
+
+**Three things worth being precise about.**
+
+**The proxy is not what provides the property. Removing the mount is.** A modified broker
+image does not run our code, so nothing written in the broker constrains it. What the proxy
+does is make the removal *possible*, by giving an honest broker somewhere else to ask.
+
+**A reader still cannot check that the mount is gone.** That is settled by the caller pinning
+`compose_hash` to a compose it reviewed — and the socket assignment is written in that
+compose, so reviewing it is how you learn the answer. Deriving it inside the verifier was
+tried and reverted; see §5.1a.
+
+**This does not make the running digest provable on its own.** With the ledger confined to
+the controller, a provider can no longer *forge* a record — but it can still serve a **stale
+genuine quote** taken while it ran a different image, because `report_data` carries no nonce
+and the signer key does not change across an in-band upgrade. Closing that needs freshness
+binding on the verifier side, which is a protocol change outside this repository. The two are
+each other's prerequisites: without this, a nonce-bound quote can still carry a forged
+ledger; without a nonce, a true ledger can still be replayed.
+
+Reachability is the volume mount, not an authentication check. That is deliberate: the broker
+cannot sign with an admin wallet, and who mounts a volume is declared per service in the
+compose file, so `compose_hash` covers it — the same discipline dstack applies to its own
+socket.
+
 ### 3.2 Environment Variable Support
 
 Both whitelists can be configured via environment variables, which **replace**

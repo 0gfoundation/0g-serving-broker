@@ -23,6 +23,20 @@ import (
 // value (0/false/no/off) as a kill switch to stop emitting the §4.2 quote.
 const bindEncPubEnvVar = "TEE_REPORT_DATA_BIND_ENC_PUB"
 
+// teeSocketEnvVar overrides where quotes and derived keys come from. Empty, the default,
+// means dstack's own socket.
+//
+// A hardened deployment sets it to the controller's attestation proxy and stops mounting
+// dstack's socket into this container. dstack serves EmitEvent from the same handler as
+// GetQuote, so a container holding that socket can append to RTMR3 — including a record
+// about the image it is itself running, which is exactly what makes such a record unable to
+// describe it. The proxy forwards GetQuote, Info and GetKey and nothing else.
+//
+// Only the missing mount provides that property; this variable just tells an honest broker
+// where else to ask. The client type stays Phala either way, because the wire protocol is
+// identical.
+const teeSocketEnvVar = "TEE_SOCKET"
+
 type ClientType int
 
 const (
@@ -80,7 +94,7 @@ func (s *TeeService) SyncQuote(ctx context.Context, nvQuote bool) error {
 	case Mock:
 		client = &MockTappdClient{}
 	case Phala:
-		client = &PhalaTappdClient{}
+		client = NewPhalaTappdClient(os.Getenv(teeSocketEnvVar))
 	case GCP:
 		client = &GcpTappdClient{}
 	case AliCloud:
