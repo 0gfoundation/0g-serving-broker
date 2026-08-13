@@ -61,12 +61,15 @@
 #
 #      The four-row {resolution, has_audio}-dimensioned price table above is
 #      published on the 0G ROUTER side (its own on-chain provider price
-#      data) — this is the first two-dimensional video-pricing table the
-#      router's variant-matching allowlist actually recognizes; a
-#      {resolution, has_video_input} table for Seedance has been proposed in
-#      design notes but is NOT wired into 0g-router's videoDimensionKeys
-#      allowlist today, so there is no existing precedent this reuses — see
-#      0g-router's pkg/modelregistry/models.yaml PRICING NOTE on
+#      data). Two-dimensional variant rows are not new there — the bucketed
+#      per_unit_table shape already matches on {resolution, duration_seconds}
+#      together — but `has_audio` itself is a new dimension key, and this is
+#      the first `video_second`-unit table dimensioned on two keys at once
+#      rather than one; a {resolution, has_video_input} table for Seedance
+#      has been proposed in design notes but is NOT wired into 0g-router's
+#      videoDimensionKeys allowlist today, so there is no existing precedent
+#      for THAT specific dimension this reuses — see 0g-router's
+#      pkg/modelregistry/models.yaml PRICING NOTE on
 #      kling/kling-v3-video-generation for the full reasoning and the exact
 #      wire dimension name.
 #   4. Keep TEE verification: this sidecar reports the vendor's TLS
