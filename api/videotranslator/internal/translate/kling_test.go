@@ -167,7 +167,7 @@ func TestToKlingCreateRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("unparsable size on text-to-video omits mode but DEFAULTS aspect_ratio (required with no vendor default for t2v)", func(t *testing.T) {
+	t.Run("unparsable size on text-to-video omits mode but EXPLICITLY sends aspect_ratio (vendor requires it present for t2v, unlike mode)", func(t *testing.T) {
 		got, err := ToKlingCreateRequest(CreateVideoRequest{Prompt: "p", Size: "garbage"})
 		if err != nil {
 			t.Fatalf("ToKlingCreateRequest: %v", err)
@@ -176,7 +176,7 @@ func TestToKlingCreateRequest(t *testing.T) {
 			t.Errorf("Mode = %q, want omitted", got.Parameters.Mode)
 		}
 		if got.Parameters.AspectRatio != "16:9" {
-			t.Errorf("AspectRatio = %q, want 16:9 default (aspect_ratio is required for text-to-video, unlike mode)", got.Parameters.AspectRatio)
+			t.Errorf("AspectRatio = %q, want 16:9 (aspect_ratio must be explicitly present for text-to-video, unlike mode)", got.Parameters.AspectRatio)
 		}
 	})
 

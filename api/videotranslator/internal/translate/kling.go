@@ -196,17 +196,23 @@ func ToKlingCreateRequest(req CreateVideoRequest) (kling.CreateRequest, error) {
 	}
 
 	// aspect_ratio: unlike mode, this one is NOT universally optional. Per
-	// Aliyun's own docs, it is REQUIRED with no default for text-to-video
-	// (and for the omni model's reference-generation modes this integration
-	// doesn't build); it is genuinely optional ONLY when a first-frame image
-	// is present, since the vendor then derives the ratio from that image
-	// ("以首帧的宽高比为基准，无需填写") and ignores whatever is sent here. So
-	// an empty/unparsable "size" must still yield a real value for a
-	// text-to-video request — omitting the field there (this integration's
-	// earlier behavior) risks an InvalidParameter rejection from the vendor,
-	// not a graceful vendor-side default. "16:9" is the same landscape
-	// fallback this package's siblings apply when their own vendor's ratio
-	// can't be derived from "size" either.
+	// Aliyun's own docs (verbatim: "可选值：16:9：默认值。9:16。1:1。以下场景
+	// 必须填写：文生视频：必须设置。参考生视频(type=feature/feature+refer/
+	// refer)：必须设置。"), 16:9 IS the field's documented default VALUE —
+	// but the field itself is still marked 条件必填 (conditionally required)
+	// and the vendor validates it must be explicitly PRESENT for
+	// text-to-video and for the omni model's reference-generation modes this
+	// integration doesn't build. It is only genuinely optional (both absent
+	// AND unenforced) when a first-frame image is present, since the vendor
+	// then derives the ratio from that image ("以首帧的宽高比为基准，无需
+	// 填写") and ignores whatever is sent here. So an empty/unparsable "size"
+	// must still yield an explicit value for a text-to-video request —
+	// omitting the field there (this integration's earlier behavior) risks
+	// an InvalidParameter rejection even though 16:9 is nominally what an
+	// omitted value would resolve to elsewhere. "16:9" is both the
+	// documented default value and the same landscape fallback this
+	// package's siblings apply when their own vendor's ratio can't be
+	// derived from "size" either.
 	aspectRatio := sizeToKlingAspectRatio(req.Size)
 	if aspectRatio == "" && len(media) == 0 {
 		aspectRatio = "16:9"
