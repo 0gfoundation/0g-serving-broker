@@ -211,9 +211,11 @@ func (c *Client) do(httpReq *http.Request, out interface{}) error {
 	// hop to this sidecar is plaintext HTTP inside the CVM). No-op when no capture
 	// is installed on the context. DO NOT OMIT — this is one of the two mandatory
 	// TEE-routing-proof halves (the other is handler.NewEngine() in
-	// cmd/server/kling.go). A prior, unrelated integration in this codebase's
-	// history shipped without this line and had to add it in a follow-up fix;
-	// this client carries it from its first commit.
+	// cmd/server/kling.go). A different, not-yet-merged video/image integration
+	// in this repository's history omitted this exact line and needed a
+	// follow-up fix to add it back — it was never released without it, since it
+	// never reached main; this client carries the line from its first commit
+	// instead of repeating that gap.
 	teeutil.CertCaptureFromContext(httpReq.Context()).Observe(resp.TLS)
 
 	respBody, err := io.ReadAll(resp.Body)
