@@ -31,9 +31,9 @@ hardware or cryptography; a link marked 👤 is a one-time human check the user 
 | 2 | Which **deployment** this is | ⚙ `compose_hash` is in the signed report body at `mr_config_id[1:33]`, and `sha256(tcb_info.app_compose) == compose_hash`, so the quote carries its own authenticated compose file. |
 | 3 | That deployment is the one the user reviewed | 👤 The user compares `compose_hash` against the hash of a compose file they read. |
 | 4 | **Only the controller can write the ledger** | 👤 read from that reviewed compose: the broker mounts no `/var/run/dstack.sock`; only the controller does. ⚙ Changing that changes `compose_hash`, which link 3 catches. |
-| 5 | Which **image** the broker runs | ⚙ RTMR3 is append-only and covered by the signature. Replay the runtime events; the last `zg-image-update` names it, as `<repo>@<digest> <0xsigner>`. Link 4 is why that record can be believed. |
+| 5 | Which **image** the broker runs | ⚙ RTMR3 is append-only and covered by the signature. Replay the runtime events; the last `zg-image-update` names it, as `<repo>@<digest> <0xsigner> <enc_pub>`. Link 4 is why that record can be believed. |
 | 6 | That image is one the user recognises | 👤 The digest is compared against a set the user obtained **for themselves** — built from source they read, or taken from a release they have a reason to trust — never fetched from the provider being checked. |
-| 7 | The key signing responses **belongs to that image** | ⚙ The record binds the address of `S = KDF(appKey, "/<digest>/sign")`, derived by the controller before it makes the change. The reader requires the quote's `report_data` to name the same address. Without this the two are unconnected: `report_data` is whatever the enclave asked the hardware to sign over, and `S` is derivable only inside the CVM, so a broker could publish an address of its own and a record left over from a change that never completed would be believed. |
+| 7 | **Both keys belong to that image** | ⚙ The record binds the address of `S = KDF(appKey, "/<digest>/sign")` **and** the public half of the enclave encryption key at `"/<digest>/e2ee-enc"`, both derived by the controller before it makes the change. The reader requires the quote's `report_data` to name the same two. Without this they are unconnected: `report_data` is whatever the enclave asked the hardware to sign over, and both keys are derivable only inside the CVM, so a broker could publish keys of its own and a record left over from a change that never completed would be believed. The enc_pub half is not redundant with the signature — the bound **address is public**, so an unrecorded image can publish it beside its own enc_pub, and a client seals its request before any signature exists to contradict it. |
 | 8 | The attestation describes **now**, not the past | ⚙ Because `S` follows the image, an upgrade changes it, so the key an old quote names stops working. A stale quote is self-invalidating — no nonce and no freshness protocol. |
 | 9 | This **response** came from that image | ⚙ Every response carries a signature by `S` over the exact bytes delivered. The controller holds `S` and signs on request; the private key never leaves the controller, so no broker image can retain it across an upgrade. |
 | 10 | The router changed nothing and replayed nothing | ⚙ It does not hold `S`. The signature binds this response's bytes, so it cannot be moved to another request. |
@@ -251,7 +251,9 @@ ledger = events[next(i for i, e in enumerate(events) if e["event"] == "system-re
 records = [e for e in ledger if e["event"] == "zg-image-update"]
 
 if records:
-    ref, bound_signer = bytes.fromhex(records[-1]["event_payload"]).decode().split()
+    # Three fields: the reference, the response-signing address, and the enclave encryption
+    # public key. Both keys, because report_data carries both — see step 5.
+    ref, bound_signer, bound_enc_pub = bytes.fromhex(records[-1]["event_payload"]).decode().split()
     source = "ledger"
 else:
     # Nothing recorded since boot, so the broker is on the image compose pins — and that file
@@ -260,7 +262,7 @@ else:
     import yaml
     compose = yaml.safe_load(json.loads(app_compose)["docker_compose_file"])
     ref = compose["services"]["0g-serving-provider-broker"]["image"]
-    bound_signer, source = None, "compose"
+    bound_signer, bound_enc_pub, source = None, None, "compose"
 
 # A reference naming a tag says which name was asked for, not which image answers. Refuse
 # rather than resolve it: a tag is resolved by the provider's daemon, which is the party being
@@ -272,7 +274,7 @@ digest = ref.split("@", 1)[1]
 
 assert digest in ACCEPTED_DIGESTS, f"unreviewed image: {digest}"
 
-# --- 5. Does the key signing responses belong to that image? ---
+# --- 5. Do the keys belong to that image? Both of them. ---
 # report_data comes back from the verifier, which read it out of the quote it just verified.
 # These 64 bytes are the one part of the quote's layout this file still has to know, because
 # their contents are ours (0g-pc SPEC 4.2) rather than dstack's.
@@ -284,12 +286,34 @@ else:                                              # the older layout: the ASCII
 
 if bound_signer:
     assert signer == bound_signer.lower(), f"the ledger binds {bound_signer}, the quote names {signer}"
-print(f"image {digest} (from the {source}), responses signed by {signer}")
+
+    # And the enc_pub, which is the half a signature check cannot rescue. The address the
+    # ledger binds is public — it is in the event log you just read — so an image that is not
+    # the recorded one can publish that address beside an enc_pub of its own. It could never
+    # sign a response, but you would already have sealed your request to its key.
+    if int.from_bytes(rd[52:56], "big") == 1:
+        assert rd[:32].hex() == bound_enc_pub.lower(), \
+            f"the ledger binds enc_pub {bound_enc_pub}, the quote names {rd[:32].hex()}"
+        seal_to = rd[:32].hex()
+    else:
+        # The older layout carries no enc_pub, so there is nothing to check. Do not seal
+        # anything using it: fetch the §4.2 quote instead.
+        seal_to = None
+else:
+    seal_to = None
+
+print(f"image {digest} (from the {source}), responses signed by {signer}, seal to {seal_to}")
 ```
 
 Step 5 is the one that makes the digest a statement about the running process rather than
-about an installation. Skipping it leaves `report_data` and the ledger unconnected, and a
-divergence between them — a broker publishing an address of its own, or a record left over
+about an installation, and the two halves fail in different directions. The signer check is
+about **authenticity**, and it can be made after the fact: a bad signature refuses a response
+you have already read. The enc_pub check is about **confidentiality**, and it cannot — you seal
+the request first, so a wrong key means the plaintext is gone before anything could object. That
+is why a record binding only one key is refused rather than half-checked.
+
+Skipping either leaves `report_data` and the ledger unconnected, and a
+divergence between them — a broker publishing keys of its own, or a record left over
 from a change that never finished — accepted rather than refused.
 
 When there is no record, there is no bound address to compare, and the property is weaker by

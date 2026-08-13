@@ -68,10 +68,14 @@ func syntheticVerified(t *testing.T, appCompose string, events []RuntimeEvent) V
 // case normalisation instead of comparing a string to itself.
 const testSigner = "0xabcdef1111111111111111111111111111111111"
 
+// testEncPub is the enclave encryption public key the fixtures' records bind and their
+// report_data names — 32 bytes in hex, like a real X25519 public key.
+const testEncPub = "beef000000000000000000000000000000000000000000000000000000000123"
+
 // imageRecordPayload is what the controller writes: the reference, then BOTH keys derived from
 // that image — the response signer and the enclave encryption public key.
 func imageRecordPayload(ref string) []byte {
-	return []byte(ref + " " + testSigner)
+	return []byte(ref + " " + testSigner + " " + testEncPub)
 }
 
 // syntheticVerifiedSigning is syntheticVerified with control over the address report_data names,
@@ -87,6 +91,11 @@ func syntheticVerifiedSigning(t *testing.T, appCompose string, events []RuntimeE
 		t.Fatalf("decoding the test signer: %v", err)
 	}
 	copy(rd[reportDataSignerOffset:], raw)
+	encRaw, err := hex.DecodeString(testEncPub)
+	if err != nil {
+		t.Fatalf("decoding the test enc_pub: %v", err)
+	}
+	copy(rd, encRaw)
 	binary.BigEndian.PutUint32(rd[reportDataVersionOffset:], reportDataLayoutVersion)
 
 	log, err := json.Marshal(tdxEventsOf(events))
@@ -549,22 +558,31 @@ func TestResolveReportsTheBoundSigner(t *testing.T) {
 	}
 }
 
-// A record that names an image but nothing else is refused rather than tolerated as an older
-// format. It is exactly as plausible as a correct record and exactly as unverifiable, and it is
-// the shape an attacker would pick: the digest a reviewer is looking for, with nothing tying it
-// to whoever holds the key.
-func TestResolveRefusesRecordsThatBindNoSigner(t *testing.T) {
+// A record that does not bind BOTH keys is refused rather than tolerated as an older format. It
+// is exactly as plausible as a correct record and exactly as unverifiable, and it is the shape an
+// attacker would pick: the digest a reviewer is looking for, with nothing tying it to whoever
+// holds the keys.
+//
+// Both together, not as far as the record goes. A record carrying only the signer would be
+// checkable for authenticity and silent about confidentiality, and a caller cannot tell that
+// state from a fully checked one — which is exactly the distinction that decides whether sealing
+// a request is safe.
+func TestResolveRefusesRecordsThatBindNeitherOrOneKey(t *testing.T) {
 	compose := pinnedCompose(t)
 	ref := "ghcr.io/x@" + upgradeDigest
 
 	for name, payload := range map[string]string{
-		"no signer":           ref,
-		"empty":               "",
-		"signer but no image": testSigner,
-		"malformed signer":    ref + " 0xnope",
-		"truncated signer":    ref + " 0x1111",
-		"an extra field":      ref + " " + testSigner + " extra",
-		"signer before image": testSigner + " " + ref,
+		"no keys at all":        ref,
+		"empty":                 "",
+		"signer but no image":   testSigner,
+		"malformed signer":      ref + " 0xnope " + testEncPub,
+		"truncated signer":      ref + " 0x1111 " + testEncPub,
+		"signer but no enc_pub": ref + " " + testSigner,
+		"malformed enc_pub":     ref + " " + testSigner + " nope",
+		"truncated enc_pub":     ref + " " + testSigner + " beef",
+		"enc_pub with 0x":       ref + " " + testSigner + " 0x" + testEncPub,
+		"an extra field":        ref + " " + testSigner + " " + testEncPub + " extra",
+		"signer before image":   testSigner + " " + ref + " " + testEncPub,
 	} {
 		t.Run(name, func(t *testing.T) {
 			state, err := resolve(t, compose, append(bootEvents(),
@@ -573,5 +591,90 @@ func TestResolveRefusesRecordsThatBindNoSigner(t *testing.T) {
 				t.Errorf("payload %q resolved to %+v, want a refusal", payload, state)
 			}
 		})
+	}
+}
+
+// The enc_pub must be bound too, and this is the case that shows why checking only the address
+// is not enough.
+//
+// The address the ledger binds is PUBLIC — it is in the very event log the client just read. So
+// an image that is not the recorded one can put that address in report_data beside an enc_pub of
+// its own. It can never sign a response under that address, so the response check would
+// eventually refuse it — but a client seals its REQUEST to report_data's enc_pub first, and by
+// then the plaintext has already reached code the ledger does not describe. The signature that
+// would have caught it comes after the thing it was meant to protect.
+func TestResolveRefusesWhenTheQuoteNamesAnotherEncPub(t *testing.T) {
+	compose := pinnedCompose(t)
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+
+	// The recorded signer, kept honestly — and someone else's enc_pub.
+	v := syntheticVerified(t, compose, events)
+	impostor := strings.Repeat("ab", 32)
+	raw, err := hex.DecodeString(impostor)
+	if err != nil {
+		t.Fatalf("decoding the impostor key: %v", err)
+	}
+	copy(v.ReportData, raw)
+
+	state, err := ResolveRunningState(v, tcbInfoFor(t, compose), brokerService)
+	if err == nil {
+		t.Fatalf("ResolveRunningState() = %+v, want a refusal when the quote's enc_pub is not the one bound to the image", state)
+	}
+	if !strings.Contains(err.Error(), impostor) || !strings.Contains(err.Error(), testEncPub) {
+		t.Errorf("error %q should name both keys so the mismatch is diagnosable", err)
+	}
+}
+
+// The event path must expose the bound enc_pub, because a client that seals a request needs the
+// key the ledger vouched for rather than whatever report_data happens to carry. And where
+// nothing vouched for one, the field must be empty rather than passed through — a caller cannot
+// tell "vouched for" from "we never looked", and sealing to the wrong key cannot be undone by a
+// later signature check.
+func TestResolveReportsTheBoundEncPub(t *testing.T) {
+	compose := pinnedCompose(t)
+
+	state, err := resolve(t, compose, append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)}))
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if state.BrokerEncPub != testEncPub {
+		t.Errorf("BrokerEncPub = %q, want %q", state.BrokerEncPub, testEncPub)
+	}
+
+	// The compose path binds neither key, so there is nothing to report.
+	boot, err := resolve(t, compose, bootEvents())
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v", err)
+	}
+	if boot.BrokerEncPub != "" {
+		t.Errorf("BrokerEncPub = %q on the compose path, want empty", boot.BrokerEncPub)
+	}
+}
+
+// A quote in the older report_data layout carries no enc_pub, so there is nothing to compare the
+// record's against. That must not invent a mismatch — and must not hand the record's key over
+// unchecked either. The digest and the signer still stand, because those were checked.
+func TestResolveBlanksTheEncPubWhenTheQuoteCarriesNone(t *testing.T) {
+	compose := pinnedCompose(t)
+	events := append(bootEvents(),
+		RuntimeEvent{Event: EventImageUpdate, Payload: imageRecordPayload("ghcr.io/x@" + upgradeDigest)})
+
+	// The legacy layout: the ASCII address filling report_data, no version field and no enc_pub.
+	v := syntheticVerified(t, compose, events)
+	legacy := make([]byte, reportDataLen)
+	copy(legacy, testSigner)
+	v.ReportData = legacy
+
+	state, err := ResolveRunningState(v, tcbInfoFor(t, compose), brokerService)
+	if err != nil {
+		t.Fatalf("ResolveRunningState() = %v, want the legacy layout to resolve", err)
+	}
+	if state.BrokerDigest != upgradeDigest || state.BrokerSigner != testSigner {
+		t.Errorf("digest = %q signer = %q, want the checked pair to survive", state.BrokerDigest, state.BrokerSigner)
+	}
+	if state.BrokerEncPub != "" {
+		t.Errorf("BrokerEncPub = %q, want empty: nothing checked it, and a caller must not read that as vouched for", state.BrokerEncPub)
 	}
 }

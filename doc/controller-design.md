@@ -379,7 +379,7 @@ on that process being honest later.
 
 | event | payload (bare bytes, not JSON) | emitted before |
 |---|---|---|
-| `zg-image-update` | `<repo>@sha256:<64hex>` — the reference the upgrade runs on | `POST /v1/images/update` touches any container |
+| `zg-image-update` | `<repo>@sha256:<64hex> <0xsigner> <enc_pub>` — the reference the upgrade runs on, then both keys derived from that image | `POST /v1/images/update` touches any container |
 | `zg-config-update` | `hex(sha256(<config file content>))` | `PUT /v1/config/core` writes the file |
 
 **Not everything is covered.** `PUT /v1/config/ingress` and
