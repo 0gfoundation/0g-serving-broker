@@ -7,19 +7,27 @@
 //
 // Kling is DashScope-family transport: same Authorization: Bearer
 // $DASHSCOPE_API_KEY auth, and the vendor has no sync mode at all — the
-// create call REQUIRES X-DashScope-Async: enable (see client.go). Unlike
-// DashScope's HappyHorse (which reports request-level failures via a
-// status_code buried in a 200 body), Kling's create/get endpoints report
-// request-level failures with real HTTP status codes — see client.go's do()
-// for the resulting error-handling shape, matching MiniMax/Seedance rather
-// than DashScope on this axis.
+// create call REQUIRES X-DashScope-Async: enable (see client.go). Kling's
+// create/get endpoints report request-level failures with real (non-200)
+// HTTP status codes only — see client.go's do() for the resulting
+// error-handling shape, matching DashScope's own HappyHorse and Seedance in
+// this repo's implementations of both. MiniMax is the outlier on this axis:
+// its client ALSO treats a 200 response carrying a non-zero
+// base_resp.status_code as a request-level failure, a defensive fallback for
+// its older API surface (see minimax.baseRespError) that Kling has no
+// equivalent of.
 package kling
 
 import "encoding/json"
 
-// Task lifecycle status values (the complete six-value enum, identical to
-// Seedance's and DashScope's). PENDING/RUNNING are transient; SUCCEEDED is
-// terminal+billable; FAILED/CANCELED/UNKNOWN are terminal+non-billable.
+// Task lifecycle status values: the complete six-value enum, with the exact
+// same literal spellings as DashScope's own (PENDING/RUNNING/SUCCEEDED/
+// FAILED/CANCELED/UNKNOWN). Seedance's enum is the same SHAPE — six values,
+// two transient + four terminal — but different literal strings (lowercase,
+// and "expired"/"cancelled" instead of "UNKNOWN"/"CANCELED" — see
+// seedance/types.go), so do not assume the two are wire-interchangeable.
+// PENDING/RUNNING are transient; SUCCEEDED is terminal+billable;
+// FAILED/CANCELED/UNKNOWN are terminal+non-billable.
 const (
 	TaskStatusPending   = "PENDING"
 	TaskStatusRunning   = "RUNNING"
