@@ -116,12 +116,13 @@ because the controller serves `GetQuote` and `Info` but never `GetKey` or `EmitE
    Keep them however you like — this is a person with two hex strings, not necessarily a program
    with a config. What matters is only that you got them yourself and that you compare against
    them, rather than reading them out of the attestation you are about to check.
-2. Per session: fetch the quote, verify the DCAP signature, check `compose_hash` against
-   the recorded one, replay RTMR3, read the last `zg-image-update`, check its digest against
-   the recorded set, and check that the signer address it binds equals the one in
-   `report_data`. `api/common/attest.ResolveRunningState` does the replay and that
-   comparison; the DCAP verification and the digest allowlist are the caller's, because both
-   need inputs only the caller has.
+2. Per session: fetch the attestation, hand the quote and the event log to **dstack's own
+   verifier**, then make the checks it does not: that `tcb_info` belongs to this quote, that
+   `compose_hash` is the one you recorded, that the last `zg-image-update` names a digest you
+   accept, and that the signer address it binds equals the one in `report_data`.
+   `api/common/attest.ResolveRunningState` does everything after the verifier; the verifier
+   call and the digest allowlist are the caller's, because both need inputs only the caller
+   has.
 3. Per response: verify the signature against that signer address.
 
 Step 3 failing means the image changed. The user returns to step 2 and decides whether to
@@ -132,13 +133,20 @@ accept the new digest — which is the intended behaviour, not an error.
 ## Verifying by hand
 
 Written out because the first users reach inference through the router and have no verifier
-of their own. Nothing below needs a library: one `curl`, one Python file, and Intel's own
-quote-verification tool. Anything that automates this later has to compute the same values
-from the same three inputs, so this doubles as the specification for it.
+of their own. Two tools: **dstack's verifier**, run by you, for everything about the platform;
+and one Python file for the four things that are ours. Anything that automates this later has
+to compute the same values from the same inputs, so this doubles as the specification for it.
 
-Read `api/common/attest` if you want the same logic as maintained code — `ResolveRunningState`
-does steps 3 to 6 — but do not treat it as a dependency. The point of this section is that a
-user can settle every mechanical link with tools they already trust.
+**Do not reimplement the platform half.** dstack ships the verifier its own KMS runs before
+releasing a CVM's keys, and it makes four independent judgements — DCAP collateral, the RTMR
+replay, the guest OS image measurement, the ACPI tables. A hand-rolled subset of those is a
+downgrade wearing independence as a costume: it verifies fewer things while feeling like it
+verifies more. `api/common/attest` used to carry its own replay and quote offsets and no
+longer does, for exactly this reason.
+
+What is left over is small, and it is the part nobody else can do, because it is about *our*
+records and *our* keys. Read `api/common/attest` if you want it as maintained code —
+`ResolveRunningState` does steps 3 to 5 — but do not treat it as a dependency.
 
 ### Once, per release
 
@@ -154,7 +162,7 @@ rather than from the provider:
 
 ### Establishing the signer — once, not per request
 
-"Once" is bounded by a signal rather than by time: steps 1–6 produce a signer address, and it
+"Once" is bounded by a signal rather than by time: steps 1–5 produce a signer address, and it
 stays good until a response signature fails to verify against it. There is no session object to
 hold and no interval to pick, which matters because the first callers are plain API clients
 with neither.
@@ -178,7 +186,7 @@ the only way to see it, and that is the one thing per-request verification would
 
 ```bash
 # 1. Fetch the attestation. Three values arrive together; only the first is trustworthy on
-#    its own, and steps 3 and 4 are what earn the other two.
+#    its own, and step 2 is what earns the other two.
 curl -s "$PROVIDER/v1/quote?legacy=true" > q.json     # {quote, event_log, tcb_info}
 ```
 
@@ -187,47 +195,58 @@ maps to that provider — the router carries the quote and cannot alter it (link
 you fetch it from does not matter to the result.
 
 ```bash
-# 2. Verify the DCAP signature. Use Intel's tooling or dcap-qvl; do not reimplement it.
-#    Everything after this treats the quote's bytes as hardware-attested.
-jq -r .quote q.json | xxd -r -p > quote.bin
-dcap-qvl verify quote.bin        # or Intel's QVL / a service you trust
+# 2. Hand the quote and the event log to dstack's verifier. Run it yourself — a verifier the
+#    provider hosts decides nothing, since the answer is what is being checked.
+docker run -d -p 8080:8080 dstacktee/dstack-verifier:v0.5.11
+curl -s -X POST localhost:8080/verify -H 'Content-Type: application/json' \
+     --data-binary @<(jq '{quote, event_log}' q.json) > v.json
 ```
 
+The request schema is the verifier's own, and it moves with its releases — read them rather
+than this file. What does not move is the set of fields whose values you must require, because
+each one is a link that fails silently if you skip it:
+
+| field | require | what accepting anything else admits |
+|---|---|---|
+| `quote_verified` | `true` | that the quote is a real TDX quote from genuine Intel hardware — everything else is arithmetic on numbers a provider could have typed |
+| `event_log_verified` | `true` | that the log replays onto the quote's registers. The log arrives over plain HTTP from the party being described; this is the only thing that makes it evidence, and steps 3–5 read records out of **exactly the bytes you sent here** |
+| `tcb_status` | `UpToDate` | a platform with a published unpatched vulnerability. Any other value comes with `advisory_ids` and is a decision to make deliberately, not a pass to wave through |
+| `os_image_is_dev` | `false` | a development guest image, which can carry debug facilities that void the confidentiality the whole chain rests on |
+| `os_image_hash_verified` | `true` | a guest OS the provider built rather than a published dstack image |
+| `acpi_tables_verified` | `true` | firmware configuration that was never measured |
+| `key_provider` | the KMS you expect | a CVM whose keys came from somewhere other than the KMS whose on-chain policy you read |
+
+`tcb_status`, `os_image_is_dev`, `os_image_hash_verified` and `acpi_tables_verified` are four
+checks this project never made when it verified quotes itself. Getting them is the reason the
+recommendation changed.
+
 ```python
-# 3-6. verify.py — the four checks that need the quote's own bytes.
-import hashlib, json, sys
+# 3-5. verify.py — the checks the verifier does not make, because they are about our records.
+import hashlib, json
 
-Q, EVENT_TYPE = json.load(open("q.json")), 0x08000001
-quote = bytes.fromhex(Q["quote"].removeprefix("0x"))
+V, Q = json.load(open("v.json")), json.load(open("q.json"))
+EVENT_TYPE = 0x08000001
 
-# Byte offsets into a TDX v4 quote. Fixed by the format; a v5 quote fails step 3 rather
-# than being misread, because nothing else lands on these boundaries.
-MR_CONFIG_ID, RTMR0, RTMR_STRIDE, REPORT_DATA = 232, 376, 48, 568
+assert V["quote_verified"] and V["event_log_verified"]     # plus the rest of the table above
 
-# --- 3. Which deployment is this, and is it the one you reviewed? ---
-# mr_config_id is 0x01 followed by the compose hash, so the quote carries its own
-# authenticated compose file once the next line checks the manifest against it.
-compose_hash = quote[MR_CONFIG_ID + 1 : MR_CONFIG_ID + 33].hex()
+# --- 3. Is tcb_info this quote's, and is this the deployment you reviewed? ---
+# The verifier is never handed app_compose — its request carries the quote and the log —
+# so this line is the only thing tying the manifest you are about to read to an attested
+# hash. Skip it and the compose file degrades to an unauthenticated claim by the provider,
+# which is precisely the thing step 1's review was supposed to have settled.
+compose_hash = V["app_info"]["compose_hash"]
 app_compose = json.loads(Q["tcb_info"])["app_compose"]
 assert hashlib.sha256(app_compose.encode()).hexdigest() == compose_hash, "tcb_info is not this quote's"
 assert compose_hash == REVIEWED_COMPOSE_HASH, f"unreviewed deployment: {compose_hash}"
 
-# --- 4. Replay RTMR3 and require the quote's value. ---
-# This is what makes the event log believable: it arrives over plain HTTP from the party
-# being described, and only a replay that lands on a hardware register redeems it.
-mr = bytes(48)
-events = [e for e in json.loads(Q["event_log"]) if e["event_type"] == EVENT_TYPE]
-for e in events:
-    payload = bytes.fromhex(e["event_payload"])
-    digest = hashlib.sha384(
-        EVENT_TYPE.to_bytes(4, "little") + b":" + e["event"].encode() + b":" + payload
-    ).digest()
-    mr = hashlib.sha384(mr + digest).digest()
-assert mr == quote[RTMR0 + 3 * RTMR_STRIDE : RTMR0 + 4 * RTMR_STRIDE], "the event log is not this quote's"
-
-# --- 5. Which image, and is it one you accept? ---
-# Only entries after system-ready can have been written by a container; reading the whole
-# log would let a record placed among the boot events be taken for ours.
+# --- 4. Which image, and is it one you accept? ---
+# Two filters, and both narrow what may be read as ours. event_log_verified covers all four
+# registers, so an entry sitting in IMR 0-2 is just as "verified" as one in 3 — but only 3 is
+# extendable after boot, so only 3 can carry a record a container wrote.
+events = [e for e in json.loads(Q["event_log"])
+          if e["event_type"] == EVENT_TYPE and e["imr"] == 3]
+# And only entries after system-ready can have been written by a container; reading the whole
+# register would let a record placed among the boot events be taken for ours.
 ledger = events[next(i for i, e in enumerate(events) if e["event"] == "system-ready") + 1 :]
 records = [e for e in ledger if e["event"] == "zg-image-update"]
 
@@ -253,8 +272,11 @@ digest = ref.split("@", 1)[1]
 
 assert digest in ACCEPTED_DIGESTS, f"unreviewed image: {digest}"
 
-# --- 6. Does the key signing responses belong to that image? ---
-rd = quote[REPORT_DATA : REPORT_DATA + 64]
+# --- 5. Does the key signing responses belong to that image? ---
+# report_data comes back from the verifier, which read it out of the quote it just verified.
+# These 64 bytes are the one part of the quote's layout this file still has to know, because
+# their contents are ours (0g-pc SPEC 4.2) rather than dstack's.
+rd = bytes.fromhex(V["report_data"].removeprefix("0x"))
 if int.from_bytes(rd[52:56], "big") == 1:          # the enc_pub-binding layout
     signer = "0x" + rd[32:52].hex()
 else:                                              # the older layout: the ASCII address
@@ -265,7 +287,7 @@ if bound_signer:
 print(f"image {digest} (from the {source}), responses signed by {signer}")
 ```
 
-Step 6 is the one that makes the digest a statement about the running process rather than
+Step 5 is the one that makes the digest a statement about the running process rather than
 about an installation. Skipping it leaves `report_data` and the ledger unconnected, and a
 divergence between them — a broker publishing an address of its own, or a record left over
 from a change that never finished — accepted rather than refused.
@@ -277,7 +299,7 @@ and a change cannot happen unrecorded — see the residual assumption about the 
 
 ### Per response
 
-One signature recovery against the address step 6 established. No quote, no replay, no DCAP.
+One signature recovery against the address step 5 established. No quote, no replay, no DCAP.
 
 A failure here is not an error to retry through. It is the notification that the image changed,
 and the only thing to do with it is go back and establish the signer again — which puts the
@@ -285,24 +307,24 @@ question link 6 exists for, *is this a digest I accept*, in front of a person at
 becomes live.
 
 ```bash
-# 7. Make the request and keep the handle the broker returns.
+# 6. Make the request and keep the handle the broker returns.
 KEY=$(curl -si "$PROVIDER/v1/proxy/$PROVIDER_ADDR/chat/completions" \
         -H 'Content-Type: application/json' -d @req.json \
         -D >(grep -i '^ZG-Res-Key:' | cut -d' ' -f2 | tr -d '\r' >&2) -o resp.json 2>&1 >/dev/null)
 
-# 8. Fetch the TEE signature over that exchange.
+# 7. Fetch the TEE signature over that exchange.
 curl -s "$PROVIDER/v1/proxy/signature/$KEY" > sig.json   # {text, signature, signing_address}
 ```
 
 ```python
-# 9. Two checks, and both matter.
+# 8. Two checks, and both matter.
 from eth_account.messages import encode_defunct
 from eth_account import Account
 import hashlib, json
 
 sig = json.load(open("sig.json"))
 
-# a. The signature is by the key step 6 established — not by whatever address the response
+# a. The signature is by the key step 5 established — not by whatever address the response
 #    happens to carry. Reading signing_address and verifying against it proves nothing.
 assert Account.recover_message(encode_defunct(text=sig["text"]), signature=sig["signature"]).lower() == signer
 
@@ -317,16 +339,21 @@ assert sig["text"] == expected, f"signed {sig['text']}, exchanged {expected}"
 
 ### What this produces on a deployment today
 
-Run against a current production CVM's attestation, the script above gets through steps 3 and
-4 — `sha256(app_compose)` matches the compose hash in the signed report body, and replaying the
-event log reproduces the quote's RTMR3 exactly — and then **refuses at step 5**, because that
+Run against a current production CVM's attestation, this gets through step 3 —
+`sha256(app_compose)` matches the compose hash in the signed report body, and the event log
+replays onto the quote's RTMR3 exactly — and then **refuses at step 4**, because that
 deployment's compose names `ghcr.io/0gfoundation/0g-serving-broker:dev1` and a tag is resolved
 by the provider's own daemon.
 
-That is the correct outcome, and it is the shortest description of what this whole series
-changes. The mechanical parts already work today; what is missing is a deployment that pins
-what it runs. After it regenerates its compose with a controller, step 5 answers from the
-ledger and step 6 has an address to compare.
+Both of those were checked against a real report, by hand, before the verifier became the
+recommendation: the anchor holds and the replay lands. What has not been run end to end is
+`POST /verify` against that same report, so treat the platform half's four extra judgements as
+the reason to use it rather than as something this file has confirmed for our deployments.
+
+The refusal point is the shortest description of what this whole series changes. The mechanical
+parts already work today; what is missing is a deployment that pins what it runs. After it
+regenerates its compose with a controller, step 4 answers from the ledger and step 5 has an
+address to compare.
 
 ### Two things a manual verifier must not do
 
@@ -382,23 +409,23 @@ ledger and step 6 has an address to compare.
 |---|---|---|
 | Pull correctness, digest-only upgrade entry point | `controller/internal/{docker,ctrl}` | merged (#622, #624) |
 | Controller cannot be widened at runtime or act on itself | `controller/internal/{ctrl,docker}` | merged (#623) |
-| Broker holds no docker socket; image identity from the environment | `inference/internal/contract`, `controller/internal/docker` | #625 |
-| Ledger: record before the change, append the truth on abort, serialise | `controller/internal/ctrl` | #626 |
-| Reader: RTMR3 replay, quote offsets, running-state resolution | `common/attest` | #627 |
-| No unrecorded controller action that changes behaviour | `controller/internal/{ctrl,handler}` | #635 |
-| An upgraded container stops claiming to match the compose file | `controller/internal/docker` | #643 |
-| Controller serves quotes so the broker can drop the dstack socket | `controller/internal/attestproxy` | #644 |
-| Per-image key derivation and controller-side signing (links 8–9) | `common/tee`, `controller/internal/attestproxy` | #648 |
-| The record binds the signer address; the reader requires the quote to match (link 7) | `common/attest`, `controller/internal/ctrl` | #649 |
-| The generated deployment actually withholds both sockets from the broker | `inference/integration/config` | #650 |
+| Broker holds no docker socket; image identity from the environment | `inference/internal/contract`, `controller/internal/docker` | merged (#625) |
+| Ledger: record before the change, append the truth on abort, serialise | `controller/internal/ctrl` | merged (#626) |
+| Reader: running-state resolution on top of a verified quote | `common/attest` | merged (#627) |
+| No unrecorded controller action that changes behaviour | `controller/internal/{ctrl,handler}` | merged (#635) |
+| Controller serves quotes so the broker can drop the dstack socket | `controller/internal/attestproxy` | merged (#644) |
+| Per-image key derivation and controller-side signing (links 8–9) | `common/tee`, `controller/internal/attestproxy` | merged (#648) |
+| The record binds the signer address; the reader requires the quote to match (link 7) | `common/attest`, `controller/internal/ctrl` | merged (#649) |
+| The generated deployment actually withholds both sockets from the broker | `inference/integration/config` | merged (#650) |
+| An upgraded container stops claiming to match the compose file | `controller/internal/docker` | merged (#652) |
 
 Every link now has code. Two things the code cannot supply:
 
 - **Nothing in this repository calls `ResolveRunningState`.** It is a library; the chain
   terminates in the client, and a client that skips step 2 gets none of links 5–8. Whatever
-  ships as the verifier has to run the replay and the binding comparison, and must not cache
-  a signer address across sessions — caching one is exactly how a stale attestation stops
-  self-invalidating.
+  ships as the verifier has to call dstack's verifier and require every field in the table
+  above, then make the binding comparison, and must not cache a signer address across
+  sessions — caching one is exactly how a stale attestation stops self-invalidating.
 - **The KMS's `compose_hash` authorization policy is outside this repository.** The app key
   follows a persisted `app_id`, not `compose_hash`, so redeploying with a different compose
   file re-derives the same app key. Only the KMS's check at CVM registration gates that;
